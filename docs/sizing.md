@@ -56,7 +56,7 @@ Change nothing yet. Every run already records what it was given and what it used
 Where to see them:
 
 - **The run record** itself, `<PI_LOGS_DIR>/<jobId>.json`.
-- **The insights page** (`/dispatch insights`): its job sizes section draws each project's memory peaks over the last
+- **The insights page** (the console's `/insights`): its job sizes section draws each project's memory peaks over the last
   30 days against its size line, with every `oom-killed` run in red ([insights](insights.md#the-job-sizes-section)).
 - **The panel's PROJECTS view** (`j` in `/dispatch`): each project's size and the p95 of its runs' memory peaks and
   cores used (the p95 is the value 95 of every 100 runs stay at or below, so one odd run does not move it).

@@ -70,8 +70,8 @@ nobody watches the terminal. Two views help you tune what you built: the **graph
 start which flows (the skill a job runs, see [Flows](#flows-the-custom-prompt-a-trigger-runs)) and what
 chained to what ([`docs/graph.md`](docs/graph.md)), and **insights** shows
 what each of them costs, whether a subscription pays off, and how busy each machine was
-([`docs/insights.md`](docs/insights.md)). `/dispatch insights` writes both into one file that your browser opens
-from disk:
+([`docs/insights.md`](docs/insights.md)). Both are on one page, `/insights` in the web console
+(`pi-dispatch-console serve`, see [`docs/console.md`](docs/console.md)), and `/dispatch insights` prints its address:
 
 ![The insights page: KPI tiles, budget dials, the budget split with each project's share, spend and floor and the split's history, a plan verdict, daily and cumulative spend charts, per flow trends, five breakdowns (flow, trigger, model, repo and project), the job sizes, how busy each host was with a chart of the jobs running at once against its slots and hatched stretches with no data, and the trigger and flow topology with spend shown on each trigger](docs/images/insights-view.png?v=2026-10-14)
 
@@ -506,7 +506,7 @@ In the panel:
 | `h` `f` | show held jobs, show failed jobs |
 | `l` `o` | open the running job's live log, change the runs sort |
 | `x` on a running job | cancel it (asks first) |
-| `i` | open the insights page |
+| `i` | show the address of the console's insights page |
 
 `Enter` on a run opens its full record. In that view, `b` reopens the run's workspace, which is not the
 list's `b`:

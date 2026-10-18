@@ -2,33 +2,57 @@
 
 One page that answers the two questions the terminal answers separately: **what is this deployment
 wired to do** (the trigger/flow topology, [`graph.md`](graph.md)) and **what is it costing**
-(the cost analytics, [`costs.md`](costs.md)). The insights artifact puts the charts a human reads
-fastest next to the topology those numbers came from — spend per day, per flow, per trigger, per
-model, per repo, plan verdicts, and the graph with spend badged onto the triggers that earned it.
+(the cost analytics, [`costs.md`](costs.md)). The page puts the charts a human reads fastest next to
+the topology those numbers came from: spend per day, per flow, per trigger, per model, per repo, plan
+verdicts, and the graph with spend badged onto the triggers that earned it.
+
+The page is `/insights` on the **operator console** ([`console.md`](console.md)), the one analytics surface.
+Start the console on the deployment's host with `pi-dispatch-console serve`, sign in, and open
+`http://127.0.0.1:4790/insights` (the address is the deployment's `PI_CONSOLE_LISTEN`, default
+`127.0.0.1:4790`). How the console is installed, its tokens and roles, and how to reach it from another machine
+over an SSH tunnel are all in [`console.md`](console.md). Both roles, `operator` and `viewer`, can read the page;
+the one difference is folder paths ([Folder paths](#folder-paths)).
+
+## Getting there from pi
 
 ```
-/dispatch insights [7d|30d|mtd] [--no-open] [--full-paths]
+/dispatch insights [7d|30d|mtd]
 ```
 
-writes **one self-contained HTML file** to `<graph dir>/insights.html` (the same directory
-`PI_GRAPH_DIR` names, defaulting to `<OS temp dir>/pi-dispatch-<uid>/graph`, one per account), prints its `file://` URL, and opens your
-browser. No server, no
-port, no external requests: the page is inline SVG/CSS/JS and works from the file system, over
-`scp`, or attached to a ticket. Re-running the command overwrites the same path atomically, so a
-tab you keep open picks the new fold up through its Reload/auto-reload controls.
+prints the console URL for that window, for example `http://127.0.0.1:4790/insights?range=30d`, built from the
+deployment's `PI_CONSOLE_LISTEN`. When the console listens on a unix socket, it prints the `ssh -L` tunnel that
+reaches it instead. When it binds every address (`0.0.0.0` or `[::]`), the URL says `<this host>`: use the host's
+name or address. With port 0 the operating system picks the port, so no URL is printed; `pi-dispatch-console serve`
+prints the address it got. If the console is not running, start it with `pi-dispatch-console serve`. The command writes
+nothing and opens no browser. In the `/dispatch` panel, the `i` key shows the same URL as a notice.
+
+```
+/dispatch insights whatif <provider/model> --flow <flow>
+```
+
+prints the URL of the console's answer to that what-if ([What-if](#what-if-re-price-a-flow-before-you-switch)).
+Any other argument answers the command's usage line. The old static export (a self-contained HTML file written
+under a graph directory and opened in a browser, with its `--no-open` and `--full-paths` flags) is gone, and so is
+the setting that placed it: a leftover graph directory line in an existing deployment's `.env` is read by nothing.
+
+## The spend window
+
+The picker at the top chooses the spend window: **last 7d**, **last 30d** (the default) or **month to date**. It is
+in the URL as `/insights?range=7d`, `range=30d` or `range=mtd`, so a link keeps its window. The page is drawn once
+per load: reload it to see new runs.
 
 ## Reading the page
 
-- **Header**: the spend window you asked for (`30d` by default, deliberately matching the topology's
-  fixed 30-day record window) and the "generated N ago" staleness stamp.
+- **Header**: the spend window and the two-window line ([Two windows, stated](#two-windows-stated)).
 - **KPI tiles**: window spend, runs, how many runs were fully ledgered, plans declared, top flow.
-- **Plan verdict cards**: one per declared subscription — SAVING/LOSING against API rates (or
+- **Plan verdict cards**: one per declared subscription: SAVING/LOSING against API rates (or
   WOULD SAVE/WOULD LOSE for hypothetical plans), the amortized $/run, the API-equivalent, and the
   observed peak per vendor window. A vendor that discloses no limit gets facts, never an invented
   burn-down. No counterfactual declared reads exactly that.
 - **Daily spend**: a column per UTC day. Quiet days render as quiet baseline ticks, never compressed
-  away. A dashed, translucent column is an estimate; a `≥` marks a floor.
-- **Budget**: the operator's one real lever on cost, beside the spend it limits — reserved vs cap
+  away. A dashed, translucent column is an estimate; a `≥` marks a floor. Hovering a column (or any
+  chart mark) gives its tooltip.
+- **Budget**: the operator's one real lever on cost, beside the spend it limits: reserved vs cap
   for the day/week/month job-slot windows and the daily token counter, states as words
   (`soft-hold`, `over`), an overlay-unset cap shown as unknown or off with no bar and no invented
   denominator, and the lever named (`/dispatch set …`, the panel's `s` key). Under them, one line per
@@ -45,17 +69,19 @@ tab you keep open picks the new fold up through its Reload/auto-reload controls.
 - **Job sizes** and **capacity**: each project's memory peaks against its size ([job sizes](#the-job-sizes-section)),
   then how busy each host was over the window, hatched where there is no data ([capacity](#the-capacity-section)).
 - **Trend lines**: a cumulative window-spend line under the daily columns (dashed from the first
-  estimated day onward — once an estimate enters a running total it never leaves), and per-flow
+  estimated day onward: once an estimate enters a running total it never leaves), and per-flow
   daily spend as small panels on one shared scale, dashed wherever an estimated day touches.
-- **Breakdowns**: five, spend by flow, by trigger, by model, by repo and by project, drawn as bars. Clicking a trigger
-  row highlights its node in the topology below. The by-project bars carry the id each run recorded, and runs
-  outside every project, or from before projects existed, are `(no project)` ([projects](projects.md)).
-- **Topology**: the trigger/flow graph, pan/zoom/hover and all ([`graph.md`](graph.md) explains
-  every edge and badge), with spend badged under every trigger that spent in the window and each
-  cron's next fire or overdue state in its tip. A `run.command` trigger renders as its `/name` with
-  no flow edge — by design, not as a defect — and earns its by-trigger spend row like any other entry.
-- **Footer**: the provenance ledger — which pi-ai priced the numbers, what was unmetered,
-  unledgered, truncated, or drifted — plus the graph's own honesty counters in the legend.
+- **Breakdowns**: five, spend by flow, by trigger, by model, by repo and by project, drawn as bars. Clicking a row
+  of the by-trigger breakdown highlights that trigger's chip and its wires in the topology below. The by-project
+  bars carry the id each run recorded, and runs outside every project, or from before projects existed, are
+  `(no project)` ([projects](projects.md)).
+- **Topology**: the trigger/flow graph ([`graph.md`](graph.md) explains every edge and badge, and
+  [The interactive topology](#the-interactive-topology) how to move around it), with spend badged under every
+  trigger that spent in the window and each cron's next fire or overdue state in its tip. A `run.command` trigger
+  renders as its `/name` with no flow edge (by design, not as a defect) and earns its by-trigger spend row like
+  any other entry.
+- **Footer**: the provenance ledger (which pi-ai priced the numbers, what was unmetered,
+  unledgered, truncated, or drifted) plus the graph's own honesty counters in the legend.
 
 ## The money never lies about itself
 
@@ -69,37 +95,52 @@ reinforces these markers; it never replaces them.
 
 ## Two windows, stated
 
-The spend half answers the window you asked for (`7d`, `30d`, or month-to-date). The topology half
+The spend half answers the window you picked (`7d`, `30d`, or month to date). The topology half
 always describes the fixed 30-day record window its run counts and observed edges are folded over.
-The header states both, and every spend badge's tooltip names its window, so a screenshot cannot
-conflate them.
+The header states both on one line:
 
-## Flags
+```
+spend window: last 30d · topology: fixed 30d record window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap
+```
 
-- `--no-open`: write and print the URL only (scripting, SSH).
-- `--full-paths`: name local folders by their full paths instead of basenames. Off by default
-  because the artifact is a durable, shareable file.
+and every spend badge's tooltip names its window, so a screenshot cannot conflate them. Every series is bounded by
+how long this host keeps its run records (`PI_LOG_RETENTION_DAYS`) and by the 92-day ceiling on the records one
+page reads.
 
-Over SSH or without a display the browser spawn is skipped and the skip is stated; the URL is
-always printed first. `scp` the file to your desktop and open it there.
+## The interactive topology
+
+- **Pan** by dragging, **zoom** with the mouse wheel.
+- Each chip has a **tooltip**. A label too long for its chip is shortened to fit, and the tooltip carries the full
+  text.
+- Clicking a row of the "spend by trigger" breakdown **selects** that trigger: its chip and its wires are
+  highlighted. **Escape** clears the selection.
+- The view (pan, zoom and selection) is kept in the URL fragment, so a reload or a copied link opens the same view.
+
+## Folder paths
+
+The topology names local folders (a local trigger's `run.folder`, a skills directory) by their basename, and so does
+the budget split's problem text. An **operator** can add `?paths=full` to the URL to see the full local paths
+instead; the page has a link that toggles it. A **viewer** always sees basenames, whatever the URL says, because
+full paths are detail about the host.
 
 ## What-if: re-price a flow before you switch
 
 The estimator answers "what would this flow have cost on another model" from the same ledger the page
-draws — history is never re-priced, the counterfactual is:
+draws. History is never re-priced; the counterfactual is. It is a form on the insights page, open to every
+signed-in role, and it only reads: it is not an action and changes nothing.
 
-```
-/dispatch insights whatif <provider/model> --flow <flow>
-```
+- **Model**: `<provider>/<model>`. The target splits on the **first** `/` (model ids carry dots and colons,
+  never the provider separator), and the field suggests the priced model ids.
+- **Flow**: required, because the estimate scores **one flow's median run**, not a portfolio. The field suggests
+  the flows seen in the window.
 
-The target splits on the **first** `/` (model ids carry dots and colons, never the provider separator),
-`--flow` is required because the estimate scores **one flow's median run**, not a portfolio, and tab
-completion offers the full priced catalog. Worked question: nightly `build-report` runs cost real money
-on the deployment default; before pinning the trigger's `model` to something cheaper, ask
+The answer is a URL like any other view of the page, `/insights?whatif=<provider>/<model>&flow=<flow>`, and keeps
+`range`. `whatif` and `flow` go together: one without the other, or a malformed value, is refused with 400. From pi,
+`/dispatch insights whatif <provider/model> --flow <flow>` prints that URL.
 
-```
-/dispatch insights whatif anthropic/claude-haiku-4-5 --flow build-report
-```
+Worked question: nightly `build-report` runs cost real money on the deployment default; before pinning the
+trigger's `model` to something cheaper, open
+`/insights?whatif=anthropic/claude-haiku-4-5&flow=build-report`, which answers
 
 ```
 What-if build-report @ anthropic/claude-haiku-4-5:
@@ -109,13 +150,14 @@ What-if build-report @ anthropic/claude-haiku-4-5:
 ```
 
 How to read it, class markers on ([`costs.md`](costs.md)): the flow's **median ledgered run** is
-re-priced at the target's rates, then multiplied across **every observed run** — the un-ledgered ones
-presumably cost something too, and the coverage line states how much of that extrapolation is measured.
-There is no window argument: the estimate wants every ledgered run it can see, so the scan runs at its
-own 92-day ceiling rather than a display window. A flow with no ledgered run at all answers with a
-seeded band, marked as such, never a confident number; an unknown model answers with the closest priced
-ids instead of an estimate. The output is an argument for an edit, not an edit: the lever stays the
-trigger's own `model`/`provider` fields or the `/dispatch set` knobs.
+re-priced at the target's rates, then multiplied across **every observed run** (the un-ledgered ones
+presumably cost something too), and the coverage line states how much of that extrapolation is measured.
+The spend window does not narrow it: the estimate wants every ledgered run it can see, so it scans the last 92
+days of run records (the scan ceiling) whatever the window. A flow with no ledgered run at all answers with the
+seeded band `unmeasured (OQ-002)`, marked as such, never a confident number. An unknown model answers with up to
+three of the closest priced ids, as links that ask again with that id, instead of an estimate. An answer is cached
+for 30 seconds, so reloading it costs nothing. The output is an argument for an edit, not an edit: the lever stays
+the trigger's own `model`/`provider` fields or the `/dispatch set` knobs.
 
 ## What each run records about resources
 
@@ -259,8 +301,8 @@ reads the report when it opens and again on `u` ([what the panel shows](multi-ho
 ### The capacity section
 
 The insights page shows the same report after the job sizes, over the page's own window: the last 7 days, the last
-30 days, or the month so far from its first instant (`mtd`, the same start as the spend). It is read once when the
-page is written, at the moment in its header stamp. Per host:
+30 days, or the month so far from its first instant (`mtd`, the same start as the spend). It is read once per page
+load. Per host:
 
 - **The headline**, in the words `pi-dispatch capacity` prints for the same report: busy and idle (each a share of the
   time the host's history covers, with the share of the window it does not cover beside them), the jobs at once on
@@ -270,7 +312,7 @@ page is written, at the moment in its header stamp. Per host:
 - **A chart** of the jobs running at once, on average, in each hour (7 days) or each six hours (30 days and the month).
   The dashed line is the host's slot count, a tick on a bar is the most that ran at once in it, and hovering a bar
   gives its busy share, average, peak and full share. The time axis is the whole window and ends at the moment the page
-  was written, so a quiet day is an empty stretch, never squeezed out.
+  was loaded, so a quiet day is an empty stretch, never squeezed out.
 - **Hatched is no data.** Time before a host's history starts (the run mirror at its cap or since it started, the log
   retention), a host whose history is not here (one without `PI_WORKER_NAME`, or a run mirror that was not read), a
   bucket the page could not read, and time after the report was read, are hatched in grey and counted as neither busy
@@ -289,12 +331,12 @@ section says so and draws no number; the rest of the page is unaffected.
 
 ## Honest limits
 
-- The page is a snapshot: it re-renders when you re-run the command, not by itself. The auto-reload
-  control re-reads the file so an open tab follows your re-runs.
+- The page is drawn once per load: it does not follow new runs by itself. Reload it to refresh.
 - Everything the [`costs.md`](costs.md) honest-limits section says holds here too: totals are
   floors, pre-ledger runs are counted rather than guessed at, and history is never re-priced.
-- The topology's tier visibility depends on this session's environment: the overlay and
-  staged-package skill tiers enumerate only when `PI_GLOBAL_PI_DIR` is set for the session running
-  `/dispatch insights` (the deployment pointer deliberately cannot carry it), and a flow the visible
-  tiers miss renders the amber `[not at HEAD]` state rather than a red claim — see
-  [`graph.md`](graph.md).
+- The topology's tier visibility depends on the console's settings: the overlay and
+  staged-package skill tiers enumerate only when `PI_GLOBAL_PI_DIR` is set in the deployment's `.env` (or the
+  shell that started `pi-dispatch-console serve`), and a flow the visible tiers miss renders the amber `[not at HEAD]` state rather than a red claim (see
+  [`graph.md`](graph.md)).
+- The page makes no request to another origin: everything it loads comes from the console itself (its
+  Content-Security-Policy is `default-src 'none'; script-src 'self'; style-src 'self'; ...`).

@@ -125,9 +125,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Why**: BullMQ supplies priorities, a rate limiter, a dedup window, and stalled-job recovery with a
   retry policy — each of which is an independent requirement here, not a bonus. Building four mechanisms
   to avoid one dependency is precisely how a solo-maintainer project drowns in maintenance. Its Bull
-  Board dashboard was a fifth draw; `DES-ADMIN-VIA-PI-EXTENSION` drops the **served** web surface
-  entirely (the insights HTML artifact is a static file the operator's own browser opens — nothing serves
-  it, nothing listens), so the case now stands on the four queue mechanisms alone. Redis persistence (AOF) is what makes
+  Board dashboard was a fifth draw; `DES-ADMIN-VIA-PI-EXTENSION` dropped the **served** web surface
+  from the extension, and the operator console that serves pages now (`DES-OPERATOR-CONSOLE`, which since
+  2026-10-18 also serves the insights page) is its own process with its own security model and no Bull Board,
+  so the case now stands on the four queue mechanisms alone. Redis persistence (AOF) is what makes
   `REQ-QUEUE-BURST-NO-DROP` survive a reboot; an in-memory queue would lose the wait-list on the first
   restart.
 - **Evidence (upstream)**: BullMQ is MIT (`taskforcesh/bullmq → LICENSE`, © BullForce Labs AB)
@@ -756,7 +757,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     own sentences (`basisNote`, `hostCaveats`, `historyNotes`, `fleetRecordNotes` in `capacity-cli.mjs`), so no surface
     can word one differently or drop it. A host whose history is not here gets `notSharedWhy` and no busy share; a job
     list that does not parse, or a row with no beat time (no evidence of life), reads `?`, never 0.
-  - **The insights page** (phase 4) draws the same report over the page's own window (7d, 30d, or the month so far from
+  - **The insights page** (phase 4; the operator console's `/insights` page since 2026-10-18) draws the same report over the page's own window (7d, 30d, or the month so far from
     its first instant, as the spend window starts), read once per page through `readCapacity` at the page's instant,
     with a finer bucket than the CLI's (an hour over 7 days, six hours over 30 days or the month), since only the chart
     reads it and the headline numbers do not depend on it. The admin turns the report into the page's words before
@@ -2326,21 +2327,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   sender must be a person at an operator surface, never the operator's own model, which text in its session could
   direct. The enumeration of tools below is unchanged and is still the pin.
   Analytics
-  live on the **insights artifact** (`REQ-INSIGHTS-HTML-EXPORT`, issue #181), the ONE surface for
-  "what is this deployment wired to do and what does it cost": bare `/dispatch insights` (and the
-  overlay's `i` key, which resolves the overlay with a done-action so `index.ts` writes and opens
-  the page between overlays — the addTrigger route, no dep seam, no TUI suspend bracket) writes the
-  self-contained page **atomically to the stable path** `<graphDir>/insights.html` (tmp+rename —
-  stable so re-running updates an already-open tab through the page's own Reload/auto-reload
-  controls, atomic so that tab's reload never reads half a file), prints the `file://` URL **first**
-  and best-effort opens the platform browser through the worker's shared opener — skipped and said
-  over SSH or without a display, `--no-open` always; `insights whatif` keeps the re-pricing
-  estimator as a command (its reply goes through the admin channel like every read). The dashboard
+  live on the **operator console's `/insights` page** (`REQ-OPERATOR-CONSOLE-SCREENS` (e), `DES-OPERATOR-CONSOLE`),
+  the ONE surface for "what is this deployment wired to do and what does it cost". From issue #181 until
+  2026-10-18 it was a static file the extension wrote and opened (the retired `REQ-INSIGHTS-HTML-EXPORT`); since
+  then bare `/dispatch insights [7d|30d|mtd]` prints the console's URL for that window
+  (`http://<PI_CONSOLE_LISTEN host:port>/insights?range=<w>`, `127.0.0.1:4790` when the setting is unset; the ssh
+  tunnel hint for a unix socket, its path one shell word; `<this host>` in place of an any-address bind such as
+  `0.0.0.0` or `[::]`, which no browser can open; a sentence instead of a URL for port 0, whose port only the running
+  console knows; a sentence saying so when the setting does not parse) and says to start the console
+  with `pi-dispatch-console serve` if it is not running, `/dispatch insights whatif <provider/model> --flow <flow>`
+  prints the console's what-if URL, and the overlay's `i` key shows the same URL as a notice. Nothing is written and
+  no browser is spawned, so the extension keeps no file, no graph dir and no opener for analytics; `--no-open` and
+  `--full-paths` are gone and answer the usage line. The dashboard
   itself carries **no analytics fetch paths at all** anymore: the two per-view refresh policies the
   removed COSTS/GRAPH views needed (the stale-gated tick piggyback; entry-plus-`r`-only around the
   git-spawning enumeration) left with them, and the overlay is back to one snapshot poll plus the
   tail read. The
-  extension still **binds no network port at all**: a file with no server is not a surface — nothing
+  extension still **binds no network port at all**: printing a URL is not a surface (and the file it wrote until
+  2026-10-18, with no server, was not one either), nothing
   listens, nothing off-machine gained reachability — so this stays strictly narrower than the
   superseded `127.0.0.1` panel. Since issue #640 that property is the EXTENSION's, and it still holds for the
   extension: the operator console of `DES-OPERATOR-CONSOLE` is a second surface, a separate process
@@ -2356,9 +2360,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   that could not be read says "parked runs unknown" rather than "nothing parked". It reads only what the console's parked
   inbox reads, so the two surfaces stay equal (#641's second open question), and like every view it writes nothing:
   since #642 a parked run is answered on the forge or from the console's parked inbox, never from this view. The
-  artifact carries **run-record fields and operator-authored
-  trigger/skill strings only, never `.log` bytes and never a host path beyond the folder's basename**
-  — the same placement boundary as everything else here, applied to a file that outlives the session.
+  insights page carries **run-record fields and operator-authored
+  trigger/skill strings only, never `.log` bytes and never a host path beyond the folder's basename**:
+  the same placement boundary as everything else here; since 2026-10-18 the one exception is the console's
+  `paths=full`, for the operator role alone (`REQ-CONSOLE-SECURITY` (m)).
   **Its labels are sized and cut in estimated COLUMNS, and no cut on the page leaves half a character**
   (issue #418): chips were sized by `.length`, so a CJK skill name drew about twice the width of its
   chip, and about forty cuts by code unit (thirty-five of them data caps) left a bare high surrogate in
@@ -2394,7 +2399,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   port straddles the chip's edge and bounding a label there cut ordinary names the builder had already cut
   at fourteen columns a second time; the next left-anchored label on the same baseline bounds it too; and
   a loop hint's box ends at the ring wire drawn inside its skill group's edge. The nearest bound wins, 2px
-  are kept, and a label no bound reaches (a value drawn after its bar) is left alone. Width is not quite
+  are kept, and a label no bound reaches (a value drawn after its bar) is left alone. **Since 2026-10-18** this
+  script, with pan, zoom, the chip tooltips and the breakdown row click that highlights its chip (`data-node`), is
+  part of the console's one served script, `/static/console.js`, under `script-src 'self'`; what this passage calls
+  the page script and the embedded JSON is now that file and a hidden escaped list of per-node tooltip and neighbour
+  data in the page, never a script element (`DES-OPERATOR-CONSOLE`). Width is not quite
   monotone (an Arabic letter can turn the one before it into a narrower joining form), so a few steps past
   the halving's answer are tried too. **Geometry never moves**: the static estimate still sizes every chip and every wire, the page
   only ever shortens a label, and a page with its script off is exactly the static page, which is why a
@@ -2923,12 +2932,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Rejected**:
   - **SUPERSEDED by `DES-OPERATOR-CONSOLE` (issue #640)**, kept as written because the reasoning was right for a
     surface with no security model of its own: the console is that served page, built as a separate process under
-    the rules of that entry, and the insights artifact itself still binds nothing.
+    the rules of that entry. Since 2026-10-18 the static insights export is gone too, and the browser view is the
+    console's `/insights` page; the extension itself still binds nothing.
     *A served graph page (a localhost listener for the HTML view, or live data via a socket)*: the
     exact surface this entry removed, re-proposed with a prettier face; the socket→file substitution
     `DES-JOB-OUTBOX-CHAINING` canonised applies symmetrically here, so the browser view is a written
     artifact and refresh is the page reloading a re-written file, never a connection.
-  - *Raw `.log` bytes in the HTML artifact* — the `.log` is untrusted, PII-bearing text whose boundary
+  - *Raw `.log` bytes in the insights page* (written for the static export, and as true of the console's page), the `.log` is untrusted, PII-bearing text whose boundary
     is placement (overlay-viewer-only), not filtering; an escaped copy in a durable file outside the
     overlay would trade that structural defence for an HTML-escaping promise, the one trade this
     design refuses everywhere else.
@@ -10439,7 +10449,8 @@ a tunnel.
 - **The screens** (issue #641, `REQ-OPERATOR-CONSOLE-SCREENS`): eight read pages, each an exact path with a bounded
   query string, so the route table stays a table of exact paths and the #640 tests that iterate it cover every page
   without a hand list. `/` is the overview, `/runs` the run history (the run filters and a `before` cursor), `/run?id=`
-  one run, `/parked` the parked inbox, `/insights?range=7d|30d|mtd` the spend and insights sections, `/fleet` the
+  one run, `/parked` the parked inbox, `/insights?range=7d|30d|mtd` the spend and insights sections (since
+  2026-10-18 also `whatif=` with `flow=`, and `paths=full`), `/fleet` the
   queues, hosts, schedules and failed jobs, `/config` the configuration and `/audit` the audit log (operator only).
   Beside them: `GET /api/state` (`INT-CONSOLE-STATE-API`), `GET /api/events?page=` (`INT-CONSOLE-EVENT-STREAM`) and
   `GET /static/console.css`. The page set is one frozen table, `PAGES` in `admin/src/console/pages.mjs`
@@ -10504,8 +10515,36 @@ a tunnel.
   `admin/src/insights-assembly.mjs`, which takes the pricing as a parameter. `index.ts` imports it and its behaviour
   and tests are unchanged. The console passes the worker's real pricing (`@edgehero/pi-dispatch/pricing`), so its
   bundle carries `pi-ai` for the price table, as the extension bundle already did, but never the pi runtime: the
-  console is not a pi session and must not load one. `insights.html` stays the offline artifact, unchanged
-  (`REQ-INSIGHTS-HTML-EXPORT`). An assembly walks run records, so the console caches it 30 s per range.
+  console is not a pi session and must not load one. An assembly walks run records, so the console caches it 30 s
+  per (range, paths).
+  - **The one analytics surface** (2026-10-18, insights move to the console): the static insights export is gone
+    (`REQ-INSIGHTS-HTML-EXPORT`, retired) with its page chrome (the whole-page builder and the page around the
+    sections; the section renderers and the stylesheet the console uses stay), the graph dir and its setting, and
+    the browser spawn; `/dispatch insights` prints this page's URL (`DES-ADMIN-VIA-PI-EXTENSION`). The page took
+    what the file alone had. Its default window is 30d, the file's, because the topology is pinned at a 30-day
+    record window and one page's two halves should describe the same period; its header states both windows and the
+    retention and scan cap sentence. **The what-if** is a GET form on the page
+    (`/insights?whatif=<provider>/<model>&flow=<flow>`), a read for either role and not an action, so it takes no
+    ticket and writes no audit row: it answers the same estimate the command did (`whatIfFlow`, the median per-run
+    quad re-priced at the target over the flow's ledgered runs, else the seeded band `unmeasured (OQ-002)`) in a
+    what-if panel. Its record scan is the 92-day scan ceiling, as the command's was, so one request is bounded, and
+    the answer is cached 30 s per (model, flow, scan window), at most 64 answers, so a viewer reloading it, or
+    many viewers, cost one scan. An unknown model is answered with the closest priced ids (at most three, a
+    contains filter over the priced catalog) and scans nothing, so a typo costs no read. `whatif` and `flow` go
+    together, and both are charset checked by `parsePageQuery` (the model like the runs filter's model rule, which
+    may also start with `@` or `~` as the priced catalog's Cloudflare and OpenRouter alias ids do, with a provider
+    before the first `/`, the flow the skill name rule; every id the pinned catalog prices passes, a test walks it) before anything is read; a `<datalist>` offers
+    the priced ids and the window's flows. **`paths=full`** draws full local folder paths in the topology's group
+    labels and the budget split's problem text for the operator role alone; a viewer's request still draws
+    basenames and the page says full paths are for operators, because a path names the host's layout and the
+    viewer role is the one handed to people who should not learn it. **The interactive topology** (pan, zoom, chip
+    tooltips, label fitting and a breakdown row's click highlighting its chip through `data-node`) is part of the
+    one served script, `/static/console.js`. Its per-node tooltip and neighbour data reach the script as a hidden
+    escaped list in the page, escaped by the one template, never as an inline
+    script element or embedded JSON, because the CSP's `script-src 'self'` refuses every inline script, and a
+    `<script type="application/json">` block would also be a second escaping context (a forged `</script>` in a
+    flow name) beside the one HTML escaping every other value already goes through. The zero external requests
+    property the file held is now this page's, held by the CSP and the page tests.
 - **The live hub** (`admin/src/console/live.mjs`): live updates are server-rendered panels over Server-Sent Events
   (`INT-CONSOLE-EVENT-STREAM`). One poll loop in the console process, every second (the panel's cadence), and only
   while at least one stream is open, so a console nobody watches reads nothing and N open tabs cost Valkey one poll,
@@ -10796,6 +10835,15 @@ a tunnel.
   (`worker/src/sandbox.mjs`), which a separate process cannot hand to a browser; `REQ-RESURRECTABLE-SANDBOX`'s
   surfaces are unchanged.
 - **Rejected**:
+  - **Keeping a second, offline insights renderer beside the console** (2026-10-18). From #641 the console served
+    the insights sections while the extension still wrote the static insights export, with its own page chrome, its
+    own inline script, its own reload loop and its own window default (30d against the console's 7d); the two
+    drifted (the full paths opt in and the interactive topology existed only in the file, the what-if only as a
+    command beside it, and a
+    screenshot of one could not be checked against the other). An offline copy also kept a second security posture
+    to argue (a file anyone can forward, with a flag that put host paths in it) beside the console's roles. One
+    served page under one CSP and one role model is the narrower surface; the file and everything only it needed
+    (the graph dir, the opener, `--no-open`, `--full-paths`, the reload) went.
   - **Mounting the console on the receiver.** Still rejected, for the reason `DES-PANEL-SEPARATE-FROM-RECEIVER`
     recorded and `DES-ADMIN-VIA-PI-EXTENSION` kept: the receiver binds `0.0.0.0` and faces the forge, so any admin
     surface on it is published to the internet, and one crash in the console would take webhook ingress with it.
@@ -10873,7 +10921,8 @@ a tunnel.
   `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONFIG-OVERLAY-CONTRACT`,
   `DES-ADMIN-VIA-PI-EXTENSION`, `DES-PANEL-SEPARATE-FROM-RECEIVER`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`,
   `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `DES-AWAIT-INPUT-ENDS-THE-JOB`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
-  `REQ-AWAIT-INPUT`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-RESURRECTABLE-SANDBOX`, `REQ-INSIGHTS-HTML-EXPORT`,
+  `REQ-AWAIT-INPUT`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-RESURRECTABLE-SANDBOX`, `REQ-INSIGHTS-HTML-EXPORT` (retired
+  2026-10-18), `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`, since #643 `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM` and
   `INT-LIVE-TRANSCRIPT-STREAM`, and since #644 `REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS` and `INT-RUN-PROGRESS-KEY`.
@@ -10898,7 +10947,11 @@ a tunnel.
   pages.mjs and script.mjs (the run page's section), the entry renderer `admin/src/console/transcript.mjs`, and admin/src/read-model.mjs
   (`readTranscriptSince`, `readTranscriptMeta`, `TRANSCRIPT_ID_RE`, `TRANSCRIPT_PAGE_MAX`). Since #644:
   admin/src/read-model.mjs (`parseProgress`, `readProgress`, `readProgressMany`, `activeProgressOf`, the fleet reader's
-  `progress` and `progressFor`), panels.mjs, pages.mjs and live.mjs (`pageMinMs.run`).
+  `progress` and `progressFor`), panels.mjs, pages.mjs and live.mjs (`pageMinMs.run`). Since 2026-10-18 (insights
+  move to the console): pages.mjs and panels.mjs (the what-if panel, the window line, `paths=full`), script.mjs (the
+  interactive topology), admin/src/insights-html.mjs (the sections only), admin/src/index.ts (`/dispatch insights`
+  prints the URL), .github/scripts/label-fit-check.mjs (now checks the console's renderers) and
+  launch/render-images.mjs (renders `docs/images/insights-view.png` from the console page).
 
 ## DES-LIVE-TRANSCRIPT-STREAM
 
@@ -11594,3 +11647,4 @@ a tunnel.
 | 2026-10-17 | Issue #646, part 3: the console and the panel. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names part 3; NEW bullet "Steering a running job": the actions `steer` (paid, no new reserve, the preview showing the text escaped and the row holding only its sha256) and `steer-withdraw` (free, its preview and answer saying guaranteed or best effort) on `planSteer`, `enqueueSteer`, `planSteerWithdraw` and `withdrawSteerMessage` beside the parked answer's planners, all on the worker's inbox module; the message id minted at the preview so the ticket binds one message; the run page's Inbox panel (`p-inbox`, after Progress: the list without text for both roles, the forms only while the run takes messages and the withdraw buttons for an operator, nothing drawn for an unarmed job, hidden by `section[data-panel]:empty`), re-rendered by digest; the snapshot reading `steer` and `recoveryOf` off a Job's data and nothing else, for at most 16 steer-armed jobs. Rejected: listing the text, a reserve per message, a model-callable steer tool. The action groups, the kinds and the action names gain the two. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the ACTIVE row of a steer-armed job takes `t` and `T` (both free in every view's key map and in the footer hints, which are unchanged; the hint rides the selected armed row alone), a footer input bound to the job the key was pressed on, the console's free plan then the push through `withAuditedWrites` (kind `steer`, the digest only), and a stated decision that no model-callable tool steers; the tool enumeration is UNCHANGED, checked, and still the pin. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` UNCHANGED, checked**: the console and the panel push through the same scripts the CLI does, so the mount, the relay and the framing do not move. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: steering is a sibling channel and cancel is untouched. **Code evidence**: admin/src/job-actions.mjs -> planSteer, enqueueSteer, planSteerWithdraw, withdrawSteerMessage; admin/src/console/actions.mjs -> the two entries; admin/src/console/panels.mjs -> runInbox; admin/src/console/pages.mjs -> the run page's `inbox` read and `p-inbox`; admin/src/console/style.mjs -> `section[data-panel]:empty`; admin/src/read-model.mjs -> readJobInbox, the fleet reader's `inbox`; admin/src/dashboard.ts -> the `t` and `T` keys, steerNote, steerFailure. |
 | 2026-10-17 | Issue #646, part 3, review round 1. **`DES-OPERATOR-CONSOLE` CORRECTED** to the code after the round: the steer bullet says the audit row names the message by id (`<job id>#<message id>`) beside the job; that the snapshot's inbox read is metadata only (`listInboxPublic` reads the state hash's `m:<id>` fields, never the list); and that a run that goes on as a #645 recovery job is found from the base run's page: `activeJobOfRun` tries the run's recovery ids, newest first, the panel says "its run continues as" that job with a link, and the planner sends through it, so the forms work from either page. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the TUI's row is the same; only its audit row's `target` gains the message id. **Code evidence**: admin/src/read-model.mjs -> activeJobOfRun, readJobInbox; admin/src/job-actions.mjs -> planSteer, steerAuditTarget; admin/src/console/panels.mjs -> runInbox. |
 | 2026-10-18 | Issue #662: three record and display gaps of durable runs. **`DES-RUN-PROGRESS` AMENDED**: the reducer's `recoveryInterrupted` and `recoveryNotStarted` summary keys (this attempt's marks only, never in the snapshot or the record's `progress`), the processor's transcript fallback for a recovery's `recovered` counts with `countsFrom`, the two rejected alternatives, and the stall listener's read of the key for the crashed attempt's `startedAt` and counts (`processedOn` rejected: BullMQ's stall re-pick overwrites it). **`DES-OPERATOR-CONSOLE` AMENDED**: the run page reads progress by the run id; an attempt whose run continues as a recovery shows its own record's progress and links the recovery, rejecting the by-time pairing for a recovery; the active rows read a recovery's key by its run id; the `/dispatch` panel reads the ACTIVE row's phase name through `progressOfRun` and RUN_DETAIL of a `recovery-enqueued` record shows its own progress and "continues as" the recovery job, read once on entry. |
+| 2026-10-18 | Insights move to the console. **`DES-OPERATOR-CONSOLE` AMENDED**: the screens list gains `whatif=` with `flow=` and `paths=full` on `/insights`; the insights bullet drops the sentence that kept the static file and caches the assembly 30 s per (range, paths); NEW sub bullet "The one analytics surface": the 30d default, the window line, the what-if as a GET read for either role (not an action, no ticket), its 92-day scan ceiling and its 30 s cache per (model, flow, scan window) of at most 64 answers, the closest priced ids with no scan for an unknown model, the charset checks, `paths=full` for the operator alone and why, and the interactive topology in `/static/console.js` with its node data as a hidden escaped list, never an inline script or embedded JSON, because of the CSP's `script-src 'self'` and because a JSON script block would be a second escaping context; NEW Rejected bullet: keeping a second, offline insights renderer beside the console, which drifted; Traces to marks the retired requirement and adds `REQ-COST-ANALYTICS` and `REQ-TOPOLOGY-GRAPH`; Code evidence names the files this change touches. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: analytics live on the console's `/insights` page; `/dispatch insights` prints the console URL (the default listen, the unix socket tunnel hint, an unparsable setting said), `whatif` prints the what-if URL, the `i` key shows the URL as a notice, nothing is written and no browser spawned, `--no-open` and `--full-paths` answer usage; the no-port sentence says printing a URL is not a surface; the content boundary names `paths=full` as the operator-only exception; the label fitting passage notes that its script now runs in the console's served script with node data in a hidden list; the superseded Rejected bullet says the file is gone too; the `.log` Rejected bullet names the insights page. **`DES-CAPACITY-FROM-RECORDS` AMENDED**, wording only: phase 4's page is the console's. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**, wording only: its aside about a static insights file not being served now names the console. UNCHANGED, checked: `DES-SIZE-SUGGESTIONS` ("the insights page" is now the console's, and the leaf function rule stands), `DES-COST-FOLD-BY-SCAN` (the what-if still folds through it, over the same 92-day ceiling), `DES-GRAPH-EDGE-DERIVATION`, `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`, `DES-LIVE-TRANSCRIPT-STREAM`, `DES-RUN-PROGRESS`. Review round 1, folded in before merge: the what-if model rule takes a leading `@` or `~` (36 priced ids were refused 400 while the datalist offered them), and the printed address shell-quotes a unix socket path, names `<this host>` for an any-address bind and prints no URL for port 0. |

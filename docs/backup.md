@@ -73,8 +73,6 @@ These are all regenerated or bounded, and copying them buys nothing:
   inputs, rebuilt from scratch for every job.
 - `PI_SANDBOX_DIR` (default `<PI_JOBS_DIR>/sandboxes`): a finished run's workspace, kept for
   `PI_SANDBOX_RETENTION_HOURS` (24 by default) so you can re-open it, and disposable by design.
-- `PI_GRAPH_DIR` (default `<OS temp dir>/pi-dispatch-<uid>/graph`): the insights HTML artifact, rewritten by the next
-  `/dispatch insights`.
 - `<deployment>/logs/worker.out.log` and `worker.err.log`: your service manager's capture of the
   worker's stdout and stderr. **This is not the run history**, and `PI_LOGS_DIR` must never be pointed
   at that directory: the retention sweep deletes any `.log` or `.json` older than the window, and it

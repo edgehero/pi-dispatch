@@ -723,8 +723,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: The admin surface shall ship as a pi extension in `admin/`, loaded into the operator's
   interactive pi session. It provides operator slash commands for observability (`status`, `runs`, `logs`,
-  `budget`, `triggers`, and `insights` — the one analytics surface, writing and opening the artifact of
-  `REQ-INSIGHTS-HTML-EXPORT`, with a `whatif` form per `REQ-COST-ANALYTICS`), queue on/off
+  `budget`, `triggers`, and `insights`, which since 2026-10-18 prints the operator console's URL for the window
+  (the console's `/insights` page is the one analytics surface, `REQ-OPERATOR-CONSOLE-SCREENS` (e)), with a `whatif`
+  form that prints the console's what-if URL per `REQ-COST-ANALYTICS`; it writes nothing and spawns no browser, and the
+  panel's `i` key shows the same URL as a notice), queue on/off
   (`pause`/`resume`, backed by the same durable `queue.pause()`), and
   settings editing (`set`/`unset`, writing the `settings.json` overlay), plus **operator-typed trigger CRUD**
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
@@ -917,7 +919,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `write-plans.mjs`, the tool's refusal is the same sentence as before, each sentence pinned word for word
   (`admin/test/write-plans.test.mjs`); given the panel's `r` while the shell's and the deployment's Valkeys disagree,
   the resume is refused and said in the footer (`admin/test/panel-audit-wiring.test.mjs`, "the panel's r on a
-  two-Valkey disagreement", through index.ts's own wiring).
+  two-Valkey disagreement", through index.ts's own wiring). Given `/dispatch insights 7d` with no `PI_CONSOLE_LISTEN`,
+  then it prints `http://127.0.0.1:4790/insights?range=7d` and says to start the console with `pi-dispatch-console
+  serve` if it is not running; given a unix socket listen, then it prints the ssh tunnel hint with the path as one
+  shell word; given an any-address listen (`0.0.0.0`, `[::]`) under PI_CONSOLE_BIND_PUBLIC=1, then it prints
+  `<this host>` for the address; given port 0, then it prints no URL and says only the running console knows the
+  port; given a listen that does not parse, then it says so; given `/dispatch insights whatif <provider/model> --flow <flow>`, then it prints the
+  console's what-if URL; given `--no-open`, `--full-paths` or any junk positional, then it answers usage; in every
+  case nothing is written and no browser is spawned, and the panel's `i` key shows the same URL as a notice
+  (`admin/test/wiring.test.mjs`; the page checks the retired command's suite held now run on `assembleInsights` and the
+  console's renderer in `admin/test/insights-assembly.test.mjs`, and `admin/test/insights-retired.test.mjs` holds that
+  no source, example file or doc names the retired export).
 
 ## REQ-CONSOLE-SECURITY
 
@@ -932,21 +944,27 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   never put a token, a login code, a cookie value or a request body in a log line, an audit row or a page; and,
   since #641, shall end every event stream when its session ends without a stream ever extending one, and shall show
   free run text (BullMQ `failedReason`) and the audit log to the operator role alone; and, since #643, shall show a
-  run's live transcript to the operator role alone, escaped, and only on the run page.
+  run's live transcript to the operator role alone, escaped, and only on the run page; and, since 2026-10-18 (insights
+  move to the console), shall serve the `/insights` page with zero external requests under its CSP, answer its what-if
+  as a GET read for either role (bounded and cached, never an action and never a ticket), and draw full local paths
+  there (`paths=full`) for the operator role alone.
 - **Scope**: the console process and its CLI. The pi extension is unchanged and still binds no port
   (`REQ-ADMIN-VIA-PI-EXTENSION`). #640 built login, logout, `whoami` and one reference write, the pause windows; #641
   added the read screens, `/api/state` and the event streams (`REQ-OPERATOR-CONSOLE-SCREENS`), which meet this
   requirement through clauses (e), (k) and (l); #642 added every other write and action
   (`REQ-OPERATOR-CONSOLE-ACTIONS`), which meet it through clause (g) above all; #643 added the live transcript
-  (`REQ-LIVE-TRANSCRIPT`), which meets it through clauses (e), (k) and (l). `REQ-INSIGHTS-HTML-EXPORT` is unchanged: the static file keeps zero
-  external requests and binds nothing.
+  (`REQ-LIVE-TRANSCRIPT`), which meets it through clauses (e), (k) and (l). Since 2026-10-18 the static insights export
+  is gone (`REQ-INSIGHTS-HTML-EXPORT`, retired), and the zero external requests property it held now holds on the
+  console's `/insights` page, through its CSP (`default-src 'none'`, `script-src 'self'`) and the page tests, not on
+  a file; the page meets this requirement through clauses (e) and (l), and through clause (m).
 - **Why**: the console is the most powerful surface after a shell on the host, and a loopback port is reachable by
   every local account, by any page the operator's browser opens and, on Docker Desktop, by a job container
   (`DES-OPERATOR-CONSOLE`'s six threats). Each clause below closes one route, and each is held by a named test,
   because a security property nobody runs is a sentence, not a control.
 - **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
   `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`,
-  `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-LIVE-TRANSCRIPT`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`.
+  `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-LIVE-TRANSCRIPT`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-044`, and since 2026-10-18
+  `REQ-COST-ANALYTICS` (the what-if).
 - **Acceptance**:
   - (a) **Where it listens, and what it refuses to start on.** Given no `PI_CONSOLE_LISTEN`, the console listens on
     `127.0.0.1:4790`; given a non-loopback IP literal without `PI_CONSOLE_BIND_PUBLIC=1`, a hostname, or a unix
@@ -1048,6 +1066,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     panel, no other page and no `/api/state` body carries transcript text; given `HEAD /api/transcript`, it is 405;
     the transcript stream shares the slots and the session re-judging of (k) and its 2 MiB cut. Tests: `admin/test/console-transcript.test.mjs`,
     `admin/test/console-pages.test.mjs` and `admin/test/console-actions.test.mjs` (the script's markup writes).
+  - (m) **The insights page's reads** (2026-10-18, insights move to the console). Given a viewer's session, then
+    `/insights?whatif=<provider>/<model>&flow=<flow>` is answered as a read (a GET, no ticket, no audit row, no
+    write) and its record scan is bounded by the 92-day scan ceiling and cached 30 s, at most 64 answers; given
+    `paths=full` from a viewer, then the page still draws basenames and says full paths are for operators; given the
+    same from an operator, then the topology's group labels and the budget split's problem text carry full local
+    paths; given either role, then the page carries no inline script, its node data is a hidden escaped list and
+    never a script element, and its bytes hold no external `src`, `href`, `url()` or `@import`. Tests:
+    `admin/test/console-panels.test.mjs`, `admin/test/console-pages.test.mjs`, `admin/test/console-cli.test.mjs`,
+    `admin/test/console-headers.test.mjs`, `admin/test/insights-html.test.mjs`.
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
@@ -1060,15 +1087,24 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Scope**: reads only. Every write and action, answering a parked run included, is #642's
   (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; the live transcript on
   the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's (`REQ-RUN-PROGRESS`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
-  (e), (k) and (l) above all. `insights.html` stays the offline artifact, unchanged (`REQ-INSIGHTS-HTML-EXPORT`).
+  (e), (k) and (l) above all, and (m) for the insights page. Since 2026-10-18 (insights move to the console) the
+  `/insights` page is the ONE analytics surface: the static insights export is retired (`REQ-INSIGHTS-HTML-EXPORT`),
+  and every normative clause it carried that is not about a file (the content bans, the allowlisting, determinism,
+  escaping, the labelling rules of `REQ-COST-ANALYTICS` and the visual clauses, and the budget, budget split, job
+  sizes and capacity sections) binds this page. The page's what-if, its `paths=full` view and its interactive
+  topology are reads too.
 - **Why**: before #641 the operator's live surfaces were the panel and a static insights file whose reload re-read
-  the same file. Parked runs were shown nowhere in the admin, the run list stopped at 50 records with no search, only
+  the same file. Until 2026-10-18 that file was kept beside the console as an offline copy, and its renderer drifted
+  from the console's (a second page chrome, a second script, a second window default), so the file went and the
+  console page took what it alone had: the what-if, the full paths opt in, the window line and the interactive
+  topology. Parked runs were shown nowhere in the admin, the run list stopped at 50 records with no search, only
   one active job was fetched, and nothing a script could read existed. A second reader for the console would have
   been a second answer to "what is the deployment doing", free to disagree with the panel's; so the panel's reader
   moved into the read model and both surfaces use it.
 - **Traces to**: `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`,
   `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`,
-  `REQ-AWAIT-INPUT`, `REQ-DURABLE-RUN-HISTORY`, `REQ-INSIGHTS-HTML-EXPORT`, `REQ-MULTI-HOST-COORDINATION`, `OQ-044`.
+  `REQ-AWAIT-INPUT`, `REQ-DURABLE-RUN-HISTORY`, `REQ-INSIGHTS-HTML-EXPORT` (retired into this entry on 2026-10-18),
+  `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`, `REQ-MULTI-HOST-COORDINATION`, `OQ-044`.
 - **Acceptance**:
   - (a) **Overview** (`/`). Given the fixture deployment, the page shows the paused state (a partial pause named as
     such), the queue counts, the hosts online with the age of each one's last beat, today's spend against its caps,
@@ -1115,11 +1151,40 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     (`REQ-OPERATOR-CONSOLE-ACTIONS` (f)). Tests: `admin/test/read-model-pages.test.mjs`
     (`readParkedRuns`), `admin/test/console-pages.test.mjs`.
   - (e) **Insights** (`/insights?range=`). Given `range` `7d`, `30d` or `mtd`, the page shows the insights sections
-    for that window, built by the same assembly `/dispatch insights` uses (`assembleInsights`, now pi-free in
-    `admin/src/insights-assembly.mjs`), with no inline style and no inline script; given any other range, it is
-    refused; given no range, the last 7 days; a second request within 30 seconds for the same
-    window reuses the assembly. `/dispatch insights` and its tests are unchanged. Tests:
-    `admin/test/insights-assembly.test.mjs`, `admin/test/insights-html.test.mjs`, `admin/test/console-pages.test.mjs`.
+    for that window, built by the one assembly (`assembleInsights`, pi-free in `admin/src/insights-assembly.mjs`),
+    with no inline style and no inline script; given any other range, it is refused; given no range, the last 30 days
+    (since 2026-10-18; it was 7 days); a second request within 30 seconds for the same window and the same `paths`
+    reuses the assembly; given an unknown query key, it is refused 400. Since 2026-10-18 (insights move to the
+    console), each of these holds too:
+    - (e1) **The two windows.** The page's header line reads "spend window: <label> · topology: fixed <N>d record
+      window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap", so a screenshot cannot
+      conflate the two windows.
+    - (e2) **The what-if panel.** Given `whatif=<provider>/<model>&flow=<flow>`, the what-if panel shows the estimate
+      of `REQ-COST-ANALYTICS`: the flow's median per-run quad re-priced at the target over its ledgered runs, marked
+      estimated, naming its rates version and coverage, else the seeded band `unmeasured (OQ-002)`; the record scan is
+      the 92-day scan ceiling, bounded, and cached 30 s per (model, flow, scan window), at most 64 cached answers;
+      given a model the pricing catalog does not hold, the panel offers at most three priced ids that contain the
+      text and scans nothing; given `whatif` without `flow`, or `flow` without `whatif`, it is refused 400; given a
+      model outside the runs filter's model charset (a leading `@` or `~` allowed, as priced catalog ids carry) or
+      with no provider before the first `/`, or a flow outside the
+      skill name rule, it is refused 400 by field name and the value is not echoed. The form is a GET with a
+      `<datalist>` of the priced model ids and the window's flows, open to the viewer role, and it is not an action.
+    - (e3) **Full paths, operator only.** Given `paths=full` and an operator's session, the topology's group labels
+      and the budget split's problem text carry full local folder paths; given the same from a viewer, they carry
+      basenames and the page says full paths are for operators; given no `paths`, basenames for both roles.
+    - (e4) **The interactive topology.** Pan, zoom, chip tooltips, label fitting, and a breakdown row's click
+      highlighting its topology chip (through `data-node`) run in the console's one served script,
+      `/static/console.js`, under `script-src 'self'`; the per-node tooltip and neighbour data reach it as a hidden
+      escaped list in the page, never a script element; a mouse click on a chip selects it (and a second clears it)
+      although pointer capture retargets the click, and a view in the fragment is clamped to the zoom bounds rather
+      than thrown on; with the script off the page is the static page, every
+      label still sized by the builder's estimate.
+    - (e5) **Nothing leaves the host.** The page's bytes hold no external `src`, `href`, `url()` or `@import`, no
+      `fetch` of another origin and no `.log` content, under both roles and with hostile fixture values.
+    Tests: `admin/test/insights-assembly.test.mjs`, `admin/test/insights-html.test.mjs`, `admin/test/graph-html.test.mjs`,
+    `admin/test/console-panels.test.mjs` (the script under a DOM stub, the what-if reader, paths, the window line, 30d,
+    zero external requests), `admin/test/console-pages.test.mjs` (the fixtures, with a what-if page),
+    `admin/test/console-headers.test.mjs`.
   - (f) **Fleet** (`/fleet`). The page shows BullMQ counts per state for each queue and summed, the held waits, each
     host with its slots, budget, running jobs and last beat, every active job (not only the first), the job
     schedulers with their next and last run and stall state, and the failed jobs as a list of job id, attempts, queue
@@ -1755,7 +1820,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   It is shown by doctor (one line per project, a warning for a raise, for a size already at the largest the host
   offers, and for a size admission would refuse), in the panel's
   PROJECTS view (the call wrapped, never cut and never broken inside a JSON string, with a line saying to join it), in
-  the `dispatch_limit_edit` confirm when a size field of a project row is edited, and on the insights page, which also
+  the `dispatch_limit_edit` confirm when a size field of a project row is edited, and on the operator console's
+  `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS` (e); it was the static insights export until 2026-10-18), which also
   draws each run's peak memory over time against its size, and each live host's budget and use. A suggestion is NEVER
   applied by anything but that call, confirmed by the operator. **The call is offered exactly when admission would
   accept the suggested job** (the suggested size per dimension, else the current one), one rule on every surface:
@@ -1790,7 +1856,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   load, then doctor prints no size line and says suggestions are off until it loads. Given a `dispatch_limit_edit`
   of a project row's memory, then its confirm names the project's p95 peak and cores and what they suggest, and says
   the budget was not checked there; given an edit of a count, then it does not.
-- **Traces to**: `DES-SIZE-SUGGESTIONS`, `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-INSIGHTS-HTML-EXPORT`,
+- **Traces to**: `DES-SIZE-SUGGESTIONS`, `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-OPERATOR-CONSOLE-SCREENS`,
   `INT-RUN-HISTORY-FILE-CONTRACT`
 
 ## REQ-CAPACITY-INSIGHTS
@@ -1803,7 +1869,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`INT-CAPACITY-REPORT`) and `pi-dispatch capacity`; phase 2 counts the jobs running now (from the host rows), and
   shows the same report as one doctor line per host and through the `dispatch_capacity` tool; phase 3 shows it in the
   panel's HOSTS view (`u`), each live host's slots, budget and running jobs now beside its last 7 days; phase 4 shows
-  it on the insights page, over the page's window. It is READ-ONLY: computing it writes no record, no key and no file,
+  it on the insights page, over the page's window (the operator console's `/insights` page since 2026-10-18,
+  `REQ-OPERATOR-CONSOLE-SCREENS` (e)). It is READ-ONLY: computing it writes no record, no key and no file,
   and nothing decides on it. It is JOBS ONLY: no host load is sampled, so a machine busy with other work reads as
   idle, and every surface says so. **History it cannot see is never shown as idle**: time before what its sources hold
   (a run mirror at its cap or one that started then, as a new deployment's or one whose Valkey lost its keys does,
@@ -1851,7 +1918,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   unreadable; given a read that never answers, then after 30 s the view says so and `u` reads again; given fifty presses of Esc and `u` over a
   slow read, then one read runs; given a host name or id with a control character, then it reaches the terminal
   escaped; given a width of 47 columns, then no line is wider.
-  Given `/dispatch insights` for 7d, 30d or mtd, then its capacity section shows each host's busy and idle share,
+  Given the console's `/insights` page for 7d, 30d or mtd, then its capacity section shows each host's busy and idle share,
   slots on average and at peak, time full, what was promised and CPU used, the wait p50 and p95 and the top projects
   in the words `pi-dispatch capacity` prints for the same report, `mtd` from the first instant of the month, and a
   chart per host whose time axis ends at the page's instant; given time before a host's history starts or a host
@@ -2202,10 +2269,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-COST-ANALYTICS
 
-- **Statement**: The harness shall make recorded spend **analyzable**: the browser surface
-  `REQ-INSIGHTS-HTML-EXPORT` (the operator's one analytics view), the `dispatch_costs` read tool (the
-  machine-readable path), and the `/dispatch insights whatif` command (the re-pricing estimator) — all
-  rendering ONE retention-bounded fold (`DES-COST-FOLD-BY-SCAN`) of the run-history
+- **Statement**: The harness shall make recorded spend **analyzable**: the operator console's `/insights` page
+  (`REQ-OPERATOR-CONSOLE-SCREENS` (e), the operator's one analytics view; it was the static insights export until
+  2026-10-18), the `dispatch_costs` read tool (the machine-readable path), and the what-if form on that page (the
+  re-pricing estimator, `/insights?whatif=<provider>/<model>&flow=<flow>`, whose URL `/dispatch insights whatif`
+  prints), all rendering ONE retention-bounded fold (`DES-COST-FOLD-BY-SCAN`) of the run-history
   sidecars: spend per **flow**, per **model**, per **day**, per **trigger** (attributed under
   `REQ-TOPOLOGY-GRAPH` (b)'s index-and-type join, with chained/manual/unattributed runs as explicit
   buckets pinned to the table's tail, never blended into a trigger's number), per **repository
@@ -2255,12 +2323,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-ADMIN-VIA-PI-EXTENSION`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-SUBSCRIPTIONS-FILE-CONTRACT`, `INT-PRICING-EXPORT-CONTRACT`,
   `DES-COST-FOLD-BY-SCAN`, `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`,
-  `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `CONST-BUDGET-BEFORE-TOKENS`, `OQ-002`, `OQ-011`
+  `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-OPERATOR-CONSOLE-SCREENS`, `OQ-002`, `OQ-011`
 - **Acceptance**: Given ledgered runs across two models and a declared plan, when the insights page
   renders, then per-flow and per-model spend render over the window, the plan's runs show `plan:<id>`
   (never `$0.00`), and the plan card shows amortized $/run and the API-equivalent comparison marked
   `~ est.`; given a window with `limit: null`, then no burn-down renders anywhere; given
-  `insights whatif` on a flow with ledgered history, then the estimate derives from repriced recorded
+  the console's what-if form on a flow with ledgered history, then the estimate derives from repriced recorded
   quads, is marked estimated, names its rates version, and reports coverage; given a flow with no
   ledgered history, then the only offer is the labeled `unmeasured (OQ-002)` band; given
   `dispatch_costs`, then every monetary value in the returned `fold`
@@ -2287,19 +2355,25 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   exact; given a floor counter of -1 or 0.5, then `≥`. Given a run refused before any spend (no `tokens`, no
   `exitCode`, `budgetReserved: false`), then it folds as an exact metered $0, its bucket is not a floor and
   `runsUnmetered` does not count it; given the same record with `budgetReserved` true, null or absent, or with an
-  exit code, then it stays a floor (issue #507).
+  exit code, then it stays a floor (issue #507). Given a what-if for a model the pricing catalog does not hold, then
+  the answer names at most three priced ids containing the text and no record is scanned; given the same what-if
+  twice within 30 seconds over the same scan window, then the second is the cached answer; given a what-if whose
+  flow has more records than the 92-day scan ceiling admits, then the scan stops at the ceiling and the answer says
+  its coverage (2026-10-18, `REQ-OPERATOR-CONSOLE-SCREENS` (e2)).
 
 ## REQ-TOPOLOGY-GRAPH
 
 - **Statement**: The harness shall make the trigger/flow **topology** visible: the topology pane of the
-  insights artifact (`REQ-INSIGHTS-HTML-EXPORT`, the one analytics surface) renders one assembled model
+  operator console's `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS` (e), the one analytics surface; the static
+  insights export of the retired `REQ-INSIGHTS-HTML-EXPORT` until 2026-10-18) renders one assembled model
   (`DES-GRAPH-EDGE-DERIVATION`) of every trigger, every
   enumerated skill, and every edge between them, grouped by folder — and, since issue #188, the three
   non-repo skill tiers the loader legally resolves from (`REQ-PER-TRIGGER-SKILLS`,
   `REQ-GLOBAL-PI-OVERLAY`): injected `run.skillsDir` skills, the overlay's `skills/` and the staged
   packages' skills each render as their own tier-labelled group where this session can enumerate them.
   The surface informs; it changes
-  nothing — no port, no database, no new dependency, all fs/redis access in the read-model. The
+  nothing, no port of its own (since 2026-10-18 it is served by the console, which already listens), no database,
+  no new dependency, all fs/redis access in the read-model. The
   **honesty rules are requirements, not conventions**:
   (a) every trigger naming a `run.flow` renders its config edge — dangling, unverifiable and
   charset-invalid included;
@@ -2354,7 +2428,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   resolution — what grew is the **node kinds** (`overlay`, `staged`, `skill-not-at-head`), which now
   form their own closed, test-pinned set (`GRAPH_NODE_KINDS`) with a glyph-parity pin so a kind
   without a renderer arm goes red in a unit test.
-- **Scope**: Display only, from the operator's session. The graph triggers nothing, writes nothing,
+- **Scope**: Display only, from the operator's session (since 2026-10-18 the console's `/insights` page, behind its
+  session and role rules, `REQ-CONSOLE-SECURITY`, and its 30 s assembly cache). The graph triggers nothing, writes nothing,
   and is deliberately **not** a model-callable tool: the enumeration spawns git per folder, and the
   topology is for the operator's eyes (`DES-CLI-SURFACE`'s ungated operator-typed tier).
 - **Why**: Every edge already exists somewhere in `triggers.json`, the run records, or the object
@@ -2366,7 +2441,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`, `REQ-PER-TRIGGER-SKILLS`, `REQ-GLOBAL-PI-OVERLAY`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-008`, `OQ-009`, `OQ-022`
 - **Acceptance**: Given a triggers file with a cron trigger whose folder enumeration succeeds and a
-  label trigger, when the insights artifact renders, then the cron trigger shows exact run counts
+  label trigger, when the console's insights page renders, then the cron trigger shows exact run counts
   joined by jobId, the label trigger shows counts joined by `triggerIndex` only, and both config
   edges render;
   given a record whose `triggerIndex` exceeds the current file, then it counts as unattributed and
@@ -2396,117 +2471,37 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   posture, the atomic stable-path write, URL-before-spawn, the page's own refresh loop and hash view
   state, the no-port property, the `.log`/host-path content bans with the `--full-paths` opt-in, and
   the headless skip-and-say — now lives verbatim in `REQ-INSIGHTS-HTML-EXPORT`, whose artifact
-  carries the same topology as one of its panes. The ID stays because spec IDs are permanent
+  carries the same topology as one of its panes. That entry was itself retired on 2026-10-18 (insights move
+  to the console), and the topology now lives on the console's `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS`).
+  The ID stays because spec IDs are permanent
   addresses; the history of what this entry required is in the Revision History rows that built it.
 
 ## REQ-INSIGHTS-HTML-EXPORT
 
-- **Statement**: The harness shall render the **unified insights artifact** — the operator's ONE
-  analytics surface — on the bare command: `/dispatch insights [7d|30d|mtd] [--no-open]
-  [--full-paths]` writes one self-contained HTML file — inline SVG/CSS/JS, `file://`, **zero
-  external requests** — atomically (tmp+rename) to the **stable path** `<graphDir>/insights.html`,
-  prints its `file://` URL **before any spawn**, and best-effort opens the platform browser; the
-  overlay's `i` key runs the same command between overlays. The page carries its own refresh: a
-  Reload control, an off/5s/30s auto-reload, a live staleness stamp, and view state that survives
-  its own reloads via the URL hash — so a re-run updates an already-open tab, and tmp+rename means
-  the tab never reads half a file. Over SSH or without a display the spawn is skipped and the skip
-  is stated; `--no-open` skips it unconditionally; a write failure notifies the path and never
-  opens. The page unifies the
-  assembled topology (`REQ-TOPOLOGY-GRAPH` — its honesty counters, edge recency, schedule tips and
-  spend badges per its (h)) with the cost fold (`REQ-COST-ANALYTICS`) rendered as **hand-rolled
-  inline SVG charts**: KPI tiles, a **budget panel** (the caps are the operator's one real lever on
-  cost, so the page that prices everything shows the dial beside the spend: reserved-vs-cap facts
-  for the day/week/month job-slot windows and the daily token counter, states computed by the
-  worker's own classifier and carried in the payload as words, the lever named — `/dispatch set …`,
-  the panel's `s`; each scoped-limits row with its job-count windows, its configured concurrency and,
-  since issue #507, its dollar windows as spent and held over the cap in exact micro-dollars, with no
-  state word), plan verdict cards, a daily spend column chart with a **cumulative mini-chart**
-  beneath it, **per-flow daily spend as small multiples** (top flows, one panel each), the five
-  breakdown bar lists (flow / trigger / model / repo / project), and a **budget split** section
-  (issue #507) under the budget panel when an envelope is set: the envelope's total and window, one
-  bar per envelope entry with its allocation, its spend in the envelope window and its floor tick,
-  the unallocated headroom beside the deployment's spend of the total, the applied plan (id,
-  writer, applied, until, clamped), the newest 20 `alloc:log` outcomes, and, over the spend window,
-  the governed refusals by reason (`allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`,
-  `portfolio-snapshot-oversize`) and the collected plans by reason. An unset envelope is one line,
-  an envelope that does not load shows its problem, and an unreadable split is a banner with no
-  number. Every labeling rule of `REQ-COST-ANALYTICS`
-  (a)-(g) applies to this surface verbatim, plus the visual clauses this surface adds:
-  (a) an estimated figure renders dashed and translucent beside its `~ est.` text — hue is never
-  the sole encoding of a cost class;
-  (b) a plan-covered bucket draws a `plan:<id>` chip and **no dollar bar** — a zero-length bar is
-  the `$0.00` lie in geometry;
-  (c) a floored figure carries `≥` on the chart as in the text;
-  (d) the page states **both windows** — the operator's spend window and the topology's fixed
-  record window — and the retention/scan-cap sentence, so a screenshot cannot conflate them;
-  (e) gap days render as zero entries, never compressed away;
-  (f) a fold assembled without a trigger join renders "not computed", never an empty table;
-  (g) the budget panel renders **used-vs-cap facts only**: an overlay-unset cap renders "cap
-  unknown" (day) or "off" (week/month with nothing reserved) with **no bar and no percentage** —
-  `REQ-COST-ANALYTICS` (e)'s no-invented-denominator rule applied to caps this process cannot read
-  authoritatively — the window state is a WORD with color only reinforcing it, slots and tokens are
-  counts that never route through the money formatter, and the display is GET-only: observing the
-  budget never consumes a slot (`CONST-BUDGET-BEFORE-TOKENS`);
-  (h) a line's estimated days render as **dashed segments** (the same honesty encoding as the
-  columns — a segment touching an estimated day wears the estimate, and a cumulative line is
-  demoted permanently from its first estimated day), and series identity is carried by **text**
-  (the panel title), never by hue alone.
-  Degrades are total: an unreachable cost scan still writes the page with its banner, an
-  unreachable budget read leaves the caps as facts with the absence stated, and junk
-  input yields a valid page, never a stack trace. **No port is ever bound; nothing serves the
-  file; no new model-callable tool exists for it** (the topology assembly spawns git per folder,
-  `REQ-TOPOLOGY-GRAPH` Scope).
-- **Scope**: Display only. The artifact carries run-record fields and operator-authored
-  trigger/skill strings only — never `.log` bytes, and a host path beyond a folder's basename only
-  under the explicit `--full-paths` opt-in (the paths are the operator's own reviewed config; the
-  default stays basename-only because the artifact is a durable, shareable file). The default
-  window is **30d**, not the old costs mtd, because the topology half is pinned at a 30-day record
-  window and one page's two halves should describe the same period unless the operator asks
-  otherwise. The what-if is the `insights whatif` command; `seeded` dollars never render on the
-  page. The budget split carries the envelope's numbers in exact micro-dollars, plan ids, and the
-  worker's enum words for writers, outcomes and reasons only: no host name, and never a plan's
-  reason text, which is agent text and is drawn only in the panel's `b` view
-  (`REQ-ADMIN-VIA-PI-EXTENSION`). Its counts come from the records the page already scans; when
-  that scan cannot be read they say "not counted", never 0. Zero new dependencies.
-- **Why**: A terminal frame communicates 76 columns at a time; a human reading "what is this
-  deployment doing and what does it cost" reads a chart faster than a table and a topology faster
-  than either — and the two questions answer each other, so they belong on one page, and one page
-  beats five overlapping surfaces answering it (issue #181). A static file keeps
-  `DES-ADMIN-VIA-PI-EXTENSION`'s load-bearing no-port property intact — the socket→file
-  substitution `DES-JOB-OUTBOX-CHAINING` canonised — and the chart grammar is hand-rolled for the
-  same reason the topology layout is: the page must work over `file://` with zero external
-  requests, and a charting dependency is a supply chain riding a security posture.
-- **Traces to**: `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`, `REQ-GRAPH-HTML-EXPORT` (superseded
-  into this entry), `DES-COST-FOLD-BY-SCAN`, `DES-ADMIN-VIA-PI-EXTENSION`, `OQ-024`
-- **Acceptance**: Given `/dispatch insights`, then exactly one artifact lands at
-  `<graphDir>/insights.html` via a `.tmp` rename with mode 0644, its URL notified before any
-  opener spawn, and the rendered bytes contain no external `src`/`href`/`url()`/`@import`, no
-  `fetch`/`XMLHttpRequest`, no `innerHTML`, no `.log` content, and no absolute host path unless
-  `--full-paths` was passed; given a second run, the artifact lands at the **same** path; given
-  `SSH_CONNECTION`/`SSH_TTY` (any platform) or linux without `DISPLAY`/`WAYLAND_DISPLAY`, the
-  spawn is skipped and the reason notified; given `insights html` or any junk positional, then the
-  command answers usage and writes nothing; given a plan-covered
-  breakdown row, then the page shows `plan:<id>` and draws no bar, and `$0.00` appears nowhere;
-  given an estimated day, then its column is dashed/translucent and its tooltip carries `~ est.`;
-  given a window with `limit: null`, then the card says "limit undisclosed by vendor" and no
-  burn-down renders; given a hostile flow name or plan id, then the page contains exactly one
-  script element and the string renders entity-escaped; given the same payload and instant twice,
-  then the bytes are identical, permuted input arrays included; given an unreachable cost scan,
-  then the page still renders the topology with a cost banner; given an overlay-unset cap, then the
-  budget row says unknown or off, draws no bar, and `/remaining/i` matches nowhere on the page;
-  given a window past its soft-hold floor, then the row carries the word `soft-hold`; given a flow
-  series whose day is estimated, then the segments touching it are dashed and its point tip carries
-  `~ est.`; given a fold without the per-flow series, then the section is absent, never an empty
-  grid; given an envelope and a readable split, then the budget split section shows each entry's
-  allocation, spend and floor, the headroom, the plan line, the history and the counts, and no
-  host and no plan reason text appear on the page; given no envelope, then the section is one
-  line and no Valkey read is made for it; given an unreadable split, then a banner says so and the
-  section draws no number; given an unreadable spend scan, then both counts read "not counted".
-  Given the capacity report (`REQ-CAPACITY-INSIGHTS`, issue #599), then a **capacity** section follows the job sizes:
-  per host its headline numbers in the CLI's words and a chart of the jobs at once per bucket against its slot count
-  on a fixed time axis ending at the page's instant, with every stretch no bucket vouches for hatched as no data
-  (never drawn as idle) and the jobs-only sentence always shown; given an unreadable report or slice, then that
-  section alone says so; given the same report and instant twice, then the bytes are identical.
+- **RETIRED** (2026-10-18, insights move to the console): the static insights export is removed. There is no file
+  any more, so no write to a stable path, no tmp and rename, no graph dir and its setting, no `file://` URL, no
+  browser spawn and its headless skip, no `--no-open` and no `--full-paths`, and no page reload or auto-reload of its
+  own. `/dispatch insights [7d|30d|mtd]` now prints the operator console's URL for that window and
+  `/dispatch insights whatif <provider/model> --flow <flow>` prints its what-if URL (`REQ-ADMIN-VIA-PI-EXTENSION`);
+  the panel's `i` key shows the same URL. The one analytics surface is the console's `/insights` page
+  (`REQ-OPERATOR-CONSOLE-SCREENS` (e), under `REQ-CONSOLE-SECURITY`), and every normative clause this entry carried
+  that is not about the file lives on there, unchanged in substance: the content bans (run-record fields and
+  operator-authored trigger and skill strings only, never `.log` bytes, and a host path beyond a folder's basename
+  only on the operator's `paths=full`, which replaced the opt in flag and which a viewer never gets); zero external
+  requests (now the console's CSP and its page tests, not a property of a file); the escaping and the allowlisting
+  of every rendered value; determinism (the same payload and instant render the same bytes, permuted input arrays
+  included); every labelling rule (a)-(g) of `REQ-COST-ANALYTICS`; this entry's visual clauses (a)-(h) (dashed and
+  translucent estimates, a `plan:<id>` chip and no dollar bar, `≥` on the chart, both windows and the retention and
+  scan cap sentence stated, gap days kept, "not computed" for a fold without a trigger join, used-vs-cap facts only
+  in the budget panel, dashed estimated segments with series named in text); the total degrades (an unreachable scan
+  or budget read is a banner, junk input a valid page); and the KPI tiles, budget panel, budget split, plan cards,
+  daily and cumulative charts, per-flow small multiples, the five breakdowns, the job sizes and the capacity section
+  (`REQ-SIZE-SUGGESTIONS`, `REQ-CAPACITY-INSIGHTS`). The default window stays **30d**, now on the console too. The
+  what-if is the console page's what-if form (`REQ-COST-ANALYTICS`), and `seeded` dollars still never render outside
+  its panel's labelled band. Why it went: the file was kept beside the console as an offline copy, and a second
+  renderer (its own page chrome, script and window default) drifted from the console's; one served page under one
+  security model is the narrower surface. The ID stays because spec IDs are permanent addresses; the history of what
+  this entry required is in the Revision History rows that built it.
 
 ## REQ-SCOPED-PAUSE-WINDOWS
 
@@ -4342,7 +4337,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **One account's deployment never takes another account's state on a shared host** (issue #464, measured on
   Fedora 44 and Ubuntu 24.04 with several accounts on one machine). Four rules. (1) The DEFAULT jobs dir is per
   account, `<tmp>/pi-dispatch-<euid>/jobs` (the plain `<tmp>/pi-dispatch/jobs` where the platform has no uid), and the
-  default sandbox and graph dirs sit under the same per-account root, as do the run history and the settings overlay
+  default sandbox dir sits under the same per-account root (the graph dir did too, until the static insights export
+  went on 2026-10-18), as do the run history and the settings overlay
   on an account with no home directory (`REQ-DURABLE-RUN-HISTORY`); the old shared default was created by whichever
   account ran a job first and failed every other account's jobs with `EACCES` while doctor said ready. The worker
   creates that root `0700` and refuses, at boot as a `configError` (exit 2) and again before every job (config-refused),
@@ -4650,6 +4646,7 @@ instead of drifting.
 | Date | Change |
 |---|---|
 | 2026-10-18 | Issue #662: three record and display gaps of durable runs. **`REQ-RUN-RECOVERY` AMENDED**, acceptance (h): the crashed attempt's stall record takes `startedAt` from the run's progress key (read before the enqueue; not ended, not after now, no earlier than the stalled job's enqueue time; else null, never `processedOn`, which BullMQ's stall re-pick overwrites) and `progress` from its integer counts; a recovery with no exit line takes its `recovered` counts from its transcript's recovery marks (this attempt's lines only, `orphans` the sum, `countsFrom: "transcript"`), the exit line's counts winning whenever it carries a `recovery` block (`countsFrom: "exit-line"`). **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, acceptance (c): the run page reads progress by the run id; an attempt whose record says `recovery-enqueued` shows its own record's progress and "This run continues as" the recovery job; a recovery's page shows its live progress; a plain retry keeps the pairing by time; the active rows read a recovery's progress by its run id. **`REQ-RUN-PROGRESS` AMENDED**, acceptance: a recovery is not a retry, by the same rule, on the console and in the `/dispatch` panel (the ACTIVE row's phase name by the run id; RUN_DETAIL's own progress and "continues as" line). Statements UNCHANGED, checked. |
+| 2026-10-18 | Insights move to the console. **`REQ-INSIGHTS-HTML-EXPORT` RETIRED**: the heading stays as a permanent address and the body is a status line. The static insights export is removed (the file, its stable path write, the graph dir and its setting, the browser spawn and its headless skip, `--no-open`, `--full-paths`, the page's own reload and auto-reload); every clause not about the file lives on in the console's `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS` (e), `REQ-COST-ANALYTICS`): the content bans, zero external requests (now the console's CSP), escaping and allowlisting, determinism, the labelling rules (a) to (g), the visual clauses (a) to (h), the degrades, and the budget, budget split, job sizes and capacity sections; `paths=full` (operator only) replaced the opt in flag. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: Scope no longer keeps the file beside the console and names the page the one analytics surface; Why says the offline copy drifted; Traces to marks the retired id and adds `REQ-COST-ANALYTICS` and `REQ-TOPOLOGY-GRAPH`; Acceptance (e) defaults to 30d (it was 7d), caches per window and `paths`, refuses an unknown key, and gains (e1) the two-window header line, (e2) the what-if panel (GET, viewer readable, not an action, 92-day scan ceiling, cached 30 s per model, flow and scan window, at most 64 answers, closest three priced ids for an unknown model with no scan, `whatif` and `flow` together, both charset checked, a `<datalist>`), (e3) `paths=full` operator only, (e4) the interactive topology in `/static/console.js` with node data as a hidden escaped list, never a script element, (e5) nothing leaves the host. **`REQ-CONSOLE-SECURITY` AMENDED**: Statement gains the insights page's three rules (zero external requests under the CSP, the what-if as a bounded and cached GET read for either role, `paths=full` for the operator alone); Scope replaces the sentence that kept the static file with the property now held by the console page; Traces to adds `REQ-COST-ANALYTICS`; NEW Acceptance (m) for the page's reads. **`REQ-COST-ANALYTICS` AMENDED**: the surfaces are the console's `/insights` page, `dispatch_costs` and the page's what-if form (`/dispatch insights whatif` prints its URL); Acceptance says the what-if form and gains the unknown-model, cache and scan-ceiling clauses; Traces to adds `REQ-OPERATOR-CONSOLE-SCREENS`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the command list says `/dispatch insights` prints the console URL (and `whatif` its what-if URL), writes nothing and spawns no browser, and the `i` key shows the URL; Acceptance gains the URL, unix socket, unparsable listen, whatif and usage clauses. The model-callable tool list and its pin paragraph UNCHANGED, checked. **`REQ-TOPOLOGY-GRAPH` AMENDED**: its surface is the console's `/insights` page; "no port" reads "no port of its own"; Scope names the console's session, role and cache; Acceptance says the console's insights page. **`REQ-SIZE-SUGGESTIONS` AMENDED**: the page it draws on is the console's `/insights` page; Traces to names `REQ-OPERATOR-CONSOLE-SCREENS` in place of the retired id. **`REQ-CAPACITY-INSIGHTS` AMENDED**: phase 4's page is the console's `/insights` page and its acceptance opens on that page, not on `/dispatch insights`. **`REQ-GRAPH-HTML-EXPORT` AMENDED** (still SUPERSEDED): one sentence saying the entry it pointed at is itself retired. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, wording only: the per-account root no longer holds a graph dir. UNCHANGED, checked: `REQ-OPERATOR-CONSOLE-ACTIONS` (the what-if is a read, not an action, so the action table is untouched), `REQ-LIVE-TRANSCRIPT`, `REQ-RUN-PROGRESS`, `REQ-DURABLE-RUN-HISTORY`, `REQ-SCOPED-LIMITS`, `REQ-HOST-BUDGET`, `REQ-DELEGATED-ALLOCATION` (each names "the insights page", which is now the console's, and no clause changes), `REQ-TOKEN-ACCOUNTING-AND-CAPS`. Review round 1, folded in before merge: (e2) admits a leading `@` or `~` in the model (priced ids the datalist offered were refused), (e4) states that a mouse click selects a chip and that a fragment's view is clamped, and the `/dispatch insights` acceptance gains the any-address, port 0 and shell-quoted socket cases. |
 | 2026-10-17 | Issue #646, part 3, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says a message is not refused while the fleet is paused (the kill switch stops new jobs, not a running one, and a message stays inside the run's caps and reservation), and that the base run page of a recovered run sends through its active recovery job; acceptance (m) gains the audit row's message id, the metadata-only listing, the recovery case and the branches the mutation round found unpinned (every refusal, the plan guards, the race to delivered, the 16-row bound, the hostile entry, the scrubbing in the TUI). **`REQ-OPERATOR-CONSOLE-ACTIONS` CORRECTED**: acceptance (n)'s audit row names `<job id>#<message id>`. **Code evidence**: admin/src/job-actions.mjs -> steerAuditTarget, planSteer; admin/src/read-model.mjs -> activeJobOfRun; worker/src/steer-inbox.mjs -> listInboxPublic. |
 | 2026-10-17 | Issue #646, part 3: the console and the panel. **`REQ-STEER-RUNNING-JOB` AMENDED**: Scope now covers parts 1 to 3; the follow-up sentence it carried is replaced by what part 3 ships: the console's run page of a steer-armed job lists its inbox without text for both roles, with a steer form, a follow-up form (only while the job is active and its run open) and a Withdraw button per queued or written message for the operator role (actions `steer` and `steer-withdraw`); the TUI's ACTIVE row of a steer-armed job takes `t` (steer) and `T` (follow-up) through the panel's audited write; `/api/state` carries each steer-armed active job's inbox without text; and steering stays an operator action, with no model-callable tool. Fail loudly gains the console's and the panel's refusals (the CLI's sentences, before anything is written; `closed`, `gone` and `full` at the confirm; a withdraw naming the state it met). NEW acceptance (m), the console and the panel, with its tests. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: the Statement's job actions gain sending a message into a running steer-armed job and taking one back; NEW acceptance (n), kinds `steer` (paid, no new reserve, the sha256 alone audited) and `steer-withdraw` (guaranteed when queued, best effort when written). **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is registered or removed, so its enumeration and the pin `admin/test/wiring.test.mjs` keeps on it stand; the TUI key is a panel key, not a tool. **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the run page gains a panel under `REQ-OPERATOR-CONSOLE-ACTIONS`, which holds the controls it adds to these pages. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the two actions are table entries behind every guard (the every-action test loops over them). **Code evidence**: admin/src/job-actions.mjs -> planSteer, enqueueSteer, planSteerWithdraw, withdrawSteerMessage; admin/src/console/actions.mjs -> the `steer` and `steer-withdraw` entries; admin/src/console/panels.mjs -> runInbox; admin/src/read-model.mjs -> readJobInbox, publicInboxEntry, the snapshot's `steer` and `inbox`; admin/src/console/live.mjs -> inboxOf; admin/src/dashboard.ts -> the `t` and `T` keys, withAuditedWrites's `steer`. |
 | 2026-10-17 | Issue #646, part 2, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED** to the code after the round: Scope says steering is per target, not per trigger, that a run stays reachable for 15 minutes after its container exits until its settle closes the inbox (the relay's hold), and that a redelivered steered comment is never enqueued; Fail loudly's log list names `steer_comment_skipped` (renamed from `steer_skipped`, which is `runContainer`'s); acceptance (k) gains the redelivery marker, the skip name and the exact fanout, and (l) gains the single answer across two settles (`first`), the target-type mismatch, the hold, the 32-entry fallback cap and the end-to-end comment after exit. **`REQ-DEDUP-BY-DELIVERY-GUID` CORRECTED**: a steered delivery leaves `steer:steered:<delivery job id>` (EX 31 days, NX, after a successful push), so a redelivery after its run ended is answered `202 {status:"steered", runs:0}` and never enqueued, restoring this requirement's guarantee for steered comments; the exit-to-outcome gap is closed by the relay's hold and the named gaps become the hold's residual, the recovery's window and the webhook-and-poller delivery ids; Acceptance gains the marker cases. |

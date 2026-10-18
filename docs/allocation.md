@@ -271,7 +271,7 @@ runs the edited file, and it cannot see a hand edit put back. Check the host's l
 - **The insights page** has a budget split section: the envelope, one bar per entry (its share, its spend and
   its floor), the headroom, the plan in force, the newest 20 outcomes from `alloc:log`, and, over the spend
   window, the split's refusals and the plans collected, counted from this host's run records. It names no host
-  and holds no reason text, because the page is a file you may share ([insights](insights.md)).
+  and holds no reason text, because a viewer reads the page as well as an operator ([insights](insights.md)).
 - **A run's detail** shows a `plan` line for a run that left one (the outcome, its reason, `clamped`, the plan
   id) and a `dollars` line (what the run settled, and on what basis).
 - **A portfolio trigger** carries `[portfolio]` in the panel's trigger list and in `/dispatch triggers`. Its
