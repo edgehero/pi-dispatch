@@ -495,3 +495,63 @@ test("the ACTIVE row ignores an ended snapshot (an earlier attempt's) and marks 
   assert.doesNotMatch(rich + comp.render(Number.NaN).join("\n"), /OLD-ATTEMPT-PHASE|turn 7/);
   await comp.dispose();
 });
+
+test("initialTail opens the overlay on that job's LIVE_TAIL, and Esc lands on its ACTIVE row, where t steers (#647 part 2)", { timeout: 20_000 }, async () => {
+  const s = scripted({ start: { entries: [e("1-1", "assistant", "working on it")], next: "1-1", ended: false } });
+  const snap = () => ({ ...SNAP(), triggers: { triggers: [{ index: 0, on: { type: "cron" } }] }, active: [{ jobId: "jA", queue: "pi-jobs@mini2", startedAt: AT - 60_000, host: "mini2", steer: true }] });
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, initialTail: "jA", deps: deps({ ...s, fetchSnapshot: async () => snap(), planSteer: async () => ({ refusal: "x" }), steer: async () => ({}) }) });
+  await until(() => s.calls.length >= 1, "the first transcript read, with no key pressed");
+  const tailOut = stripAnsi(comp.render(80).join("\n"));
+  assert.match(tailOut, /live jA -- live transcript/, "opened straight on the job's tail");
+  assert.match(tailOut, /working on it/);
+  assert.ok(s.calls.every((c) => c.jobId === "jA"), "and read that job's stream");
+  comp.handleInput("\x1b");
+  const listOut = stripAnsi(comp.render(100).join("\n"));
+  assert.doesNotMatch(listOut, /live jA -- live transcript/, "Esc left the tail");
+  assert.match(listOut, /ACTIVE jA.*t steer/, "the cursor is on the ACTIVE row, not on the trigger above it");
+  comp.handleInput("t");
+  assert.match(stripAnsi(comp.render(100).join("\n")), /steer jA: /, "t opened the steer input for that job");
+  await comp.dispose();
+});
+
+test("an initialTail outside the run-id charset is ignored: the overlay opens on the LIST (#647 part 2)", { timeout: 20_000 }, async () => {
+  const s = scripted({});
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, initialTail: "j A\u001b", deps: deps(s) });
+  await flush();
+  await delay(20);
+  const out = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.doesNotMatch(out, /live transcript/);
+  assert.equal(s.calls.length, 0, "no tail was read");
+});
+
+test("Esc from a tail whose job is no longer the ACTIVE row: the cursor rests on NO row, a note says so, and t steers nobody (#647 part 2 review)", { timeout: 20_000 }, async () => {
+  const s = scripted({ start: { entries: [e("1-1", "assistant", "done now")], next: "1-1", ended: false } });
+  // jA ended between `/dispatch chat`'s lookup and the overlay: another steer-armed job is the ACTIVE row now, and the
+  // snapshot lists several active jobs (only the ACTIVE row's is a list row).
+  const snap = () => ({ ...SNAP(), triggers: { triggers: [] }, activeJobId: "jOther", active: [{ jobId: "jOther", queue: "pi-jobs@mini2", startedAt: AT - 60_000, host: "mini2", steer: true }, { jobId: "jThird", queue: "pi-jobs@mini3", startedAt: AT - 30_000, host: "mini3", steer: true }], runs: [{ jobId: "jR", kind: "github", target: "o/r#1", outcome: "completed", endedAt: new Date(AT - 1000).toISOString() }] });
+  const planned = [];
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, initialTail: "jA", deps: deps({ ...s, fetchSnapshot: async () => snap(), planSteer: async (a) => (planned.push(a), { refusal: "x" }), steer: async () => ({}) }) });
+  await until(() => s.calls.length >= 1, "the first transcript read");
+  await delay(20);
+  comp.handleInput("\x1b");
+  const listOut = stripAnsi(comp.render(100).join("\n"));
+  assert.match(listOut, /jA is no longer the active run; use the arrows to pick a row/);
+  assert.doesNotMatch(listOut, /›/, "no row carries the cursor");
+  comp.handleInput("t");
+  assert.doesNotMatch(stripAnsi(comp.render(100).join("\n")), /steer jOther: /, "t opened no steer input for the other job");
+  comp.handleInput("\x1b[B");
+  assert.match(stripAnsi(comp.render(100).join("\n")), /› ● ACTIVE jOther/, "an arrow picks the first row again");
+  await comp.dispose();
+});
+
+test("an initialTail of spaces is outside the run-id charset: the overlay opens on the LIST (#647 part 2 review)", { timeout: 20_000 }, async () => {
+  const s = scripted({});
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, initialTail: " ", deps: deps(s) });
+  await flush();
+  await delay(20);
+  const out = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.doesNotMatch(out, /┌─ live/);
+  assert.equal(s.calls.length, 0, "no tail was read");
+});

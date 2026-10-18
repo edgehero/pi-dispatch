@@ -96,6 +96,9 @@ import {
   applyPriorities,
   revertAllocation,
   envelopeJobCap,
+  createFleetReader,
+  planParkedAnswer,
+  enqueueParkedAnswer,
 } from "./read-model.mjs";
 // The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
@@ -144,7 +147,7 @@ import { applyDeploymentPointer, pointerPath, pointerState, readPointer, takePoi
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
 // The audit rows' host name for a plan this session applies (issue #504 part C): PI_WORKER_NAME, else this machine's.
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { COSTS_WINDOWS, PROJECT_KEY_RE } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
@@ -157,6 +160,8 @@ import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandbo
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
 import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderAllocations } from "./render.mjs";
 import { makeDashboard, createDashboardDeps, switchFailure, withAuditedWrites } from "./dashboard.ts";
+// `/dispatch chat` (issue #647, part 2): pi-free, so its tests drive it with fakes; `chatIo` below wires it.
+import { CHAT_USAGE, dispatchChat } from "./dispatch-chat.mjs";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
 // buildTriggerEntry back from here -- a cycle on paper, but both sides only call across it at runtime.
@@ -278,7 +283,7 @@ const CHANNEL = "pi-dispatch-admin";
 
 
 const USAGE =
-  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|priorities|setup|secrets>";
+  "usage: /dispatch <status|pause|resume|run|runs|logs|chat|budget|insights|triggers|settings|set|unset|priorities|setup|secrets>";
 
 const KNOWN_SUBCOMMANDS = [
   "status",
@@ -287,6 +292,7 @@ const KNOWN_SUBCOMMANDS = [
   "run",
   "runs",
   "logs",
+  "chat",
   "budget",
   "insights",
   "triggers",
@@ -341,7 +347,7 @@ export default function admin(pi: ExtensionAPI): void {
     // which is exactly the drift the USAGE/KNOWN_SUBCOMMANDS pin exists to catch -- keep all three
     // in step.
     description:
-      "pi-dispatch admin: status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|priorities|setup",
+      "pi-dispatch admin: status|pause|resume|run|runs|logs|chat|budget|insights|triggers|settings|set|unset|priorities|setup",
     getArgumentCompletions: (prefix) => completeArguments(prefix),
     handler: async (args, ctx) => dispatch(pi, args, ctx),
   });
@@ -1774,6 +1780,17 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
     case "logs":
       await showLogs(paths.logsDir, tokens, ctx);
       return;
+    case "chat": {
+      // Issue #647, part 2 (REQ-TERMINAL-CHAT): a run's chat from inside pi. An operator-typed COMMAND, never a tool:
+      // it opens the dashboard, asks for an answer through dialogs, or hands the terminal to the operator's own pi, none
+      // of which a model may start. The mode is `/api/run`'s rule over the panel's own fleet reader.
+      if (tokens.length !== 2) {
+        notify?.(CHAT_USAGE, "warning");
+        return;
+      }
+      await dispatchChat(tokens[1], chatIo(paths, ctx, notify));
+      return;
+    }
     case "pause":
     case "resume": {
       const paused = sub === "pause";
@@ -1922,18 +1939,26 @@ export function insightsLink(tokens: string[], notify: Notify, env: any = deploy
  * it never sends into the model channel. The `ctx.ui.custom` factory constructs the panel with the real
  * `tui`/`done`, so the queue and redis connections open only when the overlay actually shows.
  */
-async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void> {
+async function openDashboard(paths: any, ctx: any, notify: Notify, { initialTail = null }: { initialTail?: string | null } = {}): Promise<void> {
   const custom = ctx?.ui?.custom;
   if (typeof custom !== "function") {
     notify?.(`${USAGE} — the dashboard needs a TUI (this pi build has no overlay support)`, "info");
     return;
   }
+  // `/dispatch chat` on a live run (issue #647, part 2) opens on that job's tail ONCE: a CRUD action that closes the
+  // overlay reopens it on the LIST, as from a bare `/dispatch`.
+  let tailOnce: string | null = initialTail;
   const factory = (tui: any, theme: any, _keybindings: any, done: (value: any) => void) =>
     makeDashboard({
       paths,
       done,
       tui,
       theme,
+      initialTail: (() => {
+        const t = tailOnce;
+        tailOnce = null;
+        return t;
+      })(),
       deps: {
         // The dollar caps' env (issue #501, part 7): the deployment's, the source `dispatch_set`'s confirm reads. Its
         // writes (pause, resume, both cancels) go through the console's audit chain as the panel (issue #642).
@@ -1994,6 +2019,45 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
     if (!result || !result.action) return;
     await handleDashboardAction(result, paths, ctx);
   }
+}
+
+/**
+ * `/dispatch chat`'s wiring (issue #647, part 2; `dispatch-chat.mjs` holds the logic): the deployment's environment
+ * (its PI_SESSIONS_DIR and forge hosts, `panelEnv`), a read-only fleet reader for the lookup (`resolveRunChat`, the
+ * console's own), this module's dashboard opener, the parked answer planned by `planParkedAnswer` from the panel (signed
+ * with the reserved `panel`, whose trail says the /dispatch panel answered) and written through `panelWrite` around
+ * `enqueueParkedAnswer`, and the fork's terminal lines scrubbed per line, as the sandbox's are (they run with the TUI
+ * suspended, straight to the terminal). `seams` replace the readers, the planner, the enqueue, the dashboard opener and
+ * the terminal in tests, nothing else (the audited write stays `panelWrite`, the call site the audit table scans).
+ */
+export function chatIo(paths: any, ctx: any, notify: Notify, seams: any = {}): any {
+  const {
+    envFn = deploymentEnv,
+    readerFn = createFleetReader,
+    planFn = planParkedAnswer,
+    enqueueFn = enqueueParkedAnswer,
+    dashboardFn = openDashboard,
+    stdout = process.stdout,
+    hostEnv = process.env,
+  } = seams;
+  const env = envFn();
+  return {
+    ui: ctx?.ui,
+    env,
+    openReader: () => readerFn(paths, { dollarEnvFn: envFn, readOnly: true }),
+    openDashboard: ({ initialTail }: { initialTail: string }) => dashboardFn(paths, ctx, notify, { initialTail }),
+    planAnswer: ({ jobId, text }: { jobId: string; text: string }) =>
+      planFn({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, text, from: "panel", triggersPath: paths.triggersPath ?? null, overlay: readSettingsView({ settingsFile: paths.settingsFile })?.overlay ?? {}, env }),
+    // The one write `/dispatch chat` makes: the parked answer, its kind spelled here so the audit table's scan sees it.
+    write: (opts: any, fn: () => any) => panelWrite(auditDir(), { ...opts, kind: "parked-answer" }, fn),
+    enqueueAnswer: (plan: any) => enqueueFn(plan, { url: paths.valkeyUrl }),
+    forkIo: {
+      hostEnv,
+      cwd: ctx?.cwd ?? process.cwd(),
+      agentDir: hostEnv.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
+      out: (line: string) => stdout.write(`${scrubControlsPerLine(String(line))}\n`),
+    },
+  };
 }
 
 /**
@@ -2831,6 +2895,15 @@ function completeArguments(prefix: string) {
     const items = ids
       .filter((id) => id.startsWith(partial))
       .map((id) => ({ value: `logs ${id}`, label: id }));
+    return items.length > 0 ? items : null;
+  }
+  if (parts[0] === "chat" && parts.length === 2) {
+    // A run id from this host's history; a link or a session key is typed whole.
+    const partial = parts[1];
+    const ids = listRunIds({ logsDir: resolvePaths(deploymentEnv()).logsDir });
+    const items = ids
+      .filter((id) => id.startsWith(partial))
+      .map((id) => ({ value: `chat ${id}`, label: id }));
     return items.length > 0 ? items : null;
   }
   if (parts[0] === "insights" && parts.length === 2) {

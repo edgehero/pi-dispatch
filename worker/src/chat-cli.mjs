@@ -31,6 +31,9 @@ import { SESSION_KEY_PATTERN } from "./session-key.mjs";
 /** The usage line, shared with the CLI's own usage text (a test holds both). */
 export const CHAT_USAGE = "pi-dispatch chat <run-id | issue-or-PR-url | session-key> [--fork] [--force] [--tools] [--pi <path>] [--console <addr>] [--yes]";
 
+/** The longest issue or pull request URL taken, the console's `?url=` limit (`/dispatch chat`'s, which a test holds to it). */
+export const CHAT_URL_MAX = 2048;
+
 /** A job id as the worker mints it (the console's charset). */
 const RUN_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 
@@ -50,7 +53,7 @@ export function classifyChatTarget(arg) {
 	if (s === "") return { refusal: `name a run: ${CHAT_USAGE}` };
 	if (SESSION_KEY_PATTERN.test(s)) return { kind: "key", key: s };
 	if (/^https?:\/\//i.test(s)) {
-		if (s.length > 2048) return { refusal: "the URL is longer than 2048 characters" };
+		if (s.length > CHAT_URL_MAX) return { refusal: `the URL is longer than ${CHAT_URL_MAX} characters` };
 		try {
 			new URL(s);
 		} catch {

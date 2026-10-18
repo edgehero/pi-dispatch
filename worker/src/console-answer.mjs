@@ -17,6 +17,13 @@
 
 import { TOKEN_NAME_RE } from "./console-tokens.mjs";
 
+/**
+ * The `by` an answer from the panel's `/dispatch chat` carries (issue #647, part 2): it has no console token, so it is
+ * signed with this reserved word, and its trail says it came from the panel rather than naming a token. RESERVED: the
+ * console refuses to answer as a token of this name (`planParkedAnswer`'s `from`), so no token can sign as the panel.
+ */
+export const PANEL_ANSWER_BY = "panel";
+
 /** The most an answer may carry, in UTF-8 bytes AFTER scrubbing. A person's reply to a question, not a document. */
 export const ANSWER_TEXT_MAX_BYTES = 8 * 1024;
 
@@ -81,7 +88,7 @@ export function boundAnswerText(raw) {
  * longer a mention, so an operator's answer cannot ping people or teams on the forge under the deployment's identity.
  * Chosen over wrapping in backticks, which a backtick in the text could close. U+200B is a format character, not a
  * control one, and the scrub above has already removed every control the text had. The name needs no neutralising:
- * its charset holds no `@`.
+ * its charset holds no `@`. The panel's reserved name (`PANEL_ANSWER_BY`) gets its own head line.
  */
 export function answerTrailComment(by, text) {
 	const quoted = scrubAnswerText(text)
@@ -92,5 +99,6 @@ export function answerTrailComment(by, text) {
 		.split("\n")
 		.map((line) => `> ${line}`)
 		.join("\n");
-	return `Answered from the operator console by ${by}:\n\n${quoted}`;
+	const head = by === PANEL_ANSWER_BY ? "Answered from an operator's /dispatch panel" : `Answered from the operator console by ${by}`;
+	return `${head}:\n\n${quoted}`;
 }

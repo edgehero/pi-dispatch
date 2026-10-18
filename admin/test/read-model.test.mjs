@@ -2627,6 +2627,17 @@ test("panelEnv: the pointed deployment's .env fills what pi's environment does n
   for (const key of ["PI_BACKENDS", "PI_BACKEND_FLOOR", "PI_EGRESS", "PI_EGRESS_PROXY", "DOCKER_HOST", "PI_DISPATCH_RUN_ROOTS", "PI_DISPATCH_RUN_PER_HOUR"]) assert.ok(!PANEL_SERVICE_KEYS.includes(key), key);
 });
 
+test("panelEnv: the deployment's PI_SESSIONS_DIR is a panel path key, relative to the deployment folder, pi's export winning (#647 part 2)", () => {
+  // `/dispatch chat` forks a finished run from the store the worker writes, named in the deployment's .env.
+  assert.ok(PANEL_SERVICE_KEYS.includes("PI_SESSIONS_DIR"));
+  const dir = scaffoldedDeployment("PI_SESSIONS_DIR=sessions\n", "pi-647-sessions-");
+  assert.equal(panelEnv({ env: { HOME: "/h" }, pointerDir: dir, platform: "linux" }).env.PI_SESSIONS_DIR, join(dir, "sessions"));
+  const abs = scaffoldedDeployment("PI_SESSIONS_DIR=/srv/pi-sessions\n", "pi-647-sessions-abs-");
+  assert.equal(panelEnv({ env: { HOME: "/h" }, pointerDir: abs, platform: "linux" }).env.PI_SESSIONS_DIR, "/srv/pi-sessions");
+  assert.equal(panelEnv({ env: { HOME: "/h", PI_SESSIONS_DIR: "/mine" }, pointerDir: dir, platform: "linux" }).env.PI_SESSIONS_DIR, "/mine", "pi's own export wins");
+  assert.equal(panelEnv({ env: { HOME: "/h" }, pointerDir: null }).env.PI_SESSIONS_DIR, undefined, "no pointer, no .env read");
+});
+
 test("panelEnv + settingShown: a pointer deployment's .env dollar cap is what the dispatch_set confirm states (#501)", () => {
   // The worker reads PI_MAX_COST_USD from the deployment's .env; pi's own environment does not carry it. Before the
   // dollar names joined PANEL_SERVICE_KEYS the confirm said "(unset: no cap)" while the worker ran at $2.

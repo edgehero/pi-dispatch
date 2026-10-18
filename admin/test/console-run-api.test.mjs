@@ -4,7 +4,7 @@ import { request } from "node:http";
 import { after, test } from "node:test";
 import { CHAT_REFUSALS, parkedVerdictOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { recoveryJobId } from "@edgehero/pi-dispatch/recovery-queue";
-import { CANDIDATES_MAX, chatFactsOf, NEWER_CACHE_MS, PARK_CHECK_CACHE_MS, parkedAnswerCheckOf, parseRunQuery, RUN_UNREADABLE, safeRunOf, TARGET_RUNS_MAX } from "../src/console/run-api.mjs";
+import { CANDIDATES_MAX, chatFactsOf, NEWER_CACHE_MS, PARK_CHECK_CACHE_MS, parkedAnswerCheckOf, parseRunQuery, resolveRunChat, RUN_UNREADABLE, runDocument, safeRunOf, TARGET_RUNS_MAX } from "../src/console/run-api.mjs";
 import { parkedInbox, runChat } from "../src/console/panels.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
@@ -732,4 +732,22 @@ test("/api/run: a parked record's newer-run search that stopped before the recor
   assert.deepEqual([d.state, d.mode, d.says], ["unknown", null, CHAT_REFUSALS.parkedUnknown]);
   const reached = await runConsole(fakeFleet({ records: { "gh-park": parked }, runs: [], page: { truncated: true, next: T0 - 10_000_000 } }));
   assert.equal((await reached.get("/api/run?id=gh-park")).json().mode, "reply", "a scan that reached past the record saw every later run");
+});
+
+test("resolveRunChat (the one resolution /api/run and /dispatch chat share): the document AND the full record the fleet read, by id or by link; the record never in the document (#647 part 2 review)", async () => {
+  const rec = record("gh-full");
+  const fleet = fakeFleet({ records: { "gh-full": rec } });
+  const byId = await resolveRunChat(fleet, { id: "gh-full" });
+  assert.equal(byId.id, "gh-full");
+  assert.equal(byId.record, rec, "the full record, for the panel's fork on this host");
+  assert.equal(byId.doc.run.id, "gh-full");
+  assert.ok(!JSON.stringify(byId.doc).includes(CANARY), "the document stays free of the record's free text");
+  const byUrl = await resolveRunChat(fleet, { url: "https://github.com/acme/web/issues/12" });
+  assert.equal(byUrl.id, "gh-full");
+  assert.equal(byUrl.record, rec);
+  const direct = await runDocument(fleet, "gh-full");
+  assert.equal(direct.record, rec);
+  const missing = await resolveRunChat(fleet, { id: "nope" });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.doc, undefined);
 });
