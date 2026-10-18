@@ -2311,7 +2311,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   without that seam, or when it fails, the row keeps the integers and names no phase. An ENDED snapshot draws nothing
   on the row (the row is active, so the key is an earlier attempt's: an infra retry keeps the job id), and a STALE one
   (`progressStaleFor`: not ended and no write for 180 s) leads with `no update for 4m, the worker may be gone` and
-  gives its running tool no age (`activeProgressText`).
+  gives its running tool no age (`activeProgressText`). **Since issue #646 the ACTIVE row of a steer-armed job takes
+  `t` (steer) and `T` (follow-up)** (`REQ-STEER-RUNNING-JOB`): two keys, the one place where a letter's case carries
+  two meanings, because the mode is the only choice a message needs and a second prompt for it would cost a keystroke
+  on every message. Both were free in every view's key map, and the footer's hints are unchanged (their width
+  arithmetic has no room); the selected row's hint names them (`x cancel · t steer · T follow-up`) only on an armed
+  row, which the snapshot marks `steer`, so every other row draws as before. The key opens a line input in the footer,
+  with the LIVE_TAIL search's discipline (every key types, Esc sends nothing), bound to the job the key was pressed on
+  so a refresh cannot retarget it. Enter runs the console's plan (`planSteer`, free and unaudited, a refusal said in
+  the footer with nothing written), then the push through `withAuditedWrites` (kind `steer`, actor role `panel`, the
+  message's sha256 in `afterDigest`, never the text), and the footer names the message id and that it is queued, never
+  the text. An unarmed run says why instead of opening an input; withdrawing is the console's and the CLI's.
+  **No model-callable tool steers, and none is to be added**: a message enters a running agent's context, so its
+  sender must be a person at an operator surface, never the operator's own model, which text in its session could
+  direct. The enumeration of tools below is unchanged and is still the pin.
   Analytics
   live on the **insights artifact** (`REQ-INSIGHTS-HTML-EXPORT`, issue #181), the ONE surface for
   "what is this deployment wired to do and what does it cost": bare `/dispatch insights` (and the
@@ -10262,7 +10275,8 @@ a tunnel.
   writes and actions (the bullets from "The action table" to "The sandbox, shown and not run" below, and the four
   rejected options marked #642); issue #643, the live transcript on the run page (the bullet "The live transcript"
   below, over `DES-LIVE-TRANSCRIPT-STREAM`); issue #644, run progress (the bullet "Run progress" below, over
-  `DES-RUN-PROGRESS`). This entry supersedes three of the
+  `DES-RUN-PROGRESS`); issue #646 part 3, steering (the bullet "Steering a running job" below, over
+  `DES-STEER-VIA-READONLY-INBOX-MOUNT`). This entry supersedes three of the
   rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
@@ -10577,6 +10591,45 @@ a tunnel.
     at most once every 2 s (`LIVE_DEFAULTS.pageMinMs.run`). An operator's run tab therefore holds two streams, the
     hub's and the transcript's, against the token's `PI_CONSOLE_MAX_STREAMS` (default 4). A running job with no
     record yet answers 200 when it has a progress snapshot or a transcript.
+- **Steering a running job** (issue #646 part 3, `REQ-STEER-RUNNING-JOB`, `INT-STEER-INBOX-CONTRACT`):
+  - Two entries join the action table: `steer` (paid) and `steer-withdraw` (free), each a preview and a confirm
+    through the generic pipeline below. Their planners, `planSteer` and `planSteerWithdraw`, sit in `job-actions.mjs`
+    beside the parked answer's, and their funnels, `enqueueSteer` and `withdrawSteerMessage`, call the worker's own
+    inbox module (`@edgehero/pi-dispatch/steer-inbox`), so the console refuses with the CLI's sentences. The job is
+    found across the fleet's queues and must be active and steer-armed, and its run open (`run:steer:open:<runId>`,
+    the run id the base run's for a recovery); the text is bounded by the inbox's own rule and the whole entry checked
+    by `normalizeSteerEntry` at the preview, so nothing the push would refuse for its size reaches the confirm. The
+    message id is minted at the preview, so the ticket binds one message and a replayed push can only be `dup`. A run
+    that closed or went quiet after the preview refuses the confirm (`closed`, `gone`): never accepted and silently
+    unseen. Both rows name the message: `target` is `<job id>#<message id>` (`steerAuditTarget`), never the text.
+  - **A recovered run** (review round 1): a #645 recovery keeps the run id under a new job id, so the base run's page
+    shows a job that failed while its run goes on. `activeJobOfRun` tries the run's recovery ids (`recoveryJobId`,
+    `RECOVERY_CAP` down to 1, then the run id itself) for the ACTIVE one; the panel then says "its run continues as"
+    that job, linked, and keeps the forms, and `planSteer` sends through that job, naming it in the preview.
+  - **Paid, with no new reserve.** The run already holds its reservation, and its turn, dollar and token caps bind
+    the turns a message causes, so the preview says it spends from that reservation and shows no reserve figure, and
+    the row carries none. The text is shown escaped to the operator who typed it, in the preview alone; the row holds
+    its sha256 as `afterDigest`. A withdraw's preview and answer name the state met: `queued` is guaranteed, `written`
+    best effort.
+  - **The run page's Inbox panel** (`p-inbox`, after Progress): for a steer-armed job, its messages from
+    `readJobInbox` (the fleet reader's `inbox(jobId)`, off its held client, the registry read afresh) WITHOUT TEXT for
+    both roles, the run's status (takes messages; not open, the three causes named; or no longer running), and for
+    the operator role on a console that is not read-only a steer form and a follow-up form, drawn only while the job
+    is active and its run open, and a Withdraw button on each queued or written message whose id is well formed. A
+    job that is not steer-armed draws nothing, its empty section hidden by `section[data-panel]:empty`, so every other
+    run page reads as before. The page is live, so the hub re-renders the panel by digest and a message's state moves
+    without a reload; a form in use is not swapped.
+  - The fleet snapshot's active rows gain `steer` and `inbox` for a steer-armed job (`INT-CONSOLE-STATE-API`), read
+    for at most 16 of them per tick (`STEER_INBOX_ROWS_MAX`), one MULTI each beside the progress MGET, which reads
+    the state hash's `m:<id>` metadata and never the list, so no message text moves on a tick (review round 1); of a Job's
+    `.data` it reads `steer` and `recoveryOf` and nothing else, and the run id never leaves the reader. An unarmed row
+    carries neither field.
+  - **Rejected**: listing a message's text, even to an operator (the inbox is a channel into one run, and a list is
+    drawn for every tab and every viewer: the operator who typed it sees it in the preview, and the run's transcript
+    shows what the agent received); a reserve per message (the run's caps already bound what a message causes, and a
+    second hold would refuse a message to a run that can afford it); and a model-callable steer tool
+    (`DES-ADMIN-VIA-PI-EXTENSION`: a message enters a running agent's context, so its sender is a person at an operator
+    surface, never the operator's own model).
 - **Wiring**: `serve` builds one `createFleetReader` on the deployment's Valkey, with `installPanelValkeyContext`
   applied as the panel applies it so TLS and auth deployments connect the same way, and with `PI_SESSIONS_DIR` when
   it is set; it builds the insights cache, the audit reader and the hub, passes them to `createConsoleServer` as named
@@ -10617,7 +10670,9 @@ a tunnel.
     (`cancelHeldJob`); retry a failed job and remove a failed job (`retryFailedJob`, `removeFailedJob`: BullMQ's
     own `job.retry()` and `job.remove()`, only on a job still `failed` with the previewed `attemptsMade` and
     `finishedOn`); re-run a finished run (`planRerun`, `enqueueRerun`, paid); answer a parked run
-    (`planParkedAnswer`, `enqueueParkedAnswer`, paid).
+    (`planParkedAnswer`, `enqueueParkedAnswer`, paid); since issue #646, send a message into a running job
+    (`planSteer`, `enqueueSteer`, paid with no new reserve) and withdraw one (`planSteerWithdraw`,
+    `withdrawSteerMessage`).
   - **Fleet**: pause and resume the whole fleet (`killSwitchPlan` and `killSwitchSet`, the tools' funnel, so a
     resume across two disagreeing Valkeys is refused here as it is everywhere); pause and resume one queue
     (`setQueuePausedOne`, which refuses a name the fleet does not drain rather than creating a paused queue
@@ -10631,11 +10686,12 @@ a tunnel.
     cancel every held job.
   The audit `kind` of each is the panel's where the panel already writes the same thing (`trigger-add`,
   `setting-set`, `cancel-held`, `fleet-pause`, ...), and the console adds `queue-pause`, `queue-resume`,
-  `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`, `run-rerun` and
-  `parked-answer`. The action names are the kinds' own spellings for the configuration actions (`trigger-add`, `setting-set`,
+  `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`, `run-rerun`,
+  `parked-answer`, `steer` (which the panel writes too, issue #646) and `steer-withdraw`. The action names are the
+  kinds' own spellings for the configuration actions (`trigger-add`, `setting-set`,
   `limit-edit`, ...) and `cancel-active`, `cancel-held`, `cancel-all-held`, `retry-failed`, `remove-failed`,
-  `retry-all-failed`, `remove-all-failed`, `fleet-pause`, `fleet-resume`, `queue-pause`, `queue-resume`, `rerun` and
-  `parked-answer` for the rest.
+  `retry-all-failed`, `remove-all-failed`, `fleet-pause`, `fleet-resume`, `queue-pause`, `queue-resume`, `rerun`,
+  `parked-answer`, `steer` and `steer-withdraw` for the rest.
 - **Paid actions and the reserve**: a re-run and an answer to a parked run start a paid job, so their preview shows
   what the worker will hold before the operator confirms, and the ticket and the audit row carry it (`reserve`, in
   micro-dollars). The figure is `estimateReserve` (`worker/src/reserve-estimate.mjs`, the worker export
@@ -11510,3 +11566,5 @@ a tunnel.
 | 2026-10-17 | Issue #646, part 1, review round 1. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` CORRECTED** to the code after the round: F4, the runner's push window is now each `agent_start` to its `agent_end` AND `ctx.isIdle() === false` (an aborted run skips `agent_before_settle`, and a timer poll from another extension's `agent_settled` handler appended a message the model never saw), with the `agent_before_settle` push exempt from the `agent_end` window and still needing the session busy; F3, the signed exit line is a second delivery witness (`steer.deliveredIds`, marked after the transcript acks drain and before the relay stops, nothing off an unverified line), so a symlink-swapped transcript no longer turns deliveries `late`; F5, a waiting message whose prior line verifies under the current key is marked delivered at the baseline, and the residual is named (a message delivered just before a crash can be delivered again by the recovery, since earlier-attempt lines never verify and unverified ones are deliberately not trusted); F1, a run id reused after its run ended (a console retry keeps the job id) gets its closed inbox reset in one script before the run registers, an open inbox is kept, a failed reset leaves the relay refusing to write or re-baseline (`steer_inbox_closed`). **`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` CORRECTED**: F2, the failed listener's terminal branch settles the inbox too (a stall-kill or a rethrow the processor never saw), under a bolt. **`DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` and `DES-STEER-HELD-WHILE-PARKED` UNCHANGED by this row, checked.** **Code evidence**: worker/src/inbox-relay.mjs (`resetClosedInbox`, the closed check, `priorAcked`), worker/src/steer-ack.mjs, worker/src/run-container.mjs, worker/src/start.mjs, image/runner/src/inbox.mjs. |
 | 2026-10-17 | Issue #646, part 2: forge comments. **`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED** to the code (`makeLateForge`, `enqueueLateForgeJob`, `preseedInbox`): the steer-armed run's window is released at every successful close, first; the forge late entries split by hop (hop >= 1 only answered); branch A (not `operator-cancel`, a stored fallback with `resume` naming this run's forge, repo and target: enqueued on the run's queue, host queue kept, the host-lost sweep to the shared queue, own GUID id, no dedup; the other hop-0 messages pre-seeded with `hop: 1` only into a steer-armed fallback, else answered; a failed pre-seed keeps the job); branch B (one fixed `STEER_LATE_REPLY` per run end, whatever it covers); logs; the day-long pre-seed TTL; known gaps named (replicas each reply, a recovery job cannot release the original's window, a failed close keeps the window, a pre-seeded message waiting over 24 h expires unanswered, and a comment between the container's exit and the final outcome is neither steered nor late and is swallowed by the still-held window inside ten minutes); four rejected alternatives added. **`DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` AMENDED**: Status (the receiver reads it now) and a new bullet on comment routing (`trySteer`: pure filters mark `steerMode`, free refusals first, the relay's own key derivation, at most 4 runs, the fallback stored before the push and why, `ok` or `dup` is steered, everything else falls through to today's enqueue, no timeout, the queue's own client) with three rejected alternatives. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**, one clause: a forge author's id may be an Azure DevOps GUID or `azid-` digest. **`DES-STEER-HELD-WHILE-PARKED` AMENDED**: a held forge message takes the late rule (resumed job when the comment's trigger resumes, else the reply); the resumed job is an ordinary comment job, not a parked reply. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**, the steering paragraph: the swallowed-answer residual is narrowed for a steer-armed trigger only while the parked run's container is up; after its exit and before the release a phrase reply is still swallowed, and a phrase-free reply or a trigger without `run.steer` keeps the residual unchanged. **`DES-PR-TRIGGER-ROUTES-TO-FLOW` UNCHANGED, checked**: it routes events to flows and says nothing about comment routing into a run. |
 | 2026-10-17 | Issue #646, part 2, review round 1. **`DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` CORRECTED** to the code after the round: the relay no longer unregisters at its stop but holds the open key and the target member for `STEER_HOLD_TTL_MS` (15 min, past the 10-min window; the close removes both), with the named residual that another run's 60 s target TTL can drop a held member early, and the liveness argument's lifetime follows (30 s for a running relay, 15 min for a stopped one); comment routing is stated as per target, not per trigger; the receiver's skip line is renamed `steer_comment_skipped`; the fallback hash is capped at 32 (`full` falls through); a steered delivery leaves `steer:steered:<delivery job id>` (EX 31 days, NX, after a successful push) and the fall-throughs after a successful lookup answer a marked redelivery `202 {status:"steered", runs:0}` (`steer_redelivered`), with `steer_marker_failed` and the two unmarked paths named; the poller keys under the `POLL_REPOS` spelling, and the webhook and poller see one comment under two delivery ids (the old residual). **`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` CORRECTED**: the seam and the window release run only at the first close (`closeInbox`'s `first`; a terminal throw settles twice); the resume mismatch check compares the target type too; the exit-to-outcome gap is closed by the hold and replaced by the hold's residual; one more rejected alternative (answering at every close). **`DES-AWAIT-INPUT-ENDS-THE-JOB` CORRECTED**, the steering paragraph: a phrase reply after the parked run's container exited is held too (the hold), so the residual for a steer-armed trigger narrows to the hold's own. |
+| 2026-10-17 | Issue #646, part 3: the console and the panel. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names part 3; NEW bullet "Steering a running job": the actions `steer` (paid, no new reserve, the preview showing the text escaped and the row holding only its sha256) and `steer-withdraw` (free, its preview and answer saying guaranteed or best effort) on `planSteer`, `enqueueSteer`, `planSteerWithdraw` and `withdrawSteerMessage` beside the parked answer's planners, all on the worker's inbox module; the message id minted at the preview so the ticket binds one message; the run page's Inbox panel (`p-inbox`, after Progress: the list without text for both roles, the forms only while the run takes messages and the withdraw buttons for an operator, nothing drawn for an unarmed job, hidden by `section[data-panel]:empty`), re-rendered by digest; the snapshot reading `steer` and `recoveryOf` off a Job's data and nothing else, for at most 16 steer-armed jobs. Rejected: listing the text, a reserve per message, a model-callable steer tool. The action groups, the kinds and the action names gain the two. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the ACTIVE row of a steer-armed job takes `t` and `T` (both free in every view's key map and in the footer hints, which are unchanged; the hint rides the selected armed row alone), a footer input bound to the job the key was pressed on, the console's free plan then the push through `withAuditedWrites` (kind `steer`, the digest only), and a stated decision that no model-callable tool steers; the tool enumeration is UNCHANGED, checked, and still the pin. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` UNCHANGED, checked**: the console and the panel push through the same scripts the CLI does, so the mount, the relay and the framing do not move. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: steering is a sibling channel and cancel is untouched. **Code evidence**: admin/src/job-actions.mjs -> planSteer, enqueueSteer, planSteerWithdraw, withdrawSteerMessage; admin/src/console/actions.mjs -> the two entries; admin/src/console/panels.mjs -> runInbox; admin/src/console/pages.mjs -> the run page's `inbox` read and `p-inbox`; admin/src/console/style.mjs -> `section[data-panel]:empty`; admin/src/read-model.mjs -> readJobInbox, the fleet reader's `inbox`; admin/src/dashboard.ts -> the `t` and `T` keys, steerNote, steerFailure. |
+| 2026-10-17 | Issue #646, part 3, review round 1. **`DES-OPERATOR-CONSOLE` CORRECTED** to the code after the round: the steer bullet says the audit row names the message by id (`<job id>#<message id>`) beside the job; that the snapshot's inbox read is metadata only (`listInboxPublic` reads the state hash's `m:<id>` fields, never the list); and that a run that goes on as a #645 recovery job is found from the base run's page: `activeJobOfRun` tries the run's recovery ids, newest first, the panel says "its run continues as" that job with a link, and the planner sends through it, so the forms work from either page. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the TUI's row is the same; only its audit row's `target` gains the message id. **Code evidence**: admin/src/read-model.mjs -> activeJobOfRun, readJobInbox; admin/src/job-actions.mjs -> planSteer, steerAuditTarget; admin/src/console/panels.mjs -> runInbox. |

@@ -17,10 +17,10 @@ pi-dispatch steer 1234 "The failing test is in src/date.ts, not the parser. Leav
 
 Off by default. A trigger without `steer` behaves exactly as before.
 
-**Two ways to send a message.** An operator sends one from the command line ([below](#sending-a-message)), and a
-person the comment trigger already accepts comments from sends one by commenting with the trigger's phrase on the
-issue or pull request the job works on ([Steering from a comment](#steering-from-a-comment)). Sending from the
-operator console and the `/dispatch` panel is coming in a later change.
+**Ways to send a message.** An operator sends one from the command line ([below](#sending-a-message)), or from the
+operator console's run page or the `/dispatch` panel ([From the console and the panel](#from-the-console-and-the-panel)),
+and a person the comment trigger already accepts comments from sends one by commenting with the trigger's phrase on
+the issue or pull request the job works on ([Steering from a comment](#steering-from-a-comment)).
 
 ## Turn it on
 
@@ -84,6 +84,38 @@ pi-dispatch steer --withdraw <jobId> <msgId>
 it. One that was already `written` is withdrawn on a best effort basis: the agent may have read it before the
 worker removed it, and the run's transcript says whether it did. A `delivered` or `late` message cannot be taken
 back, and the command says so.
+
+## From the console and the panel
+
+**The operator console.** The page of a running job whose trigger has `steer` (`/run?id=<job id>`) has an **Inbox**
+panel: every message sent to the run, with its id, whether it is a steer or a follow-up, where it came from (`cli`,
+`console`, `panel` or `forge`), its state (the table above, plus `withdrawn`), when it was sent and its size. It
+never shows a message's text, to anyone. Both roles see the list; an operator also gets two forms, **Steer** and
+**Follow-up**, while the job is running and its run takes messages, and a **Withdraw** button on each message that is
+still `queued` or `written`.
+
+Sending is the console's usual two steps ([`console.md`](console.md#actions)): the preview shows your message exactly
+as the run will get it (after the cleanup described under [What the agent sees](#what-the-agent-sees)), says that it
+spends from the run's existing reservation (nothing new is reserved), and Confirm sends it. The message is signed
+with your token's name, which the agent sees in place of "the command line". The console refuses, before sending
+anything, exactly what the command line refuses (the job is not running, the run is not accepting messages, the text
+is empty or too long), and a run that finished or went quiet between your preview and your confirm refuses the
+confirm, with nothing sent. A withdraw's preview says which kind it is: guaranteed for a `queued` message, best effort
+for a `written` one. The panel updates itself, so you watch the state move from `queued` to `written` to `delivered`.
+The audit log records the job, the message id and a hash of the message, never the text. On the page of a run that
+was [recovered](durable-runs.md) the panel says which recovery job the run continues as, with a link, and a message
+sent from either page goes to that running job.
+
+**The `/dispatch` panel.** On the ACTIVE row of a steer-armed job (its selected row shows `t steer · T follow-up`),
+press `t` to write a steer or `T` for a follow-up. The footer becomes an input; Enter sends, Esc cancels with
+nothing sent. The message goes to the job that was selected when you pressed the key, even if the list moves while you
+type. The footer then says the message id and that it is queued, never the text; follow its state on the console's
+run page or with the id. A refusal is said in the footer, and nothing is sent. Every message sent from the panel is
+in the console's audit log as the panel, with a hash of the text. Withdrawing a message is done from the console or
+the command line.
+
+There is no tool for your pi session's model to send a message: steering a run is something a person does, never
+something an agent asks for.
 
 ## Steering from a comment
 
@@ -157,7 +189,8 @@ short digest of their address when the work item event carried only that.
   agent would otherwise stop, then the run continues with it. Use it for "when you are done, also ...".
 
 Neither interrupts anything. A tool that is running (a long test suite, a build) finishes first; to stop a run, use
-`pi-dispatch cancel`. Messages reach the agent one per turn, in the order they were sent.
+`pi-dispatch cancel`. Pausing the fleet does not stop messages either: a pause stops new jobs from starting, not a
+job that is already running, and a message only adds turns inside that run's own limits and reservation. Messages reach the agent one per turn, in the order they were sent.
 
 If the agent has just asked a question and parked the run ([`await_human_input`](triggers.md)), nothing more is
 passed to it: a message sent then is held and becomes `late` when the run ends parked. Answer the question on the
@@ -214,8 +247,8 @@ resumed or recovered run carries it like any other part of the conversation.
 
 When a run ends (completed, stopped, failed for good), its inbox is closed before its run record is written. Any
 message that had not reached the agent becomes `late`, and anything sent after that is refused as `closed`. A late
-message from the command line is only reported: `pi-dispatch steer` says `late` if it sees it within its wait, and
-the run record counts it. No new job is started for it; start one yourself if the message still matters.
+message from an operator (the command line, the console or the panel) is only reported: `pi-dispatch steer` says
+`late` if it sees it within its wait, the console's Inbox panel shows it as `late`, and the run record counts it. No new job is started for it; start one yourself if the message still matters.
 
 A late **comment** is never dropped silently. When the run ends:
 
@@ -269,7 +302,8 @@ without steering, and says why in its record, when:
 - the worker has no Valkey connection, or no transcript file could be set up for the job (`no-transcript`);
 - the inbox directory could not be created (`no-inbox`).
 
-Such a job runs exactly as it would without `steer`, and `pi-dispatch steer` refuses messages for it.
+Such a job runs exactly as it would without `steer`, and `pi-dispatch steer`, the console and the panel refuse
+messages for it.
 
 ## Record fields
 
@@ -287,7 +321,8 @@ only, never a message's text or its sender.
 ## Security
 
 Who can send a message, how it is kept from carrying authority, and what is not defended are in
-[`SECURITY.md`](../SECURITY.md). In short: an operator who can reach the deployment's Valkey, or a person the comment
+[`SECURITY.md`](../SECURITY.md). In short: an operator who can reach the deployment's Valkey (the command line and
+the `/dispatch` panel), an operator signed in to the console with the operator role, or a person the comment
 trigger already accepts comments from, using its phrase, on a trigger that opted in; the job cannot write to its own
 inbox; and the text reaches the agent framed as data, which bounds it the same way the issue text is bounded, and no
 further. A collaborator who can comment can now add words to a running job, not only start one.

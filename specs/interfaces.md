@@ -8843,15 +8843,20 @@ back: the transcript -> the worker's ack consumer -> Valkey.** The durable inbox
 transient, TTL-bounded keys that only a live run's relay keeps alive. One module holds every Valkey side,
 `worker/src/steer-inbox.mjs`, exported as `@edgehero/pi-dispatch/steer-inbox` (and the framing as
 `@edgehero/pi-dispatch/steer-framing`, and the relay's target derivation as `@edgehero/pi-dispatch/inbox-relay`), so
-the CLI, the relay, the settle step, the receiver and, in a follow-up change, the console cannot drift. Two senders:
-the CLI (`worker/src/steer-cli.mjs`, part 1) and the receiver for a forge comment (`receiver/src/steer.mjs`
-`trySteer`, part 2, `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`), which also stores the fallback job; the
-settle step reads the fallbacks and pre-seeds a resumed job (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`).
-`listInboxPublic` is exported for the console change and exercised by tests only.
+the CLI, the relay, the settle step, the receiver, the console and the panel cannot drift. Three kinds of sender:
+the CLI (`worker/src/steer-cli.mjs`, part 1), the receiver for a forge comment (`receiver/src/steer.mjs`
+`trySteer`, part 2, `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`), which also stores the fallback job, and the
+operator console and the `/dispatch` panel (part 3, `planSteer` and `enqueueSteer` in `admin/src/job-actions.mjs`,
+`DES-OPERATOR-CONSOLE`); the settle step reads the fallbacks and pre-seeds a resumed job
+(`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`). `listInboxPublic` is what the console's run page, its state API and the
+panel read (part 3): never the text.
 
 - **The run id.** Every key is per RUN: `runIdOf(job)` (`job.data.recoveryOf ?? job.id`, `recovery-queue.mjs`), so
   a #645 recovery and a BullMQ retry find the same inbox; spelled into a key through `sanitizeJobId`, the run
   mirror's sanitizer. A run id is a non-empty string or a non-negative safe integer, else the call is refused.
+  **Residual** (part 3 review, named, not fixed here): the sanitizer folds the characters a key must not carry, so
+  two run ids that differ only there (`a:b` and `a_b`) share one inbox, as they share the recovery keys; job ids
+  minted by this project do not differ that way, and a fix belongs to the run id's spelling everywhere at once.
 - **Keys**:
   ```
   run:steer:target:<hex32>     ZSET  member: the raw run id, score: expiresAtMs (refresh time + 30 s); PEXPIRE 60 s.
@@ -8862,7 +8867,9 @@ settle step reads the fallbacks and pre-seeds a resumed job (`DES-STEER-LATE-MES
                                      takes messages.
   run:inbox:<runId>            LIST   entry JSON, append only (RPUSH), in acceptance order.
   run:inbox:state:<runId>      HASH   <id> -> queued | written | delivered | withdrawn | late, plus `_count` (messages
-                                     ever accepted) and `_bytes` (their text bytes).
+                                     ever accepted) and `_bytes` (their text bytes), and per message `m:<id>` ->
+                                     "<seq> <mode> <source> <at> <bytes>" (part 3, review round 1): its public
+                                     metadata, written by the push and the pre-seed in the same script, never text.
   run:inbox:fallback:<runId>   HASH   <id> -> the job JSON a forge message would have started (comment routing;
                                      shape below).
   run:inbox:closed:<runId>     STRING "1", set by the final close.
@@ -8889,7 +8896,9 @@ settle step reads the fallbacks and pre-seeds a resumed job (`DES-STEER-LATE-MES
     "deliveryId"?: "<[A-Za-z0-9._:-]{1,128}>", "hop"?: <0..8> }
   ```
   The source and the author must agree: a `forge` source has a forge author, every other source an operator one. The
-  CLI writes `source: "cli"`, `author: { kind: "operator", by: "cli" }`. `at` defaults to the caller's clock.
+  CLI writes `source: "cli"`, `author: { kind: "operator", by: "cli" }`; the console (part 3) `source: "console"`,
+  `author: { kind: "operator", by: <the session's token name> }`; the panel `source: "panel"`, `author: { kind:
+  "operator", by: "panel" }`. `at` defaults to the caller's clock.
   A forge user id (`FORGE_USER_RE`, `worker/src/steer-framing.mjs`, part 2) is a positive integer of up to 15 digits
   (GitHub, GitLab, Forgejo), kept as a number, or an Azure DevOps actor id kept as the string it is: the actor's GUID
   (`8-4-4-4-12` hex, either case), or `azid-` and 16 lowercase hex, the first 16 of `sha256(address)`, which the
@@ -8994,7 +9003,9 @@ settle step reads the fallbacks and pre-seeds a resumed job (`DES-STEER-LATE-MES
     is logged `steer_inbox_reset`; a failed one is a relay fault (`reset`), and the relay then reads the inbox as
     closed on every tick, so it never writes into it nor re-baselines it (`steer_inbox_closed`, said once).
   - Reads: `readInbox` (LRANGE, HGETALL, EXISTS closed in one MULTI; text included, for the relay only),
-    `listInboxPublic` (`{ entries: [{ id, mode, source, state, at, bytes }], closed }`, NEVER the text),
+    `listInboxPublic` (`{ entries: [{ id, mode, source, state, at, bytes }], closed }`, NEVER the text, read from
+    the state hash's `m:<id>` fields in `seq` order with one HGETALL and one EXISTS, so the list and its text are
+    not moved; a message held without its field, from a worker before part 3, falls back to reading the list),
     `messageState` (one HGET, the CLI's poll), `isOpen` (EXISTS on the open key), `liveRunsForTarget`
     (`ZRANGEBYSCORE target (now +inf LIMIT 0 n`, n 4 by default and at most 64). A list line that does not parse as an
     entry with a valid id is dropped, never surfaced as text.
@@ -9267,17 +9278,23 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     `priorities-set`, `allocation-revert`, `secret-profile-add`, `secret-profile-remove`, `cancel-active`,
     `cancel-held`, `fleet-pause`, `fleet-resume` and `run-enqueue`; and the console's own `queue-pause`,
     `queue-resume`, `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`,
-    `run-rerun` and `parked-answer`. The list is descriptive: the writer enforces the charset, not the list, and
+    `run-rerun`, `parked-answer` and (issue #646) `steer-withdraw`; and `steer` (issue #646), which the console and
+    the panel (the TUI's `t` and `T`) both write. The list is descriptive: the writer enforces the charset, not the list, and
     the console's configuration actions write the kind of their action's own name, plus `pause-windows-set` for the
     whole-list replace.
   - `reserve` (optional, issue #642): the micro-dollars a paid action (a re-run, an answer to a parked run) will
     hold, as the preview showed it (`estimateReserve`), a non-negative safe integer. Absent when the action is not
-    paid or no dollar cap applies.
+    paid, no dollar cap applies, or the action takes no new reserve (a `steer`, which spends from its run's own).
   - `count` (optional, issue #642): a bulk action's size, a positive safe integer. A bulk action writes one row per
     job, `target` that job's id, every row carrying the same `count` and `ticket`, so a reader groups a bulk action
     by its ticket and reads each job's outcome from its own last row.
   - An answer to a parked run is recorded by the parked run's job id in `target` and the sha256 of the answer text
     in `afterDigest`; the text is never in a row.
+  - A message into a running job (kind `steer`, issue #646) is recorded by `<job id>#<message id>` in `target`
+    (`steerAuditTarget`; `#` is outside the job-id charset, so the split on the last `#` is exact, and a job id past
+    166 characters is cut before it so the 32-hex message id always fits the 200-character cap) and the sha256 of the
+    message text, as the run's inbox stores it after the scrub, in `afterDigest`; the text is never in a row. A
+    `steer-withdraw` row has the same `target` and nothing else of the message.
   - An unknown action or outcome throws in the writer: the vocabulary is closed. A `kind`, `reserve` or `count` of
     the wrong shape throws too, and writes nothing. A row without them is a row from before them and verifies as it
     always did.
@@ -9351,9 +9368,18 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   unchanged): `{ "turn", "steps", "failed", "running": { "tool", "since" } | null, "phase": { "index", "count",
   "done", "total" } | null, "ended", "updatedAt" }` (`activeProgressOf`), `running` the newest open call, `count` the
   length of the phase list, and `updatedAt` the key's last write, so a script can apply the stale rule
-  (`INT-RUN-PROGRESS-KEY`: not ended and older than 180 s).
+  (`INT-RUN-PROGRESS-KEY`: not ended and older than 180 s). **Since issue #646 each `active` row also gains `steer`
+  and `inbox`** (`INT-STEER-INBOX-CONTRACT`), added keys within `version: 1`: `steer` is true for a job whose data
+  arms `run.steer` and false otherwise; `inbox` is that job's messages WITHOUT TEXT, `[ { "id", "mode", "source",
+  "state", "at", "bytes" } ]` (`inboxOf`), each field rebuilt against the inbox's own vocabularies (`id` 32 lowercase
+  hex, `mode` `steer` or `followUp`, `source` `forge`, `console`, `cli` or `panel`, `state` `queued`, `written`,
+  `delivered`, `withdrawn` or `late`, `at` milliseconds, `bytes` the text's UTF-8 size), a field that fails being null
+  (`bytes` 0). `inbox` is null for a job that is not steer-armed, for one whose inbox could not be read that tick, and
+  past the first 16 steer-armed active jobs a snapshot reads (`STEER_INBOX_ROWS_MAX`), so `[]` always means no
+  message. Both roles get the same.
 - **What it never holds**: a token, a cookie, a session id, a host path beyond what the panel shows, a secret's value
-  or resolver reference (secret profiles appear by name only), a job's `.data`, log or transcript text. A record's
+  or resolver reference (secret profiles appear by name only), a job's `.data`, log or transcript text, or a steer
+  message's text or sender. A record's
   `jobId`, `target` and `parentJobId` are JSON strings, encoded by `JSON.stringify` and never interpreted; a script
   that puts one in HTML escapes it itself.
 - **The role difference**: for a viewer, every failed job's `failedReason` key is absent (not null), the one free text the snapshot carries. The operator gets it scrubbed (control bytes replaced, 120
@@ -10012,3 +10038,5 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-17 | Issue #646, part 1, review round 1. **`INT-STEER-INBOX-CONTRACT` CORRECTED** to the code after the round: F6, the text is scrubbed by `scrubSteerText` (the console answer's scrub, then the Unicode tag block U+E0000 to U+E007F, U+200B to U+200D, U+2060 to U+2064, U+180E and U+FEFF removed, and U+FF40, U+02CB and U+1FEF folded to the ASCII backtick so the fence grows), no NFKC and why, an unpaired surrogate refused, the extra scrub kept off `scrubAnswerText`; F1, the `RESET` script (`resetClosedInbox`: only while `closed` exists, DEL of list, state, fallback and closed, run before `registerLive`; an open inbox kept; a failed reset never written into nor re-baselined, `steer_inbox_closed`); F5, a verified prior line marks a waiting message delivered at the baseline, and the residual named (a message delivered just before a crash can be delivered again by the recovery; unverified earlier lines deliberately not trusted); F3, the verified exit line's `deliveredIds` marked delivered after the transcript acks drain and before the relay stops; F2, the failed listener's terminal branch closes the inbox; who writes the states and the logs updated. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: the exit line's `steer` gains `deliveredIds` (at most 16 32-hex ids in delivery order, dropped whole when malformed), which ARE acted on off a signed line, while `runContainer`'s result keeps `{ delivered, pending }`; the earlier "no decision reads it" now covers the counts only. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED**: the runner's block is still not recorded, its ids only move inbox states before the close; F2's settle from the failed listener. **`INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-TRANSCRIPT-STREAM` and `INT-CANCEL-CHANNEL-CONTRACT` UNCHANGED by this row, checked.** **Code evidence**: worker/src/steer-inbox.mjs (`scrubSteerText`, `boundSteerText`), worker/src/inbox-relay.mjs, worker/src/steer-ack.mjs, worker/src/run-container.mjs, worker/src/run-history.mjs (`steerCounts`, `STEER_DELIVERED_IDS_MAX`), worker/src/start.mjs, image/runner/src/inbox.mjs (`counts`). |
 | 2026-10-17 | Issue #646, part 2: forge comments. **`INT-STEER-INBOX-CONTRACT` AMENDED**, from `receiver/src/steer.mjs`, `receiver/src/receiver.mjs`, `receiver/src/poller.mjs`, `worker/src/steer-inbox.mjs`, `steer-framing.mjs`, `inbox-settle.mjs` and `queue.mjs`: the receiver is the second sender (and the relay's `steerTargetOf` is exported as `@edgehero/pi-dispatch/inbox-relay` for it); a forge author id may be an Azure DevOps GUID or `azid-` digest (`FORGE_USER_RE`), kept as a string, and the association is the GitHub comment's or the fixed `WRITE_ACCESS` elsewhere; an entry the framing could not frame is refused at normalisation; the fallback hash's shape (the filter's job without `steerMode`, plus `kind` and `jobId`, stored before the push, rebuilt through `enqueueForgeJob`'s field list); the new `PRESEED` script (`preseedInbox`, a not-yet-started run, no open-key check, all or nothing at the caps, `hop >= 1` required, `STEER_PRESEED_TTL_MS` 24 h); the receiver's `202 {status:"steered", runs}` and the poller's `steered` count; the receiver's and the late branches' log lines. Everything else UNCHANGED, checked. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `run.steer` bullet: a phrase comment is now a sender when the comment trigger sets `run.steer` too, the filters no longer only carry the field, and the version-skew line gains part 2's mixed-release behaviour (no new field or skew row). **`INT-WEBHOOK-PAYLOAD-SUBSET` UNCHANGED, checked**: no field is added (no login: the forge author is framed by id and association only); **`INT-AZURE-PAYLOAD-SUBSET` UNCHANGED, checked**: the `azid-` sender id was already derived by the filter and is only accepted further down. |
 | 2026-10-17 | Issue #646, part 2, review round 1. **`INT-STEER-INBOX-CONTRACT` CORRECTED** to the code after the round: a new key `steer:steered:<deliveryJobId>` (EX 31 days, NX, set by the receiver after a successful push) and the receiver's answer to a marked redelivery, `202 {status:"steered", runs:0}`, never enqueued (the poller neither enqueues nor counts it), with the two fall-throughs that skip the check named; `CLOSE` returns `first` and `closeInbox` answers it (a second close only counts); the new `HOLD` script (`holdLive`, the relay's stop: the open key and the target member kept for `STEER_HOLD_TTL_MS` 15 min, never when closed, the target TTL only raised) with its residual (another run's 60 s refresh can expire a held member early), `unregisterLive` no longer the relay's exit; the TTL bullet follows; the fallback store is a script capped at `STEER_MAX_FALLBACKS` 32 (a redelivered id overwrites, a 33rd new id is `full`); the `POLL_REPOS` spelling and the webhook-and-poller delivery ids; logs: `steer_skipped` renamed `steer_comment_skipped`, new `steer_redelivered`, `steer_marker_failed`, and the relay step `hold`; who writes the liveness keys and the OQ-008 bullet follow (the marker is the GUID shield's stand-in, not run state). Azure author ids (GUID or `azid-` and 16 hex, kept as strings) UNCHANGED, checked. |
+| 2026-10-17 | Issue #646, part 3: the console and the panel. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the kinds written gain `steer` (the console's action and the panel's `t` and `T`) and `steer-withdraw` (the console's); a `steer` row names the job in `target` and holds the sha256 of the message as the inbox stores it in `afterDigest`, never the text, and no `reserve` (a message takes no new reserve; the `reserve` field says so); a `steer-withdraw` row names the job alone. The writer is unchanged: it enforces the kind charset, not the list. **`INT-CONSOLE-STATE-API` AMENDED**: each `active` row gains `steer` (whether the job's data arms `run.steer`) and `inbox`, that job's messages without text as `{id, mode, source, state, at, bytes}`, each field rebuilt against the inbox's vocabularies; null for an unarmed job, an unreadable inbox and past the 16 steer-armed jobs one snapshot reads (`STEER_INBOX_ROWS_MAX`), so `[]` means no message; the same for both roles; added keys within `version: 1`. **`INT-STEER-INBOX-CONTRACT` AMENDED**: the console and the panel are senders now (`planSteer` and `enqueueSteer` in `admin/src/job-actions.mjs`, on this module), the console writing `source: "console"` by the session's token name and the panel `source: "panel"` by `panel`; `listInboxPublic` is what the console's run page, its state API and the panel read, no longer exercised by tests only. The keys, the scripts, the caps and the entry are UNCHANGED, checked. **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: the run page was already live (issue #644), and its new Inbox panel is one more `p-` region re-rendered by digest. **Code evidence**: admin/src/console/actions.mjs -> the `steer` and `steer-withdraw` entries; admin/src/console/live.mjs -> stateOf, inboxOf; admin/src/read-model.mjs -> the snapshot's `steer` and `inbox`, readJobInbox, publicInboxEntry, STEER_INBOX_ROWS_MAX; admin/src/dashboard.ts -> withAuditedWrites. |
+| 2026-10-17 | Issue #646, part 3, review round 1. **`INT-STEER-INBOX-CONTRACT` CORRECTED** to the code after the round: the state hash gains one `m:<id>` field per message, "<seq> <mode> <source> <at> <bytes>", written by the push and the pre-seed scripts in the same call that writes the message (seq the accepted order), and `listInboxPublic` reads only the state hash and the closed key from them, so a surface that lists inboxes every second (the console's snapshot, up to 16 a tick) never moves a message's text; a message without its field (a worker from before part 3) makes that one read fall back to the whole list. The caps, the push and close semantics and the entry are UNCHANGED, checked (a meta field is not a state: the close, the counters and `stateOf` skip it). The run id's `sanitizeJobId` spelling is named as a residual: two run ids that differ only where the sanitizer folds a character share an inbox, as the recovery keys do (a part 1 residual, not changed here). **`INT-CONSOLE-AUDIT-LOG` CORRECTED**: a `steer` or `steer-withdraw` row's `target` is `<job id>#<message id>` (`steerAuditTarget`), so a row names the message it wrote or withdrew, never its text; a job id past 166 characters is cut before the `#` so the message id fits the 200-character cap. **Code evidence**: worker/src/steer-inbox.mjs -> PUSH_SCRIPT, PRESEED_SCRIPT, metaOf, metaFieldsOf, listInboxPublic; admin/src/job-actions.mjs -> steerAuditTarget. |
