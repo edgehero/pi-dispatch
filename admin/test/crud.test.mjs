@@ -1271,6 +1271,39 @@ function commandPi() {
   return { sent, run: (args) => { const notes = []; return def.handler(args, { hasUI: true, ui: { notify: (m, t) => notes.push({ m, t }) } }).then(() => notes); } };
 }
 
+// Issue #673: the overlay's model and provider are held to the trigger's id shape by the worker's `writeOverlay`, and
+// every operator surface that writes a setting goes through it. Each one shows the refusal sentence, names the key
+// and the shape, never the value, and leaves the file as it was. Review round 1: refused at PLAN time, by the worker's
+// `modelIdProblem`/`providerIdProblem`, so no confirm is asked and no audited write is attempted (a write the worker
+// refuses still leaves a row in the console-audit chain; none appears here).
+test("a model or provider outside the id shape is refused with the shape's sentence on dispatch_set, /dispatch set and the panel dialog, nothing written (#673)", async () => {
+  const MODEL_SAYS = "model must be a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one)";
+  const PROVIDER_SAYS = "provider must be a provider id of 1 to 64 characters: letters, digits, dot, dash and underscore, starting with a letter or digit";
+  await withAllocation(async ({ files }) => {
+    const before = readFileSync(files.settings, "utf8");
+    const auditDir = join(files.logs, "console-audit");
+    const auditRowCount = () => (existsSync(auditDir) ? readdirSync(auditDir).filter((n) => n.endsWith(".jsonl")).reduce((n, f) => n + readFileSync(join(auditDir, f), "utf8").trim().split("\n").filter(Boolean).length, 0) : 0);
+    const { run } = commandPi();
+    for (const [key, bad, says] of [["model", "Claude Sonnet", MODEL_SAYS], ["model", "a+b", MODEL_SAYS], ["model", "x".repeat(65), MODEL_SAYS], ["model", "\u212aimi", MODEL_SAYS], ["provider", "a/b", PROVIDER_SAYS], ["provider", "Open AI", PROVIDER_SAYS]]) {
+      const { ctx, shown } = toolCtx({ answer: true });
+      await assert.rejects(() => toolByName("dispatch_set").execute("id", { key, value: bad }, undefined, undefined, ctx), (e) => e.message === `rejected: ${says}`, `dispatch_set ${key} ${bad}`);
+      assert.equal(shown.length, 0, `dispatch_set ${key} ${bad}: no confirm is asked`);
+      const ui = mockUi({ select: [key], input: [bad] });
+      await handleDashboardAction({ action: "editSettings" }, { settingsFile: files.settings }, { ui });
+      assert.deepEqual(ui.notes.at(-1), { m: `set: ${says}`, t: "error" }, `dialog ${key} ${bad}`);
+      if (!/\s/.test(bad)) {
+        const notes = await run(`set ${key} ${bad}`);
+        assert.deepEqual(notes.at(-1), { m: `set: ${says}`, t: "error" }, `/dispatch set ${key} ${bad}`);
+      }
+      assert.equal(readFileSync(files.settings, "utf8"), before, "nothing written");
+      assert.equal(auditRowCount(), 0, `${key} ${bad}: refused at plan time, no audited write attempted`);
+    }
+    const notes = await run("set model Claude-Sonnet-X");
+    assert.match(notes.at(-1).m, /^set model = Claude-Sonnet-X/, "a good id is written, case kept");
+    assert.equal(read(files.settings).model, "Claude-Sonnet-X");
+  });
+});
+
 test("/dispatch priorities shows the split with no reason text; `priorities set` applies a plan as operator-session", async () => {
   await withAllocation(async ({ redis }) => {
     const { sent, run } = commandPi();

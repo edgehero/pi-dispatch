@@ -384,6 +384,25 @@ test("a refusal is the tool's own sentence, before any ticket: a tool-proof trig
   assert.equal(c.audit.rows.filter((r) => r.action === "write").length, 0, "no preview writes a row");
 });
 
+// Issue #673: the console's setting-set refuses a model or provider outside the id shape at the preview (the dry run
+// through the worker's writeOverlay), with the shape's sentence, never the value, and writes nothing.
+test("setting-set: a model or provider outside the id shape is refused at the preview with the shape's sentence, nothing written (#673)", async () => {
+  const { paths } = deployment();
+  const c = await start({ paths });
+  const before = readFileSync(paths.settingsFile, "utf8");
+  for (const [key, bad, says] of [
+    ["model", "Claude Sonnet", "model must be a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one)"],
+    ["model", "a~b", "model must be a model id of 1 to 64 characters: letters, digits and . _ - : / @, starting with a letter or digit (or ~ or @ then one)"],
+    ["provider", "a/b", "provider must be a provider id of 1 to 64 characters: letters, digits, dot, dash and underscore, starting with a letter or digit"],
+  ]) {
+    const res = await c.act("setting-set", { key, value: bad });
+    assert.equal(res.status, 400, res.text);
+    assert.equal(res.json().error, `rejected: ${says}`, `${key} ${bad}`);
+  }
+  assert.equal(readFileSync(paths.settingsFile, "utf8"), before, "nothing written");
+  assert.equal(c.audit.rows.filter((r) => r.action === "write").length, 0, "no preview writes a row");
+});
+
 test("a stale ticket (the file changed after the preview) is refused 409, the file keeps the other writer's bytes, rows ok then failed", async () => {
   const { paths } = deployment();
   const c = await start({ paths });

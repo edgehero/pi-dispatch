@@ -7,6 +7,7 @@ import { EXIT_POLICY, installRejectionPrinter, installStdoutPipeGuard } from "./
 import { isEntryModule } from "./entry.mjs";
 import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
+import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
 import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 
 /** How long the kill switch waits on the host registry before acting on the shared queue alone. */
@@ -163,6 +164,15 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		if (values.image) {
 			const problem = imageRefProblem(values.image);
 			if (problem) return fail(`--image ${problem.reason} (got ${JSON.stringify(values.image)})`);
+		}
+		// The one model-id and provider-id rule (model-ref.mjs, issue #673), before anything is queued, so a local run's
+		// model is one the console's runs filter can find, as a trigger's, PI_MODEL's and the overlay's are. An empty
+		// flag is refused too, never read as absent: it used to be enqueued as "" and run on a model named "". The
+		// value is not echoed, as no other refusal of this rule echoes it.
+		for (const [flag, judge] of [["provider", providerIdProblem], ["model", modelIdProblem]]) {
+			if (values[flag] === undefined) continue;
+			const problem = judge(values[flag]);
+			if (problem) return fail(`--${flag} ${problem}. Nothing was queued.`);
 		}
 
 		// The worker's folder rule, before anything is queued (issue #524): `.git` at the folder itself and a commit at

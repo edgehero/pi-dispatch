@@ -26,6 +26,7 @@ import * as nodeFs from "node:fs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
+import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import {
@@ -491,9 +492,28 @@ export function settingsEnvelopeRefusal(key, beforeOverlay, afterOverlay, paths,
 }
 
 /**
+ * A `model` or `provider` value the worker's `writeOverlay` would refuse, as the sentence it refuses with (`model must
+ * be a model id of ...`), else null (issue #673, review round 1). The worker's own rule (`modelIdProblem`,
+ * `providerIdProblem`, worker/src/model-ref.mjs), asked BEFORE the confirm, the dollar keys' rule: the operator is never
+ * asked to approve a value the write would then refuse. The same words `validateOverlay` builds, so a refusal reads
+ * the same at plan time as it would at the write. Never the value.
+ */
+function idSettingProblem(key, value) {
+  if (key === "model") {
+    const problem = modelIdProblem(value);
+    return problem === null ? null : `${key} ${problem}`;
+  }
+  if (key === "provider") {
+    const problem = providerIdProblem(value);
+    return problem === null ? null : `${key} ${problem}`;
+  }
+  return null;
+}
+
+/**
  * The tool's settings plan (`dispatch_set`): a `value` that is absent or blank unsets `key`. Refused BEFORE the confirm
  * over an invalid file (issue #501; a BLANK file, issue #540, reads as a missing one, `writeSettings`' rule), over a
- * dollar value the worker's parser refuses, and over a change that would break the allocation envelope (issue #504 part
+ * dollar value the worker's parser refuses, over a model or provider id outside the worker's shape (issue #673), and over a change that would break the allocation envelope (issue #504 part
  * C). A dollar change that leaves a window uncapped is WARNED in the confirm, never refused (`mergedDollarProblem`).
  */
 function planSettingTool({ key, value, paths, env, shown, fs }) {
@@ -509,6 +529,9 @@ function planSettingTool({ key, value, paths, env, shown, fs }) {
     const dollar = refusalOf(() => parseUsdMicros(newVal, key));
     if (dollar !== null) return { refusal: dollar };
   }
+  // Issue #673, review round 1: a model or provider id by the worker's own rule, before the confirm, for the same reason.
+  const idProblem = unset ? null : idSettingProblem(key, newVal);
+  if (idProblem !== null) return { refusal: `rejected: ${idProblem}` };
   // The AFTER side of an unset is what the key falls back to, by the same rule as the before side.
   const afterOverlay = unset ? Object.fromEntries(Object.entries(view?.overlay ?? {}).filter(([k]) => k !== key)) : { ...(view?.overlay ?? {}), [key]: newVal };
   const after = unset ? settingShown(key, afterOverlay, env, shown) : String(newVal);
@@ -533,7 +556,8 @@ function planSettingTool({ key, value, paths, env, shown, fs }) {
 /**
  * The operator-typed command's settings plan (`/dispatch set|unset`): the key must be known (checked BEFORE the write,
  * since `writeOverlay` silently drops unknown keys and would report ok on a no-op), a set takes exactly one value
- * token (model ids carry no spaces), and a change that would break the allocation envelope is refused. Every refusal
+ * token (model ids carry no spaces), a model or provider id outside the worker's shape is refused (issue #673), and a
+ * change that would break the allocation envelope is refused. Every refusal
  * is the line the command shows, prefixed with its verb. A dollar key's write carries the deployment's env so
  * `writeSettings` returns a WARNING beside the write, never a refusal (issue #501, PR #542's review).
  */
@@ -544,6 +568,10 @@ function planSettingCommand({ verb, key, valueTokens, paths, env, shown, fs }) {
   if (verb === "set") {
     if (!Array.isArray(valueTokens) || valueTokens.length !== 1) return { refusal: `set: ${key} takes exactly one value` };
     value = coerceSettingValue(key, valueTokens[0]);
+    // Issue #673, review round 1: a model or provider id by the worker's own rule, before anything is written (the
+    // panel dialog comes through here too), in the words the write would refuse with.
+    const idProblem = idSettingProblem(key, value);
+    if (idProblem !== null) return { refusal: `set: ${idProblem}` };
     mutate = (o) => ({ ...o, [key]: value });
   } else {
     mutate = (o) => {

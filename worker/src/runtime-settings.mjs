@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { ensureUnderAccountRoot } from "./config.mjs";
 import { expectRefusal } from "./file-expect.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
+import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
 import { checkDollarInvariant, parseUsdMicros } from "./money.mjs";
 
 /**
@@ -83,10 +84,6 @@ function overlayKeyShape(key) {
 	return out.replace(/[_\-. ]/g, "");
 }
 
-function isNonEmptyString(value) {
-	return typeof value === "string" && value.trim() !== "";
-}
-
 function isIntAtLeast(value, min) {
 	return Number.isInteger(value) && value >= min;
 }
@@ -121,10 +118,18 @@ function validateOverlay(candidate, log) {
 		const value = candidate[key];
 		switch (key) {
 			case "model":
-			case "provider":
-				if (!isNonEmptyString(value)) return { invalid: `${key} must be a non-empty string` };
+			case "provider": {
+				// Issue #673: the one model-id and provider-id shape a trigger's run.model and run.provider, PI_MODEL and
+				// PI_PROVIDER are held to (model-ref.mjs), so a run on the overlay's model is one the console's runs
+				// filter can find. Here, not at one admin surface, because every write (dispatch_set, /dispatch set,
+				// the panel dialog, the console's setting-set) and every read goes through this function: a bad value
+				// is refused at write, and one already on disk makes the overlay invalid, the loud path jobs and doctor
+				// already take. The value is never echoed. Kept in its original case: only the check lowercases.
+				const problem = key === "model" ? modelIdProblem(value) : providerIdProblem(value);
+				if (problem !== null) return { invalid: `${key} ${problem}` };
 				overlay[key] = value;
 				break;
+			}
 			case "maxTurns":
 			case "dailyCap":
 			case "weeklyCap":

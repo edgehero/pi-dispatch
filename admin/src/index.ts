@@ -693,7 +693,8 @@ function registerTools(pi: ExtensionAPI): void {
       const env = deploymentEnv(); // the dollar settings' source for the confirm (settingShown)
       const shown = { deploymentDir: pointerState().deploymentDir ?? null };
       // Judged BEFORE the confirm (`planSettingChange`, write-plans.mjs): an unknown key; an invalid file (issue #501;
-      // a BLANK one reads as missing, #540); a dollar value the worker's own parser refuses (#501 part 7); a change that
+      // a BLANK one reads as missing, #540); a dollar value the worker's own parser refuses (#501 part 7); a model or
+      // provider id outside the worker's shape (#673, `modelIdProblem`/`providerIdProblem`); a change that
       // would leave the allocation envelope unloadable (#504 part C). A dollar change that leaves a window uncapped in
       // the merged overlay is WARNED in the confirm, never refused (PR #542's review): the worker's cap may come from its
       // service unit, which the admin cannot see.
