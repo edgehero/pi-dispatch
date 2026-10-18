@@ -848,7 +848,7 @@ function fieldText(v) {
  * it spends. Names only: the secret profile by its name, never a secret or a reference. A model or cap the job leaves to
  * the deployment says so; the other fields appear only when set. Every value is escaped by the preview's template.
  */
-function runFieldsLines(f, lead) {
+export function runFieldsLines(f, lead) {
   if (f === null || typeof f !== "object") return [];
   const parts = [
     ...(f.flow !== null && f.flow !== undefined ? [`flow ${fieldText(f.flow)}`] : []),

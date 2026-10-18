@@ -378,6 +378,25 @@ async function resolveUrl(fleet, url, env) {
   return { id: runs[0].jobId };
 }
 
+/**
+ * One run's chat, looked up by `{ id }` or `{ url }` through `fleet`: `{ id, doc, record }` (the document `/api/run`
+ * answers, and the full record the fleet read, for a caller on the deployment's own host), or `{ status, body }` to
+ * answer with (`body.error` a sentence, `body.candidates` for an Azure work item in several repositories). THE ONE
+ * RESOLUTION: `/api/run` and the panel's `/dispatch chat` (issue #647, part 2) both call it, so a link or an id names the
+ * same run, and gets the same mode (`chatFactsOf`, `chatModeOf`), in a browser, a terminal and pi.
+ */
+export async function resolveRunChat(fleet, query, env = {}) {
+  let id = query?.id;
+  if (query?.url !== undefined) {
+    const got = await resolveUrl(fleet, query.url, env);
+    if (!got.id) return { status: got.status, body: got.body };
+    id = got.id;
+  }
+  const body = await runDocument(fleet, id, env);
+  if (body.status) return { status: body.status, body: { error: body.error } };
+  return { id, doc: body.doc, record: body.record };
+}
+
 /** `/api/run`'s handler. `ctx` is the console dispatcher's (`server.mjs`). */
 export async function getRun(ctx) {
   const { deps } = ctx;
@@ -385,19 +404,15 @@ export async function getRun(ctx) {
   if (!fleet) return ctx.json(503, { error: "this console has no fleet reader; see its log" });
   const parsed = parseRunQuery(ctx.searchParams);
   if (parsed.refusal) return ctx.json(400, { error: parsed.refusal });
-  const env = deps.pageDeps?.env ?? {};
-  let id = parsed.id;
-  if (parsed.url !== undefined) {
-    const got = await resolveUrl(fleet, parsed.url, env);
-    if (!got.id) return ctx.json(got.status, got.body);
-    id = got.id;
-  }
-  const body = await runDocument(fleet, id, env);
-  if (body.status) return ctx.json(body.status, { error: body.error });
-  return ctx.json(200, body.doc);
+  const got = await resolveRunChat(fleet, parsed, deps.pageDeps?.env ?? {});
+  if (!got.doc) return ctx.json(got.status, got.body);
+  return ctx.json(200, got.doc);
 }
 
-/** The document for run `id`: `{ doc }`, or `{ status, error }` (404 unknown, 503 unreadable). */
+/**
+ * The document for run `id`: `{ doc, record }` (`record` the run record the fleet read, or null; never in `doc`), or
+ * `{ status, error }` (404 unknown, 503 unreadable).
+ */
 export async function runDocument(fleet, id, env = {}) {
   let got;
   try {
@@ -436,5 +451,5 @@ export async function runDocument(fleet, id, env = {}) {
     // The job queued or running on a parked run's target that takes its answer (no record yet), or null.
     pendingRunOnTarget: facts.answeringJobId,
   };
-  return { doc };
+  return { doc, record };
 }

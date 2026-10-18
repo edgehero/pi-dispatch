@@ -336,6 +336,11 @@ export function makeDashboard({
   theme,
   intervalMs = REFRESH_MS,
   deps = createDashboardDeps(paths),
+  // Issue #647, part 2: `/dispatch chat <run>` for a LIVE run opens the overlay straight on that job's LIVE_TAIL (the
+  // run's active job: its own id, or the #645 recovery job its run goes on as). Esc then lands on the LIST with the
+  // cursor on the ACTIVE row when it is that job, where `t` and `T` steer it. A value outside the run-id charset is
+  // ignored, and the overlay opens on the LIST as always.
+  initialTail = null,
 }: any = {}) {
   // The overlay-only color styler, bound to pi's injected theme (null in tests -> plain, same geometry).
   // The ascii opt-in rides the same resolved paths as panel.mjs' setGlyphs funnel, so PI_DISPATCH_ASCII=1
@@ -631,6 +636,8 @@ export function makeDashboard({
       // best-effort teardown
     }
   };
+
+  if (typeof initialTail === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(initialTail)) openTail(initialTail);
 
   interval = setInterval(() => void refresh(), intervalMs);
   interval?.unref?.(); // never keep the process alive on the poll timer alone (dispose still clears it)
@@ -1155,6 +1162,19 @@ export function makeDashboard({
             return;
           }
           view = "LIST";
+          // Back on the ACTIVE row when the tail was that job's (it is where Enter or `l` opened it from, and where
+          // `/dispatch chat`'s `t`/`T` steer it), so the steer keys apply to the run just watched. When that job is no
+          // longer the ACTIVE row (it ended while watched, or another job is active now), the cursor goes on NO row
+          // (-1: no key acts until an arrow picks one) with a note saying so: left where it was, or at the top, it could
+          // rest on another job's ACTIVE row, and the `t` meant for the run just watched would steer that one.
+          {
+            const at = buildRows(snapshot, runSort, runProject).findIndex((r) => r.kind === "active" && r.jobId === tailJobId);
+            if (at >= 0) selected = at;
+            else {
+              selected = -1;
+              if (snapshot) actionNote = `${cellOf(String(tailJobId))} is no longer the active run; use the arrows to pick a row`;
+            }
+          }
           tailJobId = null;
           tail = null;
           tailTop = 0;

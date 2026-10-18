@@ -403,8 +403,15 @@ const EXIT_CODE_OF_SIGNAL = Object.freeze({ SIGINT: 130, SIGTERM: 143, SIGHUP: 1
  * mid-copy, leaving a partial unredacted file behind; with one, Node defers it to the handler. While pi runs, SIGTERM
  * and SIGHUP are passed on to it and SIGINT is left to it (a Ctrl+C reaches pi from the terminal itself), so this
  * process outlives pi and can clean up. `proc` is the seam (`on`, `removeListener`, `exit`, `stdin`).
+ *
+ * AN EMBEDDING HOST (the panel's `/dispatch chat`, issue #647 part 2) passes a `proc` whose `exit` does NOT end the
+ * process, because there it would end the operator's pi: a signal at the question then makes runFork return its exit
+ * code (130, 143 or 129) at once, with the copy removed and the line printed once, instead of asking or going on. Such a
+ * host's own signal handler can also end the process before these handlers run (they are added last), so
+ * `registerCleanup(remove)` is called once, before anything is copied, with the synchronous, idempotent removal of the
+ * copy and its emptied folder, for the host to run first (a prepended listener, `exit`).
  */
-export async function runFork({ plan, ask, out, agentDir = null, cwd = process.cwd(), home = homedir(), tools = false, now = () => Date.now(), fs = nodeFs, spawn = nodeSpawn, env = process.env, proc = process, uid, canAsk = proc?.stdin?.isTTY === true }) {
+export async function runFork({ plan, ask, out, agentDir = null, cwd = process.cwd(), home = homedir(), tools = false, now = () => Date.now(), fs = nodeFs, spawn = nodeSpawn, env = process.env, proc = process, uid, canAsk = proc?.stdin?.isTTY === true, registerCleanup = null }) {
 	if (typeof home !== "string" || home === "" || !isAbsolute(home)) {
 		out("error: there is no home directory to keep the fork's copy in, so nothing was forked");
 		return 1;
@@ -443,6 +450,7 @@ export async function runFork({ plan, ask, out, agentDir = null, cwd = process.c
 			// not empty
 		}
 	};
+	registerCleanup?.(removeCopy);
 	const hook = (handlers) => {
 		for (const [signal, handler] of Object.entries(handlers)) proc.on(signal, handler);
 		return () => {
@@ -450,8 +458,11 @@ export async function runFork({ plan, ask, out, agentDir = null, cwd = process.c
 		};
 	};
 	const whileAsked = {};
+	let signalled = null; // the exit code of the first signal at the question, for a `proc.exit` that returns
 	for (const [signal, code] of Object.entries(EXIT_CODE_OF_SIGNAL)) {
 		whileAsked[signal] = () => {
+			if (signalled !== null) return;
+			signalled = code;
 			removeCopy();
 			out("not forked; the copy was removed");
 			proc.exit(code);
@@ -472,8 +483,13 @@ export async function runFork({ plan, ask, out, agentDir = null, cwd = process.c
 		if (bytes === undefined) ours = false;
 		unhookAsk();
 		removeCopy();
+		if (signalled !== null) return signalled;
 		out(`error: the transcript could not be copied (${e?.code ?? e?.message ?? "error"}), so nothing was forked`);
 		return 1;
+	}
+	if (signalled !== null) {
+		unhookAsk();
+		return signalled;
 	}
 	for (const n of plan.notes) out(`note: session ${plan.key} ${n}`);
 	for (const w of plan.warnings) out(`warning: ${w}`);
@@ -485,6 +501,7 @@ export async function runFork({ plan, ask, out, agentDir = null, cwd = process.c
 	} finally {
 		unhookAsk();
 	}
+	if (signalled !== null) return signalled; // already removed and said, by the handler
 	if (!yes) {
 		removeCopy();
 		out("not forked; the copy was removed");

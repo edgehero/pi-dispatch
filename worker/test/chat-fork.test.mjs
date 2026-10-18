@@ -267,13 +267,19 @@ test("Ctrl+C, SIGTERM or SIGHUP at the y/N removes the copy and exits; while pi 
 		const w = world();
 		const proc = new EventEmitter();
 		const exits = [];
-		proc.exit = (c) => exits.push(c);
+		let answer;
+		// The real exit ends the process; this fake answers the question instead, so the run settles and the test
+		// awaits its code rather than leaving a runFork pending when the file ends.
+		proc.exit = (c) => {
+			exits.push(c);
+			answer(false);
+		};
 		const out = [];
 		let asked;
 		const waiting = new Promise((resolve) => {
 			asked = resolve;
 		});
-		void runFork({ canAsk: true, plan: plan(w).plan, out: (l) => out.push(l), ask: () => (asked(), new Promise(() => {})), cwd: w.work, home: w.home, now: () => 7, spawn: () => assert.fail("never run"), proc });
+		const running = runFork({ canAsk: true, plan: plan(w).plan, out: (l) => out.push(l), ask: () => (asked(), new Promise((r) => (answer = r))), cwd: w.work, home: w.home, now: () => 7, spawn: () => assert.fail("never run"), proc });
 		await waiting;
 		const snapshot = join(w.home, ".pi-dispatch", "chat", KEY, "source-7.jsonl");
 		assert.ok(existsSync(snapshot));
@@ -282,6 +288,7 @@ test("Ctrl+C, SIGTERM or SIGHUP at the y/N removes the copy and exits; while pi 
 		assert.ok(!existsSync(join(w.home, ".pi-dispatch", "chat", KEY)), `${signal}: and its emptied folder`);
 		assert.deepEqual(exits, [code]);
 		assert.match(out.at(-1), /not forked; the copy was removed/);
+		assert.equal(await running, code);
 	}
 	const w = world();
 	const proc = new EventEmitter();
@@ -369,4 +376,60 @@ test("the console's finishedAt is read as the run's end (endedAt is this host's 
 	assert.deepEqual(planFork({ record: consoleRun, env: w.env, pi: { path: w.pi }, piVersion: "1.2.0" }).plan.warnings, []);
 	utimesSync(w.file, new Date(ENDED_MS + 3_600_000), new Date(ENDED_MS + 3_600_000));
 	assert.equal(planFork({ record: consoleRun, env: w.env, pi: { path: w.pi }, piVersion: "1.2.0" }).plan.warnings.length, 1);
+});
+
+test("a host whose proc.exit returns (the panel): a signal at the y/N returns its exit code, says it once, never asks on; registerCleanup removes the copy first", async () => {
+	for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+		const w = world();
+		const proc = new EventEmitter();
+		let answer;
+		const exits = [];
+		proc.exit = (c) => {
+			exits.push(c);
+			answer(false); // the panel's seam aborts its own question
+		};
+		const out = [];
+		let asked;
+		const waiting = new Promise((resolve) => {
+			asked = resolve;
+		});
+		const running = runFork({ canAsk: true, plan: plan(w).plan, out: (l) => out.push(l), ask: () => (asked(), new Promise((r) => (answer = r))), cwd: w.work, home: w.home, now: () => 11, spawn: () => assert.fail("never run"), proc });
+		await waiting;
+		proc.emit(signal);
+		proc.emit(signal); // a second signal before the question has unwound: still one line, one exit
+		assert.equal(await running, code, `${signal}: its exit code, not a declined 0`);
+		assert.deepEqual(exits, [code]);
+		assert.equal(out.filter((l) => /not forked; the copy was removed/.test(l)).length, 1, `${signal}: said once`);
+		assert.ok(!existsSync(join(w.home, ".pi-dispatch", "chat", KEY)));
+		assert.deepEqual(["SIGINT", "SIGTERM", "SIGHUP"].map((s) => proc.listenerCount(s)), [0, 0, 0]);
+	}
+	const w = world();
+	const cleanups = [];
+	const snapshot = join(w.home, ".pi-dispatch", "chat", KEY, "source-12.jsonl");
+	let seenBeforeCopy = null;
+	const code = await runFork({
+		canAsk: true,
+		plan: plan(w).plan,
+		out: () => {},
+		ask: async () => {
+			assert.ok(existsSync(snapshot), "the copy is there while asked");
+			cleanups[0](); // the host's own exit path ran first
+			assert.ok(!existsSync(snapshot), "registerCleanup's function removes the copy synchronously");
+			assert.ok(!existsSync(join(w.home, ".pi-dispatch", "chat", KEY)), "and its emptied folder");
+			return false;
+		},
+		cwd: w.work,
+		home: w.home,
+		now: () => 12,
+		spawn: () => assert.fail("never run"),
+		proc: new EventEmitter(),
+		registerCleanup: (fn) => {
+			seenBeforeCopy = existsSync(snapshot);
+			cleanups.push(fn);
+		},
+	});
+	assert.equal(code, 0);
+	assert.equal(cleanups.length, 1, "registered once");
+	assert.equal(seenBeforeCopy, false, "before anything was copied");
+	assert.doesNotThrow(() => cleanups[0](), "idempotent");
 });

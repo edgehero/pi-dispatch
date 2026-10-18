@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { marked } from "marked";
-import { answerTrailComment, scrubAnswerText } from "../src/console-answer.mjs";
+import { answerTrailComment, PANEL_ANSWER_BY, scrubAnswerText } from "../src/console-answer.mjs";
 
 // Issue #642: the trail comment quotes an operator's answer on the forge under the deployment's identity. What the forge
 // RENDERS is the property, so the HTML cases are rendered with a real markdown renderer (marked, already in the tree as a
@@ -46,4 +46,10 @@ test("line endings: `\\r\\n`, a lone `\\r`, U+2028 and U+2029 all become a new q
 	assert.equal(scrubAnswerText("a\r\nb\rc\u2028d\u2029e"), "a\nb\nc\nd\ne");
 	assert.equal(answerTrailComment("alice", "a\rb\u2029c"), `${HEAD}> a\n> b\n> c`);
 	assert.doesNotMatch(answerTrailComment("alice", "a\rb\u2028c\u2029d"), /[\r\u2028\u2029]/);
+});
+
+test("an answer from the panel's /dispatch chat (issue #647 part 2) says it came from the panel, never \"by panel\" as if a token named it", () => {
+	assert.equal(PANEL_ANSWER_BY, "panel");
+	assert.equal(answerTrailComment(PANEL_ANSWER_BY, "use main\n@bob"), "Answered from an operator's /dispatch panel:\n\n> use main\n> @\u200bbob");
+	assert.equal(answerTrailComment("panel2", "x"), "Answered from the operator console by panel2:\n\n> x", "only the exact reserved word");
 });

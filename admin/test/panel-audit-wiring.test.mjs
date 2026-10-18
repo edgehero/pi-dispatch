@@ -335,6 +335,29 @@ const CASES = [
   { site: "index.ts:run-enqueue", name: "/dispatch run", kind: "run-enqueue", outcomes: ["ok", "failed"], reason: /./, run: () => command("run /nowhere fix go") },
   { site: "index.ts:fleet-pause|fleet-resume", name: "/dispatch pause", kind: "fleet-pause", outcomes: ["ok", "failed"], reason: NOT_REACHED, run: () => command("pause") },
   {
+    // `/dispatch chat`'s reply (issue #647, part 2) through the io index.ts builds (`chatIo`): the parked answer's enqueue
+    // inside its audited write, against a Valkey that is not there, so the ok row is followed by the failed one. The row
+    // carries the answer's digest and never its text. (`dispatch-chat.test.mjs` drives the mode itself with fakes.)
+    site: "index.ts:parked-answer",
+    name: "/dispatch chat's parked answer",
+    kind: "parked-answer",
+    outcomes: ["ok", "failed"],
+    reason: /^the queue could not be reached$/,
+    run: async () => {
+      const { answerFailure } = await import("../src/dispatch-chat.mjs");
+      const paths = { ...resolvedPaths(), valkeyUrl: process.env.VALKEY_URL };
+      const io = indexMod.chatIo(paths, { ui: {} }, () => {});
+      const text = "answer-canary-7d2e use main";
+      const plan = { kind: "parked-answer", jobId: "j1", forge: "github", queue: "pi-jobs", job: { parkedReply: true, repo: "acme/web", target: { type: "issue", number: 7 }, trigger: { comment: { body: text } } } };
+      const digest = createHash("sha256").update(text).digest("hex");
+      const res = await io.write({ kind: "parked-answer", target: "j1", afterDigest: digest, failure: answerFailure }, () => io.enqueueAnswer(plan));
+      assert.ok(res.unreachable !== undefined, JSON.stringify(res));
+      const rows = rowsOf(process.env.PI_LOGS_DIR);
+      assert.deepEqual([rows.at(-1).target, rows.at(-1).afterDigest], ["j1", digest]);
+      assert.ok(!JSON.stringify(rows).includes("answer-canary"), "no row carries the text");
+    },
+  },
+  {
     // The TUI's `r` through the deps index.ts builds (`withAuditedWrites(createDashboardDeps(paths, { killSwitchPlanFn
     // }), panelWrite)`), with this process's VALKEY_URL (database 9) and the deployment .env's (database 8) disagreeing:
     // the kill switch's plan refuses the resume, and the refusal is the audit row's reason and the footer note. Neither

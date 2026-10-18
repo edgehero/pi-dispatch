@@ -33,7 +33,7 @@ import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { gitDirty, localRepoProblem } from "@edgehero/pi-dispatch/git-dirty";
 import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
-import { boundAnswerText, consoleAnswerBy } from "@edgehero/pi-dispatch/console-answer";
+import { boundAnswerText, consoleAnswerBy, PANEL_ANSWER_BY } from "@edgehero/pi-dispatch/console-answer";
 import { runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import * as steerInbox from "@edgehero/pi-dispatch/steer-inbox";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
@@ -709,6 +709,10 @@ export function parkedAnswerRefusalOf({ jobId, data, triggersPath, fs = nodeFs }
  *
  * `plan`: `{ kind: "parked-answer", jobId (the parked run), forge, deliveryId, queue, job, runFields, reserve }`, the
  * reserve over the same inputs as `planRerun`'s (`overlay`, `env`, `modelEndpoints`, `builtinModel`).
+ *
+ * `from` is who answers: `"console"` (a token, `by` its name) or `"panel"` (the panel's `/dispatch chat`, issue #647
+ * part 2, which has no token: `by` is then the reserved `PANEL_ANSWER_BY` whatever is passed, and the worker's trail says
+ * the answer came from the panel). A console token NAMED `panel` is refused, so no token can sign as the panel.
  */
 export async function planParkedAnswer({
   url,
@@ -716,6 +720,7 @@ export async function planParkedAnswer({
   jobId,
   text,
   by,
+  from = "console",
   triggersPath = null,
   overlay = {},
   env = {},
@@ -731,8 +736,9 @@ export async function planParkedAnswer({
   timeoutMs = 2500,
   pendingBudget = PENDING_SCAN_BUDGET,
 } = {}) {
-  const who = consoleAnswerBy({ by });
+  const who = from === "panel" ? PANEL_ANSWER_BY : consoleAnswerBy({ by });
   if (who === null) return { refusal: "the answer needs the console token's name (lowercase letters, digits, . _ -)" };
+  if (from !== "panel" && who === PANEL_ANSWER_BY) return { refusal: `this console token is named "${PANEL_ANSWER_BY}", the name the /dispatch panel's answers are signed with, so the forge would say the panel answered; answer with a token of another name` };
   const bounded = boundAnswerText(text);
   if (bounded.refusal) return { refusal: bounded.refusal };
   if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: "a run id is letters, digits and . _ : -, at most 200 characters" };

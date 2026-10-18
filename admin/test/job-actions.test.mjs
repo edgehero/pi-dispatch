@@ -682,6 +682,11 @@ test("planParkedAnswer refuses by name: not parked, already answered, a pull req
     assert.match((await plan({ text: " \u0007 " })).refusal, /the answer is empty/);
     assert.match((await plan({ text: "x".repeat(8193) })).refusal, /above the 8192-byte limit/);
     assert.match((await plan({ by: "Alice!" })).refusal, /token's name/);
+    // Issue #647 part 2: `panel` is the panel's reserved signature. A console token of that name cannot answer, and the
+    // panel's answer is signed `panel` whatever `by` it passes, so the worker's trail says the panel answered.
+    assert.match((await plan({ by: "panel" })).refusal, /console token is named "panel", the name the \/dispatch panel's answers are signed with/);
+    assert.deepEqual((await plan({ by: "alice", from: "panel" })).plan.job.console, { by: "panel" });
+    assert.deepEqual((await plan()).plan.job.console, { by: "alice" });
     // A later run on the same target answered it already.
     assert.match((await plan({ runsFn: async () => [{ jobId: "gh-later", kind: "github", target: "org/repo#7", endedAt: "2026-10-15T10:30:00.000Z" }] })).refusal, /already answered: gh-later ran on org\/repo#7 after it/);
     // A later run on the same target string by ANOTHER forge is another issue: it does not answer this one.
