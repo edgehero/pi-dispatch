@@ -135,6 +135,15 @@ model a job calls, not only the main one: a model only an extension registers ha
 start, so its calls are refused. A virtual model cannot be the main model:
 set `PI_MODEL` or `run.model` to a physical one.
 
+**Upgrade: a model id in a trigger's shape.** Since issue #673 a model id you define here can be the deployment's
+default (`PI_MODEL`, or the panel's `model` setting) only when it has the shape a trigger's `run.model` takes: 1 to
+64 characters, letters, digits and `. _ - : / @`, starting with a letter or digit (or one `~` or `@` and then one),
+no spaces and no `+`. The provider id it sits under has the `run.provider` shape (letters, digits, `.`, `_` and
+`-`). pi accepts any id here, but an id outside the shape could already not be named by a trigger, and it records no
+usage row. Outside it, `PI_MODEL` stops the worker at boot, a `dispatch_set model` is refused, and a settings file
+already holding one refuses every job; `pi-dispatch doctor` names the setting first. Rename such a model's `id` in
+this file. The check ignores case, and the id runs exactly as you wrote it.
+
 ### The key is already in pi (on by default)
 
 Logged into pi already? You don't have to restate the key in `.env`. When the provider key is absent from
