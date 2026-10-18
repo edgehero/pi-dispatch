@@ -92,6 +92,9 @@ tool calls and results folded to eight lines), a status line asked for again eve
 The screen turns on the terminal's mouse tracking (pi-tui does), so a plain drag no longer selects text: hold your
 terminal's override key while you drag (often Option on macOS, Shift elsewhere) to select and copy.
 
+A steer sent after a `/later` follow-up still reaches the agent at its next turn: follow-ups wait until the agent would
+stop, and each kind keeps its own order.
+
 Any other word after a slash is refused rather than sent, so a typo like `/latr` never reaches the agent.
 
 Every message is previewed first, as on the run page: the screen shows what the console will do and asks `y/n`. A
