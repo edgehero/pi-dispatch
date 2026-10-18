@@ -16,6 +16,9 @@ const bundle = (name, calls = []) => ({
 	// The registry CALLS this to build the name the abort then stops, so a bundle without it is refused at
 	// boot rather than at the first pickup.
 	containerName: (id) => `${name}-${id}`,
+	// The host budget's two venue questions (issue #681), required like the rest.
+	listJobContainers: async () => (calls.push([name, "listJobContainers"]), []),
+	containerGone: async (n) => (calls.push([name, "containerGone", n]), true),
 });
 
 test("every per-job function resolves the SAME way, so none can be forgotten", () => {
@@ -370,4 +373,25 @@ test("the freezer verbs come as a pair and as functions, refused at boot otherwi
 	assert.throws(() => makeBackendRegistry({ bundles: [{ ...bundle("local"), pause: async () => ({ ok: true }) }], defaultName: "local" }), /pause without its pair/);
 	assert.throws(() => makeBackendRegistry({ bundles: [{ ...bundle("local"), unpause: async () => ({ ok: true }) }], defaultName: "local" }), /unpause without its pair/);
 	assert.throws(() => makeBackendRegistry({ bundles: [{ ...bundle("local"), pause: "yes", unpause: async () => ({ ok: true }) }], defaultName: "local" }), /has a pause that is not a function/);
+});
+
+test("the host budget's two venue questions are REQUIRED members and dispatched per venue (#681)", async () => {
+	// The wiring used to pick the CLI from the venue's name and send every venue but podman to docker. Each bundle now
+	// answers for its own containers, and a bundle without either member is refused at boot, like any required one.
+	for (const fn of ["listJobContainers", "containerGone"]) {
+		const hollow = { ...bundle("far"), [fn]: undefined };
+		assert.throws(() => makeBackendRegistry({ bundles: [bundle("local"), hollow], defaultName: "local" }), new RegExp(`"far" has no ${fn}\\(\\)`));
+	}
+	const calls = [];
+	const reg = makeBackendRegistry({ bundles: [bundle("local", calls), bundle("far", calls)], defaultName: "local" });
+	assert.equal(await reg.containerGone("pi-job-a", { backend: "far" }), true);
+	assert.equal(await reg.containerGone("pi-job-b", {}), true, "a venue naming none is the default's");
+	assert.deepEqual(calls, [["far", "containerGone", "pi-job-a"], ["local", "containerGone", "pi-job-b"]]);
+	// A venue no bundle answers for is unknown, never a throw: the caller is the budget's sweep, and null keeps the hold.
+	assert.equal(await reg.containerGone("pi-job-c", { backend: "ghost" }), null);
+	const listers = reg.listers();
+	assert.deepEqual(Object.keys(listers), ["local", "far"]);
+	calls.length = 0;
+	await listers.far();
+	assert.deepEqual(calls, [["far", "listJobContainers"]]);
 });

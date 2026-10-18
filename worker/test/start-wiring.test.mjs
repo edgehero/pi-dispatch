@@ -106,6 +106,8 @@ function OTHER_VENUE(name, { spawned = [], reap = async () => ({ reaped: true })
 		egressPreflight: async () => (spawned.push(`${name}:egressPreflight`), { ok: true }),
 		stopContainer: async () => spawned.push(`${name}:stopContainer`),
 		reap,
+		listJobContainers: async () => (spawned.push(`${name}:listJobContainers`), []),
+		containerGone: async () => (spawned.push(`${name}:containerGone`), true),
 		...extra,
 	};
 }
@@ -2441,6 +2443,8 @@ test("startWorker CONNECTS the registry to the processor, and to the abort (#227
 		egressPreflight: async () => (seen.push("far:egressPreflight"), { ok: true }),
 		stopContainer: async () => seen.push("far:stopContainer"),
 		reap: async () => ({ reaped: true }),
+		listJobContainers: async () => (seen.push("far:listJobContainers"), []),
+		containerGone: async (name) => (seen.push(`far:containerGone:${name}`), true),
 	};
 	let registryArgs = null;
 	const { captured } = await runStart({
@@ -2468,6 +2472,10 @@ test("startWorker CONNECTS the registry to the processor, and to the abort (#227
 	assert.deepEqual(seen.sort(), ["far:egressPreflight", "far:imagePreflight", "far:runContainer", "far:stopContainer"].sort());
 	assert.deepEqual(captured.deps.neverStartedExits(job), [7], "the exit set is the venue's too");
 	assert.equal(captured.containerName(job), "far-j", "and the NAME the abort stops is built by that venue");
+	// Issue #681: the host budget's gone-check is the registry's too. It used to send every venue but podman to docker.
+	seen.length = 0;
+	assert.equal(await captured.hostBudget.containerGone("pi-job-j", { ...job }), true);
+	assert.deepEqual(seen, ["far:containerGone:pi-job-j"], "an orphan on far is asked of far, never of docker");
 });
 
 test("the run record resolves a venue with the SAME default the registry dispatches with (#277)", { skip }, async () => {
@@ -3684,6 +3692,57 @@ test("with local blessed, a blessed venue with NO boot reaper never lets the sco
 	});
 	assert.deepEqual(swept, [{ reaped: false }], "every reaper handed over enumerated, and the host is still unproven");
 	assert.equal(logs.find((l) => l.event === "host_reap_unproven")?.reason, "a blessed backend has no boot reaper");
+});
+
+test("a blessed third venue seeds the host budget from its OWN lister and settles orphans through its OWN gone-check (#681)", { skip }, async () => {
+	// The wiring used to name local and podman only: a third venue was never seeded, so its leftover containers were never
+	// counted, and its orphans were asked of docker. Each now comes from the venue's bundle, and nothing asks docker.
+	let farList = async () => [{ name: "pi-job-old", memMiB: 512, cpuCenti: 100 }];
+	const spawned = [];
+	const { captured } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		loadConfig: await configWith({ backends: ["far"], defaultBackend: "far" }),
+		listJobContainers: (bin) => async () => assert.fail(`the ${bin} lister ran for a venue that is not blessed`),
+		extraBackends: [OTHER_VENUE("far", { spawned, listJobContainers: () => farList(), containerGone: async (name) => (spawned.push(`far:gone:${name}`), false) })],
+	});
+	const opts = captured.hostBudget;
+	assert.deepEqual(Object.keys(opts.survivors), ["far"], "the blessed venue, and only it");
+	assert.deepEqual(await opts.survivors.far(), [{ name: "pi-job-old", memMiB: 512, cpuCenti: 100, venue: { backend: "far" } }]);
+	farList = async () => {
+		throw Object.assign(new Error("spawn far ENOENT"), { code: "ENOENT" });
+	};
+	assert.deepEqual(await opts.survivors.far(), [], "an absent runtime holds no container");
+	farList = async () => {
+		throw new Error("far does not answer");
+	};
+	await assert.rejects(() => opts.survivors.far(), /far does not answer/, "any other failure leaves it unread");
+	spawned.length = 0; // the boot image read asked far's imagePreflight
+	assert.equal(await opts.containerGone("pi-job-old", { backend: "far" }), false, "far's own answer, not docker's");
+	assert.deepEqual(spawned, ["far:gone:pi-job-old"]);
+	assert.equal(await opts.containerGone("pi-job-old", { backend: "ghost" }), null, "a venue nobody answers for keeps its hold");
+});
+
+test("a third venue never borrows local's boot tolerance, and a registered but unblessed one is never listed (#681)", { skip }, async () => {
+	// Local beside far, local not the default, its daemon rootless: local's boot decision is unmappable for a boot-refusing
+	// cause, so local's own failed listing holds none. far has no boot decision, so its failed listing stays unread; and
+	// `near` is built but not blessed, so the boot spawns nothing of it.
+	const failing = (venue) => async () => {
+		throw Object.assign(new Error(`${venue} does not answer`), { code: 125 });
+	};
+	const { captured } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		loadConfig: await configWith({ backends: ["far", "local"], defaultBackend: "far" }),
+		readDaemonFacts: DOCKER_FACTS({ rootless: true }),
+		jobUserIdentity: LINUX_ID(1234),
+		listJobContainers: failing,
+		extraBackends: [OTHER_VENUE("far", { listJobContainers: failing("far") }), OTHER_VENUE("near", { listJobContainers: async () => assert.fail("near is not blessed") })],
+	});
+	const opts = captured.hostBudget;
+	assert.deepEqual(Object.keys(opts.survivors).sort(), ["far", "local"], "the blessed venues only");
+	assert.deepEqual(await opts.survivors.local(), [], "local's unmappable boot decision: none");
+	await assert.rejects(() => opts.survivors.far(), /far does not answer/, "far keeps its own rule: unread");
 });
 
 test("a venue whose words are observation-gated must carry an observationPreflight, or boot refuses (#354)", { skip }, async () => {

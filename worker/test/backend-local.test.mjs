@@ -1084,3 +1084,16 @@ test("the local bundle carries the freezer verbs by default, and refuses a non-f
 	assert.throws(() => makeLocalBackend({ ...fns(), pause: "docker pause" }), /pause must be a function/);
 	assert.throws(() => makeLocalBackend({ ...fns(), pasue: own }), /unknown bundle member "pasue"/);
 });
+
+test("the local bundle carries the host budget's two questions, docker's by default and replaceable by a part (#681)", async () => {
+	const parts = { runContainer: async () => ({}), imagePreflight: async () => ({}), egressPreflight: async () => ({}), stopContainer: async () => {}, reap: async () => ({ reaped: true }) };
+	const b = makeLocalBackend(parts);
+	assert.equal(typeof b.listJobContainers, "function");
+	assert.equal(typeof b.containerGone, "function");
+	const list = async () => [];
+	const gone = async () => true;
+	const own = makeLocalBackend({ ...parts, listJobContainers: list, containerGone: gone });
+	assert.equal(own.listJobContainers, list);
+	assert.equal(own.containerGone, gone);
+	assert.throws(() => makeLocalBackend({ ...parts, containerGone: "yes" }), /containerGone must be a function/);
+});

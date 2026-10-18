@@ -129,6 +129,16 @@ test("cgroupParentFor: none only where Podman says its cgroup manager is not sys
 	assert.equal(cgroupParentFor(undefined), "pidispatch.slice");
 });
 
+test("reservePlan: a venue other than local and podman keeps no quota here, by name, and runs nothing (#681)", async () => {
+	// It used to fall through to docker's rules, so a third venue on a cgroupfs-shaped answer was handed docker's helper.
+	const p = reservePlan({ venue: "far", facts: { cgroupDriver: "cgroupfs", cgroupVersion: "v2" }, endpointLocal: true, platform: "linux" });
+	assert.deepEqual(p, { venue: "far", parent: false, method: null, why: "venue-unmanaged" });
+	const ran = [];
+	const run = async (...args) => (ran.push(args), { code: 0, stdout: "" });
+	assert.deepEqual(await readQuota(p, { run, image: "i" }), { ok: false, reason: "venue-unmanaged" });
+	assert.deepEqual(ran, [], "no runtime command for a venue this does not plan");
+});
+
 test("reservePlan: every venue the lab measured gets its method, and every other one a named reason", () => {
 	const plan = (venue, facts, extra = {}) => reservePlan({ venue, facts, platform: "linux", ...extra });
 	assert.deepEqual(plan("podman", { rootless: true, cgroupManager: "systemd", cgroupVersion: "v2" }), { venue: "podman", parent: true, method: "user-systemd", why: null });

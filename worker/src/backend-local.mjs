@@ -145,8 +145,12 @@ export const BACKEND_VALUES = ["neverStartedExits"];
  * (start.mjs and the tests) predates them and the local adapter knows how to spell them for docker; a test seam is
  * the only reason to pass one. Still a NAMED list, so a misspelt `pasue` is refused as an unknown member like any other
  * key rather than silently replaced by the default.
+ *
+ * Issue #681: the host budget's two venue questions joined them, for the same reason. `listJobContainers` lists this
+ * venue's leftover job containers for the boot seed and `containerGone` settles an orphan's hold; both are docker's
+ * here, and a bundle carries its own so the budget never asks one runtime about another's container.
  */
-export const BACKEND_OPTIONAL_FUNCTIONS = ["pause", "unpause"];
+export const BACKEND_OPTIONAL_FUNCTIONS = ["pause", "unpause", "listJobContainers", "containerGone"];
 
 export function makeLocalBackend(parts = {}) {
 	const { runContainer, imagePreflight, egressPreflight, stopContainer, reap } = parts ?? {};
@@ -193,6 +197,10 @@ export function makeLocalBackend(parts = {}) {
 		// carry on without a frozen read.
 		pause: parts.pause ?? verbs.pause,
 		unpause: parts.unpause ?? verbs.unpause,
+		// The host budget's two questions about THIS venue's containers (issue #681), asked of docker because docker holds
+		// them. Before, the wiring derived the CLI from the job's venue name and sent every venue but podman to docker.
+		listJobContainers: parts.listJobContainers ?? makeJobContainerLister({ bin: "docker" }),
+		containerGone: parts.containerGone ?? makeContainerGone({ binOf: () => "docker" }),
 		// The integers this runtime uses for "the runner never ran". The processor asks the BACKEND rather
 		// than assuming docker's triple, because those numbers collide with the runner's own exit channel.
 		neverStartedExits: LOCAL_NEVER_STARTED_EXITS,

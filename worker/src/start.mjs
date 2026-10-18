@@ -55,7 +55,7 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue, QUEUE } from "./queue.mjs";
-import { endpointShown, execDockerBounded, makeContainerGone, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
+import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
@@ -1873,6 +1873,8 @@ export async function startWorker(
 				forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
 				backendFloor: config.backendFloor,
 				reap: backendReaps[PODMAN_BACKEND],
+				// Issue #681: the budget's leftover listing, through the same seam local's takes.
+				listJobContainers: listJobContainersFn("podman"),
 				readInfo: podmanInfo,
 				platform: jobUserIdentity.platform,
 				euid: jobUserIdentity.euid,
@@ -2182,6 +2184,8 @@ export async function startWorker(
 					// job containers, and an unproven answer must never free a slot.
 					stopContainer: makeStopContainer(),
 					reap: backendReaps[DEFAULT_BACKEND],
+					// Issue #681: the host budget's leftover listing rides on the bundle, so the boot seed asks each venue its own.
+					listJobContainers: listJobContainersFn("docker"),
 					// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
 					// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
 					// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.
@@ -2441,7 +2445,10 @@ export async function startWorker(
 			jobDefault: { memMiB: config.jobSize.memMiB, cpuCenti: config.jobSize.cpuCenti },
 			readFacts: readHostFacts,
 			onRefresh: syncCpuReserve,
-			containerGone: containerGoneFn ?? makeContainerGone({ binOf: (venue) => (resolveBackendName(venue ?? {}, config.defaultBackend) === PODMAN_BACKEND ? "podman" : "docker") }),
+			// Issue #681: asked of the venue that holds the container, through the registry. This used to pick the CLI from the
+			// venue's name and send every venue but podman to docker, so a third venue's orphan was either freed while it still
+			// ran (docker lists no such name) or never freed (no docker on the host).
+			containerGone: containerGoneFn ?? backends.containerGone,
 			// AFTER the boot reaper (above), every blessed venue's remaining job containers, seeded into the ledger
 			// as orphans from their size labels. PER VENUE (gate round 2 of phase 2): a venue that cannot be listed
 			// stops only its own jobs until a tick reads it, because a container nobody counted is an overcommit, while the
@@ -2450,18 +2457,26 @@ export async function startWorker(
 			// cause that refuses a boot (the venue's boot-refusing set: every job on it is refused before a container, so this
 			// worker starts none there). A cause decided from one unreadable answer is re-decided per job and can clear, so
 			// it leaves the venue unread.
+			// Issue #681: every BLESSED registered venue, each listed by its own bundle; it used to be local and podman by name,
+			// so a third venue was never seeded and its leftover containers were never counted. Only local and podman have a
+			// boot job-user decision; another venue's holds-none rule is ENOENT alone.
 			survivors: Object.fromEntries(
-				[...(localBlessed ? [[DEFAULT_BACKEND, "docker", bootDecision, BOOT_REFUSING_JOB_USER_CAUSES]] : []), ...(podmanBlessed ? [[PODMAN_BACKEND, "podman", bootPodmanDecision, PODMAN_BOOT_REFUSING_CAUSES]] : [])].map(([backend, bin, decision, stable]) => [
-					backend,
-					async () => {
-						try {
-							return (await listJobContainersFn(bin)()).map((c) => ({ ...c, venue: { backend } }));
-						} catch (error) {
-							if (error?.code === "ENOENT" || (decision?.mode === "unmappable" && stable.has(decision.cause))) return [];
-							throw error;
-						}
-					},
-				]),
+				Object.entries(backends.listers())
+					.filter(([backend]) => config.backends.includes(backend))
+					.map(([backend, list]) => {
+						const [decision, stable] = backend === DEFAULT_BACKEND ? [bootDecision, BOOT_REFUSING_JOB_USER_CAUSES] : backend === PODMAN_BACKEND ? [bootPodmanDecision, PODMAN_BOOT_REFUSING_CAUSES] : [null, new Set()];
+						return [
+							backend,
+							async () => {
+								try {
+									return (await list()).map((c) => ({ ...c, venue: { backend } }));
+								} catch (error) {
+									if (error?.code === "ENOENT" || (decision?.mode === "unmappable" && stable.has(decision.cause))) return [];
+									throw error;
+								}
+							},
+						];
+					}),
 			),
 			defaultVenue: config.defaultBackend,
 			now,

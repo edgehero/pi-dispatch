@@ -89,7 +89,7 @@ import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProx
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, podmanPausable, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
-import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
+import { PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
 import { JOB_NAME_PREFIX, endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, EGRESS_ENDPOINT_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEndpointProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
@@ -9612,6 +9612,9 @@ export async function liveChecks(env, seams, facts) {
 	// endpoint the job-user line was decided from. The fixture's global directory is never relabelled, like a job's.
 	const relabel = relabelsPrivateMounts(facts.daemon?.answered ? facts.daemon.facts : null, facts.endpoint, ids.platform ?? seams.platform);
 	const result = await runLiveProbes({
+		// Issue #681: the local venue's builder and CLI, named rather than defaulted.
+		buildArgs: buildDockerRunArgs,
+		bin: "docker",
 		image: facts.jobImage ?? jobImageOf(env).image,
 		// Issue #596: the deployment's default size, and the `--cpus` ceiling from the same `docker info` answer, so the
 		// probe is built at the size a job gets and reads back memory, swap, weight and ceiling against it.
