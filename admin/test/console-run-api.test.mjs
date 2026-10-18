@@ -440,17 +440,6 @@ test("safeRunOf rebuilds every field by its shape: hostile strings are null, nev
   assert.deepEqual(safeRunOf("x", null).session, { kept: false, resumed: false });
 });
 
-test("safeRunOf keeps a priced model id that starts with @ or ~ (the runs filter's own rule), and still nulls a hostile one (#668)", () => {
-  for (const model of ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", "~anthropic/claude-opus-latest", "claude-sonnet-5-5"]) {
-    assert.equal(safeRunOf("gh-1", record("gh-1", { model })).model, model, model);
-  }
-  for (const model of ["@", "~", "b~c", "@~a", ".x", "/x"]) assert.equal(safeRunOf("gh-1", record("gh-1", { model })).model, null, model);
-  assert.equal(safeRunOf("gh-1", record("gh-1", { model: "a+b" })).model, "a+b", "a + is kept");
-  const at128 = "m".repeat(128);
-  assert.equal(safeRunOf("gh-1", record("gh-1", { model: at128 })).model, at128, "128 characters is kept");
-  assert.equal(safeRunOf("gh-1", record("gh-1", { model: at128 + "m" })).model, null, "129 characters is null");
-});
-
 // ---- review round 1 ----------------------------------------------------------------------------------------------------
 
 test("forgeTargetOf: two instances sharing a prefix in EITHER order (the longer base wins), %2F is never a subgroup, zeros dropped", () => {

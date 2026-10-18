@@ -16,7 +16,6 @@
  * client walking the catalog cannot grow the console's memory.
  */
 import { whatIfFlow } from "../costs.mjs";
-import { RUN_MODEL_RE } from "../run-filter.mjs";
 
 export const WHATIF_LIMITS = Object.freeze({ ttlMs: 30_000, answers: 64, near: 3, models: 4000 });
 
@@ -26,13 +25,12 @@ export const WHATIF_SCAN_WINDOW = "92d";
 /**
  * A what-if target as the form takes it: `<provider>/<model>`, split on the FIRST `/` (a model id can hold one, an
  * OpenRouter id does; a provider never does). The provider is a catalog provider name, the model id the runs filter's
- * model rule (`RUN_MODEL_RE`, built in here so the two cannot drift, issue #668), which admits one leading `@` or `~`:
- * the priced catalog holds both (Cloudflare's `@cf/meta/...`, OpenRouter's `~anthropic/...-latest` aliases), and a rule
- * that refused them would offer ids in the datalist that the same form then answers 400 for. Every id the pinned
- * catalog prices passes, a test walks it. Neither character means anything in HTML, and the form's links carry the
- * target through URLSearchParams.
+ * model rule (`run-filter.mjs`) plus a leading `@` or `~`: the priced catalog holds both (Cloudflare's `@cf/meta/...`,
+ * OpenRouter's `~anthropic/...-latest` aliases), and a rule that refused them would offer ids in the datalist that the
+ * same form then answers 400 for. Every id the pinned catalog prices passes, a test walks it. Neither character means
+ * anything in HTML, and the form's links carry the target through URLSearchParams.
  */
-export const WHATIF_MODEL_RE = new RegExp(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\/${RUN_MODEL_RE.source.slice(1)}`);
+export const WHATIF_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9@~][A-Za-z0-9._:/@+-]{0,127}$/;
 
 /** `"provider/id"` as `{ provider, id }`, or null for a string that is not one. */
 export function splitTarget(text) {

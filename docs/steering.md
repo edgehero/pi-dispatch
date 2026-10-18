@@ -196,7 +196,8 @@ short digest of their address when the work item event carried only that.
 
 Neither interrupts anything. A tool that is running (a long test suite, a build) finishes first; to stop a run, use
 `pi-dispatch cancel`. Pausing the fleet does not stop messages either: a pause stops new jobs from starting, not a
-job that is already running, and a message only adds turns inside that run's own limits and reservation. Messages reach the agent one per turn, in the order they were sent.
+job that is already running, and a message only adds turns inside that run's own limits and reservation. Messages reach the agent one per turn, in the order they were sent within each kind: a steer never waits behind a
+follow-up, which is held until the agent would stop, so a steer sent after a follow-up reaches the agent first.
 
 If the agent has just asked a question and parked the run ([`await_human_input`](triggers.md)), nothing more is
 passed to it: a message sent then is held and becomes `late` when the run ends parked. Answer the question on the

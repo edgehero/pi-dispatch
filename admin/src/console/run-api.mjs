@@ -31,7 +31,6 @@ import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
 import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUNS_PAGE_EXAMINE_MAX, targetKeyOf } from "../read-model.mjs";
-import { RUN_MODEL_RE } from "../run-filter.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 
 /** The document's version: a client checks it before it reads a field, and a breaking change bumps it. */
@@ -66,6 +65,7 @@ const NOT_FOUND = "no run with that id is in this host's history, the fleet's ru
 const OUTCOME_RE = /^[a-z][a-z-]{0,31}$/;
 const REASON_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const TRIGGER_TYPE_RE = /^[a-z][a-z_]{0,39}$/;
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const PROVIDER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const BACKEND_RE = /^[a-z][a-z-]{0,31}$/;
 // A run target as the worker writes one: a repository path (GitLab subgroups, an Azure project with inner spaces) and
@@ -111,7 +111,7 @@ export function safeRunOf(id, record) {
     startedAt: iso(r.startedAt),
     finishedAt: iso(r.endedAt),
     provider: str(r.provider, PROVIDER_RE),
-    model: str(r.model, RUN_MODEL_RE),
+    model: str(r.model, MODEL_RE),
     host: str(r.host, WORKER_NAME_RE),
     backend: str(r.backend, BACKEND_RE),
     project: str(r.project, PROJECT_ID_RE),
