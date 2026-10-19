@@ -37,7 +37,7 @@ jobs:
           openshell status -o json || true
           cat "$RUNNER_TEMP/gateway.log" | tail -50
       - name: Build the lab image
-        run: docker build -f .github/lab/Dockerfile -t os-lab:1 .
+        run: docker build -t os-lab:1 .github/lab
       - name: Probes
         run: mkdir -p "$RUNNER_TEMP/lab" && cp .github/lab/lab.sh "$RUNNER_TEMP/lab/" && cd "$RUNNER_TEMP/lab" && ./lab.sh 2>&1
       - name: Gateway log
