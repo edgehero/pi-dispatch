@@ -38,8 +38,12 @@ jobs:
           cat "$RUNNER_TEMP/gateway.log" | tail -50
       - name: Build the job image (PR 1)
         run: docker build -f image/Dockerfile -t pi-job:683 .
-      - name: Probes
-        run: mkdir -p "$RUNNER_TEMP/lab" && cp .github/lab/lab3.sh "$RUNNER_TEMP/lab/" && cd "$RUNNER_TEMP/lab" && ./lab3.sh 2>&1
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+      - run: npm ci --no-audit --no-fund
+      - name: Conformance (the real bundle)
+        run: PI_JOB_IMAGE=pi-job:683 node .github/scripts/openshell-conformance.mjs 2>&1
       - name: Lab outputs
         if: always()
         run: cd "$RUNNER_TEMP/lab" && for f in out.jsonl err.txt; do echo "== $f"; cut -c1-400 "$f" | tail -40; done || true
