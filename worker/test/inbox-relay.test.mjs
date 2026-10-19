@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import { inboxFileName, makeInboxRelay, steerTargetOf } from "../src/inbox-relay.mjs";
+import { frameMac, keyFrame, STEER_STDIN_BUDGET_BYTES, steerFileJson, steerFrame } from "../src/steer-framing.mjs";
 import { steerTargetKey } from "../src/steer-inbox.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -496,4 +498,234 @@ test("F3: a failed hold at stop is a logged fault by code, never a throw", async
 	const quiet = relayWith(never);
 	await quiet.relay.stop();
 	assert.equal(never.calls.some(([c]) => c === "hold"), false, "a relay that never started holds nothing");
+});
+
+// --- issue #686: the stdin frame transport ---------------------------------------------------------------------------
+
+/** The exec's stdin as the relay sees it: records every write; `full` makes a write answer false until `drain`. */
+function fakeStdin({ full = false } = {}) {
+	const ee = new EventEmitter();
+	const s = Object.assign(ee, {
+		chunks: [],
+		ended: false,
+		full,
+		write(buf) {
+			s.chunks.push(Buffer.from(buf));
+			return !s.full;
+		},
+		end() {
+			s.ended = true;
+		},
+	});
+	return s;
+}
+const FKEY = "ab".repeat(32);
+const framesOf = (stdin) => {
+	const all = Buffer.concat(stdin.chunks);
+	const out = [];
+	for (let off = 0; off < all.length; ) {
+		const n = all.readUInt32BE(off);
+		out.push(JSON.parse(all.subarray(off + 4, off + 4 + n).toString("utf8")));
+		off += 4 + n;
+	}
+	return out;
+};
+function framedRelay(inbox, over = {}) {
+	const logs = [];
+	const relay = makeInboxRelay({ redis: {}, runId: "run-1", jobId: "run-1", inboxDir: null, host: "h1", now: () => T0, log: (e, f) => logs.push([e, f]), pollMs: 3_600_000, inbox, frames: { exitKey: FKEY, macRunId: "pi-job-run-1" }, ...over });
+	return { relay, logs };
+}
+
+test("frames: after the baseline every queued message is one frame on stdin, seq from 2, marked written BEFORE the write, MAC'd under the key (#686)", async () => {
+	const inbox = fakeInbox();
+	const a = inbox.push(entry());
+	const b = inbox.push(entry({ mode: "followUp" }));
+	const stdin = fakeStdin();
+	const { relay } = framedRelay(inbox);
+	relay.attach(stdin, { written: keyFrame(FKEY).length });
+	await relay.start();
+	await relay.tick();
+	assert.equal(stdin.chunks.length, 0, "nothing before the baseline");
+	relay.afterBaseline(new Set());
+	await relay.tick();
+	const frames = framesOf(stdin);
+	assert.deepEqual(frames.map((f) => [f.t, f.seq, f.id, f.mode]), [["steer", 2, a.id, "steer"], ["steer", 3, b.id, "followUp"]]);
+	for (const f of frames) assert.equal(f.mac, frameMac(FKEY, "pi-job-run-1", f.seq, JSON.stringify({ v: f.v, id: f.id, mode: f.mode, source: f.source, content: f.content })));
+	// The mark came first: the write happened only after `queued -> written` succeeded.
+	const marks = inbox.calls.filter((c) => c[0] === "mark").map((c) => c.slice(1));
+	assert.deepEqual(marks, [[a.id, "queued", "written"], [b.id, "queued", "written"]]);
+	assert.deepEqual([inbox.state[a.id], inbox.state[b.id]], ["written", "written"]);
+	await relay.tick();
+	assert.equal(framesOf(stdin).length, 2, "never written twice in one attempt");
+	await relay.stop();
+	assert.equal(stdin.ended, true, "the stop closes stdin: EOF, no more messages");
+});
+
+test("frames: a message withdrawn while queued is never written; a WITHDRAW of a written one unlinks nothing and its ack still delivers (#686)", async () => {
+	const inbox = fakeInbox({ onMark: async ({ id, to, state }) => { if (to === "written" && id === first.id) state[id] = "withdrawn"; } });
+	const first = inbox.push(entry());
+	const second = inbox.push(entry());
+	const stdin = fakeStdin();
+	const { relay } = framedRelay(inbox);
+	relay.attach(stdin);
+	await relay.start();
+	relay.afterBaseline(new Set());
+	await relay.tick();
+	assert.deepEqual(framesOf(stdin).map((f) => f.id), [second.id], "the withdrawn one never reached the pipe");
+	inbox.state[second.id] = "withdrawn"; // the sender's WITHDRAW of a `written` message: best effort
+	await relay.tick();
+	assert.equal(framesOf(stdin).length, 1, "nothing is written or taken back");
+	await relay.delivered(second.id);
+	assert.equal(inbox.state[second.id], "delivered", "the verified ack is proof the agent got it");
+	await relay.stop();
+});
+
+test("frames: the budget, prefixes and the key frame counted; a frame past it is refused (late, steer_frame_refused), never cut (#686)", async () => {
+	const inbox = fakeInbox();
+	const fits = inbox.push(entry());
+	const over = inbox.push(entry({ text: "x".repeat(4000) }));
+	const after = inbox.push(entry());
+	const stdin = fakeStdin();
+	const body = steerFileJson({ entry: fits });
+	const one = steerFrame({ exitKey: FKEY, runId: "pi-job-run-1", seq: 2, body }).length;
+	const key = keyFrame(FKEY).length;
+	// Room for the key frame and two small frames, never the large one between them.
+	const { relay, logs } = framedRelay(inbox, { frames: { exitKey: FKEY, macRunId: "pi-job-run-1", budget: key + 2 * one + 10 } });
+	relay.attach(stdin, { written: key });
+	await relay.start();
+	relay.afterBaseline(new Set());
+	await relay.tick();
+	assert.deepEqual(framesOf(stdin).map((f) => [f.id, f.seq]), [[fits.id, 2], [after.id, 3]], "the refused one takes no seq");
+	assert.equal(inbox.state[over.id], "late");
+	assert.deepEqual(logs.filter(([e]) => e === "steer_frame_refused"), [["steer_frame_refused", { jobId: "run-1", id: over.id }]]);
+	assert.ok(!JSON.stringify(logs).includes("xxxx"), "never the text");
+	assert.equal(STEER_STDIN_BUDGET_BYTES, 4 * 1024 * 1024 - 1024, "the default is the measured cap less its margin");
+	await relay.stop();
+});
+
+test("frames: backpressure is waited out on drain, the stop releases a wait on a pipe nobody reads, and an EPIPE never throws (#686)", async () => {
+	const inbox = fakeInbox();
+	const a = inbox.push(entry());
+	const b = inbox.push(entry());
+	const stdin = fakeStdin({ full: true });
+	const { relay, logs } = framedRelay(inbox);
+	relay.attach(stdin);
+	await relay.start();
+	relay.afterBaseline(new Set());
+	const pass = relay.tick();
+	await new Promise((r) => setImmediate(r));
+	assert.equal(stdin.chunks.length, 1, "the second frame waits for the pipe");
+	stdin.full = false;
+	stdin.emit("drain");
+	await pass;
+	assert.deepEqual(framesOf(stdin).map((f) => f.id), [a.id, b.id]);
+	// A wait the stop must release: a full pipe and a new message.
+	inbox.push(entry());
+	stdin.full = true;
+	const stuck = relay.tick();
+	await new Promise((r) => setImmediate(r));
+	await relay.stop();
+	await stuck;
+	// EPIPE: the exec is gone. Caught on the stream, logged once by step, never thrown.
+	const inbox2 = fakeInbox();
+	inbox2.push(entry());
+	const dead = fakeStdin();
+	dead.write = () => {
+		throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+	};
+	const r2 = framedRelay(inbox2);
+	r2.relay.attach(dead);
+	dead.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" }));
+	await r2.relay.start();
+	r2.relay.afterBaseline(new Set());
+	await r2.relay.tick();
+	await r2.relay.stop();
+	assert.ok(r2.logs.some(([e, f]) => e === "steer_relay_fault" && f.step === "stdin" && f.code === "EPIPE"));
+	assert.ok(!logs.some(([e]) => e === "steer_relay_fault"));
+});
+
+test("frames: an unattached relay writes nothing and a stopped one closes a pipe handed to it at once; the file transport ignores attach (#686)", async () => {
+	const inbox = fakeInbox();
+	inbox.push(entry());
+	const { relay } = framedRelay(inbox);
+	await relay.start();
+	relay.afterBaseline(new Set());
+	await relay.tick();
+	assert.equal(inbox.calls.filter((c) => c[0] === "mark").length, 0, "no pipe yet: nothing marked, the message stays queued");
+	await relay.stop();
+	const late = fakeStdin();
+	relay.attach(late);
+	assert.equal(late.ended, true);
+	const fileInbox = fakeInbox();
+	fileInbox.push(entry());
+	const { relay: fileRelay, dir } = relayWith(fileInbox);
+	const ignored = fakeStdin();
+	fileRelay.attach(ignored);
+	await fileRelay.start();
+	fileRelay.afterBaseline(new Set());
+	await fileRelay.tick();
+	assert.equal(ignored.chunks.length, 0);
+	assert.equal(files(dir).length, 1, "the mount transport is untouched");
+	await fileRelay.stop();
+	assert.equal(ignored.ended, false);
+});
+
+test("frames: the budget fits EXACTLY on the worker's side: a frame ending at the budget is written, one byte less refuses it (L7)", async () => {
+	for (const [slack, written] of [[0, true], [-1, false]]) {
+		const inbox = fakeInbox();
+		const e = inbox.push(entry());
+		const stdin = fakeStdin();
+		const one = steerFrame({ exitKey: FKEY, runId: "pi-job-run-1", seq: 2, body: steerFileJson({ entry: e }) }).length;
+		const key = keyFrame(FKEY).length;
+		const { relay } = framedRelay(inbox, { frames: { exitKey: FKEY, macRunId: "pi-job-run-1", budget: key + one + slack } });
+		relay.attach(stdin, { written: key });
+		await relay.start();
+		relay.afterBaseline(new Set());
+		await relay.tick();
+		assert.equal(framesOf(stdin).length, written ? 1 : 0, `slack ${slack}`);
+		assert.equal(inbox.state[e.id], written ? "written" : "late", `slack ${slack}`);
+		await relay.stop();
+	}
+});
+
+test("frames: no pass before start has reset and registered; a baseline that came first is acted on when start is done (L6)", async () => {
+	let releaseReset;
+	const inbox = fakeInbox();
+	const e = inbox.push(entry());
+	const reset = inbox.resetClosedInbox;
+	inbox.resetClosedInbox = (args) => new Promise((r) => (releaseReset = () => r(reset(args))));
+	const stdin = fakeStdin();
+	const { relay } = framedRelay(inbox);
+	relay.attach(stdin);
+	const starting = relay.start();
+	relay.afterBaseline(new Set()); // the stdin transport's release at the spawn, before the reset resolved
+	await relay.tick();
+	assert.equal(inbox.calls.some((c) => c[0] === "read" || c[0] === "mark"), false, "nothing read or written into a possibly closed inbox");
+	releaseReset();
+	await starting;
+	// No manual tick, and the poll an hour away: only start's own pass for the baseline that came first can write it.
+	for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+	assert.deepEqual(framesOf(stdin).map((f) => f.id), [e.id], "written by start's pass once it was ready");
+	assert.deepEqual(inbox.calls.map((c) => c[0]).slice(0, 2), ["reset", "register"]);
+	await relay.stop();
+});
+
+test("frames: closeStdin ends the pipe at once and the relay goes on marking acks; later messages are not written (M1)", async () => {
+	const inbox = fakeInbox();
+	const a = inbox.push(entry());
+	const stdin = fakeStdin();
+	const { relay } = framedRelay(inbox);
+	relay.attach(stdin);
+	await relay.start();
+	relay.afterBaseline(new Set());
+	await relay.tick();
+	relay.closeStdin();
+	assert.equal(stdin.ended, true);
+	const later = inbox.push(entry());
+	await relay.tick();
+	assert.equal(framesOf(stdin).length, 1, "nothing after the close");
+	assert.equal(inbox.state[later.id], "queued", "never marked written: it settles late at the inbox's close");
+	await relay.delivered(a.id);
+	assert.equal(inbox.state[a.id], "delivered");
+	await relay.stop();
 });

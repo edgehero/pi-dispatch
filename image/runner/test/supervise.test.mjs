@@ -179,3 +179,62 @@ test("the entry file, run by node, runs the supervisor: never a silent exit 0", 
 	const r = spawnSync(process.execPath, [new URL("../supervise.mjs", import.meta.url).pathname], { encoding: "utf8", env: { PATH: process.env.PATH }, timeout: 20000 });
 	assert.ok(r.status === 126 || r.status === 127, `the runner's own code, got ${r.status}: ${r.stderr}`);
 });
+
+// --- issue #686: the stdin frame channel ---------------------------------------------------------------------------
+
+import { PassThrough } from "node:stream";
+import { FRAME_FD } from "../src/steer-frames.mjs";
+
+function framedRun({ key = KEY, bytes = Buffer.from("frame-1-bytes") } = {}) {
+	const child = fakeChild();
+	const fd3 = new PassThrough();
+	const got = [];
+	fd3.on("data", (c) => got.push(Buffer.from(c)));
+	child.stdio = [child.stdin, null, null, fd3];
+	const src = new PassThrough();
+	const spawned = [];
+	const exits = [];
+	let read = 0;
+	superviseRunner({
+		env: { PI_EXIT_AUTH: "stdin-frames", PI_JOB_ID: "j1" },
+		spawnFn: (cmd, args, opts) => (spawned.push({ cmd, args, opts }), child),
+		drain: () => assert.fail("never drained to EOF on the frame channel"),
+		readFrame: () => ((read += 1), { key, problem: key ? null : "malformed", bytes }),
+		openStdin: () => src,
+		write: () => {},
+		exit: (c) => exits.push(c),
+		readResources: () => USED(0),
+		onSignal: () => {},
+	});
+	return { child, fd3, got, src, spawned, exits, read: () => read };
+}
+
+test("stdin-frames: EXACTLY frame 1 is read (never drained), handed on the runner's stdin and closed; every later byte forwarded to fd 3, in order, unchanged (#686)", async () => {
+	const { child, got, src, spawned, read, fd3 } = framedRun();
+	assert.equal(read(), 1);
+	assert.equal(FRAME_FD, 3);
+	assert.deepEqual(spawned[0].opts.stdio, ["pipe", "inherit", "inherit", "pipe"], "a fourth descriptor, the runner's fd 3");
+	assert.deepEqual(child.stdinWritten, Buffer.from("frame-1-bytes"), "the bytes frame 1 was, as read");
+	assert.equal(spawned[0].opts.env.PI_EXIT_AUTH, "stdin-frames", "the runner reads frame 1 too");
+	src.write(Buffer.from([0, 0, 0]));
+	src.write(Buffer.from("rest"));
+	await new Promise((r) => setImmediate(r));
+	assert.deepEqual(Buffer.concat(got), Buffer.from([0, 0, 0, ...Buffer.from("rest")]));
+	assert.equal(fd3.writableEnded, false, "held open while the supervisor's own stdin is");
+	src.end();
+	await new Promise((r) => setImmediate(r));
+	assert.equal(fd3.writableEnded, true, "EOF passed on");
+});
+
+test("stdin-frames: a frame 1 that is no key is handed on as read and nothing more is forwarded (the runner refuses it the same way) (#686)", () => {
+	const { child, spawned } = framedRun({ key: null, bytes: Buffer.from([0, 0, 1, 0]) });
+	assert.deepEqual(spawned[0].opts.stdio, ["pipe", "inherit", "inherit"], "no fd 3 without a key");
+	assert.deepEqual(child.stdinWritten, Buffer.from([0, 0, 1, 0]));
+});
+
+test("PI_EXIT_AUTH=stdin is untouched by the frame channel: drained, three descriptors, closed at once (#686)", () => {
+	const { spawned, drained, child } = run();
+	assert.equal(drained(), 1);
+	assert.deepEqual(spawned[0].opts.stdio, ["pipe", "inherit", "inherit"]);
+	assert.equal(child.stdinWritten, `${KEY}\n`);
+});

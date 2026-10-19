@@ -1454,6 +1454,21 @@ test("PI_EXIT_AUTH names the stdin channel only when run-container hands a key o
 	assert.ok(CONTAINER_ENV_NAMES.has("PI_EXIT_AUTH"), "reserved, so run.secrets cannot bind it");
 });
 
+test("PI_EXIT_AUTH=stdin-frames (#686): only beside the key, PI_STEER and the stdin-steer flag; every other attempt keeps stdin", { skip }, async () => {
+	const framed = mod.buildContainerEnv({ ...secretsBase, exitAuth: true, steer: true, steerStdin: true });
+	assert.equal(framed.PI_EXIT_AUTH, "stdin-frames");
+	assert.equal(framed.PI_STEER, "1");
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, exitAuth: true, steerStdin: true }).PI_EXIT_AUTH, "stdin", "never without PI_STEER");
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, exitAuth: true, steer: true }).PI_EXIT_AUTH, "stdin", "a bind venue's steered attempt: the key and EOF");
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, exitAuth: true, steer: true, steerStdin: "yes" }).PI_EXIT_AUTH, "stdin", "only the boolean true asks for it");
+	assert.equal("PI_EXIT_AUTH" in mod.buildContainerEnv({ ...secretsBase, steer: true, steerStdin: true }), false, "no key, no channel");
+	// Byte-identical: the flag changes nothing but that one value.
+	const a = mod.buildContainerEnv({ ...secretsBase, exitAuth: true, steer: true, steerStdin: true });
+	const b = mod.buildContainerEnv({ ...secretsBase, exitAuth: true, steer: true });
+	assert.deepEqual({ ...a, PI_EXIT_AUTH: "stdin" }, b);
+	assert.deepEqual(mod.buildContainerEnv({ ...secretsBase, exitAuth: true, steerStdin: true }), mod.buildContainerEnv({ ...secretsBase, exitAuth: true }));
+});
+
 test("PI_TRANSCRIPT (#686): stderr only beside a key and the armed flag, reserved, structural, and nothing else can set it", { skip }, async () => {
 	assert.equal(mod.buildContainerEnv({ ...secretsBase, exitAuth: true, transcriptStderr: true }).PI_TRANSCRIPT, "stderr");
 	assert.equal("PI_TRANSCRIPT" in mod.buildContainerEnv({ ...secretsBase, exitAuth: true }), false, "absent by default: every binding venue's env is what it was");

@@ -298,15 +298,33 @@ receipt for it was signed by the attempt that crashed and cannot be checked any 
 A failed job retried from the console keeps its job id but is a new run: it starts with an empty inbox, and the
 messages of the run before it are not handed to it.
 
+## On a venue that copies files (`openshell`)
+
+The `openshell` venue copies the job's files into its sandbox once, so no file written later would ever arrive. There
+the worker sends each message down the job's standard input instead, as a frame signed with the job's exit key, right
+behind the key itself (issue #686). The job image must declare `steerStdin`, `transcriptStderr`, `steer` and
+`exitAuth`: delivery is confirmed exactly as on the other venues, through the live transcript, which on `openshell`
+comes over the job's standard error and needs `transcriptStderr` (without it the job runs unsteered, `no-transcript`). Everything else on this page holds there: the limits, steer or follow-up, late messages, the
+record.
+
+What is weaker, stated plainly: the agent cannot plant a message (a frame without the key's signature is dropped,
+logged as `steer_frame_unverified` with a count), but it can intercept one before the job reads it. Such a message is
+never confirmed and settles as `late`, as a message the run never took. And taking back a message that was already
+written cannot stop it there, since there is no file to remove. A stream the agent breaks (`steer_stream_broken` in
+the job's log) ends steering for the rest of that attempt. On `local` and `podman` the read-only `/inbox` mount is
+kept, because it allows none of this. The stream holds at most 4 MiB over a run (the venue's own limit, measured); a
+message that would pass it is reported `late`, never cut, though the inbox's caps keep a run far below it.
+
 ## Venues that cannot deliver
 
-Steering needs the worker to write files into a running container and to confirm their delivery. A job runs
-without steering, and says why in its record, when:
+Steering needs the worker to reach a running container and to confirm the delivery. A job runs without steering, and
+says why in its record, when:
 
-- its venue copies files into the container instead of mounting them (`venue-copies`): a message written after the
-  start would never arrive;
+- its venue copies files into the container instead of mounting them and its image does not declare `steerStdin`
+  (`venue-copies`): a message written after the start would never arrive;
 - its image does not declare `exitAuth` (`no-exit-key`): the worker could not confirm a delivery;
-- the worker has no Valkey connection, or no transcript file could be set up for the job (`no-transcript`);
+- the worker has no Valkey connection, or no transcript file could be set up for the job, or on `openshell` the live
+  transcript over standard error is not armed (`no-transcript`);
 - the inbox directory could not be created (`no-inbox`).
 
 Such a job runs exactly as it would without `steer`, and `pi-dispatch steer`, the console and the panel refuse

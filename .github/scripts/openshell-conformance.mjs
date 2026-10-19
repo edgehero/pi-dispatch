@@ -16,7 +16,9 @@
  *
  * AND ONE CASE OF ITS OWN: the real job image's real runner, keyed, on the sandbox layout, offline under a cost cap of 0,
  * through the bundle, which must end on its own signed `cost-cap` line with the session brought back, and (issue #686)
- * whose session lines must reach the live transcript publisher as verified records over the exec's stderr.
+ * whose session lines must reach the live transcript publisher as verified records over the exec's stderr. And (issue
+ * #686, part 2) the same runner STEERED: one message through the real relay down the exec's stdin as a frame, its ack
+ * back over the stderr transcript and its id on the signed exit line, still at zero spend.
  *
  * STRICTER THAN THE HARNESS, as podman-conformance.mjs is: any abstention among the read-back properties fails. Run it
  * with the worker STOPPED: the harness calls the real `reap`, which deletes every sandbox carrying this worker's owner
@@ -41,6 +43,7 @@ const { makeOpenshellBackend, OPENSHELL_OWNER, OPENSHELL_OWNER_LABEL } = await l
 const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
 const { makeLogSink } = await load("worker/src/run-history.mjs");
 const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs");
+const { makeInboxRelay } = await load("worker/src/inbox-relay.mjs");
 
 const refuse = (why) => {
 	console.error(`openshell-conformance: ${why}`);
@@ -266,6 +269,90 @@ for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) consol
 	if (!piped) failed = true;
 	if (!ok) console.log(String(output.get("last") ?? "").split("\n").slice(-15).join("\n"));
 	if (!ok) failed = true;
+}
+
+// Issue #686, part 2: the real runner STEERED over the exec's stdin. The real relay (inbox-relay.mjs) over an in-memory
+// inbox holding one queued steer, the real publisher with the steer ack consumer (the opener start.mjs builds), and the
+// bundle handed both, as start.mjs hands them. A fresh job's relay is released at the spawn (an empty upload has no
+// prior line), so the FIRST message's frame travels right behind the key frame, before the runner has loaded pi. Still at
+// a cost cap of 0: pi polls its steering queue once at the start of its loop, BEFORE the first model call the cap
+// refuses, so that message is persisted (and acked) at zero spend. Asserted: the job ends on its own signed cost-cap
+// line, the ack came back through the stderr transcript (the ack consumer verified one), the signed exit line's
+// deliveredIds names it, the inbox calls it delivered, and the stream never broke and carried no forged frame.
+// A SECOND message is queued the moment the first one's ack arrives, and the relay is ticked from that very mark (not a
+// later turn of the event loop), so its frame is written mid-run, on the open pipe, before the exit line's close (M1)
+// can run: the tick's whole pass is microtasks over this in-memory inbox, and the close waits for a stdout read. Asserted:
+// the relay wrote two frames, and writing the second mid-run broke nothing (no stream break, no unverified frame, no
+// relay fault); held 6 of 6 on Docker. Whether the runner still READS it is not asserted: at zero spend the run is over
+// within milliseconds of that ack (its only model call is refused), so it ends `delivered` or `written` (the settle then
+// calls it late), printed. A delivery mid-run is shown with spend by the runner's own test
+// (image/runner/test/inbox.test.mjs, "the real run-job on the stdin frame channel").
+{
+	const logs = join(scratch, "logs-steer");
+	nodeFs.mkdirSync(logs);
+	const xadds = [];
+	const redis = {
+		status: "ready",
+		multi() {
+			const tx = { del: () => tx, pexpire: () => tx, xadd: (_key, ...args) => (xadds.push(args), tx), exec: async () => [] };
+			return tx;
+		},
+	};
+	const id = randomBytes(16).toString("hex");
+	const second = randomBytes(16).toString("hex");
+	const state = { [id]: "queued" };
+	let relayRef = null;
+	const entries = [{ v: 1, id, mode: "steer", source: "cli", author: { kind: "operator", by: "cli" }, text: "Before anything else, reply with the single word steered.", at: Date.now() }];
+	const marks = [];
+	const inbox = {
+		resetClosedInbox: async () => ({ reset: false }),
+		registerLive: async () => ({ ok: true }),
+		refreshLive: async () => ({ ok: true }),
+		holdLive: async () => ({ held: true }),
+		readInbox: async () => ({ entries: entries.map((e) => ({ ...e })), state: { ...state }, closed: false }),
+		markState: async ({ id: mid, from, to }) => {
+			marks.push([from.join("|"), to]);
+			if (!from.includes(state[mid])) return { ok: false, prior: state[mid] };
+			const prior = state[mid];
+			state[mid] = to;
+			// The first ack: queue the second message and have the relay write it now, mid-run.
+			if (mid === id && to === "delivered" && !(second in state)) {
+				entries.push({ v: 1, id: second, mode: "steer", source: "cli", author: { kind: "operator", by: "cli" }, text: "And a second thing, sent while you run.", at: Date.now() });
+				state[second] = "queued";
+				void relayRef?.tick();
+			}
+			return { ok: true, prior };
+		},
+	};
+	const events = [];
+	const log = (event, fields) => events.push([event, fields]);
+	const opener = makeLiveTranscriptOpener({ redis, transcripts: true, progress: false, steer: true });
+	const handles = [];
+	const openLiveTranscript = (args) => {
+		const h = opener(args);
+		if (h) handles.push(h);
+		return h;
+	};
+	const openInboxRelay = (args) => (relayRef = makeInboxRelay({ redis: {}, host: "conformance", log, pollMs: 500, inbox, ...args }));
+	const real = bundleFor(image, { ...POLICY_SOURCES, openJobLog: makeLogSink({ logsDir: logs, enabled: false }), openLiveTranscript, openInboxRelay, log });
+	const dirs = jobDirFor("Reply with the single word ok.");
+	output.set("last", "");
+	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0, steer: true }, prepared: dirs, name: `pi-job-conformance-${nonce}-steer`, signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, steerStdin: true, jobId: `conformance-steer-${nonce}`, size: { memMiB: 2048, cpuCenti: 200 } });
+	const said = String(output.get("last") ?? "");
+	const ackVerified = handles[0]?.stats?.().steer?.verified ?? 0;
+	const exitLine = said.split("\n").filter((l) => l.startsWith('{"event":"exit"')).at(-1) ?? "";
+	const named = exitLine.includes(`"deliveredIds":["${id}"`);
+	const broken = /"event":"steer_(stream_broken|frame_unverified|stdin_shared)"/.test(said) || events.some(([e]) => e === "steer_relay_fault" || e === "steer_skipped" || e === "steer_frame_refused" || e === "steer_acks_unread");
+	const secondOutcome = state[second] ?? "never queued";
+	const written = relayRef?.counts().written ?? 0;
+	const secondHonest = (secondOutcome === "delivered" || secondOutcome === "written") && written >= 2;
+	const ok = result.code === 2 && result.exitReason === "cost-cap" && result.exitAuth === "verified" && (result.steer?.delivered ?? 0) >= 1 && ackVerified >= 1 && named && state[id] === "delivered" && !broken && second in state && secondHonest;
+	console.log(`${ok ? "ok     " : "FAIL   "} steering over the exec's stdin: exit ${result.code} ${result.exitReason} (${result.exitAuth}), runner delivered ${result.steer?.delivered ?? "none"}, acks verified over stderr ${ackVerified}, exit line names the first ${named}, inbox says ${state[id]}; the mid-run second: ${secondOutcome} (${written} frames written, 2 wanted); marks ${JSON.stringify(marks)}, broken or refused ${broken}`);
+	if (!ok) {
+		console.log(said.split("\n").slice(-20).join("\n"));
+		console.log(JSON.stringify(events.filter(([e]) => /steer|transcript/.test(e))));
+		failed = true;
+	}
 }
 
 await run(engine, ["image", "rm", "-f", probeImage]);

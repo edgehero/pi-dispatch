@@ -605,9 +605,14 @@ placeholder cannot stand in for.
   declare `transcriptStderr` and `exitAuth`; without them the job runs without a transcript or progress, said as
   `live_transcript_skipped` (`no-capability` or `no-exit-key`). A record that does not verify is dropped and counted
   (`transcript_record_unverified`), never published.
-- **Not served yet** (issue #686): a trigger with `run.recover` is refused before it spends
-  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session; steering is skipped by name
-  (`steerSkipped: "venue-copies"`), the job still running. No
+- **Steering is served** (issue #686): with no mount a later file could reach, the worker writes each message as a
+  frame on the exec's stdin, signed with the job's exit key, and the delivery ack comes back over the stderr transcript
+  ([steering.md](steering.md#on-a-venue-that-copies-files-openshell)). The job image must declare `steerStdin` (beside
+  `steer`, `exitAuth` and `transcriptStderr`); without it a steered job runs unsteered, `steerSkipped: "venue-copies"`.
+  This channel is weaker than the read-only `/inbox` mount the binding venues keep: the agent cannot plant a message,
+  but it can intercept one, which then settles `late`.
+- **Not served yet**: a trigger with `run.recover` is refused before it spends
+  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session. No
   `pi-dispatch sandbox` shell either: the venue has no launcher. A job's MCP servers are served (issue #684): an
   `http` server's host is an allowlist entry like any other, and a stdio server's overlay paths are moved to the
   sandbox layout.

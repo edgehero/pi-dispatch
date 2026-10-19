@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
 import { readCgroupUsage } from "./cgroup-usage.mjs";
-import { createExitWriter, drainStdin, EXIT_AUTH_STDIN, EXIT_KEY_PATTERN, writeAllSync } from "./exit-line.mjs";
+import { createExitWriter, drainStdin, EXIT_AUTH_STDIN, EXIT_AUTH_STDIN_FRAMES, EXIT_KEY_PATTERN, writeAllSync } from "./exit-line.mjs";
+import { FRAME_FD, readKeyFrame } from "./steer-frames.mjs";
 
 /**
  * The job runner's supervisor (issue #596, INT-RUNNER-EXIT-CODE-PROTOCOL): a small parent between the container's init
@@ -21,6 +22,16 @@ import { createExitWriter, drainStdin, EXIT_AUTH_STDIN, EXIT_KEY_PATTERN, writeA
  *     `--disable-sigusr1` (image/entrypoint.sh), which shuts the Node inspector a SIGUSR1 would otherwise open on
  *     127.0.0.1:9229 (the loopback exists under `--network none`), from where a heap snapshot holds the key. The runner
  *     is started the same way (RUNNER_NODE_FLAGS);
+ *   - with `PI_EXIT_AUTH=stdin-frames` (issue #686, a steered job on a venue that copies its files), reads EXACTLY frame
+ *     1 of the steer frame channel (steer-frames.mjs `readKeyFrame`: a 4-byte length, then the key's JSON), never a byte
+ *     past it, hands those very bytes to the runner on the runner's stdin, closed at once (the key handoff above, in the
+ *     same shape), and then FORWARDS every later byte of its own stdin to the runner's fd 3 (FRAME_FD, which says why
+ *     not its stdin), unchanged and in order, keeping it open until its own stdin ends. It never parses a message
+ *     frame: the runner verifies each under the key, so a bug here can drop or delay a message, never forge one. The
+ *     forwarding is a stream pipe, so a runner that reads slowly holds the worker's writes back (the pipe's own
+ *     backpressure) rather than this process buffering without bound. A frame 1 that is not a key's is handed on as
+ *     read and nothing more is forwarded: the runner reports the same `malformed` it would have, and without a key a
+ *     steered run refuses (`steer-no-exit-key`);
  *   - starts the runner through `/bin/sh`, which raises its own `oom_score_adj` to 1000 and then execs the runner, so
  *     the runner and every process it starts are the kernel's first choice and this supervisor (score 0) is left alone.
  *     Raising needs no capability (allowed under `--cap-drop=ALL` and `no-new-privileges`); it is done in the shell
@@ -88,21 +99,35 @@ export function superviseRunner({
 	exit = (code) => process.exit(code),
 	readResources = () => readCgroupUsage(),
 	onSignal = (signal, handler) => process.on(signal, handler),
+	// Issue #686: frame 1 off fd 0, and the stream of what follows it (this process's stdin, after frame 1). Seams.
+	readFrame = readKeyFrame,
+	openStdin = () => process.stdin,
 } = {}) {
 	// env-internal PI_EXIT_AUTH: written by the worker into the job's closed env map. Read, never removed here: the runner
 	// reads it to know a key is waiting on ITS stdin, and removes it from its own environment as before.
-	const keyed = env.PI_EXIT_AUTH === EXIT_AUTH_STDIN;
+	const framed = env.PI_EXIT_AUTH === EXIT_AUTH_STDIN_FRAMES;
+	const keyed = env.PI_EXIT_AUTH === EXIT_AUTH_STDIN || framed;
 	let raw = null;
-	if (keyed) {
+	let key = null;
+	if (framed) {
+		let read;
+		try {
+			read = readFrame();
+		} catch {
+			read = { key: null, bytes: Buffer.alloc(0) };
+		}
+		raw = Buffer.isBuffer(read?.bytes) ? read.bytes : Buffer.alloc(0);
+		key = typeof read?.key === "string" && EXIT_KEY_PATTERN.test(read.key) ? read.key : null;
+	} else if (keyed) {
 		try {
 			raw = drain();
 		} catch {
 			// The runner then reads an empty stdin and reports the key `malformed`, as it would have reported `unreadable`.
 			raw = "";
 		}
+		const trimmed = typeof raw === "string" ? raw.trim() : "";
+		key = EXIT_KEY_PATTERN.test(trimmed) ? trimmed : null;
 	}
-	const trimmed = typeof raw === "string" ? raw.trim() : "";
-	const key = keyed && EXIT_KEY_PATTERN.test(trimmed) ? trimmed : null;
 	// The counters the verdict was made from, so the line's `resources` and its `reason` come from ONE read.
 	let atDeath;
 	const writer = createExitWriter({
@@ -116,14 +141,39 @@ export function superviseRunner({
 
 	let child;
 	try {
-		child = spawnFn(command[0], command[1], { stdio: [keyed ? "pipe" : "inherit", "inherit", "inherit"], env });
+		// Issue #686: a fourth descriptor, the runner's fd 3, for the message frames, only beside a frame-1 key.
+		const streams = framed && key !== null;
+		child = spawnFn(command[0], command[1], { stdio: [keyed ? "pipe" : "inherit", "inherit", "inherit", ...(streams ? Array(FRAME_FD - 2).fill("pipe") : [])], env });
 	} catch {
 		// No runner at all: the infra code, with a line that says nothing more, so the worker retries as it would have.
 		writer.writeExit({ code: 1, reason: "runner-not-started", by: BY_SUPERVISOR });
 		exit(1);
 		return;
 	}
-	if (keyed) {
+	if (framed && key !== null) {
+		// Frame 1 on the runner's stdin, closed, exactly as the plain key is; everything after it on fd 3, as it comes. An
+		// EPIPE (the runner gone) only ends the forwarding; this process's own exit follows the runner's below.
+		child.stdin?.on("error", () => {});
+		child.stdin?.end(raw);
+		const frames = child.stdio?.[FRAME_FD] ?? null;
+		frames?.on?.("error", () => {});
+		let src = null;
+		try {
+			src = openStdin();
+		} catch {
+			src = null;
+		}
+		if (src && typeof src.pipe === "function" && frames) {
+			src.on?.("error", () => {
+				try {
+					frames.end();
+				} catch {}
+			});
+			src.pipe(frames);
+		} else {
+			frames?.end?.();
+		}
+	} else if (keyed) {
 		child.stdin?.on("error", () => {});
 		child.stdin?.end(raw ?? "");
 	}

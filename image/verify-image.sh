@@ -532,6 +532,84 @@ PROBE
 					&& [ -n "$tr_mac" ] && [ "$tr_mac" = "$(tr_hmac "$tr_key")" ] && [ "$tr_mac" != "$(tr_hmac "$tr_other")" ] \
 					|| fail "the image declares 'transcriptStderr' but a keyed job with PI_TRANSCRIPT=stderr did not mirror its session over stderr as records signed with the handed key (records on stderr: $tr_count, on stdout: $tr_on_stdout, first: ${tr_first:-none}, first line seq: ${tr_seq:-none})"
 				;;
+			steerStdin)
+				# Issue #686, part 2. The runner reads a copying venue's steer messages as frames on stdin (INT-STEER-INBOX-
+				# CONTRACT's second transport). Proved by running it: the offline keyed job above (a cap of 0 stops it before
+				# any model call, after pi has polled its steering queue once) with PI_EXIT_AUTH=stdin-frames and PI_STEER=1, fed
+				# frame 1 (the key), one genuine steer frame and one with a wrong MAC, on a stdin HELD OPEN past the run. Three
+				# claims, each judged here:
+				#   - the key read took EXACTLY frame 1: the exit line is signed with that key, and the genuine frame right after
+				#     it in the same write reached the inbox (a read past frame 1 would have swallowed or broken it), while the
+				#     writer was still holding the pipe open (a runner that waited for EOF would not have ended);
+				#   - a frame round-trips: its id is on the signed exit line's `deliveredIds`, the transcript holds its ack under
+				#     the key, and the forged frame was dropped and counted (`steer_frame_unverified`), never delivered;
+				#   - a tool child sees /dev/null on stdin: a workspace extension runs a command through pi's OWN bash tool
+				#     operations (createLocalBashOperations, what the bash tool spawns with) and a child that INHERITS the
+				#     runner's stdin, and both read fd 0 as /dev/null (steer-frames.mjs isolateStdin) and have NO fd 3 (the frames
+				#     ride the runner's fd 3, and the isolation rests on no child of the runner inheriting it), and no
+				#     `steer_stdin_shared` was logged.
+				st_dir=$(mktemp -d)
+				mkdir -p "$st_dir/job" "$st_dir/ws/.pi/extensions" "$st_dir/session"
+				echo "Reply with the single word ok." >"$st_dir/job/prompt.md"
+				cat >"$st_dir/ws/.pi/extensions/stdin-probe.ts" <<'STPROBE'
+import { spawnSync } from "node:child_process";
+import { createLocalBashOperations } from "/app/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+export default function (pi) {
+	pi.on("agent_start", async () => {
+		let bash = "";
+		try {
+			await createLocalBashOperations().exec("readlink /proc/self/fd/0; readlink /proc/self/fd/3 || echo no-fd3", process.cwd(), { onData: (d) => (bash += String(d)), timeout: 10 });
+		} catch {
+			bash = "error";
+		}
+		const inherit = spawnSync("sh", ["-c", "readlink /proc/self/fd/0; readlink /proc/self/fd/3 || echo no-fd3"], { stdio: ["inherit", "pipe", "ignore"] });
+		const one = (text) => String(text ?? "").trim().split("\n").join(",") || "none";
+		console.log(`steer-stdin-probe bash=${one(bash)} inherit=${one(inherit.stdout)}`);
+	});
+}
+STPROBE
+				: >"$st_dir/session/current.jsonl"
+				chmod -R a+rX "$st_dir/job"
+				chmod -R a+rwX "$st_dir/ws" "$st_dir/session"
+				st_key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+				st_id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+				st_run=pi-job-verify-steer
+				# One frame: a 4-byte big-endian length (ASCII payloads, so characters are bytes), then the JSON.
+				st_frame() { st_n=${#1}; printf "\\$(printf %03o $((st_n >> 24 & 255)))\\$(printf %03o $((st_n >> 16 & 255)))\\$(printf %03o $((st_n >> 8 & 255)))\\$(printf %03o $((st_n & 255)))"; printf '%s' "$1"; }
+				st_body="{\"v\":1,\"id\":\"$st_id\",\"mode\":\"steer\",\"source\":\"cli\",\"content\":\"verify-image steer probe\"}"
+				st_mac=$(printf 'pi-dispatch-inbox-frame\000%s\000%s\000%s' "$st_run" 2 "$st_body" | openssl dgst -sha256 -hmac "$st_key" | awk '{print $NF}')
+				st_forged_id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+				st_forged="{\"t\":\"steer\",\"seq\":3,\"v\":1,\"id\":\"$st_forged_id\",\"mode\":\"steer\",\"source\":\"cli\",\"content\":\"planted\",\"mac\":\"$(printf '%064d' 0)\"}"
+				mkfifo "$st_dir/stdin"
+				# The writer holds the pipe open for two minutes after its frames, far past the run: it is killed below.
+				( st_frame "{\"t\":\"key\",\"key\":\"$st_key\"}"; st_frame "{\"t\":\"steer\",\"seq\":2,\"v\":1,\"id\":\"$st_id\",\"mode\":\"steer\",\"source\":\"cli\",\"content\":\"verify-image steer probe\",\"mac\":\"$st_mac\"}"; st_frame "$st_forged"; exec sleep 120 ) >"$st_dir/stdin" &
+				st_writer=$!
+				st_out=$(docker run -i --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$st_dir/job:/job:ro" -v "$st_dir/ws:/workspace" -v "$st_dir/session:/session" --workdir /workspace \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_EXIT_AUTH=stdin-frames -e PI_STEER=1 \
+					-e PI_JOB_ID="$st_run" -e PI_SESSION_FILE=/session/current.jsonl \
+					"$IMAGE_REF" <"$st_dir/stdin" 2>&1) || true
+				kill -0 "$st_writer" 2>/dev/null && st_open=yes || st_open=no
+				kill "$st_writer" 2>/dev/null || true
+				wait "$st_writer" 2>/dev/null || true
+				st_exit=$(echo "$st_out" | grep '"event":"exit"' | tail -1)
+				st_exit_mac=$(echo "$st_exit" | sed -nE 's/.*,"auth":"([0-9a-f]{64})"\}$/\1/p')
+				st_exit_body=$(echo "$st_exit" | sed -E 's/,"auth":"[0-9a-f]{64}"\}$/}/')
+				st_exit_want=$(printf '%s' "$st_exit_body" | openssl dgst -sha256 -hmac "$st_key" | awk '{print $NF}')
+				st_ack_want=$(printf 'pi-dispatch-inbox-ack\000%s\000%s' "$st_run" "$st_id" | openssl dgst -sha256 -hmac "$st_key" | awk '{print $NF}')
+				st_acked=$(grep -c "\"ack\":\"$st_ack_want\"" "$st_dir/session/current.jsonl" 2>/dev/null || true)
+				st_probe=$(echo "$st_out" | grep '^steer-stdin-probe ' | tail -1)
+				rm -rf "$st_dir"
+				[ -n "$st_exit_mac" ] && [ "$st_exit_mac" = "$st_exit_want" ] && [ "$st_open" = yes ] \
+					|| fail "the image declares 'steerStdin' but a job keyed over stdin-frames did not end, signed with the frame-1 key, while its stdin was still open (writer open: $st_open; $st_exit)"
+				echo "$st_exit" | grep -q "\"deliveredIds\":\[\"$st_id\"\]" && [ "${st_acked:-0}" -ge 1 ] \
+					&& echo "$st_out" | grep -q '"event":"steer_frame_unverified".*"count":1' \
+					&& ! echo "$st_out" | grep -q '"event":"steer_stream_broken"' \
+					|| fail "the image declares 'steerStdin' but the frame after the key did not round-trip (delivered and acked under the key), or the forged one was not dropped and counted ($st_exit)"
+				[ "$st_probe" = "steer-stdin-probe bash=/dev/null,no-fd3 inherit=/dev/null,no-fd3" ] && ! echo "$st_out" | grep -q '"event":"steer_stdin_shared"' \
+					|| fail "the image declares 'steerStdin' but a tool child of the steered runner does not see /dev/null on stdin, or holds an fd 3 (${st_probe:-no probe line}): the frames are reachable from it"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

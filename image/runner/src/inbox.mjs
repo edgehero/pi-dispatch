@@ -2,6 +2,7 @@ import { LAYOUT } from "./layout.mjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import { configError } from "./outcome.mjs";
+import { createFrameDecoder, STEER_STDIN_BUDGET_BYTES } from "./steer-frames.mjs";
 
 /**
  * Issue #646: the run's inbox, the container's half of steering a running job (INT-STEER-INBOX-CONTRACT).
@@ -90,6 +91,22 @@ import { configError } from "./outcome.mjs";
  * so another extension's renderer for our type changes neither what the model sees nor what is persisted. And an
  * extension that sends a message of our type itself cannot forge the ack, so the worker never counts it.
  *
+ * THE SECOND TRANSPORT, STDIN FRAMES (issue #686). On a venue that COPIES the job's files (`openshell`) there is no
+ * mount a later file could reach, so the worker writes each message as a frame on the exec's stdin instead
+ * (steer-frames.mjs, INT-STEER-INBOX-CONTRACT). `frames` names that source: the frame stream is read from the moment
+ * the inbox exists (`listen`, before the loader and the session are built; `seed` then drops what the transcript already
+ * delivered), each frame verified under the exit key before anything else, and a verified frame
+ * judged by EVERY refusal a file gets (parseInboxEntry and the 16 KiB cap, logged as `steer_file_refused`, the same
+ * reasons), then held and handed over exactly as a file's message: the two FIFOs, the one slot, the ack, the counts,
+ * the exit line's ids. What differs is only what a file had and a frame has not:
+ *   - no file to unlink, so a message the worker withdrew after writing it is still handed over (the contract's weaker
+ *     `written` withdrawal), and `stillWaiting` is always true;
+ *   - a BROKEN stream (a bogus length, bytes that are not JSON, a frame of neither shape, a second key) ends reading for
+ *     the attempt, logged once as `steer_stream_broken {reason}`; what was accepted before it is kept;
+ *   - a frame whose MAC does not verify is dropped and counted, logged once at the close as
+ *     `steer_frame_unverified {count}`, never its text or id;
+ *   - EOF is "no more messages".
+ *
  * Logs carry ids, modes, sources and counts, never the text.
  */
 
@@ -122,9 +139,15 @@ function ackVerifies(key, runId, id, ack) {
  *   - no key: the worker would count no delivery, report every message late and act on it a second time;
  *   - no readable /inbox: every message an operator sends would wait unread while the job reports success.
  */
-export function assertSteerReady({ steer, exitKey, dir = INBOX_DIR, fs: fsys = fs }) {
+export function assertSteerReady({ steer, exitKey, frames, dir = INBOX_DIR, fs: fsys = fs }) {
 	if (!steer) return;
 	if (!exitKey) throw configError("PI_STEER is set but no exit key was delivered: the run could not sign the acks the worker counts deliveries by", "steer-no-exit-key");
+	// Issue #686: on the stdin frame transport the channel is the pipe frame 1 came over, not /inbox (`frames` is that
+	// source, or null when it could not be taken). Undefined is the mount transport, checked below exactly as before.
+	if (frames !== undefined) {
+		if (frames === null || typeof frames !== "object") throw configError("PI_STEER is set on the stdin frame channel but the channel could not be opened, or stdin could not be put on /dev/null: the inbox did not land", "steer-inbox-missing");
+		return;
+	}
 	let isDir = false;
 	try {
 		isDir = fsys.statSync(dir).isDirectory();
@@ -153,9 +176,86 @@ export function parseInboxEntry(text, idFromName) {
 	return { entry: { id: entry.id, mode: entry.mode, source: entry.source, content: entry.content } };
 }
 
-export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, log = () => {}, pollMs = 1000, isParked = () => false, seenIds = [] }) {
+/**
+ * `frames` (issue #686): `{ open, consumed, budget? }` for the stdin frame transport, where `open()` returns the frame
+ * reader (steer-frames.mjs `openFrameReader`: `read(buf)` gives bytes, null for none waiting, 0 at EOF) and `consumed` the bytes frame 1 took of the attempt's budget; null
+ * (the default) is the mount transport, byte-identical to before.
+ */
+export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, log = () => {}, pollMs = 1000, isParked = () => false, seenIds = [], frames = null }) {
 	if (!exitKey) throw new Error("createInbox needs the exit key: the acks are signed with it");
 	const seen = new Set(seenIds);
+	const framed = frames !== null && typeof frames === "object" && typeof frames.open === "function";
+	// The frames verified and judged, waiting for `scan` to queue them by mode, in arrival (`seq`) order.
+	const arrived = [];
+	// The frame reader (steer-frames.mjs openFrameReader), open from `listen` until the close, a break or EOF.
+	let reader = null;
+	let readerDone = false;
+	let listening = false;
+	let unverifiedSaid = false;
+	const readBuf = framed ? Buffer.alloc(64 * 1024) : null;
+	const decoder = framed
+		? createFrameDecoder({
+				key: exitKey,
+				runId,
+				consumed: Number.isSafeInteger(frames.consumed) ? frames.consumed : 0,
+				budget: Number.isSafeInteger(frames.budget) ? frames.budget : STEER_STDIN_BUDGET_BYTES,
+				isSeen: (id) => seen.has(id),
+				onFrame: ({ id, body }) => {
+					const validId = typeof id === "string" && ID_PATTERN.test(id);
+					// The id joins the seen set even when refused, so a replay of a refused frame is not judged and logged again.
+					if (validId) seen.add(id);
+					if (Buffer.byteLength(body, "utf8") > INBOX_FILE_MAX_BYTES) {
+						log("steer_file_refused", { ...(validId ? { id } : {}), reason: "too-large" });
+						return;
+					}
+					const parsed = parseInboxEntry(body, id);
+					if (parsed.error) {
+						log("steer_file_refused", { ...(validId ? { id } : {}), reason: parsed.error });
+						return;
+					}
+					arrived.push(parsed.entry);
+				},
+				onBreak: (reason) => {
+					log("steer_stream_broken", { reason });
+					stopStream();
+				},
+			})
+		: null;
+	function stopStream() {
+		readerDone = true;
+		const r = reader;
+		reader = null;
+		try {
+			r?.close?.();
+		} catch {}
+	}
+
+	/** Everything the frame descriptor holds right now, into the decoder, without blocking. Never throws. */
+	function readAvailable() {
+		if (reader === null || readerDone) return;
+		for (;;) {
+			let n;
+			try {
+				n = reader.read(readBuf);
+			} catch (error) {
+				if (!unreadable) log("steer_inbox_unreadable", { code: typeof error?.code === "string" ? error.code : "unknown" });
+				unreadable = true;
+				decoder.end();
+				stopStream();
+				return;
+			}
+			if (n === null) return;
+			if (n === 0) {
+				// EOF: no more messages; what was accepted is kept.
+				decoder.end();
+				stopStream();
+				return;
+			}
+			decoder.push(Buffer.from(readBuf.subarray(0, n)));
+			if (readerDone) return; // a break closed it
+		}
+	}
+
 	// Names already refused (malformed, oversized), so a bad file is judged and logged once, not every second.
 	const refused = new Set();
 	// Two FIFOs, by mode, each in file order (see the header): a steer is never held behind a follow-up.
@@ -177,6 +277,12 @@ export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, lo
 
 	/** Read the directory once and queue every new, valid message in file-name order (the worker's sequence). */
 	function scan() {
+		if (framed) {
+			// What the descriptor holds now, then every frame verified and judged, in `seq` order (the worker's sequence).
+			readAvailable();
+			for (const entry of arrived.splice(0, arrived.length)) (entry.mode === "followUp" ? followUps : steers).push(entry);
+			return;
+		}
 		let names;
 		try {
 			names = fsys.readdirSync(dir);
@@ -225,6 +331,8 @@ export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, lo
 
 	/** False when the worker has unlinked the entry's file since it was read: it withdrew the message. Logged once. */
 	function stillWaiting(entry) {
+		// A frame has no file the worker could unlink: once it arrived it is handed over (the weaker `written` withdrawal).
+		if (framed) return true;
 		if (fsys.existsSync(`${dir}/${entry.name}`)) return true;
 		log("steer_withdrawn_held", { id: entry.id, mode: entry.mode, source: entry.source });
 		return false;
@@ -305,6 +413,8 @@ export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, lo
 				if (context) ctx = context;
 				if (closed) return;
 				active = true;
+				// Issue #686: a frame is read here at the latest, synchronously: pi polls steering once before its first call.
+				if (framed) scan();
 				// pi polls its steering queue right after agent_start, so a message waiting from before the prompt goes
 				// before the first model call.
 				pump();
@@ -349,22 +459,55 @@ export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, lo
 		},
 	};
 
+	/**
+	 * Open the frame reader and take what it holds (the frames transport only; idempotent). Called as soon as the inbox
+	 * exists; from then on every scan reads it again, agent_start's included, so a message the worker wrote at the spawn
+	 * is queued by the first agent_start. A reader that fails to open, or to read, is said once by code
+	 * (`steer_inbox_unreadable`) and reads as EOF: messages then settle as late on the host.
+	 */
+	function listen() {
+		if (!framed || listening || closed) return;
+		listening = true;
+		try {
+			reader = frames.open();
+		} catch (error) {
+			log("steer_inbox_unreadable", { code: typeof error?.code === "string" ? error.code : "unknown" });
+			unreadable = true;
+			decoder.end();
+			readerDone = true;
+			return;
+		}
+		readAvailable();
+	}
+
 	return {
 		factory,
+		listen,
 		/**
 		 * Mark every message this transcript already shows as delivered, so a resumed or recovered run never hands one
 		 * over twice. Only an entry whose ack verifies counts: the transcript is agent-writable, and an entry the agent
 		 * wrote itself must not suppress a real message.
 		 */
 		seed(sessionManager) {
+			const shown = new Set();
 			for (const entry of sessionManager.getEntries()) {
 				if (entry?.type !== "custom_message" || entry.customType !== INBOX_CUSTOM_TYPE) continue;
 				const id = entry.details?.id;
-				if (typeof id === "string" && ID_PATTERN.test(id) && ackVerifies(exitKey, runId, id, entry.details?.ack)) seen.add(id);
+				if (typeof id === "string" && ID_PATTERN.test(id) && ackVerifies(exitKey, runId, id, entry.details?.ack)) {
+					seen.add(id);
+					shown.add(id);
+				}
+			}
+			// Issue #686: frames are read from before the session exists, so one the transcript shows delivered may already
+			// be held. Dropped here, before anything can be pushed (the first agent_start comes after this).
+			for (const queue of [arrived, steers, followUps]) {
+				const kept = queue.filter((entry) => !shown.has(entry.id));
+				queue.splice(0, queue.length, ...kept);
 			}
 		},
 		start() {
 			if (timer !== null || closed) return;
+			listen();
 			timer = setInterval(poll, pollMs);
 			timer.unref?.();
 		},
@@ -380,6 +523,15 @@ export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, lo
 			active = false;
 			scan();
 			pruneWithdrawn();
+			if (framed) {
+				stopStream();
+				const dropped = decoder.stats().unverified;
+				// Once per attempt, by a number: a job writing forged frames in a loop must not flood the log.
+				if (dropped > 0 && !unverifiedSaid) {
+					unverifiedSaid = true;
+					log("steer_frame_unverified", { count: dropped });
+				}
+			}
 		},
 		/** The exit line's `steer` object: integers, and the delivered ids (32 hex each, never text). */
 		counts() {

@@ -296,6 +296,16 @@ export const EXIT_AUTH_CAPABILITY = "exitAuth";
 export const TRANSCRIPT_STDERR_CAPABILITY = "transcriptStderr";
 
 /**
+ * The capability an image declares when its runner reads steer messages as MAC'd frames on stdin, on
+ * PI_EXIT_AUTH=stdin-frames (issue #686, image/runner/src/steer-frames.mjs): the key as frame 1, read before pi loads,
+ * the stream moved off fd 0 so a tool child inherits /dev/null. NOT a gate, like `transcriptStderr`: `steer` stays the
+ * gate a `run.steer` job needs. On a venue that copies the job's files (`openshell`) it is what steering comes over; an
+ * image without it runs there unsteered (`steerSkipped: "venue-copies"`, as before it existed). A binding venue never
+ * reads it: it keeps the read-only `/inbox` mount, which the agent cannot withdraw a message from.
+ */
+export const STEER_STDIN_CAPABILITY = "steerStdin";
+
+/**
  * Exported so the test cannot drift from the format string above. `|` because an image id is
  * `sha256:<hex>` and a version is a version, so neither can contain one -- and because a literal control
  * character in source is the kind of thing that survives a copy/paste and then does not.

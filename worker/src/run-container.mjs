@@ -9,12 +9,14 @@ import { cpuCeilingCenti, cpuRangeRefusal, DEFAULT_JOB_SIZE } from "./job-size.m
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
+import { authenticExitLines } from "./run-history.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { LIVE_FILE_NAME, stageLiveFile } from "./live-transcript.mjs";
 import { steerTargetOf } from "./inbox-relay.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
 import { makeSteerAck } from "./steer-ack.mjs";
+import { keyFrame } from "./steer-framing.mjs";
 import { makeStderrTranscript } from "./stderr-transcript.mjs";
 
 /**
@@ -88,7 +90,8 @@ export function makeRunContainer({
 	checkpointStopTimeoutMs = 15_000,
 	// Issue #646: `({ runId, jobId, inboxDir, targetKey, ref, forge }) => relay`, the inbox relay's opener (inbox-relay.mjs
 	// `makeInboxRelay`, bound in start.mjs to the worker's Valkey client and host name). Null arms no job: a steer job is
-	// then run without steering and its record says `steerSkipped: "no-transcript"`, never a silent no-op.
+	// then run without steering and its record says `steerSkipped: "no-transcript"`, never a silent no-op. Issue #686: a
+	// stdin-steered attempt opens it with `inboxDir: null` and `frames: { exitKey, macRunId }`, then `attach`es the pipe.
 	openInboxRelay = null,
 	// Issue #646: the host fs the inbox directory is made and removed through. A seam for the tests.
 	inboxFs = { mkdirSync, rmSync },
@@ -120,6 +123,8 @@ export function makeRunContainer({
 	transcript = "file",
 	// Issue #686: the stderr demux's factory (stderr-transcript.mjs). A seam so a test can make it fail.
 	makeDemux = makeStderrTranscript,
+	// Review round 1, M1: how long a stdin-steered attempt's pipe stays open after an exit-shaped line that does not verify.
+	stdinExitGraceMs = 5_000,
 }) {
 	// Refused at construction rather than written into a job's env: a guessed layout reads nothing.
 	const paths = layoutFor(layout);
@@ -155,7 +160,10 @@ export function makeRunContainer({
 	// written later would ever arrive. Absent is false: a job is steer-armed only on a venue that SAYS it binds.
 	// `transcriptStderr` (issue #686) is the processor's, off the image preflight like `exitAuth`: true when the job image
 	// declares `transcriptStderr`, so its runner can mirror the session file over stderr. Read only on a `stdio` venue.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
+	// `steerStdin` (issue #686, part 2) is the processor's too: true when the job image declares `steerStdin`, so its
+	// runner reads steer messages as MAC'd frames on stdin. Read only for a steer job on a venue that copies (`binds` not
+	// true); a binding venue keeps the read-only mount whatever the image declares.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -178,18 +186,42 @@ export function makeRunContainer({
 		// job, whose staged transcript already is the file.
 		const armed = recover === true && checkpoint !== null && typeof checkpoint === "object";
 
+		// Issue #686 (DES-OPENSHELL-VENUE): whether this attempt's transcript comes over the CLI's stderr. Decided BEFORE
+		// steering, because a stdin-steered attempt's acks come back through it. Asked only where
+		// something would read it (an opener and a job id) on a venue whose session file is not on the host while it runs,
+		// and armed only when every part exists: the venue mirrors (`transcript: "stdio"`), the image's runner can
+		// (`transcriptStderr`), and there is an exit key to verify the records with. A missing part is a NAMED skip
+		// (`live_transcript_skipped`); the job still runs, with no live transcript and no progress, as before this issue.
+		const liveReadable = typeof openLiveTranscript === "function" && jobId !== null && jobId !== undefined;
+		let liveSkipped = null;
+		if (liveReadable && (transcript === "stdio" || layout !== "mounts")) {
+			if (transcript !== "stdio") liveSkipped = "venue-copies";
+			else if (transcriptStderr !== true) liveSkipped = "no-capability";
+			else if (exitKey === null) liveSkipped = "no-exit-key";
+		}
+		const stdioArmed = liveReadable && transcript === "stdio" && liveSkipped === null;
+		if (liveSkipped !== null) log("live_transcript_skipped", { container: name, reason: liveSkipped });
+
 		// Issue #646 (DES-STEER-VIA-READONLY-INBOX-MOUNT): whether this attempt is steer-ARMED. Asked by the job's data
 		// (`steer: true`, which the trigger's `run.steer` puts there and the image preflight already checked the image for),
 		// and armed only when every part of the channel exists: a venue that binds mounts, an exit key to verify the
 		// delivery acks with, and something to read those acks (a transcript tail) and to write the files (the relay).
 		// Each missing part is a NAMED skip on the record (`steerSkipped`); the job still runs, as it would without
 		// `run.steer`, and a message for it is refused at push because nothing ever registers it as open.
+		//
+		// Issue #686 (INT-STEER-INBOX-CONTRACT's second transport): on a venue that COPIES (`binds` not true) the inbox part
+		// is the exec's stdin instead of the mount, when the image's runner reads frames (`steerStdin`). Its parts are the
+		// same key, a relay, and the stdio transcript (`stdioArmed`, above), which is where the acks come back; without that
+		// the attempt is `no-transcript`, as a binding venue without a tail is. An image without `steerStdin` there is
+		// skipped exactly as before, `venue-copies`. A binding venue never takes this path, whatever the image declares.
 		const steerAsked = job?.steer === true;
+		const viaStdin = binds !== true && steerStdin === true;
 		let steerSkipped = null;
 		if (steerAsked) {
-			if (binds !== true) steerSkipped = "venue-copies";
+			if (binds !== true && steerStdin !== true) steerSkipped = "venue-copies";
 			else if (exitKey === null) steerSkipped = "no-exit-key";
 			else if (typeof openInboxRelay !== "function" || typeof openLiveTranscript !== "function" || jobId === null || jobId === undefined) steerSkipped = "no-transcript";
+			else if (viaStdin && !stdioArmed) steerSkipped = "no-transcript";
 		}
 		if (transcriptDir === null && (recover === true || (steerAsked && steerSkipped === null)) && typeof stageLive === "function") {
 			try {
@@ -206,7 +238,8 @@ export function makeRunContainer({
 		const inboxDir = `${prepared.jobDir}.inbox`;
 		let inboxMade = false;
 		let relay = null;
-		if (steerAsked && steerSkipped === null) {
+		// The stdin transport has no directory: its messages go down the pipe.
+		if (steerAsked && steerSkipped === null && !viaStdin) {
 			try {
 				inboxFs.rmSync(inboxDir, { recursive: true, force: true });
 				inboxFs.mkdirSync(inboxDir, { mode: 0o700 });
@@ -218,33 +251,23 @@ export function makeRunContainer({
 		if (steerAsked && steerSkipped === null) {
 			try {
 				// `runId` is the RUN's id (`jobId` here is `runIdOf(job)`, index.mjs), so a #645 recovery writes the same inbox.
-				relay = openInboxRelay({ runId: jobId, jobId, inboxDir, ...steerTargetOf(job) }) ?? null;
+				// Issue #686: the stdin transport's relay MACs each frame under this attempt's key and the container's PI_JOB_ID
+				// (`name`, as the ack's `ackRunId`); a binding venue's relay is opened with exactly the arguments it always was.
+				relay = openInboxRelay({ runId: jobId, jobId, inboxDir: viaStdin ? null : inboxDir, ...steerTargetOf(job), ...(viaStdin ? { frames: { exitKey, macRunId: name } } : {}) }) ?? null;
 			} catch {
 				relay = null;
 			}
 			if (relay === null) steerSkipped = "no-transcript";
 		}
 		const steerArmed = steerAsked && steerSkipped === null;
+		// Issue #686: this attempt's key goes down stdin as frame 1 and the pipe stays OPEN for the relay's frames.
+		const stdinSteered = steerArmed && viaStdin;
 		if (steerSkipped !== null) log("steer_skipped", { container: name, reason: steerSkipped });
 		// The ack consumer, handed to the live tail below. It verifies under THIS attempt's exit key, against the very string
 		// put in the container's PI_JOB_ID (`jobId: name` in the env below), which is what the runner MACs: one value on both
 		// sides by construction. The per-attempt key is the domain separation between attempts; the string only has to match.
 		const steerAck = steerArmed ? makeSteerAck({ exitKey, ackRunId: name, relay, jobId, log }) : null;
 
-		// Issue #686 (DES-OPENSHELL-VENUE): whether this attempt's transcript comes over the CLI's stderr. Asked only where
-		// something would read it (an opener and a job id) on a venue whose session file is not on the host while it runs,
-		// and armed only when every part exists: the venue mirrors (`transcript: "stdio"`), the image's runner can
-		// (`transcriptStderr`), and there is an exit key to verify the records with. A missing part is a NAMED skip
-		// (`live_transcript_skipped`); the job still runs, with no live transcript and no progress, as before this issue.
-		const liveReadable = typeof openLiveTranscript === "function" && jobId !== null && jobId !== undefined;
-		let liveSkipped = null;
-		if (liveReadable && (transcript === "stdio" || layout !== "mounts")) {
-			if (transcript !== "stdio") liveSkipped = "venue-copies";
-			else if (transcriptStderr !== true) liveSkipped = "no-capability";
-			else if (exitKey === null) liveSkipped = "no-exit-key";
-		}
-		const stdioArmed = liveReadable && transcript === "stdio" && liveSkipped === null;
-		if (liveSkipped !== null) log("live_transcript_skipped", { container: name, reason: liveSkipped });
 		const removeInbox = () => {
 			if (!inboxMade) return;
 			try {
@@ -348,6 +371,8 @@ export function makeRunContainer({
 			// Issue #686: PI_TRANSCRIPT=stderr, only for an attempt armed above, never off the image's label alone: the
 			// worker must be reading the records, or they would reach the job log as noise.
 			transcriptStderr: stdioArmed,
+			// Issue #686: PI_EXIT_AUTH=stdin-frames, only for an attempt armed above for stdin steering (beside PI_STEER=1).
+			steerStdin: stdinSteered,
 		}));
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
@@ -378,7 +403,7 @@ export function makeRunContainer({
 			// (a caller that predates issue #643, or a staging that failed), and docker-run's guard then skips the mount.
 			sessionDir: transcriptDir ?? undefined,
 			// Issue #646: the inbox, read-only at /inbox, for an armed attempt only; undefined leaves the argv byte-identical.
-			steerInboxDir: steerArmed ? inboxDir : undefined,
+			steerInboxDir: steerArmed && !stdinSteered ? inboxDir : undefined,
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
 			size, // issue #596: memory, swap equal to it, the CPU weight and /dev/shm, through containerSpec's one function
@@ -491,9 +516,10 @@ export function makeRunContainer({
 						}
 					: null;
 				// The stdio source has no file; a checkpoint copies a host file, so none is opened on it (a copying venue refuses
-				// `run.recover` before spend), and its steer channel is issue #686's second part.
+				// `run.recover` before spend). The steer acks ride it as they ride a tailed file (issue #686): the records are
+				// the session's lines, so a delivered message's `custom_message` reaches the ack consumer the same way.
 				const source = stdioArmed ? { source: "stdio", file: null } : { file: join(transcriptDir, LIVE_FILE_NAME) };
-				live = openLiveTranscript({ ...source, jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs && !stdioArmed ? { checkpoint: checkpointArgs } : {}), ...(steerAck && !stdioArmed ? { steer: steerAck } : {}) }) ?? null;
+				live = openLiveTranscript({ ...source, jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs && !stdioArmed ? { checkpoint: checkpointArgs } : {}), ...(steerAck ? { steer: steerAck } : {}) }) ?? null;
 			} catch {
 				live = null;
 			}
@@ -602,12 +628,36 @@ export function makeRunContainer({
 
 		const run = new Promise((resolve, reject) => {
 			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
+			// Issue #686: a stdin-steered attempt's key is frame 1, written at the spawn, and the pipe is NOT closed: it is
+			// handed to the relay, which writes each message as a frame after it and closes the pipe at its stop. The relay
+			// writes nothing before the publisher's baseline (the runner's signed baseline record and the lines up to it, so a
+			// resumed transcript's acks are known first). The runner reads exactly frame 1 before pi loads, so the key is out
+			// of the pipe before any tool exists, as on every other attempt.
+			if (stdinSteered) {
+				child.stdin?.on("error", () => {});
+				const first = keyFrame(exitKey);
+				try {
+					child.stdin?.write(first);
+				} catch {}
+				relay?.attach?.(child.stdin, { written: first.length });
+				// The baseline, when this side already knows it: a job with no staged session (not a resume, not a recovery)
+				// uploads the empty live file the preparer made, so its transcript has no prior line and nothing to
+				// re-baseline against. Released here, at the spawn, rather than when the runner's baseline record comes back
+				// over stderr (about 600 ms in, measured on Docker): a message queued before the start then reaches the runner
+				// before its first agent_start, where pi polls its steering queue once before the first model call, instead
+				// of racing the run. A staged transcript waits for the record as before (the ack's `onBaseline` is once only).
+				if (!prepared.session && recover !== true) {
+					try {
+						steerAck?.onBaseline();
+					} catch {}
+				}
+			}
 			try {
 				live?.start();
 			} catch {}
 			// Issue #646: registered live with the container, so a push is accepted only while there is a run to read it.
 			void relay?.start();
-			if (exitKey !== null) {
+			if (exitKey !== null && !stdinSteered) {
 				// Written and closed at once: the runner drains stdin to EOF before anything else runs, so the key is out of
 				// the pipe before any tool exists. A CLI that died first makes this EPIPE, which is the run failing, reported
 				// by `error` or `close` below; the listener only keeps the write's own error from crashing the worker.
@@ -622,6 +672,50 @@ export function makeRunContainer({
 				} catch {}
 			};
 			child.stdout?.on("data", tee);
+			// Review round 1, M1: a stdin-steered attempt's pipe is ended as soon as the runner's exit line is out, so a CLI
+			// that waited for EOF before it exits could never wait on the relay (OpenShell 0.1.4 does not wait, measured on
+			// the real gateway; this is the defence, and the close at the relay's stop stays). A line that VERIFIES under the
+			// attempt's key ends it at once; an exit-shaped line that does not (the supervisor's unkeyed one, a forgery) ends
+			// it after `stdinExitGraceMs`, so a forged line can only cut steering short, never hold the pipe open. Lines are
+			// cut on newlines from a bounded buffer; a line past the bound is skipped.
+			if (stdinSteered) {
+				let held = "";
+				let graceTimer = null;
+				const STDIN_LINE_MAX = 256 * 1024;
+				let stdinClosed = false;
+				// Said once, by which line ended it: a pipe ended early is steering cut short for the rest of the attempt, and
+				// every message accepted after it settles `late` (the relay writes nothing more).
+				const closeNow = (reason) => {
+					if (graceTimer) clearTimeout(graceTimer);
+					graceTimer = null;
+					if (stdinClosed) return;
+					stdinClosed = true;
+					log("steer_stdin_closed", { container: name, reason });
+					try {
+						relay?.closeStdin?.();
+					} catch {}
+				};
+				child.stdout?.on("data", (chunk) => {
+					held += String(chunk);
+					let nl = held.indexOf("\n");
+					while (nl !== -1) {
+						const line = held.slice(0, nl);
+						held = held.slice(nl + 1);
+						if (line.includes('{"event":"exit"')) {
+							if (authenticExitLines(line, exitKey) !== "") closeNow("exit-verified");
+							else if (graceTimer === null && !stdinClosed) {
+								graceTimer = setTimeout(() => closeNow("exit-unverified"), stdinExitGraceMs);
+								graceTimer.unref?.();
+							}
+						}
+						nl = held.indexOf("\n");
+					}
+					if (held.length > STDIN_LINE_MAX) held = "";
+				});
+				child.on("close", () => {
+					if (graceTimer) clearTimeout(graceTimer);
+				});
+			}
 			const stderrOut = (chunk) => {
 				if (chunk.length === 0) return;
 				if (stderrHead.length < STDERR_HEAD_MAX) stderrHead = (stderrHead + String(chunk)).slice(0, STDERR_HEAD_MAX);

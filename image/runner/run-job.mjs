@@ -52,6 +52,7 @@ import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/m
 import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
 import { assertSteerReady, createInbox } from "./src/inbox.mjs";
+import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/steer-frames.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 import { LAYOUT } from "./src/layout.mjs";
@@ -136,6 +137,12 @@ let finishMeter = () => {};
 /** The exit line's key (issue #545) and its one writer, both set in the job runner's block at the end of this file before main runs. */
 let exitKey;
 let exitWriter;
+/**
+ * Issue #686: the stdin frame channel a stdin-steered attempt's messages arrive on (`{ open, consumed }` for
+ * src/inbox.mjs), set beside the key in the job runner's block; null when frame 1 brought no key. Read only when the
+ * key came over `stdin-frames`; every other attempt is the mount transport, exactly as before.
+ */
+let frameChannel = null;
 // The job's MCP servers' close (REQ-MCP-OPERATOR-SERVERS), for the catch path: a throw after they connected (a refused
 // command, a shadowed tool) skips the prompt's finally, and a live stdio server's pipes would keep this process up.
 let stopMcp = async () => {};
@@ -144,7 +151,9 @@ async function main() {
 	// A worker that asked for a signed exit line and did not deliver a usable key: the run goes on with an unsigned
 	// line, which that worker reads as no line at all (the floor, tokens unknown). Said here, by kind only.
 	if (exitKey.problem !== null) log("exit_key_unread", { problem: exitKey.problem });
-	const cfg = parseRunnerEnv(process.env);
+	// Issue #686: whether the key came as frame 1 of the stdin frame channel, the one fact that admits PI_STEER on the
+	// sandbox layout (PI_EXIT_AUTH itself has already left the environment).
+	const cfg = parseRunnerEnv(process.env, { steerFrames: exitKey.frames === true });
 
 	// FIRST, before the prompt is read and before any auth or model lookup: a staged package root
 	// that did not mount is a pre-spend config failure (exit 2, not retried) and this is the only
@@ -160,7 +169,8 @@ async function main() {
 	assertAwaitInputHasSession(cfg);
 	// Same moment, same exit code (issue #646): a steer-armed job with no readable /inbox, or no exit key to sign its
 	// acks with, would run while every message sent to it waited unread. The worker arms steer only with both.
-	assertSteerReady({ steer: cfg.steer, exitKey: exitKey.key });
+	// On the stdin frame channel (issue #686) the channel is checked instead of /inbox.
+	assertSteerReady({ steer: cfg.steer, exitKey: exitKey.key, ...(exitKey.frames === true ? { frames: frameChannel } : {}) });
 	// Same moment, same exit code, and for EVERY job, command jobs included (issue #341): a job user that cannot
 	// traverse /job loses its trigger skills without a word and would otherwise spend anyway.
 	// /workspace joins the list for READ only (issue #355). On an SELinux-enforcing host, an operator's local folder
@@ -350,7 +360,14 @@ async function main() {
 	// attempt, and that key is what separates one attempt's acks from another's. It holds what it reads while the run is
 	// parked, so it reads the await tool's flag.
 	// env-internal PI_JOB_ID: set by the worker on the container (its container name, `pi-job-<queue id>`).
-	const inbox = cfg.steer ? createInbox({ exitKey: exitKey.key, runId: process.env.PI_JOB_ID, log, isParked: () => awaitInput?.state.called === true }) : null;
+	// Issue #686: on a copying venue its messages come as frames on stdin (`frames`), else from the /inbox mount.
+	const inbox = cfg.steer ? createInbox({ exitKey: exitKey.key, runId: process.env.PI_JOB_ID, log, isParked: () => awaitInput?.state.called === true, ...(exitKey.frames === true ? { frames: frameChannel } : {}) }) : null;
+	// Issue #686: the frame channel (fd 3) is open from here on, the moment the inbox exists: the key left the pipe at the
+	// top of this file, and a frame is only verified and held, never run. It is read synchronously at the inbox's own
+	// moments (steer-frames.mjs openFrameReader says why), so a frame the worker wrote at the spawn is read at the first
+	// agent_start at the latest; the seed below drops whatever the transcript already delivered. A no-op on the mount
+	// transport.
+	inbox?.listen();
 	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(reportProgress?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
 	const resourceLoader = await buildLoadedResourceLoader({
 		settingsManager,
@@ -723,6 +740,18 @@ if (!nestedRunner) {
 	// it as this runner does would drain a stdin that is not its own, or wait on one no one writes.
 	// env-internal PI_EXIT_AUTH: written by the worker into the job's closed env map, removed here once read.
 	delete process.env.PI_EXIT_AUTH;
+	// Issue #686: on the stdin frame channel frame 1 came on fd 0, which the supervisor then closed, and the message frames
+	// follow on fd 3 (steer-frames.mjs FRAME_FD says why not fd 0). Now, before any extension or tool exists, /dev/null is
+	// put on fd 0, so a child that inherits stdin inherits /dev/null. A close that failed is said by code and fails open
+	// (fd 0 is then a socket at EOF, never the frames); the other swap failures, and no supervisor's socket on fd 3 (a
+	// runner started without the supervisor), are no frame channel, which a steered run refuses before it spends.
+	if (exitKey.frames === true && exitKey.key !== null) {
+		const isolated = isolateStdin();
+		if (!isolated.isolated) log("steer_stdin_shared", { code: isolated.code });
+		// A swap that left fd 0 unvouched for (review round 1, L5), or no supervisor's socket on fd 3 (L4): no channel, so a
+		// steered run refuses before pi loads (assertSteerReady, `steer-inbox-missing`).
+		frameChannel = !isolated.refuse && frameFdOpen() ? { open: () => openFrameReader(FRAME_FD), consumed: exitKey.consumed } : null;
+	}
 	// Issue #686: on a copying venue the worker asks for the session file's lines over stderr, signed with the same key
 	// (transcript-mirror.mjs), because the file is in the sandbox until the download. Decided now, beside the key, and the
 	// variable leaves this process's environment at once, as PI_EXIT_AUTH does: a nested runner or any child that read it

@@ -258,3 +258,11 @@ test("run-job.mjs writes the exit line synchronously to fd 1", () => {
 	// Issue #686: the transcript mirror's final drain runs first (stderr, never fd 1), then the line, synchronously.
 	assert.match(src, /\n\t\twrite: \(line\) => \{\n(?:\t{3}transcriptMirror\?\.[a-z]+\(\);\n)*\t{3}writeAllSync\(1, line\);\n\t\t\},\n/);
 });
+
+test("readExitKey: PI_EXIT_AUTH=stdin-frames takes frame 1's key and how many bytes it took, never draining to EOF (#686)", () => {
+	const got = readExitKey({ PI_EXIT_AUTH: "stdin-frames" }, { drain: () => assert.fail("never drained"), readFrame: () => ({ key: KEY, problem: null, bytes: Buffer.alloc(88) }) });
+	assert.deepEqual(got, { key: KEY, problem: null, frames: true, consumed: 88 });
+	assert.deepEqual(readExitKey({ PI_EXIT_AUTH: "stdin-frames" }, { readFrame: () => ({ key: null, problem: "malformed", bytes: Buffer.alloc(2) }) }), { key: null, problem: "malformed", frames: true, consumed: 2 });
+	assert.deepEqual(readExitKey({ PI_EXIT_AUTH: "stdin-frames" }, { readFrame: () => { throw new Error("x"); } }), { key: null, problem: "unreadable", frames: true, consumed: 0 });
+	assert.deepEqual(readExitKey({ PI_EXIT_AUTH: "stdin-lines" }), { key: null, problem: "unknown-channel" }, "any other value is still unknown");
+});

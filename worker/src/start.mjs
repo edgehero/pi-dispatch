@@ -1655,8 +1655,8 @@ export async function startWorker(
 		config.liveTranscripts || config.runProgress || runCheckpointer || steerWired
 			? makeLiveTranscriptOpenerFn({ redis, log, transcripts: config.liveTranscripts, progress: config.runProgress, makeCommenter: makeProgressCommenter, ...(runCheckpointer ? { checkpoint: (args) => runCheckpointer.open(args) } : {}), ...(steerWired ? { steer: true } : {}) })
 			: null;
-	// Issue #646 (DES-STEER-VIA-READONLY-INBOX-MOUNT): the inbox relay's opener, handed to both venues' runContainer, which
-	// opens one per steer-ARMED attempt. Bound here to the worker's client and to the host name the run checkpointer
+	// Issue #646 (DES-STEER-VIA-READONLY-INBOX-MOUNT): the inbox relay's opener, handed to every venue's runContainer, which
+	// opens one per steer-ARMED attempt (on openshell, issue #686, one writing frames on the exec's stdin). Bound here to the worker's client and to the host name the run checkpointer
 	// writes (`durableHost`), the one this host is known by in the fleet: the open key names it.
 	const openInboxRelay = steerWired ? (args) => makeInboxRelayFn({ redis, host: durableHost, now, log, ...args }) : null;
 	// Issue #644: the final edit for an attempt that registered no commenter, so nothing else would edit the comment again.
@@ -1956,9 +1956,10 @@ export async function startWorker(
 				readEndpoints: () => modelEndpoints.current ?? [],
 				hostEnv: env,
 				openJobLog,
-				// Issue #686: the same opener the binding venues get, fed from the exec's stderr records. The inbox relay is not
-				// handed: steering on this venue is the issue's second part, and its jobs stay `steerSkipped: "venue-copies"`.
+				// Issue #686: the same opener the binding venues get, fed from the exec's stderr records, and the same inbox relay
+				// opener, whose relay writes a steered job's messages as frames on the exec's stdin there (part 2).
 				...(openLiveTranscript ? { openLiveTranscript } : {}),
+				...(openInboxRelay ? { openInboxRelay } : {}),
 				globalPiDir: config.globalPiDir,
 				allowGlobalExtensions: config.allowGlobalExtensions,
 				packagePaths: getPackagePaths,

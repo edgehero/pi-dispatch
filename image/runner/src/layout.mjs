@@ -15,8 +15,9 @@
  * refused by `parseRunnerEnv` before the job reads anything: a runner that silently used the wrong tree would read no
  * prompt and fail as a worker bug, or worse, read a stale one.
  *
- * `inbox` is null in the sandbox layout: a copying venue has no read-only mount to steer through, and its stdin channel
- * is issue #686's. `parseRunnerEnv` refuses PI_STEER there rather than poll a directory nothing writes.
+ * `inbox` is null in the sandbox layout: a copying venue has no read-only mount to steer through, so its messages come
+ * as frames on stdin (issue #686, steer-frames.mjs). `parseRunnerEnv` refuses PI_STEER there without that channel
+ * rather than poll a directory nothing writes.
  *
  * The worker carries the same table (worker/src/job-layout.mjs), held identical to this one by a test, because the
  * worker and this file are in different places and neither can import the other at run time.

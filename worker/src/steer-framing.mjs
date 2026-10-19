@@ -26,6 +26,7 @@
  * never shorten or close the fence that follows it.
  */
 
+import { createHmac } from "node:crypto";
 import { TOKEN_NAME_RE } from "./console-tokens.mjs";
 import { fenceBlock } from "./prompt-fence.mjs";
 
@@ -121,4 +122,64 @@ export function steerFileJson({ entry, ref = null, forge = null } = {}) {
 	if (content === null) return null;
 	const body = JSON.stringify({ v: 1, id: entry.id, mode: entry.mode, source: entry.source, content });
 	return Buffer.byteLength(body, "utf8") > STEER_FILE_MAX_BYTES ? null : body;
+}
+
+/**
+ * Issue #686: the stdin frame channel of a steered attempt on a venue that COPIES its files (INT-STEER-INBOX-CONTRACT's
+ * second transport). A frame is a 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON. The
+ * runner's decoder (image/runner/src/steer-frames.mjs) restates these constants and the MAC; worker/test/steer-frames
+ * .test.mjs holds the two byte for byte, since neither side can import the other at run time.
+ */
+export const STEER_FRAME_DOMAIN = "pi-dispatch-inbox-frame";
+/**
+ * The most bytes one attempt's stdin carries, every frame counted with its prefix and the key frame included.
+ * MEASURED in the #686 lab on OpenShell 0.1.4 (`.github/openshell.json`'s pin): piped stdin over 4 MiB in total makes
+ * the exec exit 1 with "streamed stdin exceeds the 4 MiB limit", and 4 MiB minus 1 KiB passed. The contract caps at
+ * 4 MiB and lets the measurement only move it down; this sits at the largest total the lab saw PASS, 1 KiB under,
+ * because exactly 4 MiB was never measured and the CLI's own accounting of its stream is its code, not ours. The
+ * inbox's caps (16 messages, 16 KiB each) keep a run near 260 KiB, so the margin costs nothing a run can reach.
+ */
+export const STEER_STDIN_BUDGET_BYTES = 4 * 1024 * 1024 - 1024;
+/** The largest message frame the runner accepts: the 16 KiB file body plus the frame's own keys, with room. */
+export const STEER_FRAME_MAX_BYTES = STEER_FILE_MAX_BYTES + 256;
+
+/** One frame's bytes: the length prefix and the UTF-8 JSON text. */
+export function encodeFrame(json) {
+	const payload = Buffer.from(String(json), "utf8");
+	const prefix = Buffer.alloc(4);
+	prefix.writeUInt32BE(payload.length, 0);
+	return Buffer.concat([prefix, payload]);
+}
+
+/** Frame 1, the attempt's exit key: `{"t":"key","key":"<64 hex>"}`. */
+export function keyFrame(key) {
+	return encodeFrame(JSON.stringify({ t: "key", key }));
+}
+
+/**
+ * `hex(HMAC-SHA256(exitKey, "pi-dispatch-inbox-frame\0" + runId + "\0" + seq + "\0" + body))`, where `runId` is the
+ * container's PI_JOB_ID (the ack's), `seq` the frame's position in the stream in decimal (the key frame is 1), and
+ * `body` the exact bytes `steerFileJson` returned for the message. Domain-separated from the ack and the exit line.
+ */
+export function frameMac(exitKey, runId, seq, body) {
+	return createHmac("sha256", exitKey).update(`${STEER_FRAME_DOMAIN}\0${runId}\0${seq}\0${body}`, "utf8").digest("hex");
+}
+
+/**
+ * The message frame for one `steerFileJson` body at stream position `seq` (2 or more):
+ * `{"t":"steer","seq","v","id","mode","source","content","mac"}`, or null when the body is not one steerFileJson
+ * writes or the frame would exceed STEER_FRAME_MAX_BYTES. The five message fields are the body's, parsed back, so the
+ * runner's re-serialisation of them is the body byte for byte (JSON.stringify of the same values and key order).
+ */
+export function steerFrame({ exitKey, runId, seq, body } = {}) {
+	if (typeof exitKey !== "string" || exitKey === "" || typeof runId !== "string" || runId === "" || !Number.isSafeInteger(seq) || seq < 2 || typeof body !== "string") return null;
+	let fields;
+	try {
+		fields = JSON.parse(body);
+	} catch {
+		return null;
+	}
+	if (fields === null || typeof fields !== "object" || JSON.stringify({ v: fields.v, id: fields.id, mode: fields.mode, source: fields.source, content: fields.content }) !== body) return null;
+	const frame = encodeFrame(JSON.stringify({ t: "steer", seq, v: fields.v, id: fields.id, mode: fields.mode, source: fields.source, content: fields.content, mac: frameMac(exitKey, runId, seq, body) }));
+	return frame.length - 4 > STEER_FRAME_MAX_BYTES ? null : frame;
 }

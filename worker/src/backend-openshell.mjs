@@ -40,8 +40,13 @@ import { makeRunContainer } from "./run-container.mjs";
  * THE LIVE TRANSCRIPT (issue #686): the session file is in the sandbox until the download, so no host tail can read it.
  * The runner mirrors its lines over the exec's STDERR as records signed with the exit key (transcript-mirror.mjs), and
  * makeRunContainer, told `transcript: "stdio"`, verifies them and feeds the same publisher (stderr-transcript.mjs), so
- * the live transcript, run progress and the status comment are served here. Steering and recovery are not yet, each
- * refused or skipped by name.
+ * the live transcript, run progress and the status comment are served here.
+ *
+ * STEERING (issue #686, part 2): there is no `/inbox` mount a later file could reach, so a steer-armed job on an image
+ * declaring `steerStdin` takes its messages as MAC'd frames on the exec's stdin, the key frame first
+ * (INT-STEER-INBOX-CONTRACT's second transport): makeRunContainer, handed the relay opener and told this venue copies
+ * (`binds: false`), writes them, and the acks come back over the stderr transcript above. An image without `steerStdin`
+ * runs unsteered, `steerSkipped: "venue-copies"`. Recovery is not served here: `run.recover` is refused before spend.
  */
 
 
@@ -439,7 +444,7 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
 });
 
-const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
+const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "openInboxRelay", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
 
 /**
  * Build the `openshell` bundle. `engine` is the gateway's compute driver, `docker` or `podman` (the only two in v1),
@@ -465,6 +470,9 @@ export function makeOpenshellBackend(opts = {}) {
 		// Issue #686: the live transcript publisher's opener (start.mjs's, shared with every venue), fed from the exec's
 		// stderr records. Absent, no job here publishes a transcript or progress, as before.
 		openLiveTranscript = null,
+		// Issue #686: the steer inbox relay's opener (start.mjs's, shared with every venue), whose relay writes frames on
+		// the exec's stdin here. Absent, a steer job here runs unsteered (`steerSkipped: "no-transcript"`).
+		openInboxRelay = null,
 		onOutput,
 		globalPiDir = null,
 		allowGlobalExtensions = true,
@@ -688,11 +696,12 @@ export function makeOpenshellBackend(opts = {}) {
 		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway }),
 		layout: "sandbox",
 		memoryLimitOf: (_args, built) => (built.size?.memMiB ?? DEFAULT_JOB_SIZE.memMiB) * 1024 * 1024,
-		// No steering or recovery staging here yet: the session file is in the sandbox until the download, so a tail on
-		// the host reads nothing. The live transcript comes over the exec's stderr instead (issue #686).
+		// No recovery staging here: the session file is in the sandbox until the download, so a tail on the host reads
+		// nothing. The live transcript comes over the exec's stderr instead, and steering over its stdin (issue #686).
 		stageLive: null,
 		transcript: "stdio",
 		...(typeof openLiveTranscript === "function" ? { openLiveTranscript } : {}),
+		...(typeof openInboxRelay === "function" ? { openInboxRelay } : {}),
 		stageRun,
 		collectRun,
 		teardownRun,
