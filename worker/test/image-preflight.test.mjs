@@ -319,8 +319,8 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
-test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625), reportProgress (#644), recover (#645) and steer (#646), each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625), reportProgress (#644), recover (#645), steer (#646) and sandboxLayout (#683), each keyed once, each free for a job without its feature", async () => {
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
@@ -332,7 +332,8 @@ test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502
 	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.
 	for (let i = 0; i < CAPABILITY_GATES.length; i++) {
 		const declared = CAPABILITY_GATES.slice(0, i + 1).map((gate) => gate.token);
-		const preflight = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+		// `copies`, so the venue-armed row (#683) is reached as every trigger-armed one is.
+		const preflight = makeImagePreflight({ image: "i", copies: true, spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
 		const next = CAPABILITY_GATES[i + 1];
 		assert.deepEqual(await preflight(all), next ? { [next.result]: "i", declared } : { ok: true, image: "i", piVersion: "0.99.1", imageDigest: "sha256:abc", capabilities: declared });
 	}
@@ -439,4 +440,25 @@ test("forgeMcp (DES-FORGE-MCP): a job whose run.mcp names `forge` needs it besid
 	// The mcp row still asks first: an image older than run.mcp is refused for that, not for the forge server.
 	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("forgeMcp")) });
 	assert.deepEqual(await none({ kind: "github", mcp: ["forge"] }), { mcpUnsupported: "i", declared: ["forgeMcp"] });
+});
+
+test("sandboxLayout (#683): armed by the VENUE, on every job of a copying one, and never on a binding one", async () => {
+	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
+	const declared = ["replicas", "commands", "excludeTools", "anyUid", "costCap", "modelPolicy", "exitAuth", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer"];
+	const copying = makeImagePreflight({ image: "i", copies: true, spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+	for (const job of [{ kind: "github" }, { kind: "local" }, { kind: "github", steer: false }]) {
+		assert.deepEqual(await copying(job), { sandboxLayoutUnsupported: "i", declared }, JSON.stringify(job));
+	}
+	// A binding venue (the default, and every venue before #683) never reads the token, whatever the job carries.
+	const binding = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+	assert.equal((await binding({ kind: "github" })).ok, true);
+	const fresh = makeImagePreflight({ image: "i", copies: true, spawnFn: fakeSpawn([], { image: 0, info: 0 }, label([...declared, "sandboxLayout"].join(","))) });
+	assert.equal((await fresh({ kind: "github" })).ok, true);
+	const row = CAPABILITY_GATES.find((gate) => gate.token === "sandboxLayout");
+	assert.equal(row.reason, "job-image-sandbox-layout-unsupported");
+	assert.equal(row.event, "refused_image_sandbox_layout_unsupported");
+	assert.equal(row.needed({ kind: "github" }), false, "no venue context is a binding venue");
+	assert.equal(row.needed({ kind: "github" }, { copies: "yes" }), false, "only `true` arms it");
+	// The option is the venue's and a boolean, refused otherwise, so a truthy string cannot arm or disarm the row.
+	for (const copies of ["true", 1, null]) assert.throws(() => makeImagePreflight({ image: "i", copies }), TypeError, String(copies));
 });

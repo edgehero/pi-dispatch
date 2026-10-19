@@ -22,6 +22,7 @@
 export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
 import { isAbsolute, relative } from "node:path";
 import { SIZE_LABEL_CPU, SIZE_LABEL_MEM, assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
+import { LAYOUTS } from "./job-layout.mjs";
 import { CGROUP_PARENT, CPU_SHARES_MAX, CPU_SHARES_MIN } from "./job-size.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
@@ -165,6 +166,10 @@ export const DOCKER_EXTRA_FORBIDDEN = [
 	// The job user is a spec field (issue #341). Here so a repeat cannot override it with uid 0.
 	"--user",
 	"-u",
+	// Issue #683: the builder pins the working directory (see `--workdir=` in `argsFromSpec`). A repeat would start the
+	// job outside its workspace, where a relative path the agent writes lands in the image's own tree.
+	"--workdir",
+	"-w",
 ];
 
 /**
@@ -331,6 +336,12 @@ function argsFromSpec(spec, { userns }) {
 		args.push("-v", `${m.host}:${m.container}${options.length > 0 ? `:${options.join(",")}` : ""}`);
 	}
 
+	// Issue #683: the job starts in its workspace mount because the ARGV says so, not because the image's WORKDIR
+	// happens to match. The shipped image's WORKDIR is now /sandbox (a copying venue's writable tree, image/Dockerfile),
+	// so without this a binding venue's job would start in an empty /sandbox and every relative path the agent writes
+	// would land outside the repository it was asked to change. A binding venue always uses the `mounts` layout. An
+	// older image, whose WORKDIR was /workspace, starts exactly where it did.
+	args.push(`--workdir=${LAYOUTS.mounts.workspace}`);
 	args.push(spec.image);
 	return args;
 }

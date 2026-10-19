@@ -97,6 +97,22 @@ else
 	ok "dev.pi-dispatch.forges ($declared) matches the CLIs actually installed"
 fi
 
+# Issue #683: the binaries the image says may need the network, at their real paths, for a venue whose egress policy
+# names executables (issue #684 generates it). Each entry must be an absolute path to a regular file that is its own
+# realpath: such a policy matches the executable the kernel ran, so a symlink or a moved binary would match nothing and
+# the job would lose the network with no word why. Absent is no claim, and a venue that needs the list refuses it.
+net_binaries=$(docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.net-binaries"}}' "$IMAGE_REF" 2>/dev/null)
+if [ -z "$net_binaries" ] || [ "$net_binaries" = "<no value>" ]; then
+	ok "no dev.pi-dispatch.net-binaries label -- the image makes no claim, and a venue that needs one refuses the image"
+else
+	for bin in $(echo "$net_binaries" | tr ',' ' '); do
+		case "$bin" in /*) ;; *) fail "dev.pi-dispatch.net-binaries names '$bin', which is not an absolute path" ;; esac
+		docker run --rm --entrypoint sh "$IMAGE_REF" -c '[ -f "$1" ] && [ ! -L "$1" ] && [ "$(readlink -f "$1")" = "$1" ]' sh "$bin" >/dev/null 2>&1 \
+			|| fail "dev.pi-dispatch.net-binaries names '$bin', which is not a regular file at its own real path in the image -- a policy naming it would match nothing"
+	done
+	ok "dev.pi-dispatch.net-binaries ($net_binaries) are regular files at their real paths"
+fi
+
 # THE CAPABILITIES LABEL MUST NOT LIE EITHER, and this one guards a quieter failure than the forge check
 # does. `replicas` (REQ-REPLICA-RUNS) tells the worker that this image's baked safety floor knows a replica
 # commits to `pi/issue-<n>-r<i>`. An image whose HARD_RULES.md still hard-codes `pi/issue-<n>` would
@@ -420,6 +436,54 @@ PROBE
 					fail "/inbox is writable from inside. The agent could plant or withdraw a message in its own inbox."
 				fi
 				rm -rf "$inbox_dir"
+				;;
+			sandboxLayout)
+				# Issue #683. Two claims. First, the runner reads PI_JOB_LAYOUT and, under `sandbox`, finds its job under
+				# /sandbox: proved by the costCap job above run on that layout, its prompt mounted at /sandbox/job and nothing
+				# at /job, which must reach the same pre-call refusal (a runner reading /job would exit "missing job input").
+				layout_job=$(mktemp -d)
+				layout_ws=$(mktemp -d)
+				echo "Reply with the single word ok." >"$layout_job/prompt.md"
+				chmod -R a+rX "$layout_job"
+				chmod 0777 "$layout_ws"
+				layout_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$layout_job:/sandbox/job:ro" -v "$layout_ws:/sandbox/workspace" --workdir /sandbox/workspace \
+					-e PI_JOB_LAYOUT=sandbox -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 \
+					"$IMAGE_REF" 2>&1) && layout_code=0 || layout_code=$?
+				layout_exit=$(echo "$layout_out" | grep '"event":"exit"' | tail -1)
+				[ "$layout_code" = 2 ] && echo "$layout_exit" | grep -q '"reason":"cost-cap"' \
+					|| { rm -rf "$layout_job" "$layout_ws"; fail "the image declares 'sandboxLayout' but a job on PI_JOB_LAYOUT=sandbox did not find its prompt under /sandbox/job (exit $layout_code: $layout_exit)"; }
+				# Second, /opt/pi-dispatch/pi-landlock confines every write of the tree it starts to the --rw paths. Where the
+				# kernel has no Landlock (Docker Desktop's LinuxKit, measured) the helper must refuse to run anything (126,
+				# "Landlock is unavailable"): fail closed, never start the runner unconfined. VERIFY_REQUIRE_LANDLOCK=1 (the
+				# image job in CI) turns that host into a failure, because there the enforcement itself must be proved.
+				ll_out=$(docker run --rm --cap-drop=ALL --security-opt no-new-privileges --entrypoint /opt/pi-dispatch/pi-landlock "$IMAGE_REF" \
+					--rw /tmp -- /bin/sh -c 'exit 0' 2>&1) && ll_code=0 || ll_code=$?
+				if [ "$ll_code" = 126 ] && echo "$ll_out" | grep -q "Landlock is unavailable"; then
+					rm -rf "$layout_job" "$layout_ws"
+					[ "${VERIFY_REQUIRE_LANDLOCK:-0}" = 1 ] && fail "VERIFY_REQUIRE_LANDLOCK=1 but this host's kernel has no Landlock, so pi-landlock's confinement cannot be proved here"
+					echo "  note this host's kernel has no Landlock: pi-landlock refused to run anything (exit 126), which is the"
+					echo "       fail-closed half; its confinement is proved on a host with Landlock (the image job in CI)."
+				elif [ "$ll_code" = 0 ]; then
+					chmod 0777 "$layout_job"
+					# The control: the same write WITHOUT the helper must succeed, else the refusal below would prove nothing.
+					docker run --rm --cap-drop=ALL -v "$layout_job:/sandbox/job" --entrypoint sh "$IMAGE_REF" -c 'echo control > /sandbox/job/control' 2>/dev/null \
+						|| { rm -rf "$layout_job" "$layout_ws"; fail "the control write to a writable /sandbox/job failed, so the pi-landlock check would prove nothing"; }
+					# Judged on the host, by what changed in the directories, not by the shell's exit status.
+					docker run --rm --cap-drop=ALL --security-opt no-new-privileges -v "$layout_job:/sandbox/job" -v "$layout_ws:/sandbox/workspace" \
+						--entrypoint /opt/pi-dispatch/pi-landlock "$IMAGE_REF" --rw /sandbox/workspace --rw /dev/null -- /bin/sh -c \
+						'echo planted > /sandbox/job/planted; rm -f /sandbox/job/prompt.md; mv /sandbox/job/control /sandbox/workspace/stolen; /opt/pi-dispatch/pi-landlock --rw / -- /bin/sh -c "echo widened > /sandbox/job/widened"; echo ok > /sandbox/workspace/ok' >/dev/null 2>&1 || true
+					if [ -e "$layout_job/planted" ] || [ -e "$layout_job/widened" ] || [ ! -e "$layout_job/prompt.md" ] || [ ! -e "$layout_job/control" ]; then
+						rm -rf "$layout_job" "$layout_ws"
+						fail "pi-landlock let the tree it starts write, remove or move a file under /sandbox/job. The agent could rewrite its own job inputs on a copying venue."
+					fi
+					[ -e "$layout_ws/ok" ] || { rm -rf "$layout_job" "$layout_ws"; fail "pi-landlock refused a write under a --rw path (/sandbox/workspace), so a job could not write its own workspace"; }
+					rm -rf "$layout_job" "$layout_ws"
+				else
+					rm -rf "$layout_job" "$layout_ws"
+					fail "pi-landlock neither ran a confined command nor refused for want of Landlock (exit $ll_code: $ll_out)"
+				fi
 				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac

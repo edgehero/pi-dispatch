@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { DefaultResourceLoader, getAgentDir, loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
+import { LAYOUT } from "./layout.mjs";
 import { extensionEntryName, isUnderAnyRoot, owningRoot, partitionAdminExtensions } from "./packages.mjs";
 
 /** Where the image bakes the guardrails. Outside agentDir, on purpose -- see buildResourceLoader. */
@@ -11,7 +12,7 @@ export const GUARDRAILS_PATH = "/opt/pi-dispatch/HARD_RULES.md";
 export const OUTBOX_PROTOCOL_PATH = "/opt/pi-dispatch/OUTBOX_PROTOCOL.md";
 
 /** Read-write mount a local job receives; its presence is what makes the outbox protocol relevant. */
-export const OUTBOX_MOUNT = "/outbox";
+export const OUTBOX_MOUNT = LAYOUT.outbox;
 
 /** Where the image bakes the portfolio protocol (issue #505). Documentation for the plan a portfolio job may write. */
 export const PORTFOLIO_PROTOCOL_PATH = "/opt/pi-dispatch/PORTFOLIO_PROTOCOL.md";
@@ -20,10 +21,10 @@ export const PORTFOLIO_PROTOCOL_PATH = "/opt/pi-dispatch/PORTFOLIO_PROTOCOL.md";
  * The snapshot the worker writes for a portfolio job only (INT-CONTAINER-JOB-INPUTS, issue #505); its presence is what
  * makes the portfolio protocol relevant. On the /job:ro bind that already exists, so no mount says it.
  */
-export const PORTFOLIO_SNAPSHOT_PATH = "/job/portfolio.json";
+export const PORTFOLIO_SNAPSHOT_PATH = `${LAYOUT.job}/portfolio.json`;
 
 /** Read-only mount the worker materialises the project's .pi/ into, from the default-branch SHA. */
-export const JOB_PI_DIR = "/job/pi";
+export const JOB_PI_DIR = `${LAYOUT.job}/pi`;
 
 /**
  * Where a trigger's INJECTED skills land (REQ-PER-TRIGGER-SKILLS, issue #60). Operator-authored, copied
@@ -38,16 +39,16 @@ export const JOB_PI_DIR = "/job/pi";
  * not in this container and this file is not on that host, so the duplication is forced. CHANGE BOTH, IN
  * THE SAME COMMIT -- the same discipline ADMIN_EXTENSION_RE carries, and each side pins the literal.
  */
-export const TRIGGER_SKILLS_DIR = "/job/trigger-skills";
+export const TRIGGER_SKILLS_DIR = `${LAYOUT.job}/trigger-skills`;
 
 /**
  * Read-only mount of the operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global
  * skills, and a global persona from the operator's own ~/.pi/agent, present only when configured. It is
  * operator deploy-time config -- the same trust class as the baked floor -- layered UNDER each repo's .pi/.
  */
-export const GLOBAL_PI_DIR = "/opt/pi-global";
+export const GLOBAL_PI_DIR = LAYOUT.global;
 
-export const WORKSPACE = "/workspace";
+export const WORKSPACE = LAYOUT.workspace;
 
 function readIfExists(path) {
 	return existsSync(path) ? readFileSync(path, "utf8") : undefined;

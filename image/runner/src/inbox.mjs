@@ -1,3 +1,4 @@
+import { LAYOUT } from "./layout.mjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import { configError } from "./outcome.mjs";
@@ -92,7 +93,7 @@ import { configError } from "./outcome.mjs";
  * Logs carry ids, modes, sources and counts, never the text.
  */
 
-export const INBOX_DIR = "/inbox";
+export const INBOX_DIR = LAYOUT.inbox;
 export const INBOX_FACTORY = "job-inbox";
 export const INBOX_CUSTOM_TYPE = "pi-dispatch-inbox";
 export const INBOX_FILE_PATTERN = /^\d{6}-([0-9a-f]{32})\.json$/;

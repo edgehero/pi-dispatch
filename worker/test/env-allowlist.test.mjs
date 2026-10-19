@@ -1452,3 +1452,11 @@ test("PI_EXIT_AUTH names the stdin channel only when run-container hands a key o
 	assert.equal(mod.buildContainerEnv({ ...secretsBase, secrets: { PI_EXIT_AUTH: "off" }, exitAuth: true }).PI_EXIT_AUTH, "stdin");
 	assert.ok(CONTAINER_ENV_NAMES.has("PI_EXIT_AUTH"), "reserved, so run.secrets cannot bind it");
 });
+
+test("PI_JOB_LAYOUT (#683): written only for a copying venue's sandbox layout, absent on a binding one, refused otherwise", { skip }, () => {
+	assert.equal(mod.buildContainerEnv(secretsBase).PI_JOB_LAYOUT, undefined, "the default is mounts, and mounts writes nothing (an undefined value emits no -e)");
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, layout: "mounts" }).PI_JOB_LAYOUT, undefined);
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, layout: "sandbox" }).PI_JOB_LAYOUT, "sandbox");
+	for (const layout of ["Sandbox", "", null, "/sandbox"]) assert.throws(() => mod.buildContainerEnv({ ...secretsBase, layout }), /unknown job layout/, String(layout));
+	assert.ok(CONTAINER_ENV_NAMES.has("PI_JOB_LAYOUT"), "reserved, so run.secrets cannot bind it");
+});

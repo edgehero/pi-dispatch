@@ -29,7 +29,8 @@ test("the loader reads the protocols from the paths the Dockerfile copies them t
 	const loader = read("../src/loader.mjs");
 	assert.match(loader, /export const OUTBOX_PROTOCOL_PATH = "\/opt\/pi-dispatch\/OUTBOX_PROTOCOL\.md";/);
 	assert.match(loader, /export const PORTFOLIO_PROTOCOL_PATH = "\/opt\/pi-dispatch\/PORTFOLIO_PROTOCOL\.md";/);
-	assert.match(loader, /export const PORTFOLIO_SNAPSHOT_PATH = "\/job\/portfolio\.json";/);
+	// Issue #683: the snapshot sits in the job dir of the container's layout, `/job` on a binding venue (layout.test.mjs).
+	assert.match(loader, /export const PORTFOLIO_SNAPSHOT_PATH = `\$\{LAYOUT\.job\}\/portfolio\.json`;/);
 	assert.match(loader, /\[guardrails, outboxProtocol, portfolioProtocol, globalPersona, projectPersona\]/, "the order is the contract");
 });
 

@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { LAYOUT, LAYOUT_ENV, layoutName } from "./layout.mjs";
 import { configError } from "./outcome.mjs";
 
 /**
@@ -19,6 +20,9 @@ import { configError } from "./outcome.mjs";
 // here that the worker does NOT write. Nothing puts them on a container by default, so a bare .env line
 // sets them on the host and changes nothing in here; PI_FORWARD_ENV is what carries a host value in.
 export function parseRunnerEnv(env) {
+	// First, before any other read: every path this runner uses comes from the layout (issue #683), and a value the
+	// table does not hold must not leave the job reading the default tree's files.
+	const layout = parseLayout(env);
 	const provider = requireEnv(env, "PI_PROVIDER");
 	const model = requireEnv(env, "PI_MODEL");
 	const maxTurns = parsePositiveInt(env, "PI_MAX_TURNS");
@@ -71,7 +75,9 @@ export function parseRunnerEnv(env) {
 		// INT-CONTAINER-JOB-INPUTS (issue #646): the trigger's run.steer -- whether the job reads the operator's and the
 		// forge's messages from the read-only /inbox mount and hands them to the running agent (src/inbox.mjs). `false`
 		// (the default) is byte-identical to every job before the feature.
-		steer: parseSteer(env, "PI_STEER"),
+		steer: parseSteerForLayout(parseSteer(env, "PI_STEER"), layout),
+		// Issue #683: which file layout this container uses, `mounts` or `sandbox` (layout.mjs).
+		layout,
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -219,6 +225,22 @@ function parseReportProgress(env, name) {
 	if (raw === undefined || raw === "") return false;
 	if (raw === "1") return true;
 	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to offer report_progress, or leave it unset)`);
+}
+
+// env-internal PI_JOB_LAYOUT: the worker's own per-job input (issue #683), the name of a layout.mjs table row, or absent
+// for `mounts`. Refused when it names no row: the paths every later read uses come from it.
+function parseLayout(env) {
+	const layout = layoutName(env);
+	if (layout === null) throw configError(`invalid ${LAYOUT_ENV}: ${JSON.stringify(env.PI_JOB_LAYOUT)} (want one of: mounts, sandbox)`);
+	return layout;
+}
+
+// A steered job on the sandbox layout has no inbox to read (layout.mjs: a copying venue has no read-only mount, and its
+// stdin channel is issue #686's). The worker never sends PI_STEER there (`steerSkipped: "venue-copies"`), so one that
+// arrives is a worker regression, refused rather than run with every message an operator sends waiting unread.
+function parseSteerForLayout(steer, layout) {
+	if (steer && layout === "sandbox") throw configError("invalid PI_STEER: the sandbox layout has no inbox to steer through");
+	return steer;
 }
 
 // env-internal PI_STEER: the worker's own per-job input (issue #646), "1" or absent. Strict for parseAwaitInput's
@@ -415,8 +437,8 @@ function parseSessionFile(env, name) {
 	if (raw.split("/").includes("..")) {
 		throw configError(`invalid ${name}: ${JSON.stringify(raw)} (must not contain a ".." segment)`);
 	}
-	if (raw === "/workspace" || raw.startsWith("/workspace/")) {
-		throw configError(`invalid ${name}: ${JSON.stringify(raw)} (must not be under /workspace -- the transcript would land in the worktree the agent commits from)`);
+	if (raw === LAYOUT.workspace || raw.startsWith(`${LAYOUT.workspace}/`)) {
+		throw configError(`invalid ${name}: ${JSON.stringify(raw)} (must not be under ${LAYOUT.workspace} -- the transcript would land in the worktree the agent commits from)`);
 	}
 	return raw;
 }
@@ -517,7 +539,7 @@ export function readPrompt(path, { readFile = (p) => readFileSync(p, "utf8"), ui
 
 // Mount roots a HOME must never sit under: pi writes auth.json and every CLI writes its caches into HOME, and a
 // HOME inside a mount lands them in the operator's folder, the job inputs or the transcript store.
-export const HOME_FORBIDDEN_ROOTS = Object.freeze(["/workspace", "/job", "/outbox", "/session"]);
+export const HOME_FORBIDDEN_ROOTS = Object.freeze([LAYOUT.workspace, LAYOUT.job, LAYOUT.outbox, LAYOUT.session]);
 
 /**
  * The advisory lines a job's mounts earn, as `[event, fields]` pairs for the caller to log (issue #341).
@@ -541,7 +563,7 @@ export function mountAdvisories({ env = process.env, uid = process.getuid?.(), a
 	// read here only to report whether it is usable, never chosen.
 	const home = env.HOME;
 	const out = [];
-	for (const [path, event] of [["/workspace", "workspace_not_writable"], ["/outbox", "outbox_not_writable"]]) {
+	for (const [path, event] of [[LAYOUT.workspace, "workspace_not_writable"], [LAYOUT.outbox, "outbox_not_writable"]]) {
 		const code = accessCode(path, constants.W_OK);
 		if (code !== null && code !== "ENOENT") out.push([event, { path, uid, code }]);
 	}

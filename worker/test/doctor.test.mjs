@@ -9789,6 +9789,7 @@ const podmanProbeArgv = (slug, url, script = egressCanaryScript(url)) => [
 	"NO_PROXY=localhost,127.0.0.1",
 	"-e",
 	"NODE_USE_ENV_PROXY=1",
+	"--workdir=/workspace",
 	"pi-job:latest",
 	"-e",
 	script,
