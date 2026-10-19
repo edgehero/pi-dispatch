@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installedUnitPaths, readUnitSeam, readUnitUser, runService, TEMPLATE_PINS } from "../src/service.mjs";
+import { findOnPath, installedUnitPaths, readUnitSeam, readUnitUser, runService, TEMPLATE_PINS } from "../src/service.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -104,6 +104,7 @@ function harness({
 	cwd = DEPLOY_AT,
 	moduleDir = WORKER_SRC,
 	resolveReceiver = () => RECEIVER_START,
+	extra = {},
 } = {}) {
 	const calls = [];
 	const buf = [];
@@ -140,6 +141,9 @@ function harness({
 			mkdirSync: (p) => mkdirs.push(p),
 			unlinkSync: (p) => store.delete(p),
 		},
+		// Never this shell's PATH: a test that asks where a CLI is says so.
+		findBin: () => null,
+		...extra,
 	};
 	return { run: () => runService(argv, deps), calls, store, mkdirs, text: () => buf.join(""), errText: () => errBuf.join("") };
 }
@@ -1445,4 +1449,101 @@ test("readUnitUser reads a systemd unit's User= and nothing else, so doctor can 
 		assert.equal(readUnitUser(text, platform), null, `${platform}: ${JSON.stringify(text)}`);
 	}
 	assert.equal(readUnitUser("[Service]\n# User=nobody\nUser=pi\n", "linux"), "pi", "a commented line is not the value");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The openshell venues (issue #707): the worker unit is ordered after the gateway's own user unit, --system is refused
+// as podman's is, the plist's PATH carries the CLI's directory, and Windows (no gateway ships for it) is refused.
+// ---------------------------------------------------------------------------------------------------
+
+test("install linux --user, openshell in .env: Wants= the gateway's user unit and no After= on it, the Description names it, docker.service kept for a docker engine, ExecStart and WorkingDirectory as ever (#707)", async () => {
+	const h = harness({ platform: "linux", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\n" } });
+	assert.equal(await h.run(), 0, h.errText());
+	const unit = h.store.get(USER_UNIT);
+	assert.match(unit, /\nWants=network-online\.target\n# Added by `pi-dispatch service install` for the openshell venue \(issue #707\): the gateway's own user unit, pulled\n# in but NOT ordered \(its unit is After=default\.target, so an After= here is an ordering cycle\)\.\nWants=openshell-gateway\.service\n/);
+	assert.doesNotMatch(unit, /^After=.*openshell-gateway/m, "the 0.1.4 unit is After=default.target: an After= on it is an ordering cycle that deletes the worker's start job (#715 review)");
+	assert.match(unit, /^Description=pi-dispatch worker \(drains the job queue on the host; launches job containers via an OpenShell gateway on docker\)$/m);
+	assert.match(unit, /^After=network-online\.target docker\.service$/m, "the gateway's engine is docker, so docker.service still orders it");
+	assert.deepEqual(readUnitSeam(unit, "linux").deployDir, DEPLOY_AT, "WorkingDirectory as ever, so doctor still finds this folder's unit");
+	assert.ok(unit.includes(`ExecStart=/fake/node/bin/node ${CLI_PATH} worker`));
+	assert.match(h.text(), /pi-dispatch-worker\.service Wants= openshell-gateway\.service \(not After=/);
+	// Beside local, the same lines and both runtimes named.
+	const both = harness({ platform: "linux", argv: ["render"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=local,openshell-bind\n" } });
+	assert.equal(await both.run(), 0);
+	assert.match(both.text(), /launches job containers via docker and an OpenShell gateway on docker\)$/m);
+	assert.match(both.text(), /^Wants=openshell-gateway\.service$/m);
+	assert.doesNotMatch(both.text(), /^After=.*openshell-gateway/m);
+	// Not blessed: byte-identical to the plain render.
+	const plain = harness({ platform: "linux", argv: ["render"] });
+	const stray = harness({ platform: "linux", argv: ["render"], files: { [`${DEPLOY_AT}/.env`]: "PI_OPENSHELL_ENGINE=podman\n" } });
+	await plain.run();
+	await stray.run();
+	assert.equal(stray.text(), plain.text(), "a value left in .env of a deployment that never chose the venue changes nothing");
+});
+
+test("install linux --system with an openshell venue is refused, naming the gateway's user unit; an unparseable list is still refused (#707)", async () => {
+	for (const argv of [["install", "--system"], ["render", "--system"]]) {
+		const h = harness({ platform: "linux", argv, files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\n" } });
+		assert.equal(await h.run(), 1);
+		assert.match(h.errText(), /lists an openshell venue, and its gateway runs as openshell-gateway\.service, a unit of the worker account's OWN user manager/);
+		assert.equal(h.calls.length, 0);
+		assert.ok(![...h.store.keys()].some((p) => p.startsWith("/faketmp")), "nothing staged");
+	}
+	const bad = harness({ platform: "linux", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell,nonsense\n" } });
+	assert.equal(await bad.run(), 1);
+	assert.match(bad.errText(), /nonsense/);
+	assert.equal(bad.store.has(USER_UNIT), false);
+	const engine = harness({ platform: "linux", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=lxc\n" } });
+	assert.equal(await engine.run(), 1);
+	assert.match(engine.errText(), /PI_OPENSHELL_ENGINE must be docker or podman/);
+});
+
+test("install darwin with an openshell venue: the plist's PATH carries the resolved openshell directory, and the note names brew services (#707)", async () => {
+	const asked = [];
+	const h = harness({ platform: "darwin", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\n" }, plan: { launchctl: 0 }, extra: { findBin: (name) => (asked.push(name), "/opt/homebrew/bin/openshell") } });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.ok(asked.includes("openshell"));
+	assert.match(h.store.get(AGENT_PLIST), /<key>PATH<\/key>\n\t\t<string>\/fake\/node\/bin:\/opt\/homebrew\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/);
+	assert.match(h.text(), /the plist's PATH carries \/opt\/homebrew\/bin[^\n]*`brew services start openshell`/);
+	// Not found: said, and the PATH is the plain one.
+	const missing = harness({ platform: "darwin", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\n" }, plan: { launchctl: 0 } });
+	assert.equal(await missing.run(), 0);
+	assert.match(missing.store.get(AGENT_PLIST), /<string>\/fake\/node\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/);
+	assert.match(missing.text(), /⚠ the openshell venue: `openshell` is not on this shell's PATH/);
+	// No openshell venue: the seam is never asked, and the plist is as before.
+	const none = harness({ platform: "darwin", argv: ["render"], extra: { findBin: () => assert.fail("asked with no openshell venue") } });
+	assert.equal(await none.run(), 0);
+});
+
+test("install win32 with an openshell venue is refused before nssm is asked anything: OpenShell 0.1.4 ships no Windows gateway (#707)", async () => {
+	const h = harness({ platform: "win32", cwd: "C:\\pi", argv: ["install"], files: { "C:\\pi/.env": "PI_BACKENDS=openshell\n", "C:\\pi\\.env": "PI_BACKENDS=openshell\n" } });
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /ships no Windows build of its CLI or gateway/);
+	assert.equal(h.calls.length, 0);
+});
+
+test("findOnPath: the first executable regular file of that name on PATH; relative and empty entries, directories and non-executables are skipped (#715 review)", () => {
+	const exec = new Set(["/b/openshell", "/c/openshell"]);
+	const files = new Set(["/a/openshell", "/b/openshell", "/c/openshell"]);
+	const seams = { access: (p) => { if (!exec.has(p) && p !== "/d/openshell") throw new Error("EACCES"); }, isFile: (p) => files.has(p) };
+	assert.equal(findOnPath("openshell", "rel:/a::/d:/b:/c", seams), "/b/openshell", "/a's is not executable, /d's is a directory, rel and empty are skipped");
+	assert.equal(findOnPath("openshell", "", seams), null);
+	assert.equal(findOnPath("openshell", undefined, seams), null);
+});
+
+test("the plist: byte-identical without an openshell venue, node in /usr/bin included; a directory XML would misread is left out and said (#715 review)", async () => {
+	const at = (extra) => {
+		const h = harness({ platform: "darwin", argv: ["render"], extra });
+		return h.run().then(() => h.text());
+	};
+	assert.match(await at({ execPath: "/usr/bin/node" }), /<string>\/usr\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/, "as it always rendered");
+	const odd = harness({ platform: "darwin", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\n" }, plan: { launchctl: 0 }, extra: { findBin: () => "/opt/a&b<c/openshell" } });
+	assert.equal(await odd.run(), 0);
+	assert.match(odd.store.get(AGENT_PLIST), /<string>\/fake\/node\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/);
+	assert.doesNotMatch(odd.store.get(AGENT_PLIST), /a&b/);
+	assert.match(odd.text(), /which the plist cannot carry/);
+	// The release formula is named, since homebrew-core's defines no service.
+	const named = harness({ platform: "darwin", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\n" }, plan: { launchctl: 0 }, extra: { findBin: () => "/opt/homebrew/bin/openshell" } });
+	await named.run();
+	assert.match(named.text(), /brew install https:\/\/github\.com\/NVIDIA\/OpenShell\/releases\/download\/v0\.1\.4\/openshell\.rb/);
 });

@@ -7,6 +7,34 @@
 /** The OpenShell release this adapter was measured on: doctor's floor and ceiling (issue #683), one place. */
 export const OPENSHELL_TESTED_VERSION = "0.1.4";
 
+/** Where that release is downloaded, for every line that tells an operator to install it (`up` installs nothing). */
+export const OPENSHELL_RELEASE_URL = `https://github.com/NVIDIA/OpenShell/releases/tag/v${OPENSHELL_TESTED_VERSION}`;
+
+/**
+ * The macOS install that gives `brew services start openshell` something to start (review round 1 of #715): NVIDIA's
+ * release asset `openshell.rb` carries the `service do` block; homebrew-core's `openshell` formula has none.
+ */
+export const OPENSHELL_BREW_INSTALL = `brew install https://github.com/NVIDIA/OpenShell/releases/download/v${OPENSHELL_TESTED_VERSION}/openshell.rb`;
+
+/**
+ * The local gateway as OpenShell 0.1.4 sets it up (issue #707): it listens on loopback at 17670, the deb ships it as the
+ * systemd USER unit `openshell-gateway.service`, and the conformance lane registers it with `openshell gateway add
+ * https://127.0.0.1:17670 --local --name openshell`. `up` offers that registration and `service install` orders the worker
+ * after that unit, so the three are spelled once.
+ */
+export const OPENSHELL_LOCAL_GATEWAY_HOST = "127.0.0.1";
+export const OPENSHELL_LOCAL_GATEWAY_PORT = 17670;
+export const OPENSHELL_LOCAL_GATEWAY_URL = `https://${OPENSHELL_LOCAL_GATEWAY_HOST}:${OPENSHELL_LOCAL_GATEWAY_PORT}`;
+export const OPENSHELL_GATEWAY_UNIT = "openshell-gateway.service";
+export const OPENSHELL_DEFAULT_GATEWAY_NAME = "openshell";
+
+/**
+ * Why the openshell venues are refused on Windows (issue #707): the pinned release's assets (checked 2026-10-19 with
+ * `gh api repos/NVIDIA/OpenShell/releases/tags/v0.1.4`) carry the CLI and the gateway for Linux (deb, rpm, snap, tarballs)
+ * and macOS (aarch64 tarballs, a Homebrew formula) and nothing for Windows, so there is no gateway on this host to set up.
+ */
+export const OPENSHELL_NO_WINDOWS = `OpenShell ${OPENSHELL_TESTED_VERSION}, the release the openshell venue was measured on, ships no Windows build of its CLI or gateway (its release carries Linux and macOS ones only), so the openshell venue cannot run on this host. Run this deployment on Linux or macOS, or remove openshell from PI_BACKENDS`;
+
 /**
  * The gateway's answer to "where are you" (`openshell status -o json`), judged: `{ connected, local, server, version }`.
  * `status` exits 0 even when the gateway is down (measured), so the JSON's own `status` decides `connected`. Local means

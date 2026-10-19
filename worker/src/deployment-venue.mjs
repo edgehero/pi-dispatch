@@ -4,10 +4,13 @@
  * different venue than the service they described. The deployment's `.env` is read with `readStackKeys`, exactly as
  * `service install` reads it, and a key this shell sets differently stops the command, since the service runs the file.
  */
-import { parseBackendList } from "./backends.mjs";
+import { parseBackendList, venuesOf } from "./backends.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { envValueShown } from "./env-file.mjs";
 import { STACK_KEYS, VALKEY_SHARED_KEY, readStackKeys, readValkeyKeys } from "./podman-stack.mjs";
+
+/** The venue keys only the openshell venues read (issue #707). */
+const OPENSHELL_KEYS = Object.freeze(["PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY"]);
 
 /** How each command says what a shell/file disagreement would make it do, the clause before "while the service ...". */
 const COMMAND_SAYS = Object.freeze({
@@ -39,10 +42,16 @@ export function deploymentVenueEnv({ env, fs, envPath, platform, command = "up",
 			text = fs.readFileSync(envPath);
 		} catch (err) {
 			// Said rather than silent (round 2 nit): the venue then comes from this shell alone.
-			notes.push(`${envPath} could not be read (${err?.message}), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone`);
+			notes.push(`${envPath} could not be read (${err?.message}), so the venue keys (${STACK_KEYS.join(", ")}) come from this shell alone`);
 		}
 		if (text !== null) {
-			const read = readStackKeys(text, { loader, path: envPath });
+			// The openshell keys are refused only where an openshell venue is blessed (review round 2 of #715): the file's
+			// PI_BACKENDS says so to the reader itself, this shell's is said here.
+			let shellOpenshell = false;
+			try {
+				shellOpenshell = typeof env.PI_BACKENDS === "string" && venuesOf({ PI_BACKENDS: env.PI_BACKENDS }).openshellUsed;
+			} catch {}
+			const read = readStackKeys(text, { loader, path: envPath, openshellBlessed: shellOpenshell });
 			if (read.error && linux) return { error: read.error };
 			if (read.error) notes.push(`${read.error}; off Linux the podman venue refuses this host anyway, so this pass reads the venue from this shell`);
 			else keys = read.keys;
@@ -57,7 +66,7 @@ export function deploymentVenueEnv({ env, fs, envPath, platform, command = "up",
 		if (typeof env[key] === "string") {
 			// Compared as the worker READS them (round 3, D4), not as strings: ` podman` and `podman,podman` are the list
 			// `podman`, and refusing them sent an operator to reconcile two values that already agree.
-			if (venueKeyMeaning(key, env[key]) !== venueKeyMeaning(key, keys[key])) conflicts.push(`${key} is ${quotedShown(env[key])} in this shell and ${quotedShown(keys[key])} in ${envPath}`);
+			if (venueKeyMeaning(key, env[key]) !== venueKeyMeaning(key, keys[key])) conflicts.push({ key, text: `${key} is ${quotedShown(env[key])} in this shell and ${quotedShown(keys[key])} in ${envPath}` });
 			continue;
 		}
 		merged[key] = keys[key];
@@ -66,8 +75,12 @@ export function deploymentVenueEnv({ env, fs, envPath, platform, command = "up",
 	// A KNOWN disagreement is a refusal (round 2, E5), not a warning: this pass would stand up one venue's stack and the
 	// service installed next would run the other. The file is what the service runs, so it is the one to change unless
 	// the shell's value was a one-off.
-	if (conflicts.length > 0) {
-		return { error: `${conflicts.join("; ")}. ${COMMAND_SAYS[command] ?? COMMAND_SAYS.up} while the service runs the file's. Make them agree: change ${envPath} (what the service reads), or unset the key in this shell` };
+	// The openshell venues' two keys disagree only where one of those venues is blessed (review round 1 of #715): elsewhere
+	// neither the worker nor any command reads them, so a stray value in one place is no reason to stop.
+	const openshellBlessed = venuesOf(merged).openshellUsed;
+	const said = conflicts.filter((c) => openshellBlessed || !OPENSHELL_KEYS.includes(c.key)).map((c) => c.text);
+	if (said.length > 0) {
+		return { error: `${said.join("; ")}. ${COMMAND_SAYS[command] ?? COMMAND_SAYS.up} while the service runs the file's. Make them agree: change ${envPath} (what the service reads), or unset the key in this shell` };
 	}
 	return { env: merged, fromFile, notes };
 }
@@ -146,6 +159,10 @@ function venueKeyMeaning(key, value) {
 	try {
 		if (key === "PI_BACKENDS") return `list:${parseBackendList(value).join(",")}`;
 		if (key === "PI_EGRESS") return `egress:${egressArmed({ PI_EGRESS: value }) ? "on" : "off"}`;
+		// Issue #707: the openshell venues' two keys, as `openshellFrom` reads them: an empty engine is docker, an empty
+		// gateway the CLI's active one. Not trimmed, as the worker trims neither.
+		if (key === "PI_OPENSHELL_ENGINE") return `engine:${value === "" ? "docker" : value}`;
+		if (key === "PI_OPENSHELL_GATEWAY") return `gateway:${value}`;
 		return `proxy:${egressProxyName({ PI_EGRESS_PROXY: value })}`;
 	} catch {
 		return `raw:${value}`;

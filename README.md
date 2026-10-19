@@ -177,6 +177,12 @@ turn on linger (`sudo loginctl enable-linger <account>`) so its services run wit
 refused (Podman machine on macOS and Windows, rootful or remote Podman on this venue, a root worker), is in
 [`docs/podman.md`](docs/podman.md).
 
+The NVIDIA OpenShell venue (`PI_BACKENDS=openshell`) is set up by the same two commands: `pi-dispatch up`
+checks its gateway (offering to start and register it, never to install OpenShell), puts the job image into
+the gateway's engine and starts no egress proxy, since the gateway's policy is that venue's egress control,
+and `pi-dispatch service install` makes the worker's unit start the gateway's own unit
+([`docs/backends.md`](docs/backends.md#the-openshell-venue)).
+
 ## Providers and models
 
 **pi-dispatch itself needs no AI key.** The queue, the caps, the containers and the panel run no model. The

@@ -1432,7 +1432,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   account's own store (issue #433), a loopback Valkey start (docker, and only while `local` is listed; `up` alone since
   issue #468, whose Valkey needs the deployment's password in the docker CLI's environment, which doctor hands no
   program, issue #471), an overlay
-  `auth.json` delete, an `import-pi` restage) is shown verbatim and runs only on an explicit y/N
+  `auth.json` delete, an `import-pi` restage, and on an `openshell` venue the start of its gateway and its loopback
+  registration, `up` alone, issue #707) is shown verbatim and runs only on an explicit y/N
   accept, defaulting to No, including on non-TTY stdin. **Shown but not prompted**, a tier `up` alone
   occupies (issue #357): filling a key that has NO VALUE in a `.env` that already exists. Every such
   write is printed as it happens and named again in the summary, and the reason it is not on the prompt
@@ -8391,7 +8392,13 @@ a tunnel.
   precisely the believed-in control `CONST-EGRESS-POLICY-IN-THE-ARGV` says is worse than a known-absent one,
   so the three words must stay told apart ON THE SCREEN: `enforced` is quiet, `asserted` renders as a
   warning that NAMES its asserter (`asserts` on the backend entry -- "not us" without "them" leaves an
-  operator nothing to go and check), and `absent` renders as a failure. An observation-gated word (#278)
+  operator nothing to go and check), and `absent` renders as a failure. **AMENDED 2026-10-19 (#707)**: `absent`
+  renders as a WARNING (`ok: false, warn: true`), still told apart by its own word and still FIRST, ahead of the gate.
+  The failure it was had a reason while no blessed venue declared anything absent; since the openshell venues one
+  does (`localFolders`, `pausable`), and the ✗ failed doctor, and with it `up`, on every such deployment for a
+  property it may not need. Whether a deployment needs it is the floor's to say: a `PI_BACKEND_FLOOR` naming the
+  property stays the ✗ (`PI_BACKEND_FLOOR is not met`) and the worker's boot refusal, both unchanged, and the warning's
+  fix says so. An observation-gated word (#278)
   renders quietly only while doctor's own reads show what the word needs (the docker CLI resolving this host for
   `credentialTransit`; since #345, the daemon's facts and this host's Podman files for `isolation` and `mountSet`);
   otherwise as `asserted`, for the endpoint by the operator, naming THIS SHELL's answer and pointing at the service's own (`worker_started.dockerEndpointLocal`),
@@ -10535,7 +10542,7 @@ a tunnel.
   `worker/src/env-file.mjs` -> `quotedRegions`, `envFileSystemdHazard`, `envFileLoadHazard`, `decodeEnvFile`,
   `SYSTEMD_HAZARD_SHAPES`, `updateEnvFile`, `envFileEditCheck`, `envFileEditRefusal`, `envFileValueLines`,
   `systemdReading`, `systemdUtf8`, `firstInvalidUtf8`; `worker/src/deployment-venue.mjs` -> `deploymentVenueEnv`; `worker/src/podman-stack.mjs` -> `STACK_VALUE_MAX`; `worker/src/doctor.mjs` -> `envFileKeys`;
-  `worker/src/service.mjs` -> `podmanVenue`, `runQuery`,
+  `worker/src/service.mjs` -> `deploymentVenue` (`podmanVenue` until issue #707), `runQuery`,
   `podmanStackFor`, `refusePodmanSystemScope`, `installLinuxUser`, `removeQuadlets`, `TEMPLATE_PINS`;
   `worker/src/up.mjs` -> `deploymentVenueEnv`, `podmanGate`, `podmanImageStep`, `podmanStackStep`; `worker/src/backends.mjs` ->
   `venuesOf`; `worker/src/doctor.mjs` -> `netnsKeeperCheck`; `deploy/pi-dispatch-*.container`, `deploy/pi-dispatch-*.network`;
@@ -10543,6 +10550,18 @@ a tunnel.
   `worker/test/helpers/systemd-env-parse.mjs`; `admin/src/setup-wizard.ts` -> `deploymentBackends`,
   `recordPodmanVenue`; `.github/workflows/deploy-lint.yml` (the `quadlet` job);
   `.github/scripts/podman-conformance.mjs` (`egressAcrossTeardowns`) and `.github/workflows/podman-conformance.yml`
+- **The openshell venue's Valkey on Podman (issue #707, AMENDED 2026-10-19)**: a deployment whose only venue is an
+  `openshell` one with `PI_OPENSHELL_ENGINE=podman` gets its queue from this same installer, the Valkey's two units
+  ALONE: `up` and `service install` call the stack step with `egress: false`, so `stackComponents` sees the policy
+  unarmed and plans no proxy and no keeper whatever `PI_EGRESS` says (the gateway's per-job policy is that venue's
+  egress control, and a proxy no job attaches to would only be a container to keep current). `decideValkey`,
+  `valkeyPasswordDecision`, the foreign-container rule, the user-bus and manager-environment refusals and the journal
+  are unchanged and apply as they do here. The worker unit is ordered after the Valkey's units as here
+  (`workerUnitDeps`, whose comment names the openshell venue for it), and pulls in the gateway's own unit without
+  being ordered after it (`DES-OPENSHELL-VENUE`). `STACK_KEYS` gains `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY`, which `readStackKeys`
+  reads in a second pass with the same checks and refuses (naming them) only where an openshell venue is blessed, by the
+  file's list or this shell's (review round 2 of #715); a shell and `.env` that set either differently stop `up` there.
+  Off Linux there is no Quadlet, so `up` says so and adds nothing.
 - **Traces to**: `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-FIRST-RUN-SETUP-WIZARD`,
   `DES-SERVICE-ENV-SETUP-SEAM`, `DES-CONCURRENCY-3`, `REQ-EGRESS-ALLOWLIST`, `REQ-QUEUE-BURST-NO-DROP`
 
@@ -11053,6 +11072,80 @@ a tunnel.
   UPSTREAM_BIND_WARNING · worker/src/backends.mjs -> BACKENDS["openshell-bind"], OPENSHELL_BIND_BACKEND,
   OPENSHELL_BACKENDS, venuesOf · worker/src/config.mjs -> openshellFrom · worker/src/start.mjs (both bundles, one
   reaper) · worker/src/doctor-openshell.mjs -> bindChecks · .github/scripts/openshell-bind-conformance.mjs.
+- **Setup (#707, AMENDED 2026-10-19)**: `up` and `service install` set the venues up, by ONE rule,
+  `openshellSetupOf(venues, env)` in `backends.mjs` beside `venuesOf`, which `up`, `service install`, `init`'s next
+  steps and doctor all ask, so they cannot disagree: the engine (`PI_OPENSHELL_ENGINE`, docker by default) is the
+  image store the gateway runs sandboxes from (`imageEngine`, null where `local` or `podman` already fills that same
+  store) and, where neither `local` nor `podman` is blessed, where Valkey runs (`valkeyEngine`). The squid egress proxy
+  is never started for these venues: every squid step keeps its `local` gate, and a test holds that an
+  openshell-on-docker host starts none.
+  - **`up`'s gate**, before anything is pulled: the engine (unless its own venue's gate asks it), the CLI's version,
+    the gateway's `status -o json` judged by `judgeGatewayStatus`, then `openshellBootVersions` over `up`'s own spawn
+    seam. Read-only unless an offer is accepted, each shown and asked (`--yes` accepts): the START of a gateway that does
+    not answer and whose port (`127.0.0.1:17670`) is free, `systemctl --user start openshell-gateway` on Linux (the user
+    unit the 0.1.4 deb ships, offered only where `systemctl --user cat` finds it) or `brew services start openshell` on
+    macOS (offered only where `brew services info openshell` answers: only NVIDIA's release formula, `brew install
+    https://github.com/NVIDIA/OpenShell/releases/download/v0.1.4/openshell.rb`, defines that service, and
+    homebrew-core's `openshell` has none), then a bounded wait (30 s, one status read a
+    second) until a registered gateway reads connected or an unregistered one's port answers; and the REGISTRATION of a
+    gateway that answers while the CLI names no server AND `openshell gateway list -o json` reads empty, `openshell gateway add https://127.0.0.1:17670 --local --name
+    openshell` (or the `PI_OPENSHELL_GATEWAY` name), the conformance lane's own command. A CLI with any registration, or
+    whose list cannot be read, gets that command as a fix and no offer, since what 0.1.4's `gateway add` does beside or
+    over an existing registration is not measured. Every read of the CLI is bounded (15 s), so a gateway that never
+    finishes its TLS handshake cannot hold `up`. A declined offer, a failed command, a CLI missing or
+    at another release (the pinned release's URL: `up` installs nothing), a gateway at another release or not on this
+    host: a ✗ with its fix and exit 1, before init when no other venue is blessed (the docker gate's rule), otherwise at
+    the end. Bind mode's three gateway settings are printed, never written. Windows is refused: the 0.1.4 release's
+    assets (checked 2026-10-19) hold Linux and macOS builds only. Then the image into `imageEngine` (docker's step, or
+    `podmanImageStep` without `podmanGate`, whose rootless job-user rule is the podman venue's), what it declares
+    (`sandboxLayout` a ✗ when missing for copy mode, `transcriptStderr` a ⚠), and Valkey: docker's block where
+    `valkeyEngine` is docker, the Quadlet Valkey alone where it is podman (`DES-PODMAN-STACK-AS-QUADLET-UNITS`). The
+    banner names the blessed venues and their engine instead of reading "not docker" as podman.
+  - **`service install`**: the venue read (`deploymentVenue`, the `.env` as the unit loads it, an unparseable list and
+    an engine the boot refuses both refused) carries the openshell setup. In user scope the worker unit gains
+    `Wants=openshell-gateway.service` (and NO `After=` on it, below) at the `Wants=network-online.target` anchor, its Description names the
+    gateway and its engine, and on Podman without `local` the template's `After=network-online.target docker.service`
+    loses `docker.service` (a pinned literal, `TEMPLATE_PINS`); `ExecStart` and `WorkingDirectory` are untouched, so
+    `readUnitSeam` holds. `--system` is refused as podman's is: the gateway is a user unit a system unit cannot pull in,
+    and the CLI keeps its registration under that account's config directory. On macOS the plist's PATH gains the
+    directory this shell finds `openshell` in (`findBin`, a seam; a directory holding a character the plist's XML would
+    misread is left out and said, `--env-setup`'s refusal for the same file; without the venue the PATH line is
+    byte-identical to before), and the note names `brew services start openshell` and the release formula. Windows is
+    refused before nssm is asked anything.
+  - **Doctor**: its Valkey fixes follow `valkeyEngine`; `CLI_SERVICE_KEYS` gains `openshell: XDG_CONFIG_HOME, HOME`
+    (where the CLI keeps its registrations; PATH is left out, since every shell sets it and the line would fire on every
+    run, and the CLI is named in that line only where an openshell venue is blessed); its Valkey owner judgement refuses
+    a root-held Valkey for an openshell venue on Podman as `up` does, and so do the worker's (`resolveWorkerValkey`) and
+    every client's (`valkeyContextFromKeys`, whose `.env` keys, `VALKEY_CONTEXT_KEYS`, and doctor's resolution carry the
+    engine; the boot hands the judgement `openshellUsed`, review round 2 of #715); and an installed user unit without `Wants=openshell-gateway.service`, or
+    WITH `After=` on it (the cycle below), is a ⚠ naming `service install --force` (a system unit a ⚠ of its own). A ⚠,
+    not a ✗: a gateway down at boot is only logged.
+  - **Rejected**: installing OpenShell from `up` (the installer, and its trust, is the operator's choice, and a deb, a
+    snap, an rpm and a formula are four); editing `gateway.toml` for bind mode (the gateway's configuration is the
+    operator's, and a restart of it cuts every running sandbox); a `dockerUsed || engine === "docker"` gate on the squid
+    steps (it would start a proxy no openshell job attaches to); `After=openshell-gateway.service`, the obvious companion
+    of the `Wants=` (review round 1 of #715, measured with `systemd-analyze --user verify default.target`): the 0.1.4
+    deb's unit is `After=default.target` and `WantedBy=default.target`, the worker is WantedBy default.target, so
+    default.target, the worker and the gateway form an ordering cycle, and systemd breaks it by deleting the worker's
+    start job ("Found ordering cycle ... Job pi-dispatch-worker.service/start deleted"); unordered is safe, since a
+    gateway down at boot is only logged and every job reads it again before it spends; registering whenever `status` is not connected (it
+    would re-register over an operator's own gateway that is merely down); PATH among the CLI keys (above); a system
+    unit with `Wants=user@<uid>.service` (the CLI's registration still lives in a home the system unit's environment does
+    not name).
+  - **CI**: the openshell lane runs `pi-dispatch up --yes` and then `doctor` in a scratch folder (`PI_BACKENDS=openshell`,
+    `VALKEY_URL` on a free loopback port, `PI_JOB_IMAGE=pi-job:ci`) against its running, registered gateway, and asserts
+    the image in docker's store, the Valkey container running on that port, no egress proxy container, no start or
+    registration offered, `up --yes` exiting 0, and doctor printing no ✗ (its `absent` lines are warnings since this
+    issue, `DES-CONTAINER-BACKEND-REGISTRY`).
+  - **Code evidence**: worker/src/backends.mjs -> openshellSetupOf, OPENSHELL_ENGINES; worker/src/openshell-cli.mjs ->
+    OPENSHELL_LOCAL_GATEWAY_URL, OPENSHELL_GATEWAY_UNIT, OPENSHELL_RELEASE_URL, OPENSHELL_NO_WINDOWS;
+    worker/src/up.mjs -> openshellGatewayStep, openshellImageCapsStep, dockerImageStep, venueWords; worker/src/service.mjs
+    -> deploymentVenue, renderLinuxUnit, renderPlist (`pathDirs`), refuseOpenshellSystemScope, stackFor, findOnPath,
+    TEMPLATE_PINS; worker/src/podman-stack.mjs -> STACK_KEYS, workerUnitDeps; worker/src/deployment-venue.mjs ->
+    venueKeyMeaning; worker/src/init.mjs -> nextSteps, openshellNextSteps; worker/src/doctor.mjs ->
+    openshellUnitOrderChecks, CLI_SERVICE_KEYS, valkeyVenues; worker/test/up.test.mjs, service.test.mjs,
+    podman-stack.test.mjs, backends.test.mjs, init.test.mjs, doctor-openshell.test.mjs;
+    .github/workflows/openshell-conformance.yml.
 
 ## DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR
 
@@ -12866,3 +12959,7 @@ a tunnel.
 | 2026-10-19 | Issue #686, part 2: steering on the `openshell` venue over the exec's stdin, built to the text #680 decided. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the copying venue's arming is built and served on `openshell` (`steerStdin`, the stderr transcript as the ack's tail, `no-transcript` without it, `venue-copies` without the capability, no new skip reason); the "framed, MAC'd stdin" bullet gains three dated "As built" bullets, each measured: the frames reach the runner on fd 3 and its fd 0 is `/dev/null` (the decided "to the runner's stdin" CORRECTED: a socketpair cannot be reopened through /proc, ENXIO, and fd 3 is not inherited by the runner's children; REJECTED trusting pi's bash tool alone and the /proc reopen), the runner reads fd 3 synchronously (an event-loop reader missed a frame under a cost cap of 0, the run ending 10 ms after listening), and an empty upload's baseline is known at the spawn (a fact of construction, not the host size read #709 rejected); the "copying venue" rejection names the capability shipped. **`DES-OPENSHELL-VENUE` AMENDED**: the stdio bullet's steer half is SERVED (the relay opener handed to the bundle, `PI_EXIT_AUTH=stdin-frames`, acks over stderr, the 4 MiB less 1 KiB budget), and the "Not served here yet" bullet gains a dated note: steering served, recovery the one item still refused before spend. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` AMENDED, wording only**: the framed-stdin carve-out is shipped on `openshell`, its four tests answered as written. **UNCHANGED, checked**: `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`, `DES-STEER-HELD-WHILE-PARKED`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` (the keys, the hold, the park and the late rule are the transport's neighbours, untouched), `DES-LIVE-TRANSCRIPT-STREAM` (the stdio source's baseline is unchanged; only the steer ack's `onBaseline` is called earlier for an attempt with no staged transcript), `DES-CONTAINER-BACKEND-REGISTRY` (`binds` is still the steer job's question, false on `openshell`). **Code evidence**: worker/src/steer-framing.mjs, worker/src/inbox-relay.mjs, worker/src/run-container.mjs, worker/src/backend-openshell.mjs, worker/src/start.mjs, image/runner/src/steer-frames.mjs, image/runner/src/supervise.mjs, image/runner/src/inbox.mjs, image/runner/run-job.mjs, image/verify-image.sh, .github/scripts/openshell-conformance.mjs. |
 | 2026-10-19 | Issue #686, part 2, review round 1. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the fd 3 "As built" bullet: a `/dev/null` swap that leaves fd 0 unvouched for REFUSES the steered run before pi loads (L5; a failed close alone fails open, said), fd 3 is the channel only as the supervisor's socket (L4), `verify-image.sh` asserts no probe child holds fd 3 (M2); NEW "As built" bullet: the pipe also ends at the verified exit line, or 5 s after an unverified exit-shaped one (M1, a defence; OpenShell 0.1.4's CLI exits with stdin open, measured on the real gateway; REJECTED ending it at the transcript's end). The rest UNCHANGED, checked. |
 | 2026-10-19 | Issue #686, part 3: bind mode, the `openshell-bind` venue. **`DES-OPENSHELL-VENUE` AMENDED**: Status says bind mode is built; the "No local-folder" bullet says bind mode admits folder jobs; the "No freeze" and "Not served here yet" bullets say `run.recover` is served in bind mode (live checkpoints off in both); the "Bind mode as the default" rejection is UNCHANGED, checked, with a note; NEW dated "Bind mode (#686 part 3)" bullet: one factory with `mode`, the gateway.toml settings (measured refusal), the binds from the spec's mounts at the `mounts`-layout paths (reserved targets refused at the stage), the policy listing every target (read-back unchanged, measured), `/job` read-only by the bind and the policy (no pi-landlock), the `mounts` layout end to end (`binds: true`, file transcript, `/inbox` steering, recovery by salvage), the job user (`decideOpenshellBindUser`; Podman refused at boot), the before-spend gate (a probe create that can only be refused, cached 10 min admitting and 1 min refusing, a create-time backstop holding the refusal; reading gateway.toml and a boot-only probe rejected), what is shared with copy mode (settings, version read, one reaper; each mode counts only its own sandboxes), doctor, CI, and the residuals; and a "Code evidence (#686 part 3)" bullet. The lab's later measurements of that day are folded in: the probe's check order (each settings refusal in 50 to 90 ms, nothing created), the admitting answer a provisioning failure that LEAVES a sandbox in phase `Error` (so the probe deletes it on every answer, and the reaper finds a crash's leftover by the owner label and the job namespace), and a `run_as_user` of 2000 running and writing a bind as uid 2000 (`/home/pi` 0777). **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the fourth entry, `openshell-bind`, its three changed words with asserters, `binds: true`, `OPENSHELL_BACKENDS` and `venuesOf`, the per-mode listing and one reaper; the fourteen UNCHANGED, checked. **Review round 1 (#714)**: a dated "Review round 1" bullet: the sandbox ended and confirmed gone before its tree is read (`collectRun` and the teardown, `BIND_SETTLE_MS`, exit 1 past it), the `pi.dispatch.job-dir` label and `settleJobDir` ahead of a salvage (`sandbox-alive`), the job user over the engine's `docker info` by `local`'s `decideJobUser` (rootless and userns-remap refused before spend), SELinux `selinux_label: "private"`, the probe's source under the jobs dir and its `openshell_bind_probed` log, `.openshell-profile.json` in `BESIDE_JOB_DIR`, and the lane's new checks. **Review round 2 (#714)**: a dated "Review round 2" bullet: a lingering sandbox marks the result (`lingering`) and never rewrites its exit code; the processor skips the exit checkpoint and returns the named `openshell-bind-sandbox-lingering` for a completed run or a folder job (exit 2, a stop and a forge job's other exits as before); the settle moves before the final transcript read (`settleRun`), once per attempt, each listing bounded and an abort not waited for; the `.openshell-bind` marker gates the salvage's settle; doctor's probe source under the jobs dir; the `socket: null` reason; the lane's non-vacuous checks. The round-1 bullet's "teardown waits the same way" is CORRECTED there. |
+| 2026-10-19 | Issue #707: `up` and `service install` learn the `openshell` venues. **`DES-OPENSHELL-VENUE` AMENDED**: a dated "Setup (#707)" bullet: the one rule `openshellSetupOf` (the engine, `imageEngine`, `valkeyEngine`, no squid for these venues), `up`'s gate (read-only unless one of two shown and asked offers is accepted: the gateway's start with a bounded 30 s wait, and its loopback registration only where the CLI names no server; never an install, never an edit of the gateway's configuration; Windows refused on the 0.1.4 release's assets), the image into the gateway's engine and what it declares, Valkey on that engine, `service install`'s `Wants=`/`After=openshell-gateway.service`, the dropped `docker.service` on Podman without `local`, `--system` refused, the plist's PATH carrying the resolved `openshell` directory, doctor's Valkey fixes, `CLI_SERVICE_KEYS`' openshell entry and the unit-ordering ⚠, the rejected alternatives, and the CI step. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**: a dated bullet: an openshell-only deployment on Podman gets the Valkey's two units alone from the same installer (`egress: false`), `STACK_KEYS` gains the two openshell keys; its code evidence names `deploymentVenue` for `podmanVenue`. **`DES-CLI-SURFACE` AMENDED**: the consented-mutation tier names the gateway's start and registration (`up` alone). **UNCHANGED, checked**: `DES-WORKER-ON-HOST` (`up` still sequences consented chores; the price is the same), `DES-CONTAINER-BACKEND-REGISTRY` (no declaration moves; `localFolders` and `pausable` stay `absent`), `DES-SERVICE-ENV-SETUP-SEAM` (`ExecStart` composes as before), `DES-PODMAN-NATIVE-ROOTLESS-BACKEND` (the podman venue's gate is untouched and not asked for openshell), `DES-FIRST-RUN-SETUP-WIZARD` (the wizard is not taught the venue here); in `interfaces.md`, `INT-CONTAINER-RUNTIME-CONTRACT` (no job argv, mount or variable moves) and `INT-EGRESS-POLICY-CONTRACT` (the proxy's components and names; none is started for these venues, as none was) UNCHANGED, checked, so that file gains no row. |
+| 2026-10-19 | Issue #707, doctor's backend section. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, its "`doctor` is what makes the declaration admissible" bullet (the rule issue #227 slice 2 wrote, f6dd252c): an `absent` word renders as a WARNING, no longer a failure, still first, ahead of the gate, because since the openshell venues a blessed venue legitimately declares properties absent and the ✗ failed doctor and `up` on every such deployment; the refusal of a deployment that needs the property is the floor's, whose ✗ (`PI_BACKEND_FLOOR is not met`) and boot refusal are UNCHANGED, checked, and the warning's fix names it. `DES-OPENSHELL-VENUE`'s "Setup (#707)" CI bullet CORRECTED to match: the lane asserts `up --yes` exits 0 and doctor prints no ✗. |
+| 2026-10-19 | Issue #707, review round 1 of #715. **`DES-OPENSHELL-VENUE` CORRECTED**, its "Setup (#707)" bullet: the worker unit gets `Wants=openshell-gateway.service` and NO `After=` (the 0.1.4 deb's unit is `After=default.target`, so the `After=` this bullet first named is an ordering cycle in which systemd deletes the worker's start job, measured; recorded among the Rejected); doctor's unit ⚠ now asks for the `Wants=` and flags an `After=`; the start offer is made only where `systemctl --user cat` finds the unit or `brew services info openshell` answers, with NVIDIA's release formula named (homebrew-core's defines no service); the registration offer only where `openshell gateway list -o json` reads empty, the command a fix otherwise; every CLI read bounded; the plist PATH byte-identical without the venue and never carrying an XML-unsafe directory; the CLI named in doctor's HOME/XDG_CONFIG_HOME line only where the venue is blessed; the worker's, the clients' and doctor's Valkey owner rules refuse a root-held Valkey for an openshell venue on Podman, as `up` does. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` CORRECTED** to match (the gateway pulled in, not ordered after); the two openshell keys are compared between this shell and `.env` only where an openshell venue is blessed. |
+| 2026-10-19 | Issue #707, review round 2 of #715. **`DES-OPENSHELL-VENUE` AMENDED**, its "Setup (#707)" bullet: the worker's boot hands the Valkey judgement `openshellUsed` (it handed `localUsed` and `podmanUsed` alone, so the root refusal round 1 added for an openshell venue on Podman never reached the boot), and `VALKEY_CONTEXT_KEYS` and doctor's resolution carry `PI_OPENSHELL_ENGINE`, so the admin panel's and doctor's clients judge it as the worker does. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` CORRECTED**: `readStackKeys` reads the two openshell keys in a second pass and refuses an odd line of theirs only where an openshell venue is blessed, naming them, so a `local`-only deployment is not stopped by a key nothing there reads. Also, unchanged in decision: the gateway list read accepts an array or `{gateways: [...]}` and the openshell lane prints the real one to measure it; the post-start poll ends at a 30 s wall-clock deadline; the engine probe is bounded; a `systemctl --user cat` that reaches no user bus is said as that. |

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PACKAGED_EGRESS_PROXY_CONF, runInit } from "../src/init.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF, nextSteps, runInit } from "../src/init.mjs";
+import { venuesOf } from "../src/backends.mjs";
 import { loadModelEndpoints, renderEndpointsInclude } from "../src/model-endpoints.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -363,4 +364,21 @@ test("a write that throws part way still prints what init already created, then 
 	const printed = lines.join("");
 	for (const name of [".env", "triggers.json", "egress-allowlist.conf"]) assert.match(printed, new RegExp(`created ${name.replace(".", "\\.")}`), printed);
 	assert.doesNotMatch(printed, /Next:/);
+});
+
+test("init's next steps for the openshell venues: their own ladder alone, one line beside another venue, and Windows refused (#707)", () => {
+	const steps = (list, env = {}, platform = "linux") => nextSteps(venuesOf({ PI_BACKENDS: list }), { platform, env });
+	const alone = steps("openshell", { PI_OPENSHELL_ENGINE: "podman" });
+	assert.match(alone, /^Next \(the openshell venue on podman\)\. First install OpenShell 0\.1\.4/m);
+	assert.match(alone, /https:\/\/github\.com\/NVIDIA\/OpenShell\/releases\/tag\/v0\.1\.4/);
+	assert.match(alone, /pi-dispatch up\s+# the gateway \(offers to start and register it\), the job image into podman, Valkey there/);
+	assert.match(alone, /pi-dispatch service install\s+# the worker as a user service that pulls in openshell-gateway\.service/);
+	assert.doesNotMatch(alone, /docker pull|podman pull|egress proxy/, "neither another venue's ladder nor a proxy");
+	assert.match(steps("openshell", {}, "darwin"), /brew services start openshell/);
+	assert.match(steps("openshell", {}, "darwin"), /brew install https:\/\/github\.com\/NVIDIA\/OpenShell\/releases\/download\/v0\.1\.4\/openshell\.rb`, the release formula/);
+	const beside = steps("local,openshell");
+	assert.ok(beside.startsWith(steps("local")), "the docker ladder as it was");
+	assert.match(beside, /The openshell venue too: install OpenShell 0\.1\.4/);
+	assert.equal(steps("local"), nextSteps(venuesOf({})), "no openshell, no change");
+	assert.match(steps("openshell", {}, "win32"), /ships no Windows build/);
 });

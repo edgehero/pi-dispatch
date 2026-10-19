@@ -25,6 +25,13 @@
  * come from this shell when it sets them and otherwise from the deployment's `.env`, the file `service install`
  * reads, so the two entry points decide the venue from the same place (`deploymentVenueEnv`).
  *
+ * The openshell venues (issue #707): when PI_BACKENDS lists `openshell` or `openshell-bind`, `up` first checks the
+ * OpenShell CLI and its gateway (read-only), offers to START a gateway that is installed but not answering and to
+ * REGISTER one that answers unregistered, each asked like every other step, and never installs OpenShell (it prints the
+ * pinned release instead). Then the job image goes into the gateway's engine (PI_OPENSHELL_ENGINE, docker by default)
+ * and, where no `local` or `podman` venue already decides it, Valkey runs on that engine (`openshellSetupOf`). No egress
+ * proxy is ever started for it: the gateway's policy layer is that venue's egress control.
+ *
  * Converge-style, not transactional: a declined or failed step is reported and the pass continues, so
  * one flaky pull does not hide the doctor report that says what else is missing. Exit code mirrors
  * doctor's: 0 unless the docker daemon was unreachable up front (nothing else can be probed, so up
@@ -40,7 +47,8 @@ import { homedir, networkInterfaces, userInfo } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
-import { venuesOf } from "./backends.mjs";
+import { openshellSetupOf, venuesOf } from "./backends.mjs";
+import { GATEWAY_TOML_WHERE, OPENSHELL_BREW_INSTALL, OPENSHELL_DEFAULT_GATEWAY_NAME, OPENSHELL_GATEWAY_UNIT, OPENSHELL_LOCAL_GATEWAY_HOST, OPENSHELL_LOCAL_GATEWAY_PORT, OPENSHELL_LOCAL_GATEWAY_URL, OPENSHELL_NO_WINDOWS, OPENSHELL_RELEASE_URL, OPENSHELL_TESTED_VERSION, gatewayTomlFor, judgeGatewayStatus } from "./openshell-cli.mjs";
 import { jobImageFrom, logsDirPath, settingsFilePath } from "./config.mjs";
 import { jobImageFix, pullOffered, registryQualified } from "./image-ref.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
@@ -216,6 +224,10 @@ export async function runUp(argv = [], deps = {}) {
 		// the clock the backup's name is stamped with.
 		readPackagedConf = readPackagedProxyConf,
 		now = Date.now,
+		// Issue #707: how long `up` waits for a gateway it just started to answer, polled every second (`sleep` above).
+		gatewayWaitMs = 30_000,
+		// How long one read of the openshell CLI may take before it is killed (review round 1 of #715).
+		openshellReadTimeoutMs = 15_000,
 	} = deps;
 	let { runInitFn, runDoctorFn } = deps;
 	const yes = argv.includes("--yes");
@@ -243,12 +255,17 @@ export async function runUp(argv = [], deps = {}) {
 	// list WITHOUT `local` never touches docker at all: such a host may have no docker, and asking it would only fail.
 	const venues = venuesOf(venueEnv);
 	const dockerUsed = venues.localUsed;
+	// Issue #707: the openshell venues' setup, by the one rule `service install`, `init` and doctor follow: the engine the
+	// image goes into, and the engine Valkey runs on where no `local` or `podman` venue decides it. `dockerUsed` stays the
+	// `local` venue's: every squid step keeps that gate, so an openshell-on-docker host starts no proxy.
+	const openshell = openshellSetupOf(venues, venueEnv);
+	const dockerValkeyUsed = dockerUsed || openshell.valkeyEngine === "docker";
 	// Issue #464: which Valkey the SERVICE's worker will use, and whether PI_VALKEY_SHARED lets it be one another uid
 	// holds, read from `.env` where `service install` reads them, with this shell's value only where the file sets none.
 	// Asked only where the podman stack decides its Valkey (docker's Valkey is the queue wherever `local` is blessed),
 	// and before anything runs, as the venue keys are.
 	let valkeyKeys = { env: {}, fromFile: {}, notes: [] };
-	if (venues.podmanUsed && !venues.localUsed) {
+	if ((venues.podmanUsed && !venues.localUsed) || openshell.valkeyEngine === "podman") {
 		valkeyKeys = deploymentValkeyEnv({ env, fs, envPath: join(cwd, ".env"), platform });
 		if (valkeyKeys.error) {
 			out(`✗ ${valkeyKeys.error}\n\nup: cannot tell which Valkey this deployment's worker uses: fix the above, then re-run \`pi-dispatch up\`.\n`);
@@ -259,7 +276,8 @@ export async function runUp(argv = [], deps = {}) {
 	//
 	// The docker lines below keep their original text and indentation, the `else` and the unbraced block included, so
 	// that the diff of issue #430 shows the docker path as the byte-identical thing its tests pin it to be.
-	if (!dockerUsed) out("pi-dispatch up: one pass over the quickstart for the podman venue; every podman and systemctl action asks first (--yes accepts)\n\n");
+	if (openshell.used) out(`pi-dispatch up: one pass over the quickstart for ${venueWords(venues, openshell)}; every ${toolWords(venues, openshell, platform)} action asks first (--yes accepts)\n\n`);
+	else if (!dockerUsed) out("pi-dispatch up: one pass over the quickstart for the podman venue; every podman and systemctl action asks first (--yes accepts)\n\n");
 	else
 	out("pi-dispatch up — one pass over the quickstart; every docker action asks first (--yes accepts)\n\n");
 
@@ -268,6 +286,25 @@ export async function runUp(argv = [], deps = {}) {
 	const jobImage = deploymentJobImage({ env, fs, envPath: join(cwd, ".env"), platform });
 	if (jobImage.skip) out(`⚠ ${jobImage.skip}\n`);
 	if (jobImage.note) out(`⚠ ${jobImage.note}\n`);
+
+	// (a0) the openshell venues' gateway (issue #707), before anything is pulled or started: read-only unless the operator
+	// accepts an offer. A deployment with no other venue stops here when it is not usable, as the docker gate below does;
+	// beside another venue the other venue's steps still run, and `up` exits non-zero at the end.
+	let openshellReady = false;
+	let openshellFailed = false;
+	if (openshell.used) {
+		const gate = await openshellGatewayStep({ openshell, venues, spawn, out, yes, prompt, platform, probeTcp, sleep, now, waitMs: gatewayWaitMs, readTimeoutMs: openshellReadTimeoutMs });
+		if (gate.ok) openshellReady = true;
+		else {
+			openshellFailed = true;
+			summary.push(["openshell", `NOT ready: ${gate.why}`]);
+			if (!dockerUsed && !venues.podmanUsed) {
+				out("\nup: cannot continue without a usable OpenShell gateway: fix the above, then re-run `pi-dispatch up`.\n");
+				return 1;
+			}
+			out("  the other venues' steps below are unaffected; the openshell steps are skipped\n");
+		}
+	}
 
 	if (dockerUsed) {
 	// (a) docker binary + daemon, before anything is offered: every mutation below runs through the
@@ -282,31 +319,7 @@ export async function runUp(argv = [], deps = {}) {
 	out("✓ Docker daemon reachable\n");
 
 	// (b) the default job image. Presence first, so the happy path re-run prompts for nothing.
-	if (jobImage.skip) summary.push(["job image", "not checked: which image the worker runs is unknown (see above)"]);
-	else if (!jobImage.isDefault) await overrideImageStep({ bin: "docker", jobImage, spawn, out, yes, prompt, summary });
-	else if (await runCmd(spawn, "docker", ["image", "inspect", LOCAL_IMAGE]) === 0) {
-		out(`✓ Job image present (${LOCAL_IMAGE})\n`);
-		summary.push(["job image", `already present (${LOCAL_IMAGE})`]);
-	} else {
-		const accepted = await consent(
-			`The default job image (${LOCAL_IMAGE}) is not on this host. up would run:`,
-			[`docker ${PULL_ARGS.join(" ")}`, `docker ${TAG_ARGS.join(" ")}`],
-			{ yes, out, prompt },
-		);
-		if (!accepted) {
-			out("skipped — pull it later with the two commands above (or build image/Dockerfile yourself)\n");
-			summary.push(["job image", "skipped (declined) — jobs run with --pull=never, so nothing fetches it later"]);
-		} else if (await runStreamed(spawn, "docker", PULL_ARGS, out) !== 0) {
-			out("✗ docker pull failed — continuing; doctor below will re-check the image\n");
-			summary.push(["job image", "pull FAILED — re-run `pi-dispatch up`, or pull by hand"]);
-		} else if (await runStreamed(spawn, "docker", TAG_ARGS, out) !== 0) {
-			out("✗ docker tag failed — continuing; doctor below will re-check the image\n");
-			summary.push(["job image", `pulled, but tagging as ${LOCAL_IMAGE} FAILED — re-run the tag command by hand`]);
-		} else {
-			out(`✓ pulled and tagged ${LOCAL_IMAGE}\n`);
-			summary.push(["job image", `pulled ${UPSTREAM_IMAGE} and tagged it ${LOCAL_IMAGE}`]);
-		}
-	}
+	await dockerImageStep({ jobImage, spawn, out, yes, prompt, summary });
 
 	}
 
@@ -327,6 +340,16 @@ export async function runUp(argv = [], deps = {}) {
 			podmanReady = true;
 			await podmanImageStep({ jobImage, spawn, out, yes, prompt, summary });
 		}
+	}
+
+	// (b3) the openshell venues' job image (issue #707), into the store the gateway runs sandboxes from: the engine
+	// PI_OPENSHELL_ENGINE names. The docker and podman steps above are reused as they are, without `podmanGate`, whose
+	// rootless job-user rule is the podman venue's and not this one's; where `local` or `podman` already put the image into
+	// that same store (`imageEngine` null) nothing is pulled twice. Then what the image declares, as doctor reads it.
+	if (openshellReady) {
+		if (openshell.imageEngine === "docker") await dockerImageStep({ jobImage, spawn, out, yes, prompt, summary });
+		else if (openshell.imageEngine === "podman") await podmanImageStep({ jobImage, spawn, out, yes, prompt, summary });
+		await openshellImageCapsStep({ engine: openshell.engine, venues, jobImage, spawn, out, summary });
 	}
 
 	// (d) init — always, and unconditionally safe to re-run: its never-clobber is contractual, so an
@@ -516,9 +539,10 @@ export async function runUp(argv = [], deps = {}) {
 	// (e0) VALKEY_PASSWORD (issue #468), where docker's Valkey is the queue: generated into .env when the deployment has
 	// none and runs a Valkey of its own on this host (`valkeyPasswordDecision`), never over a value, the file narrowed to
 	// this account, the value never printed. The podman venue's Valkey gets its password in the stack step below.
-	const dockerValkeyPassword = dockerUsed ? dockerValkeyPasswordStep({ fs, envPath, platform, out, summary, newPassword }) : null;
+	const dockerValkeyPassword = dockerValkeyUsed ? dockerValkeyPasswordStep({ fs, envPath, platform, out, summary, newPassword }) : null;
 
-	if (dockerUsed) {
+	// Issue #707: and where an openshell venue on docker is the deployment's only venue, its Valkey too (`valkeyEngine`).
+	if (dockerValkeyUsed) {
 	// (c) Valkey. A bare TCP probe of the default bind, not a redis PING: dependency-free, and the
 	// honest claim is only "something is listening". If our own compose-named container is up, docker
 	// can say so; if a listener exists that we cannot name, up must NOT offer a second Valkey; the
@@ -1040,6 +1064,17 @@ export async function runUp(argv = [], deps = {}) {
 		await podmanStackStep({ env: venueEnv, valkeyKeys: valkeyKeys.env, state: stackState, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user: userName(), euid, newPassword, platform, templatesDir, readTemplate, mkdir, realpath });
 		valkeyRefused = stackState.valkeyRefused;
 	}
+	// (e4) an openshell venue on podman with no `local` or `podman` venue (issue #707): its Valkey alone, through the same
+	// Quadlet installer, and no egress proxy or keeper (`egress: false`), since the gateway's policy is the venue's egress.
+	if (openshellReady && openshell.valkeyEngine === "podman" && platform !== "linux") {
+		// Quadlet is systemd's, so off Linux there is no unit to install it as: said, never a silent skip.
+		out(`\n⚠ PI_OPENSHELL_ENGINE=podman and no local or podman venue: this deployment's Valkey would run on Podman as a Quadlet unit, which is Linux only. Run a Valkey yourself where VALKEY_URL points\n`);
+		summary.push(["valkey", "not added: Valkey on Podman is a Quadlet unit, Linux only; run one yourself where VALKEY_URL points"]);
+	} else if (openshellReady && openshell.valkeyEngine === "podman") {
+		const stackState = { valkeyRefused: false };
+		await podmanStackStep({ env: venueEnv, valkeyKeys: valkeyKeys.env, state: stackState, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user: userName(), euid, newPassword, platform, templatesDir, readTemplate, mkdir, realpath, egress: false });
+		valkeyRefused = stackState.valkeyRefused;
+	}
 
 	// (f) doctor — always, verbatim: up converges what it can, doctor is the judge of what remains
 	// (provider key, forge env, overlay …), and its verdict is up's exit code.
@@ -1093,6 +1128,10 @@ Next:
 	if (venues.podmanUsed) {
 		out("  (podman venue: a worker started by hand reads only its shell, so export the same PI_BACKENDS there first, or run it as a service with `pi-dispatch service install`, which reads .env)\n");
 	}
+	// Issue #707: the openshell venues' own next step, said only where one is blessed.
+	if (openshell.used) {
+		out(`  pi-dispatch service install\n      the worker as a ${platform === "darwin" ? "LaunchAgent (the gateway runs in this login session: `brew services start openshell`, the service of OpenShell's release formula, keeps it there)" : `user service that pulls in the gateway's own unit (${OPENSHELL_GATEWAY_UNIT})`}; then \`pi-dispatch doctor\` reads the gateway, its engine and the image back. A worker started by hand reads only its shell, so export the same PI_BACKENDS (and PI_OPENSHELL_ENGINE) there first\n`);
+	}
 	// Issue #464: a Valkey this pass refused (another account's, or one no one could name) is a failed `up` whatever doctor
 	// says: a worker started now would take that queue's jobs, and an exit 0 read by a script or the wizard says ready.
 	if (valkeyRefused) {
@@ -1110,6 +1149,12 @@ Next:
 							? "\nup: the Valkey container or volume named above is not this deployment's (or not attributed to it), and up never stops, removes, reuses or starts beside one; take the way out it names, then re-run `pi-dispatch up`.\n"
 							: "\nup: VALKEY_URL cannot be served as it is written (above); fix it in .env, then re-run `pi-dispatch up`.\n",
 		);
+		return doctorCode !== 0 ? doctorCode : 1;
+	}
+	// Issue #707: an openshell gateway this pass could not make usable is a failed `up` whatever doctor says, as a refused
+	// Valkey is: said above, and named in the summary.
+	if (openshellFailed) {
+		out("\nup: the openshell venue is not usable yet (above); fix it, then re-run `pi-dispatch up`.\n");
 		return doctorCode !== 0 ? doctorCode : 1;
 	}
 	return doctorCode;
@@ -1145,6 +1190,243 @@ async function podmanGate({ readPodmanInfo, platform, euid, egid, out }) {
 	const why = `${decision.mode === "unmappable" ? podmanJobUserRefusal(decision) : `podman info did not answer (${decision.reason}).`} up stops here although the worker would only retry this per job: it will not install units for a Podman it could not see. Check that \`podman info --format json\` answers as this account, then re-run.`;
 	out(`✗ podman venue not answering\n    → ${why}\n`);
 	return { ok: false, why };
+}
+
+/** The venues this pass sets up, in words, for the banner (issue #707): never "not docker means podman". */
+function venueWords(venues, openshell) {
+	const parts = [];
+	if (venues.localUsed) parts.push("the docker venue (local)");
+	if (venues.podmanUsed) parts.push("the podman venue");
+	const modes = [venues.openshellCopyUsed ? "openshell" : null, venues.openshellBindUsed ? "openshell-bind" : null].filter(Boolean).join(" and ");
+	parts.push(`${modes} on ${openshell.engine}`);
+	return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
+}
+
+/** The tools whose actions this pass may ask about, for the banner (issue #707). */
+function toolWords(venues, openshell, platform) {
+	const tools = new Set();
+	if (venues.localUsed || openshell.engine === "docker") tools.add("docker");
+	if (venues.podmanUsed || openshell.engine === "podman") tools.add("podman");
+	tools.add("openshell");
+	if (platform === "darwin") tools.add("brew");
+	else tools.add("systemctl");
+	const list = [...tools];
+	return list.length > 1 ? `${list.slice(0, -1).join(", ")} and ${list.at(-1)}` : list[0];
+}
+
+/**
+ * The openshell venues' gate (issue #707): the engine, the CLI and the gateway, judged as the worker's boot judges them
+ * (`openshellBootVersions`, the CLI and the gateway at `OPENSHELL_TESTED_VERSION`; `judgeGatewayStatus`, connected and on
+ * this host). Read-only unless the operator accepts one of two offers, each shown and asked like every other step
+ * (`--yes` accepts): START a gateway that is installed and does not answer (its user unit on Linux, Homebrew's service
+ * on macOS), then wait a bounded time for it; and REGISTER a gateway that answers on loopback while the CLI has none,
+ * which is exactly what the conformance lane runs. Never an install: no CLI, or another release, is the pinned
+ * release's URL and a refusal, since an installer is the operator's to choose. Never an edit of the gateway's config:
+ * bind mode's settings are printed. `{ ok }` or `{ ok: false, why }`, the reason said above it with its fix.
+ *
+ * Every spawn goes through `spawn`, the pass's one seam, so `openshellBootVersions` is handed an `exec` over it rather
+ * than its own `execFile`.
+ */
+async function openshellGatewayStep({ openshell, venues, spawn, out, yes, prompt, platform, probeTcp, sleep, now = Date.now, waitMs = 30_000, readTimeoutMs = 15_000 }) {
+	const refuse = (label, fix, why = label) => {
+		out(`✗ ${label}\n    → ${fix}\n`);
+		return { ok: false, why };
+	};
+	if (openshell.engineError) return refuse(`openshell venue: ${openshell.engineError}`, "set PI_OPENSHELL_ENGINE in .env to docker or podman (unset is docker), the engine the gateway's compute driver runs on");
+	if (platform === "win32") return refuse("openshell venue not usable here", OPENSHELL_NO_WINDOWS, "OpenShell ships no Windows gateway");
+	// The worker's own boot refusal (`openshellFrom`), said here before anything is offered for a venue that cannot boot.
+	if (venues.openshellBindUsed && openshell.engine === "podman") return refuse("openshell-bind with PI_OPENSHELL_ENGINE=podman: the worker refuses this at boot", "bind mode was measured on OpenShell's Docker driver only, and a rootless Podman maps the sandbox's uid away from the worker's: set PI_OPENSHELL_ENGINE=docker, or run the copy venue (openshell)", "openshell-bind runs on the docker engine only");
+	const install = `install OpenShell ${OPENSHELL_TESTED_VERSION} (${OPENSHELL_RELEASE_URL}), the release this venue was measured on; up installs nothing, so the installer is yours to run`;
+	// The engine first, where no venue's own gate below asks it: the gateway's sandboxes and (without another venue) the
+	// queue run on it, so with it down every offer below would only collect consent for failures.
+	const engine = openshell.engine;
+	if (!(engine === "docker" && venues.localUsed) && !(engine === "podman" && venues.podmanUsed)) {
+		// Bounded like every read here (review round 2 of #715): a wedged daemon answers nothing, and `up` says so.
+		const probed = await runCmdQuery(spawn, engine, ["version"], { timeoutMs: readTimeoutMs });
+		if (probed.timedOut) return refuse(`${engine} did not answer \`${engine} version\` within ${Math.round(readTimeoutMs / 1000)} s (PI_OPENSHELL_ENGINE=${engine}, the gateway's engine)`, `check that ${engine} answers as this account, then re-run \`pi-dispatch up\``);
+		const code = probed.code;
+		if (code !== 0) return refuse(code === null ? `${engine} not found (PI_OPENSHELL_ENGINE=${engine}, the gateway's engine)` : `${engine} not responding (PI_OPENSHELL_ENGINE=${engine}, the gateway's engine)`, code === null ? `install ${engine}: \`${engine}\` was not found on PATH` : `start ${engine} (\`${engine} version\` did not answer)`);
+		out(`✓ ${engine} answering (the openshell gateway's engine)\n`);
+	}
+	const gw = openshell.gateway ? ["--gateway", openshell.gateway] : [];
+	// Every read of the CLI is bounded (review round 1 of #715): a gateway that accepts the connection and never finishes its
+	// TLS handshake would otherwise hold `up` at a status read forever, before it printed what it was waiting for.
+	const ask = (args) => runCmdQuery(spawn, "openshell", [...gw, ...args], { timeoutMs: readTimeoutMs });
+	const cli = await ask(["--version"]);
+	const cliVersion = cli.code === 0 ? (/openshell (\S+)/.exec(cli.stdout)?.[1] ?? null) : null;
+	if (cliVersion === null) return refuse("OpenShell CLI not found (`openshell --version` did not answer)", install, "the openshell CLI is not installed");
+	if (cliVersion !== OPENSHELL_TESTED_VERSION) return refuse(`OpenShell CLI ${cliVersion} is not the tested release (${OPENSHELL_TESTED_VERSION})`, `${install}: the venue drives interfaces OpenShell marks experimental, so another release is untested`, `the openshell CLI is ${cliVersion}, not ${OPENSHELL_TESTED_VERSION}`);
+	out(`✓ OpenShell CLI ${cliVersion}, the tested release\n`);
+	// `status -o json` exits 0 with the gateway down (measured), so its own `status` decides; `server` is null where the
+	// CLI has no gateway registered (or none active) to ask.
+	const readStatus = async (timeoutMs = readTimeoutMs) => {
+		const r = await runCmdQuery(spawn, "openshell", [...gw, "status", "-o", "json"], { timeoutMs });
+		let doc = null;
+		try {
+			doc = JSON.parse(r.stdout);
+		} catch {}
+		return judgeGatewayStatus(doc);
+	};
+	const portAnswers = () => probeTcp(OPENSHELL_LOCAL_GATEWAY_HOST, OPENSHELL_LOCAL_GATEWAY_PORT);
+	let status = await readStatus();
+	if (!status.connected && !(await portAnswers())) {
+		const start = platform === "darwin" ? ["brew", ["services", "start", "openshell"]] : ["systemctl", ["--user", "start", OPENSHELL_GATEWAY_UNIT.replace(/\.service$/, "")]];
+		const shown = `${start[0]} ${start[1].join(" ")}`;
+		// Offered only where there is something to start (review round 1 of #715), asked read-only first: on Linux the user
+		// unit OpenShell's deb and rpm ship, on macOS a Homebrew service, which only NVIDIA's release formula defines
+		// (homebrew-core's `openshell` has no `service do` block). Without one the offer would be a command that fails.
+		const probe = platform === "darwin" ? ["brew", ["services", "info", "openshell"]] : ["systemctl", ["--user", "cat", OPENSHELL_GATEWAY_UNIT]];
+		const there = await runCmdQuery(spawn, probe[0], probe[1], { timeoutMs: readTimeoutMs });
+		// No user manager to ask (a `su`/`sudo -u` shell, no XDG_RUNTIME_DIR) is not "no unit" (review round 2 of #715).
+		if (platform !== "darwin" && there.code !== 0 && /Failed to connect to (the )?bus|\$DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR/i.test(`${there.stderr} ${there.stdout}`)) {
+			return refuse("the OpenShell gateway is not answering, and this shell reaches no user manager to ask for its unit (`systemctl --user` could not connect to the bus)", "run `pi-dispatch up` from a login of the account that runs the gateway (or with its XDG_RUNTIME_DIR set: `sudo machinectl shell <account>@` gives one), then re-run it", "no user manager reachable from this shell");
+		}
+		if (there.code !== 0) {
+			return refuse(
+				platform === "darwin" ? "the OpenShell gateway is not answering, and Homebrew has no openshell service to start (`brew services info openshell` failed)" : `the OpenShell gateway is not answering, and this user manager has no ${OPENSHELL_GATEWAY_UNIT} to start (\`systemctl --user cat ${OPENSHELL_GATEWAY_UNIT}\` failed)`,
+				platform === "darwin" ? `install the release formula, which defines the service (\`${OPENSHELL_BREW_INSTALL}\`; homebrew-core's openshell formula has none), or start the gateway yourself, then re-run \`pi-dispatch up\`` : `install OpenShell's deb or rpm (${OPENSHELL_RELEASE_URL}), which ships that user unit, or start the gateway yourself, then re-run \`pi-dispatch up\``,
+				"no OpenShell gateway service to start",
+			);
+		}
+		const accepted = await consent(`The OpenShell gateway is not answering (nothing listens on ${OPENSHELL_LOCAL_GATEWAY_HOST}:${OPENSHELL_LOCAL_GATEWAY_PORT}). up would start it${platform === "darwin" ? " (the Homebrew service OpenShell's release formula defines)" : " (the user unit OpenShell's package ships)"}:`, [shown], { yes, out, prompt });
+		if (!accepted) return refuse("the OpenShell gateway is not running (declined the start)", `start it with \`${shown}\`, then re-run \`pi-dispatch up\``);
+		const code = await runStreamed(spawn, start[0], start[1], out);
+		if (code !== 0) return refuse(`\`${shown}\` failed (${code === null ? `${start[0]} not found` : `exit ${code}`})`, platform === "darwin" ? "`brew services info openshell` says why" : `\`systemctl --user status ${OPENSHELL_GATEWAY_UNIT}\` says why`, "the OpenShell gateway could not be started");
+		// Bounded: a registered gateway is waited for until it reads connected; an unregistered one until its port answers,
+		// since the CLI cannot ask it anything before it is registered. By a wall-clock deadline (review round 2 of #715),
+		// each read capped by the time left, as well as by a count of one-second polls.
+		const steps = Math.max(1, Math.ceil(waitMs / 1000));
+		const deadline = now() + waitMs;
+		let answered = false;
+		for (let i = 0; i < steps && !answered && (i === 0 || now() < deadline); i++) {
+			status = await readStatus(Math.max(1, Math.min(readTimeoutMs, deadline - now())));
+			answered = status.connected || (status.server === null && (await portAnswers()));
+			if (!answered) await sleep(1000);
+		}
+		if (!answered) return refuse(`the OpenShell gateway was started and did not answer within ${Math.round(waitMs / 1000)} s`, platform === "darwin" ? "`brew services info openshell` and the gateway's log say why" : `\`journalctl --user -u ${OPENSHELL_GATEWAY_UNIT}\` says why`, "the OpenShell gateway did not answer after its start");
+		out("✓ the OpenShell gateway answers\n");
+	}
+	if (!status.connected) {
+		// It answers, and the CLI does not reach it. Registered elsewhere (a `server` the CLI names): never re-registered
+		// over, since that registration is the operator's. None registered: the one offer is the conformance lane's own.
+		if (status.server !== null) return refuse(`the openshell CLI's gateway (${status.server}) does not answer as connected, while something listens on ${OPENSHELL_LOCAL_GATEWAY_HOST}:${OPENSHELL_LOCAL_GATEWAY_PORT}`, `\`openshell ${[...gw, "status"].join(" ")}\` says why; \`openshell gateway list\` shows the registrations (up never re-registers over one)`, "the openshell CLI's gateway does not answer");
+		const name = openshell.gateway ?? OPENSHELL_DEFAULT_GATEWAY_NAME;
+		const add = ["gateway", "add", OPENSHELL_LOCAL_GATEWAY_URL, "--local", "--name", name];
+		const shown = `openshell ${add.join(" ")}`;
+		// Offered ONLY where the CLI provably has no gateway registered at all (review round 1 of #715), read-only and
+		// without `--gateway`: what 0.1.4's `gateway add` does beside an existing registration, or over one of the same
+		// name, is not measured, so any registration, or a list this cannot read, gets the command as a fix instead.
+		const registered = registrationCount(await runCmdQuery(spawn, "openshell", ["gateway", "list", "-o", "json"], { timeoutMs: readTimeoutMs }));
+		if (registered !== 0) {
+			return refuse(
+				registered === null ? `the OpenShell gateway answers on ${OPENSHELL_LOCAL_GATEWAY_HOST}:${OPENSHELL_LOCAL_GATEWAY_PORT}, and whether the openshell CLI has a gateway registered could not be read (\`openshell gateway list -o json\`)` : `the OpenShell gateway answers on ${OPENSHELL_LOCAL_GATEWAY_HOST}:${OPENSHELL_LOCAL_GATEWAY_PORT}, and the openshell CLI has ${registered} gateway${registered === 1 ? "" : "s"} registered, none of which it reads connected${openshell.gateway ? ` as ${openshell.gateway} (PI_OPENSHELL_GATEWAY)` : ""}`,
+				`\`openshell gateway list\` shows the registrations; up never registers beside one. Register this gateway yourself if it is the one (\`${shown}\`)${openshell.gateway ? "" : `, and set PI_OPENSHELL_GATEWAY=${name} in .env unless it becomes the CLI's active gateway`}, then re-run \`pi-dispatch up\``,
+				"the gateway is not registered as the one the worker addresses",
+			);
+		}
+		const accepted = await consent(`The OpenShell gateway answers on ${OPENSHELL_LOCAL_GATEWAY_HOST}:${OPENSHELL_LOCAL_GATEWAY_PORT}, and the openshell CLI has no gateway registered. up would register it, on loopback, as ${name}${openshell.gateway ? ", the name PI_OPENSHELL_GATEWAY gives" : ""}:`, [shown], { yes, out, prompt });
+		if (!accepted) return refuse("the OpenShell gateway is not registered (declined the registration)", `register it with \`${shown}\`, then re-run \`pi-dispatch up\``);
+		const code = await runStreamed(spawn, "openshell", add, out);
+		if (code !== 0) return refuse(`\`${shown}\` failed (exit ${code})`, "its own output above says why", "the gateway registration failed");
+		status = await readStatus();
+		if (!status.connected) return refuse(`the gateway was registered as ${name}, and \`openshell status\` still does not read it connected`, `\`openshell ${[...gw, "status"].join(" ")}\` says why${openshell.gateway ? "" : "; if another gateway is the CLI's active one, set PI_OPENSHELL_GATEWAY=" + name + " in .env"}`, "the registered gateway does not answer");
+	}
+	if (!status.local) return refuse(`the openshell CLI's gateway (${status.server ?? "of unknown address"}) is not on this host`, "the venue holds the job's credentials in its gateway, so it runs only on one this deployment runs itself (CONST-VENUE-EGRESS-LAYER): register the local gateway on loopback", "the gateway is not on this host");
+	// The worker's own boot judgement, over this pass's spawn seam, so `up` passes no host the worker then refuses.
+	const { openshellBootVersions } = await import("./backend-openshell.mjs");
+	const exec = async (bin, args) => {
+		const r = await runCmdQuery(spawn, bin, args, { timeoutMs: readTimeoutMs });
+		if (r.code !== 0) throw Object.assign(new Error(`${bin} exited ${r.code}`), r);
+		return r;
+	};
+	const boot = await openshellBootVersions({ gateway: openshell.gateway, exec });
+	if (boot.refusal) return refuse("the openshell venue would be refused at the worker's boot", boot.refusal, boot.refusal);
+	if (boot.gatewayDown) return refuse("the OpenShell gateway stopped answering", "`openshell status` says why; re-run `pi-dispatch up`", "the gateway stopped answering");
+	out(`✓ OpenShell gateway ${status.version}, the tested release, on this host (${status.server})\n`);
+	if (venues.openshellBindUsed) {
+		// Printed, never written: the gateway's config is the operator's, and doctor below asks the gateway whether it admits them.
+		out(`⚠ openshell-bind: the gateway must admit bind mounts, and up never edits its configuration. It needs, in ${GATEWAY_TOML_WHERE}, then a restart of the gateway:\n${gatewayTomlFor(engine).replace(/^/gm, "    ").replace(/ +$/gm, "")}doctor below asks the gateway whether it does\n`);
+	}
+	return { ok: true };
+}
+
+/**
+ * How many gateways `openshell gateway list -o json` names (an array, or an object holding one under `gateways`), or null
+ * when it did not answer or answered in a shape this does not read, which the registration offer treats as "not none".
+ */
+function registrationCount(read) {
+	if (read.code !== 0) return null;
+	let doc;
+	try {
+		doc = JSON.parse(read.stdout);
+	} catch {
+		return null;
+	}
+	const list = Array.isArray(doc) ? doc : Array.isArray(doc?.gateways) ? doc.gateways : null;
+	return list === null ? null : list.length;
+}
+
+/**
+ * What the job image declares, read from the gateway's engine as doctor reads it (issue #707): `sandboxLayout` is copy
+ * mode's requirement (its runner finds the job under /sandbox), `transcriptStderr` its live transcript. Bind mode reads
+ * the `mounts` layout and tails the host's session file, so for it only the image's presence is said.
+ */
+async function openshellImageCapsStep({ engine, venues, jobImage, spawn, out, summary }) {
+	if (jobImage.skip) return;
+	const image = jobImage.image;
+	const read = await runCmdQuery(spawn, engine, ["image", "inspect", "--format", '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}', image]);
+	if (read.code !== 0) {
+		out(`✗ the job image (${image}) is not in ${engine}'s store, the store the OpenShell gateway runs sandboxes from\n`);
+		summary.push(["openshell image", `${image} NOT in ${engine}'s store: pull or build it there`]);
+		return;
+	}
+	if (!venues.openshellCopyUsed) {
+		out(`✓ the job image (${image}) is in ${engine}'s store, the gateway's\n`);
+		summary.push(["openshell image", `${image} in ${engine}'s store`]);
+		return;
+	}
+	const caps = read.stdout.trim().split(",").map((c) => c.trim());
+	if (!caps.includes("sandboxLayout")) {
+		out(`✗ the job image (${image}) does not declare sandboxLayout, which the openshell venue needs\n    → use a job image built after issue #683 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it): its runner finds the job under /sandbox and carries pi-landlock\n`);
+		summary.push(["openshell image", `${image} lacks sandboxLayout: every openshell job is refused before spend`]);
+		return;
+	}
+	if (!caps.includes("transcriptStderr")) {
+		out(`⚠ the job image (${image}) declares sandboxLayout and not transcriptStderr: openshell jobs run, with no live transcript\n`);
+		summary.push(["openshell image", `${image} declares sandboxLayout (no transcriptStderr: no live transcript)`]);
+		return;
+	}
+	out(`✓ the job image (${image}) declares sandboxLayout and transcriptStderr (in ${engine}'s store, the gateway's)\n`);
+	summary.push(["openshell image", `${image} declares sandboxLayout and transcriptStderr`]);
+}
+
+/** The default job image into docker's store (step b), shared by the `local` venue and an openshell venue on docker (issue #707). */
+async function dockerImageStep({ jobImage, spawn, out, yes, prompt, summary }) {
+	if (jobImage.skip) summary.push(["job image", "not checked: which image the worker runs is unknown (see above)"]);
+	else if (!jobImage.isDefault) await overrideImageStep({ bin: "docker", jobImage, spawn, out, yes, prompt, summary });
+	else if (await runCmd(spawn, "docker", ["image", "inspect", LOCAL_IMAGE]) === 0) {
+		out(`✓ Job image present (${LOCAL_IMAGE})\n`);
+		summary.push(["job image", `already present (${LOCAL_IMAGE})`]);
+	} else {
+		const accepted = await consent(
+			`The default job image (${LOCAL_IMAGE}) is not on this host. up would run:`,
+			[`docker ${PULL_ARGS.join(" ")}`, `docker ${TAG_ARGS.join(" ")}`],
+			{ yes, out, prompt },
+		);
+		if (!accepted) {
+			out("skipped — pull it later with the two commands above (or build image/Dockerfile yourself)\n");
+			summary.push(["job image", "skipped (declined) — jobs run with --pull=never, so nothing fetches it later"]);
+		} else if (await runStreamed(spawn, "docker", PULL_ARGS, out) !== 0) {
+			out("✗ docker pull failed — continuing; doctor below will re-check the image\n");
+			summary.push(["job image", "pull FAILED — re-run `pi-dispatch up`, or pull by hand"]);
+		} else if (await runStreamed(spawn, "docker", TAG_ARGS, out) !== 0) {
+			out("✗ docker tag failed — continuing; doctor below will re-check the image\n");
+			summary.push(["job image", `pulled, but tagging as ${LOCAL_IMAGE} FAILED — re-run the tag command by hand`]);
+		} else {
+			out(`✓ pulled and tagged ${LOCAL_IMAGE}\n`);
+			summary.push(["job image", `pulled ${UPSTREAM_IMAGE} and tagged it ${LOCAL_IMAGE}`]);
+		}
+	}
 }
 
 /**
@@ -1291,8 +1573,9 @@ async function podmanImageStep({ jobImage, spawn, out, yes, prompt, summary }) {
  * alone, a proxy that exists is left alone), then plans the Quadlet files with `planStack`, shows `plan.actions`, and on
  * consent hands those same objects to `applyStack`: what runs is literally what was shown.
  */
-async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user, euid, templatesDir, readTemplate, mkdir, realpath, newPassword = newValkeyPassword, platform = "linux" }) {
-	const armed = egressArmedFn(env);
+async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user, euid, templatesDir, readTemplate, mkdir, realpath, newPassword = newValkeyPassword, platform = "linux", egress = true }) {
+	// `egress: false` (issue #707): the openshell venue's Valkey alone, with no proxy and no keeper, whatever PI_EGRESS says.
+	const armed = egress ? egressArmedFn(env) : false;
 	let includeValkey = false;
 	let valkeyPort = DEFAULT_VALKEY_PORT;
 	if (!venues.localUsed) {
@@ -1855,7 +2138,7 @@ function runStreamed(spawn, cmd, args, out, { env } = {}) {
  * Like runCmdCapture with the streams SEPARATE, for a podman query whose answer is stdout alone (round 2, E2): podman
  * prints warnings on stderr on ordinary accounts, and a merged capture made `true` and our own label unequal.
  */
-function runCmdQuery(spawn, cmd, args) {
+function runCmdQuery(spawn, cmd, args, { timeoutMs = null } = {}) {
 	return new Promise((resolve) => {
 		let child;
 		try {
@@ -1866,10 +2149,26 @@ function runCmdQuery(spawn, cmd, args) {
 		}
 		let stdout = "";
 		let stderr = "";
+		let settled = false;
+		// `timeoutMs` (issue #707): a read that does not finish in time is killed and answers as one that could not run.
+		const timer = timeoutMs === null ? null : setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+			resolve({ code: null, stdout, stderr, timedOut: true });
+		}, timeoutMs);
+		const done = (result) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			resolve(result);
+		};
 		child.stdout?.on("data", (d) => (stdout += d));
 		child.stderr?.on("data", (d) => (stderr += d));
-		child.on("error", () => resolve({ code: null, stdout, stderr }));
-		child.on("close", (code) => resolve({ code, stdout, stderr }));
+		child.on("error", () => done({ code: null, stdout, stderr }));
+		child.on("close", (code) => done({ code, stdout, stderr }));
 	});
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isPerMachineHost, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, backendRefusals, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendFloor, parseBackendList, shortfall, venuesOf } from "../src/backends.mjs";
+import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isPerMachineHost, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, backendRefusals, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendFloor, parseBackendList, shortfall, venuesOf, openshellSetupOf } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -639,4 +639,23 @@ test("a layer venue cannot run with PI_EGRESS=0 (#684): its policy is the egress
 	assert.deepEqual(backendRefusals({ backends: ["local", "openshell"], backendFloor: {}, egress: true }), []);
 	// Only a layer venue: a container-custody set is untouched with egress off.
 	assert.deepEqual(backendRefusals({ backends: ["local", PODMAN_BACKEND], backendFloor: {}, egress: false }), []);
+});
+
+test("openshellSetupOf: one rule for the image's engine and Valkey's, which up, service install, init and doctor follow (#707)", () => {
+	const of = (list, env = {}) => openshellSetupOf(venuesOf({ PI_BACKENDS: list }), env);
+	assert.deepEqual(of("local"), { used: false, engine: null, gateway: null, imageEngine: null, valkeyEngine: null, engineError: null }, "not blessed: nothing, whatever .env says");
+	assert.deepEqual(of("openshell"), { used: true, engine: "docker", gateway: null, imageEngine: "docker", valkeyEngine: "docker", engineError: null }, "alone: docker by default, the image and Valkey on it");
+	assert.deepEqual(of("openshell-bind", { PI_OPENSHELL_ENGINE: "", PI_OPENSHELL_GATEWAY: "lab" }), { used: true, engine: "docker", gateway: "lab", imageEngine: "docker", valkeyEngine: "docker", engineError: null }, "empty is the default, as openshellFrom reads it");
+	assert.deepEqual(of("openshell", { PI_OPENSHELL_ENGINE: "podman" }), { used: true, engine: "podman", gateway: null, imageEngine: "podman", valkeyEngine: "podman", engineError: null });
+	// Beside a venue that already decides the queue, or already fills the same store.
+	assert.equal(of("local,openshell").imageEngine, null, "local already put the image into docker's store");
+	assert.equal(of("local,openshell").valkeyEngine, null, "local's Valkey is the queue");
+	assert.equal(of("local,openshell", { PI_OPENSHELL_ENGINE: "podman" }).imageEngine, "podman", "a different store gets its own");
+	assert.equal(of("podman,openshell", { PI_OPENSHELL_ENGINE: "podman" }).imageEngine, null);
+	assert.equal(of("podman,openshell").imageEngine, "docker");
+	assert.equal(of("podman,openshell").valkeyEngine, null, "the podman venue's Quadlet Valkey is the queue");
+	const bad = of("openshell", { PI_OPENSHELL_ENGINE: "lxc" });
+	assert.equal(bad.imageEngine, null);
+	assert.equal(bad.valkeyEngine, null);
+	assert.match(bad.engineError, /^PI_OPENSHELL_ENGINE must be docker or podman/);
 });

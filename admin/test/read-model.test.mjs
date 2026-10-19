@@ -2806,6 +2806,14 @@ test("panelValkeyContext: the pointer's folder only, through #471's reader: noth
   assert.equal(panelValkeyContext({ env: { VALKEY_URL: "redis://127.0.0.1:1" }, pointerDir: dir, owned: ["VALKEY_URL"] }).url.environment, null);
 });
 
+test("panelValkeyContext: an openshell venue on Podman in the pointer's .env refuses root's Valkey, as the worker does (#707)", () => {
+  const dir = realpathSync(tempDir("admin-ctx-os-"));
+  writeFileSync(join(dir, ".env"), "PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=podman\n", { mode: 0o600 });
+  assert.equal(panelValkeyContext({ env: {}, pointerDir: dir, platform: "linux" }).rootRefused, true);
+  writeFileSync(join(dir, ".env"), "PI_BACKENDS=openshell\n", { mode: 0o600 });
+  assert.equal(panelValkeyContext({ env: {}, pointerDir: dir, platform: "linux" }).rootRefused, false, "on docker, docker-proxy's root is the queue");
+});
+
 test("the panel's Valkey reads fail open on a VALKEY_URL whose path names no database (#477 follow-up)", async () => {
   // PR #478's gate: the client refuses such a URL where it is made; every panel read says it rather than throwing.
   const rm = await import("../src/read-model.mjs");

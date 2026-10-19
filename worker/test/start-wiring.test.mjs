@@ -4513,7 +4513,17 @@ test("boot judges VALKEY_URL's owner before any Valkey contact, refuses as a con
 		(err) => err === refusal,
 	);
 	assert.deepEqual(order, [], "no worker was created, nothing was connected");
-	assert.deepEqual(asked[0][1], { localUsed: false, podmanUsed: true }, "judged for the venues the deployment blesses");
+	assert.deepEqual(asked[0][1], { localUsed: false, podmanUsed: true, openshellUsed: false }, "judged for the venues the deployment blesses");
+	// Issue #707 (review round 2 of #715): an openshell venue on Podman reaches the rule, which then refuses root's listener.
+	const openshellAsked = [];
+	await assert.rejects(runStart({ order: [], env: { PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" }, judgeValkey: async (args) => {
+		openshellAsked.push(args);
+		throw refusal;
+	} }), (err) => err === refusal);
+	assert.deepEqual(openshellAsked[0].venues, { localUsed: false, podmanUsed: false, openshellUsed: true });
+	assert.equal(openshellAsked[0].env.PI_OPENSHELL_ENGINE, "podman");
+	const { openshellSetupOf } = await import("../src/backends.mjs");
+	assert.equal(openshellSetupOf(openshellAsked[0].venues, openshellAsked[0].env).valkeyEngine, "podman", "so resolveWorkerValkey refuses root there");
 	// Pinned: the worker's clients use the judged literal, not VALKEY_URL's name. VALKEY_URL here names a host that does not
 	// resolve, so the boot can only succeed if every client took the pinned URL instead.
 	const pinnedUrl = process.env.VALKEY_TEST_URL;

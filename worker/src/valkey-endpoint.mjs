@@ -29,7 +29,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { networkInterfaces, userInfo } from "node:os";
 import { join } from "node:path";
-import { venuesOf } from "./backends.mjs";
+import { openshellSetupOf, venuesOf } from "./backends.mjs";
 import { DEFAULT_VALKEY_URL } from "./config.mjs";
 import { VALKEY_SHARED_KEY, judgeValkeyListeners, passwdNameFrom, pinnedValkeyUrl, probeTcpAddress, readStackKeys, readSubuidRanges, readValkeyKeys, valkeySharedOn, valkeySchemeOf } from "./podman-stack.mjs";
 import { VALKEY_PASSWORD_KEY, isLoopbackHost } from "./valkey-auth.mjs";
@@ -95,7 +95,11 @@ export function valkeyClientContext({ env = process.env, cwd = process.cwd(), pl
 	if (content !== null) {
 		const stack = readStackKeys(content, { loader: "systemd", path: envPath });
 		if (stack.error) error = stack.error;
-		else if (typeof stack.keys.PI_BACKENDS === "string") fileKeys.PI_BACKENDS = stack.keys.PI_BACKENDS;
+		else {
+			if (typeof stack.keys.PI_BACKENDS === "string") fileKeys.PI_BACKENDS = stack.keys.PI_BACKENDS;
+			// Issue #707: the engine decides whether the queue is this account's Quadlet Valkey (`openshellSetupOf`).
+			if (typeof stack.keys.PI_OPENSHELL_ENGINE === "string") fileKeys.PI_OPENSHELL_ENGINE = stack.keys.PI_OPENSHELL_ENGINE;
+		}
 		const keys = readValkeyKeys(content, { loader: "systemd", path: envPath });
 		if (keys.error) error ??= keys.error;
 		else for (const k of [VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY, "VALKEY_URL"]) if (typeof keys.keys[k] === "string") fileKeys[k] = keys.keys[k];
@@ -119,12 +123,16 @@ export function valkeyContextFromResolution({ service, envPath = null, shared, p
 		if (typeof fileValue(key) === "string") fileKeys[key] = fileValue(key);
 	}
 	if (typeof service?.env?.PI_BACKENDS === "string") env.PI_BACKENDS = service.env.PI_BACKENDS;
+	// Issue #707 (review round 2 of #715): the engine beside the list, which decides whether an openshell venue's queue is
+	// this account's Quadlet Valkey (`openshellSetupOf`).
+	if (typeof service?.env?.PI_OPENSHELL_ENGINE === "string") env.PI_OPENSHELL_ENGINE = service.env.PI_OPENSHELL_ENGINE;
 	if (typeof shared === "string") fileKeys[VALKEY_SHARED_KEY] = shared;
 	return valkeyContextFromKeys({ env, envPath, fileKeys, platform });
 }
 
 /** The keys a client's context takes from a deployment `.env` (`valkeyContextFromKeys`). */
-export const VALKEY_CONTEXT_KEYS = Object.freeze(["VALKEY_URL", VALKEY_PASSWORD_KEY, VALKEY_SHARED_KEY, "PI_BACKENDS"]);
+// Issue #707 (review round 2 of #715): and PI_OPENSHELL_ENGINE, which `valkeyContextFromKeys` reads beside PI_BACKENDS.
+export const VALKEY_CONTEXT_KEYS = Object.freeze(["VALKEY_URL", VALKEY_PASSWORD_KEY, VALKEY_SHARED_KEY, "PI_BACKENDS", "PI_OPENSHELL_ENGINE"]);
 
 /**
  * A context from keys a caller has already read out of the deployment's `.env` (`fileKeys`, the `VALKEY_CONTEXT_KEYS`
@@ -144,7 +152,9 @@ export function valkeyContextFromKeys({ env = process.env, envPath = null, fileK
 	} catch {
 		// An unparseable list: the default venue, as doctor reads it; the worker refuses to boot on it anyway.
 	}
-	const derived = platform === "linux" && venues.podmanUsed && !venues.localUsed;
+	// Issue #707 (review round 1 of #715): and an openshell venue on Podman that is the queue's engine, as the worker judges it.
+	const engine = typeof env.PI_OPENSHELL_ENGINE === "string" ? env.PI_OPENSHELL_ENGINE : fileKeys.PI_OPENSHELL_ENGINE;
+	const derived = platform === "linux" && ((venues.podmanUsed && !venues.localUsed) || openshellSetupOf(venues, { PI_OPENSHELL_ENGINE: engine }).valkeyEngine === "podman");
 	const envUrl = typeof env.VALKEY_URL === "string" ? env.VALKEY_URL : null;
 	return { envPath, shared, rootRefused: typeof rootRefused === "boolean" ? rootRefused : derived, error, password: { environment: envPassword, file: filePassword }, url: { environment: envUrl, file: fileUrl } };
 }

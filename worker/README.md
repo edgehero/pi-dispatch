@@ -27,6 +27,10 @@ npx @edgehero/pi-dispatch worker    # run jobs
 npx @edgehero/pi-dispatch run ./my-project --task "add type hints" --flow tidy
 ```
 
+On the NVIDIA OpenShell venue (`PI_BACKENDS=openshell` in `.env`), `up` also checks its gateway, offers to start
+and register it (it never installs OpenShell), and puts the job image into the gateway's engine
+([backends](https://github.com/edgehero/pi-dispatch/blob/main/docs/backends.md#the-openshell-venue)).
+
 A local job edits your folder **in place**, and there is no undo, so commit first. The worker refuses a
 folder with uncommitted changes unless you pass `--force`. The folder must be the root of a git repository
 with at least one commit, and `run` refuses any other folder before it queues anything.

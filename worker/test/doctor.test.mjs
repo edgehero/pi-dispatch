@@ -9361,6 +9361,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		egressArmed: (e) => egress.egressArmed(e),
 		egressProxyName: (e) => egress.egressProxyName(e),
 		venuesOf: (e) => backends.venuesOf(e),
+		// Issue #707: the openshell venues' setup rule, which reads the two venue keys.
+		openshellSetupOf: (e) => backends.openshellSetupOf({ openshellUsed: true }, e),
 		// Its only reads of `env` are containers.conf's own variables, through the lister `podmanConfWidening` reaches.
 		observePodman: (e) => podman.podmanConfWidening({ fs: noFs, home: "/h", env: e, euid: 1 }),
 		podmanConfWidening: (e) => podman.podmanConfWidening({ fs: noFs, home: "/h", env: e, euid: 1 }),
@@ -9405,7 +9407,7 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 // and each of them the same way: taken from a plain line where this shell sets none, this shell's where it does, and a
 // disagreement returned for every one, whatever the key.
 test("resolveDoctorEnv takes every non-venue service key from .env where this shell sets none, and returns every disagreement (#471)", () => {
-	const keys = SERVICE_ENV_KEYS.filter((k) => !["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", VALKEY_SHARED_NAME].includes(k));
+	const keys = SERVICE_ENV_KEYS.filter((k) => !["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", VALKEY_SHARED_NAME].includes(k));
 	const text = `${keys.map((k) => `${k}=file-${k.toLowerCase()}`).join("\n")}\n`;
 	const file = serviceEnvFileOf(Buffer.from(text), "/d/.env", "systemd");
 	const alone = resolveDoctorEnv({}, file);
@@ -10255,7 +10257,8 @@ test("doctor's .env reads pass ONE allowlist and ONE loader mapping (#453 gate 3
 	// PR #466 gate round 2 added the GitHub auth source and App keys; issue #464 the jobs and sandbox dirs, and in its gate
 	// round 1 the Valkey opt-in, the TMPDIR the default jobs root lives under, and the worker's name.
 	// Issue #471: and every other key the service reads that doctor judges, the worker's and the receiver's.
-	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_VALKEY_SHARED", "VALKEY_PASSWORD", "PI_VALKEY_PORT", "PI_PROVIDER", "PI_MODEL", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...new Set(Object.values(CLI_SERVICE_KEYS).flat())]);
+	// Issue #707: the openshell venues' two keys are venue keys too, so each key is named once, where it first appears.
+	assert.deepEqual([...SERVICE_ENV_KEYS], [...new Set(["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "VALKEY_URL", "PI_VALKEY_SHARED", "VALKEY_PASSWORD", "PI_VALKEY_PORT", "PI_PROVIDER", "PI_MODEL", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...new Set(Object.values(CLI_SERVICE_KEYS).flat())])]);
 	for (const key of ["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "AZURE_ORG_URL", "AZURE_WEBHOOK_MODE", "WEBHOOK_SECRET", "RECEIVER_PORT", "GITHUB_PAT_VAR"]) {
 		assert.ok(SERVICE_ENV_KEYS.includes(key), `${key}, which issue #471 lists, is a service key`);
 	}
@@ -11271,6 +11274,13 @@ test("doctor on podman: a VALKEY_URL whose listener is not this account's is ✗
 	asked.length = 0;
 	assert.equal(await runDoctor(podmanEnv(), podmanDeps(podmanRoot.out, podmanPlan(), [], { userName: () => "op", valkeyOwner: owner(0) })), 1);
 	assert.equal(asked[0].rootOk, false, "root refused on the podman venue alone");
+	// Issue #707 (review round 1 of #715): an openshell venue on Podman is the queue's engine, so root's is refused there
+	// as `up` and the worker refuse it; on the docker engine docker-proxy's root is the queue.
+	for (const [engine, rootOk] of [["podman", false], ["docker", true]]) {
+		asked.length = 0;
+		await runDoctor(podmanEnv({ PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: engine }), podmanDeps(capture().out, { ...green, ...podmanPlan() }, [], { userName: () => "op", valkeyOwner: owner(0), openshellRun: async () => ({ code: null, stdout: "", stderr: "" }) }));
+		assert.equal(asked[0].rootOk, rootOk, `openshell on ${engine}`);
+	}
 	assert.match(podmanRoot.text(), /✗ Valkey \(redis:\/\/127\.0\.0\.1:6379\) is not this account's: 127\.0\.0\.1:6379 is held by root/);
 	const dockerForeign = capture();
 	talked.length = 0;
@@ -11810,6 +11820,8 @@ test("cliNotHandedLines: one ⚠ per CLI variable the file sets, the value only 
 	const home = cliNotHandedLines({ fromFile: { HOME: "/h" } }, "/d/.env")[0];
 	assert.match(home.label, /so its podman, docker and gh probes ran without it/);
 	assert.match(home.fix, /^the service's own podman, docker and gh use it: /, "the verb agrees with the count (D2)");
+	// Issue #707 (review round 1 of #715): the openshell CLI joins the list only where an openshell venue is blessed.
+	assert.match(cliNotHandedLines({ fromFile: { HOME: "/h" } }, "/d/.env", { openshellUsed: true })[0].label, /so its podman, docker, gh and openshell probes ran without it/);
 });
 
 test("this account's own unix socket in .env is no failure: named as not handed on, nothing more (#471 round cap)", async () => {
@@ -12553,4 +12565,18 @@ test("doctor says the worker's boot refusal for a layer venue with PI_EGRESS=0, 
 	assert.equal(backendChecks({ PI_BACKENDS: "local,openshell" }, {}).some((c) => /^PI_EGRESS=0 cannot run/.test(c.label)), false);
 	assert.equal(backendChecks({ PI_EGRESS: "0" }, {}).some((c) => /^PI_EGRESS=0 cannot run/.test(c.label)), false, "no layer venue, no line");
 	assert.ok(WORKER_SERVICE_KEYS.includes("PI_OPENSHELL_ENGINE") && WORKER_SERVICE_KEYS.includes("PI_OPENSHELL_GATEWAY"));
+});
+
+test("an ABSENT declaration is a warning, first, ahead of the gate; only a floor naming it fails doctor (#707)", () => {
+	const lines = backendChecks({ PI_BACKENDS: "openshell" }, {});
+	for (const property of ["localFolders", "pausable"]) {
+		const line = lines.find((c) => c.label.startsWith(`openshell: ${property} is ABSENT -- `));
+		assert.ok(line, property);
+		assert.equal(line.ok, false);
+		assert.equal(line.warn, true, "told apart by its word, never a ✗ on its own");
+		assert.match(line.fix, new RegExp(`a PI_BACKEND_FLOOR naming ${property} refuses the boot while openshell is blessed`));
+	}
+	assert.ok(!lines.some((c) => c.ok === false && !c.warn), "a blessed venue's declared absences fail nothing");
+	const floored = backendChecks({ PI_BACKENDS: "openshell", PI_BACKEND_FLOOR: "pausable=asserted" }, {});
+	assert.ok(floored.some((c) => c.ok === false && !c.warn && /PI_BACKEND_FLOOR is not met/.test(c.label)), "the floor's refusal stays the ✗");
 });

@@ -225,3 +225,24 @@ test("the doctor's probe source sits under the jobs dir when it exists, else the
 	await openshellChecks({}, { ...opts, jobsDir });
 	assert.ok(source.startsWith(`${jobsDir}/bind-probe-`), source);
 });
+
+test("doctor's unit check: the installed user unit Wants= openshell-gateway.service and is not After= it; a missing Wants=, an After= cycle or a system unit is a ⚠ (#707)", async () => {
+	const { openshellUnitOrderChecks } = await import("../src/doctor.mjs");
+	const path = "/home/op/.config/systemd/user/pi-dispatch-worker.service";
+	const unitFor = (deps) => `[Unit]\nAfter=network-online.target docker.service\n${deps}\n[Service]\nWorkingDirectory=/srv/d\nExecStart=/n /c worker\n`;
+	const seams = (text, { platform = "linux", at = path } = {}) => ({ platform, home: "/home/op", fileExists: (p) => p === at, readUnit: () => text });
+	const [wanted] = openshellUnitOrderChecks(seams(unitFor("Wants=openshell-gateway.service")), "/srv/d");
+	assert.equal(wanted.ok, true);
+	assert.equal(wanted.warn, undefined);
+	const [older] = openshellUnitOrderChecks(seams(unitFor("")), "/srv/d");
+	assert.equal(older.warn, true);
+	assert.match(older.fix, /service install --force/);
+	const [cycle] = openshellUnitOrderChecks(seams(unitFor("Wants=openshell-gateway.service\nAfter=openshell-gateway.service")), "/srv/d");
+	assert.equal(cycle.warn, true);
+	assert.match(cycle.label, /an ordering cycle/);
+	const [system] = openshellUnitOrderChecks(seams(unitFor("x"), { at: "/etc/systemd/system/pi-dispatch-worker.service" }), "/srv/d");
+	assert.equal(system.warn, true);
+	assert.match(system.label, /system unit, which cannot pull in the gateway's user unit/);
+	assert.deepEqual(openshellUnitOrderChecks(seams(unitFor("x")), "/elsewhere"), [], "no unit for this folder says nothing: the worker may run by hand");
+	assert.deepEqual(openshellUnitOrderChecks(seams(unitFor("x"), { platform: "darwin" }), "/srv/d"), []);
+});

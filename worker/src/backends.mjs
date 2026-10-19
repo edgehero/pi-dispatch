@@ -1124,6 +1124,39 @@ export function venuesOf(env) {
 	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND, openshellUsed: openshellCopyUsed || openshellBindUsed, openshellCopyUsed, openshellBindUsed };
 }
 
+/** The two engines an OpenShell gateway's compute driver may be in v1 (`config.mjs` `openshellFrom` refuses any other). */
+export const OPENSHELL_ENGINES = Object.freeze(["docker", "podman"]);
+
+/**
+ * What setting up the openshell venues needs on this host (issue #707), from the venues `venuesOf` read and the two keys
+ * the worker boots with (`PI_OPENSHELL_ENGINE`, `PI_OPENSHELL_GATEWAY`, read as `openshellFrom` reads them). ONE rule, so
+ * `up`, `service install`, `init`'s next steps and doctor cannot disagree about it:
+ *
+ *   - `engine`: the gateway's compute driver, docker unless the key says podman. It is the image store the gateway runs
+ *     sandboxes from, so the job image must be in it;
+ *   - `imageEngine`: that engine, or null where another blessed venue's own step already puts the image in the SAME
+ *     store (`local` in docker's, `podman` in this account's rootless Podman store), so `up` pulls it once;
+ *   - `valkeyEngine`: the engine Valkey runs on for this deployment, only where neither `local` nor `podman` is blessed
+ *     (each of those already decides where the queue runs, and a second Valkey on the same port would only fail to bind);
+ *   - `gateway`: the registered gateway's name the worker addresses, or null for the CLI's active one;
+ *   - `engineError`: a sentence when the key names an engine v1 does not admit (then both engines above are null).
+ *
+ * The squid egress proxy is NOT part of it, on purpose: the gateway's per-sandbox network policy is the openshell venue's
+ * egress layer (`CONST-VENUE-EGRESS-LAYER`), and a proxy started for it would be one no job of this venue attaches to.
+ * Not blessed: `{ used: false }` with every other field null, so a value left in `.env` changes nothing.
+ */
+export function openshellSetupOf(venues, env = {}) {
+	if (!venues?.openshellUsed) return { used: false, engine: null, gateway: null, imageEngine: null, valkeyEngine: null, engineError: null };
+	const raw = env?.PI_OPENSHELL_ENGINE;
+	const engine = raw === undefined || raw === null || raw === "" ? "docker" : String(raw);
+	const gateway = typeof env?.PI_OPENSHELL_GATEWAY === "string" && env.PI_OPENSHELL_GATEWAY !== "" ? env.PI_OPENSHELL_GATEWAY : null;
+	if (!OPENSHELL_ENGINES.includes(engine)) {
+		return { used: true, engine, gateway, imageEngine: null, valkeyEngine: null, engineError: `PI_OPENSHELL_ENGINE must be docker or podman, the compute drivers the openshell venue admits (got ${JSON.stringify(engine)})` };
+	}
+	const covered = (engine === "docker" && venues.localUsed) || (engine === "podman" && venues.podmanUsed);
+	return { used: true, engine, gateway, imageEngine: covered ? null : engine, valkeyEngine: venues.localUsed || venues.podmanUsed ? null : engine, engineError: null };
+}
+
 /**
  * `PI_BACKEND_FLOOR` -- the minimum every blessed backend must declare, as `property=word` pairs, comma
  * separated. Example: `egress=enforced,nonRoot=asserted`. Unset means no floor.

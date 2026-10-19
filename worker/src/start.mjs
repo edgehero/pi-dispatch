@@ -835,7 +835,10 @@ export async function startWorker(
 	// worker judges it itself, before it contacts Valkey at all, with the same function (`resolveWorkerValkey`), and
 	// every client below connects to the judged literal address, never to a name resolved again later. A refusal is a
 	// configError (exit 2, not restarted into the same answer); nothing answering is a plain error (exit 1, restarted).
-	const valkey = await judgeValkey({ url: config.valkeyUrl, venues: { localUsed: localBlessed, podmanUsed: podmanBlessed }, env });
+	// `openshellUsed` (issue #707, review round 2 of #715): an openshell venue on Podman is the queue's engine where no
+	// `local` or `podman` venue is (`openshellSetupOf`), and the judgement refuses root's listener there as `up` does. Left
+	// out, as it was, the rule saw no openshell venue and the boot took a root-held Valkey `up` had refused.
+	const valkey = await judgeValkey({ url: config.valkeyUrl, venues: { localUsed: localBlessed, podmanUsed: podmanBlessed, openshellUsed: openshellBlessed }, env });
 	for (const note of valkey.notes ?? []) log("valkey_note", { note });
 	if (valkey.pinned) log("valkey_pinned", { address: valkey.pinned.address, port: valkey.pinned.port, heldBy: valkey.pinned.heldBy });
 	// Every client below connects through connection.mjs' JudgedConnector, which judges the (pinned) address again on

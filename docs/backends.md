@@ -555,6 +555,36 @@ credential provider, and with them it is **blessable**.
 - Run `pi-dispatch doctor --openshell` first; once `PI_BACKENDS` names the venue a plain `pi-dispatch doctor` runs the
   same lines.
 
+**Setting it up** (issue #707). Install OpenShell 0.1.4 yourself (its
+[release](https://github.com/NVIDIA/OpenShell/releases/tag/v0.1.4): the deb, rpm or snap on Linux; on macOS the
+release's own formula, `brew install https://github.com/NVIDIA/OpenShell/releases/download/v0.1.4/openshell.rb`, since
+only that formula defines the Homebrew service (homebrew-core's `openshell` has none); there is no Windows build, so the
+venue is refused there). Then, in the deployment folder, with `PI_BACKENDS` (and `PI_OPENSHELL_ENGINE` for Podman) in
+`.env`:
+
+1. `pi-dispatch up` checks the engine, the CLI and the gateway as the worker's boot does, and changes nothing unless
+   you accept. A gateway that does not answer is offered a start (`systemctl --user start openshell-gateway`, the user
+   unit OpenShell's package ships, or `brew services start openshell` on macOS), only where that unit or service
+   exists, and `up` then waits up to 30 s for it. A gateway that answers on `127.0.0.1:17670` while the CLI has no
+   gateway registered at all is offered the registration (`openshell gateway add https://127.0.0.1:17670 --local --name
+   openshell`, or the name `PI_OPENSHELL_GATEWAY` gives); with any registration `up` prints that command as the fix and
+   registers nothing. A CLI that is missing or at another release stops `up` with the release's URL: `up` installs
+   nothing. For `openshell-bind` it prints the gateway's three bind settings and never edits the gateway's configuration.
+2. The same pass puts the job image into the gateway's engine (`docker` by default, or this account's Podman store),
+   unless the `local` or `podman` venue already put it into that same store, and reads what it declares
+   (`sandboxLayout`, and `transcriptStderr` for the live transcript).
+3. Where neither `local` nor `podman` is blessed, Valkey runs on that engine: docker's `pi-dispatch-valkey` container,
+   or on Podman the Quadlet Valkey alone. **No egress proxy is started for the venue**: the gateway's per-job policy is
+   its egress control.
+4. `pi-dispatch service install` runs the worker as a user service with `Wants=openshell-gateway.service`, so a boot
+   starts the gateway too, and deliberately no `After=` on it: the 0.1.4 unit is `After=default.target`, so that ordering
+   would be a cycle in which systemd drops the worker's start (measured). The worker does not need the order, since a
+   gateway still starting at boot is only logged. On Podman it is also ordered after the Quadlet Valkey's units, and
+   without `local` it names no `docker.service`. `--system` is refused, as for the podman venue: the gateway is a user
+   unit, and the CLI keeps its registration under that account's home. On macOS the LaunchAgent's `PATH` carries the
+   directory this shell finds `openshell` in, and the gateway stays up with `brew services start openshell`. Doctor
+   warns when the installed unit does not pull the gateway in, or is ordered after it.
+
 **Credentials, through a provider.** On this venue the job's secrets never enter the sandbox as values. For each job
 the worker creates an OpenShell provider named like the sandbox, holding every secret of the job's environment (the
 provider key, the minted forge token, a trigger's resolved secrets: every name the redactor treats as secret). The
