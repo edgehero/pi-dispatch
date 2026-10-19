@@ -10,6 +10,15 @@
 # vendor. This is the MANIFEST-LIST digest (pinning a per-arch manifest would break
 # multi-arch); it resolves to node 22.23.1 and carries amd64 + arm64/v8, so Apple
 # Silicon works. 22.23.1 clears pi's 22.19.0 floor.
+# pi-landlock (issue #683, image/landlock/pi-landlock.c), built in a stage of its own so the compiler never reaches the job
+# image. The SAME pinned base as the job image below, so this adds no second vendor pin; gcc and libc6-dev come from
+# that base's own Debian release. Static, so the binary needs nothing from the image it lands in. `-Werror` because a
+# warning in a forty-line security helper is a defect, not noise.
+FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS landlock
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+COPY image/landlock/pi-landlock.c /src/pi-landlock.c
+RUN gcc -O2 -Wall -Wextra -Werror -static -o /pi-landlock /src/pi-landlock.c
+
 FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -232,6 +241,17 @@ RUN useradd --create-home --shell /bin/bash --uid 1001 pi
 RUN mkdir -p /home/pi/.pi/agent && chown -R pi:pi /home/pi \
     && chmod 0777 /home/pi /home/pi/.pi /home/pi/.pi/agent
 
+# The image's WORKDIR is /sandbox (issue #683), not /workspace, because a copying venue (OpenShell) makes the WORKDIR
+# its sandbox's writable tree and uploads and downloads nothing outside it: the `sandbox` layout
+# (image/runner/src/layout.mjs) puts the job, workspace and session there. A binding venue is not moved by it: the
+# worker's argv carries `--workdir=/workspace` (worker/src/docker-run.mjs), so a job there starts where it always did,
+# and an older image under a newer worker too. Owned by pi and not world-writable: OpenShell runs the image's own USER
+# there, and on a binding venue nothing is mounted at /sandbox at all.
+# /workspace stays in the image, root-owned and empty, exactly as `WORKDIR /workspace` used to leave it: a container
+# started without a workspace mount (verify-image.sh's offline jobs, an operator's hand-run one) still has the
+# directory the runner names as its cwd.
+RUN mkdir -p /sandbox /workspace && chown pi:pi /sandbox && chmod 0755 /sandbox /workspace
+
 # The safety floor and the runner are ROOT-OWNED and NOT writable by pi. The agent runs AS pi;
 # if it could overwrite /opt/pi-dispatch/HARD_RULES.md it would own its own constraints, and if
 # it could overwrite /app it would own the runner and pi itself. `/job:ro` exists precisely so
@@ -253,6 +273,12 @@ COPY guardrails/PORTFOLIO_PROTOCOL.md /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md
 # this copy on every venue. A COPY, not a chmod of /usr/local/bin/node: every tool's node stays an ordinary readable
 # binary, and both cost the same one 120MB layer. The entrypoint execs this one.
 RUN install -o root -g root -m 0711 /usr/local/bin/node /opt/pi-dispatch/runner-node
+
+# The write confinement a copying venue starts the runner through (issue #683): root-owned, so the agent cannot replace
+# the helper that confines it (COPY keeps root:root and the 0755 gcc gave it; the chmod below takes the write bit), and
+# readable, because it holds no secret. Only the worker's own exec argv on such a venue names it; a binding venue's
+# `:ro` mounts do the same job there.
+COPY --from=landlock /pi-landlock /opt/pi-dispatch/pi-landlock
 
 # Source last: everything above is cacheable and this layer changes on every commit.
 COPY image/runner /app/image/runner
@@ -369,9 +395,23 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # a collaborator sent would wait unread while the run reported success. The worker refuses that pairing pre-spend (its
 # `steer` capability row, reason job-image-steer-unsupported). verify-image.sh checks the baked runner reads the
 # variable and carries the inbox module, and that an /inbox mounted read-only is read-only inside the container.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer"
+# `sandboxLayout` (issue #683) tells the worker this runner reads PI_JOB_LAYOUT and, under `sandbox`, finds every job
+# path under /sandbox (image/runner/src/layout.mjs), and that the image carries /opt/pi-dispatch/pi-landlock, the write
+# confinement a copying venue starts it through. An older runner on such a venue would read /job, find nothing, and
+# exit "missing job input" after the sandbox was made and the budget reserved; without the helper its /job would be
+# writable by the agent. The worker refuses that pairing pre-spend on a copying venue only (its `sandboxLayout`
+# capability row, reason job-image-sandbox-layout-unsupported). verify-image.sh runs an offline job on the sandbox
+# layout and proves the helper refuses a write under /sandbox/job while allowing one under /sandbox/workspace.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout"
+
+# The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
+# names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it
+# can write a rule; issue #684 generates that policy from this list. Real paths, not PATH names or symlinks, because
+# such a policy matches the executable the kernel ran. verify-image.sh holds every entry to an existing regular file
+# that is its own realpath, so a moved binary fails the image job rather than a policy silently matching nothing.
+LABEL dev.pi-dispatch.net-binaries="/usr/local/bin/node,/usr/bin/git,/usr/lib/git-core/git-remote-http,/usr/bin/gh,/usr/local/bin/glab,/usr/local/bin/tea,/usr/local/bin/github-mcp-server"
 
 USER pi
-WORKDIR /workspace
+WORKDIR /sandbox
 
 ENTRYPOINT ["/entrypoint.sh"]

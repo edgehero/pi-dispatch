@@ -61,7 +61,11 @@ export function resolveJobImage(job, defaultImage) {
  * `unavailable` and retry; if it comes up between them we report `missing` on an image that is genuinely
  * absent. Nothing is cached, deliberately -- see the note at the call site in start.mjs.
  */
-export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker" }) {
+export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", copies = false }) {
+	// Issue #683: `copies` is the venue's, not the job's: a venue that copies the job's files into the box (`binds:
+	// false`, `openshell`) needs the `sandboxLayout` row below on EVERY job, and a binding venue never does. A boolean
+	// and nothing else, so a truthy string from a hand-built bundle cannot arm a gate it did not mean.
+	if (typeof copies !== "boolean") throw new TypeError("makeImagePreflight: `copies` must be a boolean");
 	// Issue #354: `bin` is the venue's CLI. Both probes go through it, because a `podman image inspect` answered by one
 	// store and an `info` answered by another daemon would tell "absent" from "unavailable" about two different hosts.
 	return async function imagePreflight(job) {
@@ -104,7 +108,7 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker" }) {
 			// the job actually carries the feature it guards. The gates, their order and why each exists are
 			// the CAPABILITY_GATES table; the first one this job needs and the image lacks refuses.
 			for (const gate of CAPABILITY_GATES) {
-				if (gate.needed(job) && !(capabilities ?? []).includes(gate.token)) {
+				if (gate.needed(job, { copies }) && !(capabilities ?? []).includes(gate.token)) {
 					return { [gate.result]: wanted, declared: capabilities ?? [] };
 				}
 			}
@@ -125,7 +129,8 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker" }) {
  * row whose `needed(job)` holds and whose `token` the image does not declare, before any spend.
  *
  *   token    the capability the image must declare
- *   needed   whether this job carries the feature (a job that does not pays nothing for the row)
+ *   needed   whether this job carries the feature (a job that does not pays nothing for the row), given the job and
+ *            the venue's `{ copies }` (issue #683: the one row a venue rather than a trigger arms)
  *   result   the key the preflight result names the image under, which the processor branches on
  *   reason   the run record's reason for the refusal
  *   event    the worker log event
@@ -258,6 +263,18 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-steer-unsupported",
 		event: "refused_image_steer_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for receiving messages while it runs (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.steer\`. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #683: on a venue that copies the job's files (`openshell`), a runner that predates PI_JOB_LAYOUT looks for
+	// /job, finds nothing in a sandbox whose files sit under /sandbox, and exits "missing job input" after the sandbox
+	// was made and the budget reserved; and without /opt/pi-dispatch/pi-landlock its /job would be writable by the
+	// agent. Armed by the VENUE, on every job there, never by a trigger, so a binding venue never reads the token.
+	Object.freeze({
+		token: "sandboxLayout",
+		needed: (_job, { copies } = {}) => copies === true,
+		result: "sandboxLayoutUnsupported",
+		reason: "job-image-sandbox-layout-unsupported",
+		event: "refused_image_sandbox_layout_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for a venue that copies the job's files into its sandbox (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would not find them, and could not keep the agent from rewriting them. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 
