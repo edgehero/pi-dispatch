@@ -449,6 +449,36 @@ test("a worker abort of an armed job is policy: no exit checkpoint, no enqueue",
 	assert.ok(!names(calls).includes("enqueue"));
 });
 
+// Issue #686 part 3, review round 2 of #714: a venue whose box was not confirmed gone after the run (`lingering`).
+test("a lingering box: no exit checkpoint on any exit; a forge infra exit still recovers, from the last committed checkpoint", async () => {
+	const holder = [];
+	const { deps: d, calls } = deps({ runContainer: async () => ({ code: 1, aborted: false, lingering: true, checkpoint: checkpointHandle(holder) }) });
+	const r = await runJob(job, d);
+	assert.equal(r.reason, RECOVERY_ENQUEUED, "infrastructure as before: the retry or recovery gets a fresh tree");
+	assert.ok(!holder.some((c) => c[0] === "cp-exit"), "no snapshot of a tree something may still write");
+	assert.ok(holder.some((c) => c[0] === "cp-close"), "the handle WAS consulted, so the no-exit assertion is not vacuous");
+	assert.ok(names(calls).includes("enqueue"));
+});
+
+test("a lingering box (CONST-RETRY-INFRA-ONLY): a completed run and a folder job's infra exit RETURN the named result; exit 2 keeps its own", async () => {
+	const { OPENSHELL_BIND_LINGERING } = await import("../src/backends.mjs");
+	for (const [code, kindJob] of [[0, job], [1, { ...job, kind: "local", recover: false }], [7, { ...job, kind: "local", recover: false }]]) {
+		const holder = [];
+		const { deps: d, calls } = deps({ runContainer: async () => ({ code, aborted: false, lingering: true, checkpoint: checkpointHandle(holder) }) });
+		const r = await runJob(kindJob, d);
+		assert.deepEqual([r.outcome, r.reason, r.exitCode, r.budgetReserved], ["policy", OPENSHELL_BIND_LINGERING.reason, code, true], `exit ${code} on ${kindJob.kind}`);
+		assert.ok(calls.some((c) => c[0] === "comment" && c[1] === OPENSHELL_BIND_LINGERING.comment), "its fixed comment");
+		assert.ok(!names(calls).includes("enqueue"), "never a second agent on that tree");
+		assert.ok(!holder.some((c) => c[0] === "cp-exit"));
+	}
+	const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, lingering: true }) });
+	const r = await runJob(job, d);
+	assert.equal(r.outcome, "policy");
+	assert.notEqual(r.reason, OPENSHELL_BIND_LINGERING.reason, "a determinate refusal keeps its own reason");
+	const stopped = deps({ runContainer: async () => ({ code: 137, aborted: true, lingering: true }) });
+	assert.equal((await runJob(job, stopped.deps)).reason, "worker-abort", "a stop stays a stop");
+});
+
 test("a container the checkpointer stopped (it could not unpause it) is an infra exit: exit checkpoint, recovery queued", async () => {
 	const holder = [];
 	const { deps: d, calls } = deps({ runContainer: async () => ({ code: 137, aborted: false, checkpointStopped: true, checkpoint: checkpointHandle(holder) }) });

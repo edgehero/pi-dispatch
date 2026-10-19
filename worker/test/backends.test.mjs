@@ -602,6 +602,37 @@ test("the openshell venue (#683): every word it cannot build is asserted with it
 	assert.equal(venuesOf({}).openshellUsed, false);
 });
 
+test("the openshell-bind venue (#686 part 3): openshell's words but mountSet, readOnlyJobInputs and localFolders by the driver's binds, each with its asserter", async () => {
+	const { OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, OPENSHELL_BACKENDS, OPENSHELL_GATEWAY_LOCAL } = await import("../src/backends.mjs");
+	assert.equal(OPENSHELL_BIND_BACKEND, "openshell-bind");
+	assert.deepEqual(OPENSHELL_BACKENDS, ["openshell", "openshell-bind"]);
+	const entry = BACKENDS[OPENSHELL_BIND_BACKEND];
+	assert.equal(entry.remote, false);
+	assert.equal(entry.credentialCustody, "layer", "CONST-VENUE-EGRESS-LAYER unchanged: the same provider and policy");
+	// Pinned word by word, as the copy mode's are: the #686 lab (OpenShell 0.1.4, Docker driver, binds enabled).
+	const want = { isolation: ASSERTED, ephemeral: ASSERTED, mountSet: ASSERTED, egress: ASSERTED, jobToJobIsolation: ASSERTED, imagePinning: ASSERTED, exitCodes: ASSERTED, abortable: ASSERTED, readOnlyJobInputs: ASSERTED, nonRoot: ASSERTED, secretsCustody: ASSERTED, credentialTransit: ENFORCED, localFolders: ASSERTED, pausable: "absent" };
+	assert.deepEqual({ ...entry.declares }, want);
+	assert.deepEqual({ ...entry.observedBy }, { credentialTransit: OPENSHELL_GATEWAY_LOCAL });
+	// Every asserted word names its asserter, and the three words bind mode changes name the driver's binds.
+	for (const [word, level] of Object.entries(want)) if (level === ASSERTED) assert.equal(typeof entry.asserts[word], "string", word);
+	assert.match(entry.asserts.mountSet, /--driver-config-json/);
+	assert.match(entry.asserts.readOnlyJobInputs, /binds \/job read-only/);
+	assert.match(entry.asserts.localFolders, /read-write as \/workspace/);
+	// Every other word is the copy mode's own, so the two cannot drift apart where they agree.
+	for (const word of Object.keys(want).filter((w) => !["mountSet", "readOnlyJobInputs", "localFolders"].includes(w))) assert.equal(entry.declares[word], BACKENDS[OPENSHELL_BACKEND].declares[word], word);
+	assert.ok(Object.isFrozen(entry.declares) && Object.isFrozen(entry.asserts));
+	for (const [raw, wantList] of [["openshell-bind", ["openshell-bind"]], ["local,openshell-bind", ["local", "openshell-bind"]], ["openshell,openshell-bind", ["openshell", "openshell-bind"]]]) assert.deepEqual(parseBackendList(raw), wantList, raw);
+	assert.deepEqual(venuesOf({ PI_BACKENDS: "openshell-bind" }), { localUsed: false, podmanUsed: false, podmanDefault: false, openshellUsed: true, openshellCopyUsed: false, openshellBindUsed: true });
+	assert.deepEqual(venuesOf({ PI_BACKENDS: "local,openshell" }), { localUsed: true, podmanUsed: false, podmanDefault: false, openshellUsed: true, openshellCopyUsed: true, openshellBindUsed: false });
+	// A folder job is admitted (the loader's and the processor's refusals read `localFolders: absent` only).
+	const { refusesLocalWorkspace } = await import("../src/triggers.mjs");
+	assert.equal(refusesLocalWorkspace(entry, "/home/op/folder"), false);
+	assert.equal(refusesLocalWorkspace(BACKENDS[OPENSHELL_BACKEND], "/home/op/folder"), true);
+	// The layer rule applies by custody, not by name.
+	const [refusal] = backendRefusals({ backends: ["local", OPENSHELL_BIND_BACKEND], backendFloor: {}, egress: false });
+	assert.match(refusal, /^PI_EGRESS=0 cannot run openshell-bind: /);
+});
+
 test("a layer venue cannot run with PI_EGRESS=0 (#684): its policy is the egress control and holds the credentials", () => {
 	const [refusal] = backendRefusals({ backends: ["local", "openshell"], backendFloor: {}, egress: false });
 	assert.match(refusal, /^PI_EGRESS=0 cannot run openshell: .*CONST-VENUE-EGRESS-LAYER.*Arm PI_EGRESS, or remove that backend from PI_BACKENDS/);

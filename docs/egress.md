@@ -392,6 +392,11 @@ and the only path its credentials resolve through, so "egress off" has no meanin
 policy admitting everything, which hands the real credential to any host the agent names. Arm `PI_EGRESS`, or remove
 `openshell` from `PI_BACKENDS`.
 
+**Bind mode (`openshell-bind`) has the same policy.** Its network rules, credential provider and placeholders are
+built by the same code from the same sources, read back the same way, and `PI_EGRESS=0` refuses it the same way. The
+only difference in its policy document is the filesystem section, which also lists the job's bind targets; nothing it
+reaches on the network changes.
+
 ## What it costs when it is wrong, and why you are refused instead
 
 A job that cannot reach its provider **starts the container, spends its budget slot, and produces nothing**:

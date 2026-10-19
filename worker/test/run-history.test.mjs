@@ -1537,6 +1537,16 @@ test("docs/mcp.md's and INT-RUNNER-EXIT-CODE-PROTOCOL's exit-2 MCP reasons are M
 	assert.deepEqual([...fromSpec].sort(), [...MCP_RUNNER_REASONS].sort());
 });
 
+// Issue #686 part 3: the openshell venues' own refusal reasons reach the record as `reason`, so each is in its enum.
+test("every OPENSHELL_REFUSALS reason is in the record's reason enum (#686 part 3)", async () => {
+	const { OPENSHELL_REFUSALS } = await import("../src/backend-openshell.mjs");
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const enumLine = spec.split("\n").find((l) => l.includes('"reason":    "<fixed enum:'));
+	const tokens = enumLine.slice(enumLine.indexOf("<fixed enum:") + "<fixed enum:".length, enumLine.indexOf(">")).split("|");
+	for (const reason of Object.keys(OPENSHELL_REFUSALS)) assert.ok(tokens.includes(reason), `${reason} is in the record's reason enum`);
+	assert.ok(Object.hasOwn(OPENSHELL_REFUSALS, "openshell-bind-mounts-disabled"));
+});
+
 // Issue #507: a cost-cap stop said only `cost-cap` with $0, because which rule of the guard refused reached the job log
 // alone (`cost_refused`), never the record.
 test("parseExitWhy keeps a cost-cap line's why only from the closed set, only on code 2, and only beside cost-cap (#507)", () => {

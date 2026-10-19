@@ -1,16 +1,19 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { isJobNamespace, jobContainerName, JOB_NAME_PREFIX, reaperExec } from "./backend-local.mjs";
 import { FORGES } from "./forges.mjs";
 import { NON_SECRET_ENV_KEYS } from "./redact-secrets.mjs";
-import { BACKENDS, OPENSHELL_BACKEND } from "./backends.mjs";
+import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, OPENSHELL_BIND_LINGERING } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
-import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
+import { makeImagePreflight, normalizeImageId, resolveJobImage } from "./image-preflight.mjs";
 import { LAYOUTS } from "./job-layout.mjs";
+import { DAEMON_FACTS_MAX_BUFFER, DAEMON_FACTS_TIMEOUT_MS } from "./daemon-facts.mjs";
+import { JOB_USER_FACTS_MAX_AGE_MS, decideJobUser, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { networkPolicyFor } from "./openshell-policy.mjs";
-import { judgeGatewayStatus, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
+import { bindProbeArgs, driverConfigFor, judgeBindAnswer, judgeGatewayStatus, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
 import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 
@@ -47,12 +50,44 @@ import { makeRunContainer } from "./run-container.mjs";
  * (INT-STEER-INBOX-CONTRACT's second transport): makeRunContainer, handed the relay opener and told this venue copies
  * (`binds: false`), writes them, and the acks come back over the stderr transcript above. An image without `steerStdin`
  * runs unsteered, `steerSkipped: "venue-copies"`. Recovery is not served here: `run.recover` is refused before spend.
+ *
+ * BIND MODE (issue #686 part 3, the `openshell-bind` venue): the same factory with `mode: "bind"`, rather than a second
+ * adapter, because everything that makes the venue trustworthy is shared and must stay one copy: the image read by ID,
+ * the per-job network policy and its read-back, the credential provider and its placeholders, the gateway checks, the
+ * stop, the teardown, the reaper. What differs is exactly the transport of the job's files, and with it four answers:
+ *   - no upload and no download: the container spec's mounts are handed to the compute driver as `--driver-config-json`
+ *     binds (read-only unless the spec mounts them writable), at the `mounts` layout's own paths, which OpenShell admits
+ *     (none is `/sandbox` or under its own trees);
+ *   - the policy lists every bind target, read-only ones under `read_only` and writable ones under `read_write`
+ *     (measured: the read-back is unchanged), and runs as the job user (`decideOpenshellBindUser`), since a bind is
+ *     written as the sandbox's uid;
+ *   - the runner reads the `mounts` layout, so `/inbox` file steering, the host tail of the session file and folder jobs
+ *     work as on `local` (`binds: true`, `transcript: "file"`), and `run.recover` is served by the host workspace's
+ *     salvage and exit snapshots (no pause verb: live checkpoints stay off);
+ *   - no pi-landlock: `/job` is a read-only bind (measured: EROFS) and a `read_only` policy path (measured: denied), the
+ *     kernel control `local`'s `:ro` is, so the helper would add nothing for it and would tie the venue to the
+ *     `sandboxLayout` capability for no guarantee.
+ * Bind mounts need the gateway's own settings (`OPENSHELL_BIND_SETTINGS`), which no read reveals, so the preflight asks a
+ * create that can only be refused (`bindProbeArgs`) and caches the answer per gateway (`bindGate` below).
  */
 
 
 /** The label every sandbox this worker makes carries, which `list` selects on: a name alone is a substring world. */
 export const OPENSHELL_OWNER_LABEL = "pi.dispatch.owner";
 export const OPENSHELL_OWNER = "pi-dispatch";
+/**
+ * The label a BIND-mode sandbox carries (issue #686 part 3), value `bind`, so each mode's listing, its gone-check and the
+ * host budget's leftovers count only its own sandboxes. A copy-mode sandbox carries none, so its create is unchanged and
+ * every sandbox made before bind mode existed reads as copy mode's. The boot sweep reaps both modes' (one owner label):
+ * it runs before this process has started any job, and either mode's leftover from a crash is the same orphan.
+ */
+export const OPENSHELL_MODE_LABEL = "pi.dispatch.openshell-mode";
+/** The two modes, `copy` the default (`DES-OPENSHELL-VENUE`). */
+export const OPENSHELL_MODES = Object.freeze(["copy", "bind"]);
+/** The marker beside a bind-mode job dir (`<jobDir>.openshell-bind`): a sandbox may write it (review round 2 of #714). */
+export const OPENSHELL_BIND_MARKER = ".openshell-bind";
+/** A bind-mode sandbox's job directory, by its name (`job-...`), so a salvage can end that sandbox first (#714). */
+export const OPENSHELL_JOB_DIR_LABEL = "pi.dispatch.job-dir";
 
 /** The entrypoint and the confinement it is started through, both baked into the job image (image/Dockerfile). */
 export const OPENSHELL_ENTRYPOINT = "/entrypoint.sh";
@@ -94,13 +129,18 @@ export const OPENSHELL_WRITABLE = Object.freeze([SANDBOX.workspace, SANDBOX.sess
  * job's own (`networkPolicyFor`, issue #684), spread in beside it by the stage; none is deny-all. `run_as_user` is the image's own uid, so OpenShell's refusal of root and this
  * worker's non-root uid are the same fact.
  */
-export function sandboxPolicy({ uid = SHIPPED_IMAGE_UID, gid = SHIPPED_IMAGE_UID } = {}) {
+export function sandboxPolicy({ uid = SHIPPED_IMAGE_UID, gid = SHIPPED_IMAGE_UID, binds = [] } = {}) {
+	// Issue #686 part 3: a bind-mode sandbox lists every bind target, each where its mount puts it (a policy path the
+	// filesystem section does not list is unreadable, measured for `/opt`), after the base lists so copy mode's body is
+	// byte-identical. `/opt/pi-global` is already beneath `/opt`; listed anyway, so the list says every bind.
+	const ro = binds.filter((b) => b.readOnly === true).map((b) => b.target);
+	const rw = binds.filter((b) => b.readOnly !== true).map((b) => b.target);
 	return {
 		version: 1,
 		filesystem_policy: {
 			include_workdir: true,
-			read_only: ["/usr", "/lib", "/lib64", "/etc", "/bin", "/sbin", "/opt", "/app", "/ms-playwright", "/sys/fs/cgroup", "/dev/urandom", OPENSHELL_ENTRYPOINT],
-			read_write: ["/tmp", "/dev/null", "/home/pi", "/proc"],
+			read_only: ["/usr", "/lib", "/lib64", "/etc", "/bin", "/sbin", "/opt", "/app", "/ms-playwright", "/sys/fs/cgroup", "/dev/urandom", OPENSHELL_ENTRYPOINT, ...ro],
+			read_write: ["/tmp", "/dev/null", "/home/pi", "/proc", ...rw],
 		},
 		landlock: { compatibility: "hard_requirement" },
 		process: { run_as_user: String(uid), run_as_group: String(gid) },
@@ -247,6 +287,66 @@ export function gitCredentialEnv(env = {}) {
 	};
 }
 
+/**
+ * The targets OpenShell refuses for a bind (measured on 0.1.4: `/sandbox` "is reserved for the OpenShell workspace", and
+ * nothing may overlap its own trees). A `mounts`-layout path never is one; checked anyway, so a layout change is a
+ * refusal at the stage, never a create the gateway refuses with words this adapter does not read.
+ */
+export const BIND_RESERVED_TARGETS = Object.freeze(["/sandbox", "/opt/openshell", "/etc/openshell", "/run/openshell"]);
+const overlaps = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+
+/**
+ * A bind-mode job's binds (issue #686 part 3), from the container spec's mounts: each host path at its `mounts`-layout
+ * target, read-only exactly where the spec mounts it read-only (`/job`, `/inbox`, the overlay), writable where it does
+ * (`/workspace`, `/session`, `/outbox`). The same list `local` hands docker, so a job sees the same tree on both. THROWS
+ * on a target OpenShell reserves (`BIND_RESERVED_TARGETS`) or a relative one.
+ */
+export function bindMountsOf(spec) {
+	return (spec?.mounts ?? []).map((m) => {
+		const target = String(m.container ?? "");
+		if (!target.startsWith("/") || target === "/" || BIND_RESERVED_TARGETS.some((r) => overlaps(target, r))) throw new Error(`openshell: ${JSON.stringify(target)} is not a target OpenShell admits for a bind`);
+		// Review round 1 (#714): the spec's private relabel (`:Z`) is the driver's `selinux_label: "private"` (upstream's
+		// schema: "shared" for :z, "private" for :Z), never dropped. Only the worker's own per-job directories carry it.
+		return { source: m.host, target, readOnly: m.readOnly === true, ...(m.relabel === "private" ? { selinuxLabel: "private" } : {}) };
+	});
+}
+
+/**
+ * Who a bind-mode job runs as (issue #686 part 3), by `local`'s job-user rule (issue #341, `decideJobUser` then
+ * `resolveImageUser`) and for its reason: a bind is read and written as the sandbox's uid (measured: files owned by the
+ * image's 1001), so on a host whose worker is another uid the sandbox could neither read the worker's 0700 job dir nor
+ * leave files the worker can remove. OpenShell's policy sets the uid (`process.run_as_user`/`run_as_group`), so the job
+ * runs as the worker's own `<euid>:<egid>` where that is not 1001, which the image must declare it can (`anyUid`).
+ *
+ * REVIEW ROUND 1 (#714): decided from the gateway's ENGINE as well as the ids, `daemon` being its `docker info` read
+ * (`makeDaemonFactsReader`): a rootless or userns-remapped Docker behind the gateway maps every uid away from the
+ * worker's, so no uid could read the job dir, and `local`'s rows refuse that before spend (`rootless`, `userns-remap`,
+ * `desktop-linux-userns`, `job-user-unmappable`) rather than after it. The engine is on this host (the gateway is
+ * observed local, and the bind sources are this host's paths), so its endpoint counts as local. darwin and win32 run
+ * the image's own user (`desktop-platform`, a VM's file sharing maps ownership; UNMEASURED for OpenShell); a root worker
+ * and a primary group of 0 are refused; an unanswered read is `unavailable`, retried. Returns `resolveImageUser`'s answer.
+ * Measured: the Docker driver keeps uids across a bind (no user namespace), and `run_as_user` 2000 ran as uid 2000,
+ * wrote a bind as 2000, and found the image's /home/pi 0777.
+ */
+export function decideOpenshellBindUser({ platform = process.platform, euid, egid, capabilities = [], daemon = null } = {}) {
+	const decision = decideJobUser({ platform, euid, egid, endpoint: { local: true }, daemon: daemon ?? { answered: false, reason: "no-daemon-facts", transient: true } });
+	// `socket: null`, deliberately (review round 2): `local`'s socket rows judge the DOCKER CLI's own unix socket, which
+	// the worker never talks to on this venue (the gateway does), and `docker-group` refuses a job user whose primary
+	// group is that socket's because `--user` would hand the container the docker group. Here the gid reaches only the
+	// policy's `run_as_group`, inside a sandbox OpenShell builds without the socket, so that refusal has nothing to guard.
+	// A rootless engine is still caught, by `docker info`'s own `name=rootless`, which the socket row only backs up.
+	const chosen = resolveImageUser(decision, { capabilities, euid, egid });
+	// The relabel rule is `local`'s too: true only for a Podman daemon reporting SELinux, which bind mode (Docker only)
+	// never reads, so this stays false there; kept so the two cannot disagree.
+	return chosen.user !== undefined && relabelsPrivateMounts(daemon?.answered ? daemon.facts : null, { local: true }, platform) ? { ...chosen, relabel: true } : chosen;
+}
+
+/** The policy's uid and gid for a job user (`"<uid>:<gid>"`, or null for the image's own). */
+function policyIds(user) {
+	const m = /^([1-9]\d{0,9}):([1-9]\d{0,9})$/.exec(String(user ?? ""));
+	return m ? { uid: Number(m[1]), gid: Number(m[2]) } : { uid: SHIPPED_IMAGE_UID, gid: SHIPPED_IMAGE_UID };
+}
+
 /** The sandbox-layout path a `mounts`-layout container path is copied to, or null for one the layout does not name. */
 export function sandboxPathOf(container) {
 	const key = Object.keys(LAYOUTS.mounts).find((k) => LAYOUTS.mounts[k] === container);
@@ -265,7 +365,7 @@ function gatewayArgs(gateway) {
  * profile adds. HOME is the image's home whoever the env says: OpenShell runs the image's own uid, and a tool's cache
  * must land there.
  */
-export function openshellExecArgs({ name, env = {}, gateway = null }) {
+export function openshellExecArgs({ name, env = {}, gateway = null, mode = "copy" }) {
 	// Issue #684: no credential value on this argv, ever. ONLY the names the redactor treats as not secret
 	// (`NON_SECRET_ENV_KEYS`) travel here, an allowlist rather than "every name but the provider's": a secret the provider
 	// could not carry (a name no shell can spell) would otherwise fall through to this argv as a value (review H1). Every
@@ -277,8 +377,11 @@ export function openshellExecArgs({ name, env = {}, gateway = null }) {
 		if (value === undefined || value === null) continue;
 		envArgs.push("--env", `${key}=${value}`);
 	}
+	const head = [...gatewayArgs(gateway), "sandbox", "exec", "--name", name, "--no-login-shell", "--no-tty", "--timeout", "0"];
+	// Issue #686 part 3: bind mode runs the entrypoint itself, in `/workspace`: `/job` is a read-only bind already.
+	if (mode === "bind") return [...head, "--workdir", LAYOUTS.mounts.workspace, ...envArgs, "--", OPENSHELL_ENTRYPOINT];
 	const rw = OPENSHELL_WRITABLE.flatMap((path) => ["--rw", path]);
-	return [...gatewayArgs(gateway), "sandbox", "exec", "--name", name, "--no-login-shell", "--no-tty", "--timeout", "0", "--workdir", SANDBOX.workspace, ...envArgs, "--", PI_LANDLOCK, ...rw, "--", OPENSHELL_ENTRYPOINT];
+	return [...head, "--workdir", SANDBOX.workspace, ...envArgs, "--", PI_LANDLOCK, ...rw, "--", OPENSHELL_ENTRYPOINT];
 }
 
 /** `--cpu` in the CLI's spelling (whole or fractional CPUs) and `--memory` in MiB, from the job's size. */
@@ -311,13 +414,18 @@ export const SANDBOX_GONE_PHASES = Object.freeze(new Set(["Stopped", "Completed"
 /** Phases a sandbox has not started its workload in: deleted, then gone, as `created` is on docker. */
 export const SANDBOX_UNSTARTED_PHASES = Object.freeze(new Set(["Provisioning", "Starting", "Unspecified"]));
 
+/** Whether a listed sandbox is a bind-mode one (issue #686 part 3): its mode label, and nothing else, says so. */
+const isBindSandbox = (s) => s?.labels?.[OPENSHELL_MODE_LABEL] === "bind";
+/** Whether a listed sandbox belongs to `mode`'s bundle: a copy-mode one carries no mode label. */
+const ofMode = (mode) => (s) => (mode === "bind") === isBindSandbox(s);
+
 /** Every sandbox the gateway lists with this worker's owner label, page by page. THROWS when it does not answer. */
-async function listOwned(run) {
+async function listOwned(run, stepOpts) {
 	const out = [];
 	let token = "";
 	for (let page = 0; page < 1000; page++) {
 		const args = ["sandbox", "list", "--selector", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "--page-size", "100", ...(token ? ["--page-token", token] : []), "-o", "json"];
-		const doc = parseJson((await run(args)).stdout, "sandbox list");
+		const doc = parseJson((await (stepOpts ? run(args, stepOpts) : run(args))).stdout, "sandbox list");
 		if (!doc || !Array.isArray(doc.sandboxes)) throw new Error("openshell sandbox list: no sandboxes array");
 		out.push(...doc.sandboxes.filter((s) => s && typeof s.name === "string"));
 		token = typeof doc.next_page_token === "string" ? doc.next_page_token : "";
@@ -442,9 +550,35 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-credential-reads-value": "Refused: this job's model provider reads its credential's value inside the job (to sign requests, pick an auth scheme or decode it), and on the OpenShell venue the job sees only a placeholder for it. Run it on another venue, or with a provider whose key is sent as it is. Not run.",
 	"openshell-gateway-untested": "Refused: the OpenShell gateway runs another release than the one this venue was measured on. Not run.",
 	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
+	// Issue #686 part 3, review round 2 of #714: the bind venue's named result for a sandbox not confirmed gone (backends.mjs).
+	[OPENSHELL_BIND_LINGERING.reason]: OPENSHELL_BIND_LINGERING.comment,
+	// Issue #686 part 3, bind mode only. The setting goes to the operator's log (`openshell_bind_mounts_disabled`).
+	"openshell-bind-mounts-disabled": "Refused: this job's venue mounts its files into an OpenShell sandbox, and the OpenShell gateway is not configured to allow that (its gateway.toml must allow driver config and bind mounts, and turn resource admission off), so the operator must change it before jobs run there. Not run.",
 });
 
-const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "openInboxRelay", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
+/**
+ * How long a bind-settings answer is kept (issue #686 part 3), per bundle and so per gateway: an admitting one ten
+ * minutes, a refusing one a minute, so an operator who fixes gateway.toml and restarts the gateway is read again soon
+ * without a probe per job. A create refused with a settings sentence after a probe admitted (the probe's reading of the
+ * settings and the create's disagreeing) is held the full ten minutes, so the probe cannot re-admit a job into the same
+ * refusal: at most one attempt is retried as infrastructure, every later one refused before spend. The probe's order of
+ * checks is measured, so that disagreement means a gateway reconfigured within the admitting answer's ten minutes.
+ */
+export const BIND_GATE_ADMITTED_MS = 10 * 60_000;
+export const BIND_GATE_REFUSED_MS = 60_000;
+/**
+ * Review round 1 (#714): how long a bind-mode attempt waits for its sandbox to be GONE before its run returns. A bind is
+ * the host's own tree, so a process the agent left running in the sandbox (`setsid ... &`) keeps writing the workspace,
+ * the folder, the session and the outbox after the exec ends, and a sandbox's delete is asynchronous (measured in #684).
+ * So the sandbox is deleted and the listing polled until it no longer names it; past this bound the result is marked
+ * `lingering` (`openshell_bind_sandbox_lingering` in the log), its exit code UNCHANGED (review round 2), and the processor
+ * decides: no exit checkpoint; the named result `openshell-bind-sandbox-lingering` for a completed run or a folder job;
+ * infrastructure as before for any other forge exit; exit 2 and a stop as they are.
+ */
+export const BIND_SETTLE_MS = 60_000;
+const BIND_SETTLE_POLL_MS = 1_000;
+
+const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["mode", "euid", "egid", "now", "jobsDir", "readDaemonFacts", "image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "openInboxRelay", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
 
 /**
  * Build the `openshell` bundle. `engine` is the gateway's compute driver, `docker` or `podman` (the only two in v1),
@@ -453,8 +587,13 @@ const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "
  * CLI's active one.
  */
 export function makeOpenshellBackend(opts = {}) {
+	// Issue #686 part 3: `copy` (the `openshell` venue, the default) or `bind` (`openshell-bind`).
+	const mode = opts?.mode ?? "copy";
+	if (!OPENSHELL_MODES.includes(mode)) throw new Error(`backend "${OPENSHELL_BACKEND}": mode must be "copy" or "bind", got ${JSON.stringify(mode)}`);
+	const binding = mode === "bind";
+	const venue = binding ? OPENSHELL_BIND_BACKEND : OPENSHELL_BACKEND;
 	for (const key of Object.keys(opts ?? {})) {
-		if (!OPENSHELL_BACKEND_OPTIONS.includes(key)) throw new Error(`backend "${OPENSHELL_BACKEND}": unknown option ${JSON.stringify(key)} (takes ${OPENSHELL_BACKEND_OPTIONS.join(", ")})`);
+		if (!OPENSHELL_BACKEND_OPTIONS.includes(key)) throw new Error(`backend "${venue}": unknown option ${JSON.stringify(key)} (takes ${OPENSHELL_BACKEND_OPTIONS.join(", ")})`);
 	}
 	const {
 		image,
@@ -483,7 +622,16 @@ export function makeOpenshellBackend(opts = {}) {
 		log = () => {},
 		spawnFn = spawn,
 		exec = reaperExec(),
-		fs = { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync },
+		fs = { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync },
+		// Issue #686 part 3: the worker's own ids, which a bind-mode job runs as (`decideOpenshellBindUser`), and the clock
+		// the bind gate's cache reads.
+		euid = typeof process.geteuid === "function" ? process.geteuid() : null,
+		egid = typeof process.getegid === "function" ? process.getegid() : null,
+		now = () => Date.now(),
+		// Review round 1 (#714): where the bind probe's empty source directory is made, the jobs dir (a path the gateway's
+		// engine sees as the job dirs it binds), and the engine's `docker info` read the job user is decided from.
+		jobsDir = null,
+		readDaemonFacts = null,
 		readLsm = () => readFileSync("/sys/kernel/security/lsm", "utf8"),
 		delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 		platform = process.platform,
@@ -492,8 +640,8 @@ export function makeOpenshellBackend(opts = {}) {
 		reap: reapFn = null,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 	} = opts ?? {};
-	if (engine !== "docker" && engine !== "podman") throw new Error(`backend "${OPENSHELL_BACKEND}": engine must be "docker" or "podman" (the compute drivers v1 admits), got ${JSON.stringify(engine)}`);
-	if (gateway !== null && (typeof gateway !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(gateway))) throw new Error(`backend "${OPENSHELL_BACKEND}": gateway must be a registered gateway's name`);
+	if (engine !== "docker" && engine !== "podman") throw new Error(`backend "${venue}": engine must be "docker" or "podman" (the compute drivers v1 admits), got ${JSON.stringify(engine)}`);
+	if (gateway !== null && (typeof gateway !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(gateway))) throw new Error(`backend "${venue}": gateway must be a registered gateway's name`);
 	const run = (args, stepOpts) => exec("openshell", [...gatewayArgs(gateway), ...args], stepOpts);
 
 	// Per attempt, keyed by THAT attempt's own build options (the one object all three hooks are handed), so two
@@ -510,18 +658,128 @@ export function makeOpenshellBackend(opts = {}) {
 	const networkFor = (job, endpoints, binaries) =>
 		networkPolicyFor({ allowlist: readAllowlist(), endpoints: endpoints ?? readEndpoints(), kind: job?.kind ?? null, repo: job?.repo ?? null, binaries, onSkipped: (what) => log("openshell_policy_skipped", what) });
 
+	// Issue #686 part 3: the bind settings' verdict for this bundle's gateway, `{ until, setting | null, pinned }`, and the
+	// probe in flight, so jobs picked up together share one create.
+	let bindVerdict = null;
+	let bindProbing = null;
+	const holdBindRefusal = (setting, at) => {
+		bindVerdict = { until: now() + BIND_GATE_ADMITTED_MS, setting, pinned: true };
+		log("openshell_bind_mounts_disabled", { setting, at });
+	};
+	// `{ admitted: true }`, `{ setting }`, or `{ unknown: reason }` when the probe's answer is none of the known ones.
+	// THE PROBE LEAVES A SANDBOX when the settings admit binds (measured, 0.1.4: the reserved-target refusal comes at
+	// provisioning, "sandbox entered error phase while provisioning: ContainerCreateFailed: mount target '/sandbox' is
+	// reserved ...", and the sandbox stays listed in phase `Error`), so it is deleted on EVERY answer. A settings refusal
+	// creates nothing (measured, 50 to 90 ms), and its delete is a no-op. Should the worker die between the two, the
+	// sandbox is the boot reaper's: it carries the owner label, and its name (`sandboxNameOf`, `pi-job-s` and 11 hex
+	// digits) is in the job namespace `isJobNamespace` sweeps.
+	const probeBind = async (imageId) => {
+		const name = sandboxNameOf(`pi-job-bind-probe-${process.pid}-${now()}`);
+		let source = null;
+		try {
+			// Under the jobs dir, the tree the engine binds job dirs from (not `job-*`, so the orphan sweep leaves it alone).
+			source = fs.mkdtempSync(join(jobsDir ?? tmpdir(), "bind-probe-"));
+			await exec("openshell", bindProbeArgs({ name, image: imageId, source, engine, ownerLabel: OPENSHELL_OWNER_LABEL, owner: OPENSHELL_OWNER, modeLabel: OPENSHELL_MODE_LABEL, gateway }), { timeoutMs: 60_000 });
+			// Created and not refused at all: the gateway took the binds, so its settings admit them.
+			log("openshell_bind_probe_created", { container: name });
+			log("openshell_bind_probed", { answer: "admitted" });
+			return { admitted: true };
+		} catch (err) {
+			const judged = judgeBindAnswer(`${err?.stderr ?? ""} ${err?.stdout ?? ""}`);
+			// Said once per probe, by answer: the lane reads it to tell a probe that ran from a gate that skipped one.
+			log("openshell_bind_probed", { answer: judged.setting ?? (judged.admitted ? "admitted" : "unread") });
+			if (judged.setting || judged.admitted) return judged;
+			return { unknown: "probe-unread" };
+		} finally {
+			await run(["sandbox", "delete", name]).catch(() => {});
+			if (source !== null) {
+				try {
+					fs.rmSync(source, { recursive: true, force: true });
+				} catch {}
+			}
+		}
+	};
+	// The gate itself: `{ refused: setting }`, `{ ok: true }`, or `{ unavailable: reason }` (retried as infrastructure).
+	const bindGate = async (job) => {
+		if (bindVerdict !== null && now() < bindVerdict.until) return bindVerdict.setting ? { refused: bindVerdict.setting } : { ok: true };
+		// By ID, as the create is: a NAME the engine lacks would be pulled by the gateway (measured). An image the engine does
+		// not hold is the image preflight's refusal, next; the gate decides nothing for this job then.
+		let imageId = null;
+		try {
+			imageId = normalizeImageId(String((await exec(engine, ["image", "inspect", "--format", "{{.Id}}", resolveJobImage(job ?? {}, image)])).stdout ?? "").trim());
+		} catch {
+			imageId = null;
+		}
+		if (!/^sha256:[0-9a-f]{64}$/.test(imageId ?? "")) return { ok: true, unprobed: true };
+		bindProbing ??= probeBind(imageId).finally(() => {
+			bindProbing = null;
+		});
+		const answer = await bindProbing;
+		if (answer.unknown) return { unavailable: answer.unknown };
+		// A refusal seen at a create since this probe began is not overturned by it.
+		if (bindVerdict?.pinned && now() < bindVerdict.until) return { refused: bindVerdict.setting };
+		bindVerdict = answer.setting ? { until: now() + BIND_GATE_REFUSED_MS, setting: answer.setting, pinned: false } : { until: now() + BIND_GATE_ADMITTED_MS, setting: null, pinned: false };
+		if (answer.setting) log("openshell_bind_mounts_disabled", { setting: answer.setting, at: "probe" });
+		return answer.setting ? { refused: answer.setting } : { ok: true };
+	};
+
+	// Review round 1 (#714), M1: delete a bind-mode sandbox and wait until the listing no longer names it, so nothing in it
+	// can still write the host tree. `true` once gone, `false` past `BIND_SETTLE_MS` or when the listing cannot be read.
+	// Review round 2: every listing is bounded by what is left of the deadline (a gateway that does not answer cannot hold
+	// the slot past it), and an aborted run (a timeout, a shutdown) is asked once and not waited for: its stop already sent
+	// the delete, and a shutdown must not sit out the bound.
+	const settleSandboxes = async (names, { signal = null } = {}) => {
+		for (const name of names) await run(["sandbox", "delete", name]).catch(() => {});
+		const deadline = now() + BIND_SETTLE_MS;
+		for (;;) {
+			let listed;
+			try {
+				listed = new Set((await listOwned(run, { timeoutMs: Math.max(1, deadline - now()) })).map((s) => s.name));
+			} catch {
+				listed = null;
+			}
+			if (listed !== null && names.every((n) => !listed.has(n))) return true;
+			if (now() >= deadline || signal?.aborted === true) return false;
+			await delay(BIND_SETTLE_POLL_MS);
+		}
+	};
+	// The attempt's settle, once: the run-container hook below, else the teardown. `settleTried` keeps the teardown from
+	// waiting the bound a second time after a settle that timed out (review round 2).
+	const settleAttempt = async (built, { signal = null } = {}) => {
+		const at = attempts.get(built);
+		const name = sandboxNameOf(built.name);
+		if (at) at.settleTried = true;
+		const gone = await settleSandboxes([name], { signal });
+		if (at) at.settled = gone;
+		if (!gone) log("openshell_bind_sandbox_lingering", { container: name });
+		return gone;
+	};
+
 	const stageRun = async ({ opts: built, signal = null, job = null, modelEndpoints = null }) => {
 		const { jobDir, size = DEFAULT_JOB_SIZE } = built;
 		const name = sandboxNameOf(built.name);
 		const at = { name, jobDir, policyFile: `${jobDir}.openshell-policy.json`, profileFile: `${jobDir}.openshell-profile.json`, uploadDir: `${jobDir}.openshell-up`, downloadDir: `${jobDir}.openshell-down`, transfers: [], provider: null };
 		attempts.set(built, at);
+		at.signal = signal;
 		live.set(name, (live.get(name) ?? 0) + 1);
+		// Review round 2: a marker BESIDE the job dir saying a bind sandbox may write it, so a salvage of a crashed attempt
+		// settles that sandbox first, and only then (recovery-queue.mjs, `BESIDE_JOB_DIR`). Removed at teardown once the
+		// sandbox is confirmed gone; left (with the job dir) when it is not, or when the worker dies.
+		if (binding) {
+			at.markerFile = `${jobDir}${OPENSHELL_BIND_MARKER}`;
+			fs.writeFileSync(at.markerFile, "", { mode: 0o600 });
+		}
 		// Asked after every step that waits: a stop is the job's answer, and run-container ends the run as stopped.
 		const stopped = () => signal?.aborted === true || stopping.has(name);
-		const spec = containerSpec({ image: built.image, name: built.name, jobDir, workspace: built.workspace, outboxDir: built.outboxDir, sessionDir: built.sessionDir, globalPiDir: built.globalPiDir });
-		at.transfers = transfersFromSpec(spec, { binds: false }).map((t) => ({ ...t, sandbox: sandboxPathOf(t.container) }));
-		const unmapped = at.transfers.find((t) => t.sandbox === null);
-		if (unmapped) throw new Error(`openshell: the sandbox layout has no place for ${unmapped.container}`);
+		// Bind mode passes the relabel decision on (review round 1: SELinux `private` on the worker's own directories).
+		const spec = containerSpec({ image: built.image, name: built.name, jobDir, workspace: built.workspace, outboxDir: built.outboxDir, sessionDir: built.sessionDir, steerInboxDir: binding ? built.steerInboxDir : undefined, globalPiDir: built.globalPiDir, ...(binding ? { relabel: built.relabel === true, workspaceOwned: built.workspaceOwned === true } : {}) });
+		// Issue #686 part 3: bind mode hands the spec's mounts to the driver and copies nothing.
+		const binds = binding ? bindMountsOf(spec) : [];
+		if (!binding) {
+			at.transfers = transfersFromSpec(spec, { binds: false }).map((t) => ({ ...t, sandbox: sandboxPathOf(t.container) }));
+			const unmapped = at.transfers.find((t) => t.sandbox === null);
+			if (unmapped) throw new Error(`openshell: the sandbox layout has no place for ${unmapped.container}`);
+		}
 
 		// The image BY ID, read now from the gateway's own engine: the gateway's driver pulls a NAME it does not hold
 		// (`if_not_present`, measured: a missing tag was fetched from Docker Hub), and no registry serves a local image's
@@ -546,7 +804,9 @@ export function makeOpenshellBackend(opts = {}) {
 		}
 		// No rule at all (no allowlist, no endpoint) leaves the key out: the body is then exactly #683's, deny-all, which
 		// OpenShell reads back as written.
-		const policy = Object.keys(network.network_policies).length > 0 ? { ...sandboxPolicy(), ...network } : sandboxPolicy();
+		// Issue #686 part 3: a bind-mode policy lists the binds and runs as the job user (copy mode's is the image's uid).
+		const base = binding ? sandboxPolicy({ ...policyIds(built.user), binds }) : sandboxPolicy();
+		const policy = Object.keys(network.network_policies).length > 0 ? { ...base, ...network } : base;
 		// BESIDE the job directory, never inside what is uploaded: the policy is the box, not an input the agent reads.
 		// Issue #684: the job's credentials, into a per-job provider (CONST-VENUE-EGRESS-LAYER, OQ-028 closed here): an
 		// endpointless profile naming every secret of the env, a provider of it whose values travel in the CLI's own
@@ -577,10 +837,24 @@ export function makeOpenshellBackend(opts = {}) {
 		}
 		if (stopped()) return;
 		fs.writeFileSync(at.policyFile, `${JSON.stringify(policy)}\n`, { mode: 0o600 });
-		const created = parseJson(
-			(await run(["sandbox", "create", "--detach", "--name", name, "--from", imageId, "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "--label", `${SIZE_LABEL_MEM}=${size.memMiB}`, "--label", `${SIZE_LABEL_CPU}=${size.cpuCenti}`, ...sizeArgs(size), "--policy", at.policyFile, ...(at.provider ? ["--provider", at.provider] : []), "--no-auto-providers", "-o", "json"], { timeoutMs: 360_000 })).stdout,
-			"sandbox create",
-		);
+		// Issue #686 part 3: the mode label and the binds, bind mode only, so copy mode's create is unchanged.
+		// The job dir's name as a label too (review round 1, M1), so a salvage of a lost attempt's tree can find and end the
+		// sandbox that bound it before reading it (`settleJobDir`).
+		const bindArgs = binding ? ["--label", `${OPENSHELL_MODE_LABEL}=bind`, "--label", `${OPENSHELL_JOB_DIR_LABEL}=${basename(jobDir)}`, "--driver-config-json", driverConfigFor(engine, binds)] : [];
+		let createdOut;
+		try {
+			createdOut = await run(["sandbox", "create", "--detach", "--name", name, "--from", imageId, "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "--label", `${SIZE_LABEL_MEM}=${size.memMiB}`, "--label", `${SIZE_LABEL_CPU}=${size.cpuCenti}`, ...bindArgs, ...sizeArgs(size), "--policy", at.policyFile, ...(at.provider ? ["--provider", at.provider] : []), "--no-auto-providers", "-o", "json"], { timeoutMs: 360_000 });
+		} catch (err) {
+			// The backstop for a probe that admitted: the gateway refused the binds at the create, with one of its settings
+			// sentences. This attempt is infrastructure (nothing ran, refunded), and the verdict is held so the next attempt's
+			// preflight refuses it before spend instead of retrying into the same refusal.
+			if (binding) {
+				const judged = judgeBindAnswer(`${err?.stderr ?? ""} ${err?.stdout ?? ""}`);
+				if (judged.setting) holdBindRefusal(judged.setting, "create");
+			}
+			throw err;
+		}
+		const created = parseJson(createdOut.stdout, "sandbox create");
 		if (created?.phase !== "Ready") throw new Error(`openshell sandbox create: phase ${JSON.stringify(created?.phase ?? null)}, not Ready`);
 		if (stopped()) return;
 		// READ BACK (`CONST-VENUE-EGRESS-LAYER`'s second condition): the policy in force is the one written, from this
@@ -593,6 +867,8 @@ export function makeOpenshellBackend(opts = {}) {
 			log("openshell_policy_mismatch", { container: name, source: typeof effective?.policy_source === "string" ? effective.policy_source : null });
 			throw new Error("openshell: the sandbox's policy read back differs from the one the worker wrote");
 		}
+		// Bind mode: the driver mounted the job's directories; there is nothing to upload.
+		if (binding) return;
 		// The inputs, each to its place under /sandbox. A directory keeps its basename on upload and merges into the
 		// destination (measured), so one whose basename is not its place's, or one with another mount nested inside (the
 		// job directory holds the workspace and the session), is staged under the right name first, the nested ones left
@@ -617,6 +893,11 @@ export function makeOpenshellBackend(opts = {}) {
 
 	const collectRun = async (result, { opts: built }) => {
 		const at = attempts.get(built);
+		// Bind mode: the writable outputs are the host's own directories, and the sandbox was already ended before the
+		// transcript's final read (`settleRun`, review rounds 1 and 2). A sandbox not confirmed gone rides the result as
+		// `lingering`, its exit code UNCHANGED (CONST-RETRY-INFRA-ONLY: a timeout never rewrites a determinate exit into a
+		// retry); the processor decides from it.
+		if (binding) return result;
 		// A stopped run's sandbox is already being deleted, and its outputs are not read: the abort is the answer.
 		if (result?.aborted === true) return result;
 		if (!at) throw new Error("openshell: no staged attempt to bring the outputs of back");
@@ -651,10 +932,20 @@ export function makeOpenshellBackend(opts = {}) {
 		const at = attempts.get(built);
 		attempts.delete(built);
 		// Deleted even when the stage never recorded the attempt: a create that answered nothing may still have made one.
-		try {
-			await run(["sandbox", "delete", name]);
-		} catch {
-			log("openshell_delete_failed", { container: name });
+		// Bind mode waits for it to be gone on every path collectRun did not (a throw, a spawn error), for M1's reason.
+		if (binding) {
+			if (at?.settleTried !== true) await settleAttempt(built, { signal: at?.signal ?? null });
+			if (at?.markerFile && at.settled === true) {
+				try {
+					fs.rmSync(at.markerFile, { force: true });
+				} catch {}
+			}
+		} else {
+			try {
+				await run(["sandbox", "delete", name]);
+			} catch {
+				log("openshell_delete_failed", { container: name });
+			}
 		}
 		// Issue #684: the provider and its profile, after the sandbox. A provider still attached is refused (measured:
 		// "is attached to sandbox(es)"), and a sandbox delete is accepted before its cleanup ends, so the provider's
@@ -693,13 +984,13 @@ export function makeOpenshellBackend(opts = {}) {
 		neverStartedExits: [],
 		bin: "openshell",
 		// The sandbox's own name; PI_JOB_ID in the env stays the container name, which the exit line and its MAC carry.
-		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway }),
-		layout: "sandbox",
+		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway, mode }),
 		memoryLimitOf: (_args, built) => (built.size?.memMiB ?? DEFAULT_JOB_SIZE.memMiB) * 1024 * 1024,
-		// No recovery staging here: the session file is in the sandbox until the download, so a tail on the host reads
-		// nothing. The live transcript comes over the exec's stderr instead, and steering over its stdin (issue #686).
-		stageLive: null,
-		transcript: "stdio",
+		// Copy mode: no recovery staging, since the session file is in the sandbox until the download, so a tail on the host
+		// reads nothing. The live transcript comes over the exec's stderr instead, and steering over its stdin (issue #686).
+		// Bind mode (part 3): the `mounts` layout and the host file, tailed as on `local`, the recovery staging included
+		// (makeRunContainer's own defaults), and steering through the `/inbox` bind.
+		...(binding ? { layout: "mounts", transcript: "file", settleRun: ({ opts: built }) => settleAttempt(built, { signal: attempts.get(built)?.signal ?? null }) } : { layout: "sandbox", stageLive: null, transcript: "stdio" }),
 		...(typeof openLiveTranscript === "function" ? { openLiveTranscript } : {}),
 		...(typeof openInboxRelay === "function" ? { openInboxRelay } : {}),
 		stageRun,
@@ -715,7 +1006,8 @@ export function makeOpenshellBackend(opts = {}) {
 		// Issue #684: `run.recover` needs a checkpoint of the running session, which this venue cannot take until its
 		// transcript comes back over stdio (#686): refused by name, before anything is read, never run unarmed.
 		// A `kind: local` job runs unarmed on every venue (`recoverSkipped: "local"`), so it is not refused here either.
-		if (job?.recover === true && job?.kind !== "local") return { venueRefused: { reason: "openshell-recover-unsupported", comment: OPENSHELL_REFUSALS["openshell-recover-unsupported"] } };
+		// Issue #686 part 3: bind mode serves it (the host workspace is salvaged and snapshotted at exit, as on `local`).
+		if (!binding && job?.recover === true && job?.kind !== "local") return { venueRefused: { reason: "openshell-recover-unsupported", comment: OPENSHELL_REFUSALS["openshell-recover-unsupported"] } };
 		if (credentialReadsValue(job?.provider, hostEnv)) {
 			log("openshell_credential_reads_value", { provider: typeof job?.provider === "string" ? job.provider : null });
 			return { venueRefused: { reason: "openshell-credential-reads-value", comment: OPENSHELL_REFUSALS["openshell-credential-reads-value"] } };
@@ -781,21 +1073,81 @@ export function makeOpenshellBackend(opts = {}) {
 			log("openshell_policy_untranslatable", { refused: network.refused, ...(network.entry ? { entry: network.entry } : {}) });
 			return { venueRefused: { reason: "openshell-egress-untranslatable", comment: OPENSHELL_REFUSALS["openshell-egress-untranslatable"] }, observations: { openshellGatewayLocal: true } };
 		}
+		// Issue #686 part 3: bind mode's gateway settings, last (the one check that asks a create, which never runs a job).
+		if (binding) {
+			const gate = await bindGate(job);
+			if (gate.refused) return { venueRefused: { reason: "openshell-bind-mounts-disabled", comment: OPENSHELL_REFUSALS["openshell-bind-mounts-disabled"] }, observations: { openshellGatewayLocal: true } };
+			if (gate.unavailable) {
+				log("openshell_unavailable", { reason: `bind-${gate.unavailable}` });
+				return { unavailable: true };
+			}
+		}
 		return { observations: { openshellGatewayLocal: true } };
 	};
 
+	// Issue #686 part 3: who a bind-mode job runs as, after the image probe (its `anyUid`). Copy mode carries none, so the
+	// registry's default (the image's own user) stands, exactly as before.
+	// Review round 1 (#714), M2: the engine's `docker info`, read through this bundle's exec, cached like `local`'s (an
+	// answered read for `JOB_USER_FACTS_MAX_AGE_MS`; an unanswered one never), so a rootless or remapped Docker behind
+	// the gateway refuses before spend.
+	const engineFacts =
+		readDaemonFacts ??
+		makeDaemonFactsReader({
+			run: async (args) => {
+				try {
+					return { code: 0, stdout: String((await exec(engine, args, { timeoutMs: DAEMON_FACTS_TIMEOUT_MS, maxBuffer: DAEMON_FACTS_MAX_BUFFER })).stdout ?? "") };
+				} catch (error) {
+					return { code: typeof error?.code === "number" ? error.code : null, stdout: "", error };
+				}
+			},
+		});
+	let factsCache = null;
+	const cachedFacts = async () => {
+		if (factsCache !== null && now() - factsCache.at < JOB_USER_FACTS_MAX_AGE_MS) return factsCache.daemon;
+		const daemon = await engineFacts();
+		if (daemon?.answered === true) factsCache = { at: now(), daemon };
+		return daemon;
+	};
+	let jobUserSaid = null;
+	const jobUserPreflight = async (_job, { capabilities = [] } = {}) => {
+		const daemon = platform === "darwin" || platform === "win32" ? null : await cachedFacts();
+		const chosen = decideOpenshellBindUser({ platform, euid, egid, capabilities, daemon });
+		const said = JSON.stringify(chosen);
+		if (said !== jobUserSaid) {
+			jobUserSaid = said;
+			log("job_user", { backend: OPENSHELL_BIND_BACKEND, user: chosen.user ?? null, refused: chosen.refused ?? null, cause: chosen.cause ?? null, reason: chosen.reason ?? null });
+		}
+		return chosen;
+	};
+
+	// Review round 1 (#714), M1: before a salvage reads a lost attempt's job directory, the sandbox that bound it (found
+	// by its job-dir label) is deleted and confirmed gone. `true` when none is left, `false` when one lingers or the
+	// listing cannot be read, and the salvage then reads nothing.
+	const settleJobDir = async (jobDirName) => {
+		try {
+			const named = (await listOwned(run)).filter((s) => isBindSandbox(s) && s.labels?.[OPENSHELL_JOB_DIR_LABEL] === jobDirName).map((s) => s.name);
+			if (named.length === 0) return true;
+			const gone = await settleSandboxes(named);
+			if (!gone) log("openshell_bind_sandbox_lingering", { jobDir: jobDirName, code: null });
+			return gone;
+		} catch {
+			return false;
+		}
+	};
+
 	return {
-		name: OPENSHELL_BACKEND,
-		declares: BACKENDS[OPENSHELL_BACKEND].declares,
+		name: venue,
+		declares: BACKENDS[venue].declares,
 		neverStartedExits: [],
 		containerName: jobContainerName,
 		namePrefix: JOB_NAME_PREFIX,
-		// Copies, so the registry arms no steer channel here (`steerSkipped: "venue-copies"`) and the conformance harness
-		// holds `readOnlyJobInputs` to `asserted`.
-		binds: false,
+		// Copy mode copies, so the registry arms no file steer channel there (stdin frames instead) and the conformance
+		// harness holds `readOnlyJobInputs` to `asserted`; bind mode binds, so `/inbox` steering is armed as on `local`.
+		binds: binding,
 		runContainer,
-		// The gateway's own engine, and `copies`, which arms the `sandboxLayout` capability row on every job.
-		imagePreflight: makeImagePreflight({ image, bin: engine, copies: true, spawnFn }),
+		// The gateway's own engine, and in copy mode `copies`, which arms the `sandboxLayout` capability row on every job.
+		imagePreflight: makeImagePreflight({ image, bin: engine, copies: !binding, spawnFn }),
+		...(binding ? { jobUserPreflight, settleJobDir } : {}),
 		// The layer's policy is the egress control; there is no proxy to look for.
 		egressPreflight: async () => ({}),
 		// Marked first, so a stage still creating or uploading under this name stops at its next step (the delete below
@@ -805,9 +1157,10 @@ export function makeOpenshellBackend(opts = {}) {
 			return run(["sandbox", "delete", sandboxNameOf(name)]);
 		},
 		reap: reapFn ?? reapWith(run, deleteProvider, log),
+		// This mode's sandboxes only (issue #686 part 3), so a host blessing both modes counts each leftover once.
 		listJobContainers: async () =>
 			(await listOwned(run))
-				.filter((s) => isJobNamespace(s.name) && !SANDBOX_GONE_PHASES.has(s.phase))
+				.filter((s) => isJobNamespace(s.name) && ofMode(mode)(s) && !SANDBOX_GONE_PHASES.has(s.phase))
 				.map((s) => ({ name: s.name, memMiB: intLabel(s.labels?.[SIZE_LABEL_MEM]), cpuCenti: intLabel(s.labels?.[SIZE_LABEL_CPU]) })),
 		containerGone: async (name) => {
 			if (typeof name !== "string" || !isJobNamespace(name)) return null;
@@ -828,6 +1181,9 @@ export function makeOpenshellBackend(opts = {}) {
 					return true;
 				}
 				if (!SANDBOX_UNSTARTED_PHASES.has(s.phase)) return false;
+				// Issue #686 part 3: the other mode's sandbox is the other bundle's to delete; its live attempts are in its own
+				// `live`, which this one cannot see. Not gone, so the hold stays.
+				if (!ofMode(mode)(s)) return false;
 				await run(["sandbox", "delete", sandbox]);
 				return true;
 			} catch {

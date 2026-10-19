@@ -103,8 +103,9 @@ Two consequences worth internalising before you design anything:
   - A job's `name:` IS its required context string: renaming either workflow's job renames the check, and
     the branch protection must be updated in the same breath or every PR waits forever on the old name.
   - `the openshell venue holds its declarations` (`openshell-conformance.yml`, issue #683) reports on every PR and is
-    **advisory**: the `openshell` venue is blessable since #684, the lane stays advisory until it has passed across
-    a round, and its gateway (OpenShell, pinned in
+    **advisory**: the `openshell` venue is blessable since #684 (and its bind mode, `openshell-bind`, since #686, whose
+    pass runs in the same job after the gateway is restarted with bind mounts enabled), the lane stays advisory until
+    it has passed across a round, and its gateway (OpenShell, pinned in
     `.github/openshell.json`) is a 0.1.x vendor release. Read a red run as a finding. It becomes required in a later
     issue once it has passed across a round, as the podman lane did, and its `pull_request` trigger is already
     unfiltered so that change is branch protection alone.

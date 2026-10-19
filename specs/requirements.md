@@ -1490,6 +1490,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     fit its grammar lost with it); a record after a foreign write with no newline is still read; given a resumed session, its staged lines are the earlier runs' (`prior`), so progress does not count them;
     given an image without the capability or the key, the
     job runs without a transcript and says so (`live_transcript_skipped`); given a binding venue, nothing changes.
+    **AMENDED 2026-10-19 (#686 part 3)**: `openshell-bind` is a binding venue in this clause's sense: its session file
+    is a bind of the host's, tailed as on `local`, so given an `openshell-bind` job nothing of (g) applies (no stderr
+    mirror is armed, whatever the image declares). Tests: `worker/test/backend-openshell-bind.test.mjs`, and live in
+    `.github/scripts/openshell-bind-conformance.mjs` (the real runner's lines published from the tailed host file).
     Tests: `image/runner/test/transcript-mirror.test.mjs`, `worker/test/stderr-transcript.test.mjs`,
     `worker/test/live-transcript.test.mjs` (the stdio source), `worker/test/run-container-stdio.test.mjs`,
     `worker/test/backend-openshell.test.mjs`, `worker/test/start-wiring.test.mjs`, and live in
@@ -3214,6 +3218,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   from the same allowlist, endpoints and forge (`INT-EGRESS-POLICY-CONTRACT`), and `PI_EGRESS=0` with any blessed
   venue declaring `credentialCustody: layer` refuses the boot by name, since that venue's policy is its egress control
   and the only path its credentials resolve through (`CONST-EGRESS-POLICY-IN-THE-ARGV`).
+  **AMENDED 2026-10-19 (#686 part 3)**: the second layer venue, `openshell-bind`, has exactly the same network policy,
+  provider and refusal (the same code, the same sources); only its policy's filesystem section differs (its binds).
 - **Why the check is pre-spend, which is the whole shape of the feature**: a job that cannot reach its
   provider **starts the container, spends its budget slot, and produces nothing**. Measured against the real
   runner: three provider attempts, `Request timed out.`, exit `1`, ~40 seconds, **zero tokens**. Exit `1` is
@@ -3442,6 +3448,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   trust-path reset cannot enumerate an extension's imports (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`); such a run runs
   exactly as before. Not in scope: continuing on a host other than
   the one holding the checkpoint and a local folder's recovery (`OQ-045`); a forge mirror of the workspace is declined there.
+  **Venues (AMENDED 2026-10-19, #686 part 3)**: on the `openshell` venue (copy mode) a `run.recover` forge job is refused
+  before spend (`openshell-recover-unsupported`, since #684); on `openshell-bind` it is served as on `local`: the host
+  workspace is the job's bind, so a lost worker's tree is salvaged and an infrastructure exit snapshotted, and as on
+  every venue that cannot freeze, live checkpoints are off (`pausable: absent`). Before a salvage reads the lost
+  attempt's tree there, the sandbox that bound it is deleted and confirmed gone, or the salvage reads nothing and the
+  run continues from its last committed checkpoint (review round 1 of #714). A run whose sandbox could not be
+  confirmed gone takes no exit checkpoint, and a folder job or a completed run there is not run again
+  (`openshell-bind-sandbox-lingering`, review round 2).
 - **Why**: a run that dies part way (a worker that is killed or loses its host, a container that dies on an
   infrastructure fault) is re-run from scratch today: the retry re-clones a freshly resolved default branch, the
   transcript was promoted only on a completed exit, and a crashed worker's job is failed outright
@@ -3734,7 +3748,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Copying venues: delivery through stdin frames (AMENDED 2026-10-18, issue #680; built in #686. AMENDED 2026-10-19,
   issue #686 part 2: SHIPPED on `openshell`, the names final).** A venue that uploads the job's files once (the first is `openshell` in its default copy
   mode, `DES-OPENSHELL-VENUE`) cannot show the runner a file written after the start, so today such a job runs
-  without steering (`steerSkipped: "venue-copies"`). On such a venue a steer-armed attempt whose image declares the
+  without steering (`steerSkipped: "venue-copies"`) (**AMENDED 2026-10-19, #686 part 3**: `openshell-bind`, the same
+  gateway in bind mode, is NOT such a venue: it binds `/inbox` read-only and steers through the file, as `local` does). On such a venue a steer-armed attempt whose image declares the
   `steerStdin` capability shall receive its messages as frames on the main exec's stdin instead: the exit key
   first, read before any tool exists, then one frame per message MAC'd under that key, at most 4 MiB in all per
   attempt, the pipe closed when the attempt ends (`INT-STEER-INBOX-CONTRACT`'s stdin transport,
@@ -5104,6 +5119,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-19 | Issue #686, part 3: bind mode, the `openshell-bind` venue. **`REQ-RUN-RECOVERY` AMENDED**: a dated "Venues" sentence: copy-mode `openshell` refuses a `run.recover` forge job before spend, `openshell-bind` serves it as `local` does (salvage of the bound host workspace, exit snapshots; live checkpoints off, `pausable: absent`). **`REQ-STEER-RUNNING-JOB` AMENDED**: the copying-venue bullet says `openshell-bind` is not such a venue (it binds `/inbox` read-only). **`REQ-LIVE-TRANSCRIPT` AMENDED**: clause (g) says `openshell-bind` is a binding venue there (the host file tailed, no stderr mirror), with its tests. **`REQ-EGRESS-ALLOWLIST` AMENDED**: the layer-venue paragraph names `openshell-bind` as the second layer venue, with the same policy, provider and `PI_EGRESS=0` refusal. Folder and cron-folder jobs: no REQ entry claimed them refused on OpenShell (the refusal lives in `DES-OPENSHELL-VENUE` and the loader), UNCHANGED, checked. **Review round 1 (#714)**: `REQ-RUN-RECOVERY`'s "Venues" sentence adds that a salvage on `openshell-bind` first confirms the sandbox that bound the tree gone, or reads nothing. **Review round 2 (#714)**: `REQ-RUN-RECOVERY`'s "Venues" sentence states the round-1 salvage settle (a salvage on `openshell-bind` first deletes the sandbox that bound the lost attempt's tree and confirms it gone, or reads nothing and the run continues from its last committed checkpoint, now only for a job dir carrying the `.openshell-bind` marker) and adds that a run whose sandbox was not confirmed gone takes no exit checkpoint, and a folder job or a completed run there is not run again (`openshell-bind-sandbox-lingering`). |
 | 2026-10-19 | Issue #686, part 2, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED**, "Fail loudly": the frame channel the runner cannot open is no supervisor's SOCKET on fd 3 (an open fd 3 is not enough), or a `/dev/null` swap of stdin that left fd 0 unvouched for, both `steer-inbox-missing` before pi loads. Acceptance (c) UNCHANGED in substance, checked; its tests gain the exact-fit budget, the no-pass-before-start and the exit-line close cases (`worker/test/inbox-relay.test.mjs`, `steer-frames.test.mjs`, `run-container-stdin-steer.test.mjs`, "M1"). |
 | 2026-10-19 | Issue #686, part 2: steering on the `openshell` venue over the exec's stdin. **`REQ-STEER-RUNNING-JOB` AMENDED**: the copying-venue bullet is SHIPPED and its names final (`steerStdin`, `stdin-frames`), with the measured budget (OpenShell 0.1.4: over 4 MiB in total fails the exec, 4 MiB less 1 KiB passed; the relay's budget sits at the latter) and the acks over the stderr transcript (`no-transcript` without it); "Fail loudly" gains a dated note: a frame channel the runner cannot open is `steer-inbox-missing` too (no reason added) and a broken stream is logged `steer_stream_broken`; Acceptance (c) gains the openshell case and names its tests (`worker/test/run-container-stdin-steer.test.mjs`, `steer-frames.test.mjs`, the relay's, the bundle's and the wiring's, the supervisor's and the runner's, `verify-image.sh`'s `steerStdin` case and the conformance script's steered run). The rest of the requirement (data never instructions, at most once, the caps, the late rule, the weaker guarantee on stdin) UNCHANGED, checked. **`REQ-LIVE-TRANSCRIPT` UNCHANGED, checked**: the stderr transcript is now also the steer ack's tail, which it already carried. |
 | 2026-10-19 | Issue #686, part 1: the live transcript on the `openshell` venue, over the exec's stderr. **`REQ-LIVE-TRANSCRIPT` AMENDED**: a new acceptance clause (g) for a venue that copies the session file: the runner's signed stderr records reach the same stream, and progress and the status comment with it; a forged, replayed or malformed record is dropped and counted; every other stderr byte is passed on unchanged; an image without `transcriptStderr` or `exitAuth` runs without a transcript and says so (`live_transcript_skipped`); a binding venue is unchanged; the tests named. The Statement is UNCHANGED, checked: the transcript still leaves the host only through the worker's redacting publisher, and the job container gains no network path. **UNCHANGED, checked**: `REQ-RUN-PROGRESS` (its reducer reads the pushed lines as tailed ones), `REQ-STEER-RUNNING-JOB` (steering on a copying venue is still #686's second part, skipped by name), `REQ-EGRESS-ALLOWLIST` (nothing about the layer's policy changes). Review round (#709, same day): (g) narrowed to what the demux passes on (every byte of a line that is not a record, never a broken record's), and gains the resumed session whose staged lines are `prior`. Review round 2 (#709, same day): (g)'s job-log clause CORRECTED to what the demux does with a broken record, and gains a record read after a foreign write with no newline. |
