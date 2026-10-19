@@ -102,7 +102,7 @@ const JOB_DIR_RE = /^job-[A-Za-z0-9_-]{1,64}$/;
  * mid-job never removed. The staging directories hold a copy of the job's inputs (its prompt among them) and of its
  * outputs, so they must not outlive the job dir they were copied from.
  */
-export const BESIDE_JOB_DIR = Object.freeze([".cid", ".openshell-policy.json", ".openshell-up", ".openshell-down"]);
+export const BESIDE_JOB_DIR = Object.freeze([".cid", ".openshell-policy.json", ".openshell-profile.json", ".openshell-up", ".openshell-down", ".openshell-bind"]);
 
 /**
  * The run a queue job belongs to: its own id, or for a recovery the id of the run it continues. Every per-RUN key (the
@@ -350,7 +350,14 @@ export function makeHostLostSweep({ redis, queues, now = () => Date.now(), log =
  * within the hour, and the restore puts the bytes back only into the same run's workspace; but a resolved secret the
  * agent wrote into a file is stored where a live checkpoint would have refused it.
  */
-export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runCheckpointer = null, fs = nodeFsp, log = () => {} } = {}) {
+/**
+ * `settleJobDir(name)` (issue #686 part 3, review round 1 of #714): asked before a lost attempt's job directory is read,
+ * and it must answer `true` only once nothing can still write it. On the `openshell-bind` venue the directory is a
+ * sandbox's bind, and a sandbox outlives a dead worker, so its process could still be writing the tree; the venue deletes
+ * that sandbox and waits until the gateway no longer lists it. `false` (or a throw) reads nothing and removes nothing:
+ * the run continues from its last committed checkpoint, which is a correct place to continue from.
+ */
+export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runCheckpointer = null, fs = nodeFsp, log = () => {}, settleJobDir = async () => true } = {}) {
 	return async function salvage({ runId, pointer, attempt = 0 } = {}) {
 		try {
 			if (!workspaceCheckpointer || !jobsDir) return { skipped: "no-store" };
@@ -361,6 +368,18 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 			const dir = join(jobsDir, pointer.jobDir);
 			const st = await fs.lstat(dir).catch(() => null);
 			if (!st?.isDirectory()) return { skipped: "absent" };
+			// Only for a job dir a bind sandbox may write: the `.openshell-bind` marker beside it, written at stage time
+			// (review round 2 of #714), so a host that blesses the venue does not ask the gateway on every other venue's salvage.
+			const bound = Boolean(await fs.lstat(`${dir}.openshell-bind`).catch(() => null));
+			const settled = !bound
+				? true
+				: await Promise.resolve()
+						.then(() => settleJobDir(pointer.jobDir))
+						.catch(() => false);
+			if (settled !== true) {
+				log("checkpoint_salvage", { runId: sanitizeJobId(runId), skipped: "sandbox-alive" });
+				return { skipped: "sandbox-alive" };
+			}
 			let result;
 			try {
 				result = await snapshotFrom(dir);

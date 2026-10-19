@@ -585,7 +585,7 @@ What it is, in this page's terms:
 - **Most words are `asserted`**, each naming OpenShell's gateway, compute driver or supervisor as the source, because
   the vendor builds the box. `credentialTransit` is `enforced` only while the gateway is observed on this host, and a
   gateway that is not is refused per job whatever your floor says. `pausable` and `localFolders` are `absent`, so a
-  folder or cron-folder job is refused there. The table entry also carries `credentialCustody: "layer"`, the venue
+  folder or cron-folder job is refused there (bind mode, below, admits one). The table entry also carries `credentialCustody: "layer"`, the venue
   holding the credentials, which no floor compares.
 - **Per-job refusals before spend**: a gateway not on loopback or a unix socket (`openshell-gateway-not-local`), a
   gateway-wide policy in force (`openshell-global-policy`), on Linux a kernel without Landlock
@@ -612,7 +612,7 @@ placeholder cannot stand in for.
   This channel is weaker than the read-only `/inbox` mount the binding venues keep: the agent cannot plant a message,
   but it can intercept one, which then settles `late`.
 - **Not served yet**: a trigger with `run.recover` is refused before it spends
-  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session. No
+  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session (bind mode, below, serves it). No
   `pi-dispatch sandbox` shell either: the venue has no launcher. A job's MCP servers are served (issue #684): an
   `http` server's host is an allowlist entry like any other, and a stdio server's overlay paths are moved to the
   sandbox layout.
@@ -623,6 +623,77 @@ placeholder cannot stand in for.
   `PI_OPENSHELL_GATEWAY` names a registered gateway when the CLI's active one is not it.
 - **CI**: `openshell-conformance.yml` runs `.github/scripts/openshell-conformance.mjs` against a real gateway on every
   pull request, advisory until it has passed across a round.
+
+### Bind mode: the `openshell-bind` venue
+
+`PI_BACKENDS=openshell-bind` (alone, or beside `openshell`, which stays the default copy mode and is otherwise
+unchanged) runs a job in an OpenShell sandbox on the same gateway with the job's host directories **bind-mounted** into
+it, as `local` mounts them: `/job`, `/inbox` and the overlay read-only, `/workspace`, `/session` and `/outbox`
+read-write, at the same paths (the `mounts` layout). It shares `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY`, the
+boot's version check and the boot sweep with `openshell`, and its network policy, credential provider, placeholders and
+egress rules are exactly copy mode's (`credentialCustody: "layer"`, so `PI_EGRESS=0` refuses the boot as well).
+
+Upstream warns, in its own words: "Bind mounts expose gateway-host files to the sandbox and can bypass workspace
+isolation and filesystem policy." Its docs also call `--driver-config-json`, the flag that carries the binds,
+experimental. So what keeps the agent off the job's inputs here is not OpenShell's workspace isolation but the worker's
+own read-only binds (an append to `/job` fails with EROFS, measured) and the sandbox policy, which lists every bind
+target (`read_only` or `read_write`, the read-back unchanged, measured). The writable binds are the job's to write, as
+on `local`.
+
+**What it brings back** on OpenShell:
+
+- **Folder and cron-folder jobs** (`kind: local`): the operator's folder is bound read-write as `/workspace` and edited
+  in place (`localFolders` is `asserted`, naming the driver's bind).
+- **Steering through the read-only `/inbox` mount**, and the live transcript tailed from the host's session file, as
+  on `local`; no stdin frames and no stderr mirror.
+- **`run.recover`**: the host workspace is salvaged after a lost worker and snapshotted at an infrastructure exit, as on
+  `local`. Live checkpoints stay off: OpenShell has no pause verb (`pausable: absent`).
+
+**The gateway must allow it.** A default gateway refuses any create that carries driver configuration. Write this into
+the gateway's `gateway.toml` (`$XDG_CONFIG_HOME/openshell/gateway.toml`, or the file `--config` or
+`OPENSHELL_GATEWAY_CONFIG` names) and restart the gateway:
+
+```toml
+[openshell]
+version = 2
+
+[openshell.drivers.docker]
+allow_driver_config = true
+enable_bind_mounts = true
+
+[openshell.drivers.docker.resource_admission]
+enabled = false
+```
+
+`openshell gateway info` does not show these settings, so the worker asks a create that can only be refused: one
+read-only bind onto `/sandbox`, a target OpenShell reserves. A gateway that does not admit binds refuses it at once
+with the missing setting's own sentence (measured, checked in the order of the TOML above) and every job is refused before it spends
+(`openshell-bind-mounts-disabled`, the setting named in the log as `openshell_bind_mounts_disabled`). The answer is kept
+ten minutes when it admits and one minute when it refuses, per gateway, so a fixed gateway is seen soon. A job create
+that meets a settings refusal anyway is retried once and the next attempt is refused before spend. One that admits them
+fails the probe at provisioning on the reserved target and leaves a sandbox in phase `Error` (measured), which the
+worker deletes at once (and the boot sweep, should the worker die in between).
+
+**A job's sandbox is gone before its result is read.** A sandbox outlives the exec, and a process the agent left
+behind could keep writing the bound folder, so the worker deletes the sandbox and waits until the gateway no longer lists
+it before the run returns, and before the transcript's last lines are read (60 s at most). A sandbox still listed after
+that is said in the log (`openshell_bind_sandbox_lingering`) and its run takes no recovery snapshot: a completed run, or
+any run of a folder job, ends as `openshell-bind-sandbox-lingering` and is not run again (what it already changed stays
+as it is: check the sandbox on the gateway); another forge job's infrastructure exit is retried in a fresh clone as
+before, and an exit 2 keeps its own reason. A recovery's salvage of a lost attempt's tree waits the same way first.
+
+**Who the job runs as.** A bind is written as the sandbox's uid, so a bind-mode job runs as the worker's own
+`<uid>:<gid>` (the policy's `run_as_user`), as `local`'s inferred job user does, unless that uid is the image's own
+1001. The image must then declare `anyUid`; a root worker or a primary group of 0 is refused per job, and so is a
+rootless or userns-remapped Docker behind the gateway (read from the engine's `docker info`, as `local` reads it), before
+the job spends anything. Measured: a
+`run_as_user` of 2000 runs the job as uid 2000, its writes into a bound host directory land as 2000, and the image's
+`/home/pi` is writable by any uid. Docker driver only: `openshell-bind` with
+`PI_OPENSHELL_ENGINE=podman` refuses the boot.
+
+`pi-dispatch doctor` adds bind mode's lines while `PI_BACKENDS` names it: the three settings (asked with the same probe,
+the TOML above in the fix), and upstream's warning, quoted. The CI lane runs a bind pass after the copy one
+(`.github/scripts/openshell-bind-conformance.mjs`): refused on the default gateway, then read back with the settings on.
 
 ## What is deliberately not yours to decide
 

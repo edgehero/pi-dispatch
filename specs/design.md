@@ -8163,6 +8163,20 @@ a tunnel.
   the word, not on a name: `PI_EGRESS=0` with any blessed `layer` venue. The openshell entry's words are UNCHANGED,
   checked (`egress` and `secretsCustody` stay `asserted`: the supervisor enforces and holds, the worker writes and
   reads back); the fourteen and the conformance counts UNCHANGED.
+  **AMENDED 2026-10-19 (#686 part 3)**: a fourth entry, `openshell-bind`, the OpenShell venue in bind mode, its own
+  name so a floor, a trigger's `run.backend`, the run record and the session store's venue stamp each say which mode a
+  job ran in. `credentialCustody: layer`, `remote: false`, the same `observedBy` (`openshellGatewayLocal`), and
+  `openshell`'s words but three, each `asserted` with its asserter named: `mountSet` (the driver applies the binds the
+  worker passes in `--driver-config-json`, beside its own runtime mounts), `readOnlyJobInputs` (the driver's read-only
+  bind of `/job` and the policy listing it `read_only`, both measured to refuse a write; no pi-landlock), and
+  `localFolders` (the operator's folder bound read-write as `/workspace`), so a folder job is admitted there. `pausable`
+  stays `absent`. Pinned word by word by a test as `openshell`'s are, and every word the two share held equal by it.
+  The bundle declares `binds: true`, so the harness passes `readOnlyJobInputs` on the kernel's bind and the registry
+  arms the `/inbox` steer channel. `OPENSHELL_BACKENDS` names both, and `venuesOf` says `openshellUsed` for either plus
+  `openshellCopyUsed` and `openshellBindUsed`. Each mode's `listJobContainers` and `containerGone` count only its own
+  sandboxes (a mode label on the bind ones), and the gone-check never deletes the other mode's; the boot sweep runs one
+  reaper for both, registered under each blessed name. `backendRefusals`' `layer` rule covers it unchanged. The
+  fourteen UNCHANGED, checked.
 - **One `local` declaration is `asserted`: `nonRoot`**, because `USER pi` is the image's and `SECURITY.md`
   said "Non-root is not in that argv". Since issue #341 the argv can supply it: on a daemon that enforces bind-mount
   ownership the job runs `--user=<worker uid>:<gid>`, which the builder refuses unless both parts are non-zero.
@@ -10548,6 +10562,8 @@ a tunnel.
   the per-job network policy (part 1) and the per-job credential provider (part 2) are built, so the job's
   environment no longer carries a credential and its policy is no longer empty. What is still not served is refused or
   skipped by name ("Credentials and git push" and "Blessing" below).
+  **AMENDED 2026-10-19 (#686 part 3): BIND MODE is built**, as its own venue `openshell-bind` ("Bind mode" below);
+  copy mode stays the default and is otherwise unchanged.
 - **Decision**: a third backend, `openshell`, runs a job in an NVIDIA OpenShell sandbox (v0.1.4, Apache-2.0,
   https://github.com/NVIDIA/OpenShell) on a gateway this deployment owns.
   - **What OpenShell is, as far as this design rests on it.** A gateway control plane, and a compute driver that
@@ -10610,13 +10626,17 @@ a tunnel.
   - **No freeze, so `pausable` is `absent`.** OpenShell has no pause verb, so the venue checkpoints as every venue
     that cannot freeze does (`DES-RUN-CHECKPOINT-PAIRED`): live checkpoints off, an exit checkpoint only on an exit
     the processor may recover from (an infrastructure exit of an armed run), read from the tree the download brought
-    back, and no recovery from a worker crash mid-run there.
+    back, and no recovery from a worker crash mid-run there. **AMENDED 2026-10-19 (#686 part 3)**: in bind mode the
+    tree is the host's own, so a lost worker's workspace is salvaged as on `local` and `run.recover` is served there;
+    live checkpoints stay off in both modes.
   - **No sandbox launcher.** `SANDBOX_LAUNCHERS` gets no `openshell` row, so `pi-dispatch sandbox` on such a job is
     refused by name (`INT-SANDBOX-CONTRACT`, `sandboxVenueRefusal`), never reopened on docker.
   - **No local-folder or cron-folder jobs in copy mode.** `localFolders` means a folder edited in place; a copy is
     edited elsewhere and written back afterwards, which races every edit the operator makes meanwhile and turns a
     failed download into a lost run. So the copy venue declares `localFolders` `absent`, and a job aimed at a local
     folder (a cron folder's included) routed there is refused before spend. What bind mode admits is #686's to decide.
+    **AMENDED 2026-10-19 (#686 part 3)**: bind mode admits it (`localFolders: asserted` on `openshell-bind`); copy mode
+    UNCHANGED.
   - **Steering and the live transcript over stdio** (#686). With no bind there is no `/inbox` mount and no
     `/session` file on the host to tail, so the steer channel is the framed, MAC'd stdin that
     `DES-STEER-VIA-READONLY-INBOX-MOUNT` decides (amended by issue #680, weaker than the mount and said so), and the
@@ -10675,6 +10695,8 @@ a tunnel.
   - *Bind mode as the default.* A bind bypasses OpenShell's filesystem policy for every bound path, so the Landlock
     read-only `/job` the copy gets is gone, and it needs the gateway on the worker's own host to resolve the paths at
     all. It is admitted opt-in per host for what a copy cannot do (in-place folders, the mount steer channel), #686.
+    **UNCHANGED, checked (#686 part 3)**: still not the default; what replaces the Landlock read-only `/job` there is
+    a read-only bind plus the policy entry ("Bind mode" below).
 - **Residuals, named** (`OQ-047`): a compromised supervisor holds every credential the job would have held, and
   provider and forge plaintext exist in a vendor process; OPA's per-binary rules pin binaries by path, which can
   drift silently with the image; OpenShell is v0.1.x and marks interfaces experimental, so a patch release can change
@@ -10748,7 +10770,7 @@ a tunnel.
     (`steerSkipped: "venue-copies"`) and `run.recover` refused before spend, both still #686's. **AMENDED 2026-10-19
     (#686 part 2)**: steering is SERVED (stdin frames, above) on an image declaring `steerStdin`; an image without it
     still runs unsteered as `venue-copies`. `run.recover` stays refused before spend: recovery is the one item here
-    not served.
+    not served. **AMENDED 2026-10-19 (#686 part 3)**: in copy mode UNCHANGED; bind mode serves it ("Bind mode" below).
   - **The whole run, live**: the conformance script (`.github/scripts/openshell-conformance.mjs`, which ships with part 3
     of #683 beside its CI lane) on that host passed every harness check, all
     eight read-backs (CapEff 0, NoNewPrivs 1, seccomp 2, pids.max 2048, memory.max the job's size, the sandbox gone
@@ -10892,6 +10914,145 @@ a tunnel.
   the runner's 250 ms read plus the publisher's 500 ms flush; and the exit key that signs it passes through the vendor's
   exec relay, as the exit line's does (`OQ-047`). Measured in CI by the conformance script's real runner: its session
   lines arrive through the real publisher over stderr, none unverified, and no record reaches the output.
+- **Bind mode (#686 part 3, AMENDED 2026-10-19)**: built as its own venue, `openshell-bind`, from the same factory
+  (`makeOpenshellBackend({ mode: "bind" })`, not a second adapter: the image read by ID, the network policy and its
+  read-back, the credential provider, the gateway checks, the stop, the teardown and the reaper must stay one copy).
+  Measured on OpenShell 0.1.4, Docker driver, in the CI lab of 2026-10-19:
+  - **The gateway must allow it.** A create carrying `--driver-config-json` fails on a default gateway ("caller driver
+    config is disabled; a gateway administrator must enable allow_driver_config"); the gateway's gateway.toml needs
+    `[openshell] version = 2`, `[openshell.drivers.docker]` with `allow_driver_config = true` and `enable_bind_mounts
+    = true`, and `[openshell.drivers.docker.resource_admission] enabled = false` (the other two
+    refusals, measured, name those two, each setting refused in turn until all three are on). `openshell gateway info -o json` does not reveal them.
+  - **The binds** are the container spec's mounts (`bindMountsOf`), each host path at its `mounts`-layout path,
+    `read_only` exactly where the spec mounts it read-only (`/job`, `/inbox`, `/opt/pi-global`), writable where it
+    does (`/workspace`, `/session`, `/outbox`), keyed by the driver's name. Every target is admissible (none is
+    `/sandbox`, which OpenShell reserves, or overlaps `/opt/openshell`, `/etc/openshell` or `/run/openshell`); the
+    stage refuses one that is not, never handing the gateway a create it refuses in words this adapter does not read.
+    No upload, no download. A sandbox carries the mode label `pi.dispatch.openshell-mode=bind`.
+  - **The policy** is copy mode's with every bind target listed (`read_only` or `read_write`), `include_workdir`
+    kept; the read-back is unchanged by the listing (measured), so `expectedPolicies` holds it as it holds copy mode's.
+    The network rules, the provider and the placeholders are copy mode's exactly: `CONST-VENUE-EGRESS-LAYER` holds as
+    written.
+  - **`/job` read-only** is the read-only bind (measured: EROFS on a write) plus the `read_only` policy path
+    (measured: denied). pi-landlock is NOT used: it would add nothing for `/job` beside the bind, which is the control
+    `local`'s `:ro` is, and would tie the venue to the `sandboxLayout` capability for no guarantee. The exec runs
+    `/entrypoint.sh` in `/workspace`.
+  - **The runner reads the `mounts` layout**, so the venue is a binding one end to end: `binds: true` (the `/inbox`
+    file steer channel, never stdin frames), `transcript: "file"` (the host's session file tailed, never the stderr
+    mirror), the recovery staging as on `local`. `run.recover` is SERVED: a lost worker's host workspace is salvaged and
+    an infrastructure exit snapshotted, as on `local`; neither needs a pause, and live checkpoints stay off (no pause
+    verb, `pausable: absent`).
+  - **The job user** (`decideOpenshellBindUser`, over `resolveImageUser`, issue #341's rule): a bind is written as the
+    sandbox's uid (measured: files owned by the image's 1001), so the policy's `run_as_user`/`run_as_group` is the
+    worker's own `<euid>:<egid>` unless that uid is 1001, which needs `anyUid`; a root worker (`worker-is-root`) and a
+    primary group of 0 (`root-group`) are refused per job (`job-user-unmappable`), and darwin and win32 run the
+    image's own user (local's `desktop-platform` row, unmeasured for OpenShell). Measured in the CI lab: a policy
+    `run_as_user`/`run_as_group` of `2000` ran the workload as uid 2000 and gid 2000 (`id`, and node's `getuid()`), a
+    write into a read-write bind of a host directory owned by 2000 landed as 2000, and the image's `/home/pi` is 0777, so
+    `HOME` writes work for any uid. **The Podman driver is refused at boot** for bind mode
+    (`openshellFrom`): unmeasured, and a rootless Podman maps the sandbox's uid away from the worker's.
+  - **The gate, before spend** (`openshell-bind-mounts-disabled`, a fixed comment, the setting in the log as
+    `openshell_bind_mounts_disabled`). The settings show only at a create, which is after the free gates, so the
+    preflight asks one that can only be refused: a read-only bind of an empty directory onto the reserved `/sandbox`,
+    by the job image's ID, owner- and mode-labelled in the job namespace (`bindProbeArgs`). MEASURED, in this order: a
+    default gateway refuses it with the `allow_driver_config` sentence, one with only that setting with the
+    `enable_bind_mounts` one, one with both and admission on with "host bind or image mount cannot be attached while
+    resource admission is enabled" (each in 50 to 90 ms, nothing created); with all three on it fails at provisioning,
+    "sandbox entered error phase while provisioning: ContainerCreateFailed: mount target '/sandbox' is reserved for the
+    OpenShell workspace", and LEAVES a sandbox in phase `Error`. So the probe deletes its sandbox on every answer, and a
+    crash between the two leaves one the boot reaper deletes (owner-labelled, named `pi-job-s` and 11 hex digits, in the
+    namespace `isJobNamespace` sweeps). `judgeBindAnswer` reads the four answers. Cached per bundle (one gateway): an admitting answer 10 minutes, a refusing
+    one 1 minute, jobs picked up together sharing one probe; an answer in other words is infrastructure (retried); an
+    image the engine does not hold probes nothing (the image preflight refuses it next). THE BACKSTOP: a job's own
+    create refused with a settings sentence (a gateway restarted with other settings after an admitting probe, within
+    its ten minutes) is infrastructure for that attempt, refunded, and holds the refusal
+    10 minutes so the next attempt is refused before spend: never a retry loop. **Rejected: reading gateway.toml.**
+    Its path is the gateway process's (`$XDG_CONFIG_HOME`, `--config`, `OPENSHELL_GATEWAY_CONFIG`), which the worker
+    cannot see, the gateway may run as another account or a unit with its own environment, and a file read says what
+    the gateway WOULD load at its next start, not what it runs with; the probe asks the running gateway. **Rejected:
+    a boot-only probe**: a gateway restarted with other settings after the worker booted would be believed.
+  - **Shared with copy mode**: `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY` (judged when either venue is
+    blessed), the boot's version read (once), the boot sweep (one reaper registered under each blessed name; at boot no
+    job of the process is live in either mode, and a crash's leftover of either is an orphan alike). Each mode lists
+    and counts only its own sandboxes, and the gone-check never deletes the other mode's.
+  - **Doctor** adds, while `openshell-bind` is blessed: the engine is Docker, the three settings (the same probe,
+    the gateway.toml for the engine in the fix), and upstream's warning quoted as a ⚠ ("Bind mounts expose
+    gateway-host files to the sandbox and can bypass workspace isolation and filesystem policy."); copy mode's
+    `sandboxLayout` line runs only where `openshell` is blessed.
+  - **CI**: the same lane gains a bind pass (`.github/scripts/openshell-bind-conformance.mjs`): on the default
+    gateway the bundle's preflight refuses with `allow_driver_config`; then the gateway is restarted with the
+    settings and the real bind bundle is read back (an append to `/job` refused, the mount points beyond a copy
+    sandbox's exactly the job's binds, a folder job editing a host folder in place, the eight read-backs), and the
+    real runner at cost cap 0 publishes its transcript from the tailed host file.
+  RESIDUALS, named (`OQ-047`): upstream warns that a bind "can bypass workspace isolation and filesystem policy", so
+  what holds is the worker's read-only binds and the policy entries, applied by vendor code; `--driver-config-json`
+  is experimental upstream; the probe's admitting answer is a provisioning failure that leaves a sandbox, deleted at
+  once or by the next boot's reaper; a create that meets a settings refusal after an admitting probe (a gateway
+  reconfigured within the cache) costs that attempt one infrastructure retry.
+- **Review round 1 (#714, AMENDED 2026-10-19)**, fixes to the bind-mode bullet above:
+  - **The sandbox is ended before its tree is read (M1).** A sandbox outlives its exec and its delete is asynchronous,
+    so a process the agent left running (`setsid ... &`) could keep writing the host workspace, folder, session and
+    outbox after the run returned. Bind mode now deletes the sandbox in `collectRun`, on every result the stopped one
+    included, and polls the listing until it no longer names it (`BIND_SETTLE_MS`, 60 s, a 1 s poll); past the bound
+    the run is infrastructure (exit 1, `openshell_bind_sandbox_lingering`), a stop staying a stop. The teardown waits
+    the same way on every path `collectRun` did not see. **CORRECTED in review round 2**: the settle now runs once per
+    attempt, before the transcript's final read (below), the teardown only where it did not run; and the timeout no
+    longer rewrites the exit code. A bind sandbox also carries `pi.dispatch.job-dir=<job dir's
+    name>`, so a salvage of a lost attempt's tree first has the venue delete and confirm gone the sandbox that bound it
+    (`settleJobDir`, handed to `makeSalvager` as `settleJobDir`); while one lingers or the listing cannot be read the
+    salvage reads and removes nothing (`skipped: "sandbox-alive"`), and the run continues from its last committed
+    checkpoint. **Rejected**: relying on the boot reaper alone, whose delete is asynchronous too and which a recovery on
+    a still-running worker never meets.
+  - **The job user reads the engine (M2).** `decideOpenshellBindUser` is now `local`'s `decideJobUser` over the
+    gateway engine's `docker info` (read through the bundle's exec, cached as `local`'s is, an answered read for
+    `JOB_USER_FACTS_MAX_AGE_MS`), then `resolveImageUser`, so a rootless (`rootless`) or remapped (`userns-remap`)
+    Docker behind the gateway is refused before spend (`job-user-unmappable`) instead of failing after it; an
+    unanswered read is retried. Doctor's bind section gains the same line.
+  - **SELinux**: the spec's `relabel: "private"` on the worker's own directories becomes the bind's `selinux_label:
+    "private"` (upstream's schema: `shared` for `:z`, `private` for `:Z`) rather than being dropped; the relabel
+    decision is `local`'s (`relabelsPrivateMounts`), which on the Docker engine is never true.
+  - **The probe's source** is an empty directory under the jobs dir (`bind-probe-*`, which the `job-*` orphan sweep
+    leaves alone), a path the engine sees; doctor's stays under the worker's tmp dir, since its target is refused anyway.
+    Each probe logs `openshell_bind_probed` with its answer; doctor's probe takes the adapter's 60 s bound.
+  - `BESIDE_JOB_DIR` gains `.openshell-profile.json`, so a salvage and the orphan sweep remove the provider profile
+    beside a job dir too.
+  - The lane adds: the gate's probe must have RUN (`openshell_bind_probed: admitted`), every leftover check polls the
+    listing until empty, `/inbox` and the overlay refuse a write (EROFS), a backgrounded `setsid` writer leaves the
+    host file unchanged after the run returned, and one run as `run_as_user` 2000 writes its bound file as uid 2000.
+- **Review round 2 (#714, AMENDED 2026-10-19)**, the lingering-sandbox path:
+  - **No exit code is rewritten (CONST-RETRY-INFRA-ONLY).** A sandbox not confirmed gone within `BIND_SETTLE_MS` marks
+    the result `lingering: true`, its code as the runner ended. The processor then takes NO exit checkpoint (the tree
+    may still be written, so a snapshot of it is no state the run reached; a recovery continues from the last committed
+    checkpoint) and decides by the exit: exit 2 keeps its own reason, a worker's stop stays the stop, any other exit of
+    a forge job is infrastructure as before (its retry gets a fresh clone in a new job dir); and a COMPLETED run or ANY
+    exit of a FOLDER job returns the named policy result `openshell-bind-sandbox-lingering` (`OPENSHELL_BIND_LINGERING`
+    in backends.mjs, one fixed comment shared with `OPENSHELL_REFUSALS`, in the record's reason enum), never retried:
+    a completed run's work stays where the agent put it (a pushed branch, a folder's edits) and nothing more is done
+    with its result (no session promotion, no chained child, no completion comment), and no second agent starts on a
+    folder the first sandbox may still write. Its spend is recorded. **Rejected**: holding the retry until the
+    sandbox's gone-check answers, which keeps a slot and a queue entry on a gateway that may never answer, for a
+    result the named refusal states once.
+  - **The settle runs before the final read.** A new `makeRunContainer` hook, `settleRun({ opts, aborted })`, awaited
+    once the CLI child has closed and BEFORE the transcript's final read and the sink's close, so the last session
+    lines published and the processor's reads both see a tree nothing writes. `collectRun` does nothing in bind mode;
+    the teardown settles only where the hook did not run (a spawn error, a throw), and never waits the bound twice
+    (`settleTried`). Each listing is bounded by what is left of the deadline, and an aborted run (a timeout, a
+    shutdown) is asked once, not waited for.
+  - **The salvage asks only where a bind sandbox may write.** The stage writes `<jobDir>.openshell-bind` beside the job
+    dir (in `BESIDE_JOB_DIR`), removed at teardown once the sandbox is confirmed gone; the salvage settles the sandbox
+    only when that marker is there, so a host blessing the venue does not ask the gateway on every other venue's
+    salvage.
+  - Doctor's probe source sits under the jobs dir when it exists. `decideOpenshellBindUser` passes `socket: null` on
+    purpose: `local`'s socket rows judge the docker CLI's own socket, which this venue never uses, and `docker-group`
+    guards a `--user` that would hand the container the docker group, while here the gid reaches only the policy's
+    `run_as_group` in a sandbox built without the socket. The lane proves its read-only binds are mount points read
+    through before their EROFS, and that the background writer outlived the exec (ticks after its exit marker).
+- **Code evidence (#686 part 3)**: worker/src/backend-openshell.mjs -> makeOpenshellBackend (`mode`), bindMountsOf,
+  sandboxPolicy (`binds`), decideOpenshellBindUser, OPENSHELL_MODE_LABEL, BIND_GATE_ADMITTED_MS, OPENSHELL_REFUSALS ·
+  worker/src/openshell-cli.mjs -> judgeBindAnswer, bindProbeArgs, driverConfigFor, gatewayTomlFor,
+  UPSTREAM_BIND_WARNING · worker/src/backends.mjs -> BACKENDS["openshell-bind"], OPENSHELL_BIND_BACKEND,
+  OPENSHELL_BACKENDS, venuesOf · worker/src/config.mjs -> openshellFrom · worker/src/start.mjs (both bundles, one
+  reaper) · worker/src/doctor-openshell.mjs -> bindChecks · .github/scripts/openshell-bind-conformance.mjs.
 
 ## DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR
 
@@ -12704,3 +12865,4 @@ a tunnel.
 | 2026-10-19 | Issue #686, part 1: the live transcript, run progress and the status comment on the `openshell` venue, over the exec's stderr. **`DES-OPENSHELL-VENUE` AMENDED**: the "Steering and the live transcript over stdio" bullet gains a dated note: the transcript comes back on the exec's STDERR, not its stdout, by the operator's decision of 2026-10-19 (the #680 sentence naming stdout is amended, the steer half UNCHANGED); NEW dated bullet "The live transcript over stderr": the runner's signed, self-delimiting records (`\x1epidt <seq> <mac> <base64 line>`), the worker's demux across 4 KiB reads that are neither line-aligned nor ordered, the arming (an opener and a job id, the non-gating `transcriptStderr` capability, an exit key; `live_transcript_skipped` with `no-capability`, `no-exit-key` or `venue-copies`), the seam (`transcript: "stdio"` as the venue's construction option beside `layout`, not the call bag's `binds`, which reaches a steer job only), `status_comment_skipped` reading `no-transcript` there instead of `progress-off`; why signed and why self-delimiting; REJECTED stdout (shared with the runner log and the signed exit line's 64 KiB tail) and tailing the sandbox's file through the CLI; three named residuals (a record above PIPE_BUF against another process's write, the 250 ms plus 500 ms lag, the exit key's relay); the "Not served here yet" bullet gains a dated note (the transcript, progress and the comment SERVED; steering and recovery still not); Code evidence gains the #686 part 1 files. **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**: part 2 gains a dated paragraph on the second source, pushed lines (`source: "stdio"`, `push`, `skip`, `reset`; the tailed line's path; an empty baseline; replay after a reset by the byte count; no checkpoint), the file tail UNCHANGED, checked; Code evidence gains `stderr-transcript.mjs`. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the copying venue's arming sentence names the exec's stderr, not its stdout, and says that stream is built; the stdin frames and `steerStdin` UNCHANGED, still #686's second part. **UNCHANGED, checked**: `DES-RUN-PROGRESS` (the reducer reads pushed lines as tailed ones), `DES-RUN-CHECKPOINT-PAIRED` (no checkpoint on the stdio source; `run.recover` still refused on the venue), `DES-CONTAINER-BACKEND-REGISTRY` (no word changes; `binds` is still the steer job's question), `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-VENUE-EGRESS-LAYER` (the records leave on the exec's existing stderr: no new path, mount or credential). Review round (#709, same day): the records gain a type and the runner's file offset (`\x1epidt <seq> <type> <end> <mac> <base64>`; `b` the baseline, `l` a line, `r` a reset with the rewritten file's size); `DES-LIVE-TRANSCRIPT-STREAM`'s "a fresh attempt has no earlier content" is CORRECTED: the baseline is the runner's first signed record, the session file's size before pi loads, so a resumed session's staged lines are `prior` (REJECTED: the host's staged size read before the upload); `DES-OPENSHELL-VENUE`'s "Why signed" CORRECTED to say the MAC authenticates the channel, not the content (the agent writes the file); the pass-through claim narrowed to the grammar rule (a broken record ends at its first byte the grammar cannot hold, never passed on); the runner's rewrite detection gains the first-line probe; a failed write takes no `seq` and is sent again; the replay positions are exact (each line carries its offset); two residuals added (a broken record's record-shaped neighbour, a split record's tail as text). Review round 2 (#709, same day): `DES-OPENSHELL-VENUE`'s "never a record's bytes" CORRECTED: the marker starts a record anywhere (after a foreign write with no newline), a broken record's bytes after its break reach the log, a foreign head fitting the grammar is lost with it; the runner's quarantine swap is a reset to 0, one read is bounded by the size at its start, a lost reset is recovered from the next line's `end`, a lost baseline is no missing line; the residuals gain the lost baseline, which fails open. |
 | 2026-10-19 | Issue #686, part 2: steering on the `openshell` venue over the exec's stdin, built to the text #680 decided. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the copying venue's arming is built and served on `openshell` (`steerStdin`, the stderr transcript as the ack's tail, `no-transcript` without it, `venue-copies` without the capability, no new skip reason); the "framed, MAC'd stdin" bullet gains three dated "As built" bullets, each measured: the frames reach the runner on fd 3 and its fd 0 is `/dev/null` (the decided "to the runner's stdin" CORRECTED: a socketpair cannot be reopened through /proc, ENXIO, and fd 3 is not inherited by the runner's children; REJECTED trusting pi's bash tool alone and the /proc reopen), the runner reads fd 3 synchronously (an event-loop reader missed a frame under a cost cap of 0, the run ending 10 ms after listening), and an empty upload's baseline is known at the spawn (a fact of construction, not the host size read #709 rejected); the "copying venue" rejection names the capability shipped. **`DES-OPENSHELL-VENUE` AMENDED**: the stdio bullet's steer half is SERVED (the relay opener handed to the bundle, `PI_EXIT_AUTH=stdin-frames`, acks over stderr, the 4 MiB less 1 KiB budget), and the "Not served here yet" bullet gains a dated note: steering served, recovery the one item still refused before spend. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` AMENDED, wording only**: the framed-stdin carve-out is shipped on `openshell`, its four tests answered as written. **UNCHANGED, checked**: `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX`, `DES-STEER-HELD-WHILE-PARKED`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` (the keys, the hold, the park and the late rule are the transport's neighbours, untouched), `DES-LIVE-TRANSCRIPT-STREAM` (the stdio source's baseline is unchanged; only the steer ack's `onBaseline` is called earlier for an attempt with no staged transcript), `DES-CONTAINER-BACKEND-REGISTRY` (`binds` is still the steer job's question, false on `openshell`). **Code evidence**: worker/src/steer-framing.mjs, worker/src/inbox-relay.mjs, worker/src/run-container.mjs, worker/src/backend-openshell.mjs, worker/src/start.mjs, image/runner/src/steer-frames.mjs, image/runner/src/supervise.mjs, image/runner/src/inbox.mjs, image/runner/run-job.mjs, image/verify-image.sh, .github/scripts/openshell-conformance.mjs. |
 | 2026-10-19 | Issue #686, part 2, review round 1. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the fd 3 "As built" bullet: a `/dev/null` swap that leaves fd 0 unvouched for REFUSES the steered run before pi loads (L5; a failed close alone fails open, said), fd 3 is the channel only as the supervisor's socket (L4), `verify-image.sh` asserts no probe child holds fd 3 (M2); NEW "As built" bullet: the pipe also ends at the verified exit line, or 5 s after an unverified exit-shaped one (M1, a defence; OpenShell 0.1.4's CLI exits with stdin open, measured on the real gateway; REJECTED ending it at the transcript's end). The rest UNCHANGED, checked. |
+| 2026-10-19 | Issue #686, part 3: bind mode, the `openshell-bind` venue. **`DES-OPENSHELL-VENUE` AMENDED**: Status says bind mode is built; the "No local-folder" bullet says bind mode admits folder jobs; the "No freeze" and "Not served here yet" bullets say `run.recover` is served in bind mode (live checkpoints off in both); the "Bind mode as the default" rejection is UNCHANGED, checked, with a note; NEW dated "Bind mode (#686 part 3)" bullet: one factory with `mode`, the gateway.toml settings (measured refusal), the binds from the spec's mounts at the `mounts`-layout paths (reserved targets refused at the stage), the policy listing every target (read-back unchanged, measured), `/job` read-only by the bind and the policy (no pi-landlock), the `mounts` layout end to end (`binds: true`, file transcript, `/inbox` steering, recovery by salvage), the job user (`decideOpenshellBindUser`; Podman refused at boot), the before-spend gate (a probe create that can only be refused, cached 10 min admitting and 1 min refusing, a create-time backstop holding the refusal; reading gateway.toml and a boot-only probe rejected), what is shared with copy mode (settings, version read, one reaper; each mode counts only its own sandboxes), doctor, CI, and the residuals; and a "Code evidence (#686 part 3)" bullet. The lab's later measurements of that day are folded in: the probe's check order (each settings refusal in 50 to 90 ms, nothing created), the admitting answer a provisioning failure that LEAVES a sandbox in phase `Error` (so the probe deletes it on every answer, and the reaper finds a crash's leftover by the owner label and the job namespace), and a `run_as_user` of 2000 running and writing a bind as uid 2000 (`/home/pi` 0777). **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the fourth entry, `openshell-bind`, its three changed words with asserters, `binds: true`, `OPENSHELL_BACKENDS` and `venuesOf`, the per-mode listing and one reaper; the fourteen UNCHANGED, checked. **Review round 1 (#714)**: a dated "Review round 1" bullet: the sandbox ended and confirmed gone before its tree is read (`collectRun` and the teardown, `BIND_SETTLE_MS`, exit 1 past it), the `pi.dispatch.job-dir` label and `settleJobDir` ahead of a salvage (`sandbox-alive`), the job user over the engine's `docker info` by `local`'s `decideJobUser` (rootless and userns-remap refused before spend), SELinux `selinux_label: "private"`, the probe's source under the jobs dir and its `openshell_bind_probed` log, `.openshell-profile.json` in `BESIDE_JOB_DIR`, and the lane's new checks. **Review round 2 (#714)**: a dated "Review round 2" bullet: a lingering sandbox marks the result (`lingering`) and never rewrites its exit code; the processor skips the exit checkpoint and returns the named `openshell-bind-sandbox-lingering` for a completed run or a folder job (exit 2, a stop and a forge job's other exits as before); the settle moves before the final transcript read (`settleRun`), once per attempt, each listing bounded and an abort not waited for; the `.openshell-bind` marker gates the salvage's settle; doctor's probe source under the jobs dir; the `socket: null` reason; the lane's non-vacuous checks. The round-1 bullet's "teardown waits the same way" is CORRECTED there. |

@@ -2065,9 +2065,18 @@ export async function collectChecks(shellVars, seams) {
 	if (podman) checks.push(...podman.checks);
 	// Issue #683: the openshell venue's lines, asked by `--openshell` (before a deployment blesses it), or on every run
 	// once PI_BACKENDS does (blessable since #684).
-	if (seams.openshell === true || venuesOf(env).openshellUsed) {
+	// Issue #686 part 3: either OpenShell venue runs the section; copy mode's image line where `openshell` is blessed (or
+	// asked for with neither blessed), bind mode's lines where `openshell-bind` is.
+	const openshellVenues = venuesOf(env);
+	if (seams.openshell === true || openshellVenues.openshellUsed) {
 		const { openshellChecks } = await import("./doctor-openshell.mjs");
-		checks.push(...(await openshellChecks(env, { image: jobImage, ...(seams.openshellRun ? { run: seams.openshellRun } : {}) })));
+		const modes = { copy: openshellVenues.openshellCopyUsed || !openshellVenues.openshellUsed, bind: openshellVenues.openshellBindUsed };
+		// Bind mode's job-user line reads the same identity doctor's local and podman lines read.
+		const ids = seams.jobUserIdentity ? { ids: { euid: seams.jobUserIdentity.euid ?? null, egid: seams.jobUserIdentity.egid ?? null } } : {};
+		const osPlatform = seams.jobUserIdentity?.platform ?? seams.platform;
+		// The probe's source under the jobs dir the service will use (review round 2 of #714).
+		const probeJobsDir = Number.isInteger(seams.jobsDirUid) ? jobsDirPath(env, seams.jobsDirUid) : null;
+		checks.push(...(await openshellChecks(env, { image: jobImage, modes, ...ids, jobsDir: probeJobsDir || null, ...(osPlatform ? { platform: osPlatform } : {}), ...(seams.openshellRun ? { run: seams.openshellRun } : {}), ...(seams.openshellMkdtemp ? { mkdtemp: seams.openshellMkdtemp, rmdir: () => {} } : {}) })));
 	}
 	if (facts) facts.jobUser = jobUser.forLive;
 	// Issue #596, phase 2: the CPU budget the parent's quota is read back against by `--live`.

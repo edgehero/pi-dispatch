@@ -58,7 +58,7 @@ import { hostQueueName, makeQueue, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
-import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OPENSHELL_BACKEND, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { makeOpenshellBackend, makeOpenshellReaper, openshellBootVersions } from "./backend-openshell.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
@@ -795,7 +795,11 @@ export async function startWorker(
 	// `podman` and pays nothing for it being in the table.
 	const podmanBlessed = config.backends.includes(PODMAN_BACKEND);
 	// Issue #684: and for the openshell venue, blessable since this issue: its CLI is spawned only while it is blessed.
-	const openshellBlessed = config.backends.includes(OPENSHELL_BACKEND);
+	// Issue #686 part 3: either of its two modes, which share the gateway, the CLI, the version read and the boot reaper;
+	// each mode's own bundle is built only while that mode is blessed.
+	const openshellCopyBlessed = config.backends.includes(OPENSHELL_BACKEND);
+	const openshellBindBlessed = config.backends.includes(OPENSHELL_BIND_BACKEND);
+	const openshellBlessed = openshellCopyBlessed || openshellBindBlessed;
 	// Issue #354: an ABSENT `observationPreflight` admits every job, which is the right answer only for a venue whose
 	// words hold without observing anything. A venue whose table entry names an `observedBy` and carries no preflight
 	// would have those words hold with nothing looking, and a floor naming one would pass on capability alone: the
@@ -1296,14 +1300,18 @@ export async function startWorker(
 		// boot reaper for a venue it does not hold.
 		// Issue #354: podman's the same way and for the same reason, `makeReaper` with `bin: "podman"`, so the sweep lists
 		// the store this account's jobs actually ran in. Docker's listing says nothing about it, and the reverse.
+		// Issue #684: the openshell venue's, by its owner label: crashed jobs' sandboxes, then their providers. Issue #686 part
+		// 3: ONE reaper for both modes, registered under each blessed name and run once: the owner label is shared, a crash's
+		// leftover of either mode is an orphan alike, and at boot no job of this process is live in either.
+		const openshellReap = openshellBlessed ? makeOpenshellReaperFn({ gateway: config.openshell.gateway, log }) : null;
 		backendReaps = {
 			...(localBlessed ? { [DEFAULT_BACKEND]: makeReaperFn({ log }) } : {}),
 			...(podmanBlessed ? { [PODMAN_BACKEND]: makePodmanReaperFn({ log }) } : {}),
-			// Issue #684: the openshell venue's, by its owner label: crashed jobs' sandboxes, then their providers.
-			...(openshellBlessed ? { [OPENSHELL_BACKEND]: makeOpenshellReaperFn({ gateway: config.openshell.gateway, log }) } : {}),
+			...(openshellCopyBlessed ? { [OPENSHELL_BACKEND]: openshellReap } : {}),
+			...(openshellBindBlessed ? { [OPENSHELL_BIND_BACKEND]: openshellReap } : {}),
 			...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])),
 		};
-		const swept = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
+		const swept = (await reapAll([...new Set(Object.values(backendReaps))], { log }))?.reaped === true;
 		// PROVEN FOR THE WHOLE HOST, or not at all (issue #354). `reapAll` is conservative over the reapers it is
 		// handed, and two gaps sit outside that. A BLESSED venue with no reaper here is refused by the registry, but
 		// only further down, after the scope sweep has already acted on this answer. And a host without `local` can
@@ -1508,7 +1516,10 @@ export async function startWorker(
 		},
 	};
 	const enqueueRecovery = makeRecoveryEnqueuerFn({ redis, queues: recoveryQueues, hostQueueName, now, log });
-	const salvageCheckpoint = makeSalvager({ jobsDir: config.jobsDir, hostName: durableHost, workspaceCheckpointer, runCheckpointer, log });
+	// Issue #686 part 3, review round 1 (#714): on the openshell-bind venue a lost attempt's job dir is a sandbox's bind,
+	// and that sandbox may still be writing it, so the salvage first has the venue end it and confirm it gone. Resolved at
+	// call time: the bundle is built further down, and a salvage runs only once jobs are consumed.
+	const salvageCheckpoint = makeSalvager({ jobsDir: config.jobsDir, hostName: durableHost, workspaceCheckpointer, runCheckpointer, log, settleJobDir: (name) => (openshellBindBackend ? openshellBindBackend.settleJobDir(name) : true) });
 	// The boot sweep of orphaned `jobs/job-*` directories: a crashed worker's processor never cleaned up after its jobs.
 	// Here, before `createWorker` starts consuming, so no job of THIS process owns any of them; the age bound (the job
 	// timeout plus the abort grace's margin) covers another process on this host. A directory a checkpoint pointer of this
@@ -1947,31 +1958,38 @@ export async function startWorker(
 			throw error;
 		}
 	};
-	const openshellBackend = openshellBlessed
-		? makeOpenshellBackendFn({
-				image: config.jobImage,
-				engine: config.openshell.engine,
-				gateway: config.openshell.gateway,
-				readAllowlist: readEgressAllowlist,
-				readEndpoints: () => modelEndpoints.current ?? [],
-				hostEnv: env,
-				openJobLog,
-				// Issue #686: the same opener the binding venues get, fed from the exec's stderr records, and the same inbox relay
-				// opener, whose relay writes a steered job's messages as frames on the exec's stdin there (part 2).
-				...(openLiveTranscript ? { openLiveTranscript } : {}),
-				...(openInboxRelay ? { openInboxRelay } : {}),
-				globalPiDir: config.globalPiDir,
-				allowGlobalExtensions: config.allowGlobalExtensions,
-				packagePaths: getPackagePaths,
-				forwardEnv: config.forwardEnv,
-				authFromPi: config.authFromPi,
-				forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
-				reap: backendReaps[OPENSHELL_BACKEND],
-				log,
-			})
-		: null;
-	// Every bundle this boot built beside local's, in registration order: podman, openshell, then the injected ones.
-	const builtBackends = [...(podmanBackend ? [podmanBackend] : []), ...(openshellBackend ? [openshellBackend] : []), ...extraBackends];
+	// Issue #686 part 3: one option set, so the two modes cannot drift apart in anything but their mode (and their key in
+	// the boot sweep's map, which holds one reaper for both).
+	const readOpenshellEndpoints = () => modelEndpoints.current ?? [];
+	const openshellOptions = (mode) => ({
+		mode,
+		image: config.jobImage,
+		// Review round 1 (#714): the bind probe's empty source directory is made under the jobs dir.
+		jobsDir: config.jobsDir,
+		engine: config.openshell.engine,
+		gateway: config.openshell.gateway,
+		readAllowlist: readEgressAllowlist,
+		readEndpoints: readOpenshellEndpoints,
+		hostEnv: env,
+		openJobLog,
+		// Issue #686: the same opener the binding venues get, fed from the exec's stderr records, and the same inbox relay
+		// opener, whose relay writes a steered job's messages as frames on the exec's stdin there (part 2).
+		...(openLiveTranscript ? { openLiveTranscript } : {}),
+		...(openInboxRelay ? { openInboxRelay } : {}),
+		globalPiDir: config.globalPiDir,
+		allowGlobalExtensions: config.allowGlobalExtensions,
+		packagePaths: getPackagePaths,
+		forwardEnv: config.forwardEnv,
+		authFromPi: config.authFromPi,
+		forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+		reap: backendReaps[mode === "bind" ? OPENSHELL_BIND_BACKEND : OPENSHELL_BACKEND],
+		log,
+	});
+	const openshellBackend = openshellCopyBlessed ? makeOpenshellBackendFn(openshellOptions("copy")) : null;
+	const openshellBindBackend = openshellBindBlessed ? makeOpenshellBackendFn(openshellOptions("bind")) : null;
+	// Every bundle this boot built beside local's, in registration order: podman, openshell, openshell-bind, then the
+	// injected ones.
+	const builtBackends = [...(podmanBackend ? [podmanBackend] : []), ...(openshellBackend ? [openshellBackend] : []), ...(openshellBindBackend ? [openshellBindBackend] : []), ...extraBackends];
 	// BOUNDED, because `.catch()` cannot rescue a promise that never settles: `runDocker` resolves only on
 	// the child's `close` or `error` and has no timeout of its own, so a wedged daemon would hang boot
 	// here. This read is a nicety -- a digest for the boot line and the registry -- and a nicety may

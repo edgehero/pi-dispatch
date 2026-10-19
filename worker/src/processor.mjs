@@ -1,4 +1,4 @@
-import { ABSENT, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
+import { ABSENT, OPENSHELL_BIND_LINGERING, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseLedgers, reserveLedgers } from "./budget.mjs";
@@ -1902,7 +1902,7 @@ async function runAttempt(job, deps, durable) {
 			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
 			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
 		}
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
@@ -1940,8 +1940,11 @@ async function runAttempt(job, deps, durable) {
 		// defensively: absent, or without `exit`, means no exit checkpoint, never a failure. Neither call may throw out of here.
 		const neverStartedExit = isNeverStartedExit({ code, aborted, detached }, neverStartedExits(job));
 		const recoverable = armed && !aborted && !oomKilled && code !== EXIT_COMPLETED && code !== EXIT_POLICY && !neverStartedExit;
+		// Issue #686 part 3, review round 2 of #714: a venue whose box was not confirmed gone after the run (`lingering`,
+		// `openshell-bind`) takes NO exit checkpoint: the host tree may still be written, so a snapshot of it is not a state
+		// the run reached. A recovery then continues from the last committed checkpoint.
 		if (ranCheckpoint !== null && typeof ranCheckpoint === "object") {
-			if (recoverable && typeof ranCheckpoint.exit === "function") {
+			if (recoverable && lingering !== true && typeof ranCheckpoint.exit === "function") {
 				const taken = await Promise.resolve().then(() => ranCheckpoint.exit({ kind: "exit" })).catch(() => ({ skipped: "error" }));
 				log("checkpoint_exit", taken && Number.isSafeInteger(taken.seq) ? { seq: taken.seq } : { skipped: typeof taken?.skipped === "string" ? taken.skipped.slice(0, 40) : "unknown" });
 			}
@@ -2100,6 +2103,18 @@ async function runAttempt(job, deps, durable) {
 			log("oom_killed", { jobId: job.id ?? null });
 			await comment(job, TERMINAL_COMMENTS[EXIT_OOM_KILLED]);
 			return { outcome: "policy", reason: EXIT_OOM_KILLED, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
+		}
+		// Issue #686 part 3, review round 2 of #714 (CONST-RETRY-INFRA-ONLY): a box not confirmed gone after the run. Exit 2
+		// keeps its own reason below, and a worker's abort stays the abort. A COMPLETED run is not thrown away as a retry,
+		// and a FOLDER job is not retried while the first sandbox may still write the folder: both RETURN the venue's named
+		// result, never retried, spend kept and settled above. The completed run's work stays where the agent put it (a
+		// pushed branch, a folder's edits), but nothing more is done with its result: no session promotion, no chained
+		// child, no completion comment, since the tree it would read may still change. Any other exit of a forge job is
+		// infrastructure as before (its retry gets a fresh clone; its recovery the last committed checkpoint).
+		if (lingering === true && !aborted && code !== EXIT_POLICY && (code === EXIT_COMPLETED || job.kind === "local")) {
+			log("venue_box_lingering", { exitCode: code, kind: job.kind ?? null });
+			await comment(job, OPENSHELL_BIND_LINGERING.comment);
+			return { outcome: "policy", reason: OPENSHELL_BIND_LINGERING.reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
 		}
 
 		switch (code) {

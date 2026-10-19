@@ -5,7 +5,9 @@
 # through it, keyed and offline. The gateway is the OpenShell release `.github/openshell.json` pins (the version the
 # worker's OPENSHELL_TESTED_VERSION names, held to it by a test), installed from its checksum-pinned deb and started
 # without systemd, on the Docker driver: the runner's Docker 28 and its Linux 6.x kernel with Landlock are what the
-# venue needs (measured in the issue #683 lab).
+# venue needs (measured in the issue #683 lab). Issue #686 part 3 adds the `openshell-bind` venue's pass after it
+# (`.github/scripts/openshell-bind-conformance.mjs`): refused on the default gateway, then the gateway restarted with
+# bind mounts enabled in gateway.toml and the bind bundle read back.
 #
 # ADVISORY, NOT REQUIRED: the venue is not blessable until issue #684, and OpenShell is a 0.1.x vendor release whose
 # gateway setup in CI is new, so a red run here is a finding to read, not a merge blocker. It is promoted to a required
@@ -22,6 +24,7 @@ on:
       - "image/**"
       - ".github/openshell.json"
       - ".github/scripts/openshell-conformance.mjs"
+      - ".github/scripts/openshell-bind-conformance.mjs"
       - ".github/workflows/openshell-conformance.yml"
   pull_request:
   workflow_dispatch:
@@ -103,6 +106,43 @@ jobs:
       - name: Conformance (the real bundle, the real runner)
         run: STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
 
+      # Issue #686 part 3: bind mode. First on the gateway as it is, whose default settings must refuse it before spend
+      # (the probe create refused with upstream's allow_driver_config sentence).
+      - name: Bind mode is refused on a default gateway
+        if: always()
+        run: PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs --default-config
+
+      # Then the gateway restarted with the three settings bind mode needs (the lab's way: the same env, gateway.toml
+      # under the runner's own config home), and the bind bundle read back off live sandboxes.
+      - name: Restart the gateway with bind mounts enabled
+        if: always()
+        run: |
+          pkill -f openshell-gateway || true
+          for i in $(seq 1 30); do pgrep -f openshell-gateway >/dev/null || break; sleep 1; done
+          mkdir -p "$HOME/.config/openshell"
+          cat > "$HOME/.config/openshell/gateway.toml" <<'TOML'
+          [openshell]
+          version = 2
+
+          [openshell.drivers.docker]
+          allow_driver_config = true
+          enable_bind_mounts = true
+
+          [openshell.drivers.docker.resource_admission]
+          enabled = false
+          TOML
+          export OPENSHELL_LOCAL_TLS_DIR="$HOME/.local/state/openshell/tls"
+          OPENSHELL_COMPUTE_DRIVER=docker nohup openshell-gateway > "$RUNNER_TEMP/gateway-bind.log" 2>&1 &
+          for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/17670) 2>/dev/null && break; sleep 1; done
+          openshell status -o json
+
+      - name: Bind-mode conformance (the real bind bundle, the real runner)
+        if: always()
+        run: PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs
+
       - name: Gateway log
         if: always()
-        run: tail -100 "$RUNNER_TEMP/gateway.log" || true
+        run: |
+          tail -100 "$RUNNER_TEMP/gateway.log" || true
+          echo "--- after the restart with bind mounts enabled"
+          tail -100 "$RUNNER_TEMP/gateway-bind.log" || true

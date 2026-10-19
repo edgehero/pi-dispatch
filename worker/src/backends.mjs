@@ -791,7 +791,8 @@ const BACKENDS_TABLE = {
 		 * BLESSABLE SINCE ISSUE #684, which shipped the policy layer `CONST-VENUE-EGRESS-LAYER` asks of a layer venue: the
 		 * per-job network policy generated from the squid venues' own sources, and the per-job credential provider, with
 		 * placeholders in the agent. What the venue does not serve yet (live transcript, progress, steering, recovery) is
-		 * refused or skipped by name until issue #686.
+		 * refused or skipped by name until issue #686, which serves the first three here and recovery in bind mode only
+		 * (`openshell-bind`, below).
 		 */
 		describe: "an NVIDIA OpenShell sandbox on this host's gateway, through the openshell CLI",
 		// The gateway is refused unless it is on this host (`OPENSHELL_GATEWAY_LOCAL`), so the venue is never remote.
@@ -835,7 +836,7 @@ const BACKENDS_TABLE = {
 			// worker reads where that is (`openshellGatewayLocal`). A gateway not observed local is refused outright.
 			credentialTransit: ENFORCED,
 			// Copy mode edits a copy, not the operator's folder: a local or cron folder job is refused at load
-			// (`refusesLocalWorkspace`). Bind mode, which could, is issue #686's.
+			// (`refusesLocalWorkspace`). Bind mode, which can, is its own venue, `openshell-bind` (issue #686 part 3).
 			localFolders: ABSENT,
 			// OpenShell has no pause verb, so live checkpoints are off (`DES-RUN-CHECKPOINT-PAIRED`).
 			pausable: ABSENT,
@@ -857,6 +858,65 @@ const BACKENDS_TABLE = {
 			credentialTransit: OPENSHELL_GATEWAY_LOCAL,
 		},
 	},
+	"openshell-bind": {
+		/**
+		 * The OpenShell venue in BIND MODE (issue #686 part 3, `DES-OPENSHELL-VENUE`'s "Bind mode"): the same gateway, the
+		 * same driver, the same per-job network policy and credential provider as `openshell`, but the job's host
+		 * directories are BIND-MOUNTED into the sandbox, as `local` mounts them, through the compute driver's
+		 * `--driver-config-json` mounts. Its own venue rather than a setting of `openshell`, so a floor, a trigger's
+		 * `run.backend` and the run record each name which of the two a job ran in: the words below differ where it
+		 * matters. Opt-in per host: the gateway's gateway.toml must allow driver config and bind mounts and turn resource
+		 * admission off, and upstream warns that a bind "can bypass workspace isolation and filesystem policy".
+		 * Measured on OpenShell 0.1.4, Docker driver, 2026-10-19. Every word not commented is `openshell`'s, for its reason.
+		 */
+		describe: "an NVIDIA OpenShell sandbox on this host's gateway with the job's directories bind-mounted, through the openshell CLI",
+		remote: false,
+		// `CONST-VENUE-EGRESS-LAYER`, UNCHANGED: the provider, the policy and the placeholders are copy mode's exactly.
+		credentialCustody: "layer",
+		declares: {
+			isolation: ASSERTED,
+			ephemeral: ASSERTED,
+			// The job's mounts ARE the worker's now (the spec's mounts, handed to the driver), but the driver applies them,
+			// beside its own runtime and the supervisor's socket: no argv of the worker's is read back from a daemon.
+			mountSet: ASSERTED,
+			egress: ASSERTED,
+			jobToJobIsolation: ASSERTED,
+			imagePinning: ASSERTED,
+			exitCodes: ASSERTED,
+			abortable: ASSERTED,
+			// A read-only bind (measured: EROFS on a write) and the policy listing `/job` read_only (measured: a write
+			// denied), both applied by the vendor. No pi-landlock here: the bind is the control `local`'s `:ro` is, and the
+			// policy a second one.
+			readOnlyJobInputs: ASSERTED,
+			nonRoot: ASSERTED,
+			secretsCustody: ASSERTED,
+			credentialTransit: ENFORCED,
+			// The operator's folder, bind-mounted read-write as /workspace and edited in place (measured: rw binds write
+			// through, host writes are visible inside live), so a local or cron folder job is admitted. Asserted, not
+			// `local`'s enforced: the driver applies the bind.
+			localFolders: ASSERTED,
+			// Still no pause verb: live checkpoints stay off (`DES-RUN-CHECKPOINT-PAIRED`); an exit snapshot and a salvage
+			// of the host workspace need none.
+			pausable: ABSENT,
+		},
+		asserts: {
+			isolation: "OpenShell's compute driver (the agent container it creates with every capability dropped, no new privileges, networking off and a pids limit, under Landlock and seccomp)",
+			ephemeral: "the OpenShell gateway, which removes a sandbox's containers when the worker deletes it",
+			mountSet: "OpenShell's compute driver, which applies the binds the worker passes in --driver-config-json and mounts its own runtime and the supervisor's socket beside them",
+			egress: "OpenShell's supervisor, which decides every connection by the sandbox's policy",
+			jobToJobIsolation: "OpenShell's compute driver, which gives each sandbox's agent no network beside its own supervisor",
+			imagePinning: "the OpenShell gateway's image pull policy on its compute driver",
+			exitCodes: "OpenShell's exec relay, which returns the command's own code and 128 plus the signal",
+			abortable: "the OpenShell gateway, whose sandbox delete ends the running exec",
+			readOnlyJobInputs: "OpenShell's compute driver, which binds /job read-only, and its supervisor, which applies the policy that lists it read_only",
+			nonRoot: "OpenShell, which refuses a root workload, with the job user's uid as the policy's run_as_user",
+			secretsCustody: "the OpenShell gateway and supervisor, which hold the job's environment while it runs",
+			localFolders: "OpenShell's compute driver, which binds the operator's folder read-write as /workspace",
+		},
+		observedBy: {
+			credentialTransit: OPENSHELL_GATEWAY_LOCAL,
+		},
+	},
 };
 
 /**
@@ -867,6 +927,22 @@ export const PODMAN_BACKEND = "podman";
 
 /** The OpenShell venue's name (issue #683), for `PODMAN_BACKEND`'s reason. */
 export const OPENSHELL_BACKEND = "openshell";
+/** Its bind mode's (issue #686 part 3): a venue of its own, on the same gateway, settings and CLI. */
+export const OPENSHELL_BIND_BACKEND = "openshell-bind";
+/**
+ * Review round 2 of #714 (CONST-RETRY-INFRA-ONLY): the named result of an `openshell-bind` run whose sandbox could not
+ * be confirmed gone after its exec, where a retry would be wrong: a run that COMPLETED (its work is done and must not be
+ * thrown away as a retry) or a FOLDER job (a second agent must not start on a folder the first sandbox may still be
+ * writing). Determinate, so a policy outcome, never retried; its spend is recorded. Here, in the leaf, so the processor
+ * and the adapter's `OPENSHELL_REFUSALS` share one sentence.
+ */
+export const OPENSHELL_BIND_LINGERING = Object.freeze({
+	reason: "openshell-bind-sandbox-lingering",
+	comment: "Stopped: this job ran in an OpenShell sandbox with its files bound from this machine, and the sandbox could not be confirmed gone after the run, so something in it may still be changing those files. The run's result is not used and it is not run again; what it already changed stays as it is. The operator must check the sandbox on the gateway.",
+});
+
+/** Both OpenShell venues, the copy mode first: what "is any OpenShell venue blessed" asks of a list. */
+export const OPENSHELL_BACKENDS = Object.freeze([OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND]);
 
 /**
  * Who holds a venue's credentials (issue #683, `DES-CONTAINER-BACKEND-REGISTRY`): `container` (the job's own container,
@@ -1041,8 +1117,11 @@ export function venuesOf(env) {
 	} catch {
 		blessed = [DEFAULT_BACKEND];
 	}
-	// `openshellUsed` (issue #683, blessable since #684): the doctor's openshell section runs on it.
-	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND, openshellUsed: blessed.includes(OPENSHELL_BACKEND) };
+	// `openshellUsed` (issue #683, blessable since #684): the doctor's openshell section runs on it, for either mode (issue
+	// #686 part 3), whose gateway, CLI and settings are one; the two mode flags say which mode's own lines to add.
+	const openshellCopyUsed = blessed.includes(OPENSHELL_BACKEND);
+	const openshellBindUsed = blessed.includes(OPENSHELL_BIND_BACKEND);
+	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND, openshellUsed: openshellCopyUsed || openshellBindUsed, openshellCopyUsed, openshellBindUsed };
 }
 
 /**

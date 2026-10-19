@@ -1212,3 +1212,13 @@ test("the openshell venue's two settings (#684): judged only while it is blessed
 	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell", PI_OPENSHELL_GATEWAY: "bad name" }), (e) => e.piDispatchConfig === true && /PI_OPENSHELL_GATEWAY/.test(e.message));
 	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell", PI_EGRESS: "0" }), (e) => e.piDispatchConfig === true && /^PI_EGRESS=0 cannot run openshell/.test(e.message));
 });
+
+test("openshell-bind shares the two settings (#686 part 3): judged when either mode is blessed, and bind mode is refused on the podman driver", () => {
+	assert.deepEqual(loadConfig({ PI_BACKENDS: "openshell-bind", PI_OPENSHELL_GATEWAY: "lab" }).openshell, { engine: "docker", gateway: "lab" });
+	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell-bind", PI_OPENSHELL_ENGINE: "lxc" }), (e) => e.piDispatchConfig === true && /PI_OPENSHELL_ENGINE must be docker or podman/.test(e.message));
+	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell-bind", PI_OPENSHELL_GATEWAY: "bad name" }), (e) => e.piDispatchConfig === true && /PI_OPENSHELL_GATEWAY/.test(e.message));
+	assert.throws(() => loadConfig({ PI_BACKENDS: "local,openshell-bind", PI_OPENSHELL_ENGINE: "podman" }), (e) => e.piDispatchConfig === true && /openshell-bind with PI_OPENSHELL_ENGINE=podman: bind mode was measured on OpenShell's Docker driver only/.test(e.message));
+	// The copy venue keeps podman.
+	assert.deepEqual(loadConfig({ PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" }).openshell, { engine: "podman", gateway: null });
+	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell-bind", PI_EGRESS: "0" }), (e) => e.piDispatchConfig === true && /^PI_EGRESS=0 cannot run openshell-bind/.test(e.message));
+});

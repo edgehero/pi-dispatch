@@ -3862,6 +3862,52 @@ test("openshell blessed (#684): its versions read once with the gateway, its rea
 	assert.equal(opts.openInboxRelay, runContainerCalls[0].openInboxRelay, "one relay opener for every venue");
 });
 
+test("openshell-bind blessed (#686 part 3): beside openshell, one version read and ONE reaper for both, each mode its own bundle from one option set", { skip }, async () => {
+	let registryArgs = null;
+	const versionCalls = [];
+	const reaperCalls = [];
+	let reapRuns = 0;
+	const reap = async () => ((reapRuns += 1), { reaped: true });
+	const { openshellBackendCalls, logs } = await runStart({
+		env: { PI_BACKENDS: "local,openshell,openshell-bind", PI_OPENSHELL_GATEWAY: "lab", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readOpenshellVersions: async (args) => (versionCalls.push(args), {}),
+		makeOpenshellReaper: (args) => (reaperCalls.push(args), reap),
+		makeBackendRegistry: (args) => ((registryArgs = args), realRegistry(args)),
+	});
+	assert.deepEqual(versionCalls, [{ gateway: "lab" }], "the gateway's releases read once for both modes");
+	assert.equal(reaperCalls.length, 1, "one reaper: the owner label is shared");
+	assert.equal(reapRuns, 1, "and the boot sweep RUNS it once, though both names hold it");
+	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["local", "openshell", "openshell-bind"]);
+	assert.equal(registryArgs.reaps.openshell, reap);
+	assert.equal(registryArgs.reaps["openshell-bind"], reap);
+	assert.deepEqual(openshellBackendCalls.map((o) => o.mode), ["copy", "bind"]);
+	const [copy, bind] = openshellBackendCalls;
+	assert.deepEqual(Object.keys(bind), Object.keys(copy));
+	for (const key of Object.keys(copy)) if (key !== "mode") (typeof copy[key] === "function" ? assert.equal : assert.deepEqual)(bind[key], copy[key], `${key}: the same option for both modes`);
+	assert.equal(bind.reap, reap);
+	assert.equal(bind.gateway, "lab");
+	assert.equal(bind.engine, "docker");
+	assert.equal(typeof bind.jobsDir, "string", "the bind probe's source goes under the jobs dir");
+	assert.ok(!logs.some((l) => l.event === "host_reap_unproven" && /no boot reaper/.test(l.reason ?? "")), "every blessed venue has its reaper");
+});
+
+test("openshell-bind alone (#686 part 3): no copy bundle, the bind bundle and its reaper", { skip }, async () => {
+	let registryArgs = null;
+	const reap = async () => ({ reaped: true });
+	const { openshellBackendCalls } = await runStart({
+		env: { PI_BACKENDS: "local,openshell-bind" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		makeOpenshellReaper: () => reap,
+		makeBackendRegistry: (args) => ((registryArgs = args), realRegistry(args)),
+	});
+	assert.deepEqual(openshellBackendCalls.map((o) => o.mode), ["bind"]);
+	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["local", "openshell-bind"]);
+	assert.deepEqual(Object.keys(registryArgs.reaps).sort(), ["local", "openshell-bind"]);
+});
+
 test("openshell unblessed: no version read, no reaper, no bundle (#684)", { skip }, async () => {
 	const seen = [];
 	const { openshellBackendCalls } = await runStart({

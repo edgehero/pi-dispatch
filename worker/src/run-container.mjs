@@ -125,6 +125,13 @@ export function makeRunContainer({
 	makeDemux = makeStderrTranscript,
 	// Review round 1, M1: how long a stdin-steered attempt's pipe stays open after an exit-shaped line that does not verify.
 	stdinExitGraceMs = 5_000,
+	// Issue #686 part 3, review round 2 of #714: `({ opts, aborted }) => boolean`, a binding venue whose box OUTLIVES its CLI
+	// child (`openshell-bind`: the sandbox stays after the exec, and a process the agent left behind can still write the
+	// bound host tree). Awaited once the child has closed and BEFORE the transcript's final read and the sink's close, so
+	// the last lines and the processor's reads both see a tree nothing writes any more. `false` (not confirmed gone) puts
+	// `lingering: true` on the result, which the processor reads (no exit checkpoint; the named result where a retry
+	// would be wrong). Absent, every venue's run is exactly what it was.
+	settleRun = null,
 }) {
 	// Refused at construction rather than written into a job's env: a guessed layout reads nothing.
 	const paths = layoutFor(layout);
@@ -753,6 +760,16 @@ export function makeRunContainer({
 				// Issue #686: the demux's held tail (a last line with no newline) goes out before anything closes, and every
 				// record it completed is in the publisher before the final flush below.
 				stderrOut(endDemux());
+				// Issue #686 part 3, review round 2: the venue's box ended and confirmed gone first (see `settleRun`).
+				let settled = null;
+				if (typeof settleRun === "function") {
+					try {
+						settled = (await settleRun({ opts: buildOpts, aborted })) === true;
+					} catch {
+						settled = false;
+					}
+				}
+				const lingered = settled === false ? { lingering: true } : {};
 				// Issue #645: no live checkpoint starts once the container is gone (a quiet point in the final read would
 				// pause a dead container). Closing first, and awaiting it after the final read, lets a live one in flight
 				// finish, its pointer included, before this promise resolves and the processor's cleanup can run.
@@ -865,7 +882,7 @@ export function makeRunContainer({
 				// `steer` is the runner's own count (advisory, like `recovery`), without the ids; `steerSkipped` the verdict.
 				const steerShown = steerCounts !== null && typeof steerCounts === "object" ? { delivered: steerCounts.delivered ?? null, pending: steerCounts.pending ?? null } : null;
 				const steered = steerAsked ? { ...(steerArmed && steerShown !== null ? { steer: steerShown } : {}), ...(steerSkipped !== null ? { steerSkipped } : {}) } : {};
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint });
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
 			});
 		});
 

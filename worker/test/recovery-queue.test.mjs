@@ -405,6 +405,39 @@ test("salvage: a stale job dir on the crashed host becomes a salvage checkpoint,
 	assert.equal(existsSync(dir), false, "removed after the snapshot");
 });
 
+test("salvage asks the venue to end the sandbox that bound the job dir FIRST, and reads and removes nothing while it lingers (#686 part 3, review round 1)", async () => {
+	const jobsDir = tempDir("pi-salvage-");
+	const dir = staleJobDir(jobsDir, "job-ab12cd");
+	writeFileSync(`${dir}.openshell-profile.json`, "{}");
+	// The marker a bind-mode stage writes beside the job dir: only then is the venue asked (review round 2).
+	writeFileSync(`${dir}.openshell-bind`, "");
+	const order = [];
+	const checkpointer = { readManifest: async () => (order.push("read"), { ok: true, manifest: MANIFEST }), snapshot: async (a) => (order.push("snapshot"), { ok: true, seq: a.seq }) };
+	const salvage = makeSalvager({ jobsDir, hostName: "h1", workspaceCheckpointer: checkpointer, settleJobDir: async (name) => (order.push(`settle ${name}`), true) });
+	assert.deepEqual(await salvage({ runId: "gh-s", pointer: POINTER(), attempt: 2 }), { salvaged: true, seq: 5 });
+	assert.deepEqual(order, ["settle job-ab12cd", "read", "snapshot"], "the sandbox is confirmed gone before anything reads the tree");
+	assert.equal(existsSync(`${dir}.openshell-profile.json`), false, "the provider profile beside the job dir goes with it");
+	assert.equal(existsSync(`${dir}.openshell-bind`), false, "and the bind marker");
+	// No marker: another venue's job dir, and the gateway is never asked.
+	const plain = staleJobDir(jobsDir, "job-ef56ab");
+	const asked = [];
+	const unbound = makeSalvager({ jobsDir, hostName: "h1", workspaceCheckpointer: checkpointer, settleJobDir: async (n) => (asked.push(n), false) });
+	assert.equal((await unbound({ runId: "gh-s", pointer: POINTER({ jobDir: "job-ef56ab" }) })).salvaged, true);
+	assert.deepEqual(asked, []);
+	assert.equal(existsSync(plain), false);
+	for (const answer of [async () => false, async () => Promise.reject(new Error("gateway down"))]) {
+		const again = staleJobDir(jobsDir, "job-cd34ef");
+		writeFileSync(`${again}.openshell-bind`, "");
+		const logs = [];
+		const reads = [];
+		const blocked = makeSalvager({ jobsDir, hostName: "h1", workspaceCheckpointer: { readManifest: async () => (reads.push(1), { ok: true, manifest: MANIFEST }) }, settleJobDir: answer, log: (e, f) => logs.push([e, f]) });
+		assert.deepEqual(await blocked({ runId: "gh-s", pointer: POINTER({ jobDir: "job-cd34ef" }) }), { skipped: "sandbox-alive" });
+		assert.equal(reads.length, 0, "nothing read");
+		assert.equal(existsSync(again), true, "nothing removed while something may still write it");
+		assert.ok(logs.some(([e, f]) => e === "checkpoint_salvage" && f.skipped === "sandbox-alive"));
+	}
+});
+
 test("salvage goes through the run checkpointer when there is one: a handle with no pause verbs, exit({ kind: \"salvage\" }), then close", async () => {
 	const jobsDir = tempDir("pi-salvage-");
 	const dir = staleJobDir(jobsDir, "job-ab12cd");

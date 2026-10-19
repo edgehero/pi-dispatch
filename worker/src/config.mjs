@@ -9,7 +9,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } f
 import { homedir, hostname, tmpdir } from "node:os";
 import { delimiter, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { SESSION_KEY_PATTERN } from "./session-key.mjs";
-import { DEFAULT_BACKEND, OPENSHELL_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
+import { DEFAULT_BACKEND, OPENSHELL_BACKENDS, OPENSHELL_BIND_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
@@ -323,13 +323,18 @@ function backendFloorOf(env) {
  * name (unset: the CLI's active one). Judged only while the venue is blessed, as doctor judges them, so a value left in
  * the env of a deployment that never chose the venue refuses nothing; while blessed a bad one stops the boot here rather
  * than every job at its start.
+ *
+ * Issue #686 part 3: both OpenShell venues share them (one gateway, one engine), so either name in PI_BACKENDS judges
+ * them. Bind mode is refused on the Podman driver: it was measured on the Docker driver only, and a rootless Podman maps
+ * the sandbox's uid away from the worker's, so a bind would be neither readable nor removable by the uid that owns it.
  */
-function openshellFrom(env, backends) {
+export function openshellFrom(env, backends) {
 	const engine = env.PI_OPENSHELL_ENGINE === undefined || env.PI_OPENSHELL_ENGINE === "" ? "docker" : env.PI_OPENSHELL_ENGINE;
 	const gateway = env.PI_OPENSHELL_GATEWAY || null;
-	if (!backends.includes(OPENSHELL_BACKEND)) return { engine, gateway };
+	if (!OPENSHELL_BACKENDS.some((name) => backends.includes(name))) return { engine, gateway };
 	if (engine !== "docker" && engine !== "podman") throw configError(`PI_OPENSHELL_ENGINE must be docker or podman, the compute drivers the openshell venue admits (got ${JSON.stringify(engine)})`);
 	if (gateway !== null && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(gateway)) throw configError("PI_OPENSHELL_GATEWAY must be a registered gateway's name (`openshell gateway list`), or unset for the CLI's active gateway");
+	if (engine === "podman" && backends.includes(OPENSHELL_BIND_BACKEND)) throw configError(`PI_BACKENDS names ${OPENSHELL_BIND_BACKEND} with PI_OPENSHELL_ENGINE=podman: bind mode was measured on OpenShell's Docker driver only, and a rootless Podman maps the sandbox's uid away from the worker's, so its binds would not be the worker's to read or remove. Use the docker driver, or the copy venue (openshell)`);
 	return { engine, gateway };
 }
 
