@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
-import { CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
+import { CONTAINER_GLOBAL_PI_DIR, CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
+import { layoutFor } from "./job-layout.mjs";
 import { cpuCeilingCenti, cpuRangeRefusal, DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
@@ -90,7 +91,27 @@ export function makeRunContainer({
 	openInboxRelay = null,
 	// Issue #646: the host fs the inbox directory is made and removed through. A seam for the tests.
 	inboxFs = { mkdirSync, rmSync },
+	// Issue #683: the venue's file layout (job-layout.mjs). `mounts` for every binding venue, byte-identical to before;
+	// `sandbox` for a copying one (`openshell`), which moves the session file and the staged packages' container paths
+	// under /sandbox and writes PI_JOB_LAYOUT.
+	layout = "mounts",
+	// Issue #683: the container's memory bound in bytes, given the argv and the options it was built from. Both binding
+	// builders spell it `--memory=`, so the default reads the argv; a venue whose argv carries no such flag (an `exec`
+	// into a sandbox sized at create) says it from the job's size instead.
+	memoryLimitOf = (args) => memoryBytesOfArgs(args),
+	// Issue #683: a copying venue's own steps around the CLI child, each awaited. `stageRun({ args, opts })` runs after the
+	// argv is built and before the spawn (the venue's create, policy read-back and upload); a throw there is
+	// `container-never-started`, refunded and retried, since nothing ran. `collectRun(result)` runs once the child has
+	// closed (the download), and returns the result to resolve with. `teardownRun()` runs in the `finally`, on every
+	// path a `stageRun` was begun on (the delete). Each is handed THIS attempt's build options (`opts`, the name among
+	// them), so a venue running several jobs at once acts on its own sandbox only. Absent, a binding venue's run is
+	// exactly what it was.
+	stageRun = null,
+	collectRun = null,
+	teardownRun = null,
 }) {
+	// Refused at construction rather than written into a job's env: a guessed layout reads nothing.
+	const paths = layoutFor(layout);
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
 	// `relabel` (issue #355) is the processor's, off the same job-user answer as `user`: true where the daemon confines
@@ -244,14 +265,18 @@ export function makeRunContainer({
 			// hand-edited string "false" never becomes job data this comparison could misread as an opt-out.
 			// The opt-out short-circuits BEFORE the resolver runs: a trigger that withheld the staged set has no
 			// reason to make the worker read the manifest on its behalf.
-			packagePaths: job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths,
+			// Issue #683: the staged packages' container paths are the overlay's, so on the sandbox layout their prefix moves
+			// with it (`/opt/pi-global` to `/sandbox/pi-global`). A path not under the overlay is passed as it was.
+			packagePaths: (job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths).map((p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p)),
 			forwardEnv, // extra host var names to forward (e.g. a custom provider's key)
 			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript file, which
 			// since issue #643 is every prepared job (the live file), resume or not. The constant is imported rather than
 			// re-typed so the mount below and this variable name one path -- two literals is how they drift with both
 			// suites green. On an empty file the runner opens a fresh session there (image/runner/src/session.mjs), the
 			// same path a cold-starting resume job takes, so the image needs no change.
-			sessionFile: transcriptDir ? CONTAINER_SESSION_FILE : undefined,
+			// Issue #683: under the layout's session directory, which on `mounts` is CONTAINER_SESSION_FILE exactly.
+			sessionFile: transcriptDir ? (layout === "mounts" ? CONTAINER_SESSION_FILE : `${paths.session}/current.jsonl`) : undefined,
+			layout,
 			// Issue #189: the flow name, structurally, so the runner can verify it against the loaded
 			// skill set. Off `job` like maxTurns; absent (a bare run.task cron job) emits no variable.
 			flow: typeof job.flow === "string" && job.flow.trim() !== "" ? job.flow : undefined,
@@ -308,7 +333,7 @@ export function makeRunContainer({
 			// an unremovable stale file makes the run itself fail to start, which is reported as that
 		}
 
-		const args = beforeSpawn(() => buildArgs({
+		const buildOpts = {
 			// Same split as packagePaths above: the per-job value off `job`, the deployment value off the closure,
 			// so a trigger can name its own toolchain (INT-TRIGGERS-FILE-CONTRACT). Resolved through the SAME
 			// function the pre-spend preflight uses (image-preflight.mjs), so the tag that was checked is the tag
@@ -341,12 +366,13 @@ export function makeRunContainer({
 			// Issue #545: `-i`, so the container's stdin is the pipe the key is written to. Absent otherwise, and the argv is
 			// byte-identical to one built before the signed exit line.
 			...(exitKey !== null ? { extraFlags: ["-i"] } : {}),
-		}));
+		};
+		const args = beforeSpawn(() => buildArgs(buildOpts));
 
 		// Issue #596: the memory bound this container actually got, in bytes, read off the argv the runtime is handed (both
 		// builders spell it `--memory=`, from the job's size), never re-derived from the environment or the size. The
 		// processor confirms an OOM only when the run's peak reached 90% of it. null when the argv names none.
-		const memoryLimit = memoryBytesOfArgs(args);
+		const memoryLimit = memoryLimitOf(args, buildOpts);
 		if (!args.some((a) => typeof a === "string" && a.startsWith("--cpus="))) log("cpu_ceiling_unknown", { container: name });
 		if (Array.isArray(unenforced) && unenforced.length > 0) log("size_bound_unenforced", { container: name, flags: unenforced.filter((f) => typeof f === "string" && /^--[a-z-]{1,32}$/.test(f)) });
 
@@ -361,6 +387,30 @@ export function makeRunContainer({
 		if (network && !(await createJobNetwork(spawnFn, { network, proxy: egressProxy, bin }))) {
 			removeInbox();
 			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
+		}
+
+		// Issue #683: a copying venue's create and upload, before anything spawns the job. Its teardown is owed from the
+		// moment it begins, so a stage that fails half way (a sandbox made, an upload refused) is still deleted.
+		let staged = false;
+		const teardown = async () => {
+			if (!staged || typeof teardownRun !== "function") return;
+			try {
+				await teardownRun({ opts: buildOpts });
+			} catch {
+				// best effort: the reaper deletes what this left, by the job's label
+			}
+		};
+		if (typeof stageRun === "function") {
+			staged = true;
+			try {
+				await stageRun({ args, opts: buildOpts });
+			} catch (cause) {
+				await teardown();
+				removeInbox();
+				if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
+				if (cause instanceof InfraRetry) throw cause;
+				throw new InfraRetry("container-never-started", { cause, reason: "container-never-started" });
+			}
 		}
 
 		// Issue #643: the live transcript publisher, opened only beside a transcript file, an opener and a job id. Its
@@ -640,8 +690,11 @@ export function makeRunContainer({
 			if (!result.aborted && (neverStartedExits ?? []).includes(result.code) && (await stopDetached({ spawnFn, cidFile, fs, bin, ...detachedCheck }))) {
 				return { ...result, detached: true };
 			}
+			// Issue #683: a copying venue brings its outputs back before the processor reads them. Its own throw stands.
+			if (typeof collectRun === "function") return await collectRun(result, { opts: buildOpts });
 			return result;
 		} finally {
+			await teardown();
 			if (network) {
 				await removeJobNetwork(spawnFn, {
 					network,

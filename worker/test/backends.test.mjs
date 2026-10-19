@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isPerMachineHost, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
+import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isPerMachineHost, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendFloor, parseBackendList, shortfall, venuesOf } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -308,7 +308,7 @@ test("every observedBy names a property and an observation from the closed list 
 
 test("isolation and mountSet are ENFORCED only while the runtime is OBSERVED providing them (#345)", () => {
 	assert.deepEqual({ ...BACKENDS.local.observedBy }, { isolation: DAEMON_APPLIES_BOUNDS, mountSet: RUNTIME_ADDS_NO_MOUNTS, credentialTransit: DOCKER_ENDPOINT_LOCAL });
-	assert.deepEqual(Object.keys(OBSERVATIONS), [DOCKER_ENDPOINT_LOCAL, DAEMON_APPLIES_BOUNDS, RUNTIME_ADDS_NO_MOUNTS, PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL]);
+	assert.deepEqual(Object.keys(OBSERVATIONS), [DOCKER_ENDPOINT_LOCAL, DAEMON_APPLIES_BOUNDS, RUNTIME_ADDS_NO_MOUNTS, PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL, "openshellGatewayLocal"]);
 	assert.deepEqual(Object.keys(OBSERVATION_FIX), Object.keys(OBSERVATIONS), "every observation has its own remedy, and no remedy names an observation that does not exist");
 	assert.ok(Object.isFrozen(OBSERVATION_FIX));
 	for (const [property, observation] of [["isolation", DAEMON_APPLIES_BOUNDS], ["mountSet", RUNTIME_ADDS_NO_MOUNTS]]) {
@@ -574,4 +574,30 @@ test("isPerMachineHost: only the two alias NAMES are a different server on every
 	// hosts on one bridge can reach one neighbour server at 169.254.x.y, so it must take the fleet claim.
 	for (const host of ["host.docker.internal", "host.containers.internal", "host.docker.internal."]) assert.equal(isPerMachineHost(host), true, host);
 	for (const host of ["169.254.1.2", "[fe80::1]", "fe80::1", "[febf::1]", "gpu.lan", "192.168.5.2", "172.17.0.1", "[fd00::2]", "docker.internal", "", null]) assert.equal(isPerMachineHost(host), false, String(host));
+});
+
+test("the openshell venue (#683): every word it cannot build is asserted with its asserter, two are absent, and it holds the credentials in its layer", async () => {
+	const { OPENSHELL_BACKEND, OPENSHELL_GATEWAY_LOCAL, CREDENTIAL_CUSTODY, NOT_YET_BLESSABLE } = await import("../src/backends.mjs");
+	assert.equal(OPENSHELL_BACKEND, "openshell");
+	const entry = BACKENDS[OPENSHELL_BACKEND];
+	assert.equal(entry.remote, false);
+	assert.equal(entry.credentialCustody, "layer");
+	// Pinned word by word, as podman's are: each rests on the #683 lab (OpenShell 0.1.4, Docker driver, Linux 6.17).
+	const want = { isolation: ASSERTED, ephemeral: ASSERTED, mountSet: ASSERTED, egress: ASSERTED, jobToJobIsolation: ASSERTED, imagePinning: ASSERTED, exitCodes: ASSERTED, abortable: ASSERTED, readOnlyJobInputs: ASSERTED, nonRoot: ASSERTED, secretsCustody: ASSERTED, credentialTransit: ENFORCED, localFolders: "absent", pausable: "absent" };
+	assert.deepEqual({ ...entry.declares }, want);
+	assert.deepEqual({ ...entry.observedBy }, { credentialTransit: OPENSHELL_GATEWAY_LOCAL });
+	assert.equal(effectiveWord(OPENSHELL_BACKEND, "credentialTransit", { [OPENSHELL_GATEWAY_LOCAL]: true }), ENFORCED);
+	assert.equal(effectiveWord(OPENSHELL_BACKEND, "credentialTransit", {}), ASSERTED);
+	// The closed choice of who holds the credentials: every entry names one of the two, and the floor never compares it.
+	assert.deepEqual(CREDENTIAL_CUSTODY, ["container", "layer"]);
+	for (const name of BACKEND_NAMES) assert.ok(CREDENTIAL_CUSTODY.includes(BACKENDS[name].credentialCustody), name);
+	assert.equal(BACKENDS.local.credentialCustody, "container");
+	assert.equal(BACKENDS[PODMAN_BACKEND].credentialCustody, "container");
+	assert.throws(() => parseBackendFloor("credentialCustody=enforced"), /credentialCustody/, "not a property, so a floor cannot name it");
+	// Built and refused by name until #684.
+	assert.ok(Object.hasOwn(NOT_YET_BLESSABLE, OPENSHELL_BACKEND));
+	for (const raw of ["openshell", "local,openshell", "openshell,podman"]) assert.throws(() => parseBackendList(raw), /not yet blessable.*#684/, raw);
+	assert.deepEqual(parseBackendList("openshell", { known: BACKEND_NAMES.slice() }), ["openshell"], "a test's own list reaches it, as the conformance script does");
+	assert.equal(venuesOf({ PI_BACKENDS: "openshell" }).openshellUsed, false, "a refused list falls back to the default");
+	assert.equal(venuesOf({}).openshellUsed, false);
 });

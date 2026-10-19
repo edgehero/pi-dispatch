@@ -1257,7 +1257,9 @@ function validateSecretsProfile(run, at, path) {
  * physics. A test pins that every entry declares it, so both halves have to fail together.
  */
 export function refusesLocalWorkspace(entry, localWorkspace) {
-	return Boolean(localWorkspace) && entry?.remote !== false;
+	// Issue #683: a venue that is on this host and still cannot edit a folder in place, because it COPIES the job's files
+	// (`openshell`): it declares `localFolders` absent, and is refused for the same physics in different words.
+	return Boolean(localWorkspace) && (entry?.remote !== false || entry?.declares?.localFolders === "absent");
 }
 
 /**
@@ -1345,7 +1347,8 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
 	// world imposes, and discovering it per job would burn a pickup for an answer the file already had.
 	// The decision itself is `refusesLocalWorkspace` above, so it can be driven; see its comment.
 	if (refusesLocalWorkspace(entry, localWorkspace)) {
-		throw configError(`${at}: run.backend ${JSON.stringify(backend)} is remote, and this trigger runs against a folder on THIS machine that has to be bind-mounted and edited in place -- there is no volume to hide behind (DES-WORKER-ON-HOST): ${path}`);
+		const why = entry?.remote !== false ? "is remote" : "copies a job's files into its sandbox instead of mounting them (DES-OPENSHELL-VENUE)";
+		throw configError(`${at}: run.backend ${JSON.stringify(backend)} ${why}, and this trigger runs against a folder on THIS machine that has to be bind-mounted and edited in place -- there is no volume to hide behind (DES-WORKER-ON-HOST): ${path}`);
 	}
 
 	return backend;
