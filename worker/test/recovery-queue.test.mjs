@@ -665,3 +665,29 @@ test("the boot sweep removes a removed dir's .cid and a stale orphan .cid, keepi
 	for (const kept of ["job-gone02.cid", "job-young2.cid", "job-gone03.cid"]) assert.ok(lstatSync(join(jobsDir, kept)), kept);
 	assert.deepEqual(out, { removed: 2, kept: 3, failed: 0 });
 });
+
+test("the boot sweep takes the openshell venue's beside-files with their dir, and alone once stale; never a young one or a link (#683)", async () => {
+	const jobsDir = tempDir("pi-orphans-openshell-");
+	const old = new Date(NOW - 2 * 3600 * 1000);
+	const young = new Date(NOW - 60 * 1000);
+	const at = (path, when) => utimesSync(join(jobsDir, path), when, when);
+	// With its stale dir: the policy file and both staging dirs (which hold the job's prompt and outputs) go too.
+	mkdirSync(join(jobsDir, "job-old003"));
+	at("job-old003", old);
+	writeFileSync(join(jobsDir, "job-old003.openshell-policy.json"), "{}");
+	mkdirSync(join(jobsDir, "job-old003.openshell-up", "job"), { recursive: true });
+	writeFileSync(join(jobsDir, "job-old003.openshell-up", "job", "prompt.md"), "issue text");
+	mkdirSync(join(jobsDir, "job-old003.openshell-down"));
+	// Alone, a crash after the dir went: stale ones go, a young one stays, a link is never followed or removed.
+	mkdirSync(join(jobsDir, "job-gone04.openshell-up"));
+	at("job-gone04.openshell-up", old);
+	writeFileSync(join(jobsDir, "job-gone05.openshell-policy.json"), "{}");
+	at("job-gone05.openshell-policy.json", old);
+	mkdirSync(join(jobsDir, "job-gone06.openshell-down"));
+	at("job-gone06.openshell-down", young);
+	symlinkSync(join(jobsDir, "job-gone06.openshell-down"), join(jobsDir, "job-gone07.openshell-up"));
+	lutimesSync(join(jobsDir, "job-gone07.openshell-up"), old, old);
+	await sweepOrphanJobDirs({ jobsDir, olderThanMs: 35 * 60 * 1000, now: () => NOW });
+	for (const gone of ["job-old003", "job-old003.openshell-policy.json", "job-old003.openshell-up", "job-old003.openshell-down", "job-gone04.openshell-up", "job-gone05.openshell-policy.json"]) assert.equal(existsSync(join(jobsDir, gone)), false, gone);
+	for (const kept of ["job-gone06.openshell-down", "job-gone07.openshell-up"]) assert.ok(lstatSync(join(jobsDir, kept)), kept);
+});

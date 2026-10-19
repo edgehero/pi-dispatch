@@ -1691,10 +1691,10 @@ test("up tells init to print no next steps of its own (#480)", async () => {
 test("up hands init the venues it decided, so init's next steps match the pass (#453)", async () => {
 	const docker = harness({ plan: green, listening: true });
 	await docker.run();
-	assert.deepEqual(docker.initOpts.map((o) => o.venues), [{ localUsed: true, podmanUsed: false, podmanDefault: false }]);
+	assert.deepEqual(docker.initOpts.map((o) => o.venues), [{ localUsed: true, podmanUsed: false, podmanDefault: false, openshellUsed: false }]);
 	const podman = harness({ env: { PI_BACKENDS: "podman" }, plan: podmanPlan(), listening: true, extra: podmanExtra() });
 	await podman.run();
-	assert.deepEqual(podman.initOpts.map((o) => o.venues), [{ localUsed: false, podmanUsed: true, podmanDefault: true }]);
+	assert.deepEqual(podman.initOpts.map((o) => o.venues), [{ localUsed: false, podmanUsed: true, podmanDefault: true, openshellUsed: false }]);
 });
 
 test("up on docker: PI_EGRESS_PROXY is the name up looks for, and it never starts the shipped proxy in its place", async () => {

@@ -254,7 +254,7 @@ test("PI_BACKENDS need not include local, and its FIRST entry is the default (#3
 	assert.throws(() => parseBackendList("vapour", { known }), /unknown backend "vapour" \(known: local, podman\)/);
 	// And without the seam, the real table, which holds `podman` now: a set without `local` is written through it.
 	assert.deepEqual(parseBackendList("podman"), ["podman"]);
-	assert.throws(() => parseBackendList("vapour"), /unknown backend "vapour" \(known: local, podman\)/);
+	assert.throws(() => parseBackendList("vapour"), /unknown backend "vapour" \(known: local, podman, openshell\)/);
 	// The guard is GONE rather than merely unreachable, so reinstating it fails here rather than silently.
 	const src = readFileSync(new URL("../src/backends.mjs", import.meta.url), "utf8");
 	assert.doesNotMatch(src, /PI_BACKENDS must include/);

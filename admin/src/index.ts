@@ -2148,7 +2148,11 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
     return { retained: false, reason: "past its window: open it with the CLI's --pin" };
   }
   // The runtime `b` would open this run in, so the pane can say where an egress-off shell lands (issue #429).
-  const runtime = sandboxLauncher(sandboxVenueOf(manifest))?.bin ?? "docker";
+  // Issue #683: a venue with no launcher row (`openshell`) is refused by `sandboxSyncRefusal` above; if one ever reached
+  // here, it is not reopenable, never reopened under docker.
+  const launcher = sandboxLauncher(sandboxVenueOf(manifest));
+  if (!launcher) return { retained: false, reason: "not reopenable (its venue has no sandbox shell)" };
+  const runtime = launcher.bin;
   // The sweep's own deadline rule (issue #446): the pin, else the earlier of the `retainUntil` the worker wrote and
   // `createdAt` plus this shell's window.
   const { until, source } = sandboxDeadline(manifest, paths.sandboxRetentionHours);
