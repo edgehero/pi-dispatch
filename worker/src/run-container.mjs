@@ -403,7 +403,8 @@ export function makeRunContainer({
 		if (typeof stageRun === "function") {
 			staged = true;
 			try {
-				await stageRun({ args, opts: buildOpts, signal });
+				// Issue #684: the job and the pickup's endpoint snapshot ride with it, for the venue's per-job network policy.
+				await stageRun({ args, opts: buildOpts, signal, job, modelEndpoints });
 			} catch (cause) {
 				await teardown();
 				removeInbox();

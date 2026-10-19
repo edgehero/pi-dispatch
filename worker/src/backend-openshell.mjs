@@ -7,6 +7,7 @@ import { BACKENDS, OPENSHELL_BACKEND } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { LAYOUTS } from "./job-layout.mjs";
+import { networkPolicyFor } from "./openshell-policy.mjs";
 import { judgeGatewayStatus, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
 import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { makeRunContainer } from "./run-container.mjs";
@@ -91,6 +92,75 @@ export function sandboxPolicy({ uid = SHIPPED_IMAGE_UID, gid = SHIPPED_IMAGE_UID
 		landlock: { compatibility: "hard_requirement" },
 		process: { run_as_user: String(uid), run_as_group: String(gid) },
 	};
+}
+
+/** The image label naming the binaries that may need the network (image/Dockerfile, issue #683). */
+export const NET_BINARIES_LABEL = "dev.pi-dispatch.net-binaries";
+
+/**
+ * The policy OpenShell reads back for one the worker wrote (issue #684, measured on OpenShell 0.1.4): with at least one
+ * network rule it adds its baseline paths that exist and the policy does not list, and of those this policy lists all
+ * but `/var/log` (read-only). Nothing else is added to the base. Provider rules arrive as their own `_provider_*` layers,
+ * which issue #684 part 2 accounts for.
+ */
+export const BASELINE_ADDED_READ_ONLY = Object.freeze(["/var/log"]);
+export function expectedPolicy(policy) {
+	const rules = policy?.network_policies;
+	if (!rules || Object.keys(rules).length === 0) return policy;
+	const fsPolicy = policy.filesystem_policy;
+	const listed = new Set([...(fsPolicy.read_only ?? []), ...(fsPolicy.read_write ?? [])]);
+	const added = BASELINE_ADDED_READ_ONLY.filter((p) => !listed.has(p));
+	return { ...policy, filesystem_policy: { ...fsPolicy, read_only: [...fsPolicy.read_only, ...added] } };
+}
+/**
+ * The read-backs that count as the policy written: with the baseline addition, or without it, since OpenShell adds a
+ * baseline path only where the image HAS it (an operator-built image without `/var/log` reads back as written).
+ * Nothing else: any other difference never starts the job.
+ */
+export function expectedPolicies(policy) {
+	const withBaseline = expectedPolicy(policy);
+	return withBaseline === policy ? [policy] : [withBaseline, policy];
+}
+
+/**
+ * Rewrite a staged job's `mcp.json` for the `sandbox` layout (issue #684): every stdio server's `command` and `args`
+ * that name the overlay at `/opt/pi-global/` are moved to `/sandbox/pi-global/`, where this venue uploads it. Nothing
+ * else changes, and a job without the file is left alone. A document this cannot parse is left as written: the runner
+ * refuses it before any spend (`mcp-config-invalid`), which is the honest answer, not a guess here.
+ */
+export function rewriteMcpForSandbox(path, fs) {
+	let text;
+	try {
+		text = fs.readFileSync(path, "utf8");
+	} catch {
+		return false;
+	}
+	let doc;
+	try {
+		doc = JSON.parse(text);
+	} catch {
+		return false;
+	}
+	const from = `${LAYOUTS.mounts.global}/`;
+	const to = `${LAYOUTS.sandbox.global}/`;
+	// A path at the start of a value, or after `=` (`--root=/opt/pi-global/x`, `NODE_PATH=/opt/pi-global/lib`).
+	const move = (v) => (typeof v === "string" ? v.replace(/(^|=)\/opt\/pi-global\//g, (_m, lead) => `${lead}${to}`) : v);
+	if (from !== "/opt/pi-global/") throw new Error("rewriteMcpForSandbox: the mounts overlay moved; update the pattern");
+	let changed = false;
+	for (const server of Object.values(doc?.servers ?? {})) {
+		if (!server || typeof server !== "object") continue;
+		const before = JSON.stringify(server);
+		server.command = move(server.command);
+		if (Array.isArray(server.args)) server.args = server.args.map(move);
+		if (server.env && typeof server.env === "object") for (const [k, v] of Object.entries(server.env)) server.env[k] = move(v);
+		if (JSON.stringify(server) !== before) changed = true;
+	}
+	if (changed) {
+		// The staged copy is 0444 as the preparer wrote it, so it is replaced rather than opened for writing.
+		fs.rmSync(path, { force: true });
+		fs.writeFileSync(path, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o444 });
+	}
+	return changed;
 }
 
 /** The sandbox-layout path a `mounts`-layout container path is copied to, or null for one the layout does not name. */
@@ -178,9 +248,10 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-gateway-not-local": "Refused: this job's venue is an OpenShell gateway that is not observed on this host, and the venue holds the job's credentials in that gateway, so it runs only on a gateway this deployment runs itself. Not run.",
 	"openshell-global-policy": "Refused: the OpenShell gateway has a gateway-wide policy in force, which would replace the policy the worker generates for this job. Not run.",
 	"openshell-landlock-missing": "Refused: this host's kernel does not offer Landlock, which the OpenShell venue needs to confine the job's sandbox and to keep its inputs read-only. Not run.",
+	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
 });
 
-const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "hostEnv", "openJobLog", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "makeRunContainer"]);
+const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "makeRunContainer"]);
 
 /**
  * Build the `openshell` bundle. `engine` is the gateway's compute driver, `docker` or `podman` (the only two in v1),
@@ -196,6 +267,11 @@ export function makeOpenshellBackend(opts = {}) {
 		image,
 		gateway = null,
 		engine = "docker",
+		// Issue #684: the deployment's egress-allowlist.conf entries and model-endpoints.json endpoints, read per job as
+		// the MCP preflight reads them (start.mjs), so the venue's policy is built from the sources the squid venues
+		// read. Each a function; an unreadable source throws there, which a job reads as infrastructure.
+		readAllowlist = () => [],
+		readEndpoints = () => [],
 		hostEnv = process.env,
 		openJobLog,
 		onOutput,
@@ -226,7 +302,12 @@ export function makeOpenshellBackend(opts = {}) {
 	const live = new Map();
 	const stopping = new Set();
 
-	const stageRun = async ({ opts: built, signal = null }) => {
+	// Issue #684: the job's network policy, generated from the deployment's sources and the image's network binaries.
+	// `{ network_policies }`, or `{ refused, entry? }` when a source cannot be translated without guessing.
+	const networkFor = (job, endpoints, binaries) =>
+		networkPolicyFor({ allowlist: readAllowlist(), endpoints: endpoints ?? readEndpoints(), kind: job?.kind ?? null, repo: job?.repo ?? null, binaries, onSkipped: (what) => log("openshell_policy_skipped", what) });
+
+	const stageRun = async ({ opts: built, signal = null, job = null, modelEndpoints = null }) => {
 		const { jobDir, size = DEFAULT_JOB_SIZE } = built;
 		const name = sandboxNameOf(built.name);
 		const at = { name, jobDir, policyFile: `${jobDir}.openshell-policy.json`, uploadDir: `${jobDir}.openshell-up`, downloadDir: `${jobDir}.openshell-down`, transfers: [] };
@@ -243,12 +324,26 @@ export function makeOpenshellBackend(opts = {}) {
 		// (`if_not_present`, measured: a missing tag was fetched from Docker Hub), and no registry serves a local image's
 		// ID, so `--from <id>` is this venue's `--pull=never`. It also pins the run to the image the preflight just read,
 		// not to whatever the tag points at when the gateway gets to it.
-		const inspected = await exec(engine, ["image", "inspect", "--format", "{{.Id}}", built.image]);
+		// The network binaries ride the same read (issue #684): the policy's rules name them, and the image declares them.
+		const inspected = await exec(engine, ["image", "inspect", "--format", `{{.Id}}|{{index .Config.Labels "${NET_BINARIES_LABEL}"}}`, built.image]);
 		if (stopped()) return;
-		const imageId = normalizeImageId(String(inspected.stdout ?? "").trim());
+		const [rawId, rawBinaries = ""] = String(inspected.stdout ?? "").trim().split("|");
+		const imageId = normalizeImageId(rawId);
 		if (!/^sha256:[0-9a-f]{64}$/.test(imageId)) throw new Error(`openshell: ${engine} gave no image ID for the job image`);
+		const binaries = rawBinaries === "" || rawBinaries === "<no value>" ? [] : rawBinaries.split(",");
 
-		const policy = sandboxPolicy();
+		// The checks a job is refused for before spend ran in `observationPreflight` (the same function, the same
+		// sources). The image's label cannot refuse here: the runner's node is always first, and a bad entry is skipped
+		// and logged, so only a source edited between the preflight and now can, and that retries into the preflight's
+		// own refusal.
+		const network = networkFor(job, modelEndpoints?.endpoints ?? null, binaries);
+		if (network.refused) {
+			log("openshell_policy_untranslatable", { container: name, refused: network.refused });
+			throw new Error(`openshell: the job's network policy could not be built (${network.refused})`);
+		}
+		// No rule at all (no allowlist, no endpoint) leaves the key out: the body is then exactly #683's, deny-all, which
+		// OpenShell reads back as written.
+		const policy = Object.keys(network.network_policies).length > 0 ? { ...sandboxPolicy(), ...network } : sandboxPolicy();
 		// BESIDE the job directory, never inside what is uploaded: the policy is the box, not an input the agent reads.
 		fs.writeFileSync(at.policyFile, `${JSON.stringify(policy)}\n`, { mode: 0o600 });
 		const created = parseJson(
@@ -258,9 +353,12 @@ export function makeOpenshellBackend(opts = {}) {
 		if (created?.phase !== "Ready") throw new Error(`openshell sandbox create: phase ${JSON.stringify(created?.phase ?? null)}, not Ready`);
 		if (stopped()) return;
 		// READ BACK (`CONST-VENUE-EGRESS-LAYER`'s second condition): the policy in force is the one written, from this
-		// sandbox, or the job does not run. Measured: `--full` returns the body as given.
+		// sandbox, or the job does not run. With a network rule OpenShell adds its baseline paths (measured: `/var/log`
+		// read-only, the one baseline path this policy does not list), so the read-back is held to the written body
+		// plus exactly that (`expectedPolicy`), never to "close enough".
 		const effective = parseJson((await run(["policy", "get", name, "--full", "-o", "json"])).stdout, "policy get");
-		if (effective?.policy_source !== "sandbox" || JSON.stringify(canonical(effective?.policy)) !== JSON.stringify(canonical(policy))) {
+		const readBack = JSON.stringify(canonical(effective?.policy));
+		if (effective?.policy_source !== "sandbox" || !expectedPolicies(policy).some((p) => JSON.stringify(canonical(p)) === readBack)) {
 			log("openshell_policy_mismatch", { container: name, source: typeof effective?.policy_source === "string" ? effective.policy_source : null });
 			throw new Error("openshell: the sandbox's policy read back differs from the one the worker wrote");
 		}
@@ -277,6 +375,9 @@ export function makeOpenshellBackend(opts = {}) {
 				fs.rmSync(source, { recursive: true, force: true });
 				fs.mkdirSync(at.uploadDir, { recursive: true, mode: 0o700 });
 				fs.cpSync(t.host, source, { recursive: true, verbatimSymlinks: true, filter: (src) => !nested.some((n) => src === n || src.startsWith(`${n}/`)) });
+				// Issue #684: the job's MCP document names its stdio commands by the `mounts` layout's paths; on this venue
+				// the overlay sits at /sandbox/pi-global, so the staged copy is rewritten (the host's file is untouched).
+				if (t.container === LAYOUTS.mounts.job) rewriteMcpForSandbox(join(source, "mcp.json"), fs);
 			}
 			await run(["sandbox", "upload", name, source, dirname(t.sandbox), "--no-git-ignore"], { timeoutMs: 600_000 });
 			if (stopped()) return;
@@ -369,7 +470,7 @@ export function makeOpenshellBackend(opts = {}) {
 
 	// The per-job, pre-spend venue checks (`CONST-VENUE-EGRESS-LAYER`'s third and fourth conditions): free reads, each
 	// refusing by name. A gateway that does not answer is infrastructure (retried); one that answers wrong is policy.
-	const observationPreflight = async () => {
+	const observationPreflight = async (job) => {
 		let status;
 		try {
 			status = judgeGatewayStatus(parseJson((await run(["status", "-o", "json"])).stdout, "status"));
@@ -411,6 +512,20 @@ export function makeOpenshellBackend(opts = {}) {
 			else if (!lsm.split(",").map((s) => s.trim()).includes("landlock")) return { venueRefused: { reason: "openshell-landlock-missing", comment: OPENSHELL_REFUSALS["openshell-landlock-missing"] }, observations: { openshellGatewayLocal: true } };
 		} else {
 			log("openshell_landlock_unknown", { reason: "not-linux" });
+		}
+		// Issue #684: a source this venue cannot translate (a top-level wildcard, a loopback endpoint, a repository path
+		// a push rule cannot name) refuses the job here, before spend, with the entry in the log only. Checked with the
+		// runner's path standing in for the image's binaries, which only the stage's inspect reads.
+		let network;
+		try {
+			network = networkFor(job, null, []);
+		} catch {
+			log("openshell_unavailable", { reason: "egress-sources-unread" });
+			return { unavailable: true };
+		}
+		if (network.refused) {
+			log("openshell_policy_untranslatable", { refused: network.refused, ...(network.entry ? { entry: network.entry } : {}) });
+			return { venueRefused: { reason: "openshell-egress-untranslatable", comment: OPENSHELL_REFUSALS["openshell-egress-untranslatable"] }, observations: { openshellGatewayLocal: true } };
 		}
 		return { observations: { openshellGatewayLocal: true } };
 	};
