@@ -1,0 +1,45 @@
+name: openshell lab (throwaway, #683)
+on:
+  push:
+    branches: [lab/openshell-683]
+permissions:
+  contents: read
+jobs:
+  lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host
+        run: |
+          uname -a; docker version --format '{{.Server.Version}}'; cat /sys/kernel/security/lsm; echo; id
+      - name: Install OpenShell 0.1.4 (checksum pinned)
+        run: |
+          curl -fsSLO https://github.com/NVIDIA/OpenShell/releases/download/v0.1.4/openshell_0.1.4-1_amd64.deb
+          echo "33045069ed26acb3d1550bf10297bf4eaf9e0dce4a8c19b0dab4564650daf921  openshell_0.1.4-1_amd64.deb" | sha256sum -c
+          sudo apt-get install -y ./openshell_0.1.4-1_amd64.deb
+          dpkg -L openshell | grep -v share/doc
+          ls -la /usr/lib/systemd/user/ 2>/dev/null | grep -i openshell || true
+      - name: Start the gateway without systemd
+        run: |
+          set -x
+          export OPENSHELL_LOCAL_TLS_DIR=$HOME/.local/state/openshell/tls
+          mkdir -p "$OPENSHELL_LOCAL_TLS_DIR"
+          openshell-gateway --help | head -60
+          openshell-gateway config preflight; echo preflight=$?
+          openshell-gateway generate-certs --output-dir "$OPENSHELL_LOCAL_TLS_DIR" --server-san host.openshell.internal; echo certs=$?
+          ls -la "$OPENSHELL_LOCAL_TLS_DIR"
+          export OPENSHELL_COMPUTE_DRIVER=docker
+          nohup openshell-gateway > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/17670) 2>/dev/null && break; sleep 1; done
+          openshell gateway add https://127.0.0.1:17670 --local --name openshell; echo add=$?
+          openshell gateway list || true
+          openshell status -o json || true
+          cat "$RUNNER_TEMP/gateway.log" | tail -50
+      - name: Build the lab image
+        run: docker build -f .github/lab/Dockerfile -t os-lab:1 .
+      - name: Probes
+        run: mkdir -p "$RUNNER_TEMP/lab" && cp .github/lab/lab.sh "$RUNNER_TEMP/lab/" && cd "$RUNNER_TEMP/lab" && ./lab.sh 2>&1
+      - name: Gateway log
+        if: always()
+        run: tail -200 "$RUNNER_TEMP/gateway.log" || true
