@@ -84,7 +84,8 @@ function fakeOpenshell({ phase = "Ready", policyBack = null, sandboxes = [], fai
 		const child = new EventEmitter();
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
-		child.stdin = { on() {}, end: (chunk) => state.stdin.push(String(chunk)) };
+		// Issue #686: a stdin-steered exec is written to (frame 1, then the relay's frames) and ended by the relay's stop.
+		child.stdin = { on() {}, once() {}, off() {}, write: (chunk) => ((state.stdinWrites ??= []).push(Buffer.from(chunk)), true), end: (chunk) => state.stdin.push(String(chunk ?? "")) };
 		child.kill = () => {};
 		queueMicrotask(() => {
 			if (state.abort) state.abort();
@@ -609,5 +610,33 @@ test("the live transcript over the exec's stderr (#686): PI_TRANSCRIPT on --env,
 	await bundle(fake2, { openLiveTranscript, log: (e, f) => logs.push([e, f]) }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j2", signal: new AbortController().signal, exitAuth: true, jobId: "j2" });
 	assert.ok(!execOf(fake2.state).includes("PI_TRANSCRIPT=stderr"));
 	assert.deepEqual(logs.filter(([e]) => e === "live_transcript_skipped"), [["live_transcript_skipped", { container: "pi-job-j2", reason: "no-capability" }]]);
+	assert.equal(opened.length, 1);
+});
+
+test("steering over the exec's stdin (#686 part 2): the relay opener handed through, PI_EXIT_AUTH=stdin-frames on --env, frame 1 written and the pipe kept open; without steerStdin the old skip", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const opened = [];
+	const openInboxRelay = (args) => (opened.push(args), { start: async () => {}, afterBaseline() {}, delivered: async () => {}, stop: async () => ({}), attach() {} });
+	const openLiveTranscript = () => ({ start() {}, finish: async () => {}, setBaseline() {}, push() {}, skip() {}, reset() {}, progressSummary: () => null });
+	const dirs = jobDirs();
+	const logs = [];
+	const b = bundle(fake, { openLiveTranscript, openInboxRelay, log: (e, f) => logs.push([e, f]) });
+	const steerJob = { ...JOB, steer: true };
+	const result = await b.runContainer({ job: steerJob, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, steerStdin: true, jobId: "j1" });
+	const execOf = (state) => state.calls.find((c) => c[1] === "sandbox" && c[2] === "exec");
+	assert.ok(execOf(fake.state).includes("PI_EXIT_AUTH=stdin-frames"), "a structural name on the exec's --env");
+	assert.ok(execOf(fake.state).includes("PI_STEER=1"));
+	assert.equal(opened.length, 1);
+	assert.equal(opened[0].frames.macRunId, "pi-job-j1");
+	assert.equal(fake.state.stdinWrites.length, 1, "frame 1");
+	assert.equal(JSON.parse(fake.state.stdinWrites[0].subarray(4).toString()).t, "key");
+	assert.deepEqual(fake.state.stdin, [], "not ended at the spawn: the relay owns the pipe");
+	assert.equal(result.steerSkipped, undefined);
+	// The image without steerStdin: unsteered, exactly as before this part.
+	const fake2 = fakeOpenshell();
+	const r2 = await bundle(fake2, { openLiveTranscript, openInboxRelay, log: (e, f) => logs.push([e, f]) }).runContainer({ job: steerJob, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j2", signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, jobId: "j2" });
+	assert.equal(r2.steerSkipped, "venue-copies");
+	assert.ok(execOf(fake2.state).includes("PI_EXIT_AUTH=stdin"));
+	assert.ok(!execOf(fake2.state).some((a) => a === "PI_STEER=1"));
 	assert.equal(opened.length, 1);
 });

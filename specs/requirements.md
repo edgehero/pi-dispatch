@@ -3731,11 +3731,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`DES-STEER-VIA-READONLY-INBOX-MOUNT`): the worker writes framed messages into a per-attempt directory mounted
   read-only into the job, the runner hands each to pi as a custom message, and the worker counts a delivery from the
   transcript it already tails.
-- **Copying venues: delivery through stdin frames (AMENDED 2026-10-18, issue #680; planned, built in #686; nothing
-  of it ships today).** A venue that uploads the job's files once (the first is `openshell` in its default copy
+- **Copying venues: delivery through stdin frames (AMENDED 2026-10-18, issue #680; built in #686. AMENDED 2026-10-19,
+  issue #686 part 2: SHIPPED on `openshell`, the names final).** A venue that uploads the job's files once (the first is `openshell` in its default copy
   mode, `DES-OPENSHELL-VENUE`) cannot show the runner a file written after the start, so today such a job runs
   without steering (`steerSkipped: "venue-copies"`). On such a venue a steer-armed attempt whose image declares the
-  planned `steerStdin` capability shall receive its messages as frames on the main exec's stdin instead: the exit key
+  `steerStdin` capability shall receive its messages as frames on the main exec's stdin instead: the exit key
   first, read before any tool exists, then one frame per message MAC'd under that key, at most 4 MiB in all per
   attempt, the pipe closed when the attempt ends (`INT-STEER-INBOX-CONTRACT`'s stdin transport,
   `INT-RUNNER-EXIT-CODE-PROTOCOL`). Everything else in this requirement holds unchanged there: data never
@@ -3746,7 +3746,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   which withdraws that message (it then never acks and is reported undelivered, `late`, exactly as a message the run
   never took is today), or read it and write it back later, which delays it; and a sender's withdrawal of a
   `written` message cannot stop a frame already in the pipe. Under the read-only mount none of these is possible,
-  which is why the mount stays the transport wherever a venue binds.
+  which is why the mount stays the transport wherever a venue binds. As shipped, the relay's budget is 4 MiB less
+  1 KiB, the largest total OpenShell 0.1.4 was measured to pass (over 4 MiB fails the exec); the acks come back over
+  the stderr transcript (`REQ-LIVE-TRANSCRIPT`), and without it the job runs unsteered as `no-transcript`.
 - **Fail loudly.** The CLI refuses a job that is not active (a queued job has no run to steer, and a message waiting
   for it would open a run the person did not start for it) and an active job whose run is not open, in one sentence
   naming the three causes it cannot tell apart (not steer-armed, not running, or a venue that cannot deliver). An
@@ -3761,9 +3763,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and its record names why (`steerSkipped`: `venue-copies`, `no-exit-key`, `no-transcript`, `no-inbox`); a message
   for it is refused at push, because nothing ever registered it as open. A runner handed `PI_STEER` without a
   readable `/inbox` or without an exit key exits `2` before the prompt (`steer-inbox-missing`, `steer-no-exit-key`).
-  **AMENDED 2026-10-18 (issue #680, planned, #686)**: `steer-inbox-missing` applies to the mount transport only; a
-  stdin-steered runner (the planned `PI_EXIT_AUTH` value `stdin-frames`, `INT-RUNNER-EXIT-CODE-PROTOCOL`) checks its
-  frame channel instead of `/inbox`, and `steer-no-exit-key` holds for both. A comment the receiver cannot steer (no live run, every run `gone`, `closed` or `full`, a body over the cap or
+  **AMENDED 2026-10-18 (issue #680, built in #686)**: `steer-inbox-missing` applies to the mount transport only; a
+  stdin-steered runner (the `PI_EXIT_AUTH` value `stdin-frames`, `INT-RUNNER-EXIT-CODE-PROTOCOL`) checks its
+  frame channel instead of `/inbox`, and `steer-no-exit-key` holds for both. **AMENDED 2026-10-19 (issue #686 part
+  2)**: a frame channel the runner cannot open (no supervisor's socket on fd 3: a runner started without the in-image
+  supervisor; or a `/dev/null` swap of its stdin that left fd 0 unvouched for, review round 1) is
+  `steer-inbox-missing` too, the channel being that transport's inbox; no reason was added. A broken frame stream is
+  logged by the runner (`steer_stream_broken`, a fixed token) and every later message settles `late`. A comment the receiver cannot steer (no live run, every run `gone`, `closed` or `full`, a body over the cap or
   empty after the scrub, a Valkey fault) is never dropped: it falls through to the enqueue it always had, and the
   receiver logs why by a fixed reason (`steer_fell_through`, `steer_comment_skipped`, `steer_lookup_failed`), never
   the text.
@@ -3808,10 +3814,29 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     inbox beside the job directory mounted read-only at `/inbox`, and a relay for the RUN id; given a copying venue,
     no exit key or no wiring, the job runs unarmed with the argv of a job that never asked and a named skip; an
     unarmed argv is byte-identical; a throw before the spawn or a spawn error removes the inbox and stops the relay
-    (`worker/test/run-container-steer.test.mjs`). **AMENDED 2026-10-18 (issue #680, planned, #686; no test yet)**:
+    (`worker/test/run-container-steer.test.mjs`). **AMENDED 2026-10-18 (issue #680, built in #686)**:
     given a copying venue whose image lacks `steerStdin`, the job runs unarmed with the named skip
     (`steerSkipped: "venue-copies"`) as above; given one whose image declares it, with an exit key and the wiring, the
     attempt is armed through stdin frames (`INT-STEER-INBOX-CONTRACT`'s stdin transport) and gets no `/inbox` mount.
+    **AMENDED 2026-10-19 (issue #686 part 2), the openshell case, with its tests**: armed on a copying venue, the env
+    carries `PI_EXIT_AUTH=stdin-frames` beside `PI_STEER=1`, frame 1 is written at the spawn and the pipe is left to
+    the relay, and no directory is made; each missing part is the named skip (`venue-copies`, `no-exit-key`,
+    `no-transcript` for the stderr transcript, the relay, the opener or the job id) and the attempt's env and stdin are
+    byte-identical to an unsteered one; a bind venue keeps the mount whatever the image declares; one run end to end
+    through the real relay and publisher and the runner's own decoder delivers the message and its ack over stderr
+    marks it delivered (`worker/test/run-container-stdin-steer.test.mjs`, all five tests); the `openshell` bundle
+    passes the relay opener through and writes the variable on the exec's `--env` (`worker/test/backend-openshell
+    .test.mjs`, "steering over the exec's stdin"); start.mjs hands it the same opener as `local`
+    (`worker/test/start-wiring.test.mjs`, "openshell blessed (#684)"). The relay's frames: marked before written, the
+    budget refusal (`late`, `steer_frame_refused`, never cut), a `written` WITHDRAW that unlinks nothing, drain and
+    EPIPE (`worker/test/inbox-relay.test.mjs`, the five "frames:" tests). The encoder and decoder held byte for byte,
+    every break token, oversize and unverified frames, exactly frame 1 (`worker/test/steer-frames.test.mjs`). The
+    runner: the supervisor reads exactly frame 1 and forwards the rest to fd 3 (`image/runner/test/supervise.test.mjs`,
+    the "stdin-frames" tests), the frame source applies the file's refusals and logs a break once
+    (`image/runner/test/inbox.test.mjs`, the "frames:" tests), and the real run-job delivers a message written on fd 3
+    during request 1 in request 2, acked, on the signed exit line, with no `/inbox` ("the real run-job on the stdin
+    frame channel"). On the real image, `verify-image.sh`'s `steerStdin` case; on a real gateway,
+    `openshell-conformance.mjs`'s steered run, at zero spend.
   - (d) **The inbox scripts.** Push answers `ok` once, `dup` on the same id, `gone` without the open key and `closed`
     after the close; `full` at 16 messages and at 64 KiB, withdrawn ones still counted; a push racing a close on two
     clients is either in close's reply or refused; close turns queued and written into late and returns everything;
@@ -5079,6 +5104,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-19 | Issue #686, part 2, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED**, "Fail loudly": the frame channel the runner cannot open is no supervisor's SOCKET on fd 3 (an open fd 3 is not enough), or a `/dev/null` swap of stdin that left fd 0 unvouched for, both `steer-inbox-missing` before pi loads. Acceptance (c) UNCHANGED in substance, checked; its tests gain the exact-fit budget, the no-pass-before-start and the exit-line close cases (`worker/test/inbox-relay.test.mjs`, `steer-frames.test.mjs`, `run-container-stdin-steer.test.mjs`, "M1"). |
+| 2026-10-19 | Issue #686, part 2: steering on the `openshell` venue over the exec's stdin. **`REQ-STEER-RUNNING-JOB` AMENDED**: the copying-venue bullet is SHIPPED and its names final (`steerStdin`, `stdin-frames`), with the measured budget (OpenShell 0.1.4: over 4 MiB in total fails the exec, 4 MiB less 1 KiB passed; the relay's budget sits at the latter) and the acks over the stderr transcript (`no-transcript` without it); "Fail loudly" gains a dated note: a frame channel the runner cannot open is `steer-inbox-missing` too (no reason added) and a broken stream is logged `steer_stream_broken`; Acceptance (c) gains the openshell case and names its tests (`worker/test/run-container-stdin-steer.test.mjs`, `steer-frames.test.mjs`, the relay's, the bundle's and the wiring's, the supervisor's and the runner's, `verify-image.sh`'s `steerStdin` case and the conformance script's steered run). The rest of the requirement (data never instructions, at most once, the caps, the late rule, the weaker guarantee on stdin) UNCHANGED, checked. **`REQ-LIVE-TRANSCRIPT` UNCHANGED, checked**: the stderr transcript is now also the steer ack's tail, which it already carried. |
 | 2026-10-19 | Issue #686, part 1: the live transcript on the `openshell` venue, over the exec's stderr. **`REQ-LIVE-TRANSCRIPT` AMENDED**: a new acceptance clause (g) for a venue that copies the session file: the runner's signed stderr records reach the same stream, and progress and the status comment with it; a forged, replayed or malformed record is dropped and counted; every other stderr byte is passed on unchanged; an image without `transcriptStderr` or `exitAuth` runs without a transcript and says so (`live_transcript_skipped`); a binding venue is unchanged; the tests named. The Statement is UNCHANGED, checked: the transcript still leaves the host only through the worker's redacting publisher, and the job container gains no network path. **UNCHANGED, checked**: `REQ-RUN-PROGRESS` (its reducer reads the pushed lines as tailed ones), `REQ-STEER-RUNNING-JOB` (steering on a copying venue is still #686's second part, skipped by name), `REQ-EGRESS-ALLOWLIST` (nothing about the layer's policy changes). Review round (#709, same day): (g) narrowed to what the demux passes on (every byte of a line that is not a record, never a broken record's), and gains the resumed session whose staged lines are `prior`. Review round 2 (#709, same day): (g)'s job-log clause CORRECTED to what the demux does with a broken record, and gains a record read after a foreign write with no newline. |
 | 2026-10-19 | Issue #684, part 2: credential providers, git push, and the `openshell` venue blessed. **`REQ-EGRESS-ALLOWLIST` AMENDED**: the "A venue with its own egress layer" paragraph gains a dated note: the layer venue is built and blessable, and `PI_EGRESS=0` with a blessed `credentialCustody: layer` venue refuses the boot by name. The Statement and the squid venues' behaviour UNCHANGED, checked. **UNCHANGED, checked**: `REQ-STEER-RUNNING-JOB` (a copying venue still skips steering by name, `steerSkipped: "venue-copies"`, until #686), `REQ-TRIGGER-SECRETS` (a resolved secret reaches the openshell job as a placeholder through the provider, its resolution and refusals untouched). |
 | 2026-10-19 | Issue #638's residual (the remainder of PR #638): an answer to a parked run is never swallowed, with the review's corrections. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: a new paragraph states the rule, an answer to an awaitInput run, written within five minutes before it parks and arriving before the park has taken its held replies, is held and becomes the one resumed job once it has parked; otherwise coalescing is unchanged (a resume comment of an awaitInput comment trigger swallowed against a live awaitInput run is held, `202 {status:"held"}`; inside the park the first eligible held answer is enqueued WITH the semantic window, so later answers coalesce against that one job instead of starting a second run, which the first version, a window-less add at the final outcome, allowed; the rest get one fixed comment; all are dropped if the run did not park; a swallow no live run takes is answered `deduplicated` as before), and the Acceptance gains the held case with its tests. **`REQ-AWAIT-INPUT` AMENDED**: a new "An answer while the run parks" bullet (the worker keeps an armed job registered on its target; a swallowed resume comment and a reply on an issue lacking only the label are held; the park sets the label, releases the window, takes the held replies and then comments, saying the run continues when one was taken; replies older than five minutes are dropped; a run that does not park drops them; the residual of a recent comment not meant as an answer, named), and the Acceptance gains the parking-reply cases, including no second run after the park and a phrase-free reply with no run parking answered byte-identically to before; the wording "arriving while it parks" of the first version is replaced by the bounded rule. Every other entry UNCHANGED, checked: `REQ-STEER-RUNNING-JOB` (held replies never enter the steer inbox and `trySteer` never sees an awaitInput run's registration, so a steer-armed run's phrase reply is still steered first), `REQ-RESUMABLE-SESSION` (the held answer's job is an ordinary resumed job), `REQ-OPERATOR-CONSOLE-ACTIONS` (a console answer is queued after the park, never held), `REQ-REPLICA-RUNS` (fanout unchanged; a held fallback is the delivery's own job). |

@@ -19,7 +19,10 @@ import { configError } from "./outcome.mjs";
 // env-internal PI_RETRY_MAX, PI_RETRY_BASE_MS: this runner's own provider retry bounds, and the one pair
 // here that the worker does NOT write. Nothing puts them on a container by default, so a bare .env line
 // sets them on the host and changes nothing in here; PI_FORWARD_ENV is what carries a host value in.
-export function parseRunnerEnv(env) {
+// `steerFrames` (issue #686) is not read from `env`: PI_EXIT_AUTH has left the environment by the time this runs
+// (run-job.mjs deletes it once the key is read), so the runner passes what the key read found, true when frame 1 came
+// over the stdin frame channel (`stdin-frames`). It is what lets PI_STEER through on the sandbox layout.
+export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 	// First, before any other read: every path this runner uses comes from the layout (issue #683), and a value the
 	// table does not hold must not leave the job reading the default tree's files.
 	const layout = parseLayout(env);
@@ -75,7 +78,8 @@ export function parseRunnerEnv(env) {
 		// INT-CONTAINER-JOB-INPUTS (issue #646): the trigger's run.steer -- whether the job reads the operator's and the
 		// forge's messages from the read-only /inbox mount and hands them to the running agent (src/inbox.mjs). `false`
 		// (the default) is byte-identical to every job before the feature.
-		steer: parseSteerForLayout(parseSteer(env, "PI_STEER"), layout),
+		// Issue #686: on the stdin frame channel (`steerFrames`) a copying venue's job reads its messages as frames.
+		steer: parseSteerForLayout(parseSteer(env, "PI_STEER"), layout, steerFrames === true),
 		// Issue #683: which file layout this container uses, `mounts` or `sandbox` (layout.mjs).
 		layout,
 		retry: {
@@ -235,11 +239,12 @@ function parseLayout(env) {
 	return layout;
 }
 
-// A steered job on the sandbox layout has no inbox to read (layout.mjs: a copying venue has no read-only mount, and its
-// stdin channel is issue #686's). The worker never sends PI_STEER there (`steerSkipped: "venue-copies"`), so one that
-// arrives is a worker regression, refused rather than run with every message an operator sends waiting unread.
-function parseSteerForLayout(steer, layout) {
-	if (steer && layout === "sandbox") throw configError("invalid PI_STEER: the sandbox layout has no inbox to steer through");
+// A steered job on the sandbox layout has no inbox DIRECTORY to read (layout.mjs: a copying venue has no read-only
+// mount). Since issue #686 it reads its messages as frames on stdin instead, and the worker sends PI_STEER there only
+// beside PI_EXIT_AUTH=stdin-frames (`steerFrames`). One that arrives without it is a worker regression, refused rather
+// than run with every message an operator sends waiting unread.
+function parseSteerForLayout(steer, layout, steerFrames = false) {
+	if (steer && layout === "sandbox" && !steerFrames) throw configError("invalid PI_STEER: the sandbox layout has no inbox to steer through without the stdin frame channel");
 	return steer;
 }
 

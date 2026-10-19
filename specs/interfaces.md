@@ -933,14 +933,14 @@ refactor apart.
   The forge is closed only when BOTH the worker and the image are from #545 or later: an older worker sends no
   key to any image, and a newer worker sends none to an image without `exitAuth`, so every other pairing runs
   unsigned, exactly as before.
-  **AMENDED 2026-10-18 (issue #680), planned, built in #686: stdin stays open after the key on a stdin-steered attempt,
-  and only there.** A stdin-steered attempt is one on a COPYING venue (the first is `openshell`,
+  **AMENDED 2026-10-18 (issue #680), built in #686 (AMENDED 2026-10-19, issue #686 part 2: shipped, the names final):
+  stdin stays open after the key on a stdin-steered attempt, and only there.** A stdin-steered attempt is one on a COPYING venue (the first is `openshell`,
   `DES-OPENSHELL-VENUE`; neither argv-built venue copies) that the worker armed for steering
-  (`REQ-STEER-RUNNING-JOB`) on an image declaring the planned `steerStdin` capability. On it the key travels as frame
+  (`REQ-STEER-RUNNING-JOB`) on an image declaring the `steerStdin` capability. On it the key travels as frame
   1 of `INT-STEER-INBOX-CONTRACT`'s stdin frames: a 4-byte big-endian unsigned length, then that many bytes of UTF-8
   JSON, `{"t":"key","key":"<64 hex>"}`, the key in exactly the shape above (`EXIT_KEY_PATTERN`, 64 lowercase hex), and
-  the worker does NOT close the pipe after it. The channel is named by a planned second value of `PI_EXIT_AUTH`
-  (`stdin-frames`, the name final in #686), written only beside `PI_STEER=1` to an image declaring `steerStdin`; a
+  the worker does NOT close the pipe after it. The channel is named by a second value of `PI_EXIT_AUTH`,
+  `stdin-frames` (final), written only beside `PI_STEER=1` to an image declaring `steerStdin`; a
   runner that predates it reads the value as `unknown-channel` and runs unsigned, and an unsigned `PI_STEER=1` run is
   `2` / `steer-no-exit-key` (the row above), so a worker pointing the new channel at an old image fails closed; it is
   not free, since that exit comes after the container started and costs one reserved slot, and it needs a mislabelled
@@ -959,6 +959,33 @@ refactor apart.
   64 hex characters and a newline and the pipe is closed at once, exactly as above**, `PI_EXIT_AUTH` stays `stdin`,
   and the argv and env are byte-identical; a bind venue that is steer-armed keeps the read-only `/inbox` mount and
   never gets the framed channel, because the channel lets the agent withdraw a message and the mount does not.
+  **As built (AMENDED 2026-10-19, issue #686 part 2; `image/runner/src/steer-frames.mjs`).** Both read frame 1 with
+  `readKeyFrame`: exactly 4 bytes, then exactly the declared length when it is a key frame's (at most 256 bytes), a
+  short read waited out, never a byte past it; anything else is `malformed` and the run goes on unsigned as above.
+  **The in-image supervisor forwards the later bytes to the runner's fd 3, not its stdin** (corrected from "the
+  runner's stdin" above, by measurement): it hands frame 1's bytes to the runner's stdin and closes it there, the key
+  handoff of #545 in the same shape, and pipes every later byte of its own stdin, unchanged and in order, into a fourth
+  descriptor of the runner's (`FRAME_FD`, 3), held open until its own stdin ends. Why: a child that INHERITS the
+  runner's stdin would hold the frame stream and could consume a message; Node has no `dup2`, and reopening
+  `/proc/self/fd/0` fails on the socketpair Node's `"pipe"` stdio is (ENXIO, measured in the image); a descriptor a Node
+  parent hands its child as fd 3 is not inherited by that child's own children, while fd 0 is (measured in the image's
+  node). The runner then puts `/dev/null` on fd 0 (close, then open, which the kernel gives the lowest number), before
+  any extension or tool exists, so every tool child that inherits stdin inherits `/dev/null` (pi's bash tool spawns on
+  `/dev/null` at the pin either way). Of the swap's failures only a failed close fails open (logged
+  `steer_stdin_shared {code}`; fd 0 is then the supervisor's socket at EOF, never the frames); `/dev/null` failing to
+  open after the close, or opening on another number because something took 0 (`fd0-taken`), leaves fd 0 in a state
+  nothing vouches for, so a steered run REFUSES before pi loads, as below (review round 1, L5; also logged by code). The runner reads fd 3 SYNCHRONOUSLY and non-blocking, at its own moments (the
+  inbox's creation, every scan, `agent_start`, `turn_end`, the poll, the close), never from an event-loop callback:
+  under a cost cap of 0 the inbox closed 10 ms after it began listening with no I/O turn between, so an asynchronous
+  reader never saw a frame written at the spawn (measured on Docker). A frame channel the runner cannot open is `2` /
+  `steer-inbox-missing` before the prompt, the frame transport's inbox being the channel: fd 3 not the supervisor's
+  SOCKET (an open fd 3 is not enough, review round 1, L4: a node started without the supervisor holds its own
+  descriptors from 3 up, libuv's eventpoll among them, measured on a bare node), or the swap refusal above; with that
+  one addition `steer-inbox-missing` stays the mount transport's reason.
+  `verify-image.sh` proves on an image declaring `steerStdin` that the key read takes exactly frame 1 (the exit line
+  signed with it and the frame right after it delivered, while the stdin is still held open), that a frame round-trips
+  (its id on the signed exit line, its ack in the transcript, a forged one dropped and counted), and that pi's own bash
+  tool operations and a child inheriting stdin both read fd 0 as `/dev/null`.
   **The transcript records (AMENDED 2026-10-19, issue #686 part 1): on a copying venue, the session file's lines on
   STDERR, signed with this key.** Given `PI_TRANSCRIPT=stderr` (written by the worker only for an attempt it armed: a
   venue that copies the session file, `openshell`, an image declaring `transcriptStderr`, and a key) and a key that
@@ -1642,6 +1669,15 @@ write inside one does. The host's `<job dir>/session` is not tailed on this venu
 download. An attempt not armed gets no variable and its stderr is passed on exactly as before
 (`live_transcript_skipped`, reason `no-capability` or `no-exit-key`). The `local` and `podman` halves are UNCHANGED,
 checked: neither sets the variable, and their stderr is never demultiplexed.
+**AMENDED 2026-10-19 (#686, part 2): the exec's stdin carries steer frames.** For a steer-armed attempt on an image
+declaring `steerStdin` (and `exitAuth`, with the stderr transcript above armed and a relay), the exec's `--env` carries
+`PI_EXIT_AUTH=stdin-frames` (instead of `stdin`) beside `PI_STEER=1`, both structural, and the CLI child's stdin gets
+frame 1, the key, at the spawn and is NOT closed: the inbox relay writes each message after it as a MAC'd frame and
+closes it at its stop, after the exec ended (`INT-STEER-INBOX-CONTRACT`'s stdin transport, at most
+`STEER_STDIN_BUDGET_BYTES` in all, under the 4 MiB OpenShell's exec takes). No `/inbox` is uploaded or mounted. Every
+other attempt's stdin is the key and a newline, closed at once, and its argv and env are byte-identical; the bundle
+is handed the relay opener the binding venues get (`start.mjs`). The `local` and `podman` halves are UNCHANGED,
+checked: they bind, so a steered job there keeps the read-only `/inbox` mount whatever the image declares.
 
 - **Contract**:
   - **Which daemon (issue #278).** Every `docker` spawn inherits the worker's environment, so the daemon is
@@ -5660,10 +5696,11 @@ validator rather than a second copy of it.
   zero), and absent when the close failed (`steer_settle_failed`) or the outcome was not final (an `InfraRetry` with attempts left, a #645
   handoff), so its absence on a steer job's record says the inbox was not counted, never that it was empty.
   `steerSkipped`: why an armed job ran WITHOUT steering, a closed enum: `venue-copies` (the job's venue copies files
-  instead of binding them, so a message written after the start would never reach the container), `no-exit-key` (the
+  instead of binding them, so a message written after the start would never reach the container; since issue #686
+  only when its image also lacks `steerStdin`, else the job is steered through stdin frames), `no-exit-key` (the
   image does not declare `exitAuth`, so no delivery ack could be verified), `no-transcript` (no transcript file could
   be staged, or this worker has no tail or relay wired, so nothing could read the acks; a worker with no Valkey client
-  is the usual cause), `no-inbox` (the inbox directory could not be made). The job still runs, as it would without
+  is the usual cause; on a copying venue also the stderr transcript not armed, issue #686), `no-inbox` (the inbox directory could not be made). The job still runs, as it would without
   `run.steer`. Integers and enum members only: no message text, id, sender or author reaches the record. The runner's
   own `steer` block off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`) is NOT recorded; its `deliveredIds`, from a
   verified line, only move inbox states before the close counts them. Since review round 1 (F2) the failed listener's
@@ -9291,8 +9328,12 @@ panel read (part 3): never the text.
   `delivered` through the relay, and only then stops the relay; an unverified line marks nothing. So an agent that
   breaks the transcript (a symlink swapped in at `/session/current.jsonl` makes the tail refuse the file) can no
   longer make delivered messages settle as `late`.
-- **A second transport: stdin frames (copying venues). AMENDED 2026-10-18 (issue #680), planned, built in #686;
-  nothing of it ships today.** The `/inbox` mount above needs a venue that binds: a venue that uploads `/job` once
+- **A second transport: stdin frames (copying venues). AMENDED 2026-10-18 (issue #680), built in #686. AMENDED
+  2026-10-19 (issue #686 part 2): SHIPPED on `openshell`, the names final, written from `worker/src/steer-framing.mjs`
+  (`encodeFrame`, `keyFrame`, `frameMac`, `steerFrame`, `STEER_STDIN_BUDGET_BYTES`), `worker/src/inbox-relay.mjs`
+  (`frames`, `attach`), `worker/src/run-container.mjs`, `image/runner/src/steer-frames.mjs`,
+  `image/runner/src/supervise.mjs` and `image/runner/src/inbox.mjs`; "as built" below names what the text
+  before it did not.** The `/inbox` mount above needs a venue that binds: a venue that uploads `/job` once
   cannot show the runner a file written later, which is why such a venue is skipped today (`steerSkipped:
   "venue-copies"`). On a COPYING venue (the first is `openshell` in its default copy mode, `DES-OPENSHELL-VENUE`; its
   opt-in bind mode, #686, binds and takes the mount) the relay instead writes each message as a frame on the main
@@ -9301,8 +9342,11 @@ panel read (part 3): never the text.
   the exit line's `deliveredIds`, the record) is the same on both transports; this bullet defines only what replaces
   the file.
   - **Arming.** An attempt is stdin-steered when the job asks (`job.steer === true`), the venue copies, the image
-    declares `exitAuth` and the planned capability **`steerStdin`** (the runner reads frames, and `verify-image.sh`
-    proves the two process properties below; the name final in #686), and a transcript tail and a relay exist. An
+    declares `exitAuth` and the capability **`steerStdin`** (the runner reads frames, and `verify-image.sh`
+    proves the two process properties below), and a transcript tail and a relay exist. As built: the transcript tail
+    is the stdio transcript over the exec's stderr (`INT-RUNNER-EXIT-CODE-PROTOCOL`'s transcript records, armed by
+    `transcriptStderr`), where the acks come back; an attempt that has every other part but not that one is
+    `steerSkipped: "no-transcript"`, as a binding venue without a tail is. No new skip reason. An
     image without `steerStdin` on a copying venue is skipped exactly as today, `steerSkipped: "venue-copies"`, and the
     job runs unsteered: `steerStdin` is a capability token, not a pre-spend gate, because a job on a copying venue
     already runs without steering when it cannot be armed, and the record says why. A bind venue never uses this
@@ -9331,20 +9375,49 @@ panel read (part 3): never the text.
     larger than the remaining budget: the message is not written, its state moves to `late` as for an entry the
     framing refuses (`MARK`, `steer_frame_refused {jobId, id}`), and a message is never cut. The inbox's own caps
     (16 messages, 64 KiB of text) keep a run far below it; the cap exists so a pipe the venue buffers is never asked
-    to hold more than it can.
+    to hold more than it can. **As #686 reads it at the pin (MEASURED, OpenShell 0.1.4, `.github/openshell.json`)**:
+    piped stdin over 4 MiB in total makes the exec exit 1 with "streamed stdin exceeds the 4 MiB limit", and 4 MiB
+    minus 1 KiB passed; so the cap stands at 4 MiB, and the relay's budget (`STEER_STDIN_BUDGET_BYTES`, the runner's
+    copy pinned to it by `worker/test/steer-frames.test.mjs`) sits at 4,193,280 bytes, the largest total the lab saw
+    pass, because exactly 4 MiB was not measured and the CLI's own accounting of its stream is its code. The runner
+    holds a declared length past what is left of the same budget to be a `length` break.
   - **What breaks the stream.** A declared length the relay could never have written (zero, over the remaining
-    budget, or over the 16 KiB body plus the frame's extra keys), bytes that are not UTF-8 JSON, an object that is
+    budget, or over the 16 KiB body plus the frame's extra keys, as built `STEER_FRAME_MAX_BYTES`, 16 KiB + 256; and,
+    as built, a frame EOF cuts), bytes that are not UTF-8 JSON, an object that is
     neither shape, or a key-shaped frame (`"t":"key"`) after frame 1, which is a `shape` break and never a re-key (the
     runner accepts exactly one key per attempt, frame 1's): the runner stops reading steer frames for the attempt, logs `steer_stream_broken {reason}` (a fixed
     token: `length`, `json`, `shape`), and every message not yet accepted settles undelivered. A well-formed frame
     whose MAC does not verify is dropped and reading goes on; drops are counted and logged once per attempt,
-    `steer_frame_unverified {count}`, by that fixed token and a number, never the frame's text or id. Names planned,
-    final in #686.
+    `steer_frame_unverified {count}`, by that fixed token and a number, never the frame's text or id. The names are
+    final. As built: the runner logs `steer_frame_unverified` once, at the inbox's close, with the attempt's count; a
+    verified frame whose `seq` is not above the last accepted or whose id is already seen (a replay, or an id the
+    transcript's seed shows delivered) is dropped silently, since it is a genuine message already held; a verified
+    frame the file's refusals refuse is logged as the file's `steer_file_refused {id, reason}`, the same reasons.
   - **Close.** The relay closes the pipe when it withdraws the attempt's arming (its stop) or when the attempt ends;
     the runner reads EOF as no more messages and keeps what it already holds. A `WITHDRAW` of a `written` message is
     weaker here than on the mount: there is no file to unlink, so a frame already in the pipe is still handed over,
     and its verified ack moves it from `withdrawn` to `delivered` as `MARK` already does; a `queued` withdrawal stays
-    guaranteed, since the relay never wrote it.
+    guaranteed, since the relay never wrote it. As built: the relay marks `queued` to `written` BEFORE it writes the
+    frame (the file's mark-before-rename), waits out the pipe's backpressure (`drain`) one frame at a time, and ends
+    the pipe at its stop, which `runContainer` calls once the exec has closed; a write error on the pipe (EPIPE) is
+    caught on the stream and logged once as `steer_relay_fault {jobId, step: "stdin", code}`, never thrown. **And
+    earlier, at the exit line** (review round 1, M1, a defence: OpenShell 0.1.4's CLI exits with its stdin still open,
+    measured on the real gateway): `runContainer` ends the pipe (`closeStdin`, the relay running on for the acks) as
+    soon as a line on the exec's stdout VERIFIES as the attempt's exit line, or `stdinExitGraceMs` (5 s) after an
+    exit-shaped line that does not (the supervisor's unkeyed line, a forgery), so a CLI that waited for EOF could never
+    deadlock on the relay and a forged line can only end steering early. Nothing the runner would read is lost: it
+    has closed its inbox before its exit line. The close is logged once, `steer_stdin_closed {container, reason}`
+    (`exit-verified` or `exit-unverified`), and a message accepted after it is never written and settles `late` at the
+    close of the inbox, as one the run never took. **No pass before `start`** (review round 1, L6): the relay runs no
+    pass until its start has reset a closed inbox and registered the run, and then runs the one a baseline that came
+    first asked for, so the release at the spawn below can never read or write the previous run's closed inbox. **The
+    baseline as built**: the relay writes nothing before the ack consumer's baseline (`onBaseline`, the stdio
+    transcript's, which waits for the runner's signed baseline record), EXCEPT that an attempt with no staged
+    transcript (not a resume, not a recovery) is released at the spawn, since the upload is the preparer's empty live
+    file and holds no prior line: a message queued before the start then reaches the runner before its first
+    `agent_start`, where pi polls steering once before the first model call, instead of racing the run (measured on
+    Docker under a cost cap of 0: the record came back about 600 ms in, the run was over at about 700). The runner
+    holds a frame read before its session exists and drops it at the seed when the transcript already delivered it.
   - **The residual, stated plainly: this transport is weaker than the read-only `/inbox` mount, which is why bind
     venues keep the mount.** The agent runs as the runner's uid, and on Linux the design assumes it can open the pipe
     for READ and WRITE through a holder's `/proc/<pid>/fd/0` (the runner's own is refused by the exec-only node;
@@ -9359,7 +9432,11 @@ panel read (part 3): never the text.
     guarantee that a sent message reaches the agent at all.
   - **No TTY and no other channel.** The exec is started without a terminal, and the runner gives every tool child
     `/dev/null` as stdin, so a `bash` call cannot read a frame by inheriting fd 0; `verify-image.sh` proves both on an
-    image declaring `steerStdin` (#686). The container gains no network path, credential or listening socket.
+    image declaring `steerStdin` (#686). The container gains no network path, credential or listening socket. As
+    built (`INT-RUNNER-EXIT-CODE-PROTOCOL`'s "As built"): the frames reach the runner on its fd 3, which no tool child
+    inherits, and its fd 0 is `/dev/null` from before any extension loads; `verify-image.sh` reads fd 0 from pi's own
+    bash tool operations (`createLocalBashOperations`) and from a child spawned with inherited stdin, both
+    `/dev/null`.
 - **Who writes what.** The open key, the target member and the inbox's hour: the relay of an armed attempt alone,
   from the container's start until it stops, when it holds the open key and the member for 15 minutes (`HOLD`). The entries: the senders, through `PUSH`, and the settle step, through
   `PRESEED`, into a resumed job's inbox. The fallback hash: the receiver (`storeFallback`). The states: `PUSH` and
@@ -9469,7 +9546,10 @@ panel read (part 3): never the text.
   `steer_marker_failed {delivery, kind, op: "read" | "write", reason}`; the relay's `steer_relay_fault` gains the step
   `hold`; the runner's `steer_delivered {id,
   mode, source}`, `steer_held_parked {pending}`, `steer_withdrawn_held {id, mode, source}` (issue #670),
-  `steer_file_refused {id, reason}` and `steer_inbox_unreadable {code}`; `runContainer`'s `steer_skipped {container, reason}` and `steer_acks_unread {container}`.
+  `steer_file_refused {id, reason}` and `steer_inbox_unreadable {code}`, and on the stdin frame transport (issue #686)
+  `steer_stream_broken {reason}` (`length`, `json`, `shape`), `steer_frame_unverified {count}` and
+  `steer_stdin_shared {code}`; the relay's `steer_relay_fault` gains the step `stdin`; `runContainer`'s
+  `steer_stdin_closed {container, reason}` (`exit-verified`, `exit-unverified`); `runContainer`'s `steer_skipped {container, reason}` and `steer_acks_unread {container}`.
 
 **Code evidence**: worker/src/steer-inbox.mjs (keys, scripts, caps, ids); worker/src/steer-framing.mjs
 (`frameSteerMessage`, `steerFileJson`, the file cap); worker/src/inbox-relay.mjs (`resetClosedInbox`, `makeInboxRelay`,
@@ -9478,8 +9558,12 @@ worker/src/inbox-settle.mjs (`settleInbox`, `isFinalOutcome`, `makeLateForge`); 
 (`enqueueLateForgeJob`, `forgeJobOf`, `releaseSemanticWindow`); receiver/src/steer.mjs (`trySteer`, `steerAuthorOf`,
 `STEER_FANOUT_LIMIT`, `FORGE_GATE_ASSOCIATION`, `steeredMarkerKey`, `STEER_MARKER_TTL_S`); receiver/src/receiver.mjs (`steerOrEnqueue`); receiver/src/poller.mjs
 (`gate`); receiver/src/predicate.mjs (`steerModeOf`); worker/src/steer-cli.mjs (`runSteer`);
-worker/src/run-container.mjs (arming, the directory, `ackRunId: name`); image/runner/src/inbox.mjs (`createInbox`,
-`parseInboxEntry`, `inboxAck`, `assertSteerReady`).
+worker/src/run-container.mjs (arming, the directory, `ackRunId: name`, the stdin transport's arming and frame 1);
+image/runner/src/inbox.mjs (`createInbox`, `parseInboxEntry`, `inboxAck`, `assertSteerReady`, the frame source);
+worker/src/steer-framing.mjs (`encodeFrame`, `keyFrame`, `frameMac`, `steerFrame`, `STEER_STDIN_BUDGET_BYTES`,
+`STEER_FRAME_MAX_BYTES`); worker/src/inbox-relay.mjs (`frames`, `attach`, `writeFrame`); image/runner/src/steer-frames.mjs
+(`readKeyFrame`, `createFrameDecoder`, `isolateStdin`, `openFrameReader`, `FRAME_FD`); image/runner/src/supervise.mjs
+(the fd 3 forwarding).
 
 ## INT-ON-FAILURE-HOOK-CONTRACT
 
@@ -10506,3 +10590,6 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-19 | Issue #638's residual (the remainder of PR #638): held replies. **`INT-STEER-INBOX-CONTRACT` AMENDED**: a new "Held replies: a sibling key set, not the inbox" bullet, written from `worker/src/held-replies.mjs`, `worker/src/held-settle.mjs`, `receiver/src/held.mjs`, `receiver/src/receiver.mjs` and `receiver/src/poller.mjs`: the keys `run:await:target:<hex32>` (the steer target's hash, derived; ZSET scored `now + 30 s`, PEXPIRE 60 s), `run:await:open:<runId>` (PX 30 s), `run:held:<runId>` (LIST of `{id, at, route, fallback}`, PEXPIRE 1 h) and `run:held:closed:<runId>` (PX 1 h); never under `run:steer:*` or `run:inbox:*`; who writes them (the processor's keeper for every awaitInput job, 2 s, a reset of a closed list at its start, a stop that deletes nothing); the `HOLD` script's returns in order (`closed`, `gone`, `dup`, `full` at 20, `ok`; 1 MiB per entry refused before Valkey) and `CLOSE`'s `[list, first]`; the receiver's new answer `202 {"status":"held","runs":<n>}` on its two routes (a swallowed resume comment of an awaitInput comment trigger under the surviving id, a filter drop's `heldCandidate` under every live run, at most 4), everything else answered as before; the poller's `held` count; the take inside the park sequence (first close only: replies older than `HELD_LOOKBACK_MS` 5 min dropped, the first matching one enqueued WITH the semantic window by `enqueueForgeJob`, a swallowed add not taken, the rest one `HELD_EXTRA_REPLY` or one `HELD_RESUME_FAILED_REPLY`, the processor's `HELD_TAKEN_COMMENT`; corrected in review from a window-less `enqueueLateForgeJob` at the final outcome, which let a later answer start a second run); the final settle as the backstop (nothing after a take, a drop for any non-park outcome); the logs, `held_reply_not_taken` and the `stale` count included. The "who writes" sentence says exactly where the keeper starts. The receiver's-answer bullet's list of answers gains `202` held. Everything else in the contract UNCHANGED, checked: the inbox keys, scripts, caps and the steered marker. **`INT-WEBHOOK-PAYLOAD-SUBSET`, `INT-GITLAB-PAYLOAD-SUBSET`, `INT-AZURE-PAYLOAD-SUBSET` UNCHANGED, checked**: no field is read that was not already (the candidate is built from the fields the parked-reply route already carries). **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no new trigger field; held replies follow from `run.awaitInput` and `run.resume` as they are. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no record field (the held counts are logged, not recorded). Review round 2: the key list gains `run:await:parked:<hex32>` (the run id, PX 60 s, raised by the park's close in the same script) and the receiver's answer gains its route (a pre-label candidate no live run took is enqueued as a parked reply while it stands, `held_after_park`); `HOLD` evicts the oldest entry at 20 instead of answering `full`; the take's match includes flow and command, its result `taken`; the backstop only drops after a take whose close failed. |
 | 2026-10-19 | Issue #684, part 2: credential providers, git push, and the `openshell` venue blessed. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the "`openshell` venue's half" gains a dated paragraph: blessable; the provider calls before the create (the 0600 endpointless profile beside the job dir, `provider create --credential NAME` with the values in the CLI child's own environment, never an argv), `--provider` on the create, `credential_binding` on every endpoint and the read-back's `_provider_<name>` rule, no secret name on the exec's `--env` and the forge job's `GIT_CONFIG_*` credential helper printing the placeholder, no provider for a job with no rule, the teardown's bounded provider delete and the profile's, the reaper's provider sweep, the boot's version read. The body for `local` and `podman` UNCHANGED, checked. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: "nothing of this ships today" gains a dated note (it ships); the document as built gains `credential_binding` on every endpoint, the provider's read-back rule, and `PI_EGRESS=0` refusing the boot with a blessed layer venue. The squid venues' objects, argv and failure table UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum listing gains `openshell-recover-unsupported`. **UNCHANGED, checked**: `INT-RUNNER-EXIT-CODE-PROTOCOL` (the exit key on the exec's stdin as before), `INT-CONTAINER-JOB-INPUTS` (the profile sits beside the job dir and is never an input), `INT-STEER-INBOX-CONTRACT` (no stdin frames yet, #686), `INT-SANDBOX-CONTRACT` (no launcher row). Review round (same day): `INT-RUN-HISTORY-FILE-CONTRACT`'s reason enum also gains `openshell-credential-reads-value` and `openshell-gateway-untested`. |
 | 2026-10-19 | Issue #686, part 1: the live transcript on the `openshell` venue, over the exec's stderr. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a NEW "The transcript records" paragraph: given `PI_TRANSCRIPT=stderr` and a key, the runner writes each complete line of `PI_SESSION_FILE` to fd 2 as `\x1epidt <seq> <mac> <base64>\n`, `mac = HMAC-SHA256(key, "pi-dispatch-transcript\0" + PI_JOB_ID + "\0" + seq + "\0" + line)`, `seq` from 1 per attempt, an empty payload a reset, a line over 1 MiB not sent but counted in `seq`, a final drain inside the exit writer before every exit line, the variable removed before pi loads, `transcript_mirror_off` for each problem; the worker's verification, ordering and counting (`transcript_record_unverified`, `transcript_record_dropped`), the 8 MiB give-up, why stderr and not stdout, and the PIPE_BUF residual; without the variable every venue is byte-identical. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the "`openshell` venue's half" gains a dated paragraph: `PI_TRANSCRIPT=stderr` on the exec's `--env` for an armed attempt, the exec's stderr demultiplexed across reads, the host's session copy never tailed; the `local` and `podman` halves UNCHANGED, checked. **`INT-LIVE-TRANSCRIPT-STREAM` AMENDED**: a "source on a copying venue" bullet: the same stream fed from the records, `reset` and `skipped` each gaining a second cause; key, entries, caps, TTLs, end and readers UNCHANGED, checked. **UNCHANGED, checked**: `INT-RUN-PROGRESS-KEY` (written from the same lines), `INT-STEER-INBOX-CONTRACT` (no stdin frames yet, #686's second part), `INT-CONTAINER-JOB-INPUTS` (the `sandbox` layout unchanged; `PI_SESSION_FILE` as before), `INT-RUN-HISTORY-FILE-CONTRACT` (no record field or reason added: `live_transcript_skipped` is a log event, and `status_comment_skipped` keeps its four reasons). Review round (#709, same day): `INT-RUNNER-EXIT-CODE-PROTOCOL`'s transcript records REWRITTEN: `\x1epidt <seq> <type> <end> <mac> <base64>`, the MAC over `seq`, `type`, `end` and the payload; `b` the baseline (seq 1, the file's size before pi loads, so a resumed session's staged lines are `prior`), `l` a line with its file offset, `r` a reset with the rewritten file's size; the rewrite seen also by a changed first line; a failed write takes no `seq` and is sent again; what reaches the job log stated exactly (a line that is not a record, unchanged; never a record's bytes; the grammar rule for a broken one and its two narrow exceptions); the MAC said to prove the channel, not the content. `INT-CONTAINER-RUNTIME-CONTRACT`'s pass-through sentence narrowed to match, and `INT-LIVE-TRANSCRIPT-STREAM`'s copying-venue bullet names the runner's baseline. Review round 2 (#709, same day): `INT-RUNNER-EXIT-CODE-PROTOCOL`'s "What reaches the job log" CORRECTED to what the demux does (a verified record's bytes and a broken one's before its break never; after the break, as text; a foreign head fitting the grammar lost; everything else unchanged), the marker read anywhere, a new inode before the first read a reset to 0, one read bounded by the size at its start, the implied reset of a lost one and no gap for a lost baseline; `INT-CONTAINER-RUNTIME-CONTRACT`'s pass-through sentence narrowed to match. |
+| 2026-10-19 | Issue #686, part 2: steering on the `openshell` venue, over the exec's stdin, built to #680's text. **`INT-STEER-INBOX-CONTRACT` AMENDED**: the stdin-frames bullet is SHIPPED and its names final (`steerStdin`, `stdin-frames`, `steer_stream_broken`, `steer_frame_unverified`); as built: the tail is the stderr transcript, without it `no-transcript` (no new skip reason); the frame cap `STEER_FRAME_MAX_BYTES` (16 KiB + 256) and a frame EOF cuts among the `length` breaks; the unverified count logged once at the inbox's close; a replayed `seq` or seen id dropped silently; a verified frame's refusals logged as the file's `steer_file_refused`; the MEASURED cap recorded "as #686 reads it at the pin" (OpenShell 0.1.4: over 4 MiB in total fails the exec, 4 MiB less 1 KiB passed), the relay's budget `STEER_STDIN_BUDGET_BYTES` at 4,193,280 and why; mark before write, `drain`, the stop ends the pipe, EPIPE as `steer_relay_fault` step `stdin`; the baseline released at the spawn for an attempt with no staged transcript, and why (measured); the logs gain `steer_stdin_shared {code}`; code evidence. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the stdin-frames paragraph shipped, its names final; CORRECTED by measurement: the in-image supervisor forwards the frames after frame 1 to the runner's fd 3, not its stdin (a socketpair cannot be reopened through /proc, ENXIO; fd 3 is not inherited by the runner's children, fd 0 is), the runner puts `/dev/null` on fd 0 before any extension loads and reads fd 3 synchronously at its own moments (an asynchronous reader missed a frame under a cost cap of 0, measured); a frame channel the runner cannot open is `2` / `steer-inbox-missing`; what `verify-image.sh` proves. The signature, the codes, the classes, `decisiveExitLine` and every non-frames attempt's bytes UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the `openshell` venue's half gains a dated paragraph: `PI_EXIT_AUTH=stdin-frames` beside `PI_STEER=1` on the exec's `--env`, frame 1 at the spawn and the pipe left to the relay, no `/inbox`; the `local` and `podman` halves UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED, wording only**: `venue-copies` now means a copying venue on an image without `steerStdin`, and `no-transcript` also covers its stderr transcript not armed; the enum and the record UNCHANGED, checked. **UNCHANGED, checked**: `INT-LIVE-TRANSCRIPT-STREAM` (a delivered message's `note` is the same, its line now arriving over the stderr records), `INT-CONTAINER-JOB-INPUTS` (the `sandbox` layout still has no `/inbox`; `PI_STEER` admitted there only beside `stdin-frames`), `INT-TRIGGERS-FILE-CONTRACT` (`run.steer` as before; `steer` stays the gate, `steerStdin` is no gate), `INT-CANCEL-CHANNEL-CONTRACT`, `INT-SANDBOX-CONTRACT`. **Code evidence**: worker/src/steer-framing.mjs, worker/src/inbox-relay.mjs, worker/src/run-container.mjs, worker/src/env-allowlist.mjs, worker/src/image-preflight.mjs (`STEER_STDIN_CAPABILITY`), worker/src/processor.mjs, worker/src/backend-openshell.mjs, worker/src/start.mjs, image/runner/src/steer-frames.mjs, image/runner/src/supervise.mjs, image/runner/src/exit-line.mjs (`EXIT_AUTH_STDIN_FRAMES`), image/runner/src/inbox.mjs, image/runner/src/config.mjs, image/runner/run-job.mjs, image/Dockerfile, image/verify-image.sh. |
+| 2026-10-19 | Issue #686, part 2, review round 1. **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: the frame channel is fd 3 only when it is the supervisor's SOCKET (L4: an open fd 3 is no evidence, a bare node holds libuv's eventpoll there, measured), else `steer-inbox-missing`; of the `/dev/null` swap's failures only a failed close fails open (`steer_stdin_shared`), while `/dev/null` not opening after the close or opening elsewhere (`fd0-taken`) REFUSES a steered run before pi loads (L5); `verify-image.sh` also asserts that neither probe child holds an fd 3 (M2), the property the isolation rests on. **`INT-STEER-INBOX-CONTRACT` AMENDED**: the close bullet gains the exit-line close (M1: the pipe ended at a verified exit line, or 5 s after an exit-shaped one that does not verify; a defence, since OpenShell 0.1.4's CLI exits with stdin open, measured on the real gateway) and "no pass before `start`" (L6); the frames, the budget, the breaks and the residual UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked** (the exec's stdin is still the key and then the relay's frames; it now ends earlier, which the paragraph's "closes it at its stop" still covers as the latest). |
+| 2026-10-19 | Issue #686, part 2, review round 2. **`INT-STEER-INBOX-CONTRACT` AMENDED**: the exit-line close is logged once, `steer_stdin_closed {container, reason}` (`exit-verified` or `exit-unverified`), added to the log list, and a message accepted after it is never written and settles `late`. Everything else UNCHANGED, checked. |

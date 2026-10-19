@@ -1,7 +1,7 @@
 import { renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeJobId } from "./run-history.mjs";
-import { steerFileJson } from "./steer-framing.mjs";
+import { STEER_STDIN_BUDGET_BYTES, steerFileJson, steerFrame } from "./steer-framing.mjs";
 import * as inboxModule from "./steer-inbox.mjs";
 
 /**
@@ -31,6 +31,23 @@ import * as inboxModule from "./steer-inbox.mjs";
  * `delivered` whose id is not among the transcript's prior lines goes back to `written`, and is handed over again,
  * because the transcript this attempt starts from never saw it (a checkpoint older than the delivery, or a plain
  * retry whose session starts empty).
+ *
+ * THE SECOND TRANSPORT, STDIN FRAMES (issue #686, INT-STEER-INBOX-CONTRACT). Given `frames` (`{ exitKey, macRunId }`,
+ * a stdin-steered attempt on a venue that copies its files), the relay writes each waiting message as a frame on the
+ * exec's stdin instead of a file (steer-framing.mjs `steerFrame`), once `attach(stdin, { written })` hands it the pipe
+ * the key frame went down. Everything else is the same pass: the same baseline wait, the same order, the same marks
+ * (`queued` to `written` BEFORE the write, so a message withdrawn while queued is never written), the same
+ * `steer_frame_refused` for an entry it cannot frame. What differs:
+ *   - THE BUDGET. The relay counts every byte it wrote, the key frame's included, and a frame that would take the total
+ *     past STEER_STDIN_BUDGET_BYTES is NOT written: the message moves to `late`, logged `steer_frame_refused {jobId,
+ *     id}`, and is never cut. The venue's exec refuses a stdin past its limit by failing the whole run (measured).
+ *   - NO FILE TO UNLINK. A message withdrawn after its frame was written is still handed over by the runner; its
+ *     verified ack then moves it to `delivered`, as for the mount's best-effort `written` withdrawal.
+ *   - BACKPRESSURE. A write the pipe did not take at once is waited out (`drain`), so the relay never buffers more than
+ *     one frame ahead of the pipe; the wait ends early at the stop, a close or an error.
+ *   - THE PIPE'S END. The stop closes stdin (`end`), which the runner reads as EOF, no more messages; an attempt that
+ *     ended first has closed it already. A write error (EPIPE: the exec gone) is caught on the stream and logged once
+ *     as the step `stdin`, never thrown: nothing a dead pipe does may take the worker down.
  *
  * Never throws; `start` and `stop` resolve whatever Valkey or the disk does. Logs carry the job id, message ids, step
  * names, codes and counts, never a message's text.
@@ -92,10 +109,22 @@ export function steerTargetOf(job, { steerTargetKey = inboxModule.steerTargetKey
 }
 
 /**
- * `makeInboxRelay({ redis, runId, jobId, inboxDir, targetKey, host, ref, forge, now, log, pollMs, fs })` ->
- * `{ start(), afterBaseline(prior), delivered(id), tick(), stop(), counts() }`.
+ * `makeInboxRelay({ redis, runId, jobId, inboxDir, targetKey, host, ref, forge, now, log, pollMs, fs, frames })` ->
+ * `{ start(), afterBaseline(prior), delivered(id), tick(), stop(), counts(), attach(stdin, { written }) }`.
+ * `frames` (issue #686): `{ exitKey, macRunId, budget? }` selects the stdin frame transport (the header); absent, the
+ * file transport, byte-identical to before. `macRunId` is the container's PI_JOB_ID, which the runner MACs a frame by.
  */
-export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKey = null, host, ref = null, forge = null, now = Date.now, log = () => {}, pollMs = RELAY_POLL_MS, fs = defaultFs, inbox = inboxModule } = {}) {
+export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKey = null, host, ref = null, forge = null, now = Date.now, log = () => {}, pollMs = RELAY_POLL_MS, fs = defaultFs, inbox = inboxModule, frames = null } = {}) {
+	const framed = frames !== null && typeof frames === "object" && typeof frames.exitKey === "string" && frames.exitKey !== "" && typeof frames.macRunId === "string" && frames.macRunId !== "";
+	const budget = framed && Number.isSafeInteger(frames.budget) && frames.budget > 0 ? frames.budget : STEER_STDIN_BUDGET_BYTES;
+	// The frame transport's own state: the pipe, whether it can still take a write, the bytes written (the key frame's
+	// included, from `attach`), the next frame's position (the key frame is 1), and the writes waiting on `drain`.
+	let sink = null;
+	let sinkDead = false;
+	let sinkEnded = false;
+	let streamBytes = 0;
+	let nextSeq = 2;
+	const drainWaiters = new Set();
 	const logId = jobId === null || jobId === undefined ? null : sanitizeJobId(jobId);
 	let timer = null;
 	let started = false;
@@ -104,6 +133,7 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 	let rebaseline = null; // the prior ids, until the first tick after the baseline has applied them
 	let priorAcked = new Set(); // ids whose prior transcript line carries an ack verified under this attempt's key (F5)
 	let closedSaid = false;
+	let ready = false; // `start` has reset and registered (L6)
 	let running = null;
 	const onDisk = new Map(); // id -> file path this attempt placed and has not unlinked
 	const counts = { written: 0, rewritten: 0, unlinked: 0, refused: 0, rebaselined: 0, delivered: 0, faults: 0 };
@@ -131,11 +161,97 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 		const path = onDisk.get(id);
 		if (path === undefined) return;
 		onDisk.delete(id);
+		// A frame has no file: what was written is in the pipe, and only the runner's ack says what became of it.
+		if (framed) return;
 		if (unlinkQuiet(path)) counts.unlinked += 1;
+	};
+
+	/** Write one frame's bytes, waiting out backpressure. True when the pipe took them (buffered counts); never rejects. */
+	const writeBytes = (bytes) =>
+		new Promise((resolve) => {
+			if (sink === null || sinkDead || sinkEnded) {
+				resolve(false);
+				return;
+			}
+			let more;
+			try {
+				more = sink.write(bytes);
+			} catch (e) {
+				sinkDead = true;
+				fault("stdin", codeOf(e));
+				resolve(false);
+				return;
+			}
+			if (more !== false) {
+				resolve(true);
+				return;
+			}
+			// Accepted into the stream's buffer, so `true` whatever ends the wait: the drain, the stop, a close or an error.
+			let done = false;
+			const settle = () => {
+				if (done) return;
+				done = true;
+				drainWaiters.delete(settle);
+				try {
+					sink?.off?.("drain", settle);
+					sink?.off?.("close", settle);
+				} catch {}
+				resolve(true);
+			};
+			drainWaiters.add(settle);
+			try {
+				sink.once("drain", settle);
+				sink.once("close", settle);
+			} catch {
+				settle();
+			}
+		});
+
+	/** The frame transport's `place`: one waiting message as a frame on the pipe, under the budget, marked first. */
+	const writeFrame = async (entry, state) => {
+		if (sink === null || sinkDead || sinkEnded) return; // not attached yet, or the pipe is gone: it stays waiting
+		const body = steerFileJson({ entry, ref, forge });
+		const frame = body === null ? null : steerFrame({ exitKey: frames.exitKey, runId: frames.macRunId, seq: nextSeq, body });
+		if (frame === null || streamBytes + frame.length > budget) {
+			// Unframable (a defect or a hand-written entry), or past what the venue's stdin holds: answered as late, never
+			// cut and never written as something the person did not send.
+			counts.refused += 1;
+			log("steer_frame_refused", { jobId: logId, id: entry.id });
+			const m = await inbox.markState({ redis, runId, id: entry.id, from: [state], to: "late" });
+			if (m?.error) fault("mark-late", codeOf(m));
+			return;
+		}
+		if (state === "queued") {
+			const m = await inbox.markState({ redis, runId, id: entry.id, from: ["queued"], to: "written" });
+			if (m?.error || m?.ok !== true) {
+				// Withdrawn (or otherwise moved) in the meantime: the frame is never written.
+				if (m?.error) fault("mark-written", codeOf(m));
+				return;
+			}
+		}
+		nextSeq += 1;
+		streamBytes += frame.length;
+		onDisk.set(entry.id, nextSeq - 1);
+		if (!(await writeBytes(frame))) return;
+		if (state === "queued") counts.written += 1;
+		else counts.rewritten += 1;
+	};
+
+	/** Close the pipe once (the runner reads EOF: no more messages), releasing any write waiting on `drain` first. */
+	const endSink = () => {
+		for (const settle of [...drainWaiters]) settle();
+		if (sink === null || sinkEnded) return;
+		sinkEnded = true;
+		try {
+			sink.end();
+		} catch (e) {
+			fault("stdin", codeOf(e));
+		}
 	};
 
 	/** Place one waiting message's file. `state` is what the inbox said: `queued` is marked first, `written` re-placed. */
 	const place = async (entry, index, state) => {
+		if (framed) return writeFrame(entry, state);
 		const body = steerFileJson({ entry, ref, forge });
 		if (body === null) {
 			// The inbox refuses at push what could not be framed, so this is a defect or a hand-written entry: the
@@ -179,6 +295,10 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 	};
 
 	const pass = async () => {
+		// Review round 1, L6: nothing before `start` has reset a closed inbox and registered the run. The stdin transport
+		// releases the baseline at the spawn, which can come before `start`'s reset resolves: a pass then would read, and
+		// write into, the previous run's closed inbox. `start` runs the pass this skipped once it is ready.
+		if (!ready) return;
 		const r = await inbox.refreshLive({ redis, runId, targetKey, host, now });
 		if (r?.error) fault("refresh", codeOf(r));
 		if (!baselined || stopped) return;
@@ -270,8 +390,11 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 				fault("register", codeOf(e));
 			}
 			if (stopped) return;
+			ready = true;
 			timer = setInterval(() => void tick(), pollMs);
 			timer.unref?.();
+			// A baseline that came first (the stdin transport's, at the spawn) is acted on now rather than a poll later.
+			if (baselined) void tick();
 		},
 		/** The tail's first pass is done: re-baseline against `prior` (ids in the staged transcript) and start writing. */
 		afterBaseline(prior = new Set(), verified = new Set()) {
@@ -301,9 +424,12 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 			stopped = true;
 			if (timer) clearInterval(timer);
 			timer = null;
+			// A write waiting on `drain` would hold the pass in flight forever on a pipe nobody reads: released first.
+			for (const settle of [...drainWaiters]) settle();
 			try {
 				await running;
 			} catch {}
+			endSink();
 			if (started) {
 				try {
 					const r = await inbox.holdLive({ redis, runId, targetKey, host, now });
@@ -315,5 +441,39 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 			return { ...counts };
 		},
 		counts: () => ({ ...counts }),
+		/**
+		 * End the frame transport's pipe now, the relay otherwise running on (its marks and acks still land): the runner's
+		 * exit line is out, so nothing more is read from the pipe, and a CLI that waited for EOF before it exits must not
+		 * wait on this relay (review round 1, M1). Idempotent; a no-op on the file transport.
+		 */
+		closeStdin() {
+			if (framed) endSink();
+		},
+		/**
+		 * The frame transport's pipe (issue #686): the exec's stdin, after the key frame (`written`, its bytes, counted
+		 * against the budget) went down it. Errors on it are caught here for good, so an EPIPE never reaches the process.
+		 * A no-op on the file transport or once stopped (then the pipe is closed at once).
+		 */
+		attach(stdin, { written = 0 } = {}) {
+			if (!framed || sink !== null || stdin === null || typeof stdin !== "object" || typeof stdin.write !== "function") return;
+			sink = stdin;
+			streamBytes = Number.isSafeInteger(written) && written > 0 ? written : 0;
+			try {
+				stdin.on?.("error", (e) => {
+					sinkDead = true;
+					fault("stdin", codeOf(e));
+					for (const settle of [...drainWaiters]) settle();
+				});
+				stdin.on?.("close", () => {
+					sinkDead = true;
+					for (const settle of [...drainWaiters]) settle();
+				});
+			} catch {}
+			if (stopped) {
+				endSink();
+				return;
+			}
+			if (baselined) void tick();
+		},
 	};
 }

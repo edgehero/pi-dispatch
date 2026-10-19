@@ -374,7 +374,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -571,7 +571,10 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	// the cap above, and ONLY for a run the worker actually hands a key, so a runner never blocks on a stdin no one
 	// writes. `=== true`, so only run-container's own boolean asks for it.
 	// env-internal PI_EXIT_AUTH: written into the job's closed env map here, never read from the worker's environment.
-	if (exitAuth === true) env.PI_EXIT_AUTH = "stdin";
+	// Issue #686: `stdin-frames` names the stdin frame channel instead, the key as frame 1 and the pipe left open for
+	// message frames: only for an attempt run-container armed for stdin steering (`steerStdin`, a copying venue and an
+	// image declaring it), and only beside PI_STEER=1, so every other attempt's value stays `stdin`, byte-identical.
+	if (exitAuth === true) env.PI_EXIT_AUTH = steerStdin === true && steer === true ? "stdin-frames" : "stdin";
 	else delete env.PI_EXIT_AUTH;
 
 	// Issue #686: the runner mirrors its session file over stderr as signed records, for an attempt run-container armed

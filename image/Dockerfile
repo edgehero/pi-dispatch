@@ -407,7 +407,14 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # venue serves the live transcript, run progress and the status comment. Not a gate: an image without it runs there
 # without them (`live_transcript_skipped`, reason no-capability). verify-image.sh runs an offline keyed job with the
 # variable set and checks a record's HMAC under the key it handed over, and that another key does not verify it.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr"
+# `steerStdin` (issue #686, part 2) tells the worker this runner reads PI_EXIT_AUTH=stdin-frames: the exit key as frame 1
+# of a length-prefixed frame stream on stdin, read before pi loads, then steer messages as frames MAC'd under that key
+# (image/runner/src/steer-frames.mjs), the stream moved off fd 0 so a tool child inherits /dev/null. It is how a copying
+# venue steers a running job. Not a gate: an image without it runs there unsteered (`steerSkipped: "venue-copies"`).
+# verify-image.sh feeds an offline steered job a key frame and one message frame on a held-open stdin, and checks that
+# the key read took exactly frame 1, that pi's bash tool child and an inheriting child see /dev/null on fd 0, and that
+# the message came back acked under the key on the signed exit line.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

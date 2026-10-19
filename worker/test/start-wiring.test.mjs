@@ -3854,10 +3854,12 @@ test("openshell blessed (#684): its versions read once with the gateway, its rea
 	assert.equal(typeof opts.readAllowlist, "function");
 	assert.deepEqual(opts.readEndpoints(), [], "no model-endpoints.json declares none");
 	// Issue #686: the live transcript opener, the very one local's runContainer is handed, fed there from the exec's
-	// stderr records; the inbox relay is not handed (steering on this venue is the issue's second part).
+	// stderr records; and since part 2 the very inbox relay opener local's is handed, whose relay writes frames on the
+	// exec's stdin there.
 	assert.equal(typeof opts.openLiveTranscript, "function");
 	assert.equal(opts.openLiveTranscript, runContainerCalls[0].openLiveTranscript, "one opener for every venue");
-	assert.equal("openInboxRelay" in opts, false);
+	assert.equal(typeof opts.openInboxRelay, "function", "the steer relay opener, with Valkey");
+	assert.equal(opts.openInboxRelay, runContainerCalls[0].openInboxRelay, "one relay opener for every venue");
 });
 
 test("openshell unblessed: no version read, no reaper, no bundle (#684)", { skip }, async () => {

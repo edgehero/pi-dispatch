@@ -12,6 +12,7 @@ import { assertSteerReady, createInbox, INBOX_CUSTOM_TYPE, INBOX_FILE_MAX_BYTES,
 import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { sessionFixture, scriptedSession } from "./helpers/recover-session.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { encodeFrame, frameMac as workerFrameMac, keyFrame, steerFileJson, steerFrame } from "../../../worker/src/steer-framing.mjs";
 
 /**
  * Issue #646, the container's half of steering a running job: the env that arms it, the inbox files it reads, when it
@@ -818,7 +819,7 @@ const REMAP = fileURLToPath(new URL("./fixtures/remap-roots.mjs", import.meta.ur
  * An OpenAI-compatible endpoint: request 1 asks for `ls` and, before answering, writes a steer into the job's inbox
  * (as the worker's relay would mid-turn); every later request is answered with a short text.
  */
-async function steerServer(root, messageId) {
+async function steerServer(root, messageId, { onFirst = () => writeEntry(join(root, "inbox"), 1, { messageId, source: "console", content: "STEERED: look at the README first" }) } = {}) {
 	const { createServer } = await import("node:http");
 	const bodies = [];
 	const server = createServer((req, res) => {
@@ -831,7 +832,7 @@ async function steerServer(root, messageId) {
 			const base = { id: "r", object: "chat.completion.chunk", created: 0, model: "m1" };
 			const usage = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 };
 			if (bodies.length === 1) {
-				writeEntry(join(root, "inbox"), 1, { messageId, source: "console", content: "STEERED: look at the README first" });
+				onFirst();
 				chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_ls", type: "function", function: { name: "ls", arguments: "{}" } }] }, finish_reason: null }] });
 				chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage });
 			} else {
@@ -929,14 +930,238 @@ test("the real run-job, steered: a message written during request 1 is in reques
 
 test("run-job: the steer refusals run pre-spend, the inbox is seeded before and closed after the prompt, and both exit lines carry its counts", () => {
 	const src = readFileSync(RUN_JOB, "utf8");
-	const ready = src.indexOf("assertSteerReady({ steer: cfg.steer, exitKey: exitKey.key });");
+	// Issue #686: on the stdin frame channel the frame source is checked instead of /inbox, and handed to the inbox.
+	const ready = src.indexOf("assertSteerReady({ steer: cfg.steer, exitKey: exitKey.key, ...(exitKey.frames === true ? { frames: frameChannel } : {}) });");
 	assert.ok(ready > 0 && ready < src.indexOf("readPrompt(PROMPT_PATH)") && ready < src.indexOf("createJobModelRuntime({"), "before the prompt is read and before any model lookup");
-	assert.match(src, /const inbox = cfg\.steer \? createInbox\(\{ exitKey: exitKey\.key, runId: process\.env\.PI_JOB_ID, log, isParked: \(\) => awaitInput\?\.state\.called === true \}\) : null;/);
+	assert.match(src, /const inbox = cfg\.steer \? createInbox\(\{ exitKey: exitKey\.key, runId: process\.env\.PI_JOB_ID, log, isParked: \(\) => awaitInput\?\.state\.called === true, \.\.\.\(exitKey\.frames === true \? \{ frames: frameChannel \} : \{\}\) \}\) : null;/);
 	const seed = src.indexOf("inbox?.seed(sessionManager);");
 	assert.ok(seed > src.indexOf("await createAgentSession({") && seed < src.indexOf("inbox?.start();"), "seeded from the transcript before it starts reading");
+	// The frame stream is read from the moment the inbox exists: before the loader and the session are built (their I/O is
+	// what lets a frame written at the spawn be read before the first agent_start), and the seed drops what was delivered.
+	const listen = src.indexOf("inbox?.listen();");
+	assert.ok(listen > src.indexOf("const inbox = cfg.steer ?") && listen < src.indexOf("await buildLoadedResourceLoader("), "listening as the inbox exists, before any extension loads");
+	// And the stream is moved off fd 0 in the job runner's block, right after the key read, before main and so before
+	// any extension or tool exists.
+	const take = src.indexOf("const isolated = isolateStdin();");
+	assert.ok(take > src.indexOf("exitKey = readExitKey(process.env);") && take < src.indexOf("\tmain()"), "the frame fd is taken before main runs");
+	// Review round 1, L4 and L5: no channel (so the steered run refuses) when the swap refused or fd 3 is not the socket.
+	assert.ok(src.includes("frameChannel = !isolated.refuse && frameFdOpen() ? { open: () => openFrameReader(FRAME_FD), consumed: exitKey.consumed } : null;"));
 	assert.match(src, /\} finally \{\n\t\t\/\/ [^\n]*\n\t\tinbox\?\.close\(\);\n\t\tbudget\.unsubscribe\(\);/, "closed first in the prompt's finally");
 	assert.match(src, /const steerField = \(\{ closing = false \} = \{\}\) => \{\n\t\tif \(!inbox\) return \{\};\n\t\tif \(closing\) \{\n\t\t\ttry \{\n\t\t\t\tinbox\.close\(\);\n\t\t\t\} catch \{\n[^\n]*\n\t\t\t\}\n\t\t\}\n\t\treturn \{ steer: inbox\.counts\(\) \};\n\t\};/, "absent on every unarmed run, so their exit lines are unchanged");
 	// Issue #670: the SIGTERM line closes the inbox before it counts, so a message withdrawn while held is not pending.
 	assert.match(src, /liveExitFields = \(\) => \(\{ [^\n]*\.\.\.steerField\(\{ closing: true \}\) \}\);/, "the SIGTERM line closes the inbox, then carries the counts");
 	assert.match(src, /\.\.\.recoveryField\(\), \.\.\.steerField\(\) \}\);\n\treturn outcome\.code;/, "the decided line carries the counts");
+});
+
+// ── Issue #686: the stdin frame transport ──────────────────────────────────────────────────────────────────────
+
+/** A frame the worker writes for `fields`, built with the WORKER's encoder, so the two halves are held together here. */
+const workerFrame = (seq, { messageId, mode = "steer", source = "cli", text = "a framed message" }, key = KEY, runId = RUN_ID) =>
+	steerFrame({ exitKey: key, runId, seq, body: steerFileJson({ entry: { id: messageId, mode, source, author: { kind: "operator", by: "cli" }, text } }) });
+
+/**
+ * The frame descriptor as the inbox reads it (steer-frames.mjs openFrameReader): bytes written to it wait until read,
+ * `read` hands at most a buffer's worth (null when nothing waits, 0 after `end`), and `destroyed` once closed. `write`
+ * and `end` keep the names of a stream so the tests read as the worker's side does.
+ */
+function fakeReader() {
+	let held = Buffer.alloc(0);
+	let ended = false;
+	const r = {
+		destroyed: false,
+		write(bytes) {
+			held = Buffer.concat([held, Buffer.from(bytes)]);
+		},
+		end(bytes) {
+			if (bytes) r.write(bytes);
+			ended = true;
+		},
+		read(buf) {
+			if (r.destroyed) return 0;
+			if (held.length === 0) return ended ? 0 : null;
+			const n = Math.min(buf.length, held.length, 7); // short reads, cut anywhere
+			held.copy(buf, 0, 0, n);
+			held = held.subarray(n);
+			return n;
+		},
+		close() {
+			r.destroyed = true;
+		},
+	};
+	return r;
+}
+
+function framedStandIn({ logs = [] } = {}) {
+	const stream = fakeReader();
+	const inbox = createInbox({ exitKey: KEY, runId: RUN_ID, log: (event, fields) => logs.push({ event, ...fields }), pollMs: 1_000_000, frames: { open: () => stream, consumed: keyFrame(KEY).length } });
+	const api = fakeApi();
+	inbox.factory.factory(api);
+	const deliver = (n) => api.handlers.message_end({ message: { role: "custom", customType: INBOX_CUSTOM_TYPE, details: { id: api.sent[n].message.details.id } } });
+	const tick = () => new Promise((r) => setImmediate(r));
+	return { stream, inbox, api, logs, deliver, tick };
+}
+
+test("assertSteerReady on the frame channel: the channel is checked instead of /inbox; none is steer-inbox-missing; no key is still steer-no-exit-key (#686)", () => {
+	assert.doesNotThrow(() => assertSteerReady({ steer: true, exitKey: KEY, frames: { open() {} }, dir: "/no/such/inbox" }), "no /inbox needed");
+	assert.throws(() => assertSteerReady({ steer: true, exitKey: KEY, frames: null, dir: "/no/such/inbox" }), (e) => policy(e) && e.piDispatchReason === "steer-inbox-missing");
+	assert.throws(() => assertSteerReady({ steer: true, exitKey: null, frames: { open() {} } }), (e) => policy(e) && e.piDispatchReason === "steer-no-exit-key");
+	assert.doesNotThrow(() => assertSteerReady({ steer: false, exitKey: null, frames: null }));
+});
+
+test("PI_STEER on the sandbox layout: refused without the stdin frame channel, admitted with it (#686)", () => {
+	const env = { ...BASE, PI_STEER: "1", PI_JOB_LAYOUT: "sandbox" };
+	assert.throws(() => parseRunnerEnv(env), /sandbox layout has no inbox to steer through without the stdin frame channel/);
+	assert.equal(parseRunnerEnv(env, { steerFrames: true }).steer, true);
+	assert.equal(parseRunnerEnv({ ...BASE, PI_JOB_LAYOUT: "sandbox" }, { steerFrames: true }).steer, false, "the channel alone arms nothing");
+	assert.equal(parseRunnerEnv({ ...BASE, PI_STEER: "1" }).steer, true, "the mounts layout as before");
+});
+
+test("frames: nothing is read before listen; a verified frame is held and pushed exactly as a file's message, its ack the same (#686)", async () => {
+	const { stream, inbox, api, logs, deliver, tick } = framedStandIn();
+	stream.write(Buffer.concat([workerFrame(2, { messageId: id(1), text: "first" }), workerFrame(3, { messageId: id(2), mode: "followUp", text: "later" })]));
+	inbox.poll();
+	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 0, deliveredIds: [] }, "not read before listen");
+	inbox.listen();
+	assert.equal(inbox.counts().pending, 0, "read by listen, queued by the next scan");
+	inbox.poll();
+	assert.equal(inbox.counts().pending, 2);
+	api.handlers.agent_start();
+	assert.equal(api.sent.length, 1);
+	assert.deepEqual(api.sent[0].options, { deliverAs: "steer" });
+	assert.deepEqual(api.sent[0].message.details, { id: id(1), mode: "steer", source: "cli", ack: expectedAck(KEY, RUN_ID, id(1)) });
+	assert.match(api.sent[0].message.content[0].text, /first/);
+	deliver(0);
+	assert.equal(api.sent.length, 1, "a follow-up waits for the boundary, as a file's does");
+	api.handlers.agent_before_settle();
+	assert.equal(api.sent[1].message.details.mode, "followUp");
+	deliver(1);
+	assert.deepEqual(inbox.counts(), { delivered: 2, pending: 0, deliveredIds: [id(1), id(2)] });
+	// A frame that arrives mid-run is read at the next turn_end (or poll), synchronously, and pushed there.
+	api.handlers.agent_start();
+	stream.write(workerFrame(4, { messageId: id(3), text: "mid-run" }));
+	api.handlers.turn_end();
+	assert.equal(api.sent.at(-1).message.details.id, id(3));
+	inbox.close();
+	assert.equal(JSON.stringify(logs).includes("mid-run"), false, "never the text");
+	assert.equal(stream.destroyed, true, "the close stops reading");
+});
+
+test("frames: an unverified frame is dropped and logged once at the close by count; every file refusal applies to a verified frame (#686)", async () => {
+	const { stream, inbox, api, logs, tick } = framedStandIn();
+	inbox.listen();
+	const forged = (seq, n) => workerFrame(seq, { messageId: id(n) }, "cd".repeat(32));
+	const badSource = steerFrame({ exitKey: KEY, runId: RUN_ID, seq: 5, body: JSON.stringify({ v: 1, id: id(5), mode: "steer", source: "mallory", content: "x" }) });
+	const empty = steerFrame({ exitKey: KEY, runId: RUN_ID, seq: 6, body: JSON.stringify({ v: 1, id: id(6), mode: "steer", source: "cli", content: "   " }) });
+	const v2 = steerFrame({ exitKey: KEY, runId: RUN_ID, seq: 7, body: JSON.stringify({ v: 2, id: id(7), mode: "steer", source: "cli", content: "x" }) });
+	stream.write(Buffer.concat([forged(2, 2), forged(3, 3), workerFrame(4, { messageId: id(4) }), badSource, empty, v2, workerFrame(4, { messageId: id(8) })]));
+	await tick();
+	api.handlers.agent_start();
+	assert.deepEqual(api.sent.map((x) => x.message.details.id), [id(4)], "only the genuine, valid frame; the replayed seq 4 is dropped");
+	assert.deepEqual(logs.filter((l) => l.event === "steer_file_refused"), [
+		{ event: "steer_file_refused", id: id(5), reason: "source" },
+		{ event: "steer_file_refused", id: id(6), reason: "content" },
+		{ event: "steer_file_refused", id: id(7), reason: "version" },
+	]);
+	assert.equal(logs.filter((l) => l.event === "steer_frame_unverified").length, 0, "logged at the close, once");
+	inbox.close();
+	inbox.close();
+	assert.deepEqual(logs.filter((l) => l.event === "steer_frame_unverified"), [{ event: "steer_frame_unverified", count: 2 }]);
+	assert.equal(JSON.stringify(logs).includes(id(2)), false, "never an unverified frame's id");
+});
+
+test("frames: a break ends reading for the attempt, logged once by its token; what was accepted before it is kept; EOF is no more messages (#686)", async () => {
+	for (const [name, bad, reason] of [
+		["a bogus length", Buffer.from([0, 0, 0, 0]), "length"],
+		["bytes that are not JSON", encodeFrame("{nope"), "json"],
+		["a second key frame", keyFrame(KEY), "shape"],
+	]) {
+		const { stream, inbox, api, logs, tick } = framedStandIn();
+		inbox.listen();
+		stream.write(Buffer.concat([workerFrame(2, { messageId: id(1) }), bad, workerFrame(3, { messageId: id(2) })]));
+		await tick();
+		api.handlers.agent_start();
+		assert.deepEqual(api.sent.map((x) => x.message.details.id), [id(1)], name);
+		assert.deepEqual(logs.filter((l) => l.event === "steer_stream_broken"), [{ event: "steer_stream_broken", reason }], name);
+		assert.equal(stream.destroyed, true, `${name}: reading stops`);
+	}
+	const { stream, inbox, logs, tick } = framedStandIn();
+	inbox.listen();
+	stream.end(workerFrame(2, { messageId: id(1) }));
+	inbox.poll();
+	assert.equal(inbox.counts().pending, 1, "kept after EOF");
+	assert.equal(stream.destroyed, true, "EOF closes the reader");
+	assert.equal(logs.filter((l) => l.event === "steer_stream_broken").length, 0, "a clean EOF is no break");
+});
+
+test("frames: read before the session exists, a frame the transcript already delivered is dropped by the seed (#686)", async () => {
+	const { stream, inbox, api, tick } = framedStandIn();
+	inbox.listen();
+	stream.write(Buffer.concat([workerFrame(2, { messageId: id(1) }), workerFrame(3, { messageId: id(2) })]));
+	await tick();
+	inbox.poll();
+	inbox.seed({ getEntries: () => [{ type: "custom_message", customType: INBOX_CUSTOM_TYPE, details: { id: id(1), ack: expectedAck(KEY, RUN_ID, id(1)) } }] });
+	api.handlers.agent_start();
+	assert.deepEqual(api.sent.map((x) => x.message.details.id), [id(2)]);
+	assert.equal(inbox.counts().pending, 1);
+});
+
+test("frames: a frame written before agent_start is read there, synchronously, with no I/O turn between (the cost-cap-0 case) (#686)", () => {
+	const { stream, inbox, api } = framedStandIn();
+	inbox.listen();
+	stream.write(workerFrame(2, { messageId: id(9) }));
+	api.handlers.agent_start();
+	assert.deepEqual(api.sent.map((x) => x.message.details.id), [id(9)]);
+});
+
+test("openFrameReader: none waiting is null (EAGAIN), EOF is 0, the handle that set O_NONBLOCK is closed with it (#686)", async () => {
+	const { openFrameReader } = await import("../src/steer-frames.mjs");
+	const handle = { unref() { this.unrefd = true; }, destroy() { this.destroyed = true; } };
+	let next = [Object.assign(new Error(), { code: "EAGAIN" }), 5, 0];
+	const r = openFrameReader(3, { makeHandle: () => handle, read: () => { const v = next.shift(); if (v instanceof Error) throw v; return v; } });
+	assert.equal(handle.unrefd, true);
+	assert.equal(r.read(Buffer.alloc(8)), null);
+	assert.equal(r.read(Buffer.alloc(8)), 5);
+	assert.equal(r.read(Buffer.alloc(8)), 0);
+	r.close();
+	assert.equal(handle.destroyed, true);
+	assert.equal(r.read(Buffer.alloc(8)), 0, "closed reads as EOF");
+	assert.throws(() => openFrameReader(3, { makeHandle: () => handle, read: () => { throw Object.assign(new Error(), { code: "EIO" }); } }).read(Buffer.alloc(1)));
+});
+
+test("frames: the worker's MAC is the runner's (one formula, two copies held together) (#686)", () => {
+	const body = JSON.stringify({ v: 1, id: id(1), mode: "steer", source: "cli", content: "x" });
+	assert.equal(workerFrameMac(KEY, RUN_ID, 2, body), createHmac("sha256", KEY).update(`pi-dispatch-inbox-frame\0${RUN_ID}\0${2}\0${body}`).digest("hex"));
+});
+
+test("the real run-job on the stdin frame channel: frame 1 on stdin, a message on fd 3 during request 1, delivered in request 2, acked, on the signed exit line; no /inbox (#686)", { skip }, async () => {
+	const root = tempDir("pi-dispatch-inbox-frames-");
+	const messageId = id(0xf00d);
+	let child = null;
+	const server = await steerServer(root, messageId, { onFirst: () => child.stdio[3].write(workerFrame(2, { messageId, source: "console", text: "STEERED: look at the README first" })) });
+	try {
+		jobTree(root, { inbox: false, base: server.base });
+		const env = { PATH: process.env.PATH, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), PI_DISPATCH_TEST_ROOT: root, PI_JOB_ID: RUN_ID, PI_PROVIDER: "steer-fake", PI_MODEL: "m1", PI_MAX_TURNS: "5", PI_SESSION_FILE: "/session/current.jsonl", PI_STEER: "1", PI_EXIT_AUTH: "stdin-frames" };
+		// The supervisor's handoff: frame 1 on the runner's stdin, closed; the rest on fd 3, held open past the run.
+		child = spawn(process.execPath, [`--import=${REMAP}`, RUN_JOB], { env, cwd: join(root, "workspace"), stdio: ["pipe", "pipe", "pipe", "pipe"] });
+		child.stdin.end(keyFrame(KEY));
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (c) => (stdout += c));
+		child.stderr.on("data", (c) => (stderr += c));
+		const code = await new Promise((resolve) => child.on("exit", resolve));
+		const lines = stdout.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+		const exit = lines.find((line) => line.event === "exit");
+		assert.equal(code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		assert.deepEqual(exit.steer, { delivered: 1, pending: 0, deliveredIds: [messageId] });
+		assert.match(exit.auth, /^[0-9a-f]{64}$/, "signed with the frame-1 key");
+		assert.equal(server.bodies.length, 2);
+		const last = server.bodies[1].messages.at(-1);
+		assert.match(typeof last.content === "string" ? last.content : last.content.map((p) => p.text).join(""), /STEERED: look at the README first/);
+		const persisted = entries(join(root, "session", "current.jsonl")).filter((e) => e.type === "custom_message");
+		assert.equal(persisted[0].details.ack, expectedAck(KEY, RUN_ID, messageId));
+		assert.equal(lines.some((l) => l.event === "steer_stream_broken" || l.event === "steer_frame_unverified" || l.event === "exit_key_unread"), false);
+		child.stdio[3].destroy();
+	} finally {
+		await server.close();
+	}
 });
