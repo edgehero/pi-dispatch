@@ -6916,7 +6916,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     COPYING venue (the first is `openshell`, `DES-OPENSHELL-VENUE`) the inbox part is the stdin frame channel below
     instead of the mount, and its parts are an exit key, an image declaring the planned `steerStdin` capability, the
     transcript stream over the exec's stdout (the copying venue's tail, #686) and a relay. A bind venue is armed exactly
-    as above and never through stdin. Nothing of this ships today.
+    as above and never through stdin. Nothing of this ships today. **AMENDED 2026-10-19 (issue #686 part 1)**: that
+    transcript stream is the exec's STDERR, not its stdout (the operator's decision, `DES-OPENSHELL-VENUE`'s "The live
+    transcript over stderr"), and it is built: signed records the worker verifies and pushes into the same publisher,
+    whose consumers the steer ack will be one of. The stdin frame channel and `steerStdin` are UNCHANGED, still to be
+    built (#686's second part).
   - **On a copying venue: framed, MAC'd stdin, and weaker than the mount, in so many words** (decided 2026-10-18,
     issue #680; built in #686). A venue that uploads `/job` once cannot show the runner a file written later, so the
     worker has no read-only path into the box but the main `exec`'s stdin, which issue #545 already uses for the exit
@@ -10576,7 +10580,10 @@ a tunnel.
     `DES-STEER-VIA-READONLY-INBOX-MOUNT` decides (amended by issue #680, weaker than the mount and said so), and the
     transcript the tail and the ack consumer read comes back on the exec's stdout. The transcript was always the
     agent's to write (`/session` is agent-writable), so carrying it on stdout hands the agent nothing new; the acks
-    and the exit line keep their MACs under the attempt's exit key.
+    and the exit line keep their MACs under the attempt's exit key. **AMENDED 2026-10-19 (issue #686 part 1), by the
+    operator's decision of that day: the transcript comes back on the exec's STDERR, not its stdout**, as signed
+    records ("The live transcript over stderr" below says why and what was rejected). The steer channel's half of
+    this bullet is UNCHANGED, still to be built (#686's second part).
   - **The exit key passes through the vendor's exec relay.** On this venue the main exec's stdin, and so the exit key
     of EVERY attempt, steered or not, travels the CLI, then the gateway, then OpenShell's supervisor container before
     it reaches the in-image supervisor (`image/runner/supervise.mjs`). #545's property (no tool of the job sees the
@@ -10688,7 +10695,9 @@ a tunnel.
     under the `mounts` layout's paths (#684); the egress rules and the providers (#684). **AMENDED 2026-10-19 (#684)**:
     the MCP paths, the egress rules (part 1) and the providers (part 2) are served; `run.recover` is now REFUSED before
     spend rather than run unarmed (`openshell-recover-unsupported`); the live transcript, progress and steering stay
-    skipped by name until #686.
+    skipped by name until #686. **AMENDED 2026-10-19 (#686 part 1)**: the live transcript, run progress and the status
+    comment are SERVED (the runner's signed records on the exec's stderr, below); steering stays skipped by name
+    (`steerSkipped: "venue-copies"`) and `run.recover` refused before spend, both still #686's.
   - **The whole run, live**: the conformance script (`.github/scripts/openshell-conformance.mjs`, which ships with part 3
     of #683 beside its CI lane) on that host passed every harness check, all
     eight read-backs (CapEff 0, NoNewPrivs 1, seccomp 2, pids.max 2048, memory.max the job's size, the sandbox gone
@@ -10705,7 +10714,14 @@ a tunnel.
   part 2)**: worker/src/backend-openshell.mjs -> secretNamesOf, providerProfileFor, gitCredentialEnv,
   expectedPolicies, makeOpenshellReaper, openshellBootVersions, OPENSHELL_REFUSALS · worker/src/backends.mjs ->
   NOT_YET_BLESSABLE (empty), backendRefusals · worker/src/config.mjs -> openshellFrom · worker/src/start.mjs (the
-  bundle, the boot sweep's reaper, the boot version read). #686 still to come.
+  bundle, the boot sweep's reaper, the boot version read). #686 still to come. **AMENDED 2026-10-19 (#686 part 1)**:
+  image/runner/src/transcript-mirror.mjs -> createTranscriptMirror, transcriptRecord · image/runner/run-job.mjs (the
+  mirror started beside the key, drained by the exit writer) · worker/src/stderr-transcript.mjs -> makeStderrTranscript,
+  verifyTranscriptRecord · worker/src/run-container.mjs -> `transcript: "stdio"`, `transcriptStderr`,
+  `live_transcript_skipped` · worker/src/live-transcript.mjs -> `source: "stdio"` · worker/src/image-preflight.mjs ->
+  TRANSCRIPT_STDERR_CAPABILITY · worker/src/backend-openshell.mjs (`openLiveTranscript`, `transcript: "stdio"`) ·
+  worker/src/start.mjs (the opener handed to the bundle) · image/verify-image.sh (`transcriptStderr`) ·
+  .github/scripts/openshell-conformance.mjs (the real runner's lines through the real publisher).
 - **Egress (#684 part 1, AMENDED 2026-10-19)**: the policy is generated per job by `networkPolicyFor`
   (worker/src/openshell-policy.mjs) from the squid venues' own sources (the allowlist, the model endpoints, the job's
   forge), every endpoint `enforce`, and read back against the written body plus OpenShell's one measured baseline
@@ -10775,6 +10791,56 @@ a tunnel.
   never created is found by the next attempt of its job, not by the reaper, which lists providers only. Measured in the CI lane (OpenShell 0.1.4, 2026-10-19): the agent's `$ANTHROPIC_API_KEY` and `$GH_TOKEN` are
   placeholders, `/proc/<pid>/environ` opens and reads EMPTY inside the sandbox (its own and its parent's), and a stand-in
   on the gateway host received the real header value and git's Basic credentials, never a placeholder.
+- **The live transcript over stderr (#686 part 1, AMENDED 2026-10-19)**: the session file is in the sandbox until the
+  download, so no host tail can read it while the job runs, and with it go the live transcript, run progress and the
+  status comment, which all read the same lines. **Decision**: the runner mirrors the file's complete lines over its
+  own STDERR, each as one self-delimiting record signed with the attempt's exit key
+  (`\x1epidt <seq> <type> <end> <mac> <base64>`: a baseline first, then lines with their file offsets, and a reset when
+  the file is rewritten; the bytes and the MAC are `INT-RUNNER-EXIT-CODE-PROTOCOL`'s "The transcript records"), and
+  the worker demultiplexes the exec's stderr, verifies each record and pushes its line into the same
+  publisher a bound file feeds (`DES-LIVE-TRANSCRIPT-STREAM`'s stdio source), so the console's live page,
+  `pi-dispatch chat`, progress and the status comment read Valkey exactly as on every venue. Armed only where it is
+  read (an opener and a job id), and only when the image declares the non-gating `transcriptStderr` capability and
+  an exit key exists; otherwise `live_transcript_skipped` names `no-capability` or `no-exit-key`, and a copying venue
+  that does not mirror would say `venue-copies`. The arming is the venue's own construction option (`transcript:
+  "stdio"` on `makeRunContainer`, beside `layout`), not the call bag's `binds`, which the registry adds for a steer job
+  alone. `status_comment_skipped` reads `no-transcript` there (it read `progress-off`, the wrong switch, while the
+  bundle was not handed the opener). **Why signed, and what the MAC does NOT prove**: a tool can write to the
+  container's stderr (the runner's `/proc/<pid>/fd/2`, as #545 measured for fd 1), so an unsigned record would let
+  it forge the channel: lines, positions, resets. The MAC, under the key the agent never sees, authenticates the
+  channel (the runner's mirror wrote this record, in this order, and a `seq` that only grows refuses one taken and
+  written again); it does not authenticate the content, since the session file is the agent's to write and the
+  mirror sends whatever pi-shaped line the agent appended to it. A line here has exactly the trust of a line the
+  file tail reads on a binding venue. **Why self-delimiting**: OpenShell's `sandbox exec --no-tty` keeps the two
+  streams apart but forwards each in reads of up to 4 KiB that are neither line-aligned nor ordered against the other
+  (measured, 0.1.4), so the demux buffers across reads and holds only what may still be a record (the marker's head,
+  at most 6 bytes, or a record while its bytes fit the record's grammar, at most 8 MiB of payload), and the marker
+  starts a record wherever it appears, also after a foreign write that left no newline. A verified record's bytes
+  never reach the job log; a byte that is in no record reaches it unchanged, except a foreign write's head that
+  landed inside a record and fit its grammar (lost with the record); and a record broken by another writer ends at
+  its first byte the grammar cannot hold, the bytes after that break reaching the log as ordinary text
+  (`INT-RUNNER-EXIT-CODE-PROTOCOL`'s "What reaches the job log" states it exactly). The runner notices a rewrite as
+  the file tail does (a shrink, a new inode, or a first line whose bytes changed in place; a new inode before anything
+  was read, its own quarantine's swap, is a reset to 0), reads at most what the file held when each read began (an
+  agent appending without pause cannot hold it from its SIGTERM or its exit line), and a record whose write fails
+  takes no `seq` and is sent again from the start of its line, so a line is never lost without a gap. A lost reset is
+  recovered by the worker from the next line's `end` (not past the last one), and a lost baseline is no missing line.
+  **Rejected: stdout**, which #680's text above named. It carries the runner's log and the signed exit line, which
+  the worker reads from a bounded 64 KiB tail (`openJobLog`), so a burst of records there pushes the exit line's
+  neighbourhood out of that tail, and the one stream whose last line decides the run would also carry a second
+  protocol every reader of either must keep apart. stderr carries nothing the worker parses. The #680 sentence is
+  amended by the operator's decision of 2026-10-19. **Rejected: tailing the sandbox's file through the CLI** (a
+  `sandbox download` or an `exec cat` on a timer): a second exec per poll through the gateway, the supervisor and the
+  relay, and a read of an agent-written file by a second process whose output carries no proof of the runner.
+  RESIDUALS, named: a record above PIPE_BUF (4 KiB) is not atomic against a write from another process sharing the
+  pipe and arrives broken (refused and counted, the line lost, shown as `skipped`; the positions stay exact, since
+  every line carries its own offset); a foreign write's head that fits a broken record's grammar is lost with it, and
+  the broken record's bytes after its break reach the job log as text; a lost baseline cannot be recovered (the
+  run's lines are then all this run's, failing open: a resumed session's earlier turns count again); the transcript
+  trails the file by
+  the runner's 250 ms read plus the publisher's 500 ms flush; and the exit key that signs it passes through the vendor's
+  exec relay, as the exit line's does (`OQ-047`). Measured in CI by the conformance script's real runner: its session
+  lines arrive through the real publisher over stderr, none unverified, and no record reaches the output.
 
 ## DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR
 
@@ -11620,6 +11686,24 @@ a tunnel.
      a `reset` entry is published and the file is read again from 0. A line over 1 MiB is never parsed; one
      `skipped` entry says so, and the rest of it is dropped as it arrives. A line that is not JSON becomes one fixed
      `note` ("a transcript line that is not JSON was left out"), never its bytes.
+     **AMENDED 2026-10-19 (issue #686 part 1): a second source, pushed lines.** On a venue that copies the session
+     file into its sandbox (`openshell`, `DES-OPENSHELL-VENUE`) there is no host file to tail while the job runs, so
+     `makeLiveTranscript({ source: "stdio" })` is driven by lines `runContainer` pushes from the runner's signed stderr
+     records (`worker/src/stderr-transcript.mjs`) instead: `setBaseline(size)`, `push(line, end)`, `skip(count)` for
+     a gap in the records, and `reset(size)` for the runner's reset record. Each pushed line takes the tailed line's
+     own path (`publishLine`: the parse, `onParsed`, the mapping, the redactor, the bounds), with the runner's own
+     `end` (the file offset past its newline), so positions stay exact across a gap; the timer only flushes, and
+     `finish` flushes and publishes `end`. **The baseline is the runner's** (review of #709, same day): the session
+     file's size when its mirror started, before pi loaded, sent as the first signed record. On `openshell` the
+     session directory is uploaded, so a session-store resume puts the earlier conversation into the file, and its
+     lines end at or before that size: `prior`, as the file tail's `lstat` at spawn makes them, so progress and the
+     status comment do not count the earlier turns. `onBaseline` fires once the lines up to it are in (at once for an
+     empty file), failing open at the first line when the baseline record was broken (nothing is then `prior`), at a
+     reset or at `finish`. Taken from the runner rather than from the host's staged copy read before the upload
+     (REJECTED): the runner's is the file the lines are read from, after anything the runner did to it before pi
+     loaded, and it rides the same signed channel, in order, before any line. After a reset, the lines ending at or
+     before the reset's size (the runner's) are `replay`, the rule a rewritten file gets. No checkpoint is opened on
+     it (the checkpointer copies a host file). The file tail is UNCHANGED, checked, for every binding venue.
   3. **The mapping**, one pi entry to the display entries it becomes (`entriesOf`), against the pinned pi's
      session-manager shapes: a user message is `user`; an assistant message is one `assistant` entry for its text
      (when not blank) plus one `tool-call` per tool call, whose text is the arguments JSON-stringified; a tool result
@@ -11764,7 +11848,8 @@ a tunnel.
   `jobId`), worker/src/backend-podman.mjs, worker/src/env-allowlist.mjs, admin/src/read-model.mjs
   (`readTranscriptSince`, `readTranscriptMeta`, the fleet reader's `transcriptSince` and `transcriptMeta`),
   admin/src/dashboard.ts (LIVE_TAIL), admin/src/index.ts (`panelTailLog`). Since #644: worker/src/live-transcript.mjs
-  (`onParsed`, `onReset`, `stream`, and the opener's `transcripts`, `progress` and `makeCommenter`).
+  (`onParsed`, `onReset`, `stream`, and the opener's `transcripts`, `progress` and `makeCommenter`). Since #686:
+  worker/src/live-transcript.mjs (`source: "stdio"`, `push`, `skip`, `reset`), worker/src/stderr-transcript.mjs.
 
 ## DES-RUN-PROGRESS
 
@@ -12565,3 +12650,4 @@ a tunnel.
 | 2026-10-19 | Issue #683, the review fixes of part 1 that its squash left out (landed after #698 merged; the pull request's own review found them and they were made in its worktree, then not staged). **`DES-OPENSHELL-VENUE` AMENDED**: the #683 correction sub-bullet gains what "read-only" means there: the bytes and the tree, not the mode (Landlock below ABI 6 mediates no chmod, chown, utimes or xattrs), and on ABI 6 and later the helper's domain is also scoped (signals and abstract unix sockets cannot leave it). With it: `image/landlock/pi-landlock.c` sets those scopes, captures `errno` before formatting, and states its libc use; `image/verify-image.sh` proves an overwrite and a truncate of a file the job's own uid owns are refused (the two rights an uploaded file is protected by alone); the `dev.pi-dispatch.net-binaries` label lists `/opt/pi-dispatch/runner-node` first, the binary the runner and pi run as, and `wget`, with Chromium deliberately left out; and three bolts the review asked for: the spec's layout table and `docs/job-image.md`'s capability list pinned to their sources, and the runner refused a container-path literal outside `layout.mjs`. UNCHANGED, checked: the rest of the entry. |
 | 2026-10-19 | Issue #638's residual (the remainder of PR #638): held replies, with the review's corrections. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: the "*Residual:*" bullet under "A park closes the job's semantic window" keeps its text and gains a bold dated **CLOSED 2026-10-19** marker with the mechanism: every awaitInput job registered live on its own await target by a 2 s keeper from the moment the pickup's gates admitted it (just before the settings check and `runJob`); the receiver, all four arms and the poller, holds (a) a resume comment the window deduplicated against such a run under the surviving job id and (b) a phrase-free issue reply the filter dropped only for the missing marker, which the filter returns as `heldCandidate`, built by the same function as the parked-reply job. **The take is part of the park** (review H1): the park sequence becomes promote, marker ON, release, take, comment, and that bullet's own sentence about the release's place gains a dated note; the take enqueues the first eligible held reply WITH the semantic window (`enqueueForgeJob`), so every later answer is coalesced against that one job or held on it and never starts a second paid run from one parked transcript (the first version enqueued it window-less at the final outcome, after the parked comment had invited another answer: two runs); a swallowed take is not a resumed job (`HELD_EXTRA_REPLY` against another job, `HELD_RESUME_FAILED_REPLY` against the run's own); the rest get one `HELD_EXTRA_REPLY`; only replies written within `HELD_LOOKBACK_MS` (5 min) before the take are eligible (review M1), a mismatched fallback is skipped for the next (L5), a failed close at the take answers once (L1); the processor then posts `HELD_TAKEN_COMMENT` instead of the parked comment when a reply was taken; the final settle is the backstop, dropping held replies for any non-park outcome, an acknowledged cancel included (L2). Named residuals: a comment in the last five minutes before the question taken as an answer, a reply meeting the taken job while it is still queued answered `deduplicated`, an unreachable keeper, a pull request's phrase. (The first version of this row named "a held answer beside a steered late message each starting a job" as a residual; refuted: the steer settle answers late messages when a held reply was taken, `heldResumed`.) The #646 paragraph's "narrows ... and only narrows it" gains a dated note that the residual is now closed for every awaitInput run. **`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED**: a new bullet names held replies as a sibling mechanism in keys of their own (`run:await:*`, `run:held:*`) and why not the inbox. Every other entry UNCHANGED, checked: `DES-STEER-HELD-WHILE-PARKED` (a steer-armed run's held messages settle as before, except that late messages are answered rather than resumed when a held reply was taken), `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` (the steer pointer is untouched; the await pointer derives its hash from it), `DES-QUEUE-BULLMQ-OVER-CUSTOM`, `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (no index of parked issues: the registration is liveness with a 30 s expiry). Review round 2, in the same CLOSED text: a phrase-free reply posted before the marker and delivered after the take is enqueued as a parked reply while the target's 60 s parked marker (raised by the take's close) stands, so "nothing slips past" now holds for webhook delay too; a full list evicts its oldest entry; after a take whose own close failed the backstop only drops; a take swallowed by another job counts as taken (`taken: "other"`) for the comment and for `heldResumed`; a recovery's run id counts as the run's own; a fallback must also match the flow and command. |
 | 2026-10-19 | Issue #684, part 2: credential providers, git push, and the `openshell` venue BLESSED. **`DES-OPENSHELL-VENUE` AMENDED**: Status says BLESSED (`NOT_YET_BLESSABLE` empty); NEW dated "Credentials and git push (#684 part 2)" bullet: the per-job endpointless profile and provider (`secretNamesOf` over `NON_SECRET_ENV_KEYS`, `providerProfileFor` 0600 beside the job dir and never uploaded, `--credential NAME` reading the CLI child's own environment, never an argv or a file), attached at create, `credential_binding` on every endpoint, placeholders `openshell:resolve:env:v<rev>_NAME` resolved only toward an admitted host (measured for headers and git Basic auth), no secret on the exec's `--env`, the read-back's `_provider_<name>` layer, no provider for a job with no rule (`openshell_secrets_unbound`), teardown's bounded provider delete and the reaper's sweep; git push through a `GIT_CONFIG_COUNT` credential helper printing the token's placeholder; rotation stated, not built; NEW dated "Blessing (#684 part 2)" bullet: `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY` in `config.openshell`, judged only while blessed, the boot's bundle, reaper and exact version refusal (exit 2, exit 1 for a silent CLI, a gateway down only logged), `PI_EGRESS=0` refused at boot for a layer venue, `run.recover` refused before spend (`openshell-recover-unsupported`), doctor's note gone; the "Not measured yet" and "Not served here yet" sub-bullets and Code evidence gain dated notes. The Decision, Why, Rejected and Residuals UNCHANGED, checked. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `NOT_YET_BLESSABLE` empty, its mechanism kept; `credentialCustody: layer` live; `backendRefusals` gains the boot refusal of `PI_EGRESS=0` with any blessed layer venue, keyed on the word. The openshell entry's words and the counts UNCHANGED, checked. **UNCHANGED, checked**: `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` (the squid venues), `DES-WORKER-ON-HOST`, `DES-RUN-CHECKPOINT-PAIRED` (no armed run reaches the venue now: refused before spend), `DES-STEER-VIA-READONLY-INBOX-MOUNT` (`steerSkipped: "venue-copies"` as before), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (no launcher row), `DES-HOST-BUDGET` (the venue's lister and gone-check unchanged; its reaper now also sweeps providers). Review round (same day): NEW dated "Review fixes" bullet in `DES-OPENSHELL-VENUE` (the exec env an allowlist of `NON_SECRET_ENV_KEYS`, `openshell-credential-reads-value`, the per-job `openshell-gateway-untested`, the stale-provider removal, the gone-check provider delete, local recover unrefused, doctor replaying the egress-off refusal, two named residuals); the git-push sentence corrected: the placeholder resolves at any admitted host, not the forge host only. |
+| 2026-10-19 | Issue #686, part 1: the live transcript, run progress and the status comment on the `openshell` venue, over the exec's stderr. **`DES-OPENSHELL-VENUE` AMENDED**: the "Steering and the live transcript over stdio" bullet gains a dated note: the transcript comes back on the exec's STDERR, not its stdout, by the operator's decision of 2026-10-19 (the #680 sentence naming stdout is amended, the steer half UNCHANGED); NEW dated bullet "The live transcript over stderr": the runner's signed, self-delimiting records (`\x1epidt <seq> <mac> <base64 line>`), the worker's demux across 4 KiB reads that are neither line-aligned nor ordered, the arming (an opener and a job id, the non-gating `transcriptStderr` capability, an exit key; `live_transcript_skipped` with `no-capability`, `no-exit-key` or `venue-copies`), the seam (`transcript: "stdio"` as the venue's construction option beside `layout`, not the call bag's `binds`, which reaches a steer job only), `status_comment_skipped` reading `no-transcript` there instead of `progress-off`; why signed and why self-delimiting; REJECTED stdout (shared with the runner log and the signed exit line's 64 KiB tail) and tailing the sandbox's file through the CLI; three named residuals (a record above PIPE_BUF against another process's write, the 250 ms plus 500 ms lag, the exit key's relay); the "Not served here yet" bullet gains a dated note (the transcript, progress and the comment SERVED; steering and recovery still not); Code evidence gains the #686 part 1 files. **`DES-LIVE-TRANSCRIPT-STREAM` AMENDED**: part 2 gains a dated paragraph on the second source, pushed lines (`source: "stdio"`, `push`, `skip`, `reset`; the tailed line's path; an empty baseline; replay after a reset by the byte count; no checkpoint), the file tail UNCHANGED, checked; Code evidence gains `stderr-transcript.mjs`. **`DES-STEER-VIA-READONLY-INBOX-MOUNT` AMENDED**: the copying venue's arming sentence names the exec's stderr, not its stdout, and says that stream is built; the stdin frames and `steerStdin` UNCHANGED, still #686's second part. **UNCHANGED, checked**: `DES-RUN-PROGRESS` (the reducer reads pushed lines as tailed ones), `DES-RUN-CHECKPOINT-PAIRED` (no checkpoint on the stdio source; `run.recover` still refused on the venue), `DES-CONTAINER-BACKEND-REGISTRY` (no word changes; `binds` is still the steer job's question), `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-VENUE-EGRESS-LAYER` (the records leave on the exec's existing stderr: no new path, mount or credential). Review round (#709, same day): the records gain a type and the runner's file offset (`\x1epidt <seq> <type> <end> <mac> <base64>`; `b` the baseline, `l` a line, `r` a reset with the rewritten file's size); `DES-LIVE-TRANSCRIPT-STREAM`'s "a fresh attempt has no earlier content" is CORRECTED: the baseline is the runner's first signed record, the session file's size before pi loads, so a resumed session's staged lines are `prior` (REJECTED: the host's staged size read before the upload); `DES-OPENSHELL-VENUE`'s "Why signed" CORRECTED to say the MAC authenticates the channel, not the content (the agent writes the file); the pass-through claim narrowed to the grammar rule (a broken record ends at its first byte the grammar cannot hold, never passed on); the runner's rewrite detection gains the first-line probe; a failed write takes no `seq` and is sent again; the replay positions are exact (each line carries its offset); two residuals added (a broken record's record-shaped neighbour, a split record's tail as text). Review round 2 (#709, same day): `DES-OPENSHELL-VENUE`'s "never a record's bytes" CORRECTED: the marker starts a record anywhere (after a foreign write with no newline), a broken record's bytes after its break reach the log, a foreign head fitting the grammar is lost with it; the runner's quarantine swap is a reset to 0, one read is bounded by the size at its start, a lost reset is recovered from the next line's `end`, a lost baseline is no missing line; the residuals gain the lost baseline, which fails open. |

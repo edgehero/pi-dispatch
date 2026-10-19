@@ -959,6 +959,56 @@ refactor apart.
   64 hex characters and a newline and the pipe is closed at once, exactly as above**, `PI_EXIT_AUTH` stays `stdin`,
   and the argv and env are byte-identical; a bind venue that is steer-armed keeps the read-only `/inbox` mount and
   never gets the framed channel, because the channel lets the agent withdraw a message and the mount does not.
+  **The transcript records (AMENDED 2026-10-19, issue #686 part 1): on a copying venue, the session file's lines on
+  STDERR, signed with this key.** Given `PI_TRANSCRIPT=stderr` (written by the worker only for an attempt it armed: a
+  venue that copies the session file, `openshell`, an image declaring `transcriptStderr`, and a key) and a key that
+  read, the runner writes to fd 2, synchronously and every byte, one record per line:
+  ```
+  \x1epidt <seq> <type> <end> <mac> <base64 payload>\n
+  mac = hex(HMAC-SHA256(key, "pi-dispatch-transcript\0" + PI_JOB_ID + "\0" + seq + "\0" + type + "\0" + end + "\0" + payload))
+  ```
+  `seq` and `end` are decimal with no leading zero, `seq` from 1 per attempt; base64 is standard, padded and
+  canonical. Three types: `b`, the BASELINE, always `seq` 1, written as the mirror starts (before pi loads), `end` the
+  session file's size then and no payload, so a resumed session's staged lines (all ending at or before it) are the
+  earlier runs' (`prior`), as the file tail's `lstat` at spawn makes them on a binding venue; `l`, a LINE, for each
+  COMPLETE line (terminated by `\n`), the payload its bytes without the newline and `end` the file offset just past
+  it; `r`, a RESET, `end` the file's size when the runner saw it rewritten (it shrank, its inode changed, or its first
+  line's bytes changed, as pi's in-place rewrite does) and no payload, after which the runner reads it again from 0.
+  An inode that changed before anything was read (the runner's quarantine of an unparseable resume file renames it
+  and stages an empty one) is a reset with `end` 0, so the new file's lines are this run's, neither `prior` nor a
+  `replay`. The runner reads every 250 ms and once more inside the exit line's writer, before the line, on every path
+  (the decided line, the catch path, SIGTERM); one read takes at most what the file held when it began, so an agent
+  appending without pause cannot hold the runner inside it. A line longer than 1 MiB (`TRANSCRIPT_LINE_MAX_BYTES`, the worker's
+  `LIVE_LINE_MAX_BYTES`) is not sent and takes its `seq`; the next line's own `end` keeps every position exact. A
+  write that fails takes no `seq` and rewinds the read to the start of its line, so the next read sends it again. The
+  variable is removed from the runner's environment before pi loads (as `PI_EXIT_AUTH` is), and nothing reads the
+  session file through a link or a non-regular file (`O_NOFOLLOW`, the inode held, refused for good with
+  `transcript_mirror_off`). Asked without a key (`no-exit-key`), with another value (`unknown-channel`) or without a
+  session file (`no-session-file`), the runner logs `transcript_mirror_off` and mirrors nothing; the run is
+  otherwise unchanged. **The worker** (`worker/src/stderr-transcript.mjs`) reads the marker as the start of a record
+  wherever it appears (at a line start, or after a foreign write that left no newline; an RS not followed by `pidt `
+  is ordinary output), checks its grammar as the bytes arrive, and verifies it in constant time under the attempt's key and the
+  container name it put in `PI_JOB_ID`; a verified record whose `seq` is above the last accepted one is applied (a gap
+  is allowed and shown as `skipped`; a lost baseline is no missing line), any other is dropped and counted (`transcript_record_unverified` with a count,
+  `transcript_record_dropped` with the replays, gaps and oversize counts; never a payload). A line whose `end` is not
+  past the last one, with no reset between, applies the reset whose record was lost. **What reaches the job log**,
+  exactly: a verified record's bytes never do, nor a broken record's bytes before its break. A record broken by
+  another writer ends at its first byte the grammar cannot hold (digits, one type letter, 64 hex, base64), the break
+  byte; the record's bytes AFTER it, on the same line, DO reach the log as ordinary text (a foreign `\r` mid-payload
+  sends the rest of the base64 there), and so does a split record's tail that a foreign newline put on a line of its
+  own. A foreign write landing inside a record whose head fits the field being read (hex inside the MAC, base64 inside
+  the payload, digits inside a number) is taken into the record and lost with it, up to its first byte that does not
+  fit; a newline where a record cannot end is taken as the broken record's own. Every other byte reaches the log
+  unchanged. A payload past 8 MiB is read to its end and dropped, never held. **What the MAC
+  proves**: the CHANNEL, not the content. A verified record was written by the runner's mirror, in this order, about
+  this position in the file (a `seq` that only grows refuses a record taken and written again); a tool writing to the
+  container's stderr cannot forge one. The lines themselves are the session file's, which the agent can write (it can
+  append pi-shaped lines the mirror then sends, signed), so they carry exactly the trust of a line the file tail reads
+  on a binding venue. WHY STDERR, and not stdout: stdout carries the runner's log and the exit line, read from a
+  bounded 64 KiB tail, which a transcript burst would crowd, while stderr carries nothing the worker parses.
+  RESIDUAL: a record above PIPE_BUF (4 KiB) is not atomic against a write from another process sharing the pipe, and
+  arrives broken (refused, counted, never published). Without the variable stdout, stderr and the exit line are
+  byte-identical to before, on every venue.
   **Every exit line carries `resources`, and a supervisor reports a runner killed for memory (issue #596).** The
   runner reads its own cgroup (v2; `/proc/self/cgroup` names it, `0::/` on all five venues measured: Docker Desktop,
   rootful Docker 29, rootless Podman 4.9, rootful and rootless Podman 5.8) just before the exit line is written, in
@@ -1578,6 +1628,20 @@ secrets are on no argv and in no sandbox (`openshell_secrets_unbound`). After th
 <sandbox>`, asked up to 10 times 2 s apart (refused while still attached), then `provider profile delete <sandbox>`; the
 reaper also lists `provider list --label-selector pi.dispatch.owner=pi-dispatch -o json` and deletes each one named like
 a job sandbox. At boot, while blessed, `openshell --version` and `status -o json` must name `OPENSHELL_TESTED_VERSION`.
+**AMENDED 2026-10-19 (#686, part 1): the exec's stderr carries the transcript.** For an attempt the worker arms (an
+opener and a job id, an image declaring `transcriptStderr`, and an exit key), the exec's `--env` gains
+`PI_TRANSCRIPT=stderr` (a `NON_SECRET_ENV_KEYS` name, so it rides `--env` and is never a placeholder), and the exec's
+stderr then carries, beside whatever the CLI and the image write there, the runner's signed transcript records
+(`INT-RUNNER-EXIT-CODE-PROTOCOL`, "The transcript records"). OpenShell forwards stdout and stderr separately, each in
+reads of up to 4 KiB that are not line-aligned and not ordered against the other's (measured, 0.1.4), so the worker
+demultiplexes stderr as a byte stream across reads, verifies each record under the attempt's key, feeds the verified
+lines to the live transcript publisher (`INT-LIVE-TRANSCRIPT-STREAM`), and passes every byte of a line that is not a
+record on unchanged to the job log and the terminal; a verified record's bytes never reach them, and
+`INT-RUNNER-EXIT-CODE-PROTOCOL` ("What reaches the job log") states exactly what of a BROKEN record and of a foreign
+write inside one does. The host's `<job dir>/session` is not tailed on this venue: it is the upload's copy until the
+download. An attempt not armed gets no variable and its stderr is passed on exactly as before
+(`live_transcript_skipped`, reason `no-capability` or `no-exit-key`). The `local` and `podman` halves are UNCHANGED,
+checked: neither sets the variable, and their stderr is never demultiplexed.
 
 - **Contract**:
   - **Which daemon (issue #278).** Every `docker` spawn inherits the worker's environment, so the daemon is
@@ -9906,6 +9970,14 @@ publisher cannot drift.
 - **`reset`**: the source file shrank, was replaced or had its first line rewritten; the entries after it start the
   transcript over (a reader may clear what it shows or mark the break). **`skipped`**: one line over 1 MiB was left
   out unread.
+- **The source on a copying venue (AMENDED 2026-10-19, issue #686 part 1).** On `openshell` the lines do not come from
+  a file the worker tails but from the runner's signed records on the exec's stderr (`INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  "The transcript records"); every line then takes the same path into the same stream, with the runner's baseline
+  standing in for the tail's `lstat` at spawn (a resumed session's staged lines are `prior`), so the key, the entries, the
+  kinds, the redaction, the caps, the TTLs, the `end` and the retries above are UNCHANGED, checked, and so is every
+  reader. Two words gain a second cause there: `reset` is also the runner's reset record (its file rewritten), and
+  `skipped` also a gap in the records' `seq` (a line the runner did not send, or a record that did not verify). The
+  timing is the records' cadence (the runner reads every 250 ms) plus the publisher's 500 ms flush.
 - **Text**: redacted first (`DES-LIVE-TRANSCRIPT-STREAM`, the redactor: `[redacted]` in place of each match), then
   every control and bidi or invisible character written as `\u{XXXX}`, except real newlines (`\r\n` and lone `\r`
   normalised to `\n`) and tabs, which stay real; then cut to `LIVE_TEXT_MAX` (4,096) code points, `LIVE_ASSISTANT_TEXT_MAX`
@@ -10433,3 +10505,4 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-19 | Issue #683, the review fixes of part 1 that its squash left out (landed after #698 merged). **`INT-SANDBOX-CONTRACT` AMENDED**: its "byte-identical to the one before #429" sentence names the `--workdir=/workspace` issue #683 added, the one change to the reopened shell's argv, which part 1's row had listed as UNCHANGED. The layout table in `INT-CONTAINER-JOB-INPUTS` is now held to `worker/src/job-layout.mjs` by a test. Note on part 1's row: pi-landlock's own refusal, 126, sits INSIDE the never-started set of the two binding venues' runtimes, which never run the helper; the openshell venue decides never-started by the failed step, not a code (part 2). |
 | 2026-10-19 | Issue #638's residual (the remainder of PR #638): held replies. **`INT-STEER-INBOX-CONTRACT` AMENDED**: a new "Held replies: a sibling key set, not the inbox" bullet, written from `worker/src/held-replies.mjs`, `worker/src/held-settle.mjs`, `receiver/src/held.mjs`, `receiver/src/receiver.mjs` and `receiver/src/poller.mjs`: the keys `run:await:target:<hex32>` (the steer target's hash, derived; ZSET scored `now + 30 s`, PEXPIRE 60 s), `run:await:open:<runId>` (PX 30 s), `run:held:<runId>` (LIST of `{id, at, route, fallback}`, PEXPIRE 1 h) and `run:held:closed:<runId>` (PX 1 h); never under `run:steer:*` or `run:inbox:*`; who writes them (the processor's keeper for every awaitInput job, 2 s, a reset of a closed list at its start, a stop that deletes nothing); the `HOLD` script's returns in order (`closed`, `gone`, `dup`, `full` at 20, `ok`; 1 MiB per entry refused before Valkey) and `CLOSE`'s `[list, first]`; the receiver's new answer `202 {"status":"held","runs":<n>}` on its two routes (a swallowed resume comment of an awaitInput comment trigger under the surviving id, a filter drop's `heldCandidate` under every live run, at most 4), everything else answered as before; the poller's `held` count; the take inside the park sequence (first close only: replies older than `HELD_LOOKBACK_MS` 5 min dropped, the first matching one enqueued WITH the semantic window by `enqueueForgeJob`, a swallowed add not taken, the rest one `HELD_EXTRA_REPLY` or one `HELD_RESUME_FAILED_REPLY`, the processor's `HELD_TAKEN_COMMENT`; corrected in review from a window-less `enqueueLateForgeJob` at the final outcome, which let a later answer start a second run); the final settle as the backstop (nothing after a take, a drop for any non-park outcome); the logs, `held_reply_not_taken` and the `stale` count included. The "who writes" sentence says exactly where the keeper starts. The receiver's-answer bullet's list of answers gains `202` held. Everything else in the contract UNCHANGED, checked: the inbox keys, scripts, caps and the steered marker. **`INT-WEBHOOK-PAYLOAD-SUBSET`, `INT-GITLAB-PAYLOAD-SUBSET`, `INT-AZURE-PAYLOAD-SUBSET` UNCHANGED, checked**: no field is read that was not already (the candidate is built from the fields the parked-reply route already carries). **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no new trigger field; held replies follow from `run.awaitInput` and `run.resume` as they are. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no record field (the held counts are logged, not recorded). Review round 2: the key list gains `run:await:parked:<hex32>` (the run id, PX 60 s, raised by the park's close in the same script) and the receiver's answer gains its route (a pre-label candidate no live run took is enqueued as a parked reply while it stands, `held_after_park`); `HOLD` evicts the oldest entry at 20 instead of answering `full`; the take's match includes flow and command, its result `taken`; the backstop only drops after a take whose close failed. |
 | 2026-10-19 | Issue #684, part 2: credential providers, git push, and the `openshell` venue blessed. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the "`openshell` venue's half" gains a dated paragraph: blessable; the provider calls before the create (the 0600 endpointless profile beside the job dir, `provider create --credential NAME` with the values in the CLI child's own environment, never an argv), `--provider` on the create, `credential_binding` on every endpoint and the read-back's `_provider_<name>` rule, no secret name on the exec's `--env` and the forge job's `GIT_CONFIG_*` credential helper printing the placeholder, no provider for a job with no rule, the teardown's bounded provider delete and the profile's, the reaper's provider sweep, the boot's version read. The body for `local` and `podman` UNCHANGED, checked. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: "nothing of this ships today" gains a dated note (it ships); the document as built gains `credential_binding` on every endpoint, the provider's read-back rule, and `PI_EGRESS=0` refusing the boot with a blessed layer venue. The squid venues' objects, argv and failure table UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum listing gains `openshell-recover-unsupported`. **UNCHANGED, checked**: `INT-RUNNER-EXIT-CODE-PROTOCOL` (the exit key on the exec's stdin as before), `INT-CONTAINER-JOB-INPUTS` (the profile sits beside the job dir and is never an input), `INT-STEER-INBOX-CONTRACT` (no stdin frames yet, #686), `INT-SANDBOX-CONTRACT` (no launcher row). Review round (same day): `INT-RUN-HISTORY-FILE-CONTRACT`'s reason enum also gains `openshell-credential-reads-value` and `openshell-gateway-untested`. |
+| 2026-10-19 | Issue #686, part 1: the live transcript on the `openshell` venue, over the exec's stderr. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a NEW "The transcript records" paragraph: given `PI_TRANSCRIPT=stderr` and a key, the runner writes each complete line of `PI_SESSION_FILE` to fd 2 as `\x1epidt <seq> <mac> <base64>\n`, `mac = HMAC-SHA256(key, "pi-dispatch-transcript\0" + PI_JOB_ID + "\0" + seq + "\0" + line)`, `seq` from 1 per attempt, an empty payload a reset, a line over 1 MiB not sent but counted in `seq`, a final drain inside the exit writer before every exit line, the variable removed before pi loads, `transcript_mirror_off` for each problem; the worker's verification, ordering and counting (`transcript_record_unverified`, `transcript_record_dropped`), the 8 MiB give-up, why stderr and not stdout, and the PIPE_BUF residual; without the variable every venue is byte-identical. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the "`openshell` venue's half" gains a dated paragraph: `PI_TRANSCRIPT=stderr` on the exec's `--env` for an armed attempt, the exec's stderr demultiplexed across reads, the host's session copy never tailed; the `local` and `podman` halves UNCHANGED, checked. **`INT-LIVE-TRANSCRIPT-STREAM` AMENDED**: a "source on a copying venue" bullet: the same stream fed from the records, `reset` and `skipped` each gaining a second cause; key, entries, caps, TTLs, end and readers UNCHANGED, checked. **UNCHANGED, checked**: `INT-RUN-PROGRESS-KEY` (written from the same lines), `INT-STEER-INBOX-CONTRACT` (no stdin frames yet, #686's second part), `INT-CONTAINER-JOB-INPUTS` (the `sandbox` layout unchanged; `PI_SESSION_FILE` as before), `INT-RUN-HISTORY-FILE-CONTRACT` (no record field or reason added: `live_transcript_skipped` is a log event, and `status_comment_skipped` keeps its four reasons). Review round (#709, same day): `INT-RUNNER-EXIT-CODE-PROTOCOL`'s transcript records REWRITTEN: `\x1epidt <seq> <type> <end> <mac> <base64>`, the MAC over `seq`, `type`, `end` and the payload; `b` the baseline (seq 1, the file's size before pi loads, so a resumed session's staged lines are `prior`), `l` a line with its file offset, `r` a reset with the rewritten file's size; the rewrite seen also by a changed first line; a failed write takes no `seq` and is sent again; what reaches the job log stated exactly (a line that is not a record, unchanged; never a record's bytes; the grammar rule for a broken one and its two narrow exceptions); the MAC said to prove the channel, not the content. `INT-CONTAINER-RUNTIME-CONTRACT`'s pass-through sentence narrowed to match, and `INT-LIVE-TRANSCRIPT-STREAM`'s copying-venue bullet names the runner's baseline. Review round 2 (#709, same day): `INT-RUNNER-EXIT-CODE-PROTOCOL`'s "What reaches the job log" CORRECTED to what the demux does (a verified record's bytes and a broken one's before its break never; after the break, as text; a foreign head fitting the grammar lost; everything else unchanged), the marker read anywhere, a new inode before the first read a reset to 0, one read bounded by the size at its start, the implied reset of a lost one and no gap for a lost baseline; `INT-CONTAINER-RUNTIME-CONTRACT`'s pass-through sentence narrowed to match. |

@@ -581,6 +581,18 @@ test("an image declaring exitAuth gets a key (runContainer exitAuth: true); one 
 	}
 });
 
+test("an image declaring transcriptStderr is said so to runContainer (transcriptStderr: true); one that does not, is called as before (#686)", async () => {
+	for (const [capabilities, want] of [[["costCap", "exitAuth", "transcriptStderr"], true], [["costCap", "exitAuth"], undefined], [undefined, undefined]]) {
+		let seen = "unset";
+		const { deps: d } = deps({
+			imagePreflight: async () => ({ ok: true, image: "pi-job:x", ...(capabilities ? { capabilities } : {}) }),
+			runContainer: async (args) => ((seen = "transcriptStderr" in args ? args.transcriptStderr : undefined), { code: 0, aborted: false, exitLineCode: 0, tokens: COMPLETE_TOKENS, usage: LEDGER, ...(capabilities?.includes("exitAuth") ? { exitAuth: "verified" } : {}) }),
+		});
+		await runJob(job, d);
+		assert.equal(seen, want, JSON.stringify(capabilities));
+	}
+});
+
 test("an unverified run (a key issued, no signed line) settles at the FLOOR and records tokens as unknown", async () => {
 	const { deps: d, redis, logs } = deps({
 		imagePreflight: async () => ({ ok: true, image: "pi-job:x", capabilities: ["exitAuth"] }),

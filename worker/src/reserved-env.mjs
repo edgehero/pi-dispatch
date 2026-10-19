@@ -65,6 +65,9 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// Issue #545: tells the runner the exit line's key waits on stdin. A trigger setting it would block its own runner
 	// on a stdin no one writes, or turn the signed line off.
 	"PI_EXIT_AUTH",
+	// Issue #686: tells the runner to mirror its session file over stderr. A trigger setting it would send records no
+	// worker reads into the job log, or, with the image's key, stream a transcript the operator did not arm.
+	"PI_TRANSCRIPT",
 	"PI_OFFLINE",
 	"PLAYWRIGHT_BROWSERS_PATH",
 	"PLAYWRIGHT_MCP_BROWSER",

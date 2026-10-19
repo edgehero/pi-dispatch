@@ -599,9 +599,15 @@ placeholder cannot stand in for.
   than 128) reaches the sandbox not at all, never as a value on the exec's argv, and is named in the log
   (`openshell_secret_unbindable`). A forwarded name the redactor does not know as non-secret (`TZ`, `LANG`) is a
   credential to this venue and arrives as a placeholder: forward only what the job uses as a secret.
+- **The live transcript, run progress and the status comment are served** (issue #686): the session file is in the
+  sandbox until the download, so the runner mirrors its lines over the exec's stderr as records signed with the job's
+  exit key, and the worker verifies each and publishes it as it publishes a bind-mounted file's. The job image must
+  declare `transcriptStderr` and `exitAuth`; without them the job runs without a transcript or progress, said as
+  `live_transcript_skipped` (`no-capability` or `no-exit-key`). A record that does not verify is dropped and counted
+  (`transcript_record_unverified`), never published.
 - **Not served yet** (issue #686): a trigger with `run.recover` is refused before it spends
-  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session; the live transcript,
-  progress and steering are skipped by name (steering as `steerSkipped: "venue-copies"`), the job still running. No
+  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session; steering is skipped by name
+  (`steerSkipped: "venue-copies"`), the job still running. No
   `pi-dispatch sandbox` shell either: the venue has no launcher. A job's MCP servers are served (issue #684): an
   `http` server's host is an allowlist entry like any other, and a stdio server's overlay paths are moved to the
   sandbox layout.

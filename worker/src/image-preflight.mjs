@@ -287,6 +287,15 @@ export const CAPABILITY_GATES = Object.freeze([
 export const EXIT_AUTH_CAPABILITY = "exitAuth";
 
 /**
+ * The capability an image declares when its runner mirrors the session file over stderr as records signed with the exit
+ * key, on PI_TRANSCRIPT=stderr (issue #686, image/runner/src/transcript-mirror.mjs). NOT a gate, like `exitAuth`: no job
+ * is refused for lacking it. On a venue that copies the job's files (`openshell`) it is what the live transcript, run
+ * progress and the status comment come from; an image without it runs there without them (`live_transcript_skipped`,
+ * reason `no-capability`). A binding venue never reads it.
+ */
+export const TRANSCRIPT_STDERR_CAPABILITY = "transcriptStderr";
+
+/**
  * Exported so the test cannot drift from the format string above. `|` because an image id is
  * `sha256:<hex>` and a version is a version, so neither can contain one -- and because a literal control
  * character in source is the kind of thing that survives a copy/paste and then does not.

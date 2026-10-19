@@ -1637,7 +1637,8 @@ export async function startWorker(
 	};
 	// Issue #643 (DES-LIVE-TRANSCRIPT-STREAM): every running job's transcript, redacted, to its own capped Valkey stream,
 	// on every deployment unless PI_LIVE_TRANSCRIPTS=0. Not gated on a worker name, unlike the mirror above: the panel on
-	// a single host reads the same stream. Handed to both venues' runContainer, which publish only beside a staged file.
+	// a single host reads the same stream. Handed to every venue's runContainer, which publish only beside a staged file,
+	// or, on openshell (issue #686), from the exec's stderr records.
 	//
 	// Issue #644 (DES-RUN-PROGRESS): the same opener reads each job's progress off the same file unless PI_RUN_PROGRESS=0,
 	// so it is built when either switch is on; with transcripts off it tails the file and writes no stream.
@@ -1955,6 +1956,9 @@ export async function startWorker(
 				readEndpoints: () => modelEndpoints.current ?? [],
 				hostEnv: env,
 				openJobLog,
+				// Issue #686: the same opener the binding venues get, fed from the exec's stderr records. The inbox relay is not
+				// handed: steering on this venue is the issue's second part, and its jobs stay `steerSkipped: "venue-copies"`.
+				...(openLiveTranscript ? { openLiveTranscript } : {}),
 				globalPiDir: config.globalPiDir,
 				allowGlobalExtensions: config.allowGlobalExtensions,
 				packagePaths: getPackagePaths,
