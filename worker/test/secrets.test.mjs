@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { mergeSecretProfiles, parseSecretProfiles, withinRoots } from "../src/secret-profiles.mjs";
+import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles, withinRoots } from "../src/secret-profiles.mjs";
 import { MAX_SECRET_BYTES, makeSecretsResolver, secretsArmed } from "../src/secrets.mjs";
 
 // A resolver is an operator-written script, so the seam under test is a spawn. `plan` maps a REFERENCE to
@@ -386,4 +386,56 @@ test("a job with no provider reserves the PI_FORWARD_ENV half and refuses nothin
 	const { fn } = resolver({}, { hostEnv: {}, forwardEnv: ["MY_CUSTOM_KEY"] });
 	assert.equal((await fn(job({ ANTHROPIC_API_KEY: "op://ci/a/key" }, { provider: undefined }))).reserved, undefined);
 	assert.equal((await fn(job({ MY_CUSTOM_KEY: "op://ci/c/key" }, { provider: undefined }))).reserved, "MY_CUSTOM_KEY");
+});
+
+// --- what a host advertises (issue #704) ---
+
+test("servableSecretProfiles: env as declared, overlay only inside the roots, ambiguity advertises nothing", () => {
+	// A symlink whose target leaves the root, a missing script, and a non-executable file all fall out, by
+	// the realpath the resolver itself checks.
+	const real = { "/opt/pi/op.sh": "/opt/pi/op.sh", "/opt/pi/link.sh": "/tmp/evil.sh", "/opt/pi/plain.txt": null };
+	const realExecutablePath = (p) => {
+		if (!(p in real)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+		return real[p];
+	};
+	const overlayProfiles = { panel: "/opt/pi/op.sh", escaped: "/opt/pi/link.sh", gone: "/opt/pi/missing.sh", plain: "/opt/pi/plain.txt" };
+	const res = servableSecretProfiles({ envProfiles: { default: "/srv/env.sh" }, overlayProfiles, roots: ["/opt/pi"], realExecutablePath });
+	assert.deepEqual(Object.keys(res.profiles).sort(), ["default", "panel"]);
+	assert.deepEqual(Object.keys(servableSecretProfiles({ envProfiles: {}, overlayProfiles, realExecutablePath }).profiles), [], "no roots: the overlay advertises nothing");
+	assert.deepEqual(servableSecretProfiles({ envProfiles: { panel: "/srv/env.sh" }, overlayProfiles, roots: ["/opt/pi"], realExecutablePath }), { ambiguous: "panel" });
+});
+
+test("servableSecretProfiles advertises exactly the overlay profiles the resolver would serve (#704)", async () => {
+	const realExecutablePath = (p) => (p.endsWith(".sh") ? p : null);
+	const overlayProfiles = { inside: "/opt/pi/a.sh", outside: "/usr/bin/b.sh", notexec: "/opt/pi/c.txt" };
+	const roots = ["/opt/pi"];
+	const served = servableSecretProfiles({ envProfiles: {}, overlayProfiles, roots, realExecutablePath }).profiles;
+	const fn = makeSecretsResolver({ envProfiles: {}, roots, realExecutablePath, spawnFn: fakeSpawn([], {}), hostEnv: {} });
+	for (const name of Object.keys(overlayProfiles)) {
+		const res = await fn(job({ A: "ref" }, { secretsProfile: name }), { overlayProfiles });
+		assert.equal(Object.hasOwn(served, name), res.ok === true, `${name}: advertised iff resolved`);
+	}
+	// Ambiguity: the resolver refuses every secrets job, whatever it names, and the host advertises nothing.
+	const envProfiles = { inside: "/srv/env.sh", envonly: "/srv/env2.sh" };
+	const both = makeSecretsResolver({ envProfiles, roots, realExecutablePath, spawnFn: fakeSpawn([], {}), hostEnv: {} });
+	assert.deepEqual(servableSecretProfiles({ envProfiles, overlayProfiles, roots, realExecutablePath }), { ambiguous: "inside" });
+	for (const name of ["inside", "envonly", "outside"]) {
+		assert.deepEqual(await both(job({ A: "ref" }, { secretsProfile: name }), { overlayProfiles }), { ambiguous: "inside" }, `${name}: refused`);
+	}
+	// Env profiles are DELIBERATELY unprobed in the advertisement: the row lists them as declared (what it always
+	// published), while the resolver probes them per job; doctor is where a missing env resolver is reported.
+	assert.ok(Object.hasOwn(servableSecretProfiles({ envProfiles: { gone: "/srv/missing.txt" }, roots, realExecutablePath }).profiles, "gone"));
+});
+
+test("profile tables answer for OWN names only: toString, constructor and __proto__ (#704)", async () => {
+	// All three pass the profile charset. An `in` check answers "declared" for the first two on any object, and
+	// an assignment of `__proto__` would set the prototype instead of declaring a profile.
+	assert.deepEqual(mergeSecretProfiles({ prod: "/a" }, { toString: "/b" }), { profiles: { prod: "/a", toString: "/b" } }, "no ambiguity with an inherited name");
+	assert.deepEqual(Object.keys(parseSecretProfiles("toString:/a,constructor:/b,__proto__:/c")), ["toString", "constructor", "__proto__"], "declarable, and never 'declared twice'");
+	const served = servableSecretProfiles({ envProfiles: {}, overlayProfiles: JSON.parse('{"__proto__":"/opt/pi/p.sh"}'), roots: ["/opt/pi"], realExecutablePath: (p) => p }).profiles;
+	assert.ok(Object.hasOwn(served, "__proto__"), "an own profile, not a prototype");
+	const fn = makeSecretsResolver({ envProfiles: { prod: "/opt/pi/resolve.sh" }, realExecutablePath: (p) => p, spawnFn: () => assert.fail("must not spawn"), hostEnv: {} });
+	for (const name of ["toString", "constructor"]) {
+		assert.deepEqual(await fn(job({ A: "ref" }, { secretsProfile: name })), { profileUnknown: name });
+	}
 });

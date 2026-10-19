@@ -196,6 +196,15 @@ function stripOneNewline(text) {
 	return text;
 }
 
+/** The resolver's executable probe: the realpath when it is an executable file, else null. Throws when
+ * the path does not resolve, which every caller folds into "not usable". Exported so the capability row
+ * (`servableSecretProfiles`, start.mjs) and doctor ask the question this resolver asks, not a copy of it. */
+export function realExecutable(p) {
+	const real = realpathSync(p);
+	const st = statSync(real);
+	return st.isFile() && (st.mode & 0o111) !== 0 ? real : null;
+}
+
 /**
  * Build the pre-spend resolver the processor injects.
  *
@@ -235,11 +244,7 @@ export function makeSecretsResolver({
 	// follows symlinks -- so `lstat` would refuse an ordinary /usr/local/bin/op -> ../Cellar/... The mode is
 	// deliberately NOT checked here: a group- or world-writable resolver is a doctor WARNING, on the
 	// env-setup precedent, because refusing a job over a mode bit at job time is a new class of refusal.
-	realExecutablePath = (p) => {
-		const real = realpathSync(p);
-		const st = statSync(real);
-		return st.isFile() && (st.mode & 0o111) !== 0 ? real : null;
-	},
+	realExecutablePath = realExecutable,
 	log = () => {},
 } = {}) {
 	return async function resolveSecrets(job, { signal, overlayProfiles = {} } = {}) {
@@ -247,7 +252,8 @@ export function makeSecretsResolver({
 		if (merged.ambiguous) return { ambiguous: merged.ambiguous };
 
 		const wanted = typeof job?.secretsProfile === "string" && job.secretsProfile !== "" ? job.secretsProfile : DEFAULT_SECRETS_PROFILE;
-		const declared = merged.profiles[wanted];
+		// Own properties only: the charset admits `toString` and `constructor`, which every object inherits.
+		const declared = Object.hasOwn(merged.profiles, wanted) ? merged.profiles[wanted] : undefined;
 		// A LOOKUP, never a fallback. There is deliberately no "if only one profile is declared, use it"
 		// rule: env-allowlist.mjs records what the last `else` of that shape cost, and a default whose
 		// meaning changes the day a second profile appears is that mistake with a slower fuse.
@@ -267,7 +273,7 @@ export function makeSecretsResolver({
 		// executable on the host". An env-declared profile is exempt: PI_SECRET_PROFILES already lives
 		// beside the forge tokens and the App key, so requiring roots for it would bound nothing and would
 		// break every deployment that never wanted panel authoring.
-		const fromOverlay = !(wanted in envProfiles);
+		const fromOverlay = !Object.hasOwn(envProfiles, wanted);
 		if (fromOverlay && !withinRoots(path, roots)) return { profileUnknown: wanted };
 
 		const references = job?.secrets ?? {};

@@ -60,15 +60,25 @@ export function parseSecretProfiles(raw) {
 		if (!PROFILE_NAME.test(name)) {
 			throw configError(`PI_SECRET_PROFILES profile name ${JSON.stringify(name)} may use letters, digits, dot, dash and underscore only`);
 		}
-		if (name in profiles) {
+		if (Object.hasOwn(profiles, name)) {
 			throw configError(`PI_SECRET_PROFILES declares ${JSON.stringify(name)} twice -- one of the two is not the resolver you think is running`);
 		}
 		if (path === "" || !isAbsolutePath(path)) {
 			throw configError(`PI_SECRET_PROFILES profile ${JSON.stringify(name)} needs an ABSOLUTE path to its resolver -- a service manager's working directory is not your shell's, so a relative path is a different file on every host`);
 		}
-		profiles[name] = path;
+		defineProfile(profiles, name, path);
 	}
 	return profiles;
+}
+
+/**
+ * OWN properties only, here and in every lookup over a profile table (issue #704 review). The charset admits
+ * `toString`, `constructor` and `__proto__`, so `name in table` answers "declared" for a name nobody wrote,
+ * and `table[name] = path` with `__proto__` sets the object's prototype instead of declaring a profile. A
+ * defined property is an own, enumerable data property whatever the name.
+ */
+function defineProfile(table, name, path) {
+	Object.defineProperty(table, name, { value: path, enumerable: true, writable: true, configurable: true });
 }
 
 /** Absolute on this platform, accepting a Windows drive letter or UNC root as `service.mjs` does. */
@@ -92,7 +102,7 @@ function isAbsolutePath(path) {
  */
 export function mergeSecretProfiles(envProfiles = {}, overlayProfiles = {}) {
 	for (const name of Object.keys(overlayProfiles)) {
-		if (name in envProfiles) return { ambiguous: name };
+		if (Object.hasOwn(envProfiles, name)) return { ambiguous: name };
 	}
 	return { profiles: { ...envProfiles, ...overlayProfiles } };
 }
@@ -117,4 +127,39 @@ export function withinRoots(candidate, roots = []) {
 		const base = normalize(root).replace(new RegExp(`${sep === "\\" ? "\\\\" : sep}+$`), "");
 		return target === base || target.startsWith(base + sep);
 	});
+}
+
+/**
+ * The profiles a host would actually resolve, for its capability row and for doctor (issue #704): every
+ * env-declared profile, plus each overlay-declared one whose resolver is an executable file whose REALPATH
+ * sits inside `roots`. That is the lookup `secrets.mjs -> makeSecretsResolver` makes per job, so a host
+ * never advertises an overlay profile it would answer `secret-profile-unknown` for, and never hides one it
+ * would serve.
+ *
+ * `realExecutablePath` is REQUIRED and injected, which keeps this module fs-free: the worker passes
+ * `secrets.mjs -> realExecutable`, the probe its resolver uses, and that module is not imported here
+ * because it loads pi through `env-allowlist.mjs`.
+ *
+ * Env profiles are taken as declared, with no probe, which is what the row always published: doctor is
+ * where a missing env resolver is reported, and probing it here would change an existing host's row.
+ *
+ * `{ ambiguous }` when a name is declared in both sources (`mergeSecretProfiles`). The resolver then
+ * refuses EVERY secrets job on this host, whatever profile it names, so the caller advertises no secret
+ * profile at all rather than one it would refuse.
+ */
+export function servableSecretProfiles({ envProfiles = {}, overlayProfiles = {}, roots = [], realExecutablePath }) {
+	const merged = mergeSecretProfiles(envProfiles, overlayProfiles);
+	if (merged.ambiguous) return { ambiguous: merged.ambiguous };
+	const profiles = { ...envProfiles };
+	for (const [name, declared] of Object.entries(overlayProfiles)) {
+		if (typeof declared !== "string") continue;
+		let path;
+		try {
+			path = realExecutablePath(declared);
+		} catch {
+			path = null;
+		}
+		if (path && withinRoots(path, roots)) defineProfile(profiles, name, declared);
+	}
+	return { profiles };
 }

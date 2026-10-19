@@ -5788,3 +5788,18 @@ test("settleCloseOf routes a queue's close through its start, in place and once"
 	assert.deepEqual(order, ["ready", "close"], "a failed start still closes");
 	assert.equal(settleCloseOf(null), null);
 });
+
+test("the registry's caps thunk advertises the profiles this host would resolve, overlay included (#704)", () => {
+	// Asserted against the SOURCE, the precedent above: the thunk runs on the beat of a booted worker. The
+	// pure half (servableSecretProfiles) is pinned against the resolver in secrets.test.mjs; this pins that
+	// the beat reads the LIVE overlay and the env-only roots, not the boot config's env table alone.
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	const from = src.indexOf("caps: () => {");
+	const to = src.indexOf("tz: hostTz,", from);
+	assert.ok(from >= 0 && to > from, "the caps thunk is where this pin expects");
+	const body = src.slice(from, to);
+	assert.match(body, /const settings = resolveSettings\(config, readOverlay\(settingsFile\)\);/, "the overlay is read each beat, judged by the job path's own rule");
+	assert.match(body, /servableSecretProfiles\(\{ envProfiles: config\.secretProfiles, overlayProfiles: settings\.invalid \? \{\} : \(settings\.secretProfiles \?\? \{\}\), roots: config\.secretResolverRoots, realExecutablePath: realExecutable \}\)/, "the resolver's own probe, so the row and the job agree");
+	assert.match(body, /served\.ambiguous \? \{\} : served\.profiles/, "an ambiguous name advertises no secret profile");
+	assert.doesNotMatch(src, /capabilityTokens\(config\)/, "the env-only advertisement is gone");
+});

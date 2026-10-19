@@ -97,6 +97,39 @@ export function parseCaps(raw) {
 }
 
 /**
+ * The implicit profile, `DEFAULT_SECRETS_PROFILE` in `secrets.mjs`, copied rather than imported for the
+ * reason the charset above is: that module spawns resolvers and this one is loaded by the receiver. A test
+ * holds the two equal.
+ */
+export const IMPLICIT_SECRET_PROFILE = "default";
+
+/**
+ * The profile a job's secrets resolve through, or undefined when it asked for none. `secretsArmed`'s rule
+ * (`secrets.mjs`), spelled again here for the same reason as the constant: an explicit profile, or a
+ * non-empty `secrets` map, which then resolves through the implicit `default` (issue #704). Before #704 only
+ * the explicit field was a need, so a trigger that never wrote `run.secretsProfile` was never routed and took
+ * the coin flip this module exists to remove.
+ *
+ * UPGRADE THE WORKERS BEFORE THE RECEIVER (and the console, whose re-run routes by this rule too). The router
+ * only ever picks a host that ADVERTISES every need, so the new need never sends a job to a host that cannot
+ * serve it. But an older worker advertises `s:default` only when its ENV declares it: one whose `default`
+ * lives in the overlay serves it without saying so. For a job with only this need that costs nothing (no
+ * advertiser is abstention 3, the shared queue it used before). For a job with a SECOND need it can regress:
+ * `run.secrets` without a profile plus a `w:ci` wait, an older host A declaring `w:ci` and serving `default`
+ * from its overlay, host B declaring neither. Before #704 the job needed `[w:ci]` and was routed to A; under
+ * a new receiver it needs `[s:default, w:ci]`, no host advertises both, and the shared queue lets B pop it
+ * and refuse. Once every worker runs this release, A advertises its overlay `default` and the job is routed
+ * to A again. An older receiver computes no such need and routes as before.
+ */
+function secretProfileNeeded(job) {
+	const named = job?.secretsProfile;
+	if (typeof named === "string" && named !== "") return named;
+	const secrets = job?.secrets;
+	if (secrets !== null && typeof secrets === "object" && Object.keys(secrets).length > 0) return IMPLICIT_SECRET_PROFILE;
+	return undefined;
+}
+
+/**
  * What a JOB needs, from the same two fields the worker's own refusals read.
  *
  * `waitProfileNames`-shaped inline rather than imported, because this module is loaded by the RECEIVER and
@@ -105,7 +138,7 @@ export function parseCaps(raw) {
  */
 export function jobNeeds(job) {
 	const needs = new Set();
-	const secret = token(CAP_SECRET, job?.secretsProfile);
+	const secret = token(CAP_SECRET, secretProfileNeeded(job));
 	if (secret) needs.add(secret);
 	if (Array.isArray(job?.waitFor)) {
 		for (const condition of job.waitFor) {

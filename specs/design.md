@@ -1518,6 +1518,45 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   expensive direction: a vault unreachable for twenty seconds would permanently burn a delivery that
   `attempts: 2` would have recovered, and a webhook does not redeliver itself.
 
+  **AMENDED 2026-10-19 (#704): the routing and the diagnosis read the same table the resolver does.** Three
+  places had each read a narrower table than the one `makeSecretsResolver` resolves from, so each could
+  disagree with the job:
+  - *The job's need.* `jobNeeds` (`capabilities.mjs`) added `s:<name>` only for an explicit
+    `run.secretsProfile`, while a job with a non-empty `run.secrets` and no profile resolves through
+    `default`. Such a job now needs `s:default`, by `secretsArmed`'s rule. The router only ever picks a host
+    that ADVERTISES every need, so the new need never routes a job to a host that cannot serve it, but it is
+    NOT free on a mixed fleet: an older worker advertises `s:default` only when its env declares it, so one
+    serving `default` from its overlay says nothing. Alone, that costs nothing (nobody advertises it, so the
+    job takes the shared queue it took before). Beside a second need it regresses: `run.secrets` without a
+    profile plus a `w:ci` wait, an older host A declaring `w:ci` and serving `default` from its overlay, host B
+    declaring neither, was routed to A on `[w:ci]` and under a new receiver needs `[s:default, w:ci]`, finds
+    no capable host, and goes to the shared queue where B can pop it and refuse. **The upgrade order is
+    therefore workers first, then the receiver** (and the console, whose re-run routes by the same rule); once
+    every worker advertises its overlay profiles, A is capable again. An older receiver computes no such need
+    and routes as before.
+  - *The host's advertisement.* `caps` named the env profiles only. It now names what the host would resolve
+    (`servableSecretProfiles`, `secret-profiles.mjs`): every env profile as declared, plus each overlay profile
+    whose resolver's realpath is an executable inside `PI_SECRET_RESOLVER_ROOTS`, probed with the resolver's
+    own `realExecutable`. The `caps` thunk already ran per beat, so it reads the overlay per beat as well and a
+    panel declaration is routable within one beat; no restart and no new refresh path. A host with a name in
+    both sources refuses every secrets job as `secret-profile-ambiguous`, so it advertises no secret profile.
+    An overlay the job path refuses (`resolveSettings`, its validation or the merged dollar rule) advertises
+    the env profiles, the row it always published.
+  - *Doctor.* The secrets section read `PI_SECRET_PROFILES` alone, so a trigger naming a panel profile was
+    reported as not declared. It now merges the overlay by the same rules, and reports each name declared in
+    both sources (failing), and a named overlay profile the worker would not use (failing, apart from "not
+    declared", since the fix is the resolver or the roots). It loads the probe through a dynamic import, as it
+    loads the provider oracle, because `secrets.mjs` loads pi; without it only the probe is skipped, and the
+    ambiguity check still runs on the raw overlay.
+  - *Own names only.* The profile charset admits `toString`, `constructor` and `__proto__`, so every lookup over
+    a profile table (`parseSecretProfiles`, `mergeSecretProfiles`, the resolver, doctor) uses `Object.hasOwn`, and
+    a parsed profile is stored with `Object.defineProperty` and copies are made by spread, both of which create own properties, never an assignment that could set a prototype.
+  Rejected: probing env resolvers in the advertisement (doctor reports a missing one, and it would change the
+  row of every existing host); keeping env profiles in the row of an ambiguous host (it would attract work it
+  refuses); a version gate on the `s:default` need (a receiver cannot tell an older worker that serves
+  `default` from its overlay from one that does not serve it at all, so a gate could only drop the need until
+  every row carries a version, which is the upgrade order stated above with more machinery).
+
 - **Rejected**:
   - ***A trigger naming the resolver path directly*** — this is the thing `DES-SERVICE-ENV-SETUP-SEAM`
     refused, and no bound recovers it: `triggers.json` is operator-authored but the whole design of the
@@ -12963,3 +13002,4 @@ a tunnel.
 | 2026-10-19 | Issue #707, doctor's backend section. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, its "`doctor` is what makes the declaration admissible" bullet (the rule issue #227 slice 2 wrote, f6dd252c): an `absent` word renders as a WARNING, no longer a failure, still first, ahead of the gate, because since the openshell venues a blessed venue legitimately declares properties absent and the ✗ failed doctor and `up` on every such deployment; the refusal of a deployment that needs the property is the floor's, whose ✗ (`PI_BACKEND_FLOOR is not met`) and boot refusal are UNCHANGED, checked, and the warning's fix names it. `DES-OPENSHELL-VENUE`'s "Setup (#707)" CI bullet CORRECTED to match: the lane asserts `up --yes` exits 0 and doctor prints no ✗. |
 | 2026-10-19 | Issue #707, review round 1 of #715. **`DES-OPENSHELL-VENUE` CORRECTED**, its "Setup (#707)" bullet: the worker unit gets `Wants=openshell-gateway.service` and NO `After=` (the 0.1.4 deb's unit is `After=default.target`, so the `After=` this bullet first named is an ordering cycle in which systemd deletes the worker's start job, measured; recorded among the Rejected); doctor's unit ⚠ now asks for the `Wants=` and flags an `After=`; the start offer is made only where `systemctl --user cat` finds the unit or `brew services info openshell` answers, with NVIDIA's release formula named (homebrew-core's defines no service); the registration offer only where `openshell gateway list -o json` reads empty, the command a fix otherwise; every CLI read bounded; the plist PATH byte-identical without the venue and never carrying an XML-unsafe directory; the CLI named in doctor's HOME/XDG_CONFIG_HOME line only where the venue is blessed; the worker's, the clients' and doctor's Valkey owner rules refuse a root-held Valkey for an openshell venue on Podman, as `up` does. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` CORRECTED** to match (the gateway pulled in, not ordered after); the two openshell keys are compared between this shell and `.env` only where an openshell venue is blessed. |
 | 2026-10-19 | Issue #707, review round 2 of #715. **`DES-OPENSHELL-VENUE` AMENDED**, its "Setup (#707)" bullet: the worker's boot hands the Valkey judgement `openshellUsed` (it handed `localUsed` and `podmanUsed` alone, so the root refusal round 1 added for an openshell venue on Podman never reached the boot), and `VALKEY_CONTEXT_KEYS` and doctor's resolution carry `PI_OPENSHELL_ENGINE`, so the admin panel's and doctor's clients judge it as the worker does. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` CORRECTED**: `readStackKeys` reads the two openshell keys in a second pass and refuses an odd line of theirs only where an openshell venue is blessed, naming them, so a `local`-only deployment is not stopped by a key nothing there reads. Also, unchanged in decision: the gateway list read accepts an array or `{gateways: [...]}` and the openshell lane prints the real one to measure it; the post-start poll ends at a 30 s wall-clock deadline; the engine probe is bounded; a `systemctl --user cat` that reaches no user bus is said as that. |
+| 2026-10-19 | Issue #704, the standalone fixes found while researching project secret bundles. **`DES-PER-TRIGGER-SECRET-PROFILE` AMENDED**, a dated paragraph: the job's need (`jobNeeds` adds `s:default` for a job with `run.secrets` and no profile, by `secretsArmed`'s rule, routed only to a host that advertises every need; on a mixed fleet a job with a second need can lose its route to an older host serving `default` from its overlay, so the workers upgrade before the receiver and the console), the host's advertisement (`servableSecretProfiles`: env profiles as declared plus overlay profiles whose resolver realpath is an executable inside `PI_SECRET_RESOLVER_ROOTS`, probed with the resolver's own `realExecutable`, read by the per-beat `caps` thunk, none while a name is declared in both sources) and doctor (merges the overlay by the same rules, fails on every ambiguous name and on a named overlay profile the worker would not use, loads the probe through a dynamic import because `secrets.mjs` loads pi, and still checks ambiguity without it); every profile lookup is by own name (`Object.hasOwn`); the `caps` thunk gates the overlay on `resolveSettings`, the job path's rule; three rejected alternatives. **`DES-TRIGGERS-UNIFIED-FILE` UNCHANGED, checked**: still one file read by both services; its writers now keep every other top-level key (`INT-TRIGGERS-FILE-CONTRACT`). **`DES-ONE-SHOT-DISARM-IN-THE-FILE` UNCHANGED, checked**: the disarm still adds exactly one key inside one entry, and it no longer deletes keys beside the array. **`DES-HOST-REGISTRY` UNCHANGED, checked**: no new field, and the content rule (names, never paths) holds. **Code evidence**: worker/src/triggers-file.mjs -> serialize, writeTriggers, disarmTrigger; worker/src/capabilities.mjs -> jobNeeds; worker/src/secret-profiles.mjs -> servableSecretProfiles; worker/src/secrets.mjs -> realExecutable; worker/src/start.mjs -> the `caps` thunk; worker/src/doctor.mjs -> the secrets section. |

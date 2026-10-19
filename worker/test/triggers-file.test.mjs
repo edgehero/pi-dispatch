@@ -795,3 +795,40 @@ test("the writer's own output can never trip the check", () => {
 	assert.deepEqual(res, { ok: true });
 	assert.equal(findDuplicateKey(fs.files[T_PATH]), null);
 });
+
+// ── issue #704: the file is a shared document, every top-level key besides `triggers` survives ──────────
+
+// A document with keys BEFORE and AFTER the array, so "kept in order, `triggers` replaced in place" is
+// pinned against a real position rather than the trivial one.
+const sharedDoc = (triggers) => ({
+	secretBundles: { acme: { from: "op", items: { GH_TOKEN: "op://vault/item/field" } } },
+	triggers,
+	x: [1],
+});
+const docFile = (doc) => `${JSON.stringify(doc, null, 2)}\n`;
+
+test("writeTriggers keeps every other top-level key, in order, with triggers replaced in place (#704)", () => {
+	const fs = triggerFs({ [T_PATH]: docFile(sharedDoc([cronTrigger()])) });
+	const res = writeTriggers({ triggersPath: T_PATH, fs, mutate: (list) => [...list, labelTrigger()] });
+	assert.deepEqual(res, { ok: true });
+	assert.equal(fs.files[T_PATH], docFile(sharedDoc([cronTrigger(), labelTrigger()])), "secretBundles and x come back byte-identical around the new array");
+	assert.deepEqual(Object.keys(JSON.parse(fs.files[T_PATH])), ["secretBundles", "triggers", "x"]);
+});
+
+test("a console delete keeps the other keys too, and a document without triggers gets it first (#704)", () => {
+	const fs = triggerFs({ [T_PATH]: docFile(sharedDoc([cronTrigger(), labelTrigger()])) });
+	assert.deepEqual(writeTriggers({ triggersPath: T_PATH, fs, mutate: (list) => list.filter((_, i) => i !== 0) }), { ok: true });
+	assert.equal(fs.files[T_PATH], docFile(sharedDoc([labelTrigger()])));
+	const fs2 = triggerFs({ [T_PATH]: docFile({ x: [1] }) });
+	assert.deepEqual(writeTriggers({ triggersPath: T_PATH, fs: fs2, mutate: () => [labelTrigger()] }), { ok: true });
+	assert.equal(fs2.files[T_PATH], docFile({ triggers: [labelTrigger()], x: [1] }));
+});
+
+test("disarmTrigger keeps every other top-level key, byte-identical in content (#704)", async () => {
+	const fs = triggerFs({ [T_PATH]: docFile(sharedDoc([cronTrigger(), onceTrigger(40)])) });
+	const res = await disarmTrigger({ triggersPath: T_PATH, index: 1, number: 40, jobId: "job-abc", at: AT, fs });
+	assert.deepEqual(res, { ok: true });
+	const expected = sharedDoc([cronTrigger(), onceTrigger(40)]);
+	expected.triggers[1].on.disarmed = { at: AT, jobId: "job-abc" };
+	assert.equal(fs.files[T_PATH], docFile(expected), "the disarm adds one key inside the array and touches nothing beside it");
+});

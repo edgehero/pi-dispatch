@@ -4687,7 +4687,12 @@ function secretsTriggersFile({ profile, kind = "github", folder, names = ["STRIP
 	return path;
 }
 
-const secretsSeams = () => collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", probeValkey: async () => true });
+// Hermetic since issue #704: doctor now reads the settings overlay's `secretProfiles`, and its default path is under
+// the account's home, so a real ~/.pi-dispatch/settings.json on the machine running the suite would flip these
+// findings. An empty home of its own puts the default overlay somewhere nothing wrote. ONE home for the file, made
+// on first use: doctor prints the home's paths, and a test comparing two runs' rows must see the same ones.
+let secretsHome = null;
+const secretsSeams = () => collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", probeValkey: async () => true, home: (secretsHome ??= tempDir("pi-home-")) });
 
 test("doctor: a trigger binding secrets with NO profile declared FAILS, and says the jobs refuse until fixed", async () => {
 	// A hard fail rather than a warning, worded like the run.resume/PI_SESSIONS_DIR check: these jobs
@@ -4779,6 +4784,71 @@ test("doctor: a garbled PI_SECRET_PROFILES is REPORTED, never thrown", async () 
 	const checks = await collectChecks(env, secretsSeams());
 	const hit = checks.find((c) => /PI_SECRET_PROFILES does not parse/.test(c.label));
 	assert.ok(hit && hit.ok === false);
+});
+
+// Issue #704: an overlay-declared profile is declared, by the worker's own rules. A real resolver file under a
+// realpath'd root, because the bound is checked on the realpath (macOS's /var is /private/var).
+function overlaySecretsFixture(overlayProfiles) {
+	const root = realpathSync(tempDir("pi-resolvers-"));
+	const resolver = join(root, "op.sh");
+	writeFileSync(resolver, "#!/bin/sh\nexit 0\n");
+	chmodSync(resolver, 0o755);
+	const settings = join(tempDir("pi-settings-"), "settings.json");
+	writeFileSync(settings, JSON.stringify({ secretProfiles: overlayProfiles(resolver) }));
+	return { root, resolver, settings };
+}
+
+test("doctor: a profile declared in the settings overlay inside the roots is declared (#704)", async () => {
+	const { root, resolver, settings } = overlaySecretsFixture((r) => ({ panel: r }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "panel" }), PI_SETTINGS_FILE: settings, PI_SECRET_RESOLVER_ROOTS: root };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /bind secrets/.test(c.label));
+	assert.equal(hit.ok, true, hit.label);
+	assert.ok(checks.some((c) => c.label === `Secret resolver profiles declared: panel -> ${resolver}`));
+});
+
+test("doctor: an overlay profile outside the roots is named as unusable, not as undeclared (#704)", async () => {
+	const { settings } = overlaySecretsFixture((r) => ({ panel: r }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "panel" }), PI_SETTINGS_FILE: settings };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /declared in the settings overlay but not usable/.test(c.label));
+	assert.ok(hit && hit.ok === false);
+	assert.match(hit.label, /: panel$/);
+	assert.match(hit.fix, /PI_SECRET_RESOLVER_ROOTS is unset/);
+	assert.equal(checks.find((c) => /bind secrets/.test(c.label)).ok, true, "the one cause prints one failure");
+});
+
+test("doctor: with the roots SET, an overlay resolver outside them is named as unusable, with the roots fix (#704)", async () => {
+	const { settings } = overlaySecretsFixture((r) => ({ panel: r }));
+	const elsewhere = realpathSync(tempDir("pi-other-root-"));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "panel" }), PI_SETTINGS_FILE: settings, PI_SECRET_RESOLVER_ROOTS: elsewhere };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /declared in the settings overlay but not usable/.test(c.label));
+	assert.ok(hit && hit.ok === false);
+	assert.match(hit.label, /: panel$/);
+	assert.equal(hit.fix, "the resolver must be an executable file whose real path sits inside PI_SECRET_RESOLVER_ROOTS -- these jobs refuse pre-spend as secret-profile-unknown until it is");
+});
+
+test("doctor: a profile named like an inherited property is not declared by inheritance (#704)", async () => {
+	// `toString` and `constructor` pass the profile charset, and every plain object answers `in` for them.
+	for (const profile of ["toString", "constructor"]) {
+		const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile }), PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+		const checks = await collectChecks(env, secretsSeams());
+		const hit = checks.find((c) => /bind secrets/.test(c.label));
+		assert.equal(hit.ok, false, profile);
+		assert.match(hit.label, new RegExp(`not declared: ${profile}$`));
+		assert.equal(checks.some((c) => /declared in both/.test(c.label)), false, `${profile}: no ambiguity invented`);
+	}
+});
+
+test("doctor: a name declared in both env and the overlay is reported as ambiguous (#704)", async () => {
+	const { root, settings } = overlaySecretsFixture((r) => ({ prod: r, other: r }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod" }), PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh,other:/opt/pi/o.sh", PI_SETTINGS_FILE: settings, PI_SECRET_RESOLVER_ROOTS: root };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /declared in both PI_SECRET_PROFILES and the settings overlay/.test(c.label));
+	assert.ok(hit && hit.ok === false);
+	assert.match(hit.label, /: other, prod$/, "every colliding name, not only the first");
+	assert.match(hit.fix, /secret-profile-ambiguous/);
 });
 
 test("doctor: the panel-authoring bound reads as SAFE when closed and as a disclosure when open", async () => {
