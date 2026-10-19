@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isJobNamespace, jobContainerName, JOB_NAME_PREFIX, reaperExec } from "./backend-local.mjs";
@@ -46,6 +47,20 @@ export const OPENSHELL_ENTRYPOINT = "/entrypoint.sh";
 export const PI_LANDLOCK = "/opt/pi-dispatch/pi-landlock";
 
 const SANDBOX = LAYOUTS.sandbox;
+
+/**
+ * A sandbox's name for a job's container name. OpenShell refuses a sandbox name longer than 19 characters (measured:
+ * "name exceeds maximum length (34 > 19)"), and a job's container name is `pi-job-<the queue's job id>`, routinely
+ * longer, so the sandbox is named by a hash of it: `pi-job-s` and 11 hex digits, 19 exactly, still inside the job
+ * namespace every sweep matches. A name already of that shape is its own sandbox name, so what `list` returned (a
+ * leftover the host budget seeded by its sandbox name) maps to itself, and every step, the stop and the gone-check
+ * included, goes through this one function.
+ */
+export const SANDBOX_NAME = /^pi-job-s[0-9a-f]{11}$/;
+export function sandboxNameOf(containerName) {
+	if (SANDBOX_NAME.test(containerName)) return containerName;
+	return `${JOB_NAME_PREFIX}s${createHash("sha256").update(String(containerName)).digest("hex").slice(0, 11)}`;
+}
 
 /**
  * The paths the runner's process tree may WRITE (pi-landlock's `--rw`): the job's workspace and session, the scratch
@@ -229,10 +244,11 @@ export function makeOpenshellBackend(opts = {}) {
 	const attempts = new Map();
 
 	const stageRun = async ({ opts: built }) => {
-		const { name, jobDir, size = DEFAULT_JOB_SIZE } = built;
+		const { jobDir, size = DEFAULT_JOB_SIZE } = built;
+		const name = sandboxNameOf(built.name);
 		const at = { name, jobDir, policyFile: `${jobDir}.openshell-policy.json`, uploadDir: `${jobDir}.openshell-up`, downloadDir: `${jobDir}.openshell-down`, transfers: [] };
-		attempts.set(name, at);
-		const spec = containerSpec({ image: built.image, name, jobDir, workspace: built.workspace, outboxDir: built.outboxDir, sessionDir: built.sessionDir, globalPiDir: built.globalPiDir });
+		attempts.set(built.name, at);
+		const spec = containerSpec({ image: built.image, name: built.name, jobDir, workspace: built.workspace, outboxDir: built.outboxDir, sessionDir: built.sessionDir, globalPiDir: built.globalPiDir });
 		at.transfers = transfersFromSpec(spec, { binds: false }).map((t) => ({ ...t, sandbox: sandboxPathOf(t.container) }));
 		const unmapped = at.transfers.find((t) => t.sandbox === null);
 		if (unmapped) throw new Error(`openshell: the sandbox layout has no place for ${unmapped.container}`);
@@ -302,9 +318,9 @@ export function makeOpenshellBackend(opts = {}) {
 	};
 
 	const teardownRun = async ({ opts: built }) => {
-		const name = built.name;
-		const at = attempts.get(name);
-		attempts.delete(name);
+		const name = sandboxNameOf(built.name);
+		const at = attempts.get(built.name);
+		attempts.delete(built.name);
 		// Deleted even when the stage never recorded the attempt: a create that answered nothing may still have made one.
 		try {
 			await run(["sandbox", "delete", name]);
@@ -336,7 +352,8 @@ export function makeOpenshellBackend(opts = {}) {
 		// OpenShell's CLI failures exit 1, the runner's own infrastructure code (measured).
 		neverStartedExits: [],
 		bin: "openshell",
-		buildArgs: (built) => openshellExecArgs({ name: built.name, env: built.env, gateway }),
+		// The sandbox's own name; PI_JOB_ID in the env stays the container name, which the exit line and its MAC carry.
+		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway }),
 		layout: "sandbox",
 		memoryLimitOf: (_args, built) => (built.size?.memMiB ?? DEFAULT_JOB_SIZE.memMiB) * 1024 * 1024,
 		// No live transcript, steering or recovery staging here yet: the session file is in the sandbox until the
@@ -402,7 +419,7 @@ export function makeOpenshellBackend(opts = {}) {
 		imagePreflight: makeImagePreflight({ image, bin: engine, copies: true, spawnFn }),
 		// The layer's policy is the egress control; there is no proxy to look for.
 		egressPreflight: async () => ({}),
-		stopContainer: async (name) => run(["sandbox", "delete", name]),
+		stopContainer: async (name) => run(["sandbox", "delete", sandboxNameOf(name)]),
 		reap: async () => {
 			try {
 				const owned = (await listOwned(run)).filter((s) => isJobNamespace(s.name));
@@ -419,11 +436,12 @@ export function makeOpenshellBackend(opts = {}) {
 				.map((s) => ({ name: s.name, memMiB: intLabel(s.labels?.[SIZE_LABEL_MEM]), cpuCenti: intLabel(s.labels?.[SIZE_LABEL_CPU]) })),
 		containerGone: async (name) => {
 			if (typeof name !== "string" || !isJobNamespace(name)) return null;
+			const sandbox = sandboxNameOf(name);
 			try {
-				const s = (await listOwned(run)).find((x) => x.name === name);
+				const s = (await listOwned(run)).find((x) => x.name === sandbox);
 				if (!s || SANDBOX_GONE_PHASES.has(s.phase)) return true;
 				if (!SANDBOX_UNSTARTED_PHASES.has(s.phase)) return false;
-				await run(["sandbox", "delete", name]);
+				await run(["sandbox", "delete", sandbox]);
 				return true;
 			} catch {
 				return null;

@@ -126,7 +126,10 @@ test("one run: create sized and labelled under the generated policy, read it bac
 	assert.deepEqual(steps, ["sandbox create", "policy get", "sandbox upload", "sandbox upload", "sandbox upload", "sandbox exec", "sandbox download", "sandbox download", "sandbox delete"]);
 	for (const call of fake.state.calls) assert.deepEqual(call.slice(0, 3), ["openshell", "--gateway", "lab"], "every step names the deployment's gateway");
 	const create = fake.state.calls[0];
-	for (const pair of [["--name", "pi-job-j1"], ["--from", `sha256:${"a".repeat(64)}`], ["--cpu", "1.5"], ["--memory", "2048Mi"]]) assert.equal(create[create.indexOf(pair[0]) + 1], pair[1], pair[0]);
+	const sb = mod.sandboxNameOf("pi-job-j1");
+	assert.match(sb, /^pi-job-s[0-9a-f]{11}$/);
+	assert.equal(sb.length, 19, "OpenShell refuses a sandbox name past 19 characters (measured)");
+	for (const pair of [["--name", sb], ["--from", `sha256:${"a".repeat(64)}`], ["--cpu", "1.5"], ["--memory", "2048Mi"]]) assert.equal(create[create.indexOf(pair[0]) + 1], pair[1], pair[0]);
 	assert.deepEqual(fake.state.engine, ["docker", "image", "inspect", "--format", "{{.Id}}", "pi-job:x"], "the ID is read from the gateway's own engine, by the job's image name");
 	assert.ok(create.includes("pi.dispatch.owner=pi-dispatch") && create.includes("pi.dispatch.mem=2048") && create.includes("pi.dispatch.cpu=150"));
 	assert.ok(create.includes("--no-auto-providers"));
@@ -207,7 +210,7 @@ test("two jobs at once: each attempt's teardown deletes its own sandbox only (#6
 		b.runContainer({ job: { ...JOB, id: "c" }, prepared: { jobDir: c.jobDir, workspace: c.workspace, live: c.live }, name: "pi-job-c", signal: new AbortController().signal }),
 	]);
 	const deletes = fake.state.calls.filter((call) => call[2] === "delete").map((call) => call[3]);
-	assert.deepEqual(deletes.sort(), ["pi-job-a", "pi-job-c"], "one delete each, of its own name");
+	assert.deepEqual(deletes.sort(), [mod.sandboxNameOf("pi-job-a"), mod.sandboxNameOf("pi-job-c")].sort(), "one delete each, of its own sandbox");
 });
 
 test("the per-job venue checks: a gateway not connected retries, one not on this host or with a global policy refuses, and so does a host without Landlock (#683)", { skip }, async () => {
@@ -238,31 +241,34 @@ test("judgeGatewayStatus: loopback and unix sockets are local, anything else is 
 });
 
 test("the host budget's reads: every page, the size labels, gone and unstarted phases; the reaper's tri-state (#683)", { skip }, async () => {
+	const [run, done, fresh] = ["pi-job-run", "pi-job-done", "pi-job-new"].map((n) => mod.sandboxNameOf(n));
 	const sandboxes = [
-		{ name: "pi-job-run", phase: "Ready", labels: { "pi.dispatch.mem": "4096", "pi.dispatch.cpu": "200" } },
-		{ name: "pi-job-done", phase: "Completed", labels: {} },
-		{ name: "pi-job-new", phase: "Provisioning", labels: { "pi.dispatch.mem": "x" } },
+		{ name: run, phase: "Ready", labels: { "pi.dispatch.mem": "4096", "pi.dispatch.cpu": "200" } },
+		{ name: done, phase: "Completed", labels: {} },
+		{ name: fresh, phase: "Provisioning", labels: { "pi.dispatch.mem": "x" } },
 		{ name: "someone-else", phase: "Ready", labels: {} },
 	];
 	const fake = fakeOpenshell({ sandboxes });
 	const b = bundle(fake);
+	// Listed by their sandbox names, which the gone-check maps to themselves, so a seeded leftover is swept.
 	assert.deepEqual(await b.listJobContainers(), [
-		{ name: "pi-job-run", memMiB: 4096, cpuCenti: 200 },
-		{ name: "pi-job-new", memMiB: null, cpuCenti: null },
+		{ name: run, memMiB: 4096, cpuCenti: 200 },
+		{ name: fresh, memMiB: null, cpuCenti: null },
 	]);
+	assert.equal(await b.containerGone(run), false, "a sandbox name maps to itself");
 	assert.ok(fake.state.calls.some((c) => c.includes("--page-token") && c.includes("p2")), "the second page is read");
 	assert.ok(fake.state.calls.every((c) => c[2] !== "list" || c.includes("pi.dispatch.owner=pi-dispatch")), "selected by the owner label");
 	assert.equal(await b.containerGone("pi-job-done"), true);
 	assert.equal(await b.containerGone("pi-job-absent"), true);
 	assert.equal(await b.containerGone("pi-job-run"), false);
 	assert.equal(await b.containerGone("pi-job-new"), true, "unstarted: deleted, then gone");
-	assert.ok(fake.state.calls.some((c) => c[2] === "delete" && c[3] === "pi-job-new"));
+	assert.ok(fake.state.calls.some((c) => c[2] === "delete" && c[3] === fresh));
 	assert.equal(await b.containerGone("someone-else"), null, "outside the namespace: not this worker's to answer");
 	assert.equal(await bundle({ ...fake, exec: async () => Promise.reject(new Error("down")) }).containerGone("pi-job-run"), null);
 	await assert.rejects(bundle({ ...fake, exec: async () => Promise.reject(new Error("down")) }).listJobContainers(), "an unanswered listing throws");
 	const reaping = fakeOpenshell({ sandboxes });
 	assert.deepEqual(await bundle(reaping).reap(), { reaped: true });
-	assert.deepEqual(reaping.state.calls.filter((c) => c[2] === "delete").map((c) => c[3]).sort(), ["pi-job-done", "pi-job-new", "pi-job-run"]);
+	assert.deepEqual(reaping.state.calls.filter((c) => c[2] === "delete").map((c) => c[3]).sort(), [run, done, fresh].sort());
 	assert.deepEqual(await bundle({ ...reaping, exec: async () => Promise.reject(new Error("down")) }).reap(), { reaped: false });
 });
 
@@ -301,4 +307,15 @@ test("the sandbox policy lists the image's trees read-only, its writable ones re
 	assert.ok(!("network_policies" in policy));
 	// pi-landlock's --rw set is the policy's writable set plus the job's two writable outputs, and never the job inputs.
 	assert.deepEqual([...mod.OPENSHELL_WRITABLE].sort(), ["/sandbox/workspace", "/sandbox/session", ...policy.filesystem_policy.read_write].sort());
+});
+
+test("sandboxNameOf: 19 characters in the job namespace, stable, distinct per container, and a sandbox name maps to itself (#683)", { skip }, () => {
+	const long = `pi-job-${"repeat_sched-ul.e_1792391515419".repeat(3)}`;
+	const name = mod.sandboxNameOf(long);
+	assert.equal(name.length, 19);
+	assert.ok(name.startsWith("pi-job-"));
+	assert.equal(mod.sandboxNameOf(long), name, "stable: the stop and the gone-check reach the sandbox the run made");
+	assert.notEqual(mod.sandboxNameOf("pi-job-1"), mod.sandboxNameOf("pi-job-2"));
+	assert.equal(mod.sandboxNameOf(name), name);
+	assert.match(mod.sandboxNameOf("pi-job-1"), /^[a-z0-9-]+$/, "lower-case letters, digits and hyphens only");
 });
