@@ -131,7 +131,7 @@ async function readBack(b) {
 	output.set("last", "");
 	const name = `pi-job-conformance-${nonce}-readback`;
 	const result = await b.runContainer({ job: JOB, prepared: jobDirFor("readback"), name, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 100 } });
-	const said = Object.fromEntries([...String(output.get("last")).matchAll(/^probe ([A-Za-z.-]+)[=:]\s*(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
+	const said = Object.fromEntries([...String(output.get("last")).matchAll(/^probe ([A-Za-z.-]+)[=:][ \t]*(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
 	const gone = await b.containerGone(name);
 	let pinned;
 	try {
