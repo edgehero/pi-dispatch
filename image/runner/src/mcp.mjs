@@ -1,3 +1,4 @@
+import { LAYOUT } from "./layout.mjs";
 import { accessSync, constants, readFileSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import { isJsonRpcResponse, McpHttpError, StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
@@ -21,7 +22,7 @@ import { configError, EXIT_INFRA } from "./outcome.mjs";
  */
 
 /** Where the worker writes the job's document (INT-CONTAINER-JOB-INPUTS). */
-export const JOB_MCP_PATH = "/job/mcp.json";
+export const JOB_MCP_PATH = `${LAYOUT.job}/mcp.json`;
 /** The document version this runner reads; the worker's `JOB_MCP_VERSION`. */
 export const JOB_MCP_VERSION = 1;
 /** The env var naming the servers, in the document's order, comma separated. */
@@ -107,7 +108,7 @@ export const MCP_STDIO_BASE_ENV = Object.freeze([
 const PINNED_ENV = new Set(["NODE_OPTIONS", CHILD_LEDGER_ENV, RUNNER_PID_ENV]);
 
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-const invalid = (why) => configError(`/job/mcp.json cannot be used: ${why}`, "mcp-config-invalid");
+const invalid = (why) => configError(`${JOB_MCP_PATH} cannot be used: ${why}`, "mcp-config-invalid");
 
 /** The names in PI_MCP_SERVERS, or [] when it is unset or empty. */
 export function mcpServerNames(env = process.env) {
@@ -170,7 +171,7 @@ export function readJobMcp({ path = JOB_MCP_PATH, env = process.env, read = read
 	} catch (error) {
 		if (error?.code !== "ENOENT") throw invalid(`it cannot be read (${error?.code ?? "unreadable"})`);
 		if (names.length === 0) return null;
-		throw configError(`${MCP_SERVERS_ENV} names ${names.length} MCP server(s) but /job/mcp.json is absent`, "mcp-config-mismatch");
+		throw configError(`${MCP_SERVERS_ENV} names ${names.length} MCP server(s) but ${JOB_MCP_PATH} is absent`, "mcp-config-mismatch");
 	}
 	let doc;
 	try {
@@ -186,7 +187,7 @@ export function readJobMcp({ path = JOB_MCP_PATH, env = process.env, read = read
 	if (!isRecord(doc.servers) || !isRecord(doc.refs)) throw invalid("servers and refs must be objects");
 	const listed = Object.keys(doc.servers);
 	if (listed.join(",") !== names.join(",") || Object.keys(doc.refs).join(",") !== names.join(",")) {
-		throw configError(`/job/mcp.json holds servers ${JSON.stringify(listed)} but ${MCP_SERVERS_ENV} names ${JSON.stringify(names)}`, "mcp-config-mismatch");
+		throw configError(`${JOB_MCP_PATH} holds servers ${JSON.stringify(listed)} but ${MCP_SERVERS_ENV} names ${JSON.stringify(names)}`, "mcp-config-mismatch");
 	}
 	for (const name of names) {
 		const server = doc.servers[name];
@@ -491,7 +492,7 @@ export function guardedApi(pi, captured) {
  * The three factories for `buildLoadedResourceLoader` and the lifecycle `run-job.mjs` drives, for a document
  * `readJobMcp` returned. `pi` is the pi-coding-agent module (its three create* factories); `env` resolves references.
  */
-export function createJobMcp(doc, { pi, env = process.env, cwd = "/workspace", log = () => {}, now = Date.now, transports = { StdioTransport, StreamableHttpTransport } } = {}) {
+export function createJobMcp(doc, { pi, env = process.env, cwd = LAYOUT.workspace, log = () => {}, now = Date.now, transports = { StdioTransport, StreamableHttpTransport } } = {}) {
 	const names = Object.keys(doc.servers);
 	// A server the operator turned off is never connected by pi, so it is not waited for.
 	const track = readiness(names.filter((name) => doc.servers[name].enabled !== false));

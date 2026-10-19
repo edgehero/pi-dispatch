@@ -1,3 +1,4 @@
+import { LAYOUT } from "./layout.mjs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 
@@ -28,9 +29,9 @@ export const PLAN_FIELDS = Object.freeze(["body", "plan", "version", "basis", "v
 export const PLAN_RULES = Object.freeze(["json", "too-large", "shape", "unknown-key", "missing", "type", "range", "newer", "format", "duplicate", "unknown-id", "control-char", "too-long", "past", "too-far", "missing-project", "missing-repo", "unknown-ref"]);
 
 /** The plan file and the snapshot, where the worker's mounts put them. */
-export const OUTBOX_DIR = "/outbox";
+export const OUTBOX_DIR = LAYOUT.outbox;
 export const PLAN_FILE = "priorities.json";
-export const SNAPSHOT_PATH = "/job/portfolio.json";
+export const SNAPSHOT_PATH = `${LAYOUT.job}/portfolio.json`;
 
 const PLAN_KEYS = new Set(["version", "basis", "validUntil", "projects"]);
 const PROJECT_KEYS = new Set(["id", "weight", "reason", "repos"]);

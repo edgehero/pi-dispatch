@@ -567,6 +567,7 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 		"/j:/job:ro,Z",
 		"-v",
 		"/j/workspace:/workspace:Z",
+		"--workdir=/workspace",
 		"pi-job:pinned",
 	]);
 	assert.equal(args.filter((a) => a.startsWith("--userns")).length, 1);
@@ -712,4 +713,23 @@ test("issue #596, phase 2: only the job builder and the reserve's helper spell -
 	for (const f of readdirSync(deploy)) assert.equal(/cgroup.?parent|pidispatch\.slice/i.test(readFileSync(new URL(f, deploy), "utf8")), false, f);
 	// up.mjs runs the proxy from a literal argv; it names no parent.
 	assert.equal(readFileSync(new URL("up.mjs", dir), "utf8").includes("cgroup"), false);
+});
+
+test("the argv pins the working directory to the workspace mount, on docker and podman alike, and a dockerExtra cannot move it (#683)", () => {
+	// The image's WORKDIR moved to /sandbox (a copying venue's tree); a binding venue's job must still start in its repo.
+	for (const args of [buildDockerRunArgs(base), buildPodmanRunArgs({ ...base, user: "1234:1234" })]) {
+		assert.deepEqual(args.filter((a) => a.startsWith("--workdir") || a === "-w"), ["--workdir=/workspace"]);
+		assert.equal(args[args.length - 2], "--workdir=/workspace", "last before the image, after every dockerExtra token");
+	}
+	for (const flag of ["--workdir", "-w"]) {
+		assert.ok(DOCKER_EXTRA_FORBIDDEN.includes(flag), `${flag} must be denied`);
+		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: [flag, "/"] }), /supersede the isolation boundary/, flag);
+		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: [`${flag}=/`] }), /supersede the isolation boundary/, flag);
+	}
+});
+
+test("the image's WORKDIR is /sandbox, owned by its user, and /workspace still exists in it (#683)", () => {
+	const dockerfile = readFileSync(new URL("../../image/Dockerfile", import.meta.url), "utf8");
+	assert.deepEqual([...dockerfile.matchAll(/^WORKDIR (\S+)$/gm)].map((m) => m[1]).slice(-1), ["/sandbox"], "the final stage's last WORKDIR");
+	assert.match(dockerfile, /^RUN mkdir -p \/sandbox \/workspace && chown pi:pi \/sandbox && chmod 0755 \/sandbox \/workspace$/m);
 });

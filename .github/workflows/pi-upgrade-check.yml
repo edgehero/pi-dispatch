@@ -509,7 +509,9 @@ jobs:
       # claiming costCap an offline job with a fake key under a cap of 0 stopped before its first call (issue #501), and
       # for one claiming modelPolicy an offline job whose list lacks its model stopped before its first call (issue #502).
       - name: "CORE: the conformance checklist any nameable image must pass"
-        run: ./image/verify-image.sh "$IMAGE_REF"
+        # VERIFY_REQUIRE_LANDLOCK (issue #683): this runner's kernel has Landlock, so pi-landlock's confinement must be
+        # PROVED here, never skipped as it is on a host without Landlock (Docker Desktop's LinuxKit kernel).
+        run: VERIFY_REQUIRE_LANDLOCK=1 ./image/verify-image.sh "$IMAGE_REF"
 
       # --- INT-CONTAINER-RUNTIME-CONTRACT (costCap, issue #501) ---
       # The checklist above proves a CLAIMED capability; it cannot notice one this image stopped claiming. Dropping
