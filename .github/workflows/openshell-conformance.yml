@@ -80,6 +80,11 @@ jobs:
       - name: Build the job image
         run: docker build -f image/Dockerfile -t pi-job:ci .
 
+      # Issue #684: a model server stand-in on the gateway host, which the generated policy reaches through OpenShell's
+      # host aliases (any HTTP answer will do; it holds no data).
+      - name: A stand-in server on the gateway host
+        run: nohup python3 -m http.server 18080 --bind 0.0.0.0 > "$RUNNER_TEMP/standin.log" 2>&1 &
+
       - name: Conformance (the real bundle, the real runner)
         run: PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
 

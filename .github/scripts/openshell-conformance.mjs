@@ -74,6 +74,16 @@ case "$c" in
 		echo "probe ifaces=$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ' ')"
 		echo "probe egress=$(node -e 'const s=require("net").connect({host:"1.1.1.1",port:443,timeout:5000});s.on("connect",()=>{console.log("open");process.exit(0)});s.on("timeout",()=>{console.log("blocked");process.exit(0)});s.on("error",()=>{console.log("blocked");process.exit(0)})')"
 		if echo planted >> /sandbox/job/prompt.md 2>/dev/null; then echo "probe jobwrite=allowed"; else echo "probe jobwrite=denied"; fi
+		# Issue #684: the generated policy, read from inside. An allowlisted host answers (any HTTP status), an unlisted
+		# one does not, and a model server on the gateway host answers under each alias the policy names.
+		for u in https://api.anthropic.com/ https://example.com/ http://host.openshell.internal:18080/ http://host.docker.internal:18080/ https://github.com/ https://api.github.com/; do
+			echo "probe url $u=$(node -e 'fetch(process.argv[1],{signal:AbortSignal.timeout(10000)}).then(r=>console.log("reached",r.status),e=>console.log("refused",e.cause?.code??e.name))' "$u")"
+		done
+		# The forge rule: a push to another repository than the job's is refused by the LAYER (its own 403 body names
+		# the policy), never answered by GitHub, which would say 401.
+		for u in https://github.com/octocat/Hello-World.git/git-receive-pack; do
+			echo "probe push $u=$(node -e 'fetch(process.argv[1],{method:"POST",signal:AbortSignal.timeout(10000)}).then(async r=>console.log(r.status,/policy/i.test(await r.text())?"policy":"upstream"),e=>console.log("refused",e.cause?.code??e.name))' "$u")"
+		done
 		exit 0 ;;
 	*) exit "$c" ;;
 esac
@@ -94,7 +104,10 @@ const bundleFor = (img, extra = {}) =>
 		onOutput: (chunk) => output.set("last", (output.get("last") ?? "") + String(chunk)),
 		...extra,
 	});
-const backend = bundleFor(probeImage);
+// Issue #684: the policy every probe runs under: the provider's host, and a model server on the gateway host (the
+// workflow starts one on 18080) under both aliases. example.com is deliberately absent.
+const POLICY_SOURCES = { readAllowlist: () => ["api.anthropic.com", ".github.com"], readEndpoints: () => [{ id: "lab-a", host: "host.openshell.internal", port: 18080, slots: 1 }, { id: "lab-b", host: "host.docker.internal", port: 18080, slots: 1 }] };
+const backend = bundleFor(probeImage, POLICY_SOURCES);
 let n = 0;
 const jobDirFor = (prompt) => {
 	const jobDir = join(scratch, `job-${++n}`);
@@ -104,7 +117,7 @@ const jobDirFor = (prompt) => {
 	nodeFs.writeFileSync(join(jobDir, "session", "current.jsonl"), "");
 	return { jobDir, workspace: join(jobDir, "workspace"), live: { hostDir: join(jobDir, "session") } };
 };
-const JOB = { id: "conformance", kind: "github", provider: "anthropic", model: "claude-sonnet-4-5-20250929", maxTurns: 1 };
+const JOB = { id: "conformance", kind: "github", repo: "edgehero/pi-dispatch-conformance", provider: "anthropic", model: "claude-sonnet-4-5-20250929", maxTurns: 1 };
 
 async function probe(b, { exitCode, aborted = false }) {
 	const ac = new AbortController();
@@ -132,6 +145,9 @@ async function readBack(b) {
 	const name = `pi-job-conformance-${nonce}-readback`;
 	const result = await b.runContainer({ job: JOB, prepared: jobDirFor("readback"), name, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 100 } });
 	const said = Object.fromEntries([...String(output.get("last")).matchAll(/^probe ([A-Za-z.-]+)[=:][ \t]*(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
+	const urls = Object.fromEntries([...String(output.get("last")).matchAll(/^probe url (\S+)=(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
+	const pushes = Object.fromEntries([...String(output.get("last")).matchAll(/^probe push (\S+)=(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
+	Object.assign(readings, { urls, pushes });
 	const gone = await b.containerGone(name);
 	let pinned;
 	try {
@@ -163,6 +179,16 @@ for (const f of r.findings) {
 	console.log(`${f.ok ? (f.unverifiable ? "ABSTAIN" : "ok     ") : "FAIL   "} ${f.property ?? f.check}: ${f.detail ?? ""}`);
 	if (!f.ok) failed = true;
 	if (f.unverifiable && READ_BACK_BY_A_LIVE_PROBE.includes(f.property ?? f.check)) failed = true;
+}
+// Issue #684: the generated policy, held to what it says: the allowlisted host and both model-server aliases reached, the
+// unlisted host refused.
+{
+	const u = readings.urls ?? {};
+	const reached = (url) => /^reached /.test(u[url] ?? "");
+	const push = readings.pushes?.["https://github.com/octocat/Hello-World.git/git-receive-pack"] ?? "";
+	const ok = reached("https://api.anthropic.com/") && !reached("https://example.com/") && reached("http://host.openshell.internal:18080/") && reached("http://host.docker.internal:18080/") && reached("https://github.com/") && reached("https://api.github.com/") && /^403 policy$/.test(push);
+	console.log(`${ok ? "ok     " : "FAIL   "} the generated policy: ${JSON.stringify({ ...u, push })}`);
+	if (!ok) failed = true;
 }
 // readOnlyJobInputs is not in the harness's read-back list (the transfer check covers its word); this script reads it.
 console.log(`${readings.readOnlyJobInputs?.ok ? "ok     " : "FAIL   "} readOnlyJobInputs (live): ${readings.readOnlyJobInputs?.detail}`);

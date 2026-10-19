@@ -31,7 +31,7 @@ function fakeOpenshell({ phase = "Ready", policyBack = null, sandboxes = [], fai
 	const exec = async (bin, args) => {
 		if (bin === "docker" || bin === "podman") {
 			state.engine = [bin, ...args];
-			return { stdout: `sha256:${"a".repeat(64)}\n`, stderr: "" };
+			return { stdout: `sha256:${"a".repeat(64)}|/opt/pi-dispatch/runner-node,/usr/local/bin/node\n`, stderr: "" };
 		}
 		state.calls.push([bin, ...args]);
 		const rest = args[0] === "--gateway" ? args.slice(2) : args;
@@ -135,7 +135,7 @@ test("one run: create sized and labelled under the generated policy, read it bac
 	assert.match(sb, /^pi-job-s[0-9a-f]{11}$/);
 	assert.equal(sb.length, 19, "OpenShell refuses a sandbox name past 19 characters (measured)");
 	for (const pair of [["--name", sb], ["--from", `sha256:${"a".repeat(64)}`], ["--cpu", "1.5"], ["--memory", "2048Mi"]]) assert.equal(create[create.indexOf(pair[0]) + 1], pair[1], pair[0]);
-	assert.deepEqual(fake.state.engine, ["docker", "image", "inspect", "--format", "{{.Id}}", "pi-job:x"], "the ID is read from the gateway's own engine, by the job's image name");
+	assert.deepEqual(fake.state.engine, ["docker", "image", "inspect", "--format", '{{.Id}}|{{index .Config.Labels "dev.pi-dispatch.net-binaries"}}', "pi-job:x"], "the ID and the network binaries are read from the gateway's own engine, by the job's image name");
 	assert.ok(create.includes("pi.dispatch.owner=pi-dispatch") && create.includes("pi.dispatch.mem=2048") && create.includes("pi.dispatch.cpu=150"));
 	assert.ok(create.includes("--no-auto-providers"));
 	assert.deepEqual(fake.state.written.policy, mod.sandboxPolicy(), "the policy written is the generated one");
@@ -371,4 +371,65 @@ test("the gone-check never calls a live attempt's sandbox an orphan, by either o
 	assert.deepEqual(answer, [false, false], "live: not gone, not deleted");
 	assert.equal(fake.state.calls.filter((c) => c[2] === "delete").length, 1, "only the attempt's own teardown deleted it");
 	assert.equal(await b.containerGone(name), true, "once the attempt is over, the same unstarted leftover is deleted and gone");
+});
+
+test("a job's network policy (#684): generated from the deployment's allowlist and endpoints, written, and read back with OpenShell's one baseline addition", { skip }, async () => {
+	const fake = fakeOpenshell();
+	// What OpenShell 0.1.4 reads back for a policy with a network rule (measured): /var/log added read-only.
+	const exec = async (bin, args) => {
+		const answer = await fake.exec(bin, args);
+		if (args.includes("--full")) {
+			const doc = JSON.parse(answer.stdout);
+			doc.policy.filesystem_policy.read_only.push("/var/log");
+			return { ...answer, stdout: JSON.stringify(doc) };
+		}
+		return answer;
+	};
+	const dirs = jobDirs();
+	const b = bundle({ ...fake, exec }, { readAllowlist: () => ["api.anthropic.com", ".github.com"], readEndpoints: () => [{ id: "o", host: "host.docker.internal", port: 11434, slots: 1 }] });
+	const result = await b.runContainer({ job: { ...JOB, repo: "acme/widget" }, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.equal(result.code, 0);
+	const rules = Object.values(fake.state.written.policy.network_policies);
+	assert.deepEqual(rules.map((r) => `${r.endpoints[0].host}:${r.endpoints[0].port}`).sort(), ["*.github.com:443", "api.anthropic.com:443", "github.com:443", "host.docker.internal:11434"]);
+	assert.deepEqual(rules[0].binaries, [{ path: "/opt/pi-dispatch/runner-node" }, { path: "/usr/local/bin/node" }], "the runner's node, then the image's own declared binaries");
+	// The same written body without the baseline addition would be a mismatch, and is: never started.
+	const strict = fakeOpenshell();
+	const dirs2 = jobDirs();
+	const exact = bundle({ ...strict, exec: async (bin, args) => { const a = await strict.exec(bin, args); if (args.includes("--full")) { const d = JSON.parse(a.stdout); d.policy.filesystem_policy.read_only.push("/var/log", "/srv"); return { ...a, stdout: JSON.stringify(d) }; } return a; } }, { readAllowlist: () => ["api.anthropic.com"] });
+	await assert.rejects(exact.runContainer({ job: JOB, prepared: { jobDir: dirs2.jobDir, workspace: dirs2.workspace, live: dirs2.live }, name: "pi-job-j2", signal: new AbortController().signal }), (err) => err.reason === "container-never-started", "anything beyond the measured addition refuses");
+});
+
+test("an egress source the venue cannot translate refuses the job before spend, with the entry in the log only (#684)", { skip }, async () => {
+	const logs = [];
+	const refused = await bundle(fakeOpenshell(), { readAllowlist: () => [".com"], log: (e, f) => logs.push([e, f]) }).observationPreflight({ kind: "github", repo: "a/b" });
+	assert.equal(refused.venueRefused.reason, "openshell-egress-untranslatable");
+	assert.equal(refused.venueRefused.comment, mod.OPENSHELL_REFUSALS["openshell-egress-untranslatable"]);
+	assert.doesNotMatch(refused.venueRefused.comment, /\.com/, "the entry never reaches a forge comment");
+	assert.ok(logs.some(([e, f]) => e === "openshell_policy_untranslatable" && f.entry === ".com"));
+	const unread = await bundle(fakeOpenshell(), { readAllowlist: () => { throw new Error("EACCES"); } }).observationPreflight({ kind: "github" });
+	assert.equal(unread.unavailable, true, "a source that cannot be read is infrastructure");
+});
+
+test("the staged job's mcp.json moves overlay commands to the sandbox layout; the host's file is untouched (#684)", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const dirs = jobDirs();
+	const doc = { version: 1, servers: { local: { command: "/opt/pi-global/mcp/bin/server", args: ["--root", "/opt/pi-global/mcp/data", "-v"] }, forge: { command: "/usr/local/bin/forge-mcp-github" } } };
+	writeFileSync(join(dirs.jobDir, "mcp.json"), JSON.stringify(doc), { mode: 0o444 });
+	let staged = null;
+	const exec = async (bin, args) => {
+		if (args.includes("upload") && args.some((a) => a.endsWith("/job"))) staged = JSON.parse(readFileSync(join(args.find((a) => a.endsWith("/job")), "mcp.json"), "utf8"));
+		return fake.exec(bin, args);
+	};
+	await bundle({ ...fake, exec }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.deepEqual(staged.servers.local, { command: "/sandbox/pi-global/mcp/bin/server", args: ["--root", "/sandbox/pi-global/mcp/data", "-v"] });
+	assert.deepEqual(staged.servers.forge, { command: "/usr/local/bin/forge-mcp-github" }, "a baked command is not the overlay's");
+	assert.deepEqual(JSON.parse(readFileSync(join(dirs.jobDir, "mcp.json"), "utf8")), doc, "the host's own copy is as the preparer wrote it");
+});
+
+test("an image without /var/log reads back as written, which is also accepted; any other difference is not (#684)", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const dirs = jobDirs();
+	const result = await bundle(fake, { readAllowlist: () => ["api.anthropic.com"] }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.equal(result.code, 0, "the fake reads back exactly the body written");
+	assert.deepEqual(mod.expectedPolicies({ version: 1 }), [{ version: 1 }], "no rule, nothing added");
 });

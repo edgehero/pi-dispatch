@@ -452,6 +452,9 @@ PROBE
 					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 \
 					"$IMAGE_REF" 2>&1) && layout_code=0 || layout_code=$?
 				layout_exit=$(echo "$layout_out" | grep '"event":"exit"' | tail -1)
+				# Issue #684: a copying venue's network policy names the image's binaries, so the claim needs the label.
+				[ -n "$net_binaries" ] && [ "$net_binaries" != "<no value>" ] \
+					|| { rm -rf "$layout_job" "$layout_ws"; fail "the image declares 'sandboxLayout' but no dev.pi-dispatch.net-binaries label: a copying venue's network policy would match no binary"; }
 				[ "$layout_code" = 2 ] && echo "$layout_exit" | grep -q '"reason":"cost-cap"' \
 					|| { rm -rf "$layout_job" "$layout_ws"; fail "the image declares 'sandboxLayout' but a job on PI_JOB_LAYOUT=sandbox did not find its prompt under /sandbox/job (exit $layout_code: $layout_exit)"; }
 				# Second, /opt/pi-dispatch/pi-landlock confines every write of the tree it starts to the --rw paths. Where the
