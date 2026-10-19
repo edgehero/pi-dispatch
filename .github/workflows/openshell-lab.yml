@@ -39,7 +39,7 @@ jobs:
       - name: Build the lab image
         run: docker build -t os-lab:1 .github/lab
       - name: Probes
-        run: mkdir -p "$RUNNER_TEMP/lab" && cp .github/lab/lab.sh "$RUNNER_TEMP/lab/" && cd "$RUNNER_TEMP/lab" && ./lab.sh 2>&1
+        run: mkdir -p "$RUNNER_TEMP/lab" && cp .github/lab/lab2.sh "$RUNNER_TEMP/lab/" && cd "$RUNNER_TEMP/lab" && ./lab2.sh 2>&1
       - name: Gateway log
         if: always()
         run: tail -200 "$RUNNER_TEMP/gateway.log" || true
