@@ -2616,3 +2616,36 @@ test("run.mcp: prepare writes the document to the job folder, read-only, and not
 	const none = await prepare(ghJob, "tok", {});
 	assert.ok(!readdirSync(none.jobDir).includes("mcp.json"));
 });
+
+test("a venue's own refusal (#683) is a policy result before any spend, with the venue's fixed sentence and the reason it names", async () => {
+	const redis = fakeRedis();
+	const texts = [];
+	const logged = [];
+	const { deps: d, calls } = deps({
+		redis,
+		observationPreflight: async () => ({ venueRefused: { reason: "openshell-gateway-not-local", comment: "Refused: fixed words. Not run." } }),
+		comment: async (_j, t) => texts.push(t),
+		log: (event, fields) => logged.push([event, fields]),
+	});
+	const r = await runJob(ghJob, d);
+	assert.deepEqual([r.outcome, r.reason, r.budgetReserved], ["policy", "openshell-gateway-not-local", false]);
+	assert.equal(redis.incrCalls, 0, "nothing reserved");
+	assert.ok(!calls.includes("run-container") && !calls.includes("prepare") && !calls.some((c) => c.startsWith("mint:")));
+	assert.deepEqual(texts, ["Refused: fixed words. Not run."]);
+	assert.ok(logged.some(([e, f]) => e === "refused_venue" && f.reason === "openshell-gateway-not-local"));
+});
+
+test("a folder job on a venue that declares localFolders absent is refused before any spend, the loader's blind spot (#683)", async () => {
+	// A trigger with no run.backend on a deployment whose DEFAULT is such a venue: the loader could not see it.
+	const redis = fakeRedis();
+	const texts = [];
+	const { deps: d, calls } = deps({ redis, blessedBackends: ["openshell"], comment: async (_j, t) => texts.push(t), log: () => {} });
+	const r = await runJob({ kind: "local", folder: "/home/rob/proj", task: "t", provider: "anthropic", model: "m", maxTurns: 5 }, d);
+	assert.deepEqual([r.outcome, r.reason, r.budgetReserved], ["policy", "venue-local-folders-unsupported", false]);
+	assert.equal(redis.incrCalls, 0);
+	assert.ok(!calls.includes("run-container"));
+	assert.match(texts[0], /copies a job's files/);
+	// The same job on a binding venue is not refused for it.
+	const { deps: ok } = deps({ redis: fakeRedis(), blessedBackends: ["local"], observationPreflight: async () => ({ venueRefused: { reason: "stop-here", comment: "x" } }), comment: async () => {}, log: () => {} });
+	assert.equal((await runJob({ kind: "local", folder: "/home/rob/proj", task: "t", provider: "anthropic", model: "m", maxTurns: 5 }, ok)).reason, "stop-here", "past the folder check, stopped at the next gate");
+});

@@ -1,4 +1,4 @@
-import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
+import { ABSENT, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseLedgers, reserveLedgers } from "./budget.mjs";
@@ -42,6 +42,9 @@ export const OBSERVATION_COMMENT = Object.freeze({
 	[PODMAN_BOUNDS_DELEGATED]: "the worker's rootless Podman is not observed applying a container's pid, memory and cpu bounds",
 	[PODMAN_ADDS_NO_MOUNTS]: "the worker's rootless Podman is not observed adding no mounts of its own to a job container",
 	[PODMAN_SERVICE_LOCAL]: "the podman CLI is not observed running containers on this host rather than through a remote service, so the job's credentials could cross a network the deployment does not own",
+	// Issue #683. Never reached through a floor alone: the openshell venue refuses a gateway it does not observe local
+	// whatever the floor says (`venueRefused`), and this sentence is the floor's half for a deployment that also asks.
+	[OPENSHELL_GATEWAY_LOCAL]: "the OpenShell gateway is not observed listening on this host, so the job's credentials could cross a network the deployment does not own",
 });
 
 /**
@@ -774,6 +777,16 @@ async function runAttempt(job, deps, durable) {
 			log("refused_backend_unblessed", { backend: job.backend, blessed: blessedBackends });
 			return { outcome: "policy", reason: "backend-unblessed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
+		// Issue #683: a folder job (a local run, a cron trigger's folder) on a venue that declares `localFolders` absent.
+		// The loader refuses a trigger that NAMES such a venue (`refusesLocalWorkspace`); this is the one it could not
+		// see, a trigger with no `run.backend` on a deployment whose DEFAULT is such a venue. A copy is edited elsewhere
+		// and written back afterwards, racing every edit the operator makes meanwhile (`DES-OPENSHELL-VENUE`).
+		const venueName = resolveBackendName(job, blessedBackends[0]);
+		if (job.kind === "local" && backendFor(venueName)?.declares?.localFolders === ABSENT) {
+			await comment(job, `Refused: this job runs against a folder on this machine, and its venue "${venueName}" copies a job's files instead of editing a folder in place. Run it on a venue that mounts folders (local or podman). Not run.`);
+			log("refused_venue_local_folders", { backend: venueName });
+			return { outcome: "policy", reason: "venue-local-folders-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
 
 		// Issue #278. PI_BACKEND_FLOOR can ask for a guarantee a backend declares but EARNS only while something
 		// about this host is observed -- `local`'s credentialTransit, which holds only while the docker CLI sends
@@ -820,6 +833,16 @@ async function runAttempt(job, deps, durable) {
 				model: job.model ?? null,
 				budgetReserved: false,
 			};
+		}
+		// Issue #683: a venue's own refusal, made before spend whatever the floor says: the openshell venue's gateway is not
+		// on this host, has a gateway-wide policy in force, or the host has no Landlock (`CONST-VENUE-EGRESS-LAYER`'s third
+		// and fourth conditions). Determinate, so a RETURN (CONST-RETRY-INFRA-ONLY), ahead of the image preflight and the
+		// mint. The comment is the venue's fixed sentence for its reason, never anything the runtime said.
+		if (observed?.venueRefused && typeof observed.venueRefused.reason === "string") {
+			const { reason, comment: text } = observed.venueRefused;
+			await comment(job, typeof text === "string" && text !== "" ? text : "Refused: this job's venue cannot run it on this host right now. Not run.");
+			log("refused_venue", { reason });
+			return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 		if (observed?.unavailable) {
 			// The local venue's words stay what they were (they are its log line and BullMQ's failedReason); another venue
