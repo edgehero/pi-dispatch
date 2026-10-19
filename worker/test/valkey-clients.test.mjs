@@ -6,7 +6,7 @@ import { Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { JudgedConnector, assertJudgedConnection, isJudgedConnection, makeRedisClient, parseConnection } from "../src/connection.mjs";
 import { makeQueue } from "../src/queue.mjs";
-import { PINNED, judgedEndpoint, valkeyClientContext } from "../src/valkey-endpoint.mjs";
+import { PINNED, judgedEndpoint, valkeyClientContext, valkeyContextFromResolution, VALKEY_CONTEXT_KEYS } from "../src/valkey-endpoint.mjs";
 
 // Issue #464, gate round 2 follow-up: EVERY Valkey client in the repo goes through one judge-and-pin function
 // (valkey-endpoint.mjs), by construction: connection.mjs builds each ioredis and BullMQ client with JudgedConnector,
@@ -378,4 +378,19 @@ test("the worker's clients are enforced exactly as its boot judgement was (#464)
 	assert.equal(workerValkeyContext({ rootRefused: true }, {}, { cwd: "/d", readEnv: none }).rootRefused, true, "a boot that refused root");
 	assert.equal(workerValkeyContext({ rootRefused: false }, { PI_BACKENDS: "podman" }, { cwd: "/d", readEnv: none }).rootRefused, false, "a boot on docker's venue");
 	assert.equal(workerValkeyContext({}, {}, { cwd: "/d", readEnv: () => "PI_VALKEY_SHARED=1\n" }).shared, true);
+});
+
+test("valkeyClientContext: root refused for an openshell venue on Podman, from this environment or the .env, never on the docker engine (#707)", () => {
+	const none = () => { throw Object.assign(new Error("no"), { code: "ENOENT" }); };
+	assert.equal(valkeyClientContext({ env: { PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" }, cwd: "/d", platform: "linux", readEnv: none }).rootRefused, true);
+	assert.equal(valkeyClientContext({ env: {}, cwd: "/d", platform: "linux", readEnv: () => Buffer.from("PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=podman\n") }).rootRefused, true);
+	assert.equal(valkeyClientContext({ env: { PI_BACKENDS: "openshell" }, cwd: "/d", platform: "linux", readEnv: none }).rootRefused, false);
+	assert.equal(valkeyClientContext({ env: { PI_BACKENDS: "local,openshell", PI_OPENSHELL_ENGINE: "podman" }, cwd: "/d", platform: "linux", readEnv: none }).rootRefused, false, "local's docker Valkey is the queue");
+});
+
+test("the engine reaches every client context: VALKEY_CONTEXT_KEYS names it, and doctor's resolution carries it beside PI_BACKENDS (#715 review round 2)", () => {
+	assert.ok(VALKEY_CONTEXT_KEYS.includes("PI_OPENSHELL_ENGINE"));
+	const service = { env: { PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" }, fromFile: {}, disagreements: [] };
+	assert.equal(valkeyContextFromResolution({ service, platform: "linux" }).rootRefused, true);
+	assert.equal(valkeyContextFromResolution({ service: { ...service, env: { PI_BACKENDS: "openshell" } }, platform: "linux" }).rootRefused, false);
 });

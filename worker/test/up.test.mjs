@@ -2030,7 +2030,7 @@ test("nit: an unreadable .env is said, not silently replaced by the shell's venu
 		throw new Error(`ENOENT: ${p}`);
 	};
 	await h.run();
-	assert.match(h.text(), /\/deploy\/\.env could not be read \(EACCES: permission denied\), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone/);
+	assert.match(h.text(), /\/deploy\/\.env could not be read \(EACCES: permission denied\), so the venue keys \(PI_BACKENDS, PI_EGRESS, PI_EGRESS_PROXY, PI_OPENSHELL_ENGINE, PI_OPENSHELL_GATEWAY\) come from this shell alone/);
 });
 
 test("R25: the docker path never asks the passwd database, so an account with no entry and no USER still runs up", async () => {
@@ -2802,4 +2802,262 @@ test("up on podman: no model-endpoints.conf in the folder means no proxy unit is
 	await h.run();
 	assert.match(h.text(), /✗ the egress policy is on but model-endpoints\.conf is not here, and the proxy's rules include it/);
 	assert.ok(!h.calls.some((c) => c.cmd === "podman" && c.args.includes("pi-dispatch-egress-proxy") && c.args[0] === "run"));
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The openshell venues (issue #707): `up` checks the CLI and its gateway (offering a start and a registration, each
+// asked), puts the job image into the gateway's engine (PI_OPENSHELL_ENGINE), runs Valkey there where no `local` or
+// `podman` venue decides it (`openshellSetupOf`), and never starts the egress proxy for them.
+// ---------------------------------------------------------------------------------------------------
+
+const GATEWAY_UP = { status: "connected", server: "https://127.0.0.1:17670", version: "0.1.4" };
+const openshellPlan = (over = {}) => ({
+	"openshell --version": { code: 0, output: "openshell 0.1.4\n" },
+	"openshell status": { code: 0, output: JSON.stringify(GATEWAY_UP) },
+	// What the start and registration offers ask first (review round 1 of #715): the unit is there, none registered.
+	"systemctl --user cat": { code: 0, output: "[Unit]\n" },
+	"openshell gateway list": { code: 0, output: "[]\n" },
+	...over,
+});
+const CAPS = { code: 0, output: "sandboxLayout,transcriptStderr,mounts\n" };
+
+test("up on openshell (docker): the gateway is checked, the image goes into docker, Valkey runs on docker, and no proxy or podman is touched (#707)", async () => {
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" },
+		plan: openshellPlan({ "docker version": 0, "docker image inspect pi-job:latest": 1, "docker image inspect --format": CAPS, "docker pull": 0, "docker tag": 0, "docker volume create": 0, "docker run": 0 }),
+		listening: false,
+		argv: ["--yes"],
+	});
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.match(text, /^pi-dispatch up: one pass over the quickstart for openshell on docker; every docker, openshell and systemctl action asks first \(--yes accepts\)$/m, "the banner names the venue, never 'not docker means podman'");
+	assert.match(text, /✓ OpenShell CLI 0\.1\.4, the tested release/);
+	assert.match(text, /✓ OpenShell gateway 0\.1\.4, the tested release, on this host \(https:\/\/127\.0\.0\.1:17670\)/);
+	const runs = h.calls.filter((c) => c.cmd === "docker" && (["pull", "tag", "run"].includes(c.args[0]) || (c.args[0] === "volume" && c.args[1] === "create"))).map((c) => c.args);
+	assert.deepEqual(runs, [PULL, TAG, VOLUME, VALKEY_RUN], "the image into docker's store once, then Valkey on docker, and nothing else run");
+	assert.ok(!h.calls.some((c) => c.args.includes("pi-dispatch-egress-proxy") || c.args.includes("pi-dispatch-egress-out")), "a dockerUsed-style gate would have started squid here");
+	assert.ok(!h.calls.some((c) => c.cmd === "podman"), "no podman spawn");
+	assert.ok(!h.calls.some((c) => c.cmd === "openshell" && c.args[0] === "gateway"), "a registered, connected gateway is left alone");
+	assert.match(text, /openshell image\s+pi-job:latest declares sandboxLayout and transcriptStderr/);
+	assert.match(text, /pi-dispatch service install\n {6}the worker as a user service that pulls in the gateway's own unit \(openshell-gateway\.service\)/);
+});
+
+test("up on openshell (podman): the image goes into podman without the podman venue's gate, and Valkey alone as a Quadlet unit, with no docker (#707)", async () => {
+	let gated = 0;
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" },
+		plan: openshellPlan({ "podman version": 0, "podman image exists": 1, "podman pull": 0, "podman tag": 0, "podman image inspect": CAPS, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } }),
+		listening: false,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" },
+		extra: podmanExtra({ readPodmanInfo: async () => (gated++, { answered: false, reason: "never asked" }) }),
+	});
+	assert.equal(await h.run(), 0);
+	assert.equal(gated, 0, "podmanGate's rootless job-user rule is the podman venue's, not this one's");
+	assert.ok(!h.calls.some((c) => c.cmd === "docker"), "no docker spawn");
+	assert.deepEqual(h.calls.filter((c) => c.cmd === "podman" && ["pull", "tag"].includes(c.args[0])).map((c) => c.args), [PULL, TAG]);
+	const started = h.calls.filter((c) => c.cmd === "systemctl" && c.args[1] === "start").map((c) => c.args.slice(2));
+	assert.deepEqual(started, [["pi-dispatch-valkey.service"]], "the Quadlet Valkey alone: no proxy, no keeper");
+	assert.ok(![...h.store.keys()].some((p) => /egress|netns-keeper/.test(p) && p.startsWith(QDIR)), "no proxy or keeper unit is written");
+	assert.match(h.text(), /openshell on podman/);
+});
+
+test("up on openshell beside local: one image pull and one Valkey, the docker venue's (#707)", async () => {
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "local,openshell" },
+		plan: openshellPlan({ "docker version": 0, "docker image inspect pi-job:latest": 1, "docker image inspect --format": CAPS, "docker pull": 0, "docker tag": 0, "docker volume create": 0, "docker run": 0 }),
+		listening: false,
+		argv: ["--yes"],
+	});
+	assert.equal(await h.run(), 0);
+	assert.equal(h.calls.filter((c) => c.cmd === "docker" && c.args[0] === "pull").length, 1, "no second pull into the same store");
+	assert.equal(h.calls.filter((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("pi-dispatch-valkey")).length, 1, "no second Valkey");
+	assert.equal(h.calls.filter((c) => c.cmd === "docker" && c.args[0] === "version").length, 1, "the docker venue's gate asks the engine; the openshell gate does not ask it again");
+	assert.match(h.text(), /quickstart for the docker venue \(local\) and openshell on docker/);
+});
+
+test("up on openshell: a gateway that is down is offered a start, and a decline leaves exit 1 with the fix, before anything else runs (#707)", async () => {
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" },
+		plan: openshellPlan({ "docker version": 0, "openshell status": { code: 0, output: JSON.stringify({ status: "error", server: "https://127.0.0.1:17670" }) } }),
+		listening: false,
+		answers: [""],
+	});
+	assert.equal(await h.run(), 1);
+	assert.equal(h.promptCalls.length, 1, "asked");
+	assert.match(h.text(), /The OpenShell gateway is not answering \(nothing listens on 127\.0\.0\.1:17670\)\. up would start it \(the user unit OpenShell's package ships\):\n {2}systemctl --user start openshell-gateway\n/);
+	assert.match(h.text(), /✗ the OpenShell gateway is not running \(declined the start\)\n {4}→ start it with `systemctl --user start openshell-gateway`, then re-run `pi-dispatch up`/);
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl" && c.args[1] !== "cat"), "declined, so nothing but the read-only unit check ran");
+	assert.equal(h.initCalls.length, 0, "stops before init, like the docker gate");
+	assert.equal(h.doctorCalls.length, 0);
+	assert.ok(!h.calls.some((c) => c.cmd === "docker" && c.args[0] !== "version"));
+});
+
+test("up on openshell: under --yes a stopped, registered gateway is started and waited for; an unregistered one is registered (#707)", async () => {
+	let started = false;
+	const registered = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" },
+		plan: openshellPlan({ "docker version": 0, "docker image inspect": CAPS, "systemctl --user start openshell-gateway": () => ((started = true), 0), "openshell status": () => ({ code: 0, output: JSON.stringify(started ? GATEWAY_UP : { status: "error", server: "https://127.0.0.1:17670" }) }) }),
+		listening: true,
+		argv: ["--yes"],
+		extra: { probeTcp: async (_host, port) => port === 17670 && started, sleep: async () => {} },
+	});
+	assert.equal(await registered.run(), 0);
+	assert.ok(started);
+	assert.ok(!registered.calls.some((c) => c.cmd === "openshell" && c.args[0] === "gateway"), "a registered gateway is never registered again");
+
+	let added = false;
+	const bare = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" },
+		plan: openshellPlan({ "docker version": 0, "docker image inspect": CAPS, "openshell gateway add": () => ((added = true), 0), "openshell status": () => ({ code: 0, output: JSON.stringify(added ? GATEWAY_UP : { status: "error" }) }) }),
+		listening: true,
+		argv: ["--yes"],
+		extra: { probeTcp: async (_host, port) => port === 17670, sleep: async () => {} },
+	});
+	assert.equal(await bare.run(), 0);
+	assert.deepEqual(bare.calls.filter((c) => c.cmd === "openshell" && c.args[0] === "gateway" && c.args[1] === "add").map((c) => c.args), [["gateway", "add", "https://127.0.0.1:17670", "--local", "--name", "openshell"]], "the conformance lane's own registration, once");
+	assert.ok(!bare.calls.some((c) => c.cmd === "systemctl"), "it answered, so nothing was started");
+	assert.ok(bare.calls.some((c) => c.cmd === "openshell" && c.args.join(" ") === "gateway list -o json"), "asked first whether any gateway is registered");
+
+	// Started and never answering: bounded, then exit 1 with where to look.
+	const silent = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" },
+		plan: openshellPlan({ "docker version": 0, "systemctl --user start": 0, "openshell status": { code: 0, output: JSON.stringify({ status: "error" }) } }),
+		listening: false,
+		argv: ["--yes"],
+		extra: { sleep: async () => {}, gatewayWaitMs: 3000 },
+	});
+	assert.equal(await silent.run(), 1);
+	assert.equal(silent.calls.filter((c) => c.cmd === "openshell" && c.args.includes("status")).length, 4, "the first read, then three polls: bounded");
+	assert.match(silent.text(), /✗ the OpenShell gateway was started and did not answer within 3 s\n {4}→ `journalctl --user -u openshell-gateway\.service` says why/);
+});
+
+test("up on openshell: a CLI at another release, or none, stops up with the pinned download and pulls nothing (#707)", async () => {
+	for (const [answer, said] of [[{ code: 0, output: "openshell 0.1.5\n" }, /✗ OpenShell CLI 0\.1\.5 is not the tested release \(0\.1\.4\)/], ["enoent", /✗ OpenShell CLI not found/]]) {
+		const h = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" }, plan: openshellPlan({ "docker version": 0, "openshell --version": answer }), listening: false, argv: ["--yes"] });
+		assert.equal(await h.run(), 1);
+		assert.match(h.text(), said);
+		assert.match(h.text(), /install OpenShell 0\.1\.4 \(https:\/\/github\.com\/NVIDIA\/OpenShell\/releases\/tag\/v0\.1\.4\), the release this venue was measured on; up installs nothing/);
+		assert.ok(!h.calls.some((c) => c.cmd === "docker" && c.args[0] === "pull"));
+		assert.equal(h.initCalls.length, 0);
+	}
+});
+
+test("up on openshell: Windows is refused (no gateway ships for it), and openshell-bind prints the gateway's settings without editing them (#707)", async () => {
+	const win = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" }, plan: openshellPlan(), platform: "win32", listening: false, argv: ["--yes"] });
+	assert.equal(await win.run(), 1);
+	assert.match(win.text(), /ships no Windows build of its CLI or gateway/);
+	assert.ok(!win.calls.some((c) => c.cmd === "openshell"));
+	const bind = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell-bind" }, plan: openshellPlan({ "docker version": 0, "docker image inspect": 0, "docker volume create": 0, "docker run": 0 }), listening: false, argv: ["--yes"] });
+	assert.equal(await bind.run(), 0);
+	assert.match(bind.text(), /⚠ openshell-bind: the gateway must admit bind mounts, and up never edits its configuration[^\n]*\n {4}\[openshell\]\n {4}version = 2\n\n {4}\[openshell\.drivers\.docker\]\n {4}allow_driver_config = true\n {4}enable_bind_mounts = true\n/);
+});
+
+test("up reads PI_OPENSHELL_ENGINE from .env as the service does: a file value decides, an equal meaning agrees, a different one stops up (#707)", async () => {
+	const fromFile = harness({ env: { PI_PROVIDER: "anthropic" }, files: { "/deploy/.env": "PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=podman\n" }, plan: openshellPlan({ "podman version": 1 }), listening: false, argv: ["--yes"] });
+	assert.equal(await fromFile.run(), 1);
+	assert.match(fromFile.text(), /✗ podman not responding \(PI_OPENSHELL_ENGINE=podman, the gateway's engine\)/, "the file's engine, not docker");
+	const agree = harness({ env: { PI_PROVIDER: "anthropic", PI_OPENSHELL_ENGINE: "" }, files: { "/deploy/.env": "PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=docker\n" }, plan: openshellPlan({ "docker version": 1 }), listening: false });
+	assert.equal(await agree.run(), 1);
+	assert.match(agree.text(), /✗ docker not responding/, "empty and docker mean the same engine: no disagreement");
+	const differ = harness({ env: { PI_PROVIDER: "anthropic", PI_OPENSHELL_ENGINE: "docker" }, files: { "/deploy/.env": "PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=podman\n" }, listening: false });
+	assert.equal(await differ.run(), 1);
+	assert.match(differ.text(), /PI_OPENSHELL_ENGINE is "docker" in this shell and "podman" in \/deploy\/\.env/);
+	assert.equal(differ.calls.length, 0);
+});
+
+test("up on openshell-bind with the podman engine stops with the worker's own boot refusal, having run nothing (#707)", async () => {
+	const h = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell-bind", PI_OPENSHELL_ENGINE: "podman" }, plan: openshellPlan(), listening: false, argv: ["--yes"] });
+	assert.equal(await h.run(), 1);
+	assert.match(h.text(), /✗ openshell-bind with PI_OPENSHELL_ENGINE=podman: the worker refuses this at boot/);
+	assert.equal(h.calls.length, 0);
+});
+
+test("up on openshell: no start is offered where there is nothing to start, a registered gateway is never registered beside, and a silent status read is bounded (#715 review)", async () => {
+	const down = { status: "error" };
+	// Linux: no user unit, so the fix, not a dead offer.
+	const noUnit = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" }, plan: openshellPlan({ "docker version": 0, "openshell status": { code: 0, output: JSON.stringify(down) }, "systemctl --user cat": { code: 1, stderr: "No files found for openshell-gateway.service.\n" } }), listening: false, argv: ["--yes"] });
+	assert.equal(await noUnit.run(), 1);
+	assert.match(noUnit.text(), /✗ the OpenShell gateway is not answering, and this user manager has no openshell-gateway\.service to start/);
+	assert.ok(!noUnit.calls.some((c) => c.cmd === "systemctl" && c.args[1] === "start"));
+	// macOS: homebrew-core's formula defines no service; the release formula is named.
+	const noBrew = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" }, platform: "darwin", plan: openshellPlan({ "docker version": 0, "openshell status": { code: 0, output: JSON.stringify(down) }, "brew services info": 1 }), listening: false, argv: ["--yes"] });
+	assert.equal(await noBrew.run(), 1);
+	assert.match(noBrew.text(), /brew install https:\/\/github\.com\/NVIDIA\/OpenShell\/releases\/download\/v0\.1\.4\/openshell\.rb/);
+	assert.ok(!noBrew.calls.some((c) => c.cmd === "brew" && c.args[1] === "start"));
+	// Registered (a server named), not connected, the port answering: never registered over, exit 1 (M3).
+	const named = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" }, plan: openshellPlan({ "docker version": 0, "openshell status": { code: 0, output: JSON.stringify({ status: "error", server: "https://127.0.0.1:17670" }) } }), listening: true, argv: ["--yes"], extra: { probeTcp: async (_h, port) => port === 17670 } });
+	assert.equal(await named.run(), 1);
+	assert.match(named.text(), /does not answer as connected, while something listens on 127\.0\.0\.1:17670/);
+	assert.ok(!named.calls.some((c) => c.cmd === "openshell" && c.args[0] === "gateway" && c.args[1] === "add"));
+	// No server, but the list names one, or cannot be read: the command as a fix, never the offer.
+	for (const [list, said] of [[{ code: 0, output: JSON.stringify([{ name: "lab" }]) }, /has 1 gateway registered, none of which it reads connected as lab \(PI_OPENSHELL_GATEWAY\)/], [{ code: 2, output: "" }, /could not be read \(`openshell gateway list -o json`\)/]]) {
+		const h = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell", PI_OPENSHELL_GATEWAY: "lab" }, plan: openshellPlan({ "docker version": 0, "openshell --gateway lab status": { code: 0, output: JSON.stringify(down) }, "openshell --gateway lab --version": { code: 0, output: "openshell 0.1.4\n" }, "openshell gateway list": list }), listening: true, argv: ["--yes"], extra: { probeTcp: async (_h, port) => port === 17670 } });
+		assert.equal(await h.run(), 1);
+		assert.match(h.text(), said);
+		assert.match(h.text(), /openshell gateway add https:\/\/127\.0\.0\.1:17670 --local --name lab/, "the command, as a fix");
+		assert.equal(h.promptCalls.length, 0);
+		assert.ok(!h.calls.some((c) => c.cmd === "openshell" && c.args[1] === "add"));
+	}
+	// A status read that never finishes: killed at its bound, read as not answering.
+	const hang = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" }, plan: openshellPlan({ "docker version": 0 }), listening: false, argv: ["--yes"] });
+	const real = hang.deps.spawn;
+	let killed = 0;
+	hang.deps.spawn = (cmd, args, opts) => {
+		if (cmd === "openshell" && args.includes("status")) return { stdout: { on() {} }, stderr: { on() {} }, on() { return this; }, kill() { killed++; } };
+		return real(cmd, args, opts);
+	};
+	const code = await runUp(["--yes"], { ...hang.deps, gatewayWaitMs: 1000, sleep: async () => {}, openshellReadTimeoutMs: 5 });
+	assert.equal(code, 1);
+	assert.ok(killed >= 1, "the silent read was killed, not waited on");
+});
+
+test("up on podman,openshell (docker engine): the podman venue's Quadlet Valkey is the queue, so no docker Valkey runs (#715 review)", async () => {
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "podman,openshell", PI_EGRESS: "1" },
+		plan: openshellPlan({ "docker version": 0, "docker image inspect": CAPS, "podman image exists": 0, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } }),
+		listening: false,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" },
+		extra: podmanExtra(),
+	});
+	await h.run();
+	assert.ok(!h.calls.some((c) => c.cmd === "docker" && c.args[0] === "run"), "no docker Valkey, and no docker run at all");
+	assert.ok(!h.calls.some((c) => c.cmd === "docker" && c.args[0] === "volume" && c.args[1] === "create"));
+	assert.ok(h.calls.some((c) => c.cmd === "systemctl" && c.args[1] === "start" && c.args.includes("pi-dispatch-valkey.service")), "the podman venue's Valkey");
+	assert.ok(h.calls.some((c) => c.cmd === "docker" && c.args[0] === "image" && c.args[1] === "inspect"), "the openshell image step still reads docker's store");
+});
+
+test("up compares the two openshell keys between this shell and .env only where an openshell venue is blessed (#715 review)", async () => {
+	const h = harness({ env: { PI_PROVIDER: "anthropic", PI_OPENSHELL_ENGINE: "docker" }, files: { "/deploy/.env": "PI_BACKENDS=local\nPI_OPENSHELL_ENGINE=podman\n" }, plan: green, argv: ["--yes"] });
+	await h.run();
+	assert.doesNotMatch(h.text(), /PI_OPENSHELL_ENGINE is "docker" in this shell/, "nothing here reads it");
+	assert.match(h.text(), /✓ Docker daemon reachable/, "the pass ran");
+});
+
+test("up on openshell: the gateway list's shapes, the poll's wall-clock deadline, a wedged engine and a shell with no user bus (#715 review round 2)", async () => {
+	const answering = { listening: true, extra: { probeTcp: async (_h, port) => port === 17670, sleep: async () => {} } };
+	const env = { PI_PROVIDER: "anthropic", PI_BACKENDS: "openshell" };
+	for (const [list, offered] of [["[]", true], [JSON.stringify({ gateways: [] }), true], ["{}", false], [JSON.stringify({ items: [] }), false], ["not json", false]]) {
+		const h = harness({ env, plan: openshellPlan({ "docker version": 0, "openshell status": { code: 0, output: JSON.stringify({ status: "error" }) }, "openshell gateway list": { code: 0, output: list } }), answers: [""], ...answering });
+		assert.equal(await h.run(), 1);
+		assert.equal(h.promptCalls.length, offered ? 1 : 0, `${list}: ${offered ? "offered" : "refused"}`);
+		if (!offered) assert.match(h.text(), /could not be read \(`openshell gateway list -o json`\)/);
+	}
+	// The poll after a start ends at the wall-clock deadline, however many polls the count allows.
+	let clock = 0;
+	const slow = harness({ env, plan: openshellPlan({ "docker version": 0, "systemctl --user start": 0, "openshell status": () => ((clock += 10_000), { code: 0, output: JSON.stringify({ status: "error" }) }) }), listening: false, argv: ["--yes"], extra: { sleep: async () => {}, now: () => clock, gatewayWaitMs: 30_000 } });
+	assert.equal(await slow.run(), 1);
+	assert.ok(slow.calls.filter((c) => c.cmd === "openshell" && c.args.includes("status")).length <= 5, "about 30 s of 10 s reads, not thirty of them");
+	// A wedged engine: bounded and said.
+	const wedged = harness({ env, plan: openshellPlan(), listening: false, argv: ["--yes"] });
+	const real = wedged.deps.spawn;
+	wedged.deps.spawn = (cmd, args, opts) => (cmd === "docker" ? { stdout: { on() {} }, stderr: { on() {} }, on() { return this; }, kill() {} } : real(cmd, args, opts));
+	assert.equal(await runUp(["--yes"], { ...wedged.deps, openshellReadTimeoutMs: 5 }), 1);
+	assert.match(wedged.text(), /✗ docker did not answer `docker version` within 0 s/);
+	// No user bus: said as that, not as a missing unit.
+	const nobus = harness({ env, plan: openshellPlan({ "docker version": 0, "openshell status": { code: 0, output: JSON.stringify({ status: "error" }) }, "systemctl --user cat": { code: 1, stderr: "Failed to connect to bus: No medium found\n" } }), listening: false, argv: ["--yes"] });
+	assert.equal(await nobus.run(), 1);
+	assert.match(nobus.text(), /this shell reaches no user manager to ask for its unit/);
+	assert.doesNotMatch(nobus.text(), /has no openshell-gateway\.service/);
 });

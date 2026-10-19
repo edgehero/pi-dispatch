@@ -25,6 +25,7 @@
 import { execFileSync } from "node:child_process";
 import { connect as netConnect } from "node:net";
 import { dirname, join } from "node:path";
+import { openshellSetupOf, venuesOf } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { VALKEY_PASSWORD_KEY, valkeyEnvFileText } from "./valkey-auth.mjs";
@@ -593,8 +594,9 @@ export async function decideValkey({ venues, url, installed, probeTcp, lookup, e
 export async function resolveWorkerValkey({ url, venues, platform, env, envText, envPath, probeTcp, lookup, fs, euid, user, ownerName, interfaces, subuids, waitMs = 20_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), configError: refuse }) {
 	// Gate round 3: judged on EVERY venue on Linux, not only podman's. Another account's listener is refused everywhere
 	// (item 7: a local-venue worker silently adopted another account's rootless Valkey); root's (docker-proxy) is refused
-	// only where the podman venue is this deployment's and `local` is not.
-	const rootRefused = venues.podmanUsed && !venues.localUsed;
+	// only where the podman venue is this deployment's and `local` is not, or (issue #707, review round 1 of #715) where an
+	// openshell venue on Podman is the queue's engine (`openshellSetupOf`), whose Quadlet Valkey is this account's too.
+	const rootRefused = (venues.podmanUsed && !venues.localUsed) || openshellSetupOf(venues, env).valkeyEngine === "podman";
 	const same = { url, servername: null, pinned: null, notes: [], rootRefused };
 	if (platform !== "linux") return same;
 	const notes = [];
@@ -956,7 +958,12 @@ export function foreignContainerRefusal(found, { forceHint }) {
  * docker-shaped worker for a podman deployment, and the opposite guess a stack for a docker one. So does a line systemd
  * splits differently from this reader (`envFileSystemdHazard`, issue #447), for the whole file.
  */
-export const STACK_KEYS = Object.freeze(["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY"]);
+// Issue #707: and the openshell venues' two keys, read from the same place for the same reason. `up` and `service install`
+// decide from PI_OPENSHELL_ENGINE which engine's store gets the job image and where Valkey runs (`openshellSetupOf`), so
+// a shell value the service never sees would stand the stack up on the wrong engine.
+const PODMAN_VENUE_KEYS = Object.freeze(["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY"]);
+const OPENSHELL_VENUE_KEYS = Object.freeze(["PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY"]);
+export const STACK_KEYS = Object.freeze([...PODMAN_VENUE_KEYS, ...OPENSHELL_VENUE_KEYS]);
 
 /** The longest venue-key value `readStackKeys` accepts, in bytes (issue #447 gate round 2; systemd's own limit is ~128 KiB). */
 export const STACK_VALUE_MAX = 4096;
@@ -967,7 +974,26 @@ function shapedRefusal(path, hazard, why) {
 	return `${path} line ${hazard.line} has ${shape.what}, and ${why}, so what the service reads for it is unknown: ${shape.fix}`;
 }
 
-export function readStackKeys(content, { loader = "systemd", path = ".env", assumeSpelled = false } = {}) {
+/**
+ * The venue keys of a deployment's `.env` (`STACK_KEYS`), read by `readVenueKeys` below in two passes since review round 2
+ * of #715. The three the podman venue decides from are read and refused as ever. The openshell venues' two are read the
+ * same way but REFUSED only where an openshell venue is blessed (the file's PI_BACKENDS, or `openshellBlessed` from the
+ * caller, which knows this shell's): a stray `export PI_OPENSHELL_ENGINE=...` or a continued line in a `local`-only
+ * deployment names a key nothing there reads, and stopping `up` or `service install` on it is a refusal with no reason.
+ */
+export function readStackKeys(content, { loader = "systemd", path = ".env", assumeSpelled = false, openshellBlessed = false } = {}) {
+	const base = readVenueKeys(content, { loader, path, assumeSpelled, keys: PODMAN_VENUE_KEYS, about: "whether this deployment runs the podman venue" });
+	if (base.error) return base;
+	let blessed = openshellBlessed === true;
+	try {
+		blessed ||= venuesOf({ PI_BACKENDS: base.keys.PI_BACKENDS }).openshellUsed;
+	} catch {}
+	const openshell = readVenueKeys(content, { loader, path, assumeSpelled, keys: OPENSHELL_VENUE_KEYS, about: "which engine and gateway the openshell venue uses (PI_OPENSHELL_ENGINE, PI_OPENSHELL_GATEWAY)" });
+	if (openshell.error) return blessed ? openshell : base;
+	return { keys: { ...base.keys, ...openshell.keys } };
+}
+
+function readVenueKeys(content, { loader, path, assumeSpelled, keys: KEYS, about }) {
 	// The file's BYTES where the caller has them (issue #447, gate round 1): systemd refuses to LOAD a file with a NUL
 	// or with invalid UTF-8 in a key or value, and the unit then fails with every key unset, which no reading of the
 	// decoded text can see. Refused whatever the file assigns, because the service does not start on it at all.
@@ -979,9 +1005,9 @@ export function readStackKeys(content, { loader = "systemd", path = ".env", assu
 	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
 	// A line TOUCHES a key when the key is its leading word, `export ` allowed: that is where a loader could read an
 	// assignment of it. A key name inside another key's value (`PI_ENV_SETUP=/opt/PI_BACKENDS.sh`) touches nothing.
-	const touches = new RegExp(`^[ \\t]*(?:export[ \\t]+)?(${STACK_KEYS.join("|")})(?![A-Za-z0-9_])`);
+	const touches = new RegExp(`^[ \\t]*(?:export[ \\t]+)?(${KEYS.join("|")})(?![A-Za-z0-9_])`);
 	// `export K=v` is an assignment only to a loader that SOURCES the file (the macOS wrapper); systemd ignores it.
-	const exact = new RegExp(`^[ \\t]*${loader === "shell" ? "(?:export[ \\t]+)?" : ""}(${STACK_KEYS.join("|")})=`);
+	const exact = new RegExp(`^[ \\t]*${loader === "shell" ? "(?:export[ \\t]+)?" : ""}(${KEYS.join("|")})=`);
 	// A `#` line is a comment to every loader. A `;` line (a comment to systemd's EnvironmentFile=) needs no rule of its
 	// own: its leading word is `;`, never a key, so it touches nothing and is not refused (the round 2 nit).
 	const comment = /^[ \t]*#/;
@@ -1004,13 +1030,13 @@ export function readStackKeys(content, { loader = "systemd", path = ".env", assu
 	// value, and to a shell part of the joined line (`X=a\` + `#;PI_EGRESS=0` sets PI_EGRESS, gate round 2).
 	const afterLoneCr = (l) => (l.includes("\r") ? l.slice(l.indexOf("\r") + 1) : "");
 	const inValue = loader === "cmd" ? [] : envFileValueLines(text, { loader });
-	const spelledOutside = (commentLine) => (assumeSpelled ? STACK_KEYS[0] : STACK_KEYS.find((k) => lines.some((l, i) => (commentLine.test(l) && !inValue[i] ? afterLoneCr(l) : l).includes(k))));
+	const spelledOutside = (commentLine) => (assumeSpelled ? KEYS[0] : KEYS.find((k) => lines.some((l, i) => (commentLine.test(l) && !inValue[i] ? afterLoneCr(l) : l).includes(k))));
 	if (loader === "systemd") {
 		const h = envFileSystemdHazard(text);
 		const spelled = h === null ? undefined : spelledOutside(/^[ \t]*[#;]/);
 		if (h !== null && spelled !== undefined) {
 			const shape = SYSTEMD_HAZARD_SHAPES[h.shape];
-			return { error: `${path} line ${h.line} has ${shape.what}. The service's systemd would read the lines of this file differently from this command, so which venue keys (${STACK_KEYS.join(", ")}) it sets is unknown: ${shape.fix}` };
+			return { error: `${path} line ${h.line} has ${shape.what}. The service's systemd would read the lines of this file differently from this command, so which venue keys (${KEYS.join(", ")}) it sets is unknown: ${shape.fix}` };
 		}
 	}
 	let touched = null;
@@ -1021,7 +1047,7 @@ export function readStackKeys(content, { loader = "systemd", path = ".env", assu
 		if (!m) continue;
 		touched ??= { key: m[1], line: i + 1 };
 		if (!exact.test(line)) {
-			return { error: `${path} line ${i + 1} assigns ${m[1]} in a form other than a plain ${m[1]}=value line, which the loaders do not agree on (systemd sets \`${m[1]} =x\` and ignores \`export ${m[1]}=x\`; the shells do the opposite). Whether this deployment runs the podman venue is therefore unknown: write it as a plain ${m[1]}=value line` };
+			return { error: `${path} line ${i + 1} assigns ${m[1]} in a form other than a plain ${m[1]}=value line, which the loaders do not agree on (systemd sets \`${m[1]} =x\` and ignores \`export ${m[1]}=x\`; the shells do the opposite). ${about[0].toUpperCase()}${about.slice(1)} is therefore unknown: write it as a plain ${m[1]}=value line` };
 		}
 	}
 	if (touched) {
@@ -1060,12 +1086,12 @@ export function readStackKeys(content, { loader = "systemd", path = ".env", assu
 			return { error: `${path} line ${hazard.line} is one this command cannot read (an open quote, a continuation, a line that runs, or a second assignment on one line), and ${why}, so what the service reads for it is unknown. Fix that line first` };
 		}
 	}
-	const found = readEnvAssignments(text, STACK_KEYS, { loader });
+	const found = readEnvAssignments(text, KEYS, { loader });
 	const keys = {};
-	for (const key of STACK_KEYS) {
+	for (const key of KEYS) {
 		const read = found[key];
 		if (!read) continue;
-		if (!read.plain) return { error: `${path} line ${read.line} assigns ${key} in a form this command cannot read the way the service's loader will ($, quotes, spaces or a backslash in the value), so whether this deployment runs the podman venue is unknown. Write it as a plain ${key}=value line` };
+		if (!read.plain) return { error: `${path} line ${read.line} assigns ${key} in a form this command cannot read the way the service's loader will ($, quotes, spaces or a backslash in the value), so ${about} is unknown. Write it as a plain ${key}=value line` };
 		// THE PROJECT'S OWN CAP, not systemd's (gate round 3 corrected the wording): systemd 259 passes a value up to about
 		// 128 KiB, and past that the whole environment is `envFileLoadHazard`'s `exec-too-large`. A venue key names a list,
 		// a switch or a container, so 4096 bytes is far more than one needs, and a longer one is a mistake worth naming.
@@ -1291,9 +1317,9 @@ export function describeRollBack(rolled, { partial = false } = {}) {
  * also take the worker down with it, since the worker's own queue connection retries and says why, and a proxy that
  * is down refuses jobs pre-spend by itself. `After=` so a boot starts the queue before the worker reaches for it.
  */
-export function workerUnitDeps(units) {
+export function workerUnitDeps(units, { forWhat = "the podman venue (issue #430)" } = {}) {
 	if (units.length === 0) return "";
-	return `# Added by \`pi-dispatch service install\` for the podman venue (issue #430): the Quadlet units it installed.\nWants=${units.join(" ")}\nAfter=${units.join(" ")}\n`;
+	return `# Added by \`pi-dispatch service install\` for ${forWhat}: the Quadlet units it installed.\nWants=${units.join(" ")}\nAfter=${units.join(" ")}\n`;
 }
 
 /**

@@ -87,7 +87,7 @@ import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoade
 import { imageRefProblem, jobImageFix, pullOffered } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
-import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, backendRefusals, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
+import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, backendRefusals, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, openshellSetupOf, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, podmanPausable, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
@@ -632,9 +632,17 @@ export const CLI_SERVICE_KEYS = Object.freeze({
 	podman: Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF", "CONTAINERS_REGISTRIES_CONF", "CONTAINER_HOST", "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "HOME"]),
 	docker: Object.freeze(["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "HOME"]),
 	gh: Object.freeze(["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GH_HOST", "XDG_CONFIG_HOME", "HOME"]),
+	// Issue #707: the openshell CLI keeps its gateway registrations (and so which gateway is the active one) under this
+	// account's config dir, XDG_CONFIG_HOME or else HOME/.config (measured on 0.1.4: `gateway add` writes there), so a
+	// `.env` that moves either points the SERVICE's CLI at another registration than doctor's. PATH is not listed: every
+	// shell sets one, which would make the line fire on every run, and where the CLI is found is `service install`'s to
+	// put in the unit (the plist's PATH carries its directory on macOS).
+	openshell: Object.freeze(["XDG_CONFIG_HOME", "HOME"]),
 });
 const CLI_KEY_NAMES = [...new Set(Object.values(CLI_SERVICE_KEYS).flat())];
-export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, "PI_PROVIDER", "PI_MODEL", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...CLI_KEY_NAMES]);
+// A Set, since issue #707 made two of the worker's keys (PI_OPENSHELL_ENGINE, PI_OPENSHELL_GATEWAY) venue keys too: each
+// key once, in the order it is first named.
+export const SERVICE_ENV_KEYS = Object.freeze([...new Set([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, "PI_PROVIDER", "PI_MODEL", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...CLI_KEY_NAMES])]);
 
 /** Issue #471 (gate round 1): what a service manager gives every service itself, so a `.env` need not carry it. */
 const AMBIENT_SERVICE_KEYS = Object.freeze(["TMPDIR", "TEMP", "XDG_RUNTIME_DIR", "HOME"]);
@@ -659,6 +667,33 @@ function installedWorkerUnit(seams, cwd) {
 	return null;
 }
 
+/**
+ * Issue #707: whether the worker unit installed for this folder pulls in the OpenShell gateway's own user unit
+ * (`Wants=openshell-gateway.service`, which the 0.1.4 deb ships), as `service install` writes it for an openshell venue,
+ * and is NOT ordered after it: that unit is `After=default.target`, so an `After=` from a worker that is WantedBy
+ * default.target is an ordering cycle, and systemd deletes the worker's start job to break it (review round 1 of #715,
+ * measured). Read only on Linux, from the unit file itself (`installedWorkerUnit`); no unit for this folder says nothing,
+ * since the worker may run by hand. A ⚠, not a ✗: a missing `Wants=` costs a gateway the worker's boot only logs as
+ * down, and `service install --force` rewrites the unit.
+ */
+export function openshellUnitOrderChecks(seams, cwd) {
+	if (seams.platform !== "linux" || typeof seams.fileExists !== "function") return [];
+	const unit = installedWorkerUnit(seams, cwd);
+	if (!unit) return [];
+	if (unit.scope === "system") {
+		return [{ ok: true, warn: true, label: `openshell: the worker's unit (${unit.path}) is a system unit, which cannot pull in the gateway's user unit (openshell-gateway.service)`, fix: "install the worker in user scope (`pi-dispatch service install`, without --system), in the account whose user manager runs the gateway and whose home holds the CLI's gateway registration" }];
+	}
+	let text;
+	try {
+		text = String((seams.readUnit ?? ((path) => readFileSync(path, "utf8")))(unit.path));
+	} catch {
+		return [{ ok: true, warn: true, label: `openshell: whether the worker's unit (${unit.path}) pulls in the gateway could not be read`, fix: "make the unit file readable by this account, then re-run doctor" }];
+	}
+	const names = (key) => new RegExp(`^${key}=(?:.*\\s)?openshell-gateway\\.service(?:\\s|$)`, "m").test(text);
+	if (names("After")) return [{ ok: true, warn: true, label: `openshell: the worker's unit (${unit.path}) is After=openshell-gateway.service, an ordering cycle (the gateway's unit is After=default.target), which systemd breaks by deleting the worker's start job at boot`, fix: "`pi-dispatch service install --force` in the deployment folder rewrites the unit with Wants=openshell-gateway.service and no After= on it" }];
+	return [names("Wants") ? { ok: true, label: "openshell: the worker's unit pulls in the gateway's (Wants=openshell-gateway.service)" } : { ok: true, warn: true, label: `openshell: the worker's unit (${unit.path}) does not pull in the gateway's (openshell-gateway.service), so at boot the gateway starts only if something else starts it`, fix: "`pi-dispatch service install --force` in the deployment folder rewrites the unit with Wants=openshell-gateway.service" }];
+}
+
 /** The CLI variables that name a path, whose value a ⚠ may show; the rest (endpoints, names, tokens) it never shows. */
 const CLI_PATH_KEYS = Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF", "CONTAINERS_REGISTRIES_CONF", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DOCKER_CONFIG", "GH_CONFIG_DIR", "HOME"]);
 /** The ones the worker's containers.conf chain check reads, which doctor runs in-process on the resolved values. */
@@ -670,11 +705,13 @@ const PODMAN_CHAIN_KEYS = Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVE
  * context name, or a token. Says that doctor's probes through that CLI describe this shell's view, and, for the keys
  * the containers.conf chain check reads, that the check itself judged the file's value, in-process, as the worker does.
  */
-export function cliNotHandedLines(service, envPath) {
+export function cliNotHandedLines(service, envPath, { openshellUsed = false } = {}) {
 	const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 	// Issue #481: an empty value is left out only where the tool's own source reads it as unset (`fileConfigures`).
 	return CLI_KEY_NAMES.filter((k) => Object.hasOwn(service.fromFile, k) && fileConfigures(k, service.fromFile[k])).map((k) => {
-		const names = Object.entries(CLI_SERVICE_KEYS).filter(([, ks]) => ks.includes(k)).map(([cli]) => cli);
+		// The openshell CLI is named only where an openshell venue is blessed (review round 1 of #715): elsewhere no probe
+		// of it runs, and the service never starts it.
+		const names = Object.entries(CLI_SERVICE_KEYS).filter(([cli, ks]) => ks.includes(k) && (cli !== "openshell" || openshellUsed)).map(([cli]) => cli);
 		const clis = listed(names);
 		// Grammar by count (round-cap re-review, D2): "podman, docker and gh use it", "podman uses it".
 		const verb = names.length > 1 ? "use" : "uses";
@@ -699,6 +736,7 @@ export const STEERING_SERVICE_KEYS = Object.freeze({
 	PI_BACKENDS: "which runtime doctor spawns: judged by the worker's own list parser, a shell/.env disagreement a ✗ (deploymentVenueEnv)",
 	PI_EGRESS: "whether the egress canary runs: the worker's own reading, a disagreement a ✗ (deploymentVenueEnv)",
 	PI_EGRESS_PROXY: "which proxy container doctor inspects: the worker's own name resolution, a disagreement a ✗ (deploymentVenueEnv)",
+	PI_OPENSHELL_ENGINE: "which engine the openshell lines spawn (its version, the job image in its store): docker or podman only, anything else named and nothing spawned (doctor-openshell.mjs), a disagreement a ✗ (deploymentVenueEnv, issue #707)",
 	VALKEY_URL: "which Valkey doctor connects to: the owner rule the worker applies at boot, and a line doctor cannot read makes it contact none",
 	PI_JOB_IMAGE: "the image doctor inspects and runs (the canary, the gh probe, --live): the worker's `||` default and the one image rule its boot applies (image-ref.mjs: blank, padded, a leading dash, a control character), a refused value named and not used",
 	GITHUB_AUTH_SOURCE: "whether doctor runs gh on this host: the worker's own three values",
@@ -1562,7 +1600,7 @@ export async function collectChecks(shellVars, seams) {
 	// disagreement is said once at the end rather than lost.
 	const envPathShown = serviceEnvFile?.path ?? join(cwd, ".env");
 	// PR #474's round cap: each CLI variable the file sets, which no program doctor starts is handed.
-	checks.push(...cliNotHandedLines(service, envPathShown));
+	checks.push(...cliNotHandedLines(service, envPathShown, { openshellUsed: venuesOf(env).openshellUsed }));
 	const saidAtTop = { disagreements: service.disagreements.length, unread: service.unread.length };
 	// A CLI variable is not listed as read: no program doctor starts used it, and its own ⚠ says so.
 	checks.push(...serviceEnvLines(service, envPathShown, { said: ["VALKEY_URL", "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", ...CLI_KEY_NAMES] }));
@@ -1577,6 +1615,11 @@ export async function collectChecks(shellVars, seams) {
 	// Issue #354: which venues run jobs here. An unparseable PI_BACKENDS reads as the unset default, so every docker line
 	// below is exactly what it always was, and the backend section is what fails on it (the worker refuses to boot).
 	const { localUsed, podmanUsed, podmanDefault } = venuesOf(env);
+	// Issue #707: where an openshell-only deployment's Valkey runs (`openshellSetupOf`, the rule `up` and `service install`
+	// follow): on the gateway's engine, docker by default. The Valkey lines' fixes name THAT engine's way to start it, as
+	// they name docker's where `local` is blessed and the Quadlet unit's where `podman` is.
+	const openshellSetup = openshellSetupOf(venuesOf(env), env);
+	const valkeyVenues = { localUsed: localUsed || openshellSetup.valkeyEngine === "docker", podmanUsed: podmanUsed || openshellSetup.valkeyEngine === "podman" };
 	// THE FIRST DOCKER CALL OF THE RUN, which is why it was the one that hung (issue #397): a daemon that
 	// accepts the connection and never answers held doctor here, before it had printed anything. Bounded
 	// now, and the three outcomes are three different sentences, because telling someone whose daemon is
@@ -2077,6 +2120,7 @@ export async function collectChecks(shellVars, seams) {
 		// The probe's source under the jobs dir the service will use (review round 2 of #714).
 		const probeJobsDir = Number.isInteger(seams.jobsDirUid) ? jobsDirPath(env, seams.jobsDirUid) : null;
 		checks.push(...(await openshellChecks(env, { image: jobImage, modes, ...ids, jobsDir: probeJobsDir || null, ...(osPlatform ? { platform: osPlatform } : {}), ...(seams.openshellRun ? { run: seams.openshellRun } : {}), ...(seams.openshellMkdtemp ? { mkdtemp: seams.openshellMkdtemp, rmdir: () => {} } : {}) })));
+		if (openshellVenues.openshellUsed) checks.push(...openshellUnitOrderChecks(seams, cwd));
 	}
 	if (facts) facts.jobUser = jobUser.forLive;
 	// Issue #596, phase 2: the CPU budget the parent's quota is read back against by `--live`.
@@ -2583,7 +2627,7 @@ export async function collectChecks(shellVars, seams) {
 	})();
 	if (!unreadValkey && !valkeyDbProblem && seams.valkeyOwner) {
 		if (typeof env[VALKEY_SHARED_KEY] === "string") checks.push({ ok: false, warn: true, label: sharedShellIgnored(env[VALKEY_SHARED_KEY], join(cwd, ".env")), fix: "put PI_VALKEY_SHARED=1 in the deployment's .env if that Valkey is shared on purpose, and unset it in this shell" });
-		ownerVerdict = await seams.valkeyOwner(valkeyUrl, { shared: valkeySharedOn(sharedInFile), user: userNameOf(seams), envPath: join(cwd, ".env"), rootOk: !(podmanUsed && !localUsed) });
+		ownerVerdict = await seams.valkeyOwner(valkeyUrl, { shared: valkeySharedOn(sharedInFile), user: userNameOf(seams), envPath: join(cwd, ".env"), rootOk: !((podmanUsed && !localUsed) || openshellSetup.valkeyEngine === "podman") });
 	}
 	// A name that does not resolve here cannot be judged (gate round 3): said, and talked to no more than a refused one.
 	const valkeyUnresolved = ownerVerdict?.unresolved ? `VALKEY_URL's host ${ownerVerdict.unresolved} did not resolve here (${ownerVerdict.why}), so whose Valkey it reaches cannot be judged; the worker waits for it and retries` : null;
@@ -2617,7 +2661,7 @@ export async function collectChecks(shellVars, seams) {
 	} else if (valkeyAuthVerdict && (valkeyAuthVerdict.state === "noauth" || valkeyAuthVerdict.state === "wrongpass")) {
 		// Issue #468: a Valkey that refuses this deployment's credential answers, so "not reachable" would be the wrong
 		// sentence: it is the password, named by its key and where it came from, never its value.
-		checks.push({ ok: false, label: `Valkey (${urlShown(valkeyUrl)}) answers, and ${valkeyAuthVerdict.state === "noauth" ? "requires a password this deployment does not send" : `refuses the ${VALKEY_PASSWORD_KEY} this deployment sends`}: the worker refuses to start on it (exit 2)`, fix: valkeyAuthFix(valkeyAuthVerdict.state, { localUsed, podmanUsed, envPath: join(cwd, ".env") }) });
+		checks.push({ ok: false, label: `Valkey (${urlShown(valkeyUrl)}) answers, and ${valkeyAuthVerdict.state === "noauth" ? "requires a password this deployment does not send" : `refuses the ${VALKEY_PASSWORD_KEY} this deployment sends`}: the worker refuses to start on it (exit 2)`, fix: valkeyAuthFix(valkeyAuthVerdict.state, { ...valkeyVenues, envPath: join(cwd, ".env") }) });
 	} else checks.push({
 		ok: await probeValkey(valkeyTalkUrl),
 		label: `Valkey reachable (${urlShown(valkeyUrl)})${fromFileNote(fileSays("VALKEY_URL"))}`,
@@ -2626,9 +2670,11 @@ export async function collectChecks(shellVars, seams) {
 		// the deployment's VALKEY_PASSWORD in the docker CLI's environment, and doctor hands no program anything from
 		// `.env`). It names the step: `pi-dispatch up`, which starts it with the password, labels its container and volume
 		// with this folder, and asks before it uses a volume it cannot attribute. The words hold on both venues.
-		fix: localUsed
+		fix: valkeyVenues.localUsed
 			? "run `pi-dispatch up` in the deployment folder: it starts Valkey with the deployment's VALKEY_PASSWORD (or, in a folder /dispatch setup handed to compose, compose's own: `docker compose -p <folder name> --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.valkey.yml up -d valkey`)"
-			: "run `pi-dispatch up` (or `pi-dispatch service install`) as this account: on the podman venue both start Valkey as a Quadlet unit under its Podman (docs/podman.md, setup step 6); a Valkey you run yourself, a distribution package say, works too",
+			: openshellSetup.valkeyEngine !== "podman"
+				? "run `pi-dispatch up` (or `pi-dispatch service install`) as this account: on the podman venue both start Valkey as a Quadlet unit under its Podman (docs/podman.md, setup step 6); a Valkey you run yourself, a distribution package say, works too"
+				: "run `pi-dispatch up` (or `pi-dispatch service install`) as this account: with PI_OPENSHELL_ENGINE=podman both start Valkey as a Quadlet unit under its Podman (the openshell venue's engine; no egress proxy is started for it); a Valkey you run yourself, a distribution package say, works too",
 	});
 
 	// Round 3 of PR #475's review: PI_VALKEY_PORT is the port compose publishes its Valkey on, and VALKEY_URL's is the one
@@ -2651,7 +2697,7 @@ export async function collectChecks(shellVars, seams) {
 	if (ownerVerdict?.heldBy) {
 		checks.push({ ok: true, label: `Valkey (${urlShown(valkeyUrl)}) answers from a listener of ${ownerVerdict.heldBy}${ownerVerdict.chosen ? `; the worker connects to ${ownerVerdict.chosen} only` : ""}` });
 	}
-	checks.push(...(await valkeyPasswordChecks({ verdict: valkeyAuthVerdict, context: valkeyContext, seams, valkeyUrl, valkeyTalkUrl, localUsed, podmanUsed, platform, statSeam, fileValue })));
+	checks.push(...(await valkeyPasswordChecks({ verdict: valkeyAuthVerdict, context: valkeyContext, seams, valkeyUrl, valkeyTalkUrl, ...valkeyVenues, platform, statSeam, fileValue })));
 	for (const other of ownerVerdict?.elsewhere ?? []) {
 		checks.push({ ok: false, warn: true, label: `another account also listens on an address VALKEY_URL's host resolves to: ${other}. The worker connects only to the address judged this account's, so it never reaches that one`, fix: "nothing to change for this deployment; a client that resolves the name itself (`pi-dispatch run` from a shell) may still reach it, so prefer VALKEY_URL=redis://127.0.0.1:<port>" });
 	}
@@ -8734,8 +8780,12 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 			const d = declarationOf(name, property);
 			if (!d) continue;
 			// FIRST, ahead of the gate: a control that does not exist is not a control that is unarmed.
+			// A WARNING since issue #707, no longer a ✗: since the openshell venues, a blessed venue legitimately declares
+			// properties absent (`localFolders`, `pausable`), and a ✗ here failed doctor, and so `up`, on every such
+			// deployment. Whether the deployment NEEDS the property is the floor's to say, and that refusal is its own ✗
+			// below (`PI_BACKEND_FLOOR is not met`), as the worker's boot refusal is unchanged.
 			if (d.word === ABSENT) {
-				checks.push({ ok: false, label: `${name}: ${property} is ABSENT -- ${d.question}`, fix: `this backend does not provide ${property}; a deployment that needs it must not run jobs on ${name}` });
+				checks.push({ ok: false, warn: true, label: `${name}: ${property} is ABSENT -- ${d.question}`, fix: `this backend does not provide ${property}: a PI_BACKEND_FLOOR naming ${property} refuses the boot while ${name} is blessed, so a deployment that needs it must not run jobs on ${name}` });
 				continue;
 			}
 			if (d.armedBy && switches[d.armedBy] === undefined) {

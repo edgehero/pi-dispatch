@@ -80,6 +80,16 @@ jobs:
           openshell gateway add https://127.0.0.1:17670 --local --name openshell
           openshell status -o json
 
+      # Review round 2 of #715: `up` offers the gateway registration only where `openshell gateway list -o json` reads as
+      # an empty list (an array, or `{gateways: []}`) and refuses on any other shape. Printed here, on the real 0.1.4
+      # gateway with one registration, so the shape is measured: if it is neither of those, that is a finding.
+      - name: The gateway list's shape (measured for issue #707)
+        if: always()
+        run: |
+          set +e
+          openshell gateway list -o json; echo "exit $?"
+          openshell gateway list; echo "exit $?"
+
       - name: Build the job image
         run: docker build -f image/Dockerfile -t pi-job:ci .
 
@@ -139,6 +149,50 @@ jobs:
       - name: Bind-mode conformance (the real bind bundle, the real runner)
         if: always()
         run: PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs
+
+      # Issue #707: the setup commands on the real host. `pi-dispatch up --yes` in a scratch deployment folder whose .env
+      # blesses only the openshell venue: the gateway is already running and registered here, so the gate reads it and
+      # offers nothing; the image (pi-job:ci, built above) is found in docker's store, the gateway's engine; Valkey is
+      # started on docker on a free loopback port; and no egress proxy is started, since the gateway's policy is this
+      # venue's egress. Then `doctor` alone. `up` must exit 0 and doctor print no ✗ line (the venue's declared `absent`
+      # properties are warnings since this issue).
+      - name: up and doctor set the openshell venue up (issue #707)
+        if: always()
+        env:
+          PI_PROVIDER: anthropic
+          ANTHROPIC_API_KEY: sk-ant-ci-not-a-key
+        run: |
+          set -u
+          dep="$RUNNER_TEMP/deploy-707"
+          rm -rf "$dep" && mkdir -p "$dep"
+          port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+          printf 'PI_BACKENDS=openshell\nVALKEY_URL=redis://127.0.0.1:%s\nPI_JOB_IMAGE=pi-job:ci\n' "$port" > "$dep/.env"
+          set +e
+          (cd "$dep" && node "$GITHUB_WORKSPACE/worker/src/cli.mjs" up --yes < /dev/null) > "$RUNNER_TEMP/up-707.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/up-707.log"
+          [ "$code" -eq 0 ] || { echo "::error::pi-dispatch up --yes exited $code"; exit 1; }
+          grep -q '^✓ OpenShell gateway 0\.1\.4, the tested release, on this host' "$RUNNER_TEMP/up-707.log" || { echo "::error::up did not read the gateway as ready"; exit 1; }
+          if grep -q -E '^  (systemctl --user start|openshell gateway add)' "$RUNNER_TEMP/up-707.log"; then echo "::error::up offered to start or register a gateway that was already running and registered"; exit 1; fi
+          docker image inspect pi-job:ci > /dev/null || { echo "::error::the job image is not in docker's store"; exit 1; }
+          [ "$(docker inspect -f '{{.State.Running}}' pi-dispatch-valkey)" = "true" ] || { echo "::error::the Valkey container is not running"; exit 1; }
+          docker inspect -f '{{range .HostConfig.PortBindings}}{{range .}}{{.HostPort}}{{end}}{{end}}' pi-dispatch-valkey | grep -qx "$port" || { echo "::error::Valkey is not published on VALKEY_URL's port $port"; exit 1; }
+          if docker container inspect pi-dispatch-egress-proxy > /dev/null 2>&1; then echo "::error::an egress proxy container exists on an openshell-only deployment"; exit 1; fi
+          set +e
+          (cd "$dep" && node "$GITHUB_WORKSPACE/worker/src/cli.mjs" doctor < /dev/null) > "$RUNNER_TEMP/doctor-707.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/doctor-707.log"
+          if grep -q '^✗' "$RUNNER_TEMP/doctor-707.log"; then echo "::error::doctor printed a ✗ line:"; grep '^✗' "$RUNNER_TEMP/doctor-707.log"; exit 1; fi
+          [ "$code" -eq 0 ] || { echo "::error::doctor exited $code"; exit 1; }
+
+      - name: Clean up the issue #707 deployment
+        if: always()
+        run: |
+          docker rm -f pi-dispatch-valkey > /dev/null 2>&1 || true
+          docker volume rm pi-dispatch-valkey-data > /dev/null 2>&1 || true
+          rm -rf "$RUNNER_TEMP/deploy-707"
 
       - name: Gateway log
         if: always()

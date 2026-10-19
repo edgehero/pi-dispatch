@@ -41,14 +41,15 @@
  * the rest of the config is broken.
  */
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { connect as netConnect } from "node:net";
 import { homedir, networkInterfaces, tmpdir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { parseBackendList, venuesOf } from "./backends.mjs";
+import { openshellSetupOf, parseBackendList, venuesOf } from "./backends.mjs";
+import { OPENSHELL_BREW_INSTALL, OPENSHELL_GATEWAY_UNIT, OPENSHELL_NO_WINDOWS } from "./openshell-cli.mjs";
 import { sharedShellIgnored } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
@@ -89,7 +90,8 @@ function resolveReceiverStart() {
 // The two worker-template literals a podman render rewrites (issue #430), spelled once for the pin table and the render.
 const WORKER_DESCRIPTION = "Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)";
 const WORKER_VALKEY_COMMENT = "# Valkey must be reachable (on this host, `pi-dispatch up` in the deployment folder starts it), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n";
-
+// The template's ordering line, which an openshell render on Podman alone rewrites without docker.service (issue #707).
+const WORKER_AFTER = "After=network-online.target docker.service";
 export const TEMPLATE_PINS = {
 	"worker.service": [
 		"ExecStart=/usr/bin/node worker/src/cli.mjs worker", // the WHOLE line → `<execPath> <cliPath> worker` (cli.mjs sits beside this module in src/ in both layouts)
@@ -100,6 +102,7 @@ export const TEMPLATE_PINS = {
 		"\nWants=network-online.target\n", // the anchor the podman venue's Wants=/After= on its Quadlet units go after (issue #430), user scope only
 		"Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)", // → names rootless podman on a podman deployment (issue #430)
 		"# Valkey must be reachable (on this host, `pi-dispatch up` in the deployment folder starts it), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n", // → says it IS ordered, when the Quadlet Valkey is installed
+		"After=network-online.target docker.service", // → without docker.service on an openshell deployment whose engine is podman and that blesses no `local` (issue #707); the openshell gateway's Wants=/After= go at the \nWants= anchor above
 		// Byte-for-byte survivors — semantics the render must not lose:
 		"RestartPreventExitStatus=2", // EXIT_POLICY is never restarted (a retry loop is a bill)
 		"StartLimitIntervalSec=60",
@@ -368,6 +371,9 @@ export async function runService(argv = [], deps = {}) {
 		realpath = (p) => realpathSync(p),
 		// Issue #468: how a new Valkey password is made (a test's seam; 32 random bytes, hex, never shown).
 		newPassword = newValkeyPassword,
+		// Issue #707: where this shell finds a CLI by name (its PATH, the first executable file), for the plist's PATH.
+		// env-internal PATH: this shell's own search path, read only to find the openshell CLI's directory for the plist.
+		findBin = (name) => findOnPath(name, env.PATH),
 	} = deps;
 
 	let values, positionals;
@@ -436,6 +442,7 @@ export async function runService(argv = [], deps = {}) {
 		runSync,
 		realpath,
 		newPassword,
+		findBin,
 		which: values.receiver ? "receiver" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
 		force: values.force,
@@ -609,7 +616,7 @@ function composeEnvSetupExec(setup, argv) {
  * known literals (see TEMPLATE_PINS); everything else — RestartPreventExitStatus=2, the StartLimit
  * crash-loop bound, KillSignal, TimeoutStopSec — passes through byte-for-byte.
  */
-function renderLinuxUnit(ctx, stackUnits = [], venues = null) {
+function renderLinuxUnit(ctx, stackUnits = [], venues = null, openshell = null) {
 	const template = ctx.which === "receiver" ? "receiver.service" : "worker.service";
 	// The ExecStart line is replaced WHOLE, not path-by-path: the template's script path is relative
 	// to a repo-root WorkingDirectory that only a checkout has. The rendered unit points at absolute
@@ -649,16 +656,29 @@ function renderLinuxUnit(ctx, stackUnits = [], venues = null) {
 		unit = unit.replace("WantedBy=multi-user.target", "WantedBy=default.target");
 		// The podman venue's Quadlet units (issue #430), which live in this same user manager, so the worker can be
 		// ordered after them. Nothing is added when there are none, which keeps every other render byte-identical.
-		const deps = workerUnitDeps(stackUnits);
-		if (deps) unit = unit.replace("\nWants=network-online.target\n", () => `\nWants=network-online.target\n${deps}`);
+		const deps = workerUnitDeps(stackUnits, venues?.podmanUsed || !openshell?.used ? {} : { forWhat: "the openshell venue's Valkey on Podman (issue #707)" });
+		// Issue #707: the openshell venues' gateway is the `openshell-gateway` USER unit OpenShell's package ships, in this
+		// same user manager, so the worker pulls it in at boot. `Wants=`, never `Requires=`, for workerUnitDeps' reason: a
+		// gateway that fails to start must not stop the worker, whose boot says why (and whose other venues still run).
+		// NO `After=`, the obvious companion, REJECTED (review round 1 of #715, measured with `systemd-analyze --user verify
+		// default.target`): the 0.1.4 deb's unit has `After=default.target` and `WantedBy=default.target`, and the worker is
+		// WantedBy default.target too, so default.target -> worker -> gateway -> default.target is an ordering cycle, and
+		// systemd breaks it by deleting the worker's start job. Unordered is safe: a gateway down at boot is only logged
+		// (`openshell_gateway_down_at_boot`), and every job reads it again before it spends.
+		const gatewayDeps = openshell?.used ? `# Added by \`pi-dispatch service install\` for the openshell venue (issue #707): the gateway's own user unit, pulled\n# in but NOT ordered (its unit is After=default.target, so an After= here is an ordering cycle).\nWants=${OPENSHELL_GATEWAY_UNIT}\n` : "";
+		if (deps || gatewayDeps) unit = unit.replace("\nWants=network-online.target\n", () => `\nWants=network-online.target\n${deps}${gatewayDeps}`);
 		// The template's own words, made true for a podman deployment (round 2 nit): its Description says jobs launch
-		// via docker, and its comment says Valkey is not ordered here. Both anchors are TEMPLATE_PINS.
-		if (venues?.podmanUsed) {
-			const runtime = venues.localUsed ? "docker and rootless podman" : "rootless podman";
+		// via docker, and its comment says Valkey is not ordered here. Both anchors are TEMPLATE_PINS. Issue #707: and for
+		// an openshell one, whose jobs run in the gateway's sandboxes on its engine.
+		if (venues?.podmanUsed || openshell?.used) {
+			const runtimes = [venues?.localUsed ? "docker" : null, venues?.podmanUsed ? "rootless podman" : null, openshell?.used ? `an OpenShell gateway on ${openshell.engine}` : null].filter(Boolean);
+			const runtime = runtimes.length > 1 ? `${runtimes.slice(0, -1).join(", ")} and ${runtimes.at(-1)}` : runtimes[0];
 			unit = unit.replace(WORKER_DESCRIPTION, () => `Description=pi-dispatch worker (drains the job queue on the host; launches job containers via ${runtime})`);
 			if (stackUnits.includes(QUADLET_FILES.valkey.unit)) {
-				unit = unit.replace(WORKER_VALKEY_COMMENT, () => "# Valkey is the podman venue's Quadlet unit in this same user manager, so the worker is ordered after it\n# (the Wants=/After= lines `pi-dispatch service install` added below).\n");
+				unit = unit.replace(WORKER_VALKEY_COMMENT, () => (venues?.podmanUsed ? "# Valkey is the podman venue's Quadlet unit in this same user manager, so the worker is ordered after it\n# (the Wants=/After= lines `pi-dispatch service install` added below).\n" : "# Valkey is a Quadlet unit in this same user manager (the openshell venue's engine is Podman), so the worker is\n# ordered after it (the Wants=/After= lines `pi-dispatch service install` added below).\n"));
 			}
+			// Nothing of this deployment runs on docker: no `local` venue, and the gateway's engine is Podman.
+			if (openshell?.used && openshell.engine === "podman" && !venues?.localUsed) unit = unit.replace(WORKER_AFTER, () => "After=network-online.target");
 		}
 	} else {
 		unit = unit.replace(/^User=pi$/m, () => `User=${ctx.user}`);
@@ -675,7 +695,7 @@ function renderLinuxUnit(ctx, stackUnits = [], venues = null) {
  * the wrapper's conversion to a clean 0 is exactly what KeepAlive/SuccessfulExit=false reads as
  * "leave it stopped" -- launchd's only way to spell RestartPreventExitStatus=2.
  */
-function renderPlist(ctx) {
+function renderPlist(ctx, { pathDirs = [] } = {}) {
 	// Substituted before anything composed goes in (subDeployDir): the two anchors below are therefore
 	// written in their post-substitution form, and PI_ENV_SETUP can no longer be rewritten into a path
 	// the operator never typed. Only subDeployDir here — the template's /usr/bin/node is example prose.
@@ -709,7 +729,12 @@ function renderPlist(ctx) {
 	// no-EnvironmentVariables stance is about credentials, which still live only in .env.
 	// The dict is built as a list so the seam below can extend it without a second anchor. Everything
 	// in it is a PATH; nothing in it is a credential, which is what keeps this file committable.
-	const envEntries = ["\t\t<key>PATH</key>", `\t\t<string>${dirname(ctx.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin</string>`];
+	// Issue #707: and the directories of the CLIs a venue spawns by name (the openshell CLI, resolved from this shell's
+	// PATH at install time), which launchd's PATH cannot see either: a Homebrew `openshell` is in /opt/homebrew/bin.
+	// With none, the line is byte-identical to the one before (review round 1 of #715), node in /usr/bin included.
+	const fixed = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+	const extra = [...new Set(pathDirs)].filter((d) => d !== dirname(ctx.execPath) && !fixed.includes(d));
+	const envEntries = ["\t\t<key>PATH</key>", `\t\t<string>${[dirname(ctx.execPath), ...extra, ...fixed].join(":")}</string>`];
 	if (ctx.envSetup) {
 		// launchd has no EnvironmentFile and no shell in front of ProgramArguments, so the seam is a
 		// VARIABLE the wrapper reads rather than a composed command line: nothing here has to be quoted
@@ -779,8 +804,10 @@ function nssmSequence(ctx) {
  * splits it) and a file it cannot read there is not a refusal: refusing an install over a key that could change
  * nothing about it would be a refusal with no remedy.
  */
-function podmanVenue(ctx) {
-	if (ctx.which !== "worker") return { used: false };
+const NO_OPENSHELL = Object.freeze(openshellSetupOf(null));
+
+function deploymentVenue(ctx) {
+	if (ctx.which !== "worker") return { used: false, openshell: NO_OPENSHELL };
 	const envPath = join(ctx.deployDir, ".env");
 	const linux = ctx.platform === "linux";
 	let fileKeys = {};
@@ -790,18 +817,18 @@ function podmanVenue(ctx) {
 			// Bytes, not text: `readStackKeys` checks what systemd refuses to load before it decodes (issue #447).
 			text = ctx.fs.readFileSync(envPath);
 		} catch (err) {
-			if (!linux) return { used: false };
+			if (!linux) return { used: false, openshell: NO_OPENSHELL };
 			return { error: `cannot read ${envPath} to learn whether this deployment runs the podman venue: ${err?.message}` };
 		}
 		const loader = linux ? "systemd" : ctx.platform === "darwin" ? "shell" : "cmd";
 		const read = readStackKeys(text, { loader, path: envPath });
-		if (read.error) return linux ? { error: read.error } : { used: false };
+		if (read.error) return linux ? { error: read.error } : { used: false, openshell: NO_OPENSHELL };
 		fileKeys = read.keys;
 		// Issue #464: where the worker's queue is, and whether a Valkey another uid holds may be it (PI_VALKEY_SHARED), as
 		// the service reads them, for the Valkey rule (`decideValkey`). A line the loaders read differently is refused,
 		// naming what in it is the problem, rather than guessed at.
 		const valkey = readValkeyKeys(text, { loader, path: envPath });
-		if (valkey.error) return linux ? { error: valkey.error } : { used: false };
+		if (valkey.error) return linux ? { error: valkey.error } : { used: false, openshell: NO_OPENSHELL };
 		fileKeys = { ...fileKeys, ...valkey.keys };
 	}
 	// Refused here, unlike doctor's venuesOf, which reads an unparseable list as `local`: doctor then reports the parse,
@@ -809,11 +836,15 @@ function podmanVenue(ctx) {
 	try {
 		parseBackendList(fileKeys.PI_BACKENDS);
 	} catch (err) {
-		return linux ? { error: `${envPath}: ${err.message}` } : { used: false };
+		return linux ? { error: `${envPath}: ${err.message}` } : { used: false, openshell: NO_OPENSHELL };
 	}
 	const venues = venuesOf(fileKeys);
-	if (!venues.podmanUsed) return { used: false };
-	return { used: true, venues, env: fileKeys };
+	// Issue #707: the openshell venues' setup by the one rule `up` follows (`openshellSetupOf`): which engine, and whether
+	// this deployment's Valkey is a Quadlet unit on it. An engine the worker refuses at boot is refused here too, on Linux,
+	// rather than installing a unit that starts into that refusal.
+	const openshell = openshellSetupOf(venues, fileKeys);
+	if (openshell.engineError && linux) return { error: `${envPath}: ${openshell.engineError}` };
+	return { used: venues.podmanUsed, venues, env: fileKeys, openshell };
 }
 
 /**
@@ -823,6 +854,18 @@ function podmanVenue(ctx) {
  * the worker would race its own queue at every boot; and installing them means writing into a user's config from a
  * command whose system-scope doctrine is to write nothing. User scope with linger does both properly.
  */
+/**
+ * The refusal for an openshell venue in SYSTEM scope (issue #707), as podman's: the gateway is the `openshell-gateway` USER
+ * unit, which a system unit cannot order itself after, and the CLI the worker drives keeps its gateway registration under
+ * that user's own config directory, which a system unit's environment does not point at.
+ */
+function refuseOpenshellSystemScope(ctx) {
+	return fail(
+		ctx.err,
+		`PI_BACKENDS in ${join(ctx.deployDir, ".env")} lists an openshell venue, and its gateway runs as ${OPENSHELL_GATEWAY_UNIT}, a unit of the worker account's OWN user manager, which a system unit cannot order itself after; the openshell CLI also keeps its gateway registration under that account's home. Install in user scope (drop --system) with linger on:  sudo loginctl enable-linger ${ctx.user}`,
+	);
+}
+
 function refusePodmanSystemScope(ctx) {
 	return fail(
 		ctx.err,
@@ -836,10 +879,11 @@ function refusePodmanSystemScope(ctx) {
  * `up` starts what is not running, while an install also keeps (and orders the worker after) a Valkey unit an
  * earlier run already installed, even though that Valkey is now the thing listening.
  */
-async function podmanStackFor(ctx, venue, { readKeeper = false } = {}) {
+async function podmanStackFor(ctx, venue, { readKeeper = false, egress = true } = {}) {
 	let armed;
 	try {
-		armed = egressArmed(venue.env);
+		// `egress: false` (issue #707): the openshell venue's Valkey alone, with no proxy and no keeper, whatever PI_EGRESS says.
+		armed = egress ? egressArmed(venue.env) : false;
 	} catch (err) {
 		return { error: `${join(ctx.deployDir, ".env")}: ${err.message}` };
 	}
@@ -913,7 +957,7 @@ async function doRender(ctx) {
 	const paths = unitPaths(ctx);
 	if (ctx.platform === "darwin") {
 		ctx.out(`# → ${paths.installPath}\n`);
-		ctx.out(renderPlist(ctx));
+		ctx.out(renderPlist(ctx, { pathDirs: openshellPathDirs(ctx, deploymentVenue(ctx)) }));
 		ctx.out(
 			"\n# note: ProgramArguments runs the package's worker-env-wrapper.sh, which sources ./.env in the\n# WorkingDirectory above and then runs the argv that follows it — launchd has no EnvironmentFile.\n# The wrapper also converts a policy refusal (exit 2, EXIT_POLICY) into a clean exit, so KeepAlive\n# never relaunch-loops a refusal into a provider bill.\n",
 		);
@@ -925,16 +969,14 @@ async function doRender(ctx) {
 		return 0;
 	}
 	if (ctx.platform === "linux") {
-		const venue = podmanVenue(ctx);
+		const venue = deploymentVenue(ctx);
 		if (venue.error) return fail(ctx.err, venue.error);
-		let stack = null;
-		if (venue.used) {
-			if (ctx.scope === "system") return refusePodmanSystemScope(ctx);
-			stack = await podmanStackFor(ctx, venue);
-			if (stack.error) return fail(ctx.err, stack.error);
-		}
+		if (ctx.scope === "system" && venue.used) return refusePodmanSystemScope(ctx);
+		if (ctx.scope === "system" && venue.openshell.used) return refuseOpenshellSystemScope(ctx);
+		const stack = await stackFor(ctx, venue);
+		if (stack?.error) return fail(ctx.err, stack.error);
 		ctx.out(`# → ${paths.installPath}\n`);
-		ctx.out(renderLinuxUnit(ctx, stack?.plan.start ?? [], stack?.venues ?? null));
+		ctx.out(renderLinuxUnit(ctx, stack?.plan.start ?? [], venue.venues ?? null, venue.openshell));
 		// The proxy's rules copy is named, not printed (round 3 nit): it is the package's egress-proxy.conf verbatim, and
 		// 4.7 KB of squid configuration under a "Quadlet" heading read as a unit file.
 		for (const f of stack?.plan.files ?? []) {
@@ -973,30 +1015,56 @@ async function doInstall(ctx) {
 		}
 	}
 
-	const venue = podmanVenue(ctx);
+	const venue = deploymentVenue(ctx);
 	if (venue.error) return fail(ctx.err, venue.error);
+	// Issue #707: no OpenShell gateway exists for Windows (the pinned release's assets were checked), so a worker unit for
+	// this deployment would start into a venue that cannot run here. Refused before anything is written.
+	if (ctx.platform === "win32" && venue.openshell.used) return fail(ctx.err, OPENSHELL_NO_WINDOWS);
 	if (ctx.platform === "darwin" || ctx.platform === "win32") {
-		const code = ctx.platform === "darwin" ? await installDarwin(ctx, paths) : await installWindows(ctx);
+		const code = ctx.platform === "darwin" ? await installDarwin(ctx, paths, venue) : await installWindows(ctx);
 		// Said, never silently skipped: the venue refuses every host that is not Linux (podman-platform), so there is
 		// no stack to install here, and a deployment listing it should know why nothing about Podman happened.
 		if (code === 0 && venue.used) ctx.out("note: PI_BACKENDS lists podman, and the podman venue runs only on Linux (it refuses this host as podman-platform), so no podman stack was installed here\n");
 		return code;
 	}
-	if (ctx.scope === "system") return venue.used ? refusePodmanSystemScope(ctx) : installLinuxSystem(ctx, paths);
-	let stack = null;
+	if (ctx.scope === "system") return venue.used ? refusePodmanSystemScope(ctx) : venue.openshell.used ? refuseOpenshellSystemScope(ctx) : installLinuxSystem(ctx, paths);
 	let foreign = [];
-	if (venue.used) {
-		stack = await podmanStackFor(ctx, venue, { readKeeper: true });
+	const stack = await stackFor(ctx, venue, { readKeeper: true });
+	if (stack) {
 		if (stack.error) return fail(ctx.err, stack.error);
 		// Every stack refusal first, the unit's own among them, so installLinuxUser's unit check never fires alone.
 		const refused = await stackRefusal(ctx, paths, stack);
 		if (refused.error) return fail(ctx.err, refused.error);
 		foreign = refused.foreign;
 	}
-	return installLinuxUser(ctx, paths, stack, foreign);
+	return installLinuxUser(ctx, paths, stack, foreign, venue);
 }
 
-async function installDarwin(ctx, paths) {
+/**
+ * The Quadlet stack this deployment's worker unit is installed with, or null: the podman venue's (Valkey, the proxy and
+ * the keeper, by their own rules), or, for an openshell venue on Podman that no `local` or `podman` venue decides the
+ * queue for, its Valkey alone (issue #707, `openshellSetupOf`'s `valkeyEngine`), with no proxy and no keeper.
+ */
+async function stackFor(ctx, venue, opts = {}) {
+	if (venue.used) return podmanStackFor(ctx, venue, opts);
+	if (venue.openshell?.valkeyEngine === "podman") return podmanStackFor(ctx, venue, { ...opts, egress: false });
+	return null;
+}
+
+/**
+ * The directory of the `openshell` CLI as this shell finds it (issue #707), for the plist's PATH: launchd's own PATH
+ * cannot see a Homebrew install, and the worker spawns the CLI by name. Empty where no openshell venue is blessed, or
+ * where it is not found (then `installDarwin` says so).
+ */
+function openshellPathDirs(ctx, venue) {
+	if (!venue?.openshell?.used) return [];
+	const found = ctx.findBin("openshell");
+	// A directory the plist cannot carry as written (review round 1 of #715): `&`, `<`, `>`, `"` or a control byte would
+	// break or change the XML, the refusal `--env-setup` makes for the same file. Left out, and said by installDarwin.
+	return found && !ENV_SETUP_REFUSALS.darwin.re.test(dirname(found)) ? [dirname(found)] : [];
+}
+
+async function installDarwin(ctx, paths, venue = null) {
 	// Root refusal (the svc.sh darwin precedent): sudo would bootstrap into ROOT's gui domain and
 	// write root's LaunchAgents — a unit the operator's own session neither sees nor controls, running
 	// outside the login session that owns Docker Desktop.
@@ -1023,7 +1091,7 @@ async function installDarwin(ctx, paths) {
 		// launchd creates the StandardOutPath FILES but not their parent directory: without this the job
 		// spawns and dies with its error unwritable. Done at install, not render: render stays read-only.
 		ctx.fs.mkdirSync(join(ctx.deployDir, "logs"), { recursive: true });
-		journalWrite(ctx.fs, journal, paths.installPath, renderPlist(ctx));
+		journalWrite(ctx.fs, journal, paths.installPath, renderPlist(ctx, { pathDirs: openshellPathDirs(ctx, venue) }));
 	} catch (err) {
 		return fail(ctx.err, `could not write ${paths.installPath} (${err?.message ?? err}), so nothing was installed: ${describeRollBack(rollBackWrites(ctx.fs, journal))}`);
 	}
@@ -1038,6 +1106,13 @@ async function installDarwin(ctx, paths) {
 	ctx.out(
 		"note: a LaunchAgent is LOGIN-scoped — it runs while you are logged in, not from boot. That is the honest fit here: Docker Desktop is itself login-scoped, so a boot-time daemon would only wait on a docker socket that appears at login anyway.\n",
 	);
+	// Issue #707: the openshell venue's gateway, which a LaunchAgent cannot order itself after; Homebrew's service runs it
+	// in the same login session. And the CLI the worker spawns by name, whose directory is now on the plist's PATH.
+	if (venue?.openshell?.used) {
+		const found = ctx.findBin("openshell");
+		if (found && ENV_SETUP_REFUSALS.darwin.re.test(dirname(found))) ctx.out(`⚠ the openshell venue: this shell finds \`openshell\` in ${JSON.stringify(dirname(found))}, which the plist cannot carry (${ENV_SETUP_REFUSALS.darwin.why}), so its PATH does not name it and the worker will not find the CLI. Install it somewhere without those characters, then re-run with --force\n`);
+		else ctx.out(found ? `note: the openshell venue: the plist's PATH carries ${dirname(found)}, where this shell finds \`openshell\`. Keep its gateway running in this login session: \`brew services start openshell\` (the service of OpenShell's release formula, \`${OPENSHELL_BREW_INSTALL}\`; homebrew-core's formula defines none)\n` : `⚠ the openshell venue: \`openshell\` is not on this shell's PATH, so the plist's PATH carries no directory for it and the worker will not find the CLI. Install OpenShell's release formula (\`${OPENSHELL_BREW_INSTALL}\`), then re-run with --force; its service keeps the gateway running in this login session: \`brew services start openshell\`\n`);
+	}
 	return 0;
 }
 
@@ -1091,7 +1166,7 @@ async function stackRefusal(ctx, paths, stack) {
 	return { foreign };
 }
 
-async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
+async function installLinuxUser(ctx, paths, stack = null, foreign = [], venue = null) {
 	if (ctx.fs.existsSync(paths.installPath) && !ctx.force) {
 		return fail(ctx.err, `${paths.installPath} already exists — pass --force to replace it (same non-clobber contract as init)`);
 	}
@@ -1104,7 +1179,7 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 	const writeUnit = () => {
 		try {
 			ctx.fs.mkdirSync(dirname(paths.installPath), { recursive: true });
-			journalWrite(ctx.fs, journal, paths.installPath, renderLinuxUnit(ctx, stack?.plan.start ?? [], stack?.venues ?? null));
+			journalWrite(ctx.fs, journal, paths.installPath, renderLinuxUnit(ctx, stack?.plan.start ?? [], venue?.venues ?? stack?.venues ?? null, venue?.openshell ?? null));
 			return { ok: true };
 		} catch (err) {
 			return { ok: false, failed: `write ${paths.installPath}`, code: null, message: err?.message };
@@ -1130,7 +1205,7 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 		if (passwordWarning) ctx.out(`⚠ ${passwordWarning}\n`);
 		if (stack.plan.actions.length > 0) {
 			// Shown, then done: the same lines `up` asks consent for, carried out by the same function.
-			ctx.out(`podman venue (PI_BACKENDS in .env): its stack, as Quadlet units in ${stack.plan.dir}:\n`);
+			ctx.out(`${venue?.used === false ? "openshell venue on Podman (PI_BACKENDS and PI_OPENSHELL_ENGINE in .env): its Valkey" : "podman venue (PI_BACKENDS in .env): its stack"}, as Quadlet units in ${stack.plan.dir}:\n`);
 			for (const action of stack.plan.actions) ctx.out(`  ${describeAction(action)}\n`);
 			const applied = await applyStack(stack.plan, { fs: ctx.fs, run: (cmd, args) => run(ctx, cmd, args), journal, beforeRuns: writeUnit });
 			if (!applied.ok) {
@@ -1162,6 +1237,7 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 		return fail(ctx.err, `systemctl --user enable --now ${paths.name} failed (exit ${enable}); the unit is written at ${paths.installPath}; \`systemctl --user status ${paths.name}\` has the details (files this run wrote, which remain: ${writtenList()})`);
 	}
 	ctx.out(`installed ${paths.name} → ${paths.installPath} (enabled and started in your user manager)\n`);
+	if (venue?.openshell?.used) ctx.out(`${paths.name} Wants= ${OPENSHELL_GATEWAY_UNIT} (not After=, whose ordering would be a cycle through default.target), the OpenShell gateway's own user unit (\`systemctl --user enable --now ${OPENSHELL_GATEWAY_UNIT}\` starts it at boot too)\n`);
 	if (stack) {
 		// Said as it happened: `start` on a unit already active is a no-op, so a unit whose file this run replaced was
 		// RESTARTED (planStack), and the line names which is which rather than calling everything "started".
@@ -1566,6 +1642,19 @@ async function doRestart(ctx, values) {
 	} finally {
 		await queue.close().catch(() => {});
 	}
+}
+
+/** The first executable regular file named `name` in a PATH string, or null (issue #707's lookup seam's default). */
+export function findOnPath(name, path, { access = (p) => accessSync(p, fsConstants.X_OK), isFile = (p) => statSync(p).isFile() } = {}) {
+	for (const dir of String(path ?? "").split(delimiter)) {
+		if (dir === "" || !dir.startsWith("/")) continue;
+		const candidate = join(dir, name);
+		try {
+			access(candidate);
+			if (isFile(candidate)) return candidate;
+		} catch {}
+	}
+	return null;
 }
 
 function fail(err, message) {

@@ -4457,7 +4457,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   into the account's own Podman store and starts Valkey, the egress proxy and (while the policy is armed) the proxy's
   rootless network keeper (issue #458) as Quadlet units through the installer
   `service install` uses, shown line for line before consent, and runs no docker command at all when `PI_BACKENDS`
-  does not list `local` (`DES-PODMAN-STACK-AS-QUADLET-UNITS`). On either venue the image step checks only the image
+  does not list `local` (`DES-PODMAN-STACK-AS-QUADLET-UNITS`). **On the `openshell` venues** (issue #707) it first
+  judges the gateway's engine, the OpenShell CLI and the gateway as the worker's boot does (the tested release, connected,
+  on this host), read-only unless the operator accepts one of two offers, each shown and asked (`--yes` accepts): the
+  START of a gateway that does not answer (`systemctl --user start openshell-gateway`, the user unit OpenShell's package
+  ships, or on macOS `brew services start openshell`, the service of OpenShell's release formula, each offered only where
+  that unit or service exists), waited for a bounded 30 s, and the REGISTRATION of one that answers on `127.0.0.1:17670`
+  while the CLI has no gateway registered at all (`openshell gateway add https://127.0.0.1:17670 --local --name
+  openshell`; with any registration the command is printed as the fix instead).
+  It never installs OpenShell (a CLI that is missing or at another release stops it with the pinned release's URL, exit
+  1, as does a declined offer, each with its fix) and never edits the gateway's configuration (bind mode's settings are
+  printed). Then it puts the job image into the gateway's engine (`PI_OPENSHELL_ENGINE`, docker by default) unless the
+  `local` or `podman` venue already put it into that same store, and where neither of those is blessed runs Valkey on
+  that engine (docker's container, or the Quadlet Valkey alone on Podman); no egress proxy is ever started for these
+  venues, whose gateway policy is the egress control (`openshellSetupOf`, `DES-OPENSHELL-VENUE`). On either venue the image step checks only the image
   the worker will run (issue #523): `PI_JOB_IMAGE` by the worker's own rule (`||` to `pi-job:latest`, then the image
   rule), from this shell where it sets it and otherwise from `.env` (doctor's resolver). Unset, that is the default,
   pulled from `ghcr.io/edgehero/pi-job:latest` and tagged `pi-job:latest` when absent; set, it is that name, left
@@ -4470,8 +4483,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   pulls nothing and says why. The image it checked is named in its output, and a value only this shell sets is said
   to be one an installed service, which reads `.env`, does not run. doctor's fix line for a missing job image, on
   either venue, is the same text (`jobImageFix`): the default's pull and tag, a qualified name's own pull, or for a
-  short or `localhost/` name how to build or tag it, under a lead-in that says build or load, never pull. `up` reads `PI_BACKENDS`, `PI_EGRESS` and
-  `PI_EGRESS_PROXY` from this shell where it sets them and otherwise from the deployment's `.env`, the file
+  short or `localhost/` name how to build or tag it, under a lead-in that says build or load, never pull. `up` reads `PI_BACKENDS`, `PI_EGRESS`,
+  `PI_EGRESS_PROXY`, `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY` (the last two since issue #707) from this shell where it sets them and otherwise from the deployment's `.env`, the file
   `service install` reads, refuses when the two set one differently, and never replaces a container it did not
   start without showing that it does and asking: on the podman venue not at all, and on the docker venue only the
   shipped proxy's name, as below (issue #453). On the docker venue `up` counts the egress proxy as present only while
@@ -4491,7 +4504,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   started. Neither is offered from a folder that lacks either file, which a start would mount as a
   directory. **`init` and `doctor` decide the venue as `up` does** (issue #453): this shell where it sets a venue key,
   else the deployment's `.env` read as `service install` reads it, and a disagreement between the two is said
-  (doctor's ✗; init shows no steps). `init`'s next steps follow that venue: with podman the only venue, on Linux,
+  (doctor's ✗; init shows no steps). `init`'s next steps follow that venue (issue #707: with an `openshell` venue the
+only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `doctor` and `service install`; beside
+`local` or `podman`, that ladder and one line on what `up` adds; on Windows a line saying no gateway ships there): with podman the only venue, on Linux,
   the podman ladder (linger named first, then the job image into this account's store, `.env`, `up`, `doctor`,
   `service install`, `doctor --live`); off Linux a line saying the venue refuses the host; otherwise the docker text,
   whose steps name no file the folder `init` leaves does not have (issue #480: its step 2 is `pi-dispatch up`, which
@@ -5119,6 +5134,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-19 | Issue #707, review round 1 of #715. **`REQ-DEPLOYMENT-BOOTSTRAP` CORRECTED**, its openshell sentence: the start is offered only where the gateway's unit (`systemctl --user cat`) or Homebrew service (`brew services info openshell`, which only OpenShell's release formula defines) exists, and the registration only where the CLI has no gateway registered at all, the command printed as the fix otherwise. Everything else in the entry UNCHANGED, checked. |
+| 2026-10-19 | Issue #707: `up` and `service install` learn the `openshell` venues. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: an "On the `openshell` venues" sentence: the gate (the engine, the CLI and the gateway judged as the boot judges them), read-only unless one of two shown and asked offers is accepted (the gateway's start, waited for a bounded 30 s, and its loopback registration when the CLI has none), never an install (the pinned release's URL, exit 1) and never an edit of the gateway's configuration; the image into the gateway's engine unless `local` or `podman` already filled that store; Valkey on that engine where neither is blessed; no egress proxy for these venues. The venue keys `up` reads from `.env` gain `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY`; `init`'s next steps gain the openshell ladder. Everything else in the entry (never an unshown mutation, never a touched value, no token spent, the image rule, the docker and podman venues' steps) UNCHANGED, checked. |
 | 2026-10-19 | Issue #686, part 3: bind mode, the `openshell-bind` venue. **`REQ-RUN-RECOVERY` AMENDED**: a dated "Venues" sentence: copy-mode `openshell` refuses a `run.recover` forge job before spend, `openshell-bind` serves it as `local` does (salvage of the bound host workspace, exit snapshots; live checkpoints off, `pausable: absent`). **`REQ-STEER-RUNNING-JOB` AMENDED**: the copying-venue bullet says `openshell-bind` is not such a venue (it binds `/inbox` read-only). **`REQ-LIVE-TRANSCRIPT` AMENDED**: clause (g) says `openshell-bind` is a binding venue there (the host file tailed, no stderr mirror), with its tests. **`REQ-EGRESS-ALLOWLIST` AMENDED**: the layer-venue paragraph names `openshell-bind` as the second layer venue, with the same policy, provider and `PI_EGRESS=0` refusal. Folder and cron-folder jobs: no REQ entry claimed them refused on OpenShell (the refusal lives in `DES-OPENSHELL-VENUE` and the loader), UNCHANGED, checked. **Review round 1 (#714)**: `REQ-RUN-RECOVERY`'s "Venues" sentence adds that a salvage on `openshell-bind` first confirms the sandbox that bound the tree gone, or reads nothing. **Review round 2 (#714)**: `REQ-RUN-RECOVERY`'s "Venues" sentence states the round-1 salvage settle (a salvage on `openshell-bind` first deletes the sandbox that bound the lost attempt's tree and confirms it gone, or reads nothing and the run continues from its last committed checkpoint, now only for a job dir carrying the `.openshell-bind` marker) and adds that a run whose sandbox was not confirmed gone takes no exit checkpoint, and a folder job or a completed run there is not run again (`openshell-bind-sandbox-lingering`). |
 | 2026-10-19 | Issue #686, part 2, review round 1. **`REQ-STEER-RUNNING-JOB` CORRECTED**, "Fail loudly": the frame channel the runner cannot open is no supervisor's SOCKET on fd 3 (an open fd 3 is not enough), or a `/dev/null` swap of stdin that left fd 0 unvouched for, both `steer-inbox-missing` before pi loads. Acceptance (c) UNCHANGED in substance, checked; its tests gain the exact-fit budget, the no-pass-before-start and the exit-line close cases (`worker/test/inbox-relay.test.mjs`, `steer-frames.test.mjs`, `run-container-stdin-steer.test.mjs`, "M1"). |
 | 2026-10-19 | Issue #686, part 2: steering on the `openshell` venue over the exec's stdin. **`REQ-STEER-RUNNING-JOB` AMENDED**: the copying-venue bullet is SHIPPED and its names final (`steerStdin`, `stdin-frames`), with the measured budget (OpenShell 0.1.4: over 4 MiB in total fails the exec, 4 MiB less 1 KiB passed; the relay's budget sits at the latter) and the acks over the stderr transcript (`no-transcript` without it); "Fail loudly" gains a dated note: a frame channel the runner cannot open is `steer-inbox-missing` too (no reason added) and a broken stream is logged `steer_stream_broken`; Acceptance (c) gains the openshell case and names its tests (`worker/test/run-container-stdin-steer.test.mjs`, `steer-frames.test.mjs`, the relay's, the bundle's and the wiring's, the supervisor's and the runner's, `verify-image.sh`'s `steerStdin` case and the conformance script's steered run). The rest of the requirement (data never instructions, at most once, the caps, the late rule, the weaker guarantee on stdin) UNCHANGED, checked. **`REQ-LIVE-TRANSCRIPT` UNCHANGED, checked**: the stderr transcript is now also the steer ack's tail, which it already carried. |

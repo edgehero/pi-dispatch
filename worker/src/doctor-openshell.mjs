@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DAEMON_FACTS_ARGS, parseDaemonFacts } from "./daemon-facts.mjs";
 import { decideJobUser, JOB_USER_FIX, resolveImageUser } from "./job-user.mjs";
-import { bindProbeArgs, GATEWAY_TOML_WHERE, gatewayTomlFor, judgeBindAnswer, judgeGatewayStatus, OPENSHELL_TESTED_VERSION, UPSTREAM_BIND_WARNING } from "./openshell-cli.mjs";
+import { bindProbeArgs, GATEWAY_TOML_WHERE, gatewayTomlFor, judgeBindAnswer, judgeGatewayStatus, OPENSHELL_BREW_INSTALL, OPENSHELL_TESTED_VERSION, UPSTREAM_BIND_WARNING } from "./openshell-cli.mjs";
 
 /**
  * `pi-dispatch doctor --openshell` (issue #683): whether this host can run the `openshell` venue, asked before
@@ -116,7 +116,7 @@ export async function openshellChecks(env = {}, { run = runQuiet, platform = pro
 
 	const status = judgeGatewayStatus(json((await os(["status", "-o", "json"])).stdout));
 	if (!status.connected) {
-		checks.push({ ok: false, label: "openshell: the gateway answers", fix: "start the gateway (`systemctl --user start openshell-gateway`, or `brew services start openshell` on macOS) and register it on loopback: `openshell gateway add https://127.0.0.1:17670 --local`" });
+		checks.push({ ok: false, label: "openshell: the gateway answers", fix: "start the gateway (`systemctl --user start openshell-gateway`, or on macOS `brew services start openshell`, which only OpenShell's release formula defines: `" + OPENSHELL_BREW_INSTALL + "`) and register it on loopback: `openshell gateway add https://127.0.0.1:17670 --local`" });
 		return checks;
 	}
 	checks.push(status.local ? { ok: true, label: "openshell: the gateway is on this host (loopback or a unix socket)" } : { ok: false, label: "openshell: the gateway is on this host", fix: "the venue holds the job's credentials in its gateway, so it runs only on one this deployment runs itself (CONST-VENUE-EGRESS-LAYER): register the local gateway on loopback" });

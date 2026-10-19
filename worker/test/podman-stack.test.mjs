@@ -8,6 +8,7 @@ import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOU
 import { SYSTEMD_259_ENV_BYTES, SYSTEMD_259_ENV_FILES } from "./helpers/systemd-env-259.mjs";
 import { systemdEnvFile } from "./helpers/systemd-env-parse.mjs";
 import { runService } from "../src/service.mjs";
+import { venuesOf } from "../src/backends.mjs";
 
 /**
  * The native podman venue's stack as Quadlet units (issue #430): the shipped templates, the planner, and
@@ -810,6 +811,12 @@ test("resolveWorkerValkey: the worker's boot judgement, pinned, refused as a con
 	assert.deepEqual([proxy.url, proxy.rootRefused, proxy.pinned?.heldBy], ["redis://127.0.0.1:16483", false, "root"], "docker-proxy on the local venue");
 	await assert.rejects(at(0), (err) => err.piDispatchConfig === true && /held by root/.test(err.message), "root on the podman venue");
 	assert.equal(mine.rootRefused, true);
+	// Issue #707 (review round 1 of #715): an openshell venue on Podman is the queue's engine, so root's is refused there
+	// too, as `up` refuses it; on the docker engine, docker-proxy's root listener is the queue.
+	const onPodman = { venues: venuesOf({ PI_BACKENDS: "openshell" }), env: { PI_OPENSHELL_ENGINE: "podman" } };
+	await assert.rejects(at(0, onPodman), (err) => err.piDispatchConfig === true && /held by root/.test(err.message), "root on openshell-on-podman");
+	const onDocker = await at(0, { venues: venuesOf({ PI_BACKENDS: "openshell" }) });
+	assert.equal(onDocker.rootRefused, false, "docker-proxy on openshell-on-docker");
 	// Not judged off Linux (no /proc), nor another host.
 	for (const extra of [{ platform: "darwin" }, { url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }) }]) {
 		const same = await at(1235, extra);
@@ -1896,4 +1903,32 @@ test("service install on podman refuses a folder without model-endpoints.conf, s
 	assert.match(h.errText(), /model-endpoints\.conf does not exist: the proxy's rules include it, and squid will not start without it/);
 	assert.ok(!h.calls.some((c) => c[0] === "systemctl" && c.includes("start")), "nothing started");
 	assert.equal(h.writes.length, 0, "nothing written");
+});
+
+test("service install, an openshell venue on podman with no local or podman venue: the Quadlet Valkey alone, and the worker after it and the gateway, with no docker.service (#707)", async () => {
+	const h = svc({ files: { [ENV_PATH]: "PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=podman\n" } });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.ok(h.store.has(join(QDIR, "pi-dispatch-valkey.container")));
+	assert.ok(!h.store.has(join(QDIR, "pi-dispatch-egress-proxy.container")) && !h.store.has(join(QDIR, "pi-dispatch-netns-keeper.container")), "no proxy and no keeper, whatever PI_EGRESS says: the gateway's policy is this venue's egress");
+	assert.ok(h.calls.some((c) => c.join(" ") === "systemctl --user start pi-dispatch-valkey.service"));
+	const unit = h.store.get(USER_UNIT);
+	assert.match(unit, /# Added by `pi-dispatch service install` for the openshell venue's Valkey on Podman \(issue #707\): the Quadlet units it installed\.\nWants=pi-dispatch-valkey\.service\nAfter=pi-dispatch-valkey\.service\n/);
+	assert.match(unit, /^Wants=openshell-gateway\.service$/m);
+	assert.doesNotMatch(unit, /^After=.*openshell-gateway/m, "an ordering cycle through default.target");
+	assert.match(unit, /^After=network-online\.target$/m);
+	assert.doesNotMatch(unit, /docker\.service/, "nothing of this deployment runs on docker");
+	assert.match(unit, /launches job containers via an OpenShell gateway on podman\)$/m);
+	assert.match(unit, /# Valkey is a Quadlet unit in this same user manager \(the openshell venue's engine is Podman\)/);
+	assert.match(h.text(), /openshell venue on Podman \(PI_BACKENDS and PI_OPENSHELL_ENGINE in \.env\): its Valkey, as Quadlet units in/);
+});
+
+test("readStackKeys refuses an odd openshell key line only where an openshell venue is blessed, naming those keys (#715 review round 2)", () => {
+	for (const odd of ["export PI_OPENSHELL_ENGINE=podman\n", "PI_OPENSHELL_GATEWAY=a\\\nb\n"]) {
+		assert.deepEqual(readStackKeys(`PI_BACKENDS=local\n${odd}`).keys, { PI_BACKENDS: "local" }, `a local-only deployment is not stopped by ${JSON.stringify(odd)}`);
+		const blessed = readStackKeys(`PI_BACKENDS=openshell\n${odd}`);
+		assert.match(blessed.error, /PI_OPENSHELL_(ENGINE|GATEWAY)/);
+		assert.doesNotMatch(blessed.error, /podman venue/, "named as the openshell venue's keys");
+		assert.match(readStackKeys(odd, { openshellBlessed: true }).error, /PI_OPENSHELL_/, "blessed by this shell's list");
+	}
+	assert.deepEqual(readStackKeys("PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=podman\n").keys, { PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" });
 });

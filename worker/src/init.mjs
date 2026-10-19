@@ -10,7 +10,8 @@
 import { existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { parseBackendList, venuesOf } from "./backends.mjs";
+import { openshellSetupOf, parseBackendList, venuesOf } from "./backends.mjs";
+import { OPENSHELL_BREW_INSTALL, OPENSHELL_GATEWAY_UNIT, OPENSHELL_NO_WINDOWS, OPENSHELL_RELEASE_URL, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
 import { deploymentVenueEnv } from "./deployment-venue.mjs";
 import { setEnvKeyIfEmpty } from "./env-file.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF } from "./egress-conf-copy.mjs";
@@ -167,7 +168,7 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 	const code = results.some(([verb]) => verb === "refused") ? 1 : 0;
 	if (deps.steps === false) return code;
 	if (deps.venues) {
-		out(nextSteps(deps.venues, { platform }));
+		out(nextSteps(deps.venues, { platform, env: deps.venueEnv ?? env }));
 		return code;
 	}
 	// Decided exactly as `up` decides it (issue #453, gate round 1): a next-steps ladder for a venue `up` would refuse to
@@ -184,7 +185,7 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 		out(`\nNext: which venue this deployment runs is unknown, so no steps are shown: ${err.message}. Fix PI_BACKENDS, then run \`pi-dispatch init\` again for them (it keeps every file above).\n`);
 		return code;
 	}
-	out(nextSteps(venuesOf(venue.env), { platform }));
+	out(nextSteps(venuesOf(venue.env), { platform, env: venue.env }));
 	return code;
 }
 
@@ -250,8 +251,14 @@ function lstatOrNull(fs, path) {
  * the job image into this account's own store, the venue key and provider key in `.env` (what `up` and `service
  * install` read), the stack as Quadlet units, doctor, and the worker as a user service.
  */
-export function nextSteps(venues = { localUsed: true, podmanUsed: false }, { platform = "linux" } = {}) {
-	if (venues.podmanUsed && !venues.localUsed) return platform === "linux" ? PODMAN_NEXT_STEPS : PODMAN_OFF_LINUX;
+export function nextSteps(venues = { localUsed: true, podmanUsed: false }, { platform = "linux", env = {} } = {}) {
+	// Issue #707: the openshell venues' ladder, by the rule `up` and `service install` follow (`openshellSetupOf`). Alone,
+	// a ladder of their own; beside `local` or `podman`, that venue's ladder and one line saying what `up` adds for them.
+	const openshell = openshellSetupOf(venues, env);
+	if (openshell.used && platform === "win32") return `\nNext: ${OPENSHELL_NO_WINDOWS}.\n`;
+	if (openshell.used && !venues.localUsed && !venues.podmanUsed) return openshellNextSteps(openshell, platform);
+	const also = openshell.used ? `\nThe openshell venue too: install OpenShell ${OPENSHELL_TESTED_VERSION} (${OPENSHELL_RELEASE_URL}); \`pi-dispatch up\` then checks its gateway,\noffers to start and register it, and puts the job image into ${openshell.engine ?? "its engine"}, the gateway's engine.\n` : "";
+	if (venues.podmanUsed && !venues.localUsed) return platform === "linux" ? `${PODMAN_NEXT_STEPS}${also}` : PODMAN_OFF_LINUX;
 	return `
 Next:
   1. docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest
@@ -263,6 +270,29 @@ Next:
 
 Operator panel (optional): pi install npm:@edgehero/pi-dispatch-admin   then   /dispatch
   (or let the panel do all of the above: /dispatch setup walks these steps with a consent per action)
+${also}`;
+}
+
+/**
+ * The openshell venues alone (issue #707): OpenShell is installed by the operator (`up` never installs it), then `up`
+ * checks its gateway and offers to start and register it, puts the job image into the gateway's engine and runs Valkey
+ * there, and `service install` runs the worker as a unit that pulls the gateway's in (a LaunchAgent on macOS, beside the
+ * release formula's Homebrew service).
+ */
+function openshellNextSteps(openshell, platform) {
+	const pad = (cmd) => cmd.padEnd(52);
+	// The release formula on macOS (review round 1 of #715): homebrew-core's `openshell` defines no Homebrew service.
+	const install = platform === "darwin" ? `\`${OPENSHELL_BREW_INSTALL}\`, the release formula, whose service runs the gateway` : OPENSHELL_RELEASE_URL;
+	const service = platform === "darwin" ? "# the worker as a LaunchAgent; `brew services start openshell` keeps the gateway up" : `# the worker as a user service that pulls in ${OPENSHELL_GATEWAY_UNIT}`;
+	return `
+Next (the openshell venue on ${openshell.engine ?? "its engine"}). First install OpenShell ${OPENSHELL_TESTED_VERSION}, the release the venue was measured
+on (${install}); \`pi-dispatch up\` checks it and installs nothing:
+  1. ${pad("edit .env")}# PI_BACKENDS=openshell (PI_OPENSHELL_ENGINE=podman for Podman), and ANTHROPIC_API_KEY (or your provider's key)
+  2. ${pad("pi-dispatch up")}# the gateway (offers to start and register it), the job image into ${openshell.engine ?? "its engine"}, Valkey there
+  3. ${pad("pi-dispatch doctor")}# verify the gateway, its engine, Landlock, the image and the key
+  4. ${pad("pi-dispatch service install")}${service}
+
+Operator panel (optional): pi install npm:@edgehero/pi-dispatch-admin   then   /dispatch
 `;
 }
 

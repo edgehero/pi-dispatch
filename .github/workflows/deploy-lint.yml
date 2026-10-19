@@ -30,11 +30,13 @@ on:
     paths:
       - "deploy/**"
       - "worker/src/podman-stack.mjs"
+      - "worker/src/service.mjs"
       - ".github/workflows/deploy-lint.yml"
   pull_request:
     paths:
       - "deploy/**"
       - "worker/src/podman-stack.mjs"
+      - "worker/src/service.mjs"
       - ".github/workflows/deploy-lint.yml"
   workflow_dispatch:
 
@@ -66,6 +68,33 @@ jobs:
             exit 1
           fi
           echo "OK: unit files are syntactically valid (path-existence warnings ignored)"
+
+      # Issue #707: the templates above, and one unit as `service install` RENDERS it for an openshell deployment (the
+      # gateway's Wants=/After= lines inserted at the template's anchor), since the rewrite is what the templates alone
+      # cannot show. The docker engine's render: a Podman one appends the Quadlet files after the unit.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: a rendered openshell worker unit parses (issue #707)
+        run: |
+          d="$RUNNER_TEMP/render-707"
+          mkdir -p "$d"
+          printf 'PI_BACKENDS=openshell\n' > "$d/.env"
+          (cd "$d" && node "$GITHUB_WORKSPACE/worker/src/cli.mjs" service render) > "$d/pi-dispatch-worker.service"
+          cat "$d/pi-dispatch-worker.service"
+          # Wants= and never After=: the deb's gateway unit is After=default.target, so an After= here is an ordering cycle (#707).
+          grep -qx 'Wants=openshell-gateway.service' "$d/pi-dispatch-worker.service" || { echo "::error::the rendered unit does not want openshell-gateway.service"; exit 1; }
+          if grep -q '^After=.*openshell-gateway' "$d/pi-dispatch-worker.service"; then echo "::error::the rendered unit is ordered after openshell-gateway.service, which cycles with its default.target ordering"; exit 1; fi
+          systemd-analyze verify --no-pager "$d/pi-dispatch-worker.service" > verify-707.log 2>&1 || true
+          cat verify-707.log
+          if grep -Eiq 'Unknown (key name|lvalue|section)|Failed to parse|Invalid setting|not a valid|expected ' verify-707.log; then
+            echo "::error::systemd-analyze found a syntax error in the rendered openshell unit. See the log above."
+            exit 1
+          fi
+          echo "OK: the rendered openshell unit is syntactically valid"
 
       - name: plist is well-formed XML
         run: |
