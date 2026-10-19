@@ -405,6 +405,15 @@ export const PODMAN_ADDS_NO_MOUNTS = "podmanAddsNoMounts";
 export const PODMAN_SERVICE_LOCAL = "podmanServiceLocal";
 
 /**
+ * The observation that the OpenShell gateway this worker's CLI talks to listens on this host (issue #683,
+ * `CONST-VENUE-EGRESS-LAYER`'s third condition): `openshell status -o json` names a server on a loopback address or a
+ * unix socket. Every job's provider key and forge token reach that gateway, so a remote one is where they would travel.
+ * Unlike the docker and podman observations it is not only a floor's business: the openshell venue REFUSES a job on a
+ * gateway it does not observe local, whatever the floor says, because the constitution admits a layer venue only so.
+ */
+export const OPENSHELL_GATEWAY_LOCAL = "openshellGatewayLocal";
+
+/**
  * The podman venue's refusal of an account containers.conf that widens every job (issue #428), and the run record's
  * `reason` for a job it refuses. Here, in the leaf, rather than in backend-podman.mjs beside the check, so the processor
  * can name it without importing the venue's module (which pulls in the run path and pi-ai).
@@ -563,6 +572,7 @@ export const OBSERVATIONS = Object.freeze({
 	[PODMAN_BOUNDS_DELEGATED]: "this worker's rootless Podman runs on cgroup v2 with a systemd user manager running for its account, the pids, memory and cpu controllers delegated to that manager, and Podman putting containers under it, and no containers.conf it reads sets `cgroups`",
 	[PODMAN_ADDS_NO_MOUNTS]: "this worker's rootless Podman adds no mounts of its own to a job container",
 	[PODMAN_SERVICE_LOCAL]: "the podman CLI this worker spawns runs containers on this host, not through a remote service",
+	[OPENSHELL_GATEWAY_LOCAL]: "the OpenShell gateway this worker's openshell CLI talks to listens on a loopback address or a unix socket on this host",
 });
 
 /** What to do about each observation that a floor needed and did not get, keyed like `OBSERVATIONS` and pinned to it. */
@@ -573,6 +583,7 @@ export const OBSERVATION_FIX = Object.freeze({
 	[PODMAN_BOUNDS_DELEGATED]: "Turn on linger for the worker account (`loginctl enable-linger <account>`, which keeps its systemd user manager running with no one logged in) and run the worker as a systemd user service (`pi-dispatch service install`), or give Podman the account's user bus so it uses the systemd cgroup manager; delegate the cpu, memory and pids controllers to that manager on cgroup v2 (a systemd `Delegate=` drop-in for user@.service), remove any `cgroups` key from its containers.conf (written in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at), or lower that entry to `asserted`: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container.",
 	[PODMAN_ADDS_NO_MOUNTS]: "As the worker account, create an empty ~/.config/containers/mounts.conf (or, when it has none, an empty /etc/containers/mounts.conf), remove any `volumes`, `mounts`, `devices` or `hooks_dir` key from every containers.conf it reads (and write those in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at) and any OCI hook, or lower that entry to `asserted`.",
 	[PODMAN_SERVICE_LOCAL]: "Unset CONTAINER_HOST and any containers.conf service destination for the worker account so `podman info` reports serviceIsRemote false, or lower that entry to `asserted`.",
+	[OPENSHELL_GATEWAY_LOCAL]: "Run the OpenShell gateway on this host and register it on loopback (`openshell gateway add https://127.0.0.1:17670 --local`); a remote gateway is refused, not lowered.",
 });
 
 const BACKENDS_TABLE = {
@@ -584,6 +595,10 @@ const BACKENDS_TABLE = {
 		 */
 		describe: "the Docker daemon on this worker's host",
 		remote: false,
+		// Issue #683 (`DES-CONTAINER-BACKEND-REGISTRY`, `CONST-VENUE-EGRESS-LAYER`): the provider key and the forge token sit
+		// in the job's own container, as `-e NAME=VALUE` the agent can read. Not a word on the three-word scale: who holds
+		// the credentials is a closed choice (`CREDENTIAL_CUSTODY`), and `PI_BACKEND_FLOOR` does not compare it.
+		credentialCustody: "container",
 		declares: {
 			// Built by this worker's own argv, in `ISOLATION_FLAGS`, and asserted back member-by-member
 			// against the imported array by two tests. `dockerArgsFromSpec` additionally refuses a
@@ -699,6 +714,8 @@ const BACKENDS_TABLE = {
 		// The containers run on this host, as this account. A remote service is refused rather than declared remote, so
 		// the venue is never one; `credentialTransit`'s observation is what notices a CLI that tries.
 		remote: false,
+		// `local`'s: the credentials are `-e` values in the job's own container.
+		credentialCustody: "container",
 		declares: {
 			// The same `ISOLATION_FLAGS` through the same builder (`buildPodmanRunArgs` shares `argsFromSpec`), read back on
 			// a live rootless container: CapEff 0, NoNewPrivs 1, seccomp 2, pids.max 512, memory.max 4 GiB. AND ONLY WHILE
@@ -762,6 +779,82 @@ const BACKENDS_TABLE = {
 			credentialTransit: PODMAN_SERVICE_LOCAL,
 		},
 	},
+	openshell: {
+		/**
+		 * An NVIDIA OpenShell sandbox on a gateway this deployment owns (issue #683, `DES-OPENSHELL-VENUE`), driven through
+		 * the real `openshell` CLI with `-o json`, on its Docker or Podman compute driver only. The vendor builds the box:
+		 * an agent container with networking off beside a supervisor container that decides every connection, under
+		 * Landlock and seccomp. So every word this worker cannot build or read back itself is `asserted`, with its asserter
+		 * named, where `local` says `enforced`; `PI_BACKEND_FLOOR` lets an operator refuse that trade at boot. Measured on
+		 * OpenShell 0.1.4, Docker driver, ubuntu-24.04 (Linux 6.17), 2026-10-19.
+		 *
+		 * NOT BLESSABLE YET: `PI_BACKENDS` refuses it by name (`NOT_YET_BLESSABLE`) until issue #684 ships the policy layer
+		 * (the egress rules and the per-job credential providers), because `CONST-VENUE-EGRESS-LAYER` admits no layer venue
+		 * before then. The entry, the adapter and its conformance run exist now so #684 builds on a measured venue.
+		 */
+		describe: "an NVIDIA OpenShell sandbox on this host's gateway, through the openshell CLI",
+		// The gateway is refused unless it is on this host (`OPENSHELL_GATEWAY_LOCAL`), so the venue is never remote.
+		remote: false,
+		// `CONST-VENUE-EGRESS-LAYER`: the venue's own layer holds the credentials, placeholders in the agent (issue #684).
+		// Until #684 they still travel as `--env`, which is one of the reasons the venue is not blessable yet.
+		credentialCustody: "layer",
+		declares: {
+			// The agent container and its bounds are the compute driver's (`cap_drop ALL`, `no-new-privileges`, networking
+			// off, a pids limit of 2048, `--cpu` and `--memory`), not an argv this worker builds.
+			isolation: ASSERTED,
+			// The worker creates one sandbox per job and deletes it in a `finally`, and the reaper deletes a crashed one;
+			// that the delete really removes the agent and supervisor containers is the gateway's.
+			ephemeral: ASSERTED,
+			// No mount is the worker's: the job's files are uploaded and downloaded, and what the driver mounts beside them
+			// (its runtime, the supervisor's socket) is the vendor's.
+			mountSet: ASSERTED,
+			// The layer's policy, deny-all until issue #684 generates its rules. Gated by PI_EGRESS as on every venue.
+			egress: ASSERTED,
+			// Each sandbox's agent has networking off and reaches only its own supervisor, so another job is not on any
+			// network it can see: the driver's construction.
+			jobToJobIsolation: ASSERTED,
+			// The image is resolved by the gateway's driver (`image_pull_policy`, `if_not_present` by default), not by a
+			// `--pull=never` this worker passes.
+			imagePinning: ASSERTED,
+			// `sandbox exec` returns the command's own code and 128+n for a signal (measured: 0, 1, 2, 3, 137, 255, 143
+			// and 137), but through the vendor's relay; a CLI failure also exits 1.
+			exitCodes: ASSERTED,
+			// `sandbox delete` on the name ends the exec (measured: 143), and the abort FLAG is the discriminator as on
+			// every venue; the delete itself is the gateway's.
+			abortable: ASSERTED,
+			// Not a `:ro` bind: the uploaded `/sandbox/job` is read-only because the worker starts the runner through the
+			// image's `pi-landlock`, AFTER the upload (`DES-OPENSHELL-VENUE`, corrected in #683).
+			readOnlyJobInputs: ASSERTED,
+			// OpenShell refuses a root workload, and the worker's policy names the image's uid as `run_as_user`.
+			nonRoot: ASSERTED,
+			// The same resolver and record as `local`, but the values reach a vendor's gateway and supervisor.
+			secretsCustody: ASSERTED,
+			// ENFORCED, AND ONLY WHILE OBSERVED, for `local`'s reason: the values reach the gateway the CLI talks to, and the
+			// worker reads where that is (`openshellGatewayLocal`). A gateway not observed local is refused outright.
+			credentialTransit: ENFORCED,
+			// Copy mode edits a copy, not the operator's folder: a local or cron folder job is refused at load
+			// (`refusesLocalWorkspace`). Bind mode, which could, is issue #686's.
+			localFolders: ABSENT,
+			// OpenShell has no pause verb, so live checkpoints are off (`DES-RUN-CHECKPOINT-PAIRED`).
+			pausable: ABSENT,
+		},
+		asserts: {
+			isolation: "OpenShell's compute driver (the agent container it creates with every capability dropped, no new privileges, networking off and a pids limit, under Landlock and seccomp)",
+			ephemeral: "the OpenShell gateway, which removes a sandbox's containers when the worker deletes it",
+			mountSet: "OpenShell's compute driver, which mounts its own runtime and the supervisor's socket and nothing of the job's",
+			egress: "OpenShell's supervisor, which decides every connection by the sandbox's policy (deny-all until issue #684 generates its rules)",
+			jobToJobIsolation: "OpenShell's compute driver, which gives each sandbox's agent no network beside its own supervisor",
+			imagePinning: "the OpenShell gateway's image pull policy on its compute driver",
+			exitCodes: "OpenShell's exec relay, which returns the command's own code and 128 plus the signal",
+			abortable: "the OpenShell gateway, whose sandbox delete ends the running exec",
+			readOnlyJobInputs: "the job image's /opt/pi-dispatch/pi-landlock (the sandboxLayout capability), which the worker starts the runner through after the upload",
+			nonRoot: "OpenShell, which refuses a root workload, with the image's uid as the policy's run_as_user",
+			secretsCustody: "the OpenShell gateway and supervisor, which hold the job's environment while it runs",
+		},
+		observedBy: {
+			credentialTransit: OPENSHELL_GATEWAY_LOCAL,
+		},
+	},
 };
 
 /**
@@ -769,6 +862,26 @@ const BACKENDS_TABLE = {
  * the adapter, the boot wiring and doctor cannot disagree about it.
  */
 export const PODMAN_BACKEND = "podman";
+
+/** The OpenShell venue's name (issue #683), for `PODMAN_BACKEND`'s reason. */
+export const OPENSHELL_BACKEND = "openshell";
+
+/**
+ * Who holds a venue's credentials (issue #683, `DES-CONTAINER-BACKEND-REGISTRY`): `container` (the job's own container,
+ * where the agent can read them) or `layer` (the venue's own egress layer, placeholders in the agent,
+ * `CONST-VENUE-EGRESS-LAYER`). A closed choice, not a word on the three-word scale, so `PI_BACKEND_FLOOR` never compares
+ * it; an entry that omits it is read as `container`.
+ */
+export const CREDENTIAL_CUSTODY = Object.freeze(["container", "layer"]);
+
+/**
+ * Venues in the table that `PI_BACKENDS` refuses by name (issue #683): built and tested, and not yet admitted, each with
+ * the sentence that says why. `openshell` waits for issue #684's policy layer, which `CONST-VENUE-EGRESS-LAYER` requires
+ * before any layer venue runs a job. Removing a name here is the whole of blessing it.
+ */
+export const NOT_YET_BLESSABLE = Object.freeze({
+	[OPENSHELL_BACKEND]: "openshell is built but not yet blessable: it waits for issue #684's egress rules and per-job credential providers (CONST-VENUE-EGRESS-LAYER)",
+});
 
 /**
  * FROZEN, deeply. `makeLocalBackend` hands `BACKENDS[name].declares` out on the bundle it returns, so
@@ -894,6 +1007,9 @@ export function parseBackendList(raw, { known = BACKEND_NAMES } = {}) {
 		if (!known.includes(name)) {
 			throw new Error(`PI_BACKENDS names an unknown backend ${JSON.stringify(name)} (known: ${known.join(", ")})`);
 		}
+		// Issue #683: in the table, refused by name. Only the production table: a test passing its own `known` list
+		// reaches an entry the way the conformance script does, without blessing it.
+		if (known === BACKEND_NAMES && Object.hasOwn(NOT_YET_BLESSABLE, name)) throw new Error(`PI_BACKENDS names ${JSON.stringify(name)}: ${NOT_YET_BLESSABLE[name]}`);
 	}
 	// Deduplicated, order preserved: the first entry is what a deployment means by "the default one", and it is
 	// where a trigger that names no venue is dispatched.
@@ -925,7 +1041,8 @@ export function venuesOf(env) {
 	} catch {
 		blessed = [DEFAULT_BACKEND];
 	}
-	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND };
+	// `openshellUsed` (issue #683) is false on every deployment until `NOT_YET_BLESSABLE` lets the name through.
+	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND, openshellUsed: blessed.includes(OPENSHELL_BACKEND) };
 }
 
 /**

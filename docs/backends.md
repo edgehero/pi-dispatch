@@ -1,8 +1,9 @@
 # Container backends
 
-A **backend** is where a job's container gets built. There are two today: `local`, which is the Docker daemon
-on the worker's own host and is what every deployment has always used, and `podman`, which is this worker
-account's own rootless Podman on the same host (issue #354, [`docs/podman.md`](podman.md)).
+A **backend** is where a job's container gets built. There are two you can bless today: `local`, which is the
+Docker daemon on the worker's own host and is what every deployment has always used, and `podman`, which is this
+worker account's own rootless Podman on the same host (issue #354, [`docs/podman.md`](podman.md)). A third,
+`openshell`, is built and **not yet blessable** (below).
 
 This page is the contract. If you are adding a venue, everything you need is here: you should not have to
 read the worker's source.
@@ -529,6 +530,33 @@ sweep runs against it. Two things follow that are worth knowing before you do it
   host that no longer has a docker CLI or daemon is held on every pass, because nothing can say whether a sandbox is
   open on it. Once you know none is, remove it by hand: `pi-dispatch sandbox --list` shows its id, and
   `rm -rf "$PI_SANDBOX_DIR/<jobId>"` removes it (`PI_SANDBOX_DIR` defaults to `<PI_JOBS_DIR>/sandboxes`).
+
+## The `openshell` venue (built, not yet blessable)
+
+Issue #683 adds `openshell`: one NVIDIA OpenShell sandbox per job, on an OpenShell gateway running on this host,
+driven through the `openshell` CLI on its Docker or Podman compute driver. `PI_BACKENDS=openshell` is **refused by
+name** until issue #684 ships its egress rules and per-job credential providers; until then the entry, the adapter
+(`worker/src/backend-openshell.mjs`) and its conformance run exist so that work starts from a measured venue.
+
+What it is, in this page's terms:
+
+- **It copies files** (`binds: false`). The job's inputs are uploaded under the image's WORKDIR, `/sandbox`, and its
+  workspace and session downloaded back after the run, each replacing the host's tree. The runner reads the
+  `sandbox` layout (`PI_JOB_LAYOUT=sandbox`, [`docs/job-image.md`](job-image.md)), so the job image must declare
+  `sandboxLayout`, or the job is refused before it spends.
+- **`/sandbox/job` is read-only** because the worker starts the runner through the image's
+  `/opt/pi-dispatch/pi-landlock` after the upload. OpenShell's own policy cannot do it: its uploads run under the same
+  rules as the agent (measured).
+- **Most words are `asserted`**, each naming OpenShell's gateway, compute driver or supervisor as the source, because
+  the vendor builds the box. `credentialTransit` is `enforced` only while the gateway is observed on this host, and a
+  gateway that is not is refused per job whatever your floor says. `pausable` and `localFolders` are `absent`, so a
+  folder or cron-folder job is refused there. The table entry also carries `credentialCustody: "layer"`, the venue
+  holding the credentials, which no floor compares.
+- **Per-job refusals before spend**: a gateway not on loopback or a unix socket (`openshell-gateway-not-local`), a
+  gateway-wide policy in force (`openshell-global-policy`), and on Linux a kernel without Landlock
+  (`openshell-landlock-missing`).
+- **Not served yet**: the live transcript, progress, steering and recovery checkpoints (issue #686), a job's MCP
+  servers and the egress rules (issue #684). No `pi-dispatch sandbox` shell either: the venue has no launcher.
 
 ## What is deliberately not yours to decide
 

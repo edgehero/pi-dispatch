@@ -96,6 +96,13 @@ const HOST_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** A job directory's basename as `mkdtemp(join(jobsDir, "job-"))` makes it. Nothing else is ever joined to jobsDir. */
 const JOB_DIR_RE = /^job-[A-Za-z0-9_-]{1,64}$/;
+/**
+ * What a run writes BESIDE its job directory, swept with it (issue #683): the cidfile (#345), and the openshell venue's
+ * policy file and upload and download staging directories (worker/src/backend-openshell.mjs), which a worker that died
+ * mid-job never removed. The staging directories hold a copy of the job's inputs (its prompt among them) and of its
+ * outputs, so they must not outlive the job dir they were copied from.
+ */
+export const BESIDE_JOB_DIR = Object.freeze([".cid", ".openshell-policy.json", ".openshell-up", ".openshell-down"]);
 
 /**
  * The run a queue job belongs to: its own id, or for a recovery the id of the run it continues. Every per-RUN key (the
@@ -363,7 +370,7 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 				await fs.rm(dir, { recursive: true, force: true }).catch((err) => log("salvage_remove_failed", { code: codeOf(err) }));
 				// The container id file runContainer writes BESIDE the job dir (`<jobDir>.cid`) goes with it (lab of #645: one
 				// was left per crashed attempt). `force` and no recursion: a missing file is fine and a link is removed as a link.
-				await fs.rm(`${dir}.cid`, { force: true }).catch((err) => log("salvage_remove_failed", { code: codeOf(err) }));
+				for (const suffix of BESIDE_JOB_DIR) await fs.rm(`${dir}${suffix}`, { recursive: true, force: true }).catch((err) => log("salvage_remove_failed", { code: codeOf(err) }));
 			}
 			log("checkpoint_salvage", { runId: sanitizeJobId(runId), ...(result.salvaged ? { seq: result.seq } : { skipped: result.skipped ?? null, refused: result.refused ?? null }) });
 			return result;
@@ -467,12 +474,16 @@ export async function sweepOrphanJobDirs({ jobsDir, olderThanMs, now = () => Dat
 	const present = new Set(names);
 	for (const name of names) {
 		// A stale `<jobDir>.cid` whose job dir is already gone (a crash after the dir's removal, or one left by a salvage
-		// before #645's lab fix): only a regular file, only past the same age bound.
-		if (name.endsWith(".cid") && JOB_DIR_RE.test(name.slice(0, -4)) && !present.has(name.slice(0, -4))) {
+		// before #645's lab fix): only a regular file, only past the same age bound. Issue #683: the openshell venue's three
+		// beside-files take the same rule (the policy file, and the upload and download staging directories, which hold a
+		// copy of the job's inputs and outputs), a directory among them removed whole.
+		const beside = BESIDE_JOB_DIR.find((suffix) => name.endsWith(suffix) && JOB_DIR_RE.test(name.slice(0, -suffix.length)));
+		if (beside !== undefined && !present.has(name.slice(0, -beside.length))) {
 			try {
 				const st = await fs.lstat(join(jobsDir, name));
-				if (st.isFile() && now() - st.mtimeMs > olderThanMs) {
-					await fs.rm(join(jobsDir, name), { force: true });
+				const removable = st.isFile() || (beside !== ".cid" && st.isDirectory());
+				if (removable && now() - st.mtimeMs > olderThanMs) {
+					await fs.rm(join(jobsDir, name), { recursive: true, force: true });
 					out.removed++;
 				} else out.kept++;
 			} catch (err) {
@@ -490,7 +501,7 @@ export async function sweepOrphanJobDirs({ jobsDir, olderThanMs, now = () => Dat
 				continue;
 			}
 			await fs.rm(dir, { recursive: true, force: true });
-			await fs.rm(`${dir}.cid`, { force: true });
+			for (const suffix of BESIDE_JOB_DIR) await fs.rm(`${dir}${suffix}`, { recursive: true, force: true });
 			out.removed++;
 		} catch (err) {
 			out.failed++;
