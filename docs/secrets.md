@@ -16,6 +16,18 @@ declared a queue of its own, and when nobody declares the profile the job still 
 `secret-profile-unknown`, which is returned and never retried. Declaring the same profiles and roots on
 every host remains the right shape: it needs no routing at all, and it lets any host take the work.
 
+A trigger that binds `run.secrets` without naming a profile uses the profile called `default`, and it is
+routed the same way, to a host that has one. A host offers the profiles it would actually use: every one in
+`PI_SECRET_PROFILES`, and each one declared through the panel whose resolver is an executable file inside
+`PI_SECRET_RESOLVER_ROOTS`. A panel edit reaches the routing within one heartbeat, about 15 seconds. A host
+where one name is declared in both places offers no profile at all, because it refuses every job that binds
+secrets until one of the two is removed, and `pi-dispatch doctor` names that name.
+
+When you upgrade a deployment that runs on several machines, upgrade every worker before the receiver and the
+console. An older worker does not offer a profile declared through the panel, so a newer receiver can stop
+routing a job that binds `run.secrets` without naming a profile and also waits on a `run.waitFor` profile to the
+one host that serves both, and the job can land on a host that refuses it.
+
 ## The one fact everything follows from
 
 **The worker parses no `.env` file.** It reads the environment:

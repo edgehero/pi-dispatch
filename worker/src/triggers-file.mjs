@@ -137,9 +137,19 @@ function releaseLock(fd, triggersPath, fs, log) {
 }
 
 /** The one serializer: 2-space plus trailing newline, byte-identical to what the admin always wrote --
- * both live-reload watchers and the operator's own diff read this file, so its shape is a contract. */
-function serialize(triggersArray) {
-	return `${JSON.stringify({ triggers: triggersArray }, null, 2)}\n`;
+ * both live-reload watchers and the operator's own diff read this file, so its shape is a contract.
+ *
+ * `doc` is the parsed document the write started from, and every top-level key it carries besides
+ * `triggers` is written back unchanged, in its original order (issue #704). The file is a shared
+ * document, not a triggers-only one: the project secret bundles live beside the array, and a writer
+ * that rebuilt the file as `{ triggers }` deleted them on every console edit and every one-shot disarm,
+ * silently. `triggers` keeps its position when the document had it, and leads when it did not (the
+ * repair-from-empty shape, which is the historical file). A file whose only key is `triggers` comes
+ * out byte-identical to what this function always wrote. */
+function serialize(triggersArray, doc = null) {
+	const rest = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+	const next = Object.hasOwn(rest, "triggers") ? { ...rest, triggers: triggersArray } : { triggers: triggersArray, ...rest };
+	return `${JSON.stringify(next, null, 2)}\n`;
 }
 
 /** tmp + rename with writeOverlay's single EPERM retry (a Windows AV/indexer briefly holding the
@@ -209,6 +219,8 @@ export function writeTriggers({ triggersPath, mutate, expect = null, fs = nodeFs
 	}
 	try {
 		let current = [];
+		// The whole parsed document, so the write keeps every top-level key it does not own (issue #704).
+		let doc = null;
 		// The text ONLY IF THE PARSE ACCEPTED IT, which is the scanner's whole contract: it never has to
 		// decide whether malformed input is malformed, so it is not asked. Assigning it before the parse
 		// would hand it a truncated file and get back a confident answer about a key, when what happened is
@@ -218,6 +230,7 @@ export function writeTriggers({ triggersPath, mutate, expect = null, fs = nodeFs
 			const raw = fs.readFileSync(triggersPath, "utf8");
 			const value = JSON.parse(raw);
 			parsedText = raw;
+			doc = value;
 			if (Array.isArray(value?.triggers)) current = value.triggers;
 		} catch {
 			// Missing/invalid file: start from empty; the validated atomic write below repairs it.
@@ -234,7 +247,7 @@ export function writeTriggers({ triggersPath, mutate, expect = null, fs = nodeFs
 			}
 		}
 		const next = mutate(current.map((t) => ({ ...t })));
-		const text = serialize(next);
+		const text = serialize(next, doc);
 		try {
 			parseTriggers(text, triggersPath); // the loaders' own validator -- never write a file they would reject
 		} catch (e) {
@@ -340,7 +353,7 @@ export async function disarmTrigger({ triggersPath, index, number, flow, command
 				return { already: true };
 			}
 			entry.on.disarmed = { at, ...(jobId !== undefined && { jobId }) };
-			const text = serialize(entries);
+			const text = serialize(entries, raw); // every other top-level key rides along unchanged (issue #704)
 			try {
 				parseTriggers(text, triggersPath); // the shared validator, same rule as every write
 			} catch (e) {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ROUTE_FRESH_MS, capabilityTokens, jobNeeds, parseCaps, routeForgeJob, serializeCaps } from "../src/capabilities.mjs";
+import { IMPLICIT_SECRET_PROFILE, ROUTE_FRESH_MS, capabilityTokens, jobNeeds, parseCaps, routeForgeJob, serializeCaps } from "../src/capabilities.mjs";
+import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "../src/secrets.mjs";
 
 const host = (name, caps, { routes = "true", staleMs = 0 } = {}) => ({ name, caps, routes, staleMs });
 
@@ -40,6 +41,38 @@ test("a job needs exactly what the worker would refuse it for", () => {
 	assert.deepEqual(jobNeeds({ secretsProfile: "prod", waitFor: [{ profile: "ci" }] }), ["s:prod", "w:ci"]);
 	assert.deepEqual(jobNeeds({}), [], "an ordinary delivery needs nothing and must pay nothing");
 	assert.deepEqual(jobNeeds({ secretsProfile: "../etc/passwd" }), [], "a name this deployment would not accept is not a need");
+});
+
+test("a job with secrets and no profile needs the implicit default profile (#704)", () => {
+	// The worker resolves such a job through `default`, so a host without it refuses the job pre-spend;
+	// the need must say so, or the job takes the coin flip routing exists to remove.
+	assert.equal(IMPLICIT_SECRET_PROFILE, DEFAULT_SECRETS_PROFILE, "the receiver-safe copy must stay the worker's constant");
+	assert.deepEqual(jobNeeds({ secrets: { STRIPE_KEY: "op://v/i/f" } }), ["s:default"]);
+	assert.deepEqual(jobNeeds({ secrets: { STRIPE_KEY: "op://v/i/f" }, secretsProfile: "prod" }), ["s:prod"], "an explicit profile is the need, never both");
+	assert.deepEqual(jobNeeds({ secrets: {} }), [], "an empty map asks for nothing");
+	assert.deepEqual(jobNeeds({ secretsProfile: "", secrets: { A: "x" } }), ["s:default"], "an empty profile string is no profile");
+	// The need and the worker's own "armed" predicate agree on every shape: a job needs a profile exactly
+	// when the worker would resolve one for it.
+	for (const job of [{}, { secrets: {} }, { secrets: { A: "x" } }, { secretsProfile: "p" }, { secretsProfile: "" }, { secrets: null }]) {
+		assert.equal(jobNeeds(job).some((n) => n.startsWith("s:")), secretsArmed(job), JSON.stringify(job));
+	}
+});
+
+test("the default need on a mixed fleet routes only to an advertiser, else the shared queue (#704)", () => {
+	const needs = jobNeeds({ secrets: { A: "x" } });
+	// An older host whose `default` is overlay-declared advertises nothing for it: it is passed over.
+	assert.equal(routeForgeJob({ hosts: [host("new1", "s:default"), host("old1", "")], needs, jobId: "j" }), "new1");
+	// Nobody advertises it (every host older, or none declares it): abstention 3, today's behaviour.
+	assert.equal(routeForgeJob({ hosts: [host("old1", ""), host("old2", "w:ci")], needs, jobId: "j" }), null);
+	// Everybody advertises it (the recommended deployment): the shared queue, byte-identical to before.
+	assert.equal(routeForgeJob({ hosts: [host("a", "s:default"), host("b", "s:default")], needs, jobId: "j" }), null);
+	// THE REGRESSION that sets the upgrade order (workers before the receiver): beside a second need, an older
+	// host serving `default` from its overlay advertises only `w:ci`, so the route it had is lost.
+	const both = jobNeeds({ secrets: { A: "x" }, waitFor: [{ profile: "ci" }] });
+	const mixed = [host("oldA", "w:ci"), host("b", "")];
+	assert.equal(routeForgeJob({ hosts: mixed, needs: ["w:ci"], jobId: "j" }), "oldA", "before #704 the job was routed to A");
+	assert.equal(routeForgeJob({ hosts: mixed, needs: both, jobId: "j" }), null, "a new receiver over an old A: the shared queue");
+	assert.equal(routeForgeJob({ hosts: [host("A", "s:default,w:ci"), host("b", "")], needs: both, jobId: "j" }), "A", "an upgraded A advertises its overlay default");
 });
 
 // --- the routing rule, one test per abstention -----------------------------------------------------------

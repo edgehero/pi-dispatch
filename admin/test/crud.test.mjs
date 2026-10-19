@@ -118,6 +118,25 @@ test("editTrigger: an existing run.packages opt-in survives the write round-trip
   assert.equal(t.run.packages, true, "the untouched opt-in survived the round-trip");
 });
 
+test("editTrigger and deleteTrigger keep every other top-level key of the file (#704)", async () => {
+  // The project secret bundles live beside the triggers array, so a console write that rebuilt the file as
+  // `{ triggers }` would delete them on every edit. Both keys must come back with identical content.
+  const bundles = { acme: { from: "op", items: { GH_TOKEN: "op://vault/item/field" } } };
+  const path = tmpTriggers({
+    secretBundles: bundles,
+    triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old" } }, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "f2" } }],
+    x: [1],
+  });
+  await handleDashboardAction({ action: "editTrigger", index: 0 }, { triggersPath: path }, { ui: mockUi({ input: ["newflow"] }) });
+  assert.equal(read(path).triggers[0].run.flow, "newflow");
+  await handleDashboardAction({ action: "deleteTrigger", index: 1, confirmed: true }, { triggersPath: path }, { ui: mockUi() });
+  const after = read(path);
+  assert.equal(after.triggers.length, 1);
+  assert.deepEqual(Object.keys(after), ["secretBundles", "triggers", "x"], "key order is kept, triggers replaced in place");
+  assert.equal(JSON.stringify(after.secretBundles), JSON.stringify(bundles));
+  assert.equal(JSON.stringify(after.x), "[1]");
+});
+
 test("deleteTrigger: removes on confirm, no-ops on decline", async () => {
   const two = { triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "f1" } }, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "f2" } }] };
   const path = tmpTriggers(two);

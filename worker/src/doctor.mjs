@@ -55,7 +55,7 @@ import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } fr
 import { BlockList, isIPv4, isIPv6 } from "node:net";
 import * as nodeFs from "node:fs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, proxyConfCopyPath, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
-import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -109,7 +109,7 @@ import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reserv
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
-import { parseSecretProfiles } from "./secret-profiles.mjs";
+import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
@@ -3522,19 +3522,67 @@ export async function collectChecks(shellVars, seams) {
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
 	// reason to set.
 	if (secreting > 0) {
-		const { profiles: declared, error: parseFailure } = parseSecretProfilesSafe(env.PI_SECRET_PROFILES);
-		const names = Object.keys(declared).sort();
+		const { profiles: envDeclared, error: parseFailure } = parseSecretProfilesSafe(env.PI_SECRET_PROFILES);
+		const roots = delimitedList(env.PI_SECRET_RESOLVER_ROOTS);
 		if (parseFailure) {
 			checks.push({ ok: false, label: "PI_SECRET_PROFILES does not parse", fix: `${parseFailure} -- the worker refuses to boot until this is fixed, rather than dropping the entry and leaving you a profile you believe is wired` });
 		} else {
+			// Issue #704: the worker resolves a profile from PI_SECRET_PROFILES AND the settings overlay's
+			// `secretProfiles`, so a profile declared in the panel is declared, and reading env alone told an
+			// operator it was missing. The worker's rules, reused rather than restated: a name in both sources is
+			// ambiguous (`mergeSecretProfiles`, and the worker then refuses every secrets job), and an overlay
+			// profile counts only when its resolver is an executable file whose realpath sits inside
+			// PI_SECRET_RESOLVER_ROOTS (`servableSecretProfiles`, the lookup the resolver makes). An invalid
+			// overlay contributes nothing here; its own check below already fails doctor.
+			//
+			// The probe is the resolver's own (`secrets.mjs -> realExecutable`), through a dynamic import for the
+			// reason `providerOracle` gives: that module loads pi through `env-allowlist.mjs`, and a static import
+			// would make doctor itself fail to start when pi does not load. Without it only the usability probe is
+			// skipped: the ambiguity check needs no pi and still runs on the raw overlay, and an overlay profile then
+			// counts as declared as written (the pi failure is already its own failing line).
+			//
+			// OWN properties only, in every lookup below: the profile charset admits `toString` and `constructor`.
+			const settingsRead = fileExists(settingsFilePath(env, home)) ? readOverlay(settingsFilePath(env, home)) : { overlay: {} };
+			let realExecutablePath = null;
+			try {
+				({ realExecutable: realExecutablePath } = await import("./secrets.mjs"));
+			} catch {
+				realExecutablePath = null;
+			}
+			const overlayDeclared = settingsRead.invalid ? {} : (settingsRead.overlay?.secretProfiles ?? {});
+			const ambiguousNames = Object.keys(overlayDeclared).filter((name) => Object.hasOwn(envDeclared, name)).sort();
+			const unambiguous = Object.fromEntries(Object.entries(overlayDeclared).filter(([name]) => !Object.hasOwn(envDeclared, name)));
+			const overlayUsable = realExecutablePath === null ? unambiguous : servableSecretProfiles({ envProfiles: {}, overlayProfiles: unambiguous, roots, realExecutablePath }).profiles;
+			const declared = { ...envDeclared, ...overlayUsable };
+			const names = Object.keys(declared).sort();
+			if (mergeSecretProfiles(envDeclared, overlayDeclared).ambiguous) {
+				checks.push({
+					ok: false,
+					label: `${ambiguousNames.length} secret profile name(s) are declared in both PI_SECRET_PROFILES and the settings overlay: ${ambiguousNames.join(", ")}`,
+					fix: "remove each name from one of the two (neither source wins a collision) -- until then the worker refuses every job that binds secrets as secret-profile-ambiguous, whatever profile it names",
+				});
+			}
+			// Named by a trigger, declared in the overlay, and not usable: said apart from "not declared",
+			// because the fix is the resolver or the roots, not a new declaration.
+			const unusable = secretProfiles.filter((name) => Object.hasOwn(unambiguous, name) && !Object.hasOwn(overlayUsable, name));
+			if (unusable.length > 0) {
+				checks.push({
+					ok: false,
+					label: `${unusable.length} named secret profile(s) are declared in the settings overlay but not usable: ${unusable.join(", ")}`,
+					fix:
+						roots.length === 0
+							? "PI_SECRET_RESOLVER_ROOTS is unset, so the worker uses no overlay-declared resolver: set it to the directory the resolver lives in, or declare the profile in PI_SECRET_PROFILES -- these jobs refuse pre-spend as secret-profile-unknown until you do"
+							: "the resolver must be an executable file whose real path sits inside PI_SECRET_RESOLVER_ROOTS -- these jobs refuse pre-spend as secret-profile-unknown until it is",
+				});
+			}
 			// A HARD FAIL, not a warning, and worded like the run.resume/PI_SESSIONS_DIR check below for the
 			// same reason: these jobs refuse pre-spend until it is set, deliberately, rather than running
 			// without their secrets and looking like they worked.
-			const missing = secretProfiles.filter((name) => !(name in declared));
+			const missing = secretProfiles.filter((name) => !Object.hasOwn(declared, name) && !unusable.includes(name) && !ambiguousNames.includes(name));
 			checks.push({
 				ok: missing.length === 0,
 				label: missing.length === 0 ? `${secreting} trigger(s) bind secrets, and every profile they name is declared` : `${secreting} trigger(s) bind secrets, but ${missing.length} named profile(s) are not declared: ${missing.join(", ")}`,
-				fix: `declare them in PI_SECRET_PROFILES as name:/absolute/path pairs (a resolver is one line, e.g. \`exec op read --no-newline "$1"\`) -- these jobs refuse pre-spend until you do`,
+				fix: `declare them in PI_SECRET_PROFILES as name:/absolute/path pairs (a resolver is one line, e.g. \`exec op read --no-newline "$1"\`), or through the panel with PI_SECRET_RESOLVER_ROOTS set -- these jobs refuse pre-spend until you do`,
 			});
 			// The declared table, so an operator sees what is wired without reading .env. NAMES and paths only:
 			// this is doctor's own stdout on the operator's host, not a public issue comment.
@@ -3545,7 +3593,6 @@ export async function collectChecks(shellVars, seams) {
 			// when closed and a disclosure when open. Issue #462: the disclosure is a FACT LINE too, since the operator opened
 			// it on purpose and nothing but closing it again clears it, so its advice lives in the label (an `ok: true` check
 			// never prints a fix line).
-			const roots = (env.PI_SECRET_RESOLVER_ROOTS ?? "").split(delimiter).map((r) => r.trim()).filter(Boolean);
 			checks.push({
 				ok: true,
 				...(roots.length === 0

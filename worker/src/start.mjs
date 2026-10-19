@@ -68,7 +68,8 @@ import { piProviders, providerKeyCandidates, resolveProviderCredential } from ".
 import { parseAllowlist } from "./egress-allowlist.mjs";
 import { MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, providerKeyNames } from "./mcp-preflight.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
-import { makeSecretsResolver } from "./secrets.mjs";
+import { makeSecretsResolver, realExecutable } from "./secrets.mjs";
+import { servableSecretProfiles } from "./secret-profiles.mjs";
 import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { makeLiveTranscriptOpener } from "./live-transcript.mjs";
@@ -2069,7 +2070,20 @@ export async function startWorker(
 		//
 		// Recomputed per beat rather than frozen at boot, for the reason the digest is: a host that gains a
 		// profile on restart must start attracting that work within one beat, and one that loses it must stop.
-		caps: () => serializeCaps(capabilityTokens(config)),
+		//
+		// Issue #704: the secret half is the profiles this host would RESOLVE, not only the env-declared ones. The
+		// overlay is read here each beat (without a log, `fpUsd`'s reason), so a profile declared in the panel is
+		// advertised within one beat of the write when its resolver sits inside PI_SECRET_RESOLVER_ROOTS, and
+		// never when it does not. A name declared in both sources makes this host refuse every secrets job, so it
+		// then advertises no secret profile at all. An overlay the job path refuses advertises the env profiles,
+		// the row it always published; every job on such a host refuses as settings-overlay-invalid anyway.
+		caps: () => {
+			// `resolveSettings`, the job path's own rule (getSettings): an overlay that refuses every job as
+			// settings-overlay-invalid, by its own validation or by the merged dollar rule, contributes no profile.
+			const settings = resolveSettings(config, readOverlay(settingsFile));
+			const served = servableSecretProfiles({ envProfiles: config.secretProfiles, overlayProfiles: settings.invalid ? {} : (settings.secretProfiles ?? {}), roots: config.secretResolverRoots, realExecutablePath: realExecutable });
+			return serializeCaps(capabilityTokens({ secretProfiles: served.ambiguous ? {} : served.profiles, waitProfiles: config.waitProfiles }));
+		},
 		// The host's IANA zone, because a cron PATTERN carries none: `triggers.json` has no `tz` field and
 		// BullMQ hands the pattern to cron-parser with no zone, so it resolves in each worker's LOCAL time.
 		// On one host that is exactly what an operator means; on two in different zones the same pattern is
