@@ -409,7 +409,11 @@ LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCa
 # can write a rule; issue #684 generates that policy from this list. Real paths, not PATH names or symlinks, because
 # such a policy matches the executable the kernel ran. verify-image.sh holds every entry to an existing regular file
 # that is its own realpath, so a moved binary fails the image job rather than a policy silently matching nothing.
-LABEL dev.pi-dispatch.net-binaries="/usr/local/bin/node,/usr/bin/git,/usr/lib/git-core/git-remote-http,/usr/bin/gh,/usr/local/bin/glab,/usr/local/bin/tea,/usr/local/bin/github-mcp-server"
+# /opt/pi-dispatch/runner-node FIRST: it is the binary the runner and pi run as (the exec-only copy above), so every
+# provider call leaves through it, not through /usr/local/bin/node. Playwright's Chromium is deliberately NOT listed:
+# its path carries a build number and the architecture, and a job's browser reaches its own dev server on loopback,
+# which no egress rule governs; a trigger that needs it to reach the internet is #684's to decide.
+LABEL dev.pi-dispatch.net-binaries="/opt/pi-dispatch/runner-node,/usr/local/bin/node,/usr/bin/git,/usr/lib/git-core/git-remote-http,/usr/bin/gh,/usr/local/bin/glab,/usr/local/bin/tea,/usr/local/bin/github-mcp-server,/usr/bin/wget"
 
 USER pi
 WORKDIR /sandbox

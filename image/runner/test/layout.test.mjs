@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseRunnerEnv } from "../src/config.mjs";
@@ -53,7 +55,10 @@ test("every module that names a container path follows the layout the process st
 		const plan = await import(${JSON.stringify(`${src}plan-check.mjs`)});
 		const inbox = await import(${JSON.stringify(`${src}inbox.mjs`)});
 		const config = await import(${JSON.stringify(`${src}config.mjs`)});
-		console.log(JSON.stringify({ skills: packages.PROTECTED_SKILL_ROOTS, outbox: plan.OUTBOX_DIR, snapshot: plan.SNAPSHOT_PATH, inbox: inbox.INBOX_DIR, home: config.HOME_FORBIDDEN_ROOTS }));
+		const loader = await import(${JSON.stringify(`${src}loader.mjs`)});
+		const mcp = await import(${JSON.stringify(`${src}mcp.mjs`)});
+		console.log(JSON.stringify({ skills: packages.PROTECTED_SKILL_ROOTS, outbox: plan.OUTBOX_DIR, snapshot: plan.SNAPSHOT_PATH, inbox: inbox.INBOX_DIR, home: config.HOME_FORBIDDEN_ROOTS,
+			loader: [loader.OUTBOX_MOUNT, loader.PORTFOLIO_SNAPSHOT_PATH, loader.JOB_PI_DIR, loader.TRIGGER_SKILLS_DIR, loader.GLOBAL_PI_DIR, loader.WORKSPACE], mcp: mcp.JOB_MCP_PATH }));
 	`;
 	const read = (layout) => JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, [LAYOUT_ENV]: layout }, encoding: "utf8" }));
 	assert.deepEqual(read("sandbox"), {
@@ -62,6 +67,8 @@ test("every module that names a container path follows the layout the process st
 		snapshot: "/sandbox/job/portfolio.json",
 		inbox: null,
 		home: ["/sandbox/workspace", "/sandbox/job", "/sandbox/outbox", "/sandbox/session"],
+		loader: ["/sandbox/outbox", "/sandbox/job/portfolio.json", "/sandbox/job/pi", "/sandbox/job/trigger-skills", "/sandbox/pi-global", "/sandbox/workspace"],
+		mcp: "/sandbox/job/mcp.json",
 	});
 	assert.deepEqual(read("mounts"), {
 		skills: ["/job/pi/skills", "/job/trigger-skills", "/opt/pi-global/skills"],
@@ -69,5 +76,21 @@ test("every module that names a container path follows the layout the process st
 		snapshot: "/job/portfolio.json",
 		inbox: "/inbox",
 		home: ["/workspace", "/job", "/outbox", "/session"],
+		loader: ["/outbox", "/job/portfolio.json", "/job/pi", "/job/trigger-skills", "/opt/pi-global", "/workspace"],
+		mcp: "/job/mcp.json",
 	});
+});
+
+test("no runner source spells a container path as a literal outside layout.mjs", () => {
+	// The bolt behind the probe above: a module the probe does not import (run-job.mjs needs pi and a container) could
+	// slip back to "/job" and stay green. Code only, comments stripped, so the prose that explains a path stays free.
+	const root = fileURLToPath(new URL("../", import.meta.url));
+	const files = ["run-job.mjs", ...readdirSync(join(root, "src")).filter((f) => f.endsWith(".mjs") && f !== "layout.mjs").map((f) => `src/${f}`)];
+	const literal = /["'`](?:\/job|\/workspace|\/session|\/outbox|\/inbox|\/opt\/pi-global)(?:[/"'`$])/;
+	const offenders = [];
+	for (const file of files) {
+		const code = readFileSync(join(root, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+		for (const [i, line] of code.split("\n").entries()) if (literal.test(line)) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
+	}
+	assert.deepEqual(offenders, [], "read the path from LAYOUT (layout.mjs) instead");
 });

@@ -476,8 +476,10 @@ PROBE
 					# Judged on the host, by what changed in the directories, not by the shell's exit status.
 					docker run --rm --cap-drop=ALL --security-opt no-new-privileges -v "$layout_job:/sandbox/job" -v "$layout_ws:/sandbox/workspace" \
 						--entrypoint /opt/pi-dispatch/pi-landlock "$IMAGE_REF" --rw /sandbox/workspace --rw /dev/null -- /bin/sh -c \
-						'echo planted > /sandbox/job/planted; rm -f /sandbox/job/prompt.md; mv /sandbox/job/control /sandbox/workspace/stolen; /opt/pi-dispatch/pi-landlock --rw / -- /bin/sh -c "echo widened > /sandbox/job/widened"; echo ok > /sandbox/workspace/ok' >/dev/null 2>&1 || true
-					if [ -e "$layout_job/planted" ] || [ -e "$layout_job/widened" ] || [ ! -e "$layout_job/prompt.md" ] || [ ! -e "$layout_job/control" ]; then
+						'echo planted > /sandbox/job/planted; echo appended >> /sandbox/job/control; : > /sandbox/job/prompt.md; rm -f /sandbox/job/prompt.md; mv /sandbox/job/control /sandbox/workspace/stolen; /opt/pi-dispatch/pi-landlock --rw / -- /bin/sh -c "echo widened > /sandbox/job/widened"; echo ok > /sandbox/workspace/ok' >/dev/null 2>&1 || true
+					# The overwrite and the truncate are the two rights (WRITE_FILE, TRUNCATE) a file the job's own uid owns is
+					# protected by alone, which is every uploaded file on a copying venue: the content must be untouched.
+					if [ -e "$layout_job/planted" ] || [ -e "$layout_job/widened" ] || [ ! -s "$layout_job/prompt.md" ] || [ "$(cat "$layout_job/control" 2>/dev/null)" != control ]; then
 						rm -rf "$layout_job" "$layout_ws"
 						fail "pi-landlock let the tree it starts write, remove or move a file under /sandbox/job. The agent could rewrite its own job inputs on a copying venue."
 					fi
