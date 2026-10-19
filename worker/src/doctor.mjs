@@ -235,6 +235,10 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
 		live = false,
+		// Issue #683: `--openshell`, the openshell venue's lines (doctor-openshell.mjs), strictly `=== true` as `live`.
+		// `openshellRun` is their spawn seam, for the tests.
+		openshell = false,
+		openshellRun,
 		liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync },
 		// Issue #341: who a job on this host would run as, decided from the same facts the worker reads. Seams because
 		// the answer is this process's own ids and a daemon, neither of which belongs in a unit test. `stat` reads the
@@ -394,7 +398,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -2059,6 +2063,12 @@ export async function collectChecks(shellVars, seams) {
 	}
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
+	// Issue #683: the openshell venue's lines, asked by `--openshell` (it cannot be blessed yet, so `openshellUsed` is
+	// false on every deployment until #684), or once a deployment blesses it.
+	if (seams.openshell === true || venuesOf(env).openshellUsed) {
+		const { openshellChecks } = await import("./doctor-openshell.mjs");
+		checks.push(...(await openshellChecks(env, { image: jobImage, ...(seams.openshellRun ? { run: seams.openshellRun } : {}) })));
+	}
 	if (facts) facts.jobUser = jobUser.forLive;
 	// Issue #596, phase 2: the CPU budget the parent's quota is read back against by `--live`.
 	if (facts) facts.cpuBudgetCenti = budgetView.cpuCenti ?? null;

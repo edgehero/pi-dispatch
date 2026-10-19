@@ -25,8 +25,8 @@ test("`doctor --live` reaches runDoctor as live: true, and the usage names the f
 	// deps bag, where runDoctor reads it strictly as `=== true`.
 	const { readFileSync } = await import("node:fs");
 	const src = readFileSync(new URL("../src/cli.mjs", import.meta.url), "utf8");
-	assert.match(src, /runDoctor\(env, \{ fix: argv\.slice\(1\)\.includes\("--fix"\), live: argv\.slice\(1\)\.includes\("--live"\) \}\)/);
-	assert.match(src, /pi-dispatch doctor \[--fix\] \[--live\]/);
+	assert.match(src, /runDoctor\(env, \{ fix: argv\.slice\(1\)\.includes\("--fix"\), live: argv\.slice\(1\)\.includes\("--live"\), openshell: argv\.slice\(1\)\.includes\("--openshell"\) \}\)/);
+	assert.match(src, /pi-dispatch doctor \[--fix\] \[--live\] \[--openshell\]/, "issue #683 adds --openshell");
 });
 
 test("no args prints usage and exits 0", async () => {
