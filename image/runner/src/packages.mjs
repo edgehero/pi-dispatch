@@ -7,6 +7,7 @@
  * nothing. So every decision this file encodes is testable without a container.
  */
 import { basename, dirname } from "node:path";
+import { LAYOUT } from "./layout.mjs";
 
 /**
  * Roots whose skills a staged package must never be able to replace, most specific FIRST.
@@ -15,7 +16,7 @@ import { basename, dirname } from "node:path";
  * between the repo and the overlay for the same reason it does in additionalSkillPaths: "for THIS
  * trigger" is a narrower operator statement than "for this deployment", and narrower wins.
  */
-export const PROTECTED_SKILL_ROOTS = ["/job/pi/skills", "/job/trigger-skills", "/opt/pi-global/skills"];
+export const PROTECTED_SKILL_ROOTS = [`${LAYOUT.job}/pi/skills`, `${LAYOUT.job}/trigger-skills`, `${LAYOUT.global}/skills`];
 
 /**
  * The admin extension, BY NAME -- a deliberate duplicate of `ADMIN_RE` in worker/src/import-pi.mjs.

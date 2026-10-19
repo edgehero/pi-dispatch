@@ -54,6 +54,7 @@ import { createReportProgress, reportProgressShadow } from "./src/report-progres
 import { assertSteerReady, createInbox } from "./src/inbox.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
+import { LAYOUT } from "./src/layout.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
 // never a static import. Never add a pi-ai package specifier to this file's imports: two copies of that
@@ -80,7 +81,7 @@ import {
 const nestedRunner = isNestedRunner(process.env, process.pid);
 if (nestedRunner) await runAsPiCli();
 
-const JOB_DIR = "/job";
+const JOB_DIR = LAYOUT.job;
 const PROMPT_PATH = `${JOB_DIR}/prompt.md`;
 
 /** Log a stable identifier, never task content. Issue bodies are user-authored personal data.
@@ -209,7 +210,7 @@ async function main() {
 	// runtime may ever reach the network (model-runtime.js:92). The options, and why each is set, live in
 	// src/model-runtime.mjs. Prefer the operator's global overlay models.json (REQ-GLOBAL-PI-OVERLAY) when the :ro
 	// overlay is mounted -- this is how a CUSTOM provider/model becomes resolvable.
-	const GLOBAL_MODELS = "/opt/pi-global/models.json";
+	const GLOBAL_MODELS = `${GLOBAL_PI_DIR}/models.json`;
 	const modelsPath = existsSync(GLOBAL_MODELS) ? GLOBAL_MODELS : `${agentDir}/models.json`;
 	// The credentials are auth.json as it is NOW, held in memory (issue #587's review, src/model-runtime.mjs has the why).
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime, AuthStorage: await loadPiAuthStorage(), agentDir, modelsPath });

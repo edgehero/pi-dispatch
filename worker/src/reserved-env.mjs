@@ -53,6 +53,9 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// Issue #646: a trigger binding it through run.secrets would tell the runner to watch an inbox the operator did not
 	// arm, on a run the worker never opened one for.
 	"PI_STEER",
+	// Issue #683: which file layout the runner reads. A trigger binding it through run.secrets would point the runner at
+	// a tree the worker never wrote, or, on a copying venue, back at /job, where nothing was uploaded.
+	"PI_JOB_LAYOUT",
 	"PI_MCP_SERVERS",
 	// Issues #501, #502: the per-job dollar cap (written by the worker since #501, from the trigger's and the
 	// deployment's caps) and the allowed-model list (reserved until #502 writes it). Neither can be bound through
