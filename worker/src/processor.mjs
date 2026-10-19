@@ -171,6 +171,11 @@ export const PARKED_COMMENT_PR = "This run stopped to wait for an answer to the 
 export function parkedComment(target) {
 	return target?.type === "pull_request" ? PARKED_COMMENT_PR : PARKED_COMMENT;
 }
+// Issue #638: the park's comment when a reply that arrived while the run was parking was taken as its answer (the
+// held reply, held-settle.mjs), so the resumed run is already queued and "Reply here" would invite a second answer to
+// a question that has one. One sentence for an issue and a pull request alike: it says how the run continues, never
+// how to reply. Fixed words, no quote of the reply, no mention.
+export const HELD_TAKEN_COMMENT = "The run had asked a question and took the reply above as the answer, so it continues from here.";
 
 // Issue #502: the `model-unknown` refusal's comment. Names no model: the reader may be an issue author.
 export const MODEL_UNKNOWN_COMMENT = "Refused: this job names an AI model that this deployment does not know (it is in neither pi's model catalog nor the overlay models.json), so no container was started and nothing was spent. Ask the operator to check the trigger's model settings. Not run.";
@@ -470,6 +475,11 @@ async function runAttempt(job, deps, durable) {
 		// so the answer is not swallowed against it. Takes no job: the key belongs to the REAL BullMQ job, which only the
 		// wiring holds (index.mjs binds queue.mjs's `releaseSemanticWindow` to it). Never throws. The default does nothing.
 		releaseParkedWindow = async () => {},
+		// () => Promise<{ resumed } | null> (issue #638, DES-AWAIT-INPUT-ENDS-THE-JOB): take the replies held for this run
+		// while it was parking, after the window is released: the first recent one is enqueued as the resumed job, the
+		// rest answered once (held-settle.mjs `takeHeld`). Bound by the wiring to the REAL job, like the release. Never
+		// throws. The default takes nothing, so a wiring without it parks exactly as before.
+		takeHeldReplies = async () => null,
 		// The session store's root, or null when the feature is unavailable (REQ-RESUMABLE-SESSION). Read
 		// ONLY to answer the fail-closed gate below -- nothing here opens it, and it never reaches the
 		// container env (docker-run.mjs mounts a per-job COPY, never the store).
@@ -2112,17 +2122,27 @@ async function runAttempt(job, deps, durable) {
 				// job is ignored, since that runner was never offered the tool.
 				const parked = exitReason === "awaiting-input" && job.awaitInput === true;
 				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked }) : null;
-				// The window closes AFTER the promotion (an answer that gets in must find the `parked` mark and the transcript)
-				// and BEFORE the comment and the marker: the marker is what routes a phrase-free reply on an issue, and the
-				// comment is what tells a pull request's author to reply, so no answer they invite can meet the old key. Every
-				// park takes this path, a resumed run that parks again included. Guarded although the seam never throws: a
-				// fault here must not cost the person the comment that says how to continue.
-				if (parked) await Promise.resolve().then(releaseParkedWindow).catch(() => {});
-				if (parked) await comment(job, parkedComment(job.target));
-				// The forge marker the receiver routes a phrase-free reply on: set on a park, cleared when a run on a key that
-				// could park ends without parking. Never throws, and decides nothing: the sidecar promotion just wrote does.
+				// THE PARK SEQUENCE (issue #638 reordered it): promote, marker ON, release the window, take the held replies,
+				// then the comment. Every step closes a gap the one before it leaves open:
+				//   - the marker AFTER the promotion (a reply it routes must find the `parked` mark and the transcript) and
+				//     BEFORE the release: a phrase-free reply in between routes as a parked reply, meets the window this run
+				//     still holds, and is HELD (the keeper still registers the run), so no reply slips past both;
+				//   - the release before the take, so the taken reply is enqueued WITH the window (held-settle.mjs) and becomes
+				//     the one job every later answer is coalesced against, never a second resumed run beside it;
+				//   - the comment LAST, because it invites an answer: with a reply taken it says the run continues
+				//     (HELD_TAKEN_COMMENT) instead of asking for one.
+				// The marker stays on when a reply was taken; the resumed run clears it when it ends without parking, as any
+				// run on the key does. Every park takes this path, a resumed run that parks again included. Each seam never
+				// throws and is guarded anyway: a fault must not cost the person the comment that says how to continue. The
+				// marker: set on a park, cleared when a run on a key that could park ends without parking; it decides nothing,
+				// the sidecar the promotion just wrote does.
 				if (parked) await parkedLabel(job, true);
 				else if (job.awaitInput === true || job.parkedReply === true) await parkedLabel(job, false);
+				if (parked) await Promise.resolve().then(releaseParkedWindow).catch(() => {});
+				const taken = parked ? await Promise.resolve().then(takeHeldReplies).catch(() => null) : null;
+				// `taken` "other": a reply that got in between the release and the take already is the resumed job, so the
+				// comment says the run continues there too, never "Reply here" (review round 2).
+				if (parked) await comment(job, taken?.taken === "here" || taken?.taken === "other" || Number(taken?.resumed) > 0 ? HELD_TAKEN_COMMENT : parkedComment(job.target));
 				return {
 					outcome: "completed",
 					...(parked ? { reason: "awaiting-input" } : {}),

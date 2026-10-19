@@ -514,3 +514,23 @@ test("L29: the resumed job's kind is the RUN's (job.data.kind), on gitlab and az
 		assert.equal(env.calls.adds[0].opts.jobId, `${prefix}${GUID(1)}`);
 	}
 });
+
+test("a late steer message on a parked run whose held reply already resumed it is answered, never a second resumed job (#638)", async () => {
+	const { makeLateForge } = await import("../src/inbox-settle.mjs");
+	const enqueued = [];
+	const comments = [];
+	const late = makeLateForge({
+		redis: {},
+		queues: { shared: () => ({}) },
+		comment: async (_job, text) => comments.push(text),
+		inbox: { readFallbacks: async () => ({ jobs: { a: { resume: true, kind: "github", repo: "o/r", target: { type: "issue", number: 1 } } } }) },
+		enqueue: async () => (enqueued.push(1), { jobId: "x" }),
+		release: async () => {},
+	});
+	const job = { id: "run-1", data: { steer: true, kind: "github", repo: "o/r", target: { type: "issue", number: 1 } } };
+	await late([{ id: "a", source: "forge", hop: 0 }], { job, runId: "run-1", result: { outcome: "completed", reason: "awaiting-input" }, heldResumed: true });
+	assert.equal(enqueued.length, 0, "no second job");
+	assert.equal(comments.length, 1, "the late message is answered once");
+	await late([{ id: "a", source: "forge", hop: 0 }], { job, runId: "run-1", result: { outcome: "completed", reason: "awaiting-input" } });
+	assert.equal(enqueued.length, 1, "without a held resume the late rule is unchanged");
+});

@@ -74,3 +74,59 @@ test("a run that did not park keeps its window under the wired worker", { skip }
 	await harness({ exitReason: null, lines })(job, "tok", new AbortController().signal);
 	assert.deepEqual(asked, []);
 });
+
+// Issue #638, review round 2: a run both steer-armed and awaitInput, driven through the wired processor. Its park takes a
+// held reply as the resumed job; a late steer message from the same moment is then ANSWERED, never resumed beside it
+// (`heldResumed`), and the park's comment says the run continues rather than asking for a reply.
+test("a steer-armed awaitInput park that took a held reply answers its late steer message instead of starting a second resume", { skip }, async () => {
+	const { makeHeldSettle, HELD_EXTRA_REPLY } = await import("../src/held-settle.mjs");
+	const { HELD_TAKEN_COMMENT } = await import("../src/processor.mjs");
+	const { makeLateForge, STEER_LATE_REPLY } = await import("../src/inbox-settle.mjs");
+	const NOW = 1_800_000_000_000;
+	const lateId = "a".repeat(32);
+	const late = { v: 1, id: lateId, mode: "steer", source: "forge", author: { kind: "forge", id: 5, association: "OWNER" }, text: "late words", at: NOW, deliveryId: "d-late" };
+	const heldEntry = { id: "b".repeat(32), at: NOW, route: "dedup", fallback: { kind: "github", repo: "acme/web", target: { type: "issue", number: 3 }, flow: "ask", resume: true, awaitInput: true, trigger: { deliveryId: "d-held", sender: { id: 5 } }, jobId: "gh-d-held" } };
+	const redis = fakeRedis();
+	// The steer inbox's close (settleInbox): one late forge message, closed for the first time.
+	redis.eval = async () => [[JSON.stringify(late)], [lateId, "late"], 1];
+	const posted = [];
+	const adds = [];
+	const comment = async (_job, text) => posted.push(text);
+	const queues = { shared: () => ({ add: async (name, data, opts) => (adds.push(opts.jobId), { id: opts.jobId }) }) };
+	const heldSettle = makeHeldSettle({ redis, queues, comment, now: () => NOW, held: { awaitTargetKeyOf: () => null, closeHeld: async () => ({ entries: [heldEntry], first: true }) } });
+	const lateForge = makeLateForge({ redis, queues, comment, now: () => NOW, release: async () => false, inbox: { readFallbacks: async () => ({ jobs: { [lateId]: { ...heldEntry.fallback, trigger: { deliveryId: "d-late", sender: { id: 5 } }, jobId: "gh-d-late" } } }) } });
+	const lines = [];
+	const processor = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		applyConcurrency: () => {},
+		recordRun: () => {},
+		timeoutMs: 100000,
+		deps: {
+			mintToken: async () => "tok",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j", session: { key: "abc", hostDir: "/j/session", resume: true, reason: "resumed", bytes: 1 } }),
+			imagePreflight: async () => ({ ok: true, piVersion: "0.80.7", capabilities: ["awaitInput", "steer"] }),
+			sessionsDir: "/srv/pi-sessions",
+			promoteSession: () => ({ promoted: true, reason: "promoted", bytes: 1 }),
+			runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, exitReason: "awaiting-input" }),
+			cleanup: async () => {},
+			comment,
+			parkedLabel: async () => {},
+			settleHeld: heldSettle,
+			takeHeld: heldSettle.take,
+			onLateForge: lateForge,
+			log: (event, fields) => lines.push({ event, ...fields }),
+		},
+	});
+	const { job } = bullJob();
+	job.data = { ...job.data, steer: true };
+	const r = await processor(job, "tok", new AbortController().signal);
+	assert.equal(r.reason, "awaiting-input");
+	assert.deepEqual(adds, ["gh-d-held"], "ONE resumed job: the held reply, never the late steer message beside it");
+	assert.ok(posted.includes(HELD_TAKEN_COMMENT), "the park says the run continues");
+	assert.ok(posted.includes(STEER_LATE_REPLY), "the late message is answered");
+	assert.equal(posted.includes(HELD_EXTRA_REPLY), false);
+});

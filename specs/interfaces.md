@@ -9303,7 +9303,7 @@ panel read (part 3): never the text.
   steer the receiver sets the steered marker (after the push, never before). One no run took, after a successful
   live-run lookup, is checked against the marker: present (a redelivery of a delivery steered before, whose run has
   ended), it is answered `202 {"status":"steered","runs":0}` and never enqueued (review round 1). Otherwise it is
-  enqueued and answered exactly as before (`202` queued or deduplicated, `503` on an enqueue fault); a lookup fault,
+  enqueued and answered exactly as before (`202` queued or deduplicated, `202` held since issue #638 (the next bullet), `503` on an enqueue fault); a lookup fault,
   or a fanout in which every store or push errored, falls through without the marker check. The poller has no answer
   to give: a marked redelivery is neither enqueued nor counted, and its `poll_cycle` line gains `steered: <n>` only
   in a cycle where a comment steered. The target key's repo is the job's own spelling, for the poller its
@@ -9311,6 +9311,58 @@ panel read (part 3): never the text.
   both webhook and poller with a differently cased entry keys the two apart (its comments fall through to ordinary
   jobs), and the two transports see one comment under different delivery ids (the old residual: it can be handled
   twice).
+- **Held replies: a sibling key set, not the inbox** (issue #638, `DES-AWAIT-INPUT-ENDS-THE-JOB`). One module,
+  `worker/src/held-replies.mjs`, exported as `@edgehero/pi-dispatch/held-replies`; the worker's keeper and settle are
+  `worker/src/held-settle.mjs`, the receiver's side `receiver/src/held.mjs`. Per RUN, spelled like the inbox's keys:
+  ```
+  run:await:target:<hex32>     ZSET  member: the raw run id, score: expiresAtMs (refresh time + 30 s); PEXPIRE 60 s.
+                                     <hex32> is the steer target's own hash (`awaitTargetKeyOf` cuts it off the
+                                     `steerTargetOf` key, never re-spells it). Every job with `awaitInput: true` and a
+                                     forge target, steer-armed or not.
+  run:await:open:<runId>       STRING the host name, PX 30 s: the ONE authority on whether a run takes a held reply.
+  run:held:<runId>             LIST  entry JSON {"id","at","route","fallback"} in that order, append only, PEXPIRE 1 h;
+                                     id the 32-hex `forgeMessageId` of the delivery; route "dedup" | "pre-label";
+                                     fallback the job the receiver would have enqueued (`fallbackJobOf`, the inbox
+                                     fallback's shape: the filter's job without `steerMode`, plus `kind` and `jobId`).
+  run:held:closed:<runId>      STRING "1", PX 1 h, set by the settle's close.
+  run:await:parked:<hex32>     STRING the run id, PX 60 s, set by the park's close in the same script: a run parked
+                                     here a moment ago (review round 2). Read by the receiver only.
+  ```
+  Never under `run:steer:*` or `run:inbox:*`: `trySteer` never sees an awaitInput run, and a held reply is never a
+  steer. **Who writes**: the processor's keeper registers the run once the pickup's gates (pause, size, wait, scope,
+  endpoint, host slot) have admitted it, just before the settings overlay check and `runJob` (one MULTI: open key,
+  target member, the list's hour), and refreshes it every 2 s until the park's take or the final settle stops it; its start first
+  resets a CLOSED list of the same run id (`RESET`, a console retry keeps the job id); its stop deletes nothing. **The
+  scripts**: `HOLD` (KEYS open, closed, list; ARGV the id's JSON prefix, entry JSON, max 20, ttl) returns `closed`,
+  `gone`, `dup` (an entry with that id is listed) or `ok` in that order of checks, and at 20 entries evicts the
+  oldest (`LTRIM`) rather than refusing; an entry over 1 MiB is refused before Valkey. `CLOSE` (KEYS closed, open,
+  list, the target, and for the park's take the parked marker; ARGV the raw run id, ttl, the marker's ttl) sets
+  `closed`, drops the open key and the target member, raises the marker when given, and returns `[list, first]`, `first` 1 only for the call that
+  closed it. **The receiver's answer**: a delivery a live run held (`ok` or `dup`) and that created no job is answered
+  `202 {"status":"held","runs":<n>}`. Two routes: a comment-matched job with `resume` and `awaitInput` that the
+  semantic window deduplicated is held under each surviving job id (the swallow is still logged `deduplicated`); a
+  filter drop carrying `heldCandidate` (a phrase-free reply on an issue lacking only the parked marker) is held under
+  every live run on the await target, at most 4; when no live run takes it but the target's parked marker stands, it
+  is enqueued as the parked reply it is (logged `held_after_park`, answered as any enqueue). A hold no run took is
+  answered exactly as before (`202` deduplicated, or `204` with today's `dropped` line). The poller holds by the same two routes and counts `held: <n>`
+  on its `poll_cycle` line only in a cycle that held one. **The take** (`takeHeld`, inside the processor's park
+  sequence: promote, marker on, release the window, take, comment) acts on the first close only: entries whose `at`
+  is more than `HELD_LOOKBACK_MS` (5 min) before the take are dropped; the first remaining entry whose fallback names
+  the run's forge, repo, target type and number, flow and command (a mismatch is skipped for the next) is enqueued WITH the semantic
+  window (`enqueueForgeJob`) on the queue that ran the run; an add the window swallows is not taken; the rest get one
+  `HELD_EXTRA_REPLY` (or one `HELD_RESUME_FAILED_REPLY` when nothing could be started, also for a close that failed);
+  and the processor posts `HELD_TAKEN_COMMENT` instead of the parked comment when one was taken, here or (`taken:
+  "other"`) by another job the window showed already holds the answer; the take's close also raises the parked
+  marker. **The settle** (at a
+  final outcome, `isFinalOutcome`, the inbox settle's three sites) is the backstop: after a take it finds the list
+  closed and does nothing; after a take whose own close failed it only drops; for any outcome that is not a park it
+  drops every held reply. **Logs**, ids and counts
+  only: the receiver's and the poller's `held {delivery, repo, target, route, runId}` and `held_fell_through
+  {delivery, kind, route, reason, outcomes?}`; the keeper's `held_keeper_fault {jobId, step, code}`; the settle's
+  `held_reply_resumed {jobId, runId, n, queue}`, `held_replies_dropped {runId, n, stale?}`, `held_reply_mismatch
+  {runId}`, `held_reply_not_taken {runId, survivingJobId}`, `held_reply_resume_failed {runId, queue, code}` and `held_settle_failed {jobId, code}`. Like the inbox keys these
+  are transient, TTL-bounded keys of a live run (`OQ-008` does not apply): delete them and every reply is answered as
+  it was before this feature.
 - **Logs** carry the job id, message ids, step names, codes and counts, never a message's text: the relay's
   `steer_relay_fault {jobId, step, code}` (once per step and code), `steer_frame_refused {jobId, id}`,
   `steer_inbox_reset {jobId}` and `steer_inbox_closed {jobId}` (once); the ack
@@ -10356,3 +10408,4 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-19 | Issue #683, part 2: the `openshell` backend, built and not yet blessable. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a NEW paragraph, "The `openshell` venue's half", states the CLI calls per attempt in order (the image ID from the gateway's own engine; `sandbox create` sized, labelled with the owner and the size labels, under the generated policy file, which must answer `Ready`; the `policy get --full` read-back, equal body and source `sandbox`; one `sandbox upload` per input with `--no-git-ignore`; the one long-lived `sandbox exec`, the entrypoint through pi-landlock with its `--rw` list, the exit key on stdin, `PI_JOB_ID` the container name; the downloads, each replacing the host's tree; the `delete` in a `finally`), the stop, and the paged owner-label listing; the sandbox's name is a hash of the container name because OpenShell caps it at 19 characters. The body above it is UNCHANGED, checked, for `local` and `podman`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's `reason` enum listing gains the five reasons #683 makes a record reason: `job-image-sandbox-layout-unsupported` (part 1's gate), `venue-local-folders-unsupported`, `openshell-gateway-not-local`, `openshell-global-policy` and `openshell-landlock-missing`. **UNCHANGED, checked**: `INT-RUNNER-EXIT-CODE-PROTOCOL` (the key is written and the pipe closed as on every venue; stdin frames are #686's), `INT-CONTAINER-JOB-INPUTS` (the `sandbox` layout as part 1 stated it), `INT-SANDBOX-CONTRACT` (no launcher row, refused by name), `INT-EGRESS-POLICY-CONTRACT` (the layer's rules are #684's). |
 | 2026-10-19 | Issue #684, part 1: the openshell venue's per-job network policy. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: the "A venue's own egress layer" paragraph gains the document as built: the translation table (an allowlist name and a leading-dot wildcard on 443, a one-label wildcard refused, a line squid matches nothing for skipped, `github.com` alone carrying the git transport with a push to the job's own repository only and LFS batch, the other forges' hosts kept at full access because their API shares the git host, a model endpoint exactly), every endpoint `enforce` and `rest`, the runner's node always the first binary and the binaries stated as no narrowing (OpenShell matches ancestors, and every job process descends from the runner), WebSockets on 443 refused, deny-all with no rule, the read-back held to the body plus `/var/log` (measured) or the body alone for an image without it, `openshell-egress-untranslatable` before spend, MCP hosts as allowlist entries and overlay stdio commands moved to the sandbox layout. The squid venues' objects, argv and failure table UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum listing gains `openshell-egress-untranslatable`. |
 | 2026-10-19 | Issue #683, the review fixes of part 1 that its squash left out (landed after #698 merged). **`INT-SANDBOX-CONTRACT` AMENDED**: its "byte-identical to the one before #429" sentence names the `--workdir=/workspace` issue #683 added, the one change to the reopened shell's argv, which part 1's row had listed as UNCHANGED. The layout table in `INT-CONTAINER-JOB-INPUTS` is now held to `worker/src/job-layout.mjs` by a test. Note on part 1's row: pi-landlock's own refusal, 126, sits INSIDE the never-started set of the two binding venues' runtimes, which never run the helper; the openshell venue decides never-started by the failed step, not a code (part 2). |
+| 2026-10-19 | Issue #638's residual (the remainder of PR #638): held replies. **`INT-STEER-INBOX-CONTRACT` AMENDED**: a new "Held replies: a sibling key set, not the inbox" bullet, written from `worker/src/held-replies.mjs`, `worker/src/held-settle.mjs`, `receiver/src/held.mjs`, `receiver/src/receiver.mjs` and `receiver/src/poller.mjs`: the keys `run:await:target:<hex32>` (the steer target's hash, derived; ZSET scored `now + 30 s`, PEXPIRE 60 s), `run:await:open:<runId>` (PX 30 s), `run:held:<runId>` (LIST of `{id, at, route, fallback}`, PEXPIRE 1 h) and `run:held:closed:<runId>` (PX 1 h); never under `run:steer:*` or `run:inbox:*`; who writes them (the processor's keeper for every awaitInput job, 2 s, a reset of a closed list at its start, a stop that deletes nothing); the `HOLD` script's returns in order (`closed`, `gone`, `dup`, `full` at 20, `ok`; 1 MiB per entry refused before Valkey) and `CLOSE`'s `[list, first]`; the receiver's new answer `202 {"status":"held","runs":<n>}` on its two routes (a swallowed resume comment of an awaitInput comment trigger under the surviving id, a filter drop's `heldCandidate` under every live run, at most 4), everything else answered as before; the poller's `held` count; the take inside the park sequence (first close only: replies older than `HELD_LOOKBACK_MS` 5 min dropped, the first matching one enqueued WITH the semantic window by `enqueueForgeJob`, a swallowed add not taken, the rest one `HELD_EXTRA_REPLY` or one `HELD_RESUME_FAILED_REPLY`, the processor's `HELD_TAKEN_COMMENT`; corrected in review from a window-less `enqueueLateForgeJob` at the final outcome, which let a later answer start a second run); the final settle as the backstop (nothing after a take, a drop for any non-park outcome); the logs, `held_reply_not_taken` and the `stale` count included. The "who writes" sentence says exactly where the keeper starts. The receiver's-answer bullet's list of answers gains `202` held. Everything else in the contract UNCHANGED, checked: the inbox keys, scripts, caps and the steered marker. **`INT-WEBHOOK-PAYLOAD-SUBSET`, `INT-GITLAB-PAYLOAD-SUBSET`, `INT-AZURE-PAYLOAD-SUBSET` UNCHANGED, checked**: no field is read that was not already (the candidate is built from the fields the parked-reply route already carries). **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no new trigger field; held replies follow from `run.awaitInput` and `run.resume` as they are. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no record field (the held counts are logged, not recorded). Review round 2: the key list gains `run:await:parked:<hex32>` (the run id, PX 60 s, raised by the park's close in the same script) and the receiver's answer gains its route (a pre-label candidate no live run took is enqueued as a parked reply while it stands, `held_after_park`); `HOLD` evicts the oldest entry at 20 instead of answering `full`; the take's match includes flow and command, its result `taken`; the backstop only drops after a take whose close failed. |

@@ -73,6 +73,7 @@ import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { makeLiveTranscriptOpener } from "./live-transcript.mjs";
 import { makeInboxRelay } from "./inbox-relay.mjs";
 import { makeLateForge, settleInbox } from "./inbox-settle.mjs";
+import { makeHeldSettle } from "./held-settle.mjs";
 import { readProgressKey } from "./run-progress.mjs";
 import { makeStatusCommenter, makeStatusCommentRegistry, renderStatusText, STATUS_OUTCOMES, STATUS_RETRYING } from "./status-comment.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
@@ -2339,6 +2340,11 @@ export async function startWorker(
 	// The host-lost sweep's run ended on a host that is gone, so its resumed job goes to the shared queue, never to that
 	// host's queue, where nothing would ever take it.
 	const lateForgeShared = (entries, context) => lateForge(entries, { ...context, queueName: QUEUE });
+	// Issue #638 (DES-AWAIT-INPUT-ENDS-THE-JOB): what an awaitInput run's held replies become. `take` runs inside the
+	// processor's park sequence and starts the first recent one as the resumed job, with the window; the settle at the
+	// same three final-outcome sites is the backstop that drops them for any run that did not park (held-settle.mjs).
+	// The host-lost sweep's run can never have parked, so there it only ever drops.
+	const heldSettle = makeHeldSettle({ redis, queues: recoveryQueues, comment, log, now });
 
 	// Issue #625: the forge's parked marker, set on a park and cleared when it no longer applies. comment()'s shape and its
 	// rule: it NEVER throws, because the marker decides nothing (the session store's sidecar does) and a forge that refuses
@@ -2430,6 +2436,7 @@ export async function startWorker(
 				const steered = await settleInbox({ redis, job, error: lostError, log, onLateForge: lateForgeShared });
 				if (steered) lostError.steered = steered;
 			}
+			if (job?.data?.awaitInput === true) await heldSettle({ job, error: lostError, queueName: QUEUE });
 			recordRun({ job: { id: job.id, name: job.name, data: job.data, opts: job.opts, attemptsMade: 0, timestamp: job.timestamp }, error: lostError, startedAt: null, endedAt: at });
 			await comment({ ...job.data, id: job.id }, RECOVERY_HOST_LOST_COMMENT);
 			onFailure?.({ jobId: job.id, outcome: "failed", reason: "recovery-host-lost" });
@@ -2563,6 +2570,11 @@ export async function startWorker(
 			collectPlan,
 			// Issue #646: the late-message branches at the processor's settle (index.mjs `settleSteer`).
 			onLateForge: lateForge,
+			// Issue #638: held replies at the processor's settle (index.mjs `settleSteer` calls it first). Wired, it also arms
+			// the keeper that makes an awaitInput run reachable while it runs.
+			settleHeld: heldSettle,
+			// The take inside the park sequence (processor.mjs), which starts the held answer before the parked comment.
+			takeHeld: heldSettle.take,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
 			// only on a FOREIGN positive mark (index.mjs binds the real queue jobId so a retry of the
 			// spending delivery is excused). In the compose topology this check is the once-enforcement
@@ -2860,6 +2872,9 @@ export async function startWorker(
 				// terminal failure the processor did see was settled before its record: this second close returns the same entries
 				// with `first: false` (steer-inbox.mjs closeInbox), so settleInbox answers nothing again (review round 1, F2).
 				if (job.data?.steer === true) void settleInbox({ redis, job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" }, log, onLateForge: lateForge });
+				// Issue #638: the same for an awaitInput run's held replies; a failure never parked, so they are dropped, and a
+				// second close (the processor settled first) acts on nothing.
+				if (job.data?.awaitInput === true) void heldSettle({ job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" } });
 				void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}

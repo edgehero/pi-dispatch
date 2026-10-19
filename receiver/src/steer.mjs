@@ -92,8 +92,12 @@ function skipReason(body) {
 	return "too-large";
 }
 
-/** The job the receiver would have enqueued, as late branch A starts it: the job, its kind and its delivery job id. */
-function fallbackJobOf(job, kind) {
+/**
+ * The job the receiver would have enqueued, as late branch A starts it: the job, its kind and its delivery job id. Exported
+ * for held replies (issue #638, held.mjs), whose fallback is the same object for the same reason: one spelling of "the job
+ * this comment would have been".
+ */
+export function fallbackJobOf(job, kind) {
 	const { steerMode: _mode, ...rest } = job;
 	let jobId = null;
 	try {

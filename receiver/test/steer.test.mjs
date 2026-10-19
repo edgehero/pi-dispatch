@@ -263,8 +263,14 @@ for (const forge of Object.keys(GATES)) {
 
 	test(`${forge}: phrase-free, parked-reply and command paths are byte-identical to an unarmed trigger's`, () => {
 		const unarmed = cfgWith(commentRule({ steer: undefined }));
-		// Phrase-free: dropped either way, the same reason.
-		assert.deepEqual(GATES[forge]({ body: "just a remark" }), GATES[forge]({ body: "just a remark", cfg: unarmed }));
+		// Phrase-free: dropped either way, the same reason. The drop carries the held candidate (issue #638, the parked-reply
+		// job the missing marker kept from running), which differs only by the trigger's own `steer: true`, and no steerMode.
+		const drop = GATES[forge]({ body: "just a remark" });
+		const dropUnarmed = GATES[forge]({ body: "just a remark", cfg: unarmed });
+		assert.equal(drop.reason, "no-trigger-phrase");
+		assert.equal("steerMode" in drop.heldCandidate, false);
+		const noSteer = (d) => JSON.stringify({ ...d, heldCandidate: { ...d.heldCandidate, steer: undefined } });
+		assert.equal(noSteer(drop), noSteer(dropUnarmed));
 		// A parked reply: the same job but for the trigger's own `steer: true`, and no steerMode.
 		const parked = GATES[forge]({ body: "the answer is 42", labels: [PARKED] });
 		assert.equal(parked.enqueue, true);

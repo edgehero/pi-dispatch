@@ -112,6 +112,7 @@ import { judgeValkeyAtStart, makeRedisClient, parseConnection, valkeyClientConte
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { trySteer } from "./steer.mjs";
+import { holdAfterDedup, holdBeforeLabel } from "./held.mjs";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
 import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
@@ -348,8 +349,9 @@ export async function startPoller(env = process.env, deps = {}) {
 			}
 
 			cycleNo++;
-			// `steered` (issue #646) only when a comment steered a run this cycle, so a cycle line without one is unchanged.
-			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ...(stats.steered > 0 ? { steered: stats.steered } : {}), ms: now() - startedAt });
+			// `steered` (issue #646) only when a comment steered a run this cycle, so a cycle line without one is unchanged;
+			// `held` (issue #638) by the same rule, when a reply was held for a parking run.
+			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ...(stats.steered > 0 ? { steered: stats.steered } : {}), ...(stats.held > 0 ? { held: stats.held } : {}), ms: now() - startedAt });
 			if (stopped) break;
 
 			// The delay: the configured interval, raised by any x-poll-interval hint seen this cycle, and
@@ -392,7 +394,7 @@ export async function startPoller(env = process.env, deps = {}) {
 }
 
 function emptyStats() {
-	return { fetched: 0, enqueued: 0, notModified: 0, minDelaySeconds: 0, steered: 0 };
+	return { fetched: 0, enqueued: 0, notModified: 0, minDelaySeconds: 0, steered: 0, held: 0 };
 }
 
 /** 1-30s of jitter for the post-rate-limit wake, spread by the injected `random`. */
@@ -975,13 +977,27 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 
 	const result = filter(eventName, subset, ctx.cfg, ctx.selfId, deliveryId, closerAuthorized);
 	if (!result.enqueue) {
-		ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
-		return;
+		// Issue #638, the webhook arms' `heldBeforeLabelOr` at the poller's seam: a phrase-free reply that missed only the
+		// parked marker is held for an awaitInput run parking on its target; otherwise today's drop.
+		let rescued = null;
+		if (result.heldCandidate !== undefined) {
+			const c = result.heldCandidate;
+			rescued = await holdBeforeLabel({ redis: ctx.redis, candidate: c, kind: "github", now: ctx.now, log: ctx.out, delivery: deliveryId, target: `${c.target.type}#${c.target.number}` });
+			if (rescued !== null && rescued.enqueue !== true) {
+				stats.held = (stats.held ?? 0) + 1;
+				return;
+			}
+		}
+		// A run just parked on the target (held.mjs): the reply is the parked reply it would have been, enqueued below.
+		if (rescued?.enqueue !== true) {
+			ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
+			return;
+		}
 	}
 	// Comment steering (issue #646), the webhook arms' `steerOrEnqueue` at the poller's seam: the same `trySteer` over
 	// the poller's own Valkey client, before any enqueue, only for a job the filter marked `steerMode`. A null falls
 	// through to the enqueue below unchanged, minus the marker.
-	let job = result.job;
+	let job = result.enqueue ? result.job : result.heldCandidate;
 	if (job.steerMode !== undefined) {
 		const { steerMode: mode, ...rest } = job;
 		const steered = await trySteer({ redis: ctx.redis, job, kind: "github", now: ctx.now, log: ctx.out });
@@ -996,6 +1012,7 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 	}
 	const replicas = job.replicas ?? 1;
 	let created = 0;
+	const deduplicated = [];
 	for (let i = 1; i <= replicas; i++) {
 		const r = await ctx.enqueue(replicas > 1 ? { ...job, replica: i } : job);
 		// Issue #289, the receiver arms' honesty rule at the poller's own seam: a semantic-window swallow
@@ -1003,9 +1020,16 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		// return from an enqueue seam predating the shape counts as created -- the old behaviour exactly.
 		if (r && typeof r === "object" && r.deduplicated === true) {
 			ctx.out({ event: "deduplicated", delivery: deliveryId, repo: job.repo, target: `${job.target.type}#${job.target.number}`, flow: job.flow, jobId: r.jobId, survivingJobId: r.survivingJobId });
+			deduplicated.push({ jobId: r.jobId, survivingJobId: r.survivingJobId });
 		} else {
 			created += 1;
 		}
+	}
+	// Issue #638: a resume comment the window swallowed against an awaitInput run still going is held for that run's
+	// settle (held.mjs asks nothing of Valkey unless the job and the swallow say so); `held` lines are its own.
+	if (deduplicated.length > 0) {
+		const held = await holdAfterDedup({ redis: ctx.redis, job, kind: "github", outcome: { created, deduplicated }, now: ctx.now, log: ctx.out, delivery: deliveryId, target: `${job.target.type}#${job.target.number}` });
+		if (held !== null) stats.held = (stats.held ?? 0) + 1;
 	}
 	stats.enqueued += created;
 	if (created > 0) ctx.out({ event: "enqueued", delivery: deliveryId, repo: job.repo, target: `${job.target.type}#${job.target.number}`, flow: job.flow, replicas: created });

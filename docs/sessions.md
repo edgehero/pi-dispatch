@@ -226,6 +226,19 @@ second comment on the same issue as a repeat of the first, so a quick answer is 
 worker cannot reach Valkey at that moment it logs `parked_window_release_failed`, and an answer within those ten
 minutes is then answered `deduplicated`; post it again after the window.)
 
+You can even answer before the run has finished stopping. The agent posts its question first and only then ends, so
+for a few seconds the run is still going and the issue has no label yet. An answer in that moment is held for the run
+(the receiver answers `202 {"status":"held"}` and logs `held`) and starts the resumed job as soon as the run has
+stopped to wait, with or without the phrase on an issue. pi-dispatch's own comment then says the run took your reply
+as the answer instead of asking for one. If several answers came in that moment, the first one is used and
+pi-dispatch posts one comment asking you to comment again once the run has replied. A comment after that never
+starts a second run beside the resumed one: while the resumed job is still queued it is answered `deduplicated` (post
+it again once the run has replied), and while it runs it is held for that run's own next question, and dropped if the
+run finishes without asking one. A comment written more than five minutes before the run stopped is not
+taken as the answer. If the run turns out not to stop and wait after all (it finished, failed or was cancelled), a
+held answer is dropped, exactly as a comment during a running job always was. A pull request's answer still needs the
+phrase.
+
 Rules:
 
 - `awaitInput` needs `"resume": true` beside it, and is refused wherever `resume` is (cron, `command`, `replicas`,

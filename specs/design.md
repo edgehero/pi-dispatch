@@ -6249,8 +6249,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   finishes, so an answer inside ten minutes of the delivery that STARTED the run was swallowed against the finished
   run: `deduplicated`, `202`, nothing run, the label left on (found live against Forgejo 14 on 4.3.0; every forge has
   it). The window exists to coalesce duplicates into one ACTIVE job, and after a park the next delivery is a
-  deliberate answer. So the processor's parked branch, AFTER the promotion and BEFORE the fixed comment and the label,
-  calls `releaseParkedWindow`, which the wiring binds to the real BullMQ job: `Job.removeDeduplicationKey()` with the
+  deliberate answer. So the processor's parked branch, AFTER the promotion and BEFORE the fixed comment and the label
+  (**2026-10-19, issue #638 review: now AFTER the label**, which goes on first so a reply in between is held, and
+  before the take of the held replies; the sequence is under the CLOSED residual below), calls `releaseParkedWindow`, which the wiring binds to the real BullMQ job: `Job.removeDeduplicationKey()` with the
   `deid` the add stored. After the promotion, so an answer that gets in finds the `parked` mark and the transcript;
   before the comment and the label, because those are what invite an answer (the label routes a phrase-free reply,
   the comment tells a pull request's author to reply). A resumed run that parks again takes the same branch. It fails
@@ -6270,6 +6271,58 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - *Residual:* an answer that lands while the parked run is still finishing, before the release, is still
     swallowed. On an issue it cannot be routed then (the label is set after the release); on a pull request the
     person would have to answer the agent's question before the fixed comment appears.
+    **CLOSED 2026-10-19 (issue #638's residual, the remainder of PR #638): an answer is held, not swallowed.** Every
+    job with `run.awaitInput` is registered live on an await target of its own by a keeper refreshing every 2 s
+    (`run:await:target:<the steer target's hash>` and `run:await:open:<runId>`, `INT-STEER-INBOX-CONTRACT`), from the
+    moment the pickup's gates (pause, size, wait, scope, endpoint, host slot) have admitted it, just before the
+    settings overlay check and `runJob` (so before the mint and the container), until the park's take or the final
+    settle stops it. The receiver (all four arms and the poller, one shared body) then rescues both ways an answer was
+    lost: (a) a resume comment of an awaitInput comment trigger that the window deduplicated against a run still going
+    (the parked run finishing, or a resumed run) is HELD under the surviving job's id, and (b) a phrase-free reply on
+    an issue that the filter dropped ONLY for the missing marker (every other condition of the parked-reply route
+    holds; the filter returns that route's job as `heldCandidate`, built by the same function) is held under every
+    awaitInput run live on its target. A held reply answers `202 {status:"held"}`; a hold every run refuses (`gone`,
+    `closed`, a fault, no client) answers exactly as before. A full list (20) evicts its OLDEST entry rather than
+    refusing the newest (review round 2), since the newest is the likeliest answer and the oldest the one the take's
+    lookback drops anyway.
+    **The take is part of the park** (issue #638 review, H1). The park sequence is now: promote, marker ON, release the
+    window, TAKE the held replies, comment. The marker goes on BEFORE the release, so a phrase-free reply in between
+    routes as a parked reply, meets the window the run still holds and is held (the keeper is still live). A
+    phrase-free reply POSTED before the marker but DELIVERED after the take (webhook delay) finds the run off its
+    target; for that case the take's closing script also raises a parked marker on the target
+    (`run:await:parked:<hash>`, 60 s, review round 2), and a pre-label candidate that finds it is enqueued as the
+    ordinary parked reply it would have been a moment later, which coalesces against the taken job or resumes the
+    parked session. A reply delayed longer than that minute meets the label, which is on by then. The take (`takeHeld`, one closing script, the first close only) enqueues the first eligible held
+    reply's fallback as the resumed job WITH the semantic window (`enqueueForgeJob`, on the queue that ran the run): the
+    park released this run's window a moment before, so the taken reply now holds it, and every later answer (a
+    phrase-free reply the marker routes, a phrase reply) is coalesced against that one job, or held on it once it runs
+    (it is an awaitInput run too), never started beside it as a second paid run from the same parked transcript. An add
+    the window swallows is not taken: against another job (an answer that got in between the release and the take,
+    which is then the run) the held ones get `HELD_EXTRA_REPLY`; against the run's own job (its release failed) they get
+    `HELD_RESUME_FAILED_REPLY` (the run's own id or, for a #645 recovery, its run id). Every other eligible held reply gets ONE `HELD_EXTRA_REPLY`. Eligible means written
+    within `HELD_LOOKBACK_MS` (5 minutes) before the take: an older one is dropped silently, the coalescing it always
+    had, since the keeper registers the run for its whole pickup and a comment made long before the agent asked
+    anything is no answer. A fallback that does not name the run's target, flow and command is skipped and the next
+    one tried. A close that fails at the take posts `HELD_RESUME_FAILED_REPLY` once, since an answer may have been held
+    and lost, and the backstop settle after it then only drops, so it can never start a job the comment said was not
+    started. Then the processor comments: `HELD_TAKEN_COMMENT` ("The run had asked a question and took the reply above
+    as the answer, so it continues from here.", one sentence for an issue and a pull request) when a reply was taken,
+    by this take or by another job the window showed already holds the answer (`taken`: "here" or "other"), the
+    parked comment exactly as before when none was; the marker stays on, and the resumed run clears it when it ends without parking.
+    A taken parked-reply job finds the `parked` sidecar, since it is enqueued after the promotion.
+    **The final-outcome settle is the backstop** (`isFinalOutcome`, the steer settle's three sites): after a take the
+    list is closed and it acts on nothing; for any outcome that is not a park it drops every held reply, which is the
+    coalescing such a reply always got, an operator cancel acknowledged before the result included (the record says
+    the run was cancelled, not parked). A held reply and a steered late message never both start a job: when a held
+    reply was taken (here or by another job), the steer settle answers its late messages instead (`heldResumed`). So the rule is: an answer to
+    an awaitInput run, written within five minutes before it parks and arriving before the park has taken its held
+    replies, is held and becomes the one resumed job once it has parked; otherwise coalescing is unchanged. Not done:
+    a release at the final outcome, since the park already released the window and a run that did not park keeps
+    today's coalescing. Its own residuals, named: a comment written in the last five minutes before the question and
+    not meant as an answer is taken as one (the resumed agent reads it as a reply and may ask again); a reply that
+    meets the taken job while it is still queued is answered `deduplicated` (its keeper registers it only once it
+    runs), as any reply into a queued job always was; a keeper that cannot reach Valkey leaves its run unregistered,
+    the old residual for that run (`held_keeper_fault`); and a pull request's reply still needs the phrase.
 - **A steered run that parks holds its messages** (issue #646, `DES-STEER-HELD-WHILE-PARKED`). With `run.steer` a
   message can reach a running agent (`DES-STEER-VIA-READONLY-INBOX-MOUNT`), and pi polls its steering queue after a
   terminating tool, so a message handed over after `await_human_input` would un-park the run. The runner therefore
@@ -6278,7 +6331,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   comment on a steer-armed comment trigger, while the container still runs) takes the late-message rule: when the
   comment's trigger resumes it becomes the resumed job, further held ones pre-seeded into it, else one fixed reply
   (`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`). That **narrows the swallowed-answer residual above for a steer-armed
-  trigger, and only narrows it**: a phrase reply that arrives while the parked run is still finishing, its container
+  trigger, and only narrows it** (**2026-10-19, issue #638: the residual is now CLOSED for every awaitInput run** by
+  the held replies above, steer-armed or not, phrase reply or phrase-free; the steer path keeps taking a phrase reply
+  on a steer-armed run first, so for those runs nothing below changes): a phrase reply that arrives while the parked run is still finishing, its container
   up or already exited (the relay holds the run reachable until the settle closes its inbox, `holdLive`), is held and
   run (or answered) rather than deduplicated. The hold's own residual remains (a held member can drop out of the
   target early when another run there died after refreshing the key). A phrase-free reply never steers (`parkedReply` is not a steer route), so it keeps the
@@ -7219,6 +7274,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     tell a follow-up from a duplicate; the worker knows the run is over.
   - *Answering at every close* (part 2 as first written). A terminal failure settles twice, so its late comments were
     answered, or resumed, twice; the close says which call was first.
+- **A sibling, not a branch: held replies** (issue #638, 2026-10-19, `DES-AWAIT-INPUT-ENDS-THE-JOB`). An awaitInput
+  run's held replies are TAKEN inside its park sequence, before the parked comment, and enqueued WITH the semantic
+  window (unlike a late steer's window-less job: the park already released the window and invited further answers,
+  which must be coalesced against the one resumed job); the final-outcome settle at the same three sites as this one
+  (index.mjs's `settleSteer` calls `settleHeldReplies` first, so the bolt that pins this settle to every record write
+  pins that one too) is their backstop, with the same `isFinalOutcome` and the same closing script answering `first`.
+  When a held reply was taken, this settle answers its late messages rather than resuming one (`heldResumed`), so the
+  two never both start a job. They live in keys of their own (`run:await:*`, `run:held:*`,
+  `INT-STEER-INBOX-CONTRACT`), never in this inbox, for two reasons. An awaitInput run need not be steer-armed, and
+  registering it under `run:steer:target:*` would put it in front of `trySteer`, which would push a phrase comment
+  into an inbox no relay reads. And a held reply is an answer for AFTER the park, never a message for the running
+  agent: written into the inbox, the relay would frame it as a steer (and a steer handed over after the terminating
+  tool un-parks the run, `DES-STEER-HELD-WHILE-PARKED`). `worker/src/held-replies.mjs`, `worker/src/held-settle.mjs`,
+  `receiver/src/held.mjs`.
 - **Traces to**: `REQ-STEER-RUNNING-JOB`, `CONST-RETRY-INFRA-ONLY`, `REQ-RUN-RECOVERY`, `REQ-DEDUP-BY-DELIVERY-GUID`,
   `DES-STEER-HELD-WHILE-PARKED`, `INT-STEER-INBOX-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`.
 
@@ -12422,3 +12491,4 @@ a tunnel.
 | 2026-10-19 | Issue #683, part 3: doctor and an advisory CI lane for the `openshell` venue. **`DES-OPENSHELL-VENUE` AMENDED**: a NEW "Doctor and CI (#683)" bullet: the version check is EXACT (the CLI and the gateway at `OPENSHELL_TESTED_VERSION`, one pin in `.github/openshell.json`, checksum-installed by the lane and held to the constant by a test), because the interfaces driven are experimental; doctor's lines run on `pi-dispatch doctor --openshell`, before the venue is blessable, adding the engine floor (Docker 28, Podman 5, measured) and the image's `sandboxLayout`; the boot half of the version floor moves to #684 with the blessing; the conformance lane is advisory until it has passed across a round. Code evidence gains the doctor module, the leaf with the tested version, the pin, the script and the workflow. **UNCHANGED, checked**: `DES-CONTAINER-BACKEND-REGISTRY`, `DES-WORKER-ON-HOST`, the "Measured in #683" bullet. |
 | 2026-10-19 | Issue #684, part 1: the openshell venue's per-job network policy. **`DES-OPENSHELL-VENUE` AMENDED**: a dated "Egress (#684 part 1)" bullet: the policy is generated per job by `networkPolicyFor` from the squid venues' own sources and read back against the written body plus OpenShell's measured baseline addition; a source it cannot translate refuses before spend; the push rule narrows GitHub's git transport to the job's own repository, a control squid could not express (GitHub only, since the other forges' API shares the git host); the binaries are named and are not a narrowing; the advisory lane reads the policy back off a live sandbox (an allowlisted host, github.com, api.github.com through the wildcard and two host aliases reached, an unlisted host refused, a push to another repository refused by the layer itself). **UNCHANGED, checked**: `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` (the squid venues), `DES-CONTAINER-BACKEND-REGISTRY` (the venue's `egress` stays `asserted`: the layer enforces, the worker writes and reads back). |
 | 2026-10-19 | Issue #683, the review fixes of part 1 that its squash left out (landed after #698 merged; the pull request's own review found them and they were made in its worktree, then not staged). **`DES-OPENSHELL-VENUE` AMENDED**: the #683 correction sub-bullet gains what "read-only" means there: the bytes and the tree, not the mode (Landlock below ABI 6 mediates no chmod, chown, utimes or xattrs), and on ABI 6 and later the helper's domain is also scoped (signals and abstract unix sockets cannot leave it). With it: `image/landlock/pi-landlock.c` sets those scopes, captures `errno` before formatting, and states its libc use; `image/verify-image.sh` proves an overwrite and a truncate of a file the job's own uid owns are refused (the two rights an uploaded file is protected by alone); the `dev.pi-dispatch.net-binaries` label lists `/opt/pi-dispatch/runner-node` first, the binary the runner and pi run as, and `wget`, with Chromium deliberately left out; and three bolts the review asked for: the spec's layout table and `docs/job-image.md`'s capability list pinned to their sources, and the runner refused a container-path literal outside `layout.mjs`. UNCHANGED, checked: the rest of the entry. |
+| 2026-10-19 | Issue #638's residual (the remainder of PR #638): held replies, with the review's corrections. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: the "*Residual:*" bullet under "A park closes the job's semantic window" keeps its text and gains a bold dated **CLOSED 2026-10-19** marker with the mechanism: every awaitInput job registered live on its own await target by a 2 s keeper from the moment the pickup's gates admitted it (just before the settings check and `runJob`); the receiver, all four arms and the poller, holds (a) a resume comment the window deduplicated against such a run under the surviving job id and (b) a phrase-free issue reply the filter dropped only for the missing marker, which the filter returns as `heldCandidate`, built by the same function as the parked-reply job. **The take is part of the park** (review H1): the park sequence becomes promote, marker ON, release, take, comment, and that bullet's own sentence about the release's place gains a dated note; the take enqueues the first eligible held reply WITH the semantic window (`enqueueForgeJob`), so every later answer is coalesced against that one job or held on it and never starts a second paid run from one parked transcript (the first version enqueued it window-less at the final outcome, after the parked comment had invited another answer: two runs); a swallowed take is not a resumed job (`HELD_EXTRA_REPLY` against another job, `HELD_RESUME_FAILED_REPLY` against the run's own); the rest get one `HELD_EXTRA_REPLY`; only replies written within `HELD_LOOKBACK_MS` (5 min) before the take are eligible (review M1), a mismatched fallback is skipped for the next (L5), a failed close at the take answers once (L1); the processor then posts `HELD_TAKEN_COMMENT` instead of the parked comment when a reply was taken; the final settle is the backstop, dropping held replies for any non-park outcome, an acknowledged cancel included (L2). Named residuals: a comment in the last five minutes before the question taken as an answer, a reply meeting the taken job while it is still queued answered `deduplicated`, an unreachable keeper, a pull request's phrase. (The first version of this row named "a held answer beside a steered late message each starting a job" as a residual; refuted: the steer settle answers late messages when a held reply was taken, `heldResumed`.) The #646 paragraph's "narrows ... and only narrows it" gains a dated note that the residual is now closed for every awaitInput run. **`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED**: a new bullet names held replies as a sibling mechanism in keys of their own (`run:await:*`, `run:held:*`) and why not the inbox. Every other entry UNCHANGED, checked: `DES-STEER-HELD-WHILE-PARKED` (a steer-armed run's held messages settle as before, except that late messages are answered rather than resumed when a held reply was taken), `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` (the steer pointer is untouched; the await pointer derives its hash from it), `DES-QUEUE-BULLMQ-OVER-CUSTOM`, `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (no index of parked issues: the registration is liveness with a 30 s expiry). Review round 2, in the same CLOSED text: a phrase-free reply posted before the marker and delivered after the take is enqueued as a parked reply while the target's 60 s parked marker (raised by the take's close) stands, so "nothing slips past" now holds for webhook delay too; a full list evicts its oldest entry; after a take whose own close failed the backstop only drops; a take swallowed by another job counts as taken (`taken: "other"`) for the comment and for `heldResumed`; a recovery's run id counts as the run's own; a fallback must also match the flow and command. |
