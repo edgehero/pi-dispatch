@@ -28,7 +28,7 @@ const skip = mod ? false : `backend-openshell could not import (${importError?.m
 function fakeOpenshell({ phase = "Ready", policyBack = null, sandboxes = [], failDownload = false, failCreate = false, globalPolicy = false, status = { status: "connected", server: "https://127.0.0.1:17670", version: "0.1.4" } } = {}) {
 	const state = { calls: [], exit: 0, abort: null, stdin: [], written: {} };
 	const reject = (message, stderr = "") => Promise.reject(Object.assign(new Error(message), { code: 1, stdout: "", stderr }));
-	const exec = async (bin, args) => {
+	const exec = async (bin, args, opts = {}) => {
 		if (bin === "docker" || bin === "podman") {
 			state.engine = [bin, ...args];
 			return { stdout: `sha256:${"a".repeat(64)}|/opt/pi-dispatch/runner-node,/usr/local/bin/node\n`, stderr: "" };
@@ -38,13 +38,29 @@ function fakeOpenshell({ phase = "Ready", policyBack = null, sandboxes = [], fai
 		const [a, b] = rest;
 		if (a === "status") return { stdout: JSON.stringify(status), stderr: "" };
 		if (a === "policy" && rest.includes("--global")) return globalPolicy ? { stdout: JSON.stringify({ policy: {} }), stderr: "" } : reject("no global", "Error:   × code: 'Some requested entity was not found', message: \"no global policy\n  │ revision found\"");
+		if (a === "provider" && b === "profile") {
+			if (rest[2] === "import") state.written.profile = JSON.parse(readFileSync(rest[rest.indexOf("-f") + 1], "utf8"));
+			return { stdout: "", stderr: "" };
+		}
+		if (a === "provider" && b === "create") {
+			state.provider = { args: rest, env: opts.env ?? null };
+			return { stdout: "", stderr: "" };
+		}
+		if (a === "provider" && b === "list") return { stdout: JSON.stringify({ providers: state.providers ?? [], next_page_token: "" }), stderr: "" };
+		if (a === "provider" && b === "delete") return { stdout: "", stderr: "" };
 		if (a === "sandbox" && b === "create") {
 			if (failCreate) return reject("create failed", "ImagePullFailed");
 			const file = rest[rest.indexOf("--policy") + 1];
 			state.written.policy = JSON.parse(readFileSync(file, "utf8"));
+			state.attached = rest.includes("--provider") ? rest[rest.indexOf("--provider") + 1] : null;
 			return { stdout: JSON.stringify({ name: rest[rest.indexOf("--name") + 1], phase }), stderr: "" };
 		}
-		if (a === "policy" && b === "get") return { stdout: JSON.stringify({ policy_source: "sandbox", policy: policyBack ?? state.written.policy }), stderr: "" };
+		if (a === "policy" && b === "get") {
+			// What OpenShell reads back: the body, plus an attached provider's own layer (measured).
+			const body = policyBack ?? JSON.parse(JSON.stringify(state.written.policy));
+			if (!policyBack && state.attached) { const key = `_provider_${state.attached.replace(/-/g, "_")}`; body.network_policies = { ...body.network_policies, [key]: { name: key } }; }
+			return { stdout: JSON.stringify({ policy_source: "sandbox", policy: body }), stderr: "" };
+		}
 		if (a === "sandbox" && b === "upload") return { stdout: "", stderr: "" };
 		if (a === "sandbox" && b === "download") {
 			if (failDownload) return reject("download failed");
@@ -432,4 +448,134 @@ test("an image without /var/log reads back as written, which is also accepted; a
 	const result = await bundle(fake, { readAllowlist: () => ["api.anthropic.com"] }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
 	assert.equal(result.code, 0, "the fake reads back exactly the body written");
 	assert.deepEqual(mod.expectedPolicies({ version: 1 }), [{ version: 1 }], "no rule, nothing added");
+});
+
+test("credentials (#684): every secret goes into a per-job provider by the CLI's ENV, none onto any argv, and every endpoint is bound to it", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const dirs = jobDirs();
+	const b = bundle(fake, { readAllowlist: () => ["api.anthropic.com", ".github.com"], hostEnv: { ANTHROPIC_API_KEY: "sk-ant-real-provider-key-0001" } });
+	const result = await b.runContainer({ job: { ...JOB, repo: "acme/widget" }, token: "ghs_real_forge_token_0002", prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal, exitAuth: true });
+	assert.equal(result.code, 0);
+	const sb = mod.sandboxNameOf("pi-job-j1");
+	// The profile names the secrets; the provider is made of it with the values in the child's ENV only.
+	const names = fake.state.written.profile.credentials.map((c) => c.env_vars[0]).sort();
+	assert.deepEqual(names, ["ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"]);
+	assert.equal(fake.state.written.profile.id, sb);
+	assert.deepEqual(fake.state.written.profile.credentials.map((c) => Object.keys(c).sort()), names.map(() => ["env_vars", "name", "required"]), "endpointless: no endpoint, no binary");
+	assert.equal(fake.state.provider.env.ANTHROPIC_API_KEY, "sk-ant-real-provider-key-0001");
+	assert.equal(fake.state.provider.env.GH_TOKEN, "ghs_real_forge_token_0002");
+	for (const call of fake.state.calls) {
+		const flat = call.join(" ");
+		assert.ok(!flat.includes("sk-ant-real-provider-key-0001") && !flat.includes("ghs_real_forge_token_0002"), `no value on any argv: ${call.slice(0, 4).join(" ")}`);
+	}
+	assert.ok(fake.state.calls.find((c) => c[2] === "create" && c[1] === "sandbox").includes("--provider"));
+	for (const rule of Object.values(fake.state.written.policy.network_policies)) for (const e of rule.endpoints) assert.deepEqual(e.credential_binding, { provider: sb });
+	// The exec carries no secret name, and the git helper names the token's placeholder.
+	const execCall = fake.state.calls.find((c) => c[2] === "exec");
+	const env = Object.fromEntries(execCall.flatMap((a, i) => (a === "--env" ? [execCall[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
+	for (const name of names) assert.equal(env[name], undefined, name);
+	assert.equal(env.GIT_CONFIG_KEY_0, "credential.helper");
+	assert.match(env.GIT_CONFIG_VALUE_0, /username=x-access-token; echo "password=\$GITHUB_TOKEN"/);
+	// A leftover of an earlier attempt removed first (review M2); teardown: the sandbox, then its provider and profile.
+	const order = fake.state.calls.map((c) => c.slice(1, 4).join(" ")).filter((s) => /delete/.test(s));
+	assert.deepEqual(order, [`provider delete ${sb}`, `provider profile delete`, `sandbox delete ${sb}`, `provider delete ${sb}`, `provider profile delete`]);
+	assert.ok(fake.state.calls.findIndex((c) => c[1] === "provider" && c[2] === "profile" && c[3] === "import") > fake.state.calls.findIndex((c) => c[1] === "provider" && c[2] === "profile" && c[3] === "delete"), "the stale removal comes before the import");
+	for (const suffix of [".openshell-profile.json", ".openshell-policy.json"]) assert.equal(existsSync(`${dirs.jobDir}${suffix}`), false, suffix);
+});
+
+test("no rule, no provider: a deny-all job's secrets go nowhere, said in the log (#684)", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const logs = [];
+	const dirs = jobDirs();
+	await bundle(fake, { log: (e, f) => logs.push([e, f]) }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.equal(fake.state.provider, undefined);
+	assert.ok(logs.some(([e]) => e === "openshell_secrets_unbound"));
+	assert.ok(!fake.state.calls.find((c) => c[2] === "create" && c[1] === "sandbox").includes("--provider"));
+});
+
+test("a provider still attached is deleted again until its sandbox's cleanup lets it; the reaper deletes a crashed job's (#684)", { skip }, async () => {
+	const fake = fakeOpenshell();
+	let refusals = 2;
+	const exec = async (bin, args, opts) => {
+		if (args[0] === "provider" && args[1] === "delete" && refusals-- > 0) return Promise.reject(Object.assign(new Error("attached"), { stderr: "is attached to sandbox(es)" }));
+		return fake.exec(bin, args, opts);
+	};
+	const dirs = jobDirs();
+	await bundle({ ...fake, exec }, { readAllowlist: () => ["api.anthropic.com"], delay: async () => {} }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.equal(fake.state.calls.filter((c) => c[1] === "provider" && c[2] === "delete").length, 1, "the third try, the first the fake recorded, took");
+	const reaping = fakeOpenshell();
+	reaping.state.providers = [{ name: mod.sandboxNameOf("pi-job-old") }, { name: "someone-elses" }];
+	assert.deepEqual(await bundle(reaping, { delay: async () => {} }).reap(), { reaped: true });
+	assert.deepEqual(reaping.state.calls.filter((c) => c[1] === "provider" && c[2] === "delete").map((c) => c[3]), [mod.sandboxNameOf("pi-job-old")], "only this worker's namespace");
+});
+
+test("gitCredentialEnv: the forge whose token the env carries, its placeholder by name, never a value (#684)", { skip }, () => {
+	assert.equal(mod.gitCredentialEnv({ ANTHROPIC_API_KEY: "x" }), null);
+	assert.match(mod.gitCredentialEnv({ GITLAB_TOKEN: "glpat-x" }).GIT_CONFIG_VALUE_0, /username=oauth2; echo "password=\$GITLAB_TOKEN"/);
+	assert.match(mod.gitCredentialEnv({ FORGEJO_TOKEN: "f" }).GIT_CONFIG_VALUE_0, /password=\$FORGEJO_TOKEN/);
+	assert.ok(!JSON.stringify(mod.gitCredentialEnv({ GH_TOKEN: "ghs_secret" })).includes("ghs_secret"));
+	assert.deepEqual(mod.secretNamesOf({ PI_PROVIDER: "anthropic", PI_JOB_LAYOUT: "sandbox", HOME: "/home/pi", ANTHROPIC_API_KEY: "k", EMPTY: "", "bad-name": "v" }), ["ANTHROPIC_API_KEY"]);
+});
+
+test("the boot's reaper on its own sweeps what the bundle's would, through the gateway it names (#684)", { skip }, async () => {
+	const reaping = fakeOpenshell({ sandboxes: [{ name: mod.sandboxNameOf("pi-job-old"), phase: "Ready", labels: {} }] });
+	reaping.state.providers = [{ name: mod.sandboxNameOf("pi-job-old") }];
+	const seen = [];
+	const exec = (bin, args, opts) => (seen.push(args), reaping.exec(bin, args.slice(2), opts));
+	assert.deepEqual(await mod.makeOpenshellReaper({ gateway: "lab", exec, delay: async () => {} })(), { reaped: true });
+	assert.ok(seen.every((a) => a[0] === "--gateway" && a[1] === "lab"));
+	assert.ok(reaping.state.calls.some((c) => c[1] === "sandbox" && c[2] === "delete"));
+	assert.ok(reaping.state.calls.some((c) => c[1] === "provider" && c[2] === "delete"));
+	assert.deepEqual(await mod.makeOpenshellReaper({ exec: async () => Promise.reject(new Error("down")) })(), { reaped: false });
+});
+
+test("the boot's release judgement: the tested CLI and gateway pass, another release refuses, a silent CLI is transient, a gateway down refuses nothing (#684)", { skip }, async () => {
+	const answers = (version, status) => async (_bin, args) => {
+		if (args.includes("--version")) return version === null ? Promise.reject(new Error("ENOENT")) : { stdout: `openshell ${version}\n` };
+		if (args.includes("status")) return { stdout: JSON.stringify(status) };
+		throw new Error(`unexpected ${args.join(" ")}`);
+	};
+	const up = { status: "connected", server: "https://127.0.0.1:17670", version: mod.OPENSHELL_TESTED_VERSION };
+	assert.deepEqual(await mod.openshellBootVersions({ exec: answers(mod.OPENSHELL_TESTED_VERSION, up) }), {});
+	const cli = await mod.openshellBootVersions({ exec: answers("0.1.5", up) });
+	assert.equal(cli.transient, false);
+	assert.match(cli.refusal, /CLI is 0\.1\.5, not 0\.1\.4/);
+	const gw = await mod.openshellBootVersions({ exec: answers(mod.OPENSHELL_TESTED_VERSION, { ...up, version: "0.2.0" }) });
+	assert.equal(gw.transient, false);
+	assert.match(gw.refusal, /gateway runs 0\.2\.0/);
+	assert.equal((await mod.openshellBootVersions({ exec: answers(null, up) })).transient, true);
+	assert.deepEqual(await mod.openshellBootVersions({ exec: answers(mod.OPENSHELL_TESTED_VERSION, { status: "error" }) }), { gatewayDown: true });
+	const calls = [];
+	await mod.openshellBootVersions({ gateway: "lab", exec: async (bin, args) => (calls.push(args), answers(mod.OPENSHELL_TESTED_VERSION, up)(bin, args)) });
+	assert.ok(calls.every((a) => a[0] === "--gateway" && a[1] === "lab"));
+});
+
+test("a provider that reads its key's value is refused before spend; recover is refused unless the job is local; an untested gateway is refused per job (#684 review)", { skip }, async () => {
+	for (const provider of mod.VALUE_READING_PROVIDERS) {
+		const r = await bundle(fakeOpenshell()).observationPreflight({ ...JOB, provider });
+		assert.equal(r.venueRefused?.reason, "openshell-credential-reads-value", provider);
+	}
+	assert.equal((await bundle(fakeOpenshell(), { hostEnv: { ANTHROPIC_API_KEY: "sk-ant-oat01-x" } }).observationPreflight(JOB)).venueRefused?.reason, "openshell-credential-reads-value");
+	assert.equal((await bundle(fakeOpenshell(), { hostEnv: { ANTHROPIC_OAUTH_TOKEN: "t" } }).observationPreflight(JOB)).venueRefused?.reason, "openshell-credential-reads-value");
+	assert.equal((await bundle(fakeOpenshell(), { hostEnv: { ANTHROPIC_API_KEY: "sk-ant-api03-x" } }).observationPreflight(JOB)).venueRefused, undefined, "an API key is sent as it is");
+	assert.equal((await bundle(fakeOpenshell()).observationPreflight({ ...JOB, recover: true })).venueRefused?.reason, "openshell-recover-unsupported");
+	assert.equal((await bundle(fakeOpenshell()).observationPreflight({ ...JOB, kind: "local", recover: true })).venueRefused, undefined, "a local job runs unarmed, as everywhere");
+	const untested = await bundle(fakeOpenshell({ status: { status: "connected", server: "https://127.0.0.1:17670", version: "0.1.5" } })).observationPreflight(JOB);
+	assert.equal(untested.venueRefused?.reason, "openshell-gateway-untested");
+	for (const reason of ["openshell-credential-reads-value", "openshell-gateway-untested", "openshell-recover-unsupported"]) assert.equal(typeof mod.OPENSHELL_REFUSALS[reason], "string", reason);
+});
+
+test("a secret no provider can carry reaches neither the provider nor the exec argv, and is named in the log (#684 review H1)", { skip }, async () => {
+	const long = "A".repeat(130);
+	const args = mod.openshellExecArgs({ name: "pi-job-sx", env: { PI_PROVIDER: "anthropic", "bad-name": "secretvalue", [long]: "longsecret", ANTHROPIC_API_KEY: "k" } });
+	assert.ok(!args.join(" ").includes("secretvalue") && !args.join(" ").includes("longsecret") && !args.join(" ").includes("=k"));
+	assert.ok(args.includes("PI_PROVIDER=anthropic"));
+	assert.deepEqual(mod.unbindableSecretNamesOf({ "bad-name": "v", [long]: "v", OK_NAME: "v", PI_PROVIDER: "x" }), ["bad-name", long]);
+});
+
+test("a gone sandbox's provider is deleted by the gone-check (#684 review M3)", { skip }, async () => {
+	const fake = fakeOpenshell({ sandboxes: [] });
+	assert.equal(await bundle(fake).containerGone("pi-job-gone"), true);
+	await new Promise((r) => setImmediate(r));
+	assert.ok(fake.state.calls.some((c) => c[1] === "provider" && c[2] === "delete" && c[3] === mod.sandboxNameOf("pi-job-gone")));
 });

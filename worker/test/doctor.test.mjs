@@ -12545,3 +12545,12 @@ test("issue #599, phase 2: runDoctor hands its readCapacity seam to the checks, 
 	// Dropping the seam reaches the default, which this helper has forbidden: the run fails rather than read this machine.
 	await assert.rejects(() => runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" }, { ...ghDeps(() => {}, { ...green }, []), agentDir: NO_AGENT_DIR, readCapacity: undefined }), /real capacity read in a test/);
 });
+
+test("doctor says the worker's boot refusal for a layer venue with PI_EGRESS=0, in the worker's own words (#684 review)", () => {
+	const off = backendChecks({ PI_BACKENDS: "local,openshell", PI_EGRESS: "0" }, {});
+	const line = off.find((c) => /^PI_EGRESS=0 cannot run openshell/.test(c.label));
+	assert.ok(line && line.ok === false && /refuses to boot/.test(line.fix));
+	assert.equal(backendChecks({ PI_BACKENDS: "local,openshell" }, {}).some((c) => /^PI_EGRESS=0 cannot run/.test(c.label)), false);
+	assert.equal(backendChecks({ PI_EGRESS: "0" }, {}).some((c) => /^PI_EGRESS=0 cannot run/.test(c.label)), false, "no layer venue, no line");
+	assert.ok(WORKER_SERVICE_KEYS.includes("PI_OPENSHELL_ENGINE") && WORKER_SERVICE_KEYS.includes("PI_OPENSHELL_GATEWAY"));
+});

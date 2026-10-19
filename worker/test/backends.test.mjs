@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isPerMachineHost, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendFloor, parseBackendList, shortfall, venuesOf } from "../src/backends.mjs";
+import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isPerMachineHost, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, backendRefusals, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendFloor, parseBackendList, shortfall, venuesOf } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -594,10 +594,18 @@ test("the openshell venue (#683): every word it cannot build is asserted with it
 	assert.equal(BACKENDS.local.credentialCustody, "container");
 	assert.equal(BACKENDS[PODMAN_BACKEND].credentialCustody, "container");
 	assert.throws(() => parseBackendFloor("credentialCustody=enforced"), /credentialCustody/, "not a property, so a floor cannot name it");
-	// Built and refused by name until #684.
-	assert.ok(Object.hasOwn(NOT_YET_BLESSABLE, OPENSHELL_BACKEND));
-	for (const raw of ["openshell", "local,openshell", "openshell,podman"]) assert.throws(() => parseBackendList(raw), /not yet blessable.*#684/, raw);
-	assert.deepEqual(parseBackendList("openshell", { known: BACKEND_NAMES.slice() }), ["openshell"], "a test's own list reaches it, as the conformance script does");
-	assert.equal(venuesOf({ PI_BACKENDS: "openshell" }).openshellUsed, false, "a refused list falls back to the default");
+	// Blessed by #684: the mechanism stays, empty, and the venue parses like any other.
+	assert.deepEqual({ ...NOT_YET_BLESSABLE }, {});
+	assert.ok(Object.isFrozen(NOT_YET_BLESSABLE));
+	for (const [raw, want] of [["openshell", ["openshell"]], ["local,openshell", ["local", "openshell"]], ["openshell,podman", ["openshell", "podman"]]]) assert.deepEqual(parseBackendList(raw), want, raw);
+	assert.equal(venuesOf({ PI_BACKENDS: "openshell" }).openshellUsed, true);
 	assert.equal(venuesOf({}).openshellUsed, false);
+});
+
+test("a layer venue cannot run with PI_EGRESS=0 (#684): its policy is the egress control and holds the credentials", () => {
+	const [refusal] = backendRefusals({ backends: ["local", "openshell"], backendFloor: {}, egress: false });
+	assert.match(refusal, /^PI_EGRESS=0 cannot run openshell: .*CONST-VENUE-EGRESS-LAYER.*Arm PI_EGRESS, or remove that backend from PI_BACKENDS/);
+	assert.deepEqual(backendRefusals({ backends: ["local", "openshell"], backendFloor: {}, egress: true }), []);
+	// Only a layer venue: a container-custody set is untouched with egress off.
+	assert.deepEqual(backendRefusals({ backends: ["local", PODMAN_BACKEND], backendFloor: {}, egress: false }), []);
 });

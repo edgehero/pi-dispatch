@@ -363,6 +363,35 @@ mechanism, a materially larger change, and it is not this.
 warn, in bold, to bind it to the bridge gateway, because an unbound `http_port` in the host's namespace is
 an open forward proxy on your LAN. On a docker network with no ports published, that whole class is gone.
 
+## On the `openshell` venue
+
+The `openshell` venue ([`docs/backends.md`](backends.md), blessable since issue #684) has no job network and no
+squid: an NVIDIA OpenShell sandbox's agent has networking off and reaches only its own supervisor, which decides every
+connection against a policy. The worker writes that policy per job from **the same sources** the proxy reads, this
+folder's `egress-allowlist.conf` (none admits nothing) and the model endpoints, and reads it back before the job
+starts; a policy that reads back differently never runs. So a host a job reaches on `local` is the host it reaches
+there. The translation:
+
+- an allowlist name is that host on 443; a leading-dot entry is the name and its `*.` wildcard (a one-label wildcard
+  such as `.com` is refused, since OpenShell needs three labels and widening is not guessed); a line squid matches
+  nothing for is skipped and logged (`openshell_policy_skipped`);
+- a model endpoint is exactly its host and port;
+- every endpoint enforces and reads each request, so a WebSocket or another protocol on 443, which squid tunnelled
+  without reading, is refused;
+- on a GitHub job, `github.com` carries the git transport with a push admitted to the job's **own repository only**;
+  a push anywhere else is refused by the layer, which squid could not express. The other forges serve their API from
+  the git host, so they keep full access, as on squid.
+
+An entry the policy cannot express without widening refuses every job there before it spends
+(`openshell-egress-untranslatable`, the entry in the log). The layer also holds the job's credentials: every endpoint
+of the policy is bound to the job's provider, so a placeholder in the agent's environment becomes the real value
+only in a request to a host the policy admits. Unlike squid, it terminates TLS to do that (`SECURITY.md`).
+
+**`PI_EGRESS=0` refuses the boot** while `PI_BACKENDS` names `openshell`. That policy is the venue's egress control
+and the only path its credentials resolve through, so "egress off" has no meaning there: honouring it would mean a
+policy admitting everything, which hands the real credential to any host the agent names. Arm `PI_EGRESS`, or remove
+`openshell` from `PI_BACKENDS`.
+
 ## What it costs when it is wrong, and why you are refused instead
 
 A job that cannot reach its provider **starts the container, spends its budget slot, and produces nothing**:

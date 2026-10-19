@@ -34,12 +34,11 @@ function fake(over = {}) {
 
 const lines = (checks) => checks.map((c) => `${c.ok ? (c.warn ? "warn" : "ok") : "FAIL"} ${c.label}`);
 
-test("a ready host: every line passes, and the first says the venue is not yet blessable", async () => {
+test("a ready host: every line passes (blessable since #684, so no note says otherwise)", async () => {
 	const { run } = fake();
 	const checks = await openshellChecks({}, { run, platform: "linux", readLsm: () => "lockdown,capability,landlock,yama" });
-	assert.match(lines(checks)[0], /^warn openshell: built but not yet blessable .*#684/);
-	assert.deepEqual(lines(checks).slice(1).filter((l) => !l.startsWith("ok")), []);
-	assert.equal(checks.length, 9, "the note, the CLI, the locality, the gateway version, the driver, the global policy, the engine, Landlock, the image");
+	assert.deepEqual(lines(checks).filter((l) => !l.startsWith("ok")), []);
+	assert.equal(checks.length, 8, "the CLI, the locality, the gateway version, the driver, the global policy, the engine, Landlock, the image");
 });
 
 test("each fault is its own failing line with a fix", async () => {
@@ -66,7 +65,7 @@ test("each fault is its own failing line with a fix", async () => {
 
 test("a missing CLI or a gateway that does not answer stops the section there, with the fix", async () => {
 	const missing = await openshellChecks({}, { run: fake({ "openshell --version": { code: null, stdout: "" } }).run });
-	assert.deepEqual(lines(missing).slice(1), ["FAIL openshell: the CLI is installed"]);
+	assert.deepEqual(lines(missing), ["FAIL openshell: the CLI is installed"]);
 	// `status` exits 0 even when the gateway is down (measured): its own field decides.
 	const down = await openshellChecks({}, { run: fake({ "openshell status": { code: 0, stdout: JSON.stringify({ status: "error" }) } }).run });
 	assert.equal(lines(down).at(-1), "FAIL openshell: the gateway answers");

@@ -8110,6 +8110,13 @@ a tunnel.
   table that `PI_BACKENDS` refuses by name with a sentence why (`openshell`, until #684); a test's own `known` list
   reaches them (a test passes its own; the adapter is built directly, never through `PI_BACKENDS`, by its tests and by
   part 3's conformance script), so an entry can be built and measured before it is admitted.
+  **AMENDED 2026-10-19 (#684 part 2)**: `NOT_YET_BLESSABLE` is EMPTY, `openshell` admitted by `PI_BACKENDS`; the
+  mechanism is kept, so the next venue that lands before its gate has the same one-line switch. `credentialCustody:
+  layer` is now LIVE: on that venue a per-job provider holds every secret of the job's environment and the agent holds
+  placeholders (`DES-OPENSHELL-VENUE`'s "Credentials and git push"). `backendRefusals` gains one boot refusal keyed on
+  the word, not on a name: `PI_EGRESS=0` with any blessed `layer` venue. The openshell entry's words are UNCHANGED,
+  checked (`egress` and `secretsCustody` stay `asserted`: the supervisor enforces and holds, the worker writes and
+  reads back); the fourteen and the conformance counts UNCHANGED.
 - **One `local` declaration is `asserted`: `nonRoot`**, because `USER pi` is the image's and `SECURITY.md`
   said "Non-root is not in that argv". Since issue #341 the argv can supply it: on a daemon that enforces bind-mount
   ownership the job runs `--user=<worker uid>:<gid>`, which the builder refuses unless both parts are non-zero.
@@ -10491,6 +10498,10 @@ a tunnel.
   (`NOT_YET_BLESSABLE`) until #684 ships the egress rules and the per-job credential providers, because until then the
   job's environment, its provider key included, travels as the exec's `--env` and the sandbox's network policy is
   empty. The "Measured in #683" bullet below says what the build found that this plan did not know.
+  **AMENDED 2026-10-19 (#684 part 2): BLESSED.** `NOT_YET_BLESSABLE` is empty and `PI_BACKENDS` admits `openshell`:
+  the per-job network policy (part 1) and the per-job credential provider (part 2) are built, so the job's
+  environment no longer carries a credential and its policy is no longer empty. What is still not served is refused or
+  skipped by name ("Credentials and git push" and "Blessing" below).
 - **Decision**: a third backend, `openshell`, runs a job in an NVIDIA OpenShell sandbox (v0.1.4, Apache-2.0,
   https://github.com/NVIDIA/OpenShell) on a gateway this deployment owns.
   - **What OpenShell is, as far as this design rests on it.** A gateway control plane, and a compute driver that
@@ -10654,6 +10665,9 @@ a tunnel.
     whether `sandbox upload` copies a symlink's target from the host tree it uploads, and whether the host side of
     `sandbox download` refuses an archive entry that escapes the destination; and how an `--env` value with spaces,
     quotes, `$` or a newline reaches the process (measured only for a space). Until #684 the venue runs no job.
+    **AMENDED 2026-10-19 (#684 part 2)**: no credential is on the exec's `--env` any more, so the quoting question is
+    the non-secret values' alone; a credential's value travels in the CLI's own environment to `provider create`.
+    The upload and download questions are UNCHANGED, still not measured.
   - **Never-started is the failed step, not a code**: a create, read-back or upload that fails is
     `container-never-started` (refunded, retried, the sandbox deleted anyway). The CLI's own failures exit 1, which is
     the runner's own infrastructure code, so such an exec is retried as one with its reservation kept (the safe
@@ -10671,7 +10685,10 @@ a tunnel.
     (`venue-local-folders-unsupported`), the loader's blind spot.
   - **Not served here yet**, each its issue's: the live transcript, progress, steering and recovery checkpoints (the
     session file is in the sandbox until the download, #686); a job's MCP servers, whose commands the mcp.json names
-    under the `mounts` layout's paths (#684); the egress rules and the providers (#684).
+    under the `mounts` layout's paths (#684); the egress rules and the providers (#684). **AMENDED 2026-10-19 (#684)**:
+    the MCP paths, the egress rules (part 1) and the providers (part 2) are served; `run.recover` is now REFUSED before
+    spend rather than run unarmed (`openshell-recover-unsupported`); the live transcript, progress and steering stay
+    skipped by name until #686.
   - **The whole run, live**: the conformance script (`.github/scripts/openshell-conformance.mjs`, which ships with part 3
     of #683 beside its CI lane) on that host passed every harness check, all
     eight read-backs (CapEff 0, NoNewPrivs 1, seccomp 2, pids.max 2048, memory.max the job's size, the sandbox gone
@@ -10684,7 +10701,11 @@ a tunnel.
   worker/src/processor.mjs -> venueRefused, venue-local-folders-unsupported · worker/src/triggers.mjs ->
   refusesLocalWorkspace · worker/src/doctor-openshell.mjs -> openshellChecks (`pi-dispatch doctor --openshell`) ·
   worker/src/openshell-cli.mjs -> OPENSHELL_TESTED_VERSION · .github/openshell.json · .github/scripts/openshell-conformance.mjs
-  · .github/workflows/openshell-conformance.yml (advisory). #684 and #686 still to come.
+  · .github/workflows/openshell-conformance.yml (advisory). #684 and #686 still to come. **AMENDED 2026-10-19 (#684
+  part 2)**: worker/src/backend-openshell.mjs -> secretNamesOf, providerProfileFor, gitCredentialEnv,
+  expectedPolicies, makeOpenshellReaper, openshellBootVersions, OPENSHELL_REFUSALS · worker/src/backends.mjs ->
+  NOT_YET_BLESSABLE (empty), backendRefusals · worker/src/config.mjs -> openshellFrom · worker/src/start.mjs (the
+  bundle, the boot sweep's reaper, the boot version read). #686 still to come.
 - **Egress (#684 part 1, AMENDED 2026-10-19)**: the policy is generated per job by `networkPolicyFor`
   (worker/src/openshell-policy.mjs) from the squid venues' own sources (the allowlist, the model endpoints, the job's
   forge), every endpoint `enforce`, and read back against the written body plus OpenShell's one measured baseline
@@ -10703,6 +10724,57 @@ a tunnel.
   `sandboxLayout` to the plan's list. The boot half of the version floor is #684's, with the blessing. The CI lane is
   ADVISORY (`the openshell venue holds its declarations`), promoted to required in a later issue once it has passed
   across a round.
+- **Credentials and git push (#684 part 2, AMENDED 2026-10-19)**: the "Credentials through per-job providers" plan
+  above, as built and measured on OpenShell 0.1.4. Per job, `secretNamesOf` takes every env name the redactor does not
+  list as non-secret (`NON_SECRET_ENV_KEYS`, the one list), and the adapter imports an ENDPOINTLESS profile for them
+  (`providerProfileFor`, no endpoints and no binaries of its own, written 0600 at `<job dir>.openshell-profile.json`
+  beside the job dir, never uploaded; `provider profile import -f`), then creates a provider named like the sandbox
+  with `--credential NAME` per secret and the owner label. `--credential NAME` reads `$NAME` from the CLI's own
+  environment (measured), so the values ride the CLI child's environment (PATH, HOME, XDG_CONFIG_HOME and the values,
+  nothing else of the worker's), never an argv and never a file: `OQ-028` is not reproduced on the CLI. The provider is
+  attached at `sandbox create --provider`, and every endpoint of the network policy gets `credential_binding:
+  {provider}`, so the agent sees `openshell:resolve:env:v<rev>_NAME` placeholders and the supervisor swaps the value
+  in only in a request to a host the policy admits (measured for headers and for git Basic auth). The exec's `--env`
+  carries no secret name. The read-back expects one more layer, `_provider_<name, dashes as underscores>` (measured,
+  `expectedPolicies(policy, {provider})`). With no network rule no provider is made (`openshell_secrets_unbound`):
+  the job reaches nothing, and its secrets go nowhere rather than back onto `--env`. Teardown deletes the provider
+  after the sandbox (asked up to 10 times, 2 s apart, since it is refused while still attached and a sandbox's delete
+  is asynchronous, measured), then its profile; the boot sweep's reaper (`makeOpenshellReaper`) deletes owner-labelled
+  providers named like a job sandbox. **git push**: the clone's remote is tokenless, so a forge job's exec gets a
+  credential helper through `GIT_CONFIG_COUNT`/`_KEY_0`/`_VALUE_0` (`gitCredentialEnv`) that answers only `get` and
+  prints the forge's username (`x-access-token` on GitHub, `oauth2` on GitLab, `pi-dispatch` elsewhere) and the token
+  variable's placeholder as the password, which the supervisor rewrites in a request to any admitted host (each
+  credential is bound to every endpoint: squid's reach, not narrower; review, 2026-10-19); with part 1's push rule
+  a GitHub job pushes to its own repository only. **Rotation** does not reach a running process (a job is bounded at
+  30 minutes, an App token lives about an hour): stated, not built. The supervisor sets `NODE_EXTRA_CA_CERTS` in the agent, so
+  node trusts its per-sandbox CA, and strips the proxy variables (measured): the vendor's, relied on and not built.
+- **Blessing (#684 part 2, AMENDED 2026-10-19)**: `NOT_YET_BLESSABLE` is empty. `PI_OPENSHELL_ENGINE` (`docker` or
+  `podman`, default `docker`) and `PI_OPENSHELL_GATEWAY` (a registered gateway's name, or unset) are parsed into
+  `config.openshell`, judged only while `PI_BACKENDS` names the venue. The boot builds the bundle (its allowlist the
+  working directory's `egress-allowlist.conf`, ENOENT admitting nothing, one reader shared with the MCP check; its
+  endpoints the model-endpoints snapshot), registers its reaper in the boot sweep, and reads the versions
+  (`openshellBootVersions`): a CLI or a gateway not at `OPENSHELL_TESTED_VERSION` is a configError (exit 2); a CLI that
+  does not answer is a plain error (exit 1, restarted); a gateway down at boot is only logged
+  (`openshell_gateway_down_at_boot`), the per-job preflight being the gate. `PI_EGRESS=0` with this venue blessed
+  refuses the boot (`backendRefusals`, keyed on `credentialCustody: layer`, the operator's decision: the layer has no
+  "egress off"). `run.recover` is refused before spend (`openshell-recover-unsupported`, the first per-job check):
+  the venue cannot checkpoint a running session until its transcript comes back over stdio (#686). Doctor's "not yet
+  blessable" line is gone, and a plain `doctor` runs the venue's lines when `PI_BACKENDS` names it. The CI lane stays
+  advisory until it has passed across a round.
+- **Review fixes (#684 part 2, AMENDED 2026-10-19)**: the exec's `--env` carries ONLY `NON_SECRET_ENV_KEYS` (an
+  allowlist; a secret name no provider can carry is dropped and logged, `openshell_secret_unbindable`, never put on the
+  argv as a value). A provider that reads its credential's value inside the job (`VALUE_READING_PROVIDERS`: Bedrock,
+  Vertex, Codex, Copilot; Anthropic judged by the value, `sk-ant-oat`, as pi judges it) is refused before spend
+  (`openshell-credential-reads-value`). The gateway's release is read per job too (`openshell-gateway-untested`). A
+  same-named leftover provider and profile are deleted before a job's import (every attempt of one job shares the
+  sandbox's name); the provider is recorded only after its create; the host budget's gone-check deletes a gone
+  sandbox's provider; the CLI child that creates the provider runs in the worker's own environment plus the values.
+  `run.recover` on a `kind: local` job is not refused (it runs unarmed, as everywhere). Doctor replays the boot's
+  layer-venue egress refusal and reads the two settings from the service env. RESIDUALS, named: a provider that reads
+  its key by value and is not listed fails with its own provider error, never silently; a profile whose provider was
+  never created is found by the next attempt of its job, not by the reaper, which lists providers only. Measured in the CI lane (OpenShell 0.1.4, 2026-10-19): the agent's `$ANTHROPIC_API_KEY` and `$GH_TOKEN` are
+  placeholders, `/proc/<pid>/environ` opens and reads EMPTY inside the sandbox (its own and its parent's), and a stand-in
+  on the gateway host received the real header value and git's Basic credentials, never a placeholder.
 
 ## DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR
 
@@ -12492,3 +12564,4 @@ a tunnel.
 | 2026-10-19 | Issue #684, part 1: the openshell venue's per-job network policy. **`DES-OPENSHELL-VENUE` AMENDED**: a dated "Egress (#684 part 1)" bullet: the policy is generated per job by `networkPolicyFor` from the squid venues' own sources and read back against the written body plus OpenShell's measured baseline addition; a source it cannot translate refuses before spend; the push rule narrows GitHub's git transport to the job's own repository, a control squid could not express (GitHub only, since the other forges' API shares the git host); the binaries are named and are not a narrowing; the advisory lane reads the policy back off a live sandbox (an allowlisted host, github.com, api.github.com through the wildcard and two host aliases reached, an unlisted host refused, a push to another repository refused by the layer itself). **UNCHANGED, checked**: `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` (the squid venues), `DES-CONTAINER-BACKEND-REGISTRY` (the venue's `egress` stays `asserted`: the layer enforces, the worker writes and reads back). |
 | 2026-10-19 | Issue #683, the review fixes of part 1 that its squash left out (landed after #698 merged; the pull request's own review found them and they were made in its worktree, then not staged). **`DES-OPENSHELL-VENUE` AMENDED**: the #683 correction sub-bullet gains what "read-only" means there: the bytes and the tree, not the mode (Landlock below ABI 6 mediates no chmod, chown, utimes or xattrs), and on ABI 6 and later the helper's domain is also scoped (signals and abstract unix sockets cannot leave it). With it: `image/landlock/pi-landlock.c` sets those scopes, captures `errno` before formatting, and states its libc use; `image/verify-image.sh` proves an overwrite and a truncate of a file the job's own uid owns are refused (the two rights an uploaded file is protected by alone); the `dev.pi-dispatch.net-binaries` label lists `/opt/pi-dispatch/runner-node` first, the binary the runner and pi run as, and `wget`, with Chromium deliberately left out; and three bolts the review asked for: the spec's layout table and `docs/job-image.md`'s capability list pinned to their sources, and the runner refused a container-path literal outside `layout.mjs`. UNCHANGED, checked: the rest of the entry. |
 | 2026-10-19 | Issue #638's residual (the remainder of PR #638): held replies, with the review's corrections. **`DES-AWAIT-INPUT-ENDS-THE-JOB` AMENDED**: the "*Residual:*" bullet under "A park closes the job's semantic window" keeps its text and gains a bold dated **CLOSED 2026-10-19** marker with the mechanism: every awaitInput job registered live on its own await target by a 2 s keeper from the moment the pickup's gates admitted it (just before the settings check and `runJob`); the receiver, all four arms and the poller, holds (a) a resume comment the window deduplicated against such a run under the surviving job id and (b) a phrase-free issue reply the filter dropped only for the missing marker, which the filter returns as `heldCandidate`, built by the same function as the parked-reply job. **The take is part of the park** (review H1): the park sequence becomes promote, marker ON, release, take, comment, and that bullet's own sentence about the release's place gains a dated note; the take enqueues the first eligible held reply WITH the semantic window (`enqueueForgeJob`), so every later answer is coalesced against that one job or held on it and never starts a second paid run from one parked transcript (the first version enqueued it window-less at the final outcome, after the parked comment had invited another answer: two runs); a swallowed take is not a resumed job (`HELD_EXTRA_REPLY` against another job, `HELD_RESUME_FAILED_REPLY` against the run's own); the rest get one `HELD_EXTRA_REPLY`; only replies written within `HELD_LOOKBACK_MS` (5 min) before the take are eligible (review M1), a mismatched fallback is skipped for the next (L5), a failed close at the take answers once (L1); the processor then posts `HELD_TAKEN_COMMENT` instead of the parked comment when a reply was taken; the final settle is the backstop, dropping held replies for any non-park outcome, an acknowledged cancel included (L2). Named residuals: a comment in the last five minutes before the question taken as an answer, a reply meeting the taken job while it is still queued answered `deduplicated`, an unreachable keeper, a pull request's phrase. (The first version of this row named "a held answer beside a steered late message each starting a job" as a residual; refuted: the steer settle answers late messages when a held reply was taken, `heldResumed`.) The #646 paragraph's "narrows ... and only narrows it" gains a dated note that the residual is now closed for every awaitInput run. **`DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED**: a new bullet names held replies as a sibling mechanism in keys of their own (`run:await:*`, `run:held:*`) and why not the inbox. Every other entry UNCHANGED, checked: `DES-STEER-HELD-WHILE-PARKED` (a steer-armed run's held messages settle as before, except that late messages are answered rather than resumed when a held reply was taken), `DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` (the steer pointer is untouched; the await pointer derives its hash from it), `DES-QUEUE-BULLMQ-OVER-CUSTOM`, `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` (no index of parked issues: the registration is liveness with a 30 s expiry). Review round 2, in the same CLOSED text: a phrase-free reply posted before the marker and delivered after the take is enqueued as a parked reply while the target's 60 s parked marker (raised by the take's close) stands, so "nothing slips past" now holds for webhook delay too; a full list evicts its oldest entry; after a take whose own close failed the backstop only drops; a take swallowed by another job counts as taken (`taken: "other"`) for the comment and for `heldResumed`; a recovery's run id counts as the run's own; a fallback must also match the flow and command. |
+| 2026-10-19 | Issue #684, part 2: credential providers, git push, and the `openshell` venue BLESSED. **`DES-OPENSHELL-VENUE` AMENDED**: Status says BLESSED (`NOT_YET_BLESSABLE` empty); NEW dated "Credentials and git push (#684 part 2)" bullet: the per-job endpointless profile and provider (`secretNamesOf` over `NON_SECRET_ENV_KEYS`, `providerProfileFor` 0600 beside the job dir and never uploaded, `--credential NAME` reading the CLI child's own environment, never an argv or a file), attached at create, `credential_binding` on every endpoint, placeholders `openshell:resolve:env:v<rev>_NAME` resolved only toward an admitted host (measured for headers and git Basic auth), no secret on the exec's `--env`, the read-back's `_provider_<name>` layer, no provider for a job with no rule (`openshell_secrets_unbound`), teardown's bounded provider delete and the reaper's sweep; git push through a `GIT_CONFIG_COUNT` credential helper printing the token's placeholder; rotation stated, not built; NEW dated "Blessing (#684 part 2)" bullet: `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY` in `config.openshell`, judged only while blessed, the boot's bundle, reaper and exact version refusal (exit 2, exit 1 for a silent CLI, a gateway down only logged), `PI_EGRESS=0` refused at boot for a layer venue, `run.recover` refused before spend (`openshell-recover-unsupported`), doctor's note gone; the "Not measured yet" and "Not served here yet" sub-bullets and Code evidence gain dated notes. The Decision, Why, Rejected and Residuals UNCHANGED, checked. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `NOT_YET_BLESSABLE` empty, its mechanism kept; `credentialCustody: layer` live; `backendRefusals` gains the boot refusal of `PI_EGRESS=0` with any blessed layer venue, keyed on the word. The openshell entry's words and the counts UNCHANGED, checked. **UNCHANGED, checked**: `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` (the squid venues), `DES-WORKER-ON-HOST`, `DES-RUN-CHECKPOINT-PAIRED` (no armed run reaches the venue now: refused before spend), `DES-STEER-VIA-READONLY-INBOX-MOUNT` (`steerSkipped: "venue-copies"` as before), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (no launcher row), `DES-HOST-BUDGET` (the venue's lister and gone-check unchanged; its reaper now also sweeps providers). Review round (same day): NEW dated "Review fixes" bullet in `DES-OPENSHELL-VENUE` (the exec env an allowlist of `NON_SECRET_ENV_KEYS`, `openshell-credential-reads-value`, the per-job `openshell-gateway-untested`, the stale-provider removal, the gone-check provider delete, local recover unrefused, doctor replaying the egress-off refusal, two named residuals); the git-push sentence corrected: the placeholder resolves at any admitted host, not the forge host only. |

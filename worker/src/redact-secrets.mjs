@@ -157,6 +157,8 @@ export const NON_SECRET_ENV_KEYS = new Set([
 	"PI_ALLOWED_MODELS",
 	"PI_OFFLINE",
 	"PI_EXIT_AUTH",
+	// Issue #683: the runner's layout name, `sandbox` on the openshell venue.
+	"PI_JOB_LAYOUT",
 	"HOME",
 	KEYLESS_ENV_NAME,
 	...FORGE_HOST_VARS,

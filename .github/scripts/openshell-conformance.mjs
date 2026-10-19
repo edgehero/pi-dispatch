@@ -79,6 +79,17 @@ case "$c" in
 		for u in https://api.anthropic.com/ https://example.com/ http://host.openshell.internal:18080/ http://host.docker.internal:18080/ https://github.com/ https://api.github.com/; do
 			echo "probe url $u=$(node -e 'fetch(process.argv[1],{signal:AbortSignal.timeout(10000)}).then(r=>console.log("reached",r.status),e=>console.log("refused",e.cause?.code??e.name))' "$u")"
 		done
+		# Issue #684 part 2: the job's credentials are placeholders in the agent, no process's environment holds a value,
+		# and the supervisor swaps the real one in for a request to an admitted host: a header to the stand-in, and git's
+		# Basic auth through the worker-set credential helper (the stand-in records both, the script reads its log).
+		echo "probe envkey=$(case "$ANTHROPIC_API_KEY" in openshell:resolve:env:*) echo placeholder ;; conformance-probe-not-a-key) echo value ;; '') echo unset ;; *) echo other ;; esac)"
+		echo "probe envtoken=$(case "$GH_TOKEN" in openshell:resolve:env:*) echo placeholder ;; conformance-probe-not-a-token) echo value ;; '') echo unset ;; *) echo other ;; esac)"
+		# Readable means NON-EMPTY: under OpenShell 0.1.4 the file opens and reads as nothing (measured, self and parent).
+		echo "probe environ-readable=$(if [ "$(tr '\\0' '\\n' < /proc/self/environ 2>/dev/null | wc -c)" -gt 0 ]; then echo yes; else echo no; fi)"
+		echo "probe environ-self=$(tr '\\0' '\\n' < /proc/self/environ | grep -c -e '^ANTHROPIC_API_KEY=openshell:resolve:env:')"
+		echo "probe environ-values=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c -e conformance-probe-not-a)"
+		echo "probe header=$(node -e 'fetch("http://host.openshell.internal:18080/header",{headers:{"x-api-key":process.env.ANTHROPIC_API_KEY},signal:AbortSignal.timeout(10000)}).then(r=>console.log(r.status),e=>console.log("refused",e.cause?.code??e.name))')"
+		echo "probe git=$(cd /tmp && GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote http://host.openshell.internal:18080/edgehero/pi-dispatch-conformance.git >/dev/null 2>&1; echo $?)"
 		# The forge rule: a push to another repository than the job's is refused by the LAYER (its own 403 body names
 		# the policy), never answered by GitHub, which would say 401.
 		for u in https://github.com/octocat/Hello-World.git/git-receive-pack; do
@@ -143,11 +154,11 @@ const withBrokenEnumeration = () => bundleFor(probeImage, { gateway: `no-such-ga
 async function readBack(b) {
 	output.set("last", "");
 	const name = `pi-job-conformance-${nonce}-readback`;
-	const result = await b.runContainer({ job: JOB, prepared: jobDirFor("readback"), name, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 100 } });
+	const result = await b.runContainer({ job: JOB, token: "conformance-probe-not-a-token", prepared: jobDirFor("readback"), name, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 100 } });
 	const said = Object.fromEntries([...String(output.get("last")).matchAll(/^probe ([A-Za-z.-]+)[=:][ \t]*(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
 	const urls = Object.fromEntries([...String(output.get("last")).matchAll(/^probe url (\S+)=(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
 	const pushes = Object.fromEntries([...String(output.get("last")).matchAll(/^probe push (\S+)=(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
-	Object.assign(readings, { urls, pushes });
+	Object.assign(readings, { urls, pushes, said });
 	const gone = await b.containerGone(name);
 	let pinned;
 	try {
@@ -190,6 +201,27 @@ for (const f of r.findings) {
 	console.log(`${ok ? "ok     " : "FAIL   "} the generated policy: ${JSON.stringify({ ...u, push })}`);
 	if (!ok) failed = true;
 }
+// Issue #684 part 2: the credentials. Placeholders in the agent, no value in any environment it can read, and the real
+// values received by the stand-in only after the supervisor's swap (a header, and git's Basic auth via the helper).
+{
+	const said = readings.said ?? {};
+	let seen = [];
+	try {
+		seen = nodeFs.readFileSync(process.env.STANDIN_LOG ?? "", "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	} catch {}
+	const basic = `Basic ${Buffer.from("x-access-token:conformance-probe-not-a-token").toString("base64")}`;
+	const swapped = seen.some((e) => e.xApiKey === "conformance-probe-not-a-key");
+	// A placeholder that reached the stand-in unswapped, in a header or inside git's base64 Basic credentials.
+	const decoded = (a) => (/^Basic /.test(a ?? "") ? Buffer.from(a.slice(6), "base64").toString("utf8") : (a ?? ""));
+	const leaked = seen.some((e) => /openshell:resolve/.test(`${e.xApiKey ?? ""}${decoded(e.authorization)}`));
+	const git = seen.some((e) => e.authorization === basic);
+	// The values in no readable environment: either the process's own environ is readable and holds the placeholder (so
+	// the scan of every process's is not vacuous), or it is not readable at all, which is the stronger answer.
+	const environ = said["environ-values"] === "0" && (said["environ-readable"] === "no" || (said["environ-readable"] === "yes" && said["environ-self"] === "1"));
+	const ok = said.envkey === "placeholder" && said.envtoken === "placeholder" && environ && swapped && !leaked && git;
+	console.log(`${ok ? "ok     " : "FAIL   "} the credentials: ${JSON.stringify({ envkey: said.envkey, envtoken: said.envtoken, environReadable: said["environ-readable"], environSelf: said["environ-self"], environValues: said["environ-values"], header: said.header, git: said.git, swapped, leaked, gitBasic: git })}`);
+	if (!ok) failed = true;
+}
 // readOnlyJobInputs is not in the harness's read-back list (the transfer check covers its word); this script reads it.
 console.log(`${readings.readOnlyJobInputs?.ok ? "ok     " : "FAIL   "} readOnlyJobInputs (live): ${readings.readOnlyJobInputs?.detail}`);
 if (!readings.readOnlyJobInputs?.ok) failed = true;
@@ -199,12 +231,15 @@ for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) consol
 {
 	const logs = join(scratch, "logs");
 	nodeFs.mkdirSync(logs);
-	const real = bundleFor(image, { openJobLog: makeLogSink({ logsDir: logs, enabled: false }) });
+	// Under the same policy as the probes: with no rule no provider is made and the key reaches the job not at all
+	// (`openshell_secrets_unbound`), which is the venue working, and a runner with no key to read.
+	const real = bundleFor(image, { ...POLICY_SOURCES, openJobLog: makeLogSink({ logsDir: logs, enabled: false }) });
 	const dirs = jobDirFor("Reply with the single word ok.");
 	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0 }, prepared: dirs, name: `pi-job-conformance-${nonce}-runner`, signal: new AbortController().signal, exitAuth: true, size: { memMiB: 2048, cpuCenti: 200 } });
 	const session = nodeFs.readFileSync(join(dirs.jobDir, "session", "current.jsonl"), "utf8");
 	const ok = result.code === 2 && result.exitReason === "cost-cap" && result.exitAuth === "verified" && session.length > 0;
 	console.log(`${ok ? "ok     " : "FAIL   "} the real runner: exit ${result.code}, reason ${result.exitReason}, exit line ${result.exitAuth}, session ${session.length} bytes`);
+	if (!ok) console.log(String(output.get("last") ?? "").split("\n").slice(-15).join("\n"));
 	if (!ok) failed = true;
 }
 
