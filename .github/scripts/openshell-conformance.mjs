@@ -15,7 +15,8 @@
  *     after the run, and a job image the engine does not hold refused before any sandbox exists.
  *
  * AND ONE CASE OF ITS OWN: the real job image's real runner, keyed, on the sandbox layout, offline under a cost cap of 0,
- * through the bundle, which must end on its own signed `cost-cap` line with the session brought back.
+ * through the bundle, which must end on its own signed `cost-cap` line with the session brought back, and (issue #686)
+ * whose session lines must reach the live transcript publisher as verified records over the exec's stderr.
  *
  * STRICTER THAN THE HARNESS, as podman-conformance.mjs is: any abstention among the read-back properties fails. Run it
  * with the worker STOPPED: the harness calls the real `reap`, which deletes every sandbox carrying this worker's owner
@@ -39,6 +40,7 @@ const load = (path) => import(pathToFileURL(join(root, path)).href);
 const { makeOpenshellBackend, OPENSHELL_OWNER, OPENSHELL_OWNER_LABEL } = await load("worker/src/backend-openshell.mjs");
 const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
 const { makeLogSink } = await load("worker/src/run-history.mjs");
+const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs");
 
 const refuse = (why) => {
 	console.error(`openshell-conformance: ${why}`);
@@ -233,12 +235,35 @@ for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) consol
 	nodeFs.mkdirSync(logs);
 	// Under the same policy as the probes: with no rule no provider is made and the key reaches the job not at all
 	// (`openshell_secrets_unbound`), which is the venue working, and a runner with no key to read.
-	const real = bundleFor(image, { ...POLICY_SOURCES, openJobLog: makeLogSink({ logsDir: logs, enabled: false }) });
+	// Issue #686: the REAL publisher (live-transcript.mjs, the opener start.mjs builds), transcripts on and progress off,
+	// over a Valkey stand-in that records every XADD in memory, so what is checked is the path a job's lines take: the
+	// runner's mirror, the exec's stderr, the demux's verification under this attempt's key, the stdio source.
+	const xadds = [];
+	const redis = {
+		status: "ready",
+		multi() {
+			const tx = { del: () => tx, pexpire: () => tx, xadd: (_key, ...args) => (xadds.push(args), tx), exec: async () => [] };
+			return tx;
+		},
+	};
+	const openLiveTranscript = makeLiveTranscriptOpener({ redis, transcripts: true, progress: false });
+	const events = [];
+	const real = bundleFor(image, { ...POLICY_SOURCES, openJobLog: makeLogSink({ logsDir: logs, enabled: false }), openLiveTranscript, log: (event, fields) => events.push([event, fields]) });
 	const dirs = jobDirFor("Reply with the single word ok.");
-	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0 }, prepared: dirs, name: `pi-job-conformance-${nonce}-runner`, signal: new AbortController().signal, exitAuth: true, size: { memMiB: 2048, cpuCenti: 200 } });
+	// This run's output alone, so the record check below reads nothing an earlier probe wrote.
+	output.set("last", "");
+	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0 }, prepared: dirs, name: `pi-job-conformance-${nonce}-runner`, signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, jobId: `conformance-${nonce}`, size: { memMiB: 2048, cpuCenti: 200 } });
 	const session = nodeFs.readFileSync(join(dirs.jobDir, "session", "current.jsonl"), "utf8");
 	const ok = result.code === 2 && result.exitReason === "cost-cap" && result.exitAuth === "verified" && session.length > 0;
 	console.log(`${ok ? "ok     " : "FAIL   "} the real runner: exit ${result.code}, reason ${result.exitReason}, exit line ${result.exitAuth}, session ${session.length} bytes`);
+	// Every published entry's kind (the field list is flat: "kind", <kind>, "ts", ...): at least one from the session (the
+	// prompt's `user` entry is the one a cost cap of 0 always leaves), the `end`, and no forged or broken record on the way.
+	const kinds = xadds.map((fields) => fields[fields.indexOf("kind") + 1]);
+	const fromSession = kinds.filter((k) => k !== "end" && k !== "skipped").length;
+	const unverified = events.filter(([e]) => e === "transcript_record_unverified" || e === "transcript_record_dropped" || e === "transcript_demux_failed" || e === "live_transcript_skipped");
+	const piped = fromSession > 0 && kinds.at(-1) === "end" && unverified.length === 0 && !/\x1epidt /.test(String(output.get("last") ?? ""));
+	console.log(`${piped ? "ok     " : "FAIL   "} the live transcript over stderr: ${fromSession} entries from the session (${[...new Set(kinds)].join(", ") || "none"}), ${unverified.length} skip, unverified or dropped events, records kept out of the output`);
+	if (!piped) failed = true;
 	if (!ok) console.log(String(output.get("last") ?? "").split("\n").slice(-15).join("\n"));
 	if (!ok) failed = true;
 }

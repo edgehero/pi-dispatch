@@ -255,5 +255,6 @@ test("a large exit line written on SIGTERM and exited on at once arrives whole a
 
 test("run-job.mjs writes the exit line synchronously to fd 1", () => {
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /\n\t\twrite: \(line\) => writeAllSync\(1, line\),\n/);
+	// Issue #686: the transcript mirror's final drain runs first (stderr, never fd 1), then the line, synchronously.
+	assert.match(src, /\n\t\twrite: \(line\) => \{\n(?:\t{3}transcriptMirror\?\.[a-z]+\(\);\n)*\t{3}writeAllSync\(1, line\);\n\t\t\},\n/);
 });

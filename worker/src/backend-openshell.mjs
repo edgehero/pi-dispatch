@@ -35,8 +35,13 @@ import { makeRunContainer } from "./run-container.mjs";
  *
  * BLESSABLE SINCE ISSUE #684: the sandbox's network policy is generated per job (openshell-policy.mjs) and the job's
  * credentials live in a per-job provider, placeholders in the agent (`CONST-VENUE-EGRESS-LAYER`); only names the
- * redactor treats as not secret reach the exec's `--env`. The live transcript, progress, steering and recovery are not
- * served here yet (#686), each refused or skipped by name.
+ * redactor treats as not secret reach the exec's `--env`.
+ *
+ * THE LIVE TRANSCRIPT (issue #686): the session file is in the sandbox until the download, so no host tail can read it.
+ * The runner mirrors its lines over the exec's STDERR as records signed with the exit key (transcript-mirror.mjs), and
+ * makeRunContainer, told `transcript: "stdio"`, verifies them and feeds the same publisher (stderr-transcript.mjs), so
+ * the live transcript, run progress and the status comment are served here. Steering and recovery are not yet, each
+ * refused or skipped by name.
  */
 
 
@@ -434,7 +439,7 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
 });
 
-const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
+const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
 
 /**
  * Build the `openshell` bundle. `engine` is the gateway's compute driver, `docker` or `podman` (the only two in v1),
@@ -457,6 +462,9 @@ export function makeOpenshellBackend(opts = {}) {
 		readEndpoints = () => [],
 		hostEnv = process.env,
 		openJobLog,
+		// Issue #686: the live transcript publisher's opener (start.mjs's, shared with every venue), fed from the exec's
+		// stderr records. Absent, no job here publishes a transcript or progress, as before.
+		openLiveTranscript = null,
 		onOutput,
 		globalPiDir = null,
 		allowGlobalExtensions = true,
@@ -680,9 +688,11 @@ export function makeOpenshellBackend(opts = {}) {
 		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway }),
 		layout: "sandbox",
 		memoryLimitOf: (_args, built) => (built.size?.memMiB ?? DEFAULT_JOB_SIZE.memMiB) * 1024 * 1024,
-		// No live transcript, steering or recovery staging here yet: the session file is in the sandbox until the
-		// download, so a tail on the host reads nothing (stdio transcripts are issue #686).
+		// No steering or recovery staging here yet: the session file is in the sandbox until the download, so a tail on
+		// the host reads nothing. The live transcript comes over the exec's stderr instead (issue #686).
 		stageLive: null,
+		transcript: "stdio",
+		...(typeof openLiveTranscript === "function" ? { openLiveTranscript } : {}),
 		stageRun,
 		collectRun,
 		teardownRun,

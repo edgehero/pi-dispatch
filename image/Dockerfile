@@ -402,7 +402,12 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # writable by the agent. The worker refuses that pairing pre-spend on a copying venue only (its `sandboxLayout`
 # capability row, reason job-image-sandbox-layout-unsupported). verify-image.sh runs an offline job on the sandbox
 # layout and proves the helper refuses a write under /sandbox/job while allowing one under /sandbox/workspace.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout"
+# `transcriptStderr` (issue #686) tells the worker this runner reads PI_TRANSCRIPT=stderr and mirrors its session file's
+# lines over stderr as records signed with the exit key (image/runner/src/transcript-mirror.mjs), which is how a copying
+# venue serves the live transcript, run progress and the status comment. Not a gate: an image without it runs there
+# without them (`live_transcript_skipped`, reason no-capability). verify-image.sh runs an offline keyed job with the
+# variable set and checks a record's HMAC under the key it handed over, and that another key does not verify it.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

@@ -492,6 +492,46 @@ PROBE
 					fail "pi-landlock neither ran a confined command nor refused for want of Landlock (exit $ll_code: $ll_out)"
 				fi
 				;;
+			transcriptStderr)
+				# Issue #686. The runner mirrors its session file over stderr as records signed with the exit key, the channel
+				# a copying venue's live transcript comes over. Proved by running it: exitAuth's keyed offline job (a cap of 0
+				# stops it before any call, after pi has written the prompt to its session), with PI_TRANSCRIPT=stderr and a
+				# writable session, must put records on stderr and none on stdout: first the baseline (seq 1, type b, the empty
+				# session's size 0), then a line record whose payload decodes to a session line; that record's MAC must be
+				# HMAC-SHA256 under the handed key over the record's domain, run id, seq, type, end and decoded payload
+				# (INT-RUNNER-EXIT-CODE-PROTOCOL's transcript records), and must NOT be under another key, else this check would
+				# accept any MAC. The worker's own verifier is held to the runner's by the unit tests.
+				tr_job=$(mktemp -d)
+				tr_session=$(mktemp -d)
+				tr_err=$(mktemp)
+				echo "Reply with the single word ok." >"$tr_job/prompt.md"
+				chmod -R a+rX "$tr_job"
+				: >"$tr_session/current.jsonl"
+				chmod 0777 "$tr_session"
+				chmod 0666 "$tr_session/current.jsonl"
+				tr_key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+				tr_other=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+				tr_out=$(printf '%s\n' "$tr_key" | docker run -i --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$tr_job:/job:ro" -v "$tr_session:/session" \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_EXIT_AUTH=stdin \
+					-e PI_JOB_ID=pi-job-verify-transcript -e PI_SESSION_FILE=/session/current.jsonl -e PI_TRANSCRIPT=stderr \
+					"$IMAGE_REF" 2>"$tr_err") || true
+				tr_rs=$(printf '\036')
+				tr_count=$(grep -ac "^${tr_rs}pidt " "$tr_err" || true)
+				tr_on_stdout=$(printf '%s\n' "$tr_out" | grep -ac "^${tr_rs}pidt " || true)
+				tr_first=$(grep -a "^${tr_rs}pidt " "$tr_err" | head -1 | sed "s/^${tr_rs}pidt //" | cut -d' ' -f1-3)
+				tr_record=$(grep -a "^${tr_rs}pidt [0-9]* l " "$tr_err" | head -1 | sed "s/^${tr_rs}pidt //")
+				rm -rf "$tr_job" "$tr_session" "$tr_err"
+				tr_seq=$(echo "$tr_record" | cut -d' ' -f1)
+				tr_end=$(echo "$tr_record" | cut -d' ' -f3)
+				tr_mac=$(echo "$tr_record" | cut -d' ' -f4)
+				tr_b64=$(echo "$tr_record" | cut -d' ' -f5)
+				tr_hmac() { { printf 'pi-dispatch-transcript\000pi-job-verify-transcript\000%s\000l\000%s\000' "$tr_seq" "$tr_end"; printf '%s' "$tr_b64" | base64 -d; } | openssl dgst -sha256 -hmac "$1" | awk '{print $NF}'; }
+				[ "$tr_count" -gt 1 ] && [ "$tr_on_stdout" = 0 ] && [ "$tr_first" = "1 b 0" ] && [ "$tr_seq" = 2 ] && [ "$(printf '%s' "$tr_b64" | base64 -d | head -c 1)" = "{" ] \
+					&& [ -n "$tr_mac" ] && [ "$tr_mac" = "$(tr_hmac "$tr_key")" ] && [ "$tr_mac" != "$(tr_hmac "$tr_other")" ] \
+					|| fail "the image declares 'transcriptStderr' but a keyed job with PI_TRANSCRIPT=stderr did not mirror its session over stderr as records signed with the handed key (records on stderr: $tr_count, on stdout: $tr_on_stdout, first: ${tr_first:-none}, first line seq: ${tr_seq:-none})"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

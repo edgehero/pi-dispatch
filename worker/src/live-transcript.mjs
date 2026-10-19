@@ -271,8 +271,29 @@ export const outcomeOf = (outcome) => (LIVE_OUTCOMES.includes(outcome) ? outcome
  * the reducer does with it). `onReset()` is called at each reset. `stream: false` is the mode for progress with
  * transcripts off: the file is tailed and every line handed to `onParsed`, and nothing is queued or written to the
  * stream, so no `run:live:` key is ever touched.
+ *
+ * THE STDIO SOURCE (issue #686). `source: "stdio"` drives the same publisher with PUSHED lines instead of a file tail,
+ * for a venue that copies the session file into its sandbox (`openshell`), whose runner mirrors the file's lines over
+ * stderr as signed records (stderr-transcript.mjs verifies them). No file is read, ever: `file` is ignored. The returned
+ * object gains `setBaseline(size)`, `push(lineBytes, end)` (one complete line, without its newline, and the file
+ * position just past its newline, as the runner read it), `skip(count)` (lines the runner did not send, shown as one
+ * `skipped` entry, as an oversize line is here) and `reset(size)` (the runner saw its file rewritten, `size` its size
+ * then: the `reset` entry and `onReset`, exactly as a rewrite seen here). Every pushed line takes the per-line path a
+ * tailed line takes (`publishLine`: the parse, `onParsed`, the mapping, the redaction, the bounds), with the runner's
+ * own `end`, so positions stay exact across a gap. THE BASELINE is the runner's: the session file's size when its
+ * mirror started, before pi loaded, sent as the first signed record (`setBaseline`). A resumed session's staged
+ * transcript lies at or before it, so those lines are `prior`, as the file tail's `lstat` at spawn makes them on a
+ * binding venue. Taken from the runner rather than from the host's staged copy before the upload because it is the
+ * file the lines are read from (what the upload wrote, after anything the runner did to it before pi loaded), and it
+ * rides the same signed channel, in order, before any line. `onBaseline` is called once the lines up to it were pushed
+ * (at once for an empty one), or, failing open, at the first line when no baseline record arrived (it was broken: no
+ * line is then `prior`), at a reset, or at `finish`. After a reset, `replay` marks the lines ending at or before the
+ * reset's size, the rule a rewritten file gets. A line whose `end` is not past the last one's, with no reset between,
+ * implies a reset whose record was lost: it is applied, with the last end as its size. The timer only flushes;
+ * `finish` flushes what was pushed and publishes `end`. A line pushed once `finish` began is not taken.
  */
-export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat, lstatSync: fsLstatSync }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES, stream = true, onParsed = null, onReset = null, onBaseline = null } = {}) {
+export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(t ?? ""), now = () => Date.now(), pollMs = 500, log = () => {}, fs = { open: fsOpen, lstat: fsLstat, lstatSync: fsLstatSync }, timeoutMs = OP_TIMEOUT_MS, finishTimeoutMs = FINISH_TIMEOUT_MS, lineMaxBytes = LIVE_LINE_MAX_BYTES, pendingMax = PENDING_MAX, pendingMaxBytes = PENDING_MAX_BYTES, finalReadMaxBytes = LIVE_FINAL_READ_MAX_BYTES, readChunkBytes = READ_CHUNK_BYTES, stream = true, onParsed = null, onReset = null, onBaseline = null, source = "file" } = {}) {
+	const stdio = source === "stdio";
 	const key = liveKeyFor(jobId);
 	const id = sanitizeJobId(jobId);
 	let offset = 0;
@@ -320,6 +341,8 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	 * as `prior` instead of this attempt's. The async path is kept for an injected `fs` without `lstatSync`.
 	 */
 	const takeBaseline = () => {
+		// Issue #686: a pushed source has no file and no earlier content; its baseline is 0 by construction.
+		if (stdio) return undefined;
 		if (typeof onParsed !== "function" && typeof onBaseline !== "function") return undefined;
 		if (baselineTaken === null && typeof fs.lstatSync === "function") {
 			try {
@@ -500,6 +523,8 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 	 * settled (`readAt`), and what a read still in flight then returns is never queued (`enqueue`).
 	 */
 	const readOnce = async (final = false) => {
+		// Issue #686: a pushed source reads nothing; its lines arrive through `push`.
+		if (stdio) return undefined;
 		if (refused) return reportBaseline();
 		await takeBaseline();
 		let handle = null;
@@ -630,11 +655,64 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 		return inFlight;
 	};
 
+	// Issue #686: the stdio source's own state: the last line's end (a fallback position for a line pushed without one),
+	// and whether the runner's baseline record arrived.
+	let position = 0;
+	let baselineKnown = false;
+	const stdioMethods = stdio
+		? {
+				/** The runner's baseline: the file's size before pi loaded. Once, before any line; later calls are ignored. */
+				setBaseline(size) {
+					if (closed || finishing || baselineKnown) return;
+					baselineKnown = true;
+					baseline = Number.isSafeInteger(size) && size >= 0 ? size : 0;
+					if (baseline === 0) reportBaseline();
+				},
+				/** One complete line, without its newline, and its end in the file. Never throws; nothing once `finish` began. */
+				push(lineBytes, end) {
+					if (closed || finishing) return;
+					try {
+						const line = Buffer.isBuffer(lineBytes) ? lineBytes : Buffer.from(String(lineBytes ?? ""), "utf8");
+						// A line that ends at or before the last one, with no reset between, means the file was rewritten and
+						// the reset record was lost (broken in transit): the reset it implies, with the last end as its size.
+						if (Number.isSafeInteger(end) && end > 0 && position > 0 && end <= position) restart(position);
+						position = Number.isSafeInteger(end) && end > 0 ? end : position + line.length + 1;
+						// No baseline record came first (it was broken): failing open, nothing is `prior`.
+						baselineKnown = true;
+						if (line.length > lineMaxBytes) {
+							counts.skipped += 1;
+							enqueue({ kind: "skipped", ts: now() });
+						} else if (line.length > 0) {
+							publishLine(line, position);
+						}
+						if (position >= baseline) reportBaseline();
+					} catch {
+						counts.errors += 1;
+					}
+				},
+				/** `count` lines the source did not deliver: one `skipped` entry, each counted. */
+				skip(count = 1) {
+					if (closed || finishing) return;
+					const n = Number.isSafeInteger(count) && count > 0 ? count : 1;
+					counts.skipped += n;
+					enqueue({ kind: "skipped", ts: now() });
+				},
+				/** The source's file was rewritten, `size` its size then: what `restart` does for a tailed file. */
+				reset(size) {
+					if (closed || finishing) return;
+					restart(Number.isSafeInteger(size) && size >= 0 ? size : position);
+					position = 0;
+					reportBaseline();
+				},
+			}
+		: {};
+
 	return {
 		/** One poll now (read what was appended, then flush), the same the timer runs. For tests; never throws. */
 		poll: () => tick() ?? Promise.resolve(),
 		/** What is held in memory right now, and the counts. For tests. */
 		stats: () => ({ pending: pending.length, pendingBytes, held: held.length, closed, ...counts }),
+		...stdioMethods,
 		start() {
 			if (started || finishing) return;
 			started = true;
@@ -652,6 +730,8 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
 					await inFlight;
 				} catch {}
 				await readOnce(true);
+				// Issue #686: a pushed source that never reached its baseline still says so, failing open.
+				if (stdio) reportBaseline();
 				await flush([{ kind: "end", ts: now(), outcome: outcomeOf(outcome) }]);
 			})();
 			finishing = bounded(work, finishTimeoutMs)
@@ -698,14 +778,21 @@ export function makeLiveTranscript({ file, jobId, redis, redact = (t) => String(
  *     it turns the tailing on by itself (`stream: false`): the acks are what count a delivery, so a steer job with
  *     transcripts, progress and checkpoints all off still has its file read. An unarmed job hands none, and its opener
  *     is exactly what it was.
+ *   - `source` (issue #686): `"stdio"` opens the publisher on PUSHED lines (`makeLiveTranscript`'s stdio source), for a
+ *     venue whose runner mirrors the session file over stderr; the handle then also carries `setBaseline`, `push`,
+ *     `skip` and `reset`,
+ *     which runContainer's stderr demux calls. `file` is ignored, and no checkpoint is opened (the checkpointer copies a
+ *     file on the host, and there is none until the download). Every other consumer reads the pushed lines as it reads
+ *     tailed ones. Absent, `"file"`, and the opener is exactly what it was.
  */
 export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Date.now(), pollMs = 500, transcripts = true, progress = false, makeCommenter = null, progressWriter = {}, checkpoint = null, steer = false } = {}) {
 	const streamOn = Boolean(redis) && transcripts;
 	const progressOn = Boolean(redis) && progress;
 	if (!streamOn && !progressOn && typeof checkpoint !== "function" && steer !== true) return null;
-	return ({ file, jobId, redact, job = null, checkpoint: checkpointArgs = null, steer: steerAck = null }) => {
+	return ({ file, jobId, redact, job = null, checkpoint: checkpointArgs = null, steer: steerAck = null, source = "file" }) => {
+		const stdio = source === "stdio";
 		let handle = null;
-		if (typeof checkpoint === "function" && checkpointArgs && typeof checkpointArgs === "object") {
+		if (!stdio && typeof checkpoint === "function" && checkpointArgs && typeof checkpointArgs === "object") {
 			try {
 				handle = checkpoint({ ...checkpointArgs, sessionFile: file }) ?? null;
 			} catch {
@@ -755,9 +842,10 @@ export function makeLiveTranscriptOpener({ redis, log = () => {}, now = () => Da
 					}
 				: {};
 		if (steerAck && typeof steerAck.onBaseline === "function") consumers.onBaseline = () => steerAck.onBaseline();
-		const live = makeLiveTranscript({ file, jobId, redis, redact, now, pollMs, log, stream: streamOn, ...consumers });
+		const live = makeLiveTranscript({ file: stdio ? null : file, jobId, redis, redact, now, pollMs, log, stream: streamOn, ...consumers, ...(stdio ? { source: "stdio" } : {}) });
 		let finishing = null;
 		return {
+			...(stdio ? { setBaseline: live.setBaseline, push: live.push, skip: live.skip, reset: live.reset } : {}),
 			poll: live.poll,
 			stats: () => ({ ...live.stats(), ...(sink ? { progress: sink.stats() } : {}), ...(handle ? { checkpoint: handle.stats() } : {}), ...(typeof steerAck?.stats === "function" ? { steer: steerAck.stats() } : {}) }),
 			start() {

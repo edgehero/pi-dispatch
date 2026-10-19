@@ -15,6 +15,7 @@ import { steerTargetOf } from "./inbox-relay.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
 import { makeSteerAck } from "./steer-ack.mjs";
+import { makeStderrTranscript } from "./stderr-transcript.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
@@ -109,6 +110,16 @@ export function makeRunContainer({
 	stageRun = null,
 	collectRun = null,
 	teardownRun = null,
+	// Issue #686: how this venue's session file reaches the host while the job runs. `file` for every binding venue (the
+	// live tail reads the bind-mounted file, byte-identical to before); `stdio` for a copying one (`openshell`), whose
+	// runner mirrors the file's lines over the CLI's stderr as records signed with the exit key, which this side
+	// verifies and pushes into the same publisher (stderr-transcript.mjs). A CONSTRUCTION option, the venue's own
+	// statement beside `layout`, rather than read off the call bag's `binds`: `binds` reaches a steer job only (the
+	// registry adds it for that one question), while every job of a copying venue needs this answer, and a venue that
+	// copies but cannot mirror (none today) is then named for what it is (`venue-copies`) instead of guessed from a flag.
+	transcript = "file",
+	// Issue #686: the stderr demux's factory (stderr-transcript.mjs). A seam so a test can make it fail.
+	makeDemux = makeStderrTranscript,
 }) {
 	// Refused at construction rather than written into a job's env: a guessed layout reads nothing.
 	const paths = layoutFor(layout);
@@ -142,7 +153,9 @@ export function makeRunContainer({
 	// `binds` (issue #646) is the venue's own statement that it bind-mounts (the backend bundle's `binds`, which the registry
 	// puts on the call bag of a steer job only): a copying venue would upload `/inbox` once, at the start, so no message
 	// written later would ever arrive. Absent is false: a job is steer-armed only on a venue that SAYS it binds.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
+	// `transcriptStderr` (issue #686) is the processor's, off the image preflight like `exitAuth`: true when the job image
+	// declares `transcriptStderr`, so its runner can mirror the session file over stderr. Read only on a `stdio` venue.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -217,6 +230,21 @@ export function makeRunContainer({
 		// put in the container's PI_JOB_ID (`jobId: name` in the env below), which is what the runner MACs: one value on both
 		// sides by construction. The per-attempt key is the domain separation between attempts; the string only has to match.
 		const steerAck = steerArmed ? makeSteerAck({ exitKey, ackRunId: name, relay, jobId, log }) : null;
+
+		// Issue #686 (DES-OPENSHELL-VENUE): whether this attempt's transcript comes over the CLI's stderr. Asked only where
+		// something would read it (an opener and a job id) on a venue whose session file is not on the host while it runs,
+		// and armed only when every part exists: the venue mirrors (`transcript: "stdio"`), the image's runner can
+		// (`transcriptStderr`), and there is an exit key to verify the records with. A missing part is a NAMED skip
+		// (`live_transcript_skipped`); the job still runs, with no live transcript and no progress, as before this issue.
+		const liveReadable = typeof openLiveTranscript === "function" && jobId !== null && jobId !== undefined;
+		let liveSkipped = null;
+		if (liveReadable && (transcript === "stdio" || layout !== "mounts")) {
+			if (transcript !== "stdio") liveSkipped = "venue-copies";
+			else if (transcriptStderr !== true) liveSkipped = "no-capability";
+			else if (exitKey === null) liveSkipped = "no-exit-key";
+		}
+		const stdioArmed = liveReadable && transcript === "stdio" && liveSkipped === null;
+		if (liveSkipped !== null) log("live_transcript_skipped", { container: name, reason: liveSkipped });
 		const removeInbox = () => {
 			if (!inboxMade) return;
 			try {
@@ -317,6 +345,9 @@ export function makeRunContainer({
 			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
 			modelEndpoints, // issue #503: the keyless branch of the credential, from the gate's own snapshot
 			exitAuth: exitKey !== null, // issue #545: PI_EXIT_AUTH=stdin, only when a key is actually handed over below
+			// Issue #686: PI_TRANSCRIPT=stderr, only for an attempt armed above, never off the image's label alone: the
+			// worker must be reading the records, or they would reach the job log as noise.
+			transcriptStderr: stdioArmed,
 		}));
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
@@ -438,7 +469,9 @@ export function makeRunContainer({
 			const killed = await dockerStep(spawnFn, ["kill", name], checkpointStopTimeoutMs, bin);
 			if (killed.code !== 0) await dockerStep(spawnFn, ["rm", "-f", name], checkpointStopTimeoutMs, bin);
 		};
-		if (transcriptDir && typeof openLiveTranscript === "function" && jobId !== null && jobId !== undefined) {
+		// Issue #686: on a copying venue the host file is the upload's copy, never written while the job runs, so it is not
+		// tailed: the transcript is the stderr records' (`stdioArmed`) or there is none (`liveSkipped`).
+		if (liveReadable && liveSkipped === null && (stdioArmed || transcriptDir)) {
 			try {
 				// `workerSet`: the proxy variables count as structural only with the values this worker wrote for this job's
 				// egress; a proxy URL an operator forwarded with PI_EGRESS=0 is redacted like any other forwarded value.
@@ -457,13 +490,18 @@ export function makeRunContainer({
 							onStop: () => stopFrozen(),
 						}
 					: null;
-				live = openLiveTranscript({ file: join(transcriptDir, LIVE_FILE_NAME), jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs ? { checkpoint: checkpointArgs } : {}), ...(steerAck ? { steer: steerAck } : {}) }) ?? null;
+				// The stdio source has no file; a checkpoint copies a host file, so none is opened on it (a copying venue refuses
+				// `run.recover` before spend), and its steer channel is issue #686's second part.
+				const source = stdioArmed ? { source: "stdio", file: null } : { file: join(transcriptDir, LIVE_FILE_NAME) };
+				live = openLiveTranscript({ ...source, jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs && !stdioArmed ? { checkpoint: checkpointArgs } : {}), ...(steerAck && !stdioArmed ? { steer: steerAck } : {}) }) ?? null;
 			} catch {
 				live = null;
 			}
 		}
 		// Issue #644: no publisher means no progress, so a trigger's `run.statusComment` cannot be honoured. Said once, by
-		// reason: both switches off (no opener), or no transcript file or job id to read progress from.
+		// reason: both switches off (no opener), or no transcript file or job id to read progress from. Issue #686: a
+		// copying venue's skipped transcript is `no-transcript` too (its own reason is on `live_transcript_skipped`); before
+		// the openshell bundle was handed the opener it read `progress-off` there, which named the wrong switch.
 		if (job?.statusComment === true && live === null) log("status_comment_skipped", { jobId: jobId ?? null, reason: typeof openLiveTranscript === "function" ? "no-transcript" : "progress-off" });
 		// Bounded and never throwing (live-transcript.mjs); called at most once, and always BEFORE this function resolves,
 		// so before the processor's `finally` removes the job directory the file lives in.
@@ -532,6 +570,35 @@ export function makeRunContainer({
 		// (`cpuRangeRefusal`). Bounded, and never logged: only the count it names leaves this function.
 		let stderrHead = "";
 		const STDERR_HEAD_MAX = 4096;
+		// Issue #686: an armed attempt's stderr goes through the record demux first. Records are verified under THIS
+		// attempt's exit key against the string in the container's PI_JOB_ID (`name`, as the steer ack's `ackRunId`), and
+		// their lines pushed into the publisher; every other byte is passed on unchanged to the tee and the head below.
+		// Demuxed even when the opener returned no publisher, so the records never reach the job log or the terminal.
+		const demux = stdioArmed
+			? makeDemux({
+					key: exitKey,
+					runId: name,
+					onBaseline: (size) => live?.setBaseline?.(size),
+					onLine: (line, end) => live?.push?.(line, end),
+					onGap: (missing) => live?.skip?.(missing),
+					onReset: (size) => live?.reset?.(size),
+				})
+			: null;
+		let demuxEnded = false;
+		// A demux that threw is not asked again for this attempt (none is known to throw). Its error carries what that chunk
+		// had already passed on and the part of it not yet read, so the output is exactly: those passed bytes, then what it
+		// held (`end()`), then the unread rest, then every later chunk as it comes. No byte twice, and no completed
+		// record's bytes. A throw that carries neither (not the demux's own) passes the chunk on whole.
+		let demuxFailed = false;
+		const endDemux = () => {
+			if (demux === null || demuxEnded) return Buffer.alloc(0);
+			demuxEnded = true;
+			const counts = demux.stats();
+			// Counts only, never a payload: a forged record is the agent's text.
+			if (counts.unverified > 0) log("transcript_record_unverified", { container: name, count: counts.unverified });
+			if (counts.replayed > 0 || counts.gaps > 0 || counts.oversize > 0) log("transcript_record_dropped", { container: name, replayed: counts.replayed, gaps: counts.gaps, oversize: counts.oversize });
+			return demux.end();
+		};
 
 		const run = new Promise((resolve, reject) => {
 			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
@@ -555,14 +622,33 @@ export function makeRunContainer({
 				} catch {}
 			};
 			child.stdout?.on("data", tee);
-			child.stderr?.on("data", (chunk) => {
+			const stderrOut = (chunk) => {
+				if (chunk.length === 0) return;
 				if (stderrHead.length < STDERR_HEAD_MAX) stderrHead = (stderrHead + String(chunk)).slice(0, STDERR_HEAD_MAX);
 				tee(chunk);
+			};
+			child.stderr?.on("data", (chunk) => {
+				if (demux === null || demuxFailed) {
+					if (stderrHead.length < STDERR_HEAD_MAX) stderrHead = (stderrHead + String(chunk)).slice(0, STDERR_HEAD_MAX);
+					tee(chunk);
+					return;
+				}
+				let out;
+				try {
+					out = demux.push(chunk);
+				} catch (error) {
+					demuxFailed = true;
+					log("transcript_demux_failed", { container: name });
+					const carried = Buffer.isBuffer(error?.passed) && Buffer.isBuffer(error?.rest);
+					out = carried ? Buffer.concat([error.passed, endDemux(), error.rest]) : Buffer.concat([endDemux(), Buffer.from(chunk)]);
+				}
+				stderrOut(out);
 			});
 			// docker not found / daemon down -- a transient infra fault, so tag it retryable
 			// (CONST-RETRY-INFRA-ONLY). `reason` also cues the processor to release the budget slot,
 			// since a container that never started spent nothing.
 			child.on("error", (err) => {
+				stderrOut(endDemux());
 				void closeCheckpoint();
 				void finishLive("failed").then(stopRelay);
 				sink.close().catch(() => {}); // best-effort teardown; a rejecting close cannot leak an unhandled rejection
@@ -570,6 +656,9 @@ export function makeRunContainer({
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
+				// Issue #686: the demux's held tail (a last line with no newline) goes out before anything closes, and every
+				// record it completed is in the publisher before the final flush below.
+				stderrOut(endDemux());
 				// Issue #645: no live checkpoint starts once the container is gone (a quiet point in the final read would
 				// pause a dead container). Closing first, and awaiting it after the final read, lets a live one in flight
 				// finish, its pointer included, before this promise resolves and the processor's cleanup can run.

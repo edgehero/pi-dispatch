@@ -55,6 +55,7 @@ import { assertSteerReady, createInbox } from "./src/inbox.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 import { LAYOUT } from "./src/layout.mjs";
+import { createTranscriptMirror, transcriptMirrorWanted } from "./src/transcript-mirror.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
 // never a static import. Never add a pi-ai package specifier to this file's imports: two copies of that
@@ -722,12 +723,37 @@ if (!nestedRunner) {
 	// it as this runner does would drain a stdin that is not its own, or wait on one no one writes.
 	// env-internal PI_EXIT_AUTH: written by the worker into the job's closed env map, removed here once read.
 	delete process.env.PI_EXIT_AUTH;
+	// Issue #686: on a copying venue the worker asks for the session file's lines over stderr, signed with the same key
+	// (transcript-mirror.mjs), because the file is in the sandbox until the download. Decided now, beside the key, and the
+	// variable leaves this process's environment at once, as PI_EXIT_AUTH does: a nested runner or any child that read it
+	// would mirror a file it was never asked to. Unset (every binding venue), nothing is started and stderr is untouched.
+	const mirrorWanted = transcriptMirrorWanted(process.env, { key: exitKey.key });
+	// env-internal PI_TRANSCRIPT: written by the worker into the job's closed env map, removed here once read.
+	delete process.env.PI_TRANSCRIPT;
+	if (mirrorWanted.problem !== null) log("transcript_mirror_off", { problem: mirrorWanted.problem });
+	const transcriptMirror = mirrorWanted.on
+		? createTranscriptMirror({
+				// env-internal PI_SESSION_FILE, PI_JOB_ID: the worker's own per-job inputs. PI_JOB_ID is the run id the MAC
+				// names, the same string the exit line and the steer ack carry.
+				file: process.env.PI_SESSION_FILE,
+				key: exitKey.key,
+				runId: process.env.PI_JOB_ID,
+				log,
+			})
+		: null;
+	transcriptMirror?.start();
 	exitWriter = createExitWriter({
 		key: exitKey.key,
 		// env-internal PI_JOB_ID: set by the worker on the container, so the exit line can name its job.
 		jobId: process.env.PI_JOB_ID,
 		// Synchronously, every byte, to fd 1 (writeAllSync): the SIGTERM path exits the moment the line is written.
-		write: (line) => writeAllSync(1, line),
+		// Issue #686: the transcript's last lines first, on every path (the decided line, the catch path, SIGTERM), so a
+		// record is never left unwritten behind an exit line the process dies right after. Never throws (drain swallows).
+		write: (line) => {
+			transcriptMirror?.drain();
+			transcriptMirror?.stop();
+			writeAllSync(1, line);
+		},
 		exit: (code) => process.exit(code),
 		// Issue #596: this container's cgroup counters, read by the writer just before each line (cgroup-usage.mjs).
 		resources: () => readCgroupUsage(),

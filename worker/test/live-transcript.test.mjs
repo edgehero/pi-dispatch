@@ -1084,3 +1084,142 @@ test("the checkpoint factory: a third consumer fed every line with its end, rese
 	assert.deepEqual(order, ["ckpt"]);
 	assert.ok(pub2.stats().published >= 2, "the header note and the end reached the stream");
 });
+
+// --- the stdio source (issue #686): pushed lines, no file ---------------------------------------------------------
+
+/** An fs that fails the test if the stdio source ever touches it: it has no file. */
+const noFs = new Proxy({}, { get: (_t, name) => () => assert.fail(`the stdio source called fs.${String(name)}`) });
+
+test("stdio: pushed lines take the tailed line's path (parse, onParsed with end positions, mapping, redaction), never a file (#686)", async () => {
+	const redis = fakeRedis();
+	const seen = [];
+	let baselines = 0;
+	const secret = "SECRETVALUE0123456789";
+	const pub = makeLiveTranscript({ source: "stdio", file: "/nowhere", fs: noFs, jobId: "stdio-1", redis, pollMs: 3_600_000, now: () => Date.parse(AT), redact: makeRedactor({ values: [secret] }), onParsed: (parsed, _ts, flags) => seen.push([parsed.type, flags]), onBaseline: () => (baselines += 1) });
+	pub.start();
+	assert.equal(baselines, 0, "not before the runner's baseline arrives");
+	pub.setBaseline(0);
+	assert.equal(baselines, 1, "an empty baseline is reached at once, so a consumer waiting on it never waits");
+	const a = header().trimEnd();
+	const b = msg({ role: "user", content: `the key is ${secret}` }).trimEnd();
+	const endA = Buffer.byteLength(a) + 1;
+	const endB = endA + Buffer.byteLength(b) + 1;
+	pub.push(Buffer.from(a), endA);
+	pub.push(Buffer.from(b), endB);
+	pub.push(Buffer.from("not json"), endB + 9);
+	pub.push(Buffer.alloc(0), endB + 10);
+	await pub.poll();
+	await pub.finish("completed");
+	assert.deepEqual(seen, [
+		["session", { prior: false, end: Buffer.byteLength(a) + 1 }],
+		["message", { prior: false, end: Buffer.byteLength(a) + Buffer.byteLength(b) + 2 }],
+	]);
+	assert.deepEqual(redis.writes.map((w) => w.kind), ["note", "user", "note", "end"]);
+	assert.equal(redis.writes[2].text, UNPARSEABLE_NOTE);
+	assert.ok(!JSON.stringify(redis.writes).includes(secret), "redacted as a tailed line is");
+	assert.equal(redis.writes.at(-1).outcome, "completed");
+	assert.equal(redis.dels, 1, "the attempt's first write empties the stream, as on a tailed file");
+});
+
+test("stdio: skip and an oversize line are one skipped entry each; a reset replays the lines a rewrite holds again; nothing after finish (#686)", async () => {
+	const redis = fakeRedis();
+	const seen = [];
+	let resets = 0;
+	const pub = makeLiveTranscript({ source: "stdio", fs: noFs, jobId: "stdio-2", redis, pollMs: 3_600_000, now: () => Date.parse(AT), lineMaxBytes: 64, onParsed: (parsed, _ts, flags) => seen.push([parsed.n, flags]), onReset: () => (resets += 1) });
+	pub.start();
+	pub.setBaseline(0);
+	const line = (n) => Buffer.from(JSON.stringify({ type: "custom", n }));
+	const size = line(1).length + 1;
+	pub.push(line(1), size);
+	pub.push(line(2), 2 * size);
+	pub.skip(3);
+	pub.push(Buffer.alloc(100, 0x78), 2 * size + 101);
+	// The runner's reset carries the rewritten file's size: the lines ending at or before it are a replay.
+	pub.reset(2 * size);
+	pub.push(line(1), size);
+	pub.push(line(2), 2 * size);
+	pub.push(line(3), 3 * size);
+	const finishing = pub.finish("policy");
+	pub.push(line(4), 4 * size);
+	pub.skip(1);
+	await finishing;
+	assert.deepEqual(seen, [
+		[1, { prior: false, end: size }],
+		[2, { prior: false, end: 2 * size }],
+		[1, { prior: false, replay: true, end: size }],
+		[2, { prior: false, replay: true, end: 2 * size }],
+		[3, { prior: false, replay: false, end: 3 * size }],
+	], "the rewritten file's size bounds the replay exactly, whatever was skipped before it");
+	assert.equal(resets, 1);
+	assert.deepEqual(redis.writes.map((w) => w.kind), ["skipped", "skipped", "reset", "end"]);
+	assert.equal(pub.stats().skipped, 4, "three not sent, one oversize");
+	assert.equal(pub.stats().resets, 1);
+});
+
+test("stdio: a resumed session's staged lines are PRIOR, by the runner's baseline, and onBaseline fires once they are in (#709 review)", async () => {
+	const seen = [];
+	let baselines = 0;
+	const pub = makeLiveTranscript({ source: "stdio", fs: noFs, jobId: "stdio-5", redis: fakeRedis(), pollMs: 3_600_000, now: () => Date.parse(AT), onParsed: (parsed, _ts, flags) => seen.push([parsed.n, flags.prior]), onBaseline: () => (baselines += 1) });
+	pub.start();
+	const line = (n) => Buffer.from(JSON.stringify({ type: "message", n, message: { role: "user", content: "x" } }));
+	const size = line(1).length + 1;
+	// The staged transcript holds two lines: the runner's baseline is their size.
+	pub.setBaseline(2 * size);
+	assert.equal(baselines, 0);
+	pub.push(line(1), size);
+	assert.equal(baselines, 0, "the staged transcript is not all in yet");
+	pub.push(line(2), 2 * size);
+	assert.equal(baselines, 1, "the last staged line is in");
+	pub.push(line(3), 3 * size);
+	await pub.finish("completed");
+	assert.deepEqual(seen, [[1, true], [2, true], [3, false]], "only this run's own line counts as this run's");
+	assert.equal(baselines, 1, "once");
+	// No baseline record (it was broken): failing open, the first line reports it and nothing is prior.
+	const open = [];
+	let fired = 0;
+	const lost = makeLiveTranscript({ source: "stdio", fs: noFs, jobId: "stdio-6", redis: fakeRedis(), pollMs: 3_600_000, onParsed: (parsed, _ts, flags) => open.push(flags.prior), onBaseline: () => (fired += 1) });
+	lost.start();
+	lost.push(line(1), size);
+	await lost.finish("completed");
+	assert.deepEqual(open, [false]);
+	assert.equal(fired, 1);
+});
+
+test("the opener's stdio source: push, skip and reset on the handle, no checkpoint opened, the file never read (#686)", async () => {
+	const redis = fakeRedis();
+	let checkpoints = 0;
+	const open = makeLiveTranscriptOpener({ redis, transcripts: true, progress: false, pollMs: 3_600_000, now: () => Date.parse(AT), checkpoint: () => ((checkpoints += 1), { consume() {}, reset() {}, stats: () => ({}) }) });
+	const pub = open({ source: "stdio", file: "/never/read.jsonl", jobId: "stdio-3", redact: (t) => String(t), checkpoint: { runId: "r" } });
+	assert.equal(checkpoints, 0, "a checkpoint copies a host file, and there is none");
+	assert.equal(pub.checkpoint, null);
+	assert.equal(typeof pub.push, "function");
+	assert.equal(typeof pub.setBaseline, "function");
+	assert.equal(typeof pub.skip, "function");
+	assert.equal(typeof pub.reset, "function");
+	pub.start();
+	pub.push(Buffer.from(msg({ role: "user", content: "hello" }).trimEnd()));
+	await pub.finish("completed");
+	assert.deepEqual(redis.writes.map((w) => [w.kind, w.text ?? null]), [["user", "hello"], ["end", null]]);
+	const file = open({ file: join(tempDir("pi-live-src-"), "current.jsonl"), jobId: "stdio-4", redact: (t) => String(t) });
+	assert.equal("push" in file, false, "a tailed source's handle is what it was");
+});
+
+test("stdio: a line ending at or before the last one, with no reset between, applies the reset whose record was lost (#709 review 2)", async () => {
+	const redis = fakeRedis();
+	const seen = [];
+	let resets = 0;
+	const pub = makeLiveTranscript({ source: "stdio", fs: noFs, jobId: "stdio-7", redis, pollMs: 3_600_000, now: () => Date.parse(AT), onParsed: (parsed, _ts, flags) => seen.push([parsed.n, flags.replay ?? null]), onReset: () => (resets += 1) });
+	pub.start();
+	pub.setBaseline(0);
+	const line = (n) => Buffer.from(JSON.stringify({ type: "custom", n }));
+	const size = line(1).length + 1;
+	pub.push(line(1), size);
+	pub.push(line(2), 2 * size);
+	// The runner's reset record was broken in transit: the rewritten file's first line comes next.
+	pub.push(line(1), size);
+	pub.push(line(3), 3 * size);
+	await pub.finish("completed");
+	assert.equal(resets, 1);
+	assert.deepEqual(seen, [[1, null], [2, null], [1, true], [3, false]], "the last end before it bounds the replay");
+	assert.deepEqual(redis.writes.map((w) => w.kind).filter((k) => k === "reset"), ["reset"]);
+});

@@ -374,7 +374,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -573,6 +573,13 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	// env-internal PI_EXIT_AUTH: written into the job's closed env map here, never read from the worker's environment.
 	if (exitAuth === true) env.PI_EXIT_AUTH = "stdin";
 	else delete env.PI_EXIT_AUTH;
+
+	// Issue #686: the runner mirrors its session file over stderr as signed records, for an attempt run-container armed
+	// (a copying venue, an image that declares `transcriptStderr`, and a key). Settled here like PI_EXIT_AUTH, and only
+	// beside it: a record is signed with that key, so without one the runner would mirror nothing anyway. `=== true`.
+	// env-internal PI_TRANSCRIPT: written into the job's closed env map here, never read from the worker's environment.
+	if (transcriptStderr === true && exitAuth === true) env.PI_TRANSCRIPT = "stderr";
+	else delete env.PI_TRANSCRIPT;
 
 	// Issue #500: the runner sets these in its own environment, for its child processes, and no value from outside
 	// may arrive first. Both lists refuse them upstream (config.mjs for PI_FORWARD_ENV, the triggers loader for

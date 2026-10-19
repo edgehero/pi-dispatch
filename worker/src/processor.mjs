@@ -13,7 +13,7 @@ import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS, recoveryCounts, 
 import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
-import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY } from "./image-preflight.mjs";
+import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mjs";
 
@@ -1869,6 +1869,9 @@ async function runAttempt(job, deps, durable) {
 		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
 		// declare it is read as before, under the #542 trust rule below alone.
 		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
+		// Issue #686: an image whose runner can mirror its transcript over stderr. Handed as a fact; runContainer arms it only
+		// on a venue that copies (`transcript: "stdio"`) and only beside a key, so every other run is called as before.
+		const transcriptStderr = (img.capabilities ?? []).includes(TRANSCRIPT_STDERR_CAPABILITY);
 		// Issue #645: a FRESH armed run seeds the checkpoint store from its clone, now, before the container: the one moment
 		// the workspace's `.git` is still the worker's own (workspace-checkpoint.mjs `primeBase`). After every reserve, so a
 		// refused job never writes to the store. A recovery's base is already there. A base that could not be primed means
@@ -1896,7 +1899,7 @@ async function runAttempt(job, deps, durable) {
 			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
 			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
 		}
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.

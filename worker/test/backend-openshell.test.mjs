@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { BACKENDS, OPENSHELL_BACKEND } from "../src/backends.mjs";
 import { READ_BACK_BY_A_LIVE_PROBE, runBackendConformance } from "../src/backend-conformance.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { transcriptRecord } from "../../image/runner/src/transcript-mirror.mjs";
 
 /**
  * Issue #683: the `openshell` bundle, driven against a fake `openshell` CLI. Two seams, because the adapter has two
@@ -87,6 +88,8 @@ function fakeOpenshell({ phase = "Ready", policyBack = null, sandboxes = [], fai
 		child.kill = () => {};
 		queueMicrotask(() => {
 			if (state.abort) state.abort();
+			// Issue #686: what the exec's stderr carries, given the key the exec was handed on its stdin.
+			for (const chunk of state.stderr?.(state.stdin.at(-1)?.trim() ?? null) ?? []) child.stderr.emit("data", Buffer.from(chunk));
 			child.emit("close", state.exit);
 		});
 		return child;
@@ -578,4 +581,33 @@ test("a gone sandbox's provider is deleted by the gone-check (#684 review M3)", 
 	assert.equal(await bundle(fake).containerGone("pi-job-gone"), true);
 	await new Promise((r) => setImmediate(r));
 	assert.ok(fake.state.calls.some((c) => c[1] === "provider" && c[2] === "delete" && c[3] === mod.sandboxNameOf("pi-job-gone")));
+});
+
+test("the live transcript over the exec's stderr (#686): PI_TRANSCRIPT on --env, the opener on the stdio source, the records verified and kept out of the output", { skip }, async () => {
+	const fake = fakeOpenshell();
+	fake.state.stderr = (key) => {
+		const records = transcriptRecord(key, "pi-job-j1", 1, "b", 0) + transcriptRecord(key, "pi-job-j1", 2, "l", 19, Buffer.from('{"type":"session"}'));
+		return ["openshell: a line of its own\n", records.slice(0, 9), records.slice(9)];
+	};
+	const opened = [];
+	const pushed = [];
+	const output = [];
+	const openLiveTranscript = (args) => (opened.push(args), { start() {}, finish: async () => {}, push: (l) => pushed.push(l.toString()), skip() {}, reset() {}, progressSummary: () => null });
+	const dirs = jobDirs();
+	const b = bundle(fake, { openLiveTranscript, onOutput: (c) => output.push(String(c)) });
+	await b.runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, jobId: "j1" });
+	const execOf = (state) => state.calls.find((c) => c[1] === "sandbox" && c[2] === "exec");
+	const execCall = execOf(fake.state);
+	assert.ok(execCall.includes("PI_TRANSCRIPT=stderr"), "a structural name, so it rides the exec's --env and is never a provider placeholder");
+	assert.equal(opened.length, 1);
+	assert.equal(opened[0].source, "stdio");
+	assert.deepEqual(pushed, ['{"type":"session"}']);
+	assert.equal(output.join(""), "openshell: a line of its own\n");
+	// Without the image's capability: no variable, no publisher, and the skip said by name.
+	const logs = [];
+	const fake2 = fakeOpenshell();
+	await bundle(fake2, { openLiveTranscript, log: (e, f) => logs.push([e, f]) }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j2", signal: new AbortController().signal, exitAuth: true, jobId: "j2" });
+	assert.ok(!execOf(fake2.state).includes("PI_TRANSCRIPT=stderr"));
+	assert.deepEqual(logs.filter(([e]) => e === "live_transcript_skipped"), [["live_transcript_skipped", { container: "pi-job-j2", reason: "no-capability" }]]);
+	assert.equal(opened.length, 1);
 });
