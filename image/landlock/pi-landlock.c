@@ -11,7 +11,12 @@
 // rename out, symlink, a nested shell and a nested pi-landlock asking for `/` all refused).
 //
 // READS are deliberately NOT handled: the venue's own policy decides them, and narrowing them here would only make
-// this helper a second, drifting copy of that policy.
+// this helper a second, drifting copy of that policy. Nor is METADATA: Landlock (ABI 3 to 5) does not mediate chmod,
+// chown, utimes or xattrs, so the agent can still change an uploaded file's mode, never its bytes or the tree.
+//
+// On a kernel with Landlock ABI 6 or later the domain is also SCOPED: signals and abstract unix sockets cannot leave
+// it, so a process outside it that takes commands over such a socket cannot be asked to write on the agent's behalf.
+// Below ABI 6 there is no such knob, and the domain is the write confinement alone.
 //
 // The worker builds this command line (`--rw` per writable path, then `--`, then the absolute entrypoint), never the
 // image: the paths are the box, and the box is the worker's (CONST-ISOLATION-CONTAINER-PER-JOB). A venue that binds
@@ -22,9 +27,9 @@
 // the kernel refuses, a relative or missing command. 126 is "found but could not run", which is what this is, and it
 // never collides with the runner's own codes (0 to 3) or a signal's (128 and up).
 //
-// Static, no libc beyond syscall(2), prctl(2), open(2) and execv(2), and no header for Landlock itself: the build
-// image's kernel headers predate ABI 3, so the constants are spelled here from the kernel's uapi
-// (include/uapi/linux/landlock.h), whose values are ABI and never change.
+// Static, and no header for Landlock itself: the build image's kernel headers predate ABI 3, so the constants are
+// spelled here from the kernel's uapi (include/uapi/linux/landlock.h), whose values are ABI and never change. Beyond the
+// Landlock syscalls it uses only prctl, open, fstat, close and execv, and stdio for its one refusal line.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -70,11 +75,19 @@
 // The subset the kernel accepts on a rule for a non-directory (/dev/null is one).
 #define FILE_WRITE_RIGHTS (ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE)
 
+// ABI 6: the scopes, in `struct landlock_ruleset_attr`'s third field.
+#define SCOPE_ABSTRACT_UNIX_SOCKET (1ULL << 0)
+#define SCOPE_SIGNAL (1ULL << 1)
+#define SCOPE_ABI 6
+
 #define MIN_ABI 3
 #define EXIT_REFUSED 126
 
+// The kernel's struct, whose size tells it which fields the caller knows: the short form below ABI 6, the long one from it.
 struct ruleset_attr {
 	uint64_t handled_access_fs;
+	uint64_t handled_access_net;
+	uint64_t scoped;
 };
 
 struct path_beneath_attr {
@@ -91,12 +104,15 @@ static int refuse(const char *what, const char *detail) {
 int main(int argc, char **argv) {
 	long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, CREATE_RULESET_VERSION);
 	if (abi < MIN_ABI) {
+		int err = errno;
 		char detail[64];
 		snprintf(detail, sizeof detail, "abi %ld, want %d or later", abi, MIN_ABI);
-		return refuse("Landlock is unavailable", abi < 0 ? strerror(errno) : detail);
+		return refuse("Landlock is unavailable", abi < 0 ? strerror(err) : detail);
 	}
-	struct ruleset_attr attr = { .handled_access_fs = WRITE_RIGHTS };
-	int ruleset = (int)syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, 0);
+	// No network rights are handled (the venue's policy decides egress), so `handled_access_net` stays 0 on every ABI.
+	struct ruleset_attr attr = { .handled_access_fs = WRITE_RIGHTS, .handled_access_net = 0, .scoped = abi >= SCOPE_ABI ? (SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL) : 0 };
+	size_t attr_size = abi >= SCOPE_ABI ? sizeof attr : sizeof attr.handled_access_fs;
+	int ruleset = (int)syscall(SYS_landlock_create_ruleset, &attr, attr_size, 0);
 	if (ruleset < 0) return refuse("landlock_create_ruleset", strerror(errno));
 
 	int i = 1;
