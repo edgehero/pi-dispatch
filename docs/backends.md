@@ -1,9 +1,9 @@
 # Container backends
 
-A **backend** is where a job's container gets built. There are two you can bless today: `local`, which is the
-Docker daemon on the worker's own host and is what every deployment has always used, and `podman`, which is this
-worker account's own rootless Podman on the same host (issue #354, [`docs/podman.md`](podman.md)). A third,
-`openshell`, is built and **not yet blessable** (below).
+A **backend** is where a job's container gets built. There are three you can bless today: `local`, which is the
+Docker daemon on the worker's own host and is what every deployment has always used, `podman`, which is this
+worker account's own rootless Podman on the same host (issue #354, [`docs/podman.md`](podman.md)), and `openshell`,
+an NVIDIA OpenShell sandbox per job on this host's gateway, blessable since issue #684 (below).
 
 This page is the contract. If you are adding a venue, everything you need is here: you should not have to
 read the worker's source.
@@ -531,12 +531,47 @@ sweep runs against it. Two things follow that are worth knowing before you do it
   open on it. Once you know none is, remove it by hand: `pi-dispatch sandbox --list` shows its id, and
   `rm -rf "$PI_SANDBOX_DIR/<jobId>"` removes it (`PI_SANDBOX_DIR` defaults to `<PI_JOBS_DIR>/sandboxes`).
 
-## The `openshell` venue (built, not yet blessable)
+## The `openshell` venue
 
 Issue #683 adds `openshell`: one NVIDIA OpenShell sandbox per job, on an OpenShell gateway running on this host,
-driven through the `openshell` CLI on its Docker or Podman compute driver. `PI_BACKENDS=openshell` is **refused by
-name** until issue #684 ships its egress rules and per-job credential providers; until then the entry, the adapter
-(`worker/src/backend-openshell.mjs`) and its conformance run exist so that work starts from a measured venue.
+driven through the `openshell` CLI on its Docker or Podman compute driver (the adapter is
+`worker/src/backend-openshell.mjs`). Issue #684 gave it its policy layer, the per-job network policy and the per-job
+credential provider, and with them it is **blessable**.
+
+**Blessing it.**
+
+- Name it in `PI_BACKENDS` (`PI_BACKENDS=local,openshell`, or `openshell` alone to make it the default).
+- Two settings, read by the worker at boot only while `PI_BACKENDS` names it (a bad value refuses the boot):
+  `PI_OPENSHELL_ENGINE`, the gateway's compute driver whose store the job image is read from (`docker`, the default,
+  or `podman`), and `PI_OPENSHELL_GATEWAY`, a registered gateway's name (`openshell gateway list`; unset uses the
+  CLI's active gateway).
+- **`PI_EGRESS` must stay armed.** `PI_EGRESS=0` with `openshell` blessed refuses the boot: the venue's own policy is
+  its egress control and holds the job's credentials, so it has no "egress off" ([`docs/egress.md`](egress.md)).
+- **The tested release, exactly.** At boot the `openshell` CLI and the gateway must both be
+  `OPENSHELL_TESTED_VERSION` (0.1.4), since OpenShell marks the interfaces this venue drives experimental; another
+  release refuses the boot (exit 2, not restarted into). A CLI that does not answer exits 1 and the service restarts
+  into it; a gateway that is down at boot is only logged (`openshell_gateway_down_at_boot`), because every job reads it
+  again before it spends.
+- Run `pi-dispatch doctor --openshell` first; once `PI_BACKENDS` names the venue a plain `pi-dispatch doctor` runs the
+  same lines.
+
+**Credentials, through a provider.** On this venue the job's secrets never enter the sandbox as values. For each job
+the worker creates an OpenShell provider named like the sandbox, holding every secret of the job's environment (the
+provider key, the minted forge token, a trigger's resolved secrets: every name the redactor treats as secret). The
+values reach the `openshell` CLI through its own environment, never its argv, and are never written to a file; the
+provider's profile (names only) sits beside the job directory, mode 0600, and is never uploaded. The provider is
+attached at create and every endpoint of the job's policy is bound to it, so the agent sees placeholders
+(`openshell:resolve:env:v<rev>_NAME`) and OpenShell's supervisor swaps the real value in only in a request to a host
+the policy admits (measured for headers and for git's Basic auth). A job whose policy has no rule at all reaches
+nothing, so no provider is made and its secrets go nowhere (logged `openshell_secrets_unbound`). The teardown deletes
+the provider and its profile after the sandbox; a crashed job's are deleted by the boot sweep, by the owner label.
+Rotation does not reach a running job: a job is bounded at 30 minutes and an App token lives about an hour.
+
+**git push.** The clone's remote carries no token, so a forge job's exec gets a git credential helper (through
+`GIT_CONFIG_COUNT`) that prints the forge token's placeholder as the password, the supervisor rewriting it in a request to
+any host the policy admits (every credential of the job's provider is bound to every admitted host, as squid gives every
+listed host the whole environment). On GitHub the policy admits a push only to the job's own repository; a push anywhere else is refused by
+the layer itself ([`docs/egress.md`](egress.md)).
 
 What it is, in this page's terms:
 
@@ -553,17 +588,30 @@ What it is, in this page's terms:
   folder or cron-folder job is refused there. The table entry also carries `credentialCustody: "layer"`, the venue
   holding the credentials, which no floor compares.
 - **Per-job refusals before spend**: a gateway not on loopback or a unix socket (`openshell-gateway-not-local`), a
-  gateway-wide policy in force (`openshell-global-policy`), and on Linux a kernel without Landlock
-  (`openshell-landlock-missing`).
-- **Not served yet**: the live transcript, progress, steering and recovery checkpoints (issue #686), a job's MCP
-  servers and the egress rules (issue #684). No `pi-dispatch sandbox` shell either: the venue has no launcher.
+  gateway-wide policy in force (`openshell-global-policy`), on Linux a kernel without Landlock
+  (`openshell-landlock-missing`), an egress entry the policy cannot express without widening
+  (`openshell-egress-untranslatable`), `run.recover` (`openshell-recover-unsupported`, a `kind: local` job excepted,
+which runs unarmed as on every venue), a gateway at another release than the tested one
+(`openshell-gateway-untested`, read per job as well as at boot), and a model provider that reads its key's value inside
+the job (`openshell-credential-reads-value`: Bedrock, Vertex, Codex, Copilot, and an Anthropic OAuth token), which a
+placeholder cannot stand in for.
+- **A secret no provider can carry** (a `run.secrets` key or a `PI_FORWARD_ENV` name no shell can spell, or longer
+  than 128) reaches the sandbox not at all, never as a value on the exec's argv, and is named in the log
+  (`openshell_secret_unbindable`). A forwarded name the redactor does not know as non-secret (`TZ`, `LANG`) is a
+  credential to this venue and arrives as a placeholder: forward only what the job uses as a secret.
+- **Not served yet** (issue #686): a trigger with `run.recover` is refused before it spends
+  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session; the live transcript,
+  progress and steering are skipped by name (steering as `steerSkipped: "venue-copies"`), the job still running. No
+  `pi-dispatch sandbox` shell either: the venue has no launcher. A job's MCP servers are served (issue #684): an
+  `http` server's host is an allowlist entry like any other, and a stdio server's overlay paths are moved to the
+  sandbox layout.
 - **`pi-dispatch doctor --openshell`** says whether this host is ready: the CLI and the gateway at the tested release
   (`OPENSHELL_TESTED_VERSION`, exactly, since OpenShell marks these interfaces experimental), the gateway on loopback,
   its compute driver the engine `PI_OPENSHELL_ENGINE` names (`docker` by default, or `podman`), no gateway-wide policy,
   Docker 28 or Podman 5 or later, Landlock in the kernel, and the job image declaring `sandboxLayout`.
   `PI_OPENSHELL_GATEWAY` names a registered gateway when the CLI's active one is not it.
 - **CI**: `openshell-conformance.yml` runs `.github/scripts/openshell-conformance.mjs` against a real gateway on every
-  pull request, advisory for now.
+  pull request, advisory until it has passed across a round.
 
 ## What is deliberately not yours to decide
 

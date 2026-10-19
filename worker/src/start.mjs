@@ -58,7 +58,8 @@ import { hostQueueName, makeQueue, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
-import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OPENSHELL_BACKEND, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { makeOpenshellBackend, makeOpenshellReaper, openshellBootVersions } from "./backend-openshell.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
@@ -728,6 +729,11 @@ export async function startWorker(
 		readPodmanInfo: readPodmanInfoFn = makePodmanInfoReader(),
 		makePodmanReaper: makePodmanReaperFn = makePodmanReaper,
 		makePodmanBackend: makePodmanBackendFn = makePodmanBackend,
+		// Issue #684: the openshell venue's three, podman's pattern: the boot's version read, its reaper and its bundle,
+		// each a seam because the real ones spawn `openshell`, and only while the venue is blessed.
+		readOpenshellVersions: readOpenshellVersionsFn = openshellBootVersions,
+		makeOpenshellReaper: makeOpenshellReaperFn = makeOpenshellReaper,
+		makeOpenshellBackend: makeOpenshellBackendFn = makeOpenshellBackend,
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
 		makeGitLabHost: makeGitLabHostFn = makeGitLabHost,
 		makeForgejoAuth: makeForgejoAuthFn = makeForgejoAuth,
@@ -788,6 +794,8 @@ export async function startWorker(
 	// read, its reaper and its bundle exist only while it is blessed, so a deployment that never chose it spawns no
 	// `podman` and pays nothing for it being in the table.
 	const podmanBlessed = config.backends.includes(PODMAN_BACKEND);
+	// Issue #684: and for the openshell venue, blessable since this issue: its CLI is spawned only while it is blessed.
+	const openshellBlessed = config.backends.includes(OPENSHELL_BACKEND);
 	// Issue #354: an ABSENT `observationPreflight` admits every job, which is the right answer only for a venue whose
 	// words hold without observing anything. A venue whose table entry names an `observedBy` and carries no preflight
 	// would have those words hold with nothing looking, and a floor naming one would pass on capability alone: the
@@ -993,6 +1001,14 @@ export async function startWorker(
 
 	const bootRefusal = jobUserBootRefusal(bootDecision, config.defaultBackend);
 	if (bootRefusal) throw configError(bootRefusal);
+	// Issue #684: the openshell venue's releases, read once at boot (the half #683 left to the blessing). A CLI or a gateway
+	// at another release than the one this venue was measured on refuses the boot (exit 2); a CLI that does not answer is
+	// restarted into (exit 1); a gateway that does not answer refuses nothing, since every job's preflight reads it again.
+	if (openshellBlessed) {
+		const versions = await readOpenshellVersionsFn({ gateway: config.openshell.gateway });
+		if (versions?.refusal) throw versions.transient ? new Error(versions.refusal) : configError(versions.refusal);
+		if (versions?.gatewayDown) log("openshell_gateway_down_at_boot", { gateway: config.openshell.gateway });
+	}
 	// Issue #448: where a local job runs on rootful Podman's Docker API service on this host, the containers.conf that
 	// service reads (the system chain, root's own, the unit's CONTAINERS_CONF) and whether the running service started
 	// before it last changed. A VENUE refusal, as the podman venue's #428 one is and for its reason: with egress off no
@@ -1283,6 +1299,8 @@ export async function startWorker(
 		backendReaps = {
 			...(localBlessed ? { [DEFAULT_BACKEND]: makeReaperFn({ log }) } : {}),
 			...(podmanBlessed ? { [PODMAN_BACKEND]: makePodmanReaperFn({ log }) } : {}),
+			// Issue #684: the openshell venue's, by its owner label: crashed jobs' sandboxes, then their providers.
+			...(openshellBlessed ? { [OPENSHELL_BACKEND]: makeOpenshellReaperFn({ gateway: config.openshell.gateway, log }) } : {}),
 			...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])),
 		};
 		const swept = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
@@ -1914,8 +1932,41 @@ export async function startWorker(
 		// Its own sentence (PR #463 round 3): the job-shaped one says "this job is retried", and at boot there is no job.
 		if (typeof bootKeeper?.keeper === "string") log("netns_keeper_not_holding_at_boot", { reason: bootKeeper.keeperAtBoot ?? bootKeeper.keeper });
 	}
-	// Every bundle this boot built beside local's, in registration order: the podman one first, then the injected ones.
-	const builtBackends = [...(podmanBackend ? [podmanBackend] : []), ...extraBackends];
+	// Issue #684: the openshell bundle, while blessed. Its policy reads the same two sources the squid venues' proxy reads
+	// and the MCP check reads (this folder's egress-allowlist.conf, a missing one admitting nothing, and the pickup's
+	// endpoint snapshot, or the boot-loaded one where a job carries none); its reaper is the boot sweep's own.
+	// ONE reader of this folder's egress-allowlist.conf for the MCP check and the openshell policy, so the two cannot
+	// disagree about what the proxy admits. No allowlist here: every host outside a declared endpoint is unreachable,
+	// which it is. Any other failure is the caller's to classify (a transient errno is retried).
+	const readEgressAllowlist = () => {
+		try {
+			return parseAllowlist(readFileSync(join(process.cwd(), "egress-allowlist.conf"), "utf8"));
+		} catch (error) {
+			if (error?.code === "ENOENT") return [];
+			throw error;
+		}
+	};
+	const openshellBackend = openshellBlessed
+		? makeOpenshellBackendFn({
+				image: config.jobImage,
+				engine: config.openshell.engine,
+				gateway: config.openshell.gateway,
+				readAllowlist: readEgressAllowlist,
+				readEndpoints: () => modelEndpoints.current ?? [],
+				hostEnv: env,
+				openJobLog,
+				globalPiDir: config.globalPiDir,
+				allowGlobalExtensions: config.allowGlobalExtensions,
+				packagePaths: getPackagePaths,
+				forwardEnv: config.forwardEnv,
+				authFromPi: config.authFromPi,
+				forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+				reap: backendReaps[OPENSHELL_BACKEND],
+				log,
+			})
+		: null;
+	// Every bundle this boot built beside local's, in registration order: podman, openshell, then the injected ones.
+	const builtBackends = [...(podmanBackend ? [podmanBackend] : []), ...(openshellBackend ? [openshellBackend] : []), ...extraBackends];
 	// BOUNDED, because `.catch()` cannot rescue a promise that never settles: `runDocker` resolves only on
 	// the child's `close` or `error` and has no timeout of its own, so a wedged daemon would hang boot
 	// here. This read is a nicety -- a digest for the boot line and the registry -- and a nicety may
@@ -2705,16 +2756,7 @@ export async function startWorker(
 					const providers = jobProviders(job, { defaultProvider: config.provider, allowedModels: config.allowedModels, everyProvider: piProviders() });
 					return new Set([...RESERVED_ENV_NAMES, ...providerKeyNames({ providers, candidatesOf: providerKeyCandidates, overlayModels })]);
 				},
-				allowlist: () => {
-					try {
-						return parseAllowlist(readFileSync(join(process.cwd(), "egress-allowlist.conf"), "utf8"));
-					} catch (error) {
-						// No allowlist here: every server outside a declared endpoint is unreachable, which it is. Any other
-						// failure is the check's to classify (a transient errno is retried).
-						if (error?.code === "ENOENT") return [];
-						throw error;
-					}
-				},
+				allowlist: readEgressAllowlist,
 				endpoints: () => modelEndpoints.current,
 			}),
 			// #227. What PI_BACKENDS blessed, so a trigger naming an unblessed venue refuses pre-spend. The

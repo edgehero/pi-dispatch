@@ -81,12 +81,27 @@ jobs:
         run: docker build -f image/Dockerfile -t pi-job:ci .
 
       # Issue #684: a model server stand-in on the gateway host, which the generated policy reaches through OpenShell's
-      # host aliases (any HTTP answer will do; it holds no data).
+      # host aliases. It records what each request carried in its credential headers (only fake values reach it), so the
+      # script can tell a swapped value from a placeholder, and asks git for Basic auth on info/refs.
       - name: A stand-in server on the gateway host
-        run: nohup python3 -m http.server 18080 --bind 0.0.0.0 > "$RUNNER_TEMP/standin.log" 2>&1 &
+        run: |
+          cat > "$RUNNER_TEMP/standin.mjs" <<'JS'
+          import { createServer } from "node:http";
+          import { appendFileSync } from "node:fs";
+          createServer((req, res) => {
+            appendFileSync(process.env.STANDIN_LOG, JSON.stringify({ method: req.method, path: req.url, xApiKey: req.headers["x-api-key"] ?? null, authorization: req.headers.authorization ?? null }) + "\n");
+            if (req.url.includes("/info/refs") && !req.headers.authorization) {
+              res.writeHead(401, { "WWW-Authenticate": 'Basic realm="standin"' });
+              return res.end();
+            }
+            res.writeHead(200, { "content-type": "text/plain" });
+            res.end("");
+          }).listen(18080, "0.0.0.0");
+          JS
+          STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" nohup node "$RUNNER_TEMP/standin.mjs" > "$RUNNER_TEMP/standin.log" 2>&1 &
 
       - name: Conformance (the real bundle, the real runner)
-        run: PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
+        run: STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
 
       - name: Gateway log
         if: always()

@@ -1203,3 +1203,12 @@ test("issue #596, phase 2: the host budget's four settings are judged at boot, a
 	// Judged against the deployment's own default size: 1 CPU is a budget when the default job takes 1.
 	assert.equal(hostBudgetFrom({ PI_HOST_CPU_BUDGET: "1", PI_JOB_CPUS: "1" }).cpus.cpuCenti, 100);
 });
+
+test("the openshell venue's two settings (#684): judged only while it is blessed, docker and the active gateway by default", () => {
+	assert.deepEqual(loadConfig({}).openshell, { engine: "docker", gateway: null });
+	assert.deepEqual(loadConfig({ PI_OPENSHELL_ENGINE: "lxc", PI_OPENSHELL_GATEWAY: "bad name" }).openshell, { engine: "lxc", gateway: "bad name" }, "unblessed: a stray value refuses nothing");
+	assert.deepEqual(loadConfig({ PI_BACKENDS: "local,openshell", PI_OPENSHELL_ENGINE: "podman", PI_OPENSHELL_GATEWAY: "lab" }).openshell, { engine: "podman", gateway: "lab" });
+	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "lxc" }), (e) => e.piDispatchConfig === true && /PI_OPENSHELL_ENGINE must be docker or podman/.test(e.message));
+	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell", PI_OPENSHELL_GATEWAY: "bad name" }), (e) => e.piDispatchConfig === true && /PI_OPENSHELL_GATEWAY/.test(e.message));
+	assert.throws(() => loadConfig({ PI_BACKENDS: "openshell", PI_EGRESS: "0" }), (e) => e.piDispatchConfig === true && /^PI_EGRESS=0 cannot run openshell/.test(e.message));
+});

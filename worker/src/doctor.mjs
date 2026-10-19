@@ -87,7 +87,7 @@ import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoade
 import { imageRefProblem, jobImageFix, pullOffered } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
-import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
+import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, backendRefusals, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, podmanPausable, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
@@ -610,7 +610,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -2063,8 +2063,8 @@ export async function collectChecks(shellVars, seams) {
 	}
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
-	// Issue #683: the openshell venue's lines, asked by `--openshell` (it cannot be blessed yet, so `openshellUsed` is
-	// false on every deployment until #684), or once a deployment blesses it.
+	// Issue #683: the openshell venue's lines, asked by `--openshell` (before a deployment blesses it), or on every run
+	// once PI_BACKENDS does (blessable since #684).
 	if (seams.openshell === true || venuesOf(env).openshellUsed) {
 		const { openshellChecks } = await import("./doctor-openshell.mjs");
 		checks.push(...(await openshellChecks(env, { image: jobImage, ...(seams.openshellRun ? { run: seams.openshellRun } : {}) })));
@@ -8706,6 +8706,13 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 		// that" -- nothing did, so doctor printed every gated property as quietly enforced on a deployment
 		// that could not start.
 		checks.push({ ok: false, label: `PI_EGRESS does not parse, so what this deployment actually gets cannot be determined: ${error.message}`, fix: 'set PI_EGRESS to exactly "0" (off) or "1"/unset (on)' });
+	}
+	// Issue #684 (review): the worker's own boot rule for a layer venue with egress off, replayed from `backendRefusals`
+	// so doctor and the worker say one sentence. Only that rule: the floor rules are this section's own lines below.
+	if (switches.PI_EGRESS === false) {
+		for (const refusal of backendRefusals({ backends, backendFloor: {}, egress: false }).filter((r) => r.startsWith("PI_EGRESS=0 cannot run"))) {
+			checks.push({ ok: false, label: refusal, fix: "unset PI_EGRESS (armed is the default), or remove that backend from PI_BACKENDS: the worker refuses to boot otherwise" });
+		}
 	}
 
 	// The dispatch landed in slice 4, so the "nothing selects yet" qualifier came off -- and it came off HERE

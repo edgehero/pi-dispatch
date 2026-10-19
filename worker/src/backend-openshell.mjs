@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isJobNamespace, jobContainerName, JOB_NAME_PREFIX, reaperExec } from "./backend-local.mjs";
+import { FORGES } from "./forges.mjs";
+import { NON_SECRET_ENV_KEYS } from "./redact-secrets.mjs";
 import { BACKENDS, OPENSHELL_BACKEND } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -31,9 +33,10 @@ import { makeRunContainer } from "./run-container.mjs";
  *
  * Measured on OpenShell 0.1.4, Docker driver, ubuntu-24.04 (Linux 6.17), 2026-10-19 (the issue #683 lab).
  *
- * NOT BLESSABLE YET (`NOT_YET_BLESSABLE` in backends.mjs): until issue #684 the job's environment, its provider key
- * included, goes on the exec's `--env` (the CLI's own argv, as `-e` is docker's, `OQ-028`), the sandbox's network
- * policy is empty (deny-all), and a job's MCP servers, live transcript and steering are not served here (#684, #686).
+ * BLESSABLE SINCE ISSUE #684: the sandbox's network policy is generated per job (openshell-policy.mjs) and the job's
+ * credentials live in a per-job provider, placeholders in the agent (`CONST-VENUE-EGRESS-LAYER`); only names the
+ * redactor treats as not secret reach the exec's `--env`. The live transcript, progress, steering and recovery are not
+ * served here yet (#686), each refused or skipped by name.
  */
 
 
@@ -77,8 +80,8 @@ export const OPENSHELL_WRITABLE = Object.freeze([SANDBOX.workspace, SANDBOX.sess
  * condition). A policy with a `filesystem_policy` grants nothing it does not list (measured: `/opt` and `/sys/fs/cgroup`
  * were unreadable under the default one), so the image's own trees are listed read-only, the cgroup files the
  * supervisor reads at a kill among them, and the WORKDIR is writable through `include_workdir`. `hard_requirement`, so a
- * kernel that cannot apply it fails the create instead of running the job without it. No `network_policies`: deny-all,
- * until issue #684 generates them. `run_as_user` is the image's own uid, so OpenShell's refusal of root and this
+ * kernel that cannot apply it fails the create instead of running the job without it. Its `network_policies` are the
+ * job's own (`networkPolicyFor`, issue #684), spread in beside it by the stage; none is deny-all. `run_as_user` is the image's own uid, so OpenShell's refusal of root and this
  * worker's non-root uid are the same fact.
  */
 export function sandboxPolicy({ uid = SHIPPED_IMAGE_UID, gid = SHIPPED_IMAGE_UID } = {}) {
@@ -117,10 +120,19 @@ export function expectedPolicy(policy) {
  * baseline path only where the image HAS it (an operator-built image without `/var/log` reads back as written).
  * Nothing else: any other difference never starts the job.
  */
-export function expectedPolicies(policy) {
+export function expectedPolicies(policy, { provider = null } = {}) {
 	const withBaseline = expectedPolicy(policy);
-	return withBaseline === policy ? [policy] : [withBaseline, policy];
+	const bodies = withBaseline === policy ? [policy] : [withBaseline, policy];
+	if (provider === null) return bodies;
+	// Issue #684: an attached provider adds one layer of its own to the full read-back (measured: a rule named
+	// `_provider_<name, its dashes as underscores>` holding only its name, for an endpointless profile).
+	const key = `_provider_${provider.replace(/-/g, "_")}`;
+	return bodies.map((b) => ({ ...b, network_policies: { ...b.network_policies, [key]: { name: key } } }));
 }
+
+/** How often, and how far apart, a provider's delete is asked again while its sandbox's cleanup finishes. */
+const PROVIDER_DELETE_TRIES = 10;
+const PROVIDER_DELETE_WAIT_MS = 2_000;
 
 /**
  * Rewrite a staged job's `mcp.json` for the `sandbox` layout (issue #684): every stdio server's `command` and `args`
@@ -163,6 +175,68 @@ export function rewriteMcpForSandbox(path, fs) {
 	return changed;
 }
 
+/**
+ * The names of a job's env that carry a credential (issue #684): every key the redactor treats as secret
+ * (`NON_SECRET_ENV_KEYS`, redact-secrets.mjs, is the one list of what is NOT), with a value. On this venue none of them
+ * reaches the sandbox as a value: each goes into the job's provider, and the agent sees OpenShell's placeholder.
+ */
+export function secretNamesOf(env = {}) {
+	return Object.entries(env ?? {})
+		.filter(([key, value]) => !NON_SECRET_ENV_KEYS.has(key) && typeof value === "string" && value !== "" && PROVIDER_ENV_NAME.test(key))
+		.map(([key]) => key);
+}
+
+/** What a provider credential's env var may be called: a shell name, 128 at most (the CLI reads `$NAME`). */
+const PROVIDER_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+
+/**
+ * The secret names a provider cannot carry (issue #684, review): a `run.secrets` key or a `PI_FORWARD_ENV` name that is
+ * no shell name, or longer than 128. Never a value on the exec's argv instead: such a name reaches the sandbox not at
+ * all, and the stage logs it by name (`openshell_secret_unbindable`), so the job runs without it and says which.
+ */
+export function unbindableSecretNamesOf(env = {}) {
+	return Object.entries(env ?? {})
+		.filter(([key, value]) => !NON_SECRET_ENV_KEYS.has(key) && typeof value === "string" && value !== "" && !PROVIDER_ENV_NAME.test(key))
+		.map(([key]) => key);
+}
+
+/**
+ * The per-job endpointless provider profile (issue #684, measured on OpenShell 0.1.4): one credential per secret name,
+ * no endpoints and no binaries of its own, so the credentials resolve only where the job's own policy binds them
+ * (`credential_binding.provider`). Named by the sandbox, so the reaper finds a crashed job's.
+ */
+export function providerProfileFor(name, secretNames) {
+	return {
+		id: name,
+		display_name: name,
+		description: "pi-dispatch per-job credentials",
+		category: "other",
+		credentials: secretNames.map((env, i) => ({ name: `c${i}`, env_vars: [env], required: true })),
+	};
+}
+
+/**
+ * The git credential helper a forge job's exec gets on this venue (issue #684), as `GIT_CONFIG_COUNT`, `_KEY_0` and
+ * `_VALUE_0`: it prints the forge token's PLACEHOLDER as the password, and OpenShell's supervisor rewrites it into the
+ * real token in the Basic header (measured), at any host the policy admits, as every credential of the provider is bound
+ * to every endpoint (squid's reach, not narrower). git sends a token only through a helper, and
+ * the clone's remote is tokenless (prepare-github.mjs), so without it a push would never authenticate. Null for a job
+ * whose forge token is not in its env.
+ */
+export function gitCredentialEnv(env = {}) {
+	// The forge is the one whose token variable the env carries: the worker writes a minted token into its own forge's
+	// names only (env-allowlist.mjs), so at most one forge matches.
+	const kind = Object.keys(FORGES).find((k) => (FORGES[k].tokenVars ?? []).some((v) => typeof env[v] === "string" && env[v] !== ""));
+	if (!kind) return null;
+	const tokenVar = FORGES[kind].tokenVars.find((v) => typeof env[v] === "string" && env[v] !== "");
+	const user = kind === "github" ? "x-access-token" : kind === "gitlab" ? "oauth2" : "pi-dispatch";
+	return {
+		GIT_CONFIG_COUNT: "1",
+		GIT_CONFIG_KEY_0: "credential.helper",
+		GIT_CONFIG_VALUE_0: `!f() { test "$1" = get || exit 0; echo username=${user}; echo "password=$${tokenVar}"; }; f`,
+	};
+}
+
 /** The sandbox-layout path a `mounts`-layout container path is copied to, or null for one the layout does not name. */
 export function sandboxPathOf(container) {
 	const key = Object.keys(LAYOUTS.mounts).find((k) => LAYOUTS.mounts[k] === container);
@@ -182,8 +256,14 @@ function gatewayArgs(gateway) {
  * must land there.
  */
 export function openshellExecArgs({ name, env = {}, gateway = null }) {
+	// Issue #684: no credential value on this argv, ever. ONLY the names the redactor treats as not secret
+	// (`NON_SECRET_ENV_KEYS`) travel here, an allowlist rather than "every name but the provider's": a secret the provider
+	// could not carry (a name no shell can spell) would otherwise fall through to this argv as a value (review H1). Every
+	// other name is the provider's, its placeholder in the sandbox's env already; the git helper names the forge token's
+	// placeholder, never its value.
 	const envArgs = [];
-	for (const [key, value] of Object.entries({ ...env, HOME: "/home/pi" })) {
+	const carried = Object.fromEntries(Object.entries(env ?? {}).filter(([key]) => NON_SECRET_ENV_KEYS.has(key)));
+	for (const [key, value] of Object.entries({ ...carried, ...(gitCredentialEnv(env) ?? {}), HOME: "/home/pi" })) {
 		if (value === undefined || value === null) continue;
 		envArgs.push("--env", `${key}=${value}`);
 	}
@@ -241,6 +321,106 @@ const intLabel = (v) => (/^[1-9][0-9]{0,8}$/.test(String(v ?? "")) ? Number(v) :
 
 
 /**
+ * A provider's delete, asked again for a bounded while: OpenShell refuses it while a sandbox still has it attached, and
+ * the sandbox's delete is asynchronous (measured). Its profile goes after it; a profile still named by a provider is
+ * refused, and the reaper's next sweep finds both again.
+ */
+function providerDeleter(run, { log, delay }) {
+	return async (provider) => {
+		for (let i = 0; i < PROVIDER_DELETE_TRIES; i++) {
+			try {
+				await run(["provider", "delete", provider]);
+				break;
+			} catch {
+				if (i === PROVIDER_DELETE_TRIES - 1) log("openshell_provider_delete_failed", { provider });
+				else await delay(PROVIDER_DELETE_WAIT_MS);
+			}
+		}
+		try {
+			await run(["provider", "profile", "delete", provider]);
+		} catch {}
+	};
+}
+
+/** The sweep: every owned sandbox in the job namespace, then every owned provider (and its profile) named like one. */
+function reapWith(run, deleteProvider, log) {
+	return async () => {
+		try {
+			const owned = (await listOwned(run)).filter((s) => isJobNamespace(s.name));
+			for (const s of owned) await run(["sandbox", "delete", s.name]);
+			if (owned.length > 0) log("reaped_sandboxes", { count: owned.length });
+			// Issue #684: a crashed job's provider and profile, by the owner label and the job namespace.
+			const providers = parseJson((await run(["provider", "list", "--label-selector", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "-o", "json"])).stdout, "provider list");
+			for (const p of (providers?.providers ?? []).filter((x) => typeof x?.name === "string" && SANDBOX_NAME.test(x.name))) await deleteProvider(p.name);
+			return { reaped: true };
+		} catch {
+			return { reaped: false };
+		}
+	};
+}
+
+/**
+ * The venue's reaper on its own (issue #684), for the boot sweep, which runs before the bundle can be built (it needs the
+ * log sink and the package resolver); the bundle is then handed this same function as `reap`, podman's pattern.
+ */
+export function makeOpenshellReaper({ gateway = null, exec = reaperExec(), log = () => {}, delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+	const run = (args, stepOpts) => exec("openshell", [...gatewayArgs(gateway), ...args], stepOpts);
+	return reapWith(run, providerDeleter(run, { log, delay }), log);
+}
+
+/**
+ * The boot's version judgement (issue #684, the half #683 left to the blessing): the CLI and, when it answers, the
+ * gateway must be `OPENSHELL_TESTED_VERSION`, since the venue drives interfaces OpenShell marks experimental and another
+ * release is untested until the conformance run passes on it. `{ refusal, transient }` or `{ gatewayDown }` or `{}`:
+ *
+ *   - a CLI that does not answer is transient (exit 1, restarted): an install mid-way or a PATH the unit has not
+ *     picked up yet, which a restart can meet fixed;
+ *   - a CLI or a gateway at another release is the deployment's (a configError, exit 2, not restarted into it);
+ *   - a gateway that does not answer refuses nothing here: every job's preflight reads it again and retries, so a
+ *     gateway started after the worker is not a boot loop. Said as `gatewayDown` for the boot's log.
+ */
+export async function openshellBootVersions({ gateway = null, exec = reaperExec() } = {}) {
+	const run = (args) => exec("openshell", [...gatewayArgs(gateway), ...args]);
+	let cli;
+	try {
+		cli = /openshell (\S+)/.exec(String((await run(["--version"])).stdout ?? ""))?.[1] ?? null;
+	} catch {
+		cli = null;
+	}
+	if (cli === null) return { refusal: "PI_BACKENDS blesses openshell, and the openshell CLI did not answer `openshell --version`: install OpenShell " + OPENSHELL_TESTED_VERSION + " on this host's PATH (pi-dispatch doctor --openshell)", transient: true };
+	if (cli !== OPENSHELL_TESTED_VERSION) return { refusal: `PI_BACKENDS blesses openshell, and the openshell CLI is ${cli}, not ${OPENSHELL_TESTED_VERSION}, the release this venue was measured on: install ${OPENSHELL_TESTED_VERSION}, or remove openshell from PI_BACKENDS`, transient: false };
+	let status;
+	try {
+		status = judgeGatewayStatus(JSON.parse(String((await run(["status", "-o", "json"])).stdout ?? "")));
+	} catch {
+		return { gatewayDown: true };
+	}
+	if (!status.connected) return { gatewayDown: true };
+	if (status.version !== OPENSHELL_TESTED_VERSION) return { refusal: `PI_BACKENDS blesses openshell, and its gateway runs ${status.version ?? "an unknown release"}, not ${OPENSHELL_TESTED_VERSION}, the release this venue was measured on: run the gateway of ${OPENSHELL_TESTED_VERSION}`, transient: false };
+	return {};
+}
+
+/**
+ * The pi providers that READ their credential's value inside the job (issue #684 review, read at the pinned pi-ai), where
+ * this venue's placeholder cannot stand in for it: Bedrock signs each request with the secret (SigV4), Vertex reads a
+ * credentials FILE, Codex decodes its key as a JWT for the account id, and Copilot exchanges its token for another.
+ * Refused before spend by name. Anthropic is judged by the VALUE, as pi judges it (`isOAuthToken`, a substring test for
+ * `sk-ant-oat`): an OAuth token picks other headers. A provider not listed here sends its key as it is, in a header the
+ * supervisor rewrites; one that does otherwise fails with its own provider error, never silently (`OQ-047`).
+ */
+export const VALUE_READING_PROVIDERS = Object.freeze(["amazon-bedrock", "google-vertex", "openai-codex", "github-copilot"]);
+
+/** Whether a job's provider credential, as the worker's environment holds it, is one pi reads by value. */
+// env-internal ANTHROPIC_OAUTH_TOKEN: pi's own variable, read from the worker's environment only to refuse a job whose
+// credential the venue's placeholder cannot stand in for; documented with the provider keys pi reads.
+export function credentialReadsValue(provider, hostEnv = {}) {
+	if (VALUE_READING_PROVIDERS.includes(provider)) return true;
+	if (provider !== "anthropic") return false;
+	if (typeof hostEnv?.ANTHROPIC_OAUTH_TOKEN === "string" && hostEnv.ANTHROPIC_OAUTH_TOKEN !== "") return true;
+	return typeof hostEnv?.ANTHROPIC_API_KEY === "string" && hostEnv.ANTHROPIC_API_KEY.includes("sk-ant-oat");
+}
+
+/**
  * The fixed comments of this venue's own refusals, by reason. Fixed text, so nothing the gateway said reaches a forge
  * comment; the evidence goes to the operator's log.
  */
@@ -248,10 +428,13 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-gateway-not-local": "Refused: this job's venue is an OpenShell gateway that is not observed on this host, and the venue holds the job's credentials in that gateway, so it runs only on a gateway this deployment runs itself. Not run.",
 	"openshell-global-policy": "Refused: the OpenShell gateway has a gateway-wide policy in force, which would replace the policy the worker generates for this job. Not run.",
 	"openshell-landlock-missing": "Refused: this host's kernel does not offer Landlock, which the OpenShell venue needs to confine the job's sandbox and to keep its inputs read-only. Not run.",
+	"openshell-recover-unsupported": "Refused: this trigger asks for runs that continue after a lost worker, which the OpenShell venue cannot checkpoint yet. Run it on another venue, or without run.recover. Not run.",
+	"openshell-credential-reads-value": "Refused: this job's model provider reads its credential's value inside the job (to sign requests, pick an auth scheme or decode it), and on the OpenShell venue the job sees only a placeholder for it. Run it on another venue, or with a provider whose key is sent as it is. Not run.",
+	"openshell-gateway-untested": "Refused: the OpenShell gateway runs another release than the one this venue was measured on. Not run.",
 	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
 });
 
-const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "makeRunContainer"]);
+const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
 
 /**
  * Build the `openshell` bundle. `engine` is the gateway's compute driver, `docker` or `podman` (the only two in v1),
@@ -286,7 +469,11 @@ export function makeOpenshellBackend(opts = {}) {
 		exec = reaperExec(),
 		fs = { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync },
 		readLsm = () => readFileSync("/sys/kernel/security/lsm", "utf8"),
+		delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 		platform = process.platform,
+		// The boot-built reaper (`makeOpenshellReaper`), so the sweep and the registry hold the same function; none builds
+		// this bundle's own.
+		reap: reapFn = null,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 	} = opts ?? {};
 	if (engine !== "docker" && engine !== "podman") throw new Error(`backend "${OPENSHELL_BACKEND}": engine must be "docker" or "podman" (the compute drivers v1 admits), got ${JSON.stringify(engine)}`);
@@ -310,7 +497,7 @@ export function makeOpenshellBackend(opts = {}) {
 	const stageRun = async ({ opts: built, signal = null, job = null, modelEndpoints = null }) => {
 		const { jobDir, size = DEFAULT_JOB_SIZE } = built;
 		const name = sandboxNameOf(built.name);
-		const at = { name, jobDir, policyFile: `${jobDir}.openshell-policy.json`, uploadDir: `${jobDir}.openshell-up`, downloadDir: `${jobDir}.openshell-down`, transfers: [] };
+		const at = { name, jobDir, policyFile: `${jobDir}.openshell-policy.json`, profileFile: `${jobDir}.openshell-profile.json`, uploadDir: `${jobDir}.openshell-up`, downloadDir: `${jobDir}.openshell-down`, transfers: [], provider: null };
 		attempts.set(built, at);
 		live.set(name, (live.get(name) ?? 0) + 1);
 		// Asked after every step that waits: a stop is the job's answer, and run-container ends the run as stopped.
@@ -345,9 +532,37 @@ export function makeOpenshellBackend(opts = {}) {
 		// OpenShell reads back as written.
 		const policy = Object.keys(network.network_policies).length > 0 ? { ...sandboxPolicy(), ...network } : sandboxPolicy();
 		// BESIDE the job directory, never inside what is uploaded: the policy is the box, not an input the agent reads.
+		// Issue #684: the job's credentials, into a per-job provider (CONST-VENUE-EGRESS-LAYER, OQ-028 closed here): an
+		// endpointless profile naming every secret of the env, a provider of it whose values travel in the CLI's own
+		// ENVIRONMENT (`--credential NAME` reads `$NAME`, measured), never its argv, and every endpoint of the policy
+		// bound to it, so a placeholder resolves only in a request to a host the policy admits. With no rule the job
+		// reaches nothing, so no provider is made and the secrets go nowhere.
+		const secrets = secretNamesOf(built.env ?? {});
+		const unbindable = unbindableSecretNamesOf(built.env ?? {});
+		if (unbindable.length > 0) log("openshell_secret_unbindable", { container: name, names: unbindable });
+		const rules = policy.network_policies ?? {};
+		if (secrets.length > 0 && Object.keys(rules).length > 0) {
+			// Named by the sandbox, so every attempt of one job uses the same name: an earlier attempt's leftover (a delete
+			// refused while its sandbox lingered, a crash between import and create) is removed first, once, or this create
+			// would collide with it until the next boot's reap (review M2).
+			await run(["provider", "delete", name]).catch(() => {});
+			await run(["provider", "profile", "delete", name]).catch(() => {});
+			fs.writeFileSync(at.profileFile, `${JSON.stringify(providerProfileFor(name, secrets))}\n`, { mode: 0o600 });
+			await run(["provider", "profile", "import", "-f", at.profileFile]);
+			at.profile = name;
+			// The CLI child's environment is the worker's own, as on every other step (so it reaches the same gateway with
+			// the same settings), plus the values; never its argv.
+			const valueEnv = { ...process.env, ...Object.fromEntries(secrets.map((k) => [k, built.env[k]])) };
+			await run(["provider", "create", "--name", name, "--type", name, ...secrets.flatMap((k) => ["--credential", k]), "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`], { env: valueEnv });
+			at.provider = name;
+			for (const rule of Object.values(rules)) for (const endpoint of rule.endpoints) endpoint.credential_binding = { provider: name };
+		} else if (secrets.length > 0) {
+			log("openshell_secrets_unbound", { container: name, n: secrets.length });
+		}
+		if (stopped()) return;
 		fs.writeFileSync(at.policyFile, `${JSON.stringify(policy)}\n`, { mode: 0o600 });
 		const created = parseJson(
-			(await run(["sandbox", "create", "--detach", "--name", name, "--from", imageId, "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "--label", `${SIZE_LABEL_MEM}=${size.memMiB}`, "--label", `${SIZE_LABEL_CPU}=${size.cpuCenti}`, ...sizeArgs(size), "--policy", at.policyFile, "--no-auto-providers", "-o", "json"], { timeoutMs: 360_000 })).stdout,
+			(await run(["sandbox", "create", "--detach", "--name", name, "--from", imageId, "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "--label", `${SIZE_LABEL_MEM}=${size.memMiB}`, "--label", `${SIZE_LABEL_CPU}=${size.cpuCenti}`, ...sizeArgs(size), "--policy", at.policyFile, ...(at.provider ? ["--provider", at.provider] : []), "--no-auto-providers", "-o", "json"], { timeoutMs: 360_000 })).stdout,
 			"sandbox create",
 		);
 		if (created?.phase !== "Ready") throw new Error(`openshell sandbox create: phase ${JSON.stringify(created?.phase ?? null)}, not Ready`);
@@ -358,7 +573,7 @@ export function makeOpenshellBackend(opts = {}) {
 		// plus exactly that (`expectedPolicy`), never to "close enough".
 		const effective = parseJson((await run(["policy", "get", name, "--full", "-o", "json"])).stdout, "policy get");
 		const readBack = JSON.stringify(canonical(effective?.policy));
-		if (effective?.policy_source !== "sandbox" || !expectedPolicies(policy).some((p) => JSON.stringify(canonical(p)) === readBack)) {
+		if (effective?.policy_source !== "sandbox" || !expectedPolicies(policy, { provider: at.provider }).some((p) => JSON.stringify(canonical(p)) === readBack)) {
 			log("openshell_policy_mismatch", { container: name, source: typeof effective?.policy_source === "string" ? effective.policy_source : null });
 			throw new Error("openshell: the sandbox's policy read back differs from the one the worker wrote");
 		}
@@ -413,6 +628,8 @@ export function makeOpenshellBackend(opts = {}) {
 		return result;
 	};
 
+	const deleteProvider = providerDeleter(run, { log, delay });
+
 	const teardownRun = async ({ opts: built }) => {
 		const name = sandboxNameOf(built.name);
 		const at = attempts.get(built);
@@ -423,7 +640,12 @@ export function makeOpenshellBackend(opts = {}) {
 		} catch {
 			log("openshell_delete_failed", { container: name });
 		}
-		for (const path of at ? [at.policyFile, at.uploadDir, at.downloadDir] : []) {
+		// Issue #684: the provider and its profile, after the sandbox. A provider still attached is refused (measured:
+		// "is attached to sandbox(es)"), and a sandbox delete is accepted before its cleanup ends, so the provider's
+		// delete is asked again for a bounded while; what is left, the reaper deletes by the owner label.
+		if (at?.provider) await deleteProvider(at.provider);
+		else if (at?.profile) await run(["provider", "profile", "delete", at.profile]).catch(() => {});
+		for (const path of at ? [at.policyFile, at.profileFile, at.uploadDir, at.downloadDir] : []) {
 			try {
 				fs.rmSync(path, { recursive: true, force: true });
 			} catch {}
@@ -471,6 +693,14 @@ export function makeOpenshellBackend(opts = {}) {
 	// The per-job, pre-spend venue checks (`CONST-VENUE-EGRESS-LAYER`'s third and fourth conditions): free reads, each
 	// refusing by name. A gateway that does not answer is infrastructure (retried); one that answers wrong is policy.
 	const observationPreflight = async (job) => {
+		// Issue #684: `run.recover` needs a checkpoint of the running session, which this venue cannot take until its
+		// transcript comes back over stdio (#686): refused by name, before anything is read, never run unarmed.
+		// A `kind: local` job runs unarmed on every venue (`recoverSkipped: "local"`), so it is not refused here either.
+		if (job?.recover === true && job?.kind !== "local") return { venueRefused: { reason: "openshell-recover-unsupported", comment: OPENSHELL_REFUSALS["openshell-recover-unsupported"] } };
+		if (credentialReadsValue(job?.provider, hostEnv)) {
+			log("openshell_credential_reads_value", { provider: typeof job?.provider === "string" ? job.provider : null });
+			return { venueRefused: { reason: "openshell-credential-reads-value", comment: OPENSHELL_REFUSALS["openshell-credential-reads-value"] } };
+		}
 		let status;
 		try {
 			status = judgeGatewayStatus(parseJson((await run(["status", "-o", "json"])).stdout, "status"));
@@ -483,6 +713,11 @@ export function makeOpenshellBackend(opts = {}) {
 		if (!status.connected) {
 			log("openshell_unavailable", { reason: "gateway-not-connected" });
 			return { unavailable: true };
+		}
+		// Per job as well as at boot (review M4): a gateway down at boot and started later at another release is read here.
+		if (status.local && status.version !== OPENSHELL_TESTED_VERSION) {
+			log("openshell_gateway_untested", { version: status.version });
+			return { venueRefused: { reason: "openshell-gateway-untested", comment: OPENSHELL_REFUSALS["openshell-gateway-untested"] }, observations: { openshellGatewayLocal: true } };
 		}
 		if (!status.local) return { venueRefused: { reason: "openshell-gateway-not-local", comment: OPENSHELL_REFUSALS["openshell-gateway-not-local"] }, observations: { openshellGatewayLocal: false } };
 		// A gateway-wide policy replaces every sandbox's. With none set the CLI exits 1 with this sentence (measured, the
@@ -550,16 +785,7 @@ export function makeOpenshellBackend(opts = {}) {
 			stopping.add(sandboxNameOf(name));
 			return run(["sandbox", "delete", sandboxNameOf(name)]);
 		},
-		reap: async () => {
-			try {
-				const owned = (await listOwned(run)).filter((s) => isJobNamespace(s.name));
-				for (const s of owned) await run(["sandbox", "delete", s.name]);
-				if (owned.length > 0) log("reaped_sandboxes", { count: owned.length });
-				return { reaped: true };
-			} catch {
-				return { reaped: false };
-			}
-		},
+		reap: reapFn ?? reapWith(run, deleteProvider, log),
 		listJobContainers: async () =>
 			(await listOwned(run))
 				.filter((s) => isJobNamespace(s.name) && !SANDBOX_GONE_PHASES.has(s.phase))
@@ -573,7 +799,15 @@ export function makeOpenshellBackend(opts = {}) {
 			if (live.has(sandbox)) return false;
 			try {
 				const s = (await listOwned(run)).find((x) => x.name === sandbox);
-				if (!s || SANDBOX_GONE_PHASES.has(s.phase)) return true;
+				if (!s || SANDBOX_GONE_PHASES.has(s.phase)) {
+					// Issue #684 (review M3): the gone sandbox's provider goes too, so a teardown that could not delete it does
+					// not leave the job's credentials in the gateway until the next boot's reap. Once, not awaited: the
+					// budget's question is about the sandbox, and the boot reap is the backstop.
+					run(["provider", "delete", sandbox])
+						.then(() => run(["provider", "profile", "delete", sandbox]))
+						.catch(() => {});
+					return true;
+				}
 				if (!SANDBOX_UNSTARTED_PHASES.has(s.phase)) return false;
 				await run(["sandbox", "delete", sandbox]);
 				return true;

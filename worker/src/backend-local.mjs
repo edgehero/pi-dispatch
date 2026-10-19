@@ -51,7 +51,9 @@ export function reaperExec({ execFileFn = execFile, timeoutMs = REAPER_STEP_TIME
 	// 1 MiB, the facts readers' own); every other step keeps the reaper's 30 s.
 	return (bin, args, opts = {}) =>
 		new Promise((resolve, reject) => {
-			execFileFn(bin, [...args], { timeout: opts.timeoutMs ?? timeoutMs, killSignal: "SIGKILL", maxBuffer: opts.maxBuffer ?? 1024 * 1024 }, (err, stdout, stderr) => {
+			// `env` (issue #684): a step that hands the CLI a credential through its own environment, never its argv
+			// (the openshell venue's `provider create --credential NAME`); every other step inherits the worker's.
+			execFileFn(bin, [...args], { timeout: opts.timeoutMs ?? timeoutMs, killSignal: "SIGKILL", maxBuffer: opts.maxBuffer ?? 1024 * 1024, ...(opts.env ? { env: opts.env } : {}) }, (err, stdout, stderr) => {
 				if (err) reject(Object.assign(err, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
 				else resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
 			});

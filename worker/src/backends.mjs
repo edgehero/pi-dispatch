@@ -788,15 +788,16 @@ const BACKENDS_TABLE = {
 		 * named, where `local` says `enforced`; `PI_BACKEND_FLOOR` lets an operator refuse that trade at boot. Measured on
 		 * OpenShell 0.1.4, Docker driver, ubuntu-24.04 (Linux 6.17), 2026-10-19.
 		 *
-		 * NOT BLESSABLE YET: `PI_BACKENDS` refuses it by name (`NOT_YET_BLESSABLE`) until issue #684 ships the policy layer
-		 * (the egress rules and the per-job credential providers), because `CONST-VENUE-EGRESS-LAYER` admits no layer venue
-		 * before then. The entry, the adapter and its conformance run exist now so #684 builds on a measured venue.
+		 * BLESSABLE SINCE ISSUE #684, which shipped the policy layer `CONST-VENUE-EGRESS-LAYER` asks of a layer venue: the
+		 * per-job network policy generated from the squid venues' own sources, and the per-job credential provider, with
+		 * placeholders in the agent. What the venue does not serve yet (live transcript, progress, steering, recovery) is
+		 * refused or skipped by name until issue #686.
 		 */
 		describe: "an NVIDIA OpenShell sandbox on this host's gateway, through the openshell CLI",
 		// The gateway is refused unless it is on this host (`OPENSHELL_GATEWAY_LOCAL`), so the venue is never remote.
 		remote: false,
-		// `CONST-VENUE-EGRESS-LAYER`: the venue's own layer holds the credentials, placeholders in the agent (issue #684).
-		// Until #684 they still travel as `--env`, which is one of the reasons the venue is not blessable yet.
+		// `CONST-VENUE-EGRESS-LAYER`: the venue's own layer holds the credentials, placeholders in the agent (issue #684):
+		// a per-job provider holds the values and the supervisor swaps them in for a request to a host the policy admits.
 		credentialCustody: "layer",
 		declares: {
 			// The agent container and its bounds are the compute driver's (`cap_drop ALL`, `no-new-privileges`, networking
@@ -808,7 +809,8 @@ const BACKENDS_TABLE = {
 			// No mount is the worker's: the job's files are uploaded and downloaded, and what the driver mounts beside them
 			// (its runtime, the supervisor's socket) is the vendor's.
 			mountSet: ASSERTED,
-			// The layer's policy, deny-all until issue #684 generates its rules. Gated by PI_EGRESS as on every venue.
+			// The layer's per-job policy (issue #684), deny-all but for the hosts the allowlist, the model endpoints and the
+			// forge admit. The boot refuses PI_EGRESS=0 with this venue blessed: the layer has no "off" (`config.mjs`).
 			egress: ASSERTED,
 			// Each sandbox's agent has networking off and reaches only its own supervisor, so another job is not on any
 			// network it can see: the driver's construction.
@@ -876,12 +878,10 @@ export const CREDENTIAL_CUSTODY = Object.freeze(["container", "layer"]);
 
 /**
  * Venues in the table that `PI_BACKENDS` refuses by name (issue #683): built and tested, and not yet admitted, each with
- * the sentence that says why. `openshell` waits for issue #684's policy layer, which `CONST-VENUE-EGRESS-LAYER` requires
- * before any layer venue runs a job. Removing a name here is the whole of blessing it.
+ * the sentence that says why. Removing a name here is the whole of blessing it. EMPTY since issue #684 blessed
+ * `openshell`; kept, so the next venue that lands before its gate has the same one-line switch.
  */
-export const NOT_YET_BLESSABLE = Object.freeze({
-	[OPENSHELL_BACKEND]: "openshell is built but not yet blessable: it waits for issue #684's egress rules and per-job credential providers (CONST-VENUE-EGRESS-LAYER)",
-});
+export const NOT_YET_BLESSABLE = Object.freeze({});
 
 /**
  * FROZEN, deeply. `makeLocalBackend` hands `BACKENDS[name].declares` out on the bundle it returns, so
@@ -1041,7 +1041,7 @@ export function venuesOf(env) {
 	} catch {
 		blessed = [DEFAULT_BACKEND];
 	}
-	// `openshellUsed` (issue #683) is false on every deployment until `NOT_YET_BLESSABLE` lets the name through.
+	// `openshellUsed` (issue #683, blessable since #684): the doctor's openshell section runs on it.
 	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND, openshellUsed: blessed.includes(OPENSHELL_BACKEND) };
 }
 
@@ -1182,6 +1182,21 @@ export function backendRefusals({ backends = [], backendFloor = {}, egress = fal
 			`${armedBy} is armed but ${names.join(", ")} ${names.length === 1 ? "declares" : "declare"} ${property} absent, so that control cannot exist there. ` +
 				`Set ${armedBy}=0 to run without it, or remove that backend from PI_BACKENDS.`,
 		);
+	}
+
+	// Issue #684 (the operator's decision): a venue whose own layer holds the credentials (`credentialCustody: layer`)
+	// cannot run with PI_EGRESS=0. Its policy IS the egress control and the provider's placeholders resolve only through
+	// it, so "egress off" has no meaning there: honouring it would mean a policy admitting everything, which hands the
+	// real credential to any host the agent names, and ignoring it would run the job under a control the operator
+	// switched off. Refused at boot, by name, rather than either guess. Every layer venue, not `openshell` by name.
+	if (egress !== true) {
+		const layered = backends.filter((name) => (BACKENDS[name]?.credentialCustody ?? "container") === "layer");
+		if (layered.length > 0) {
+			out.push(
+				`PI_EGRESS=0 cannot run ${layered.join(", ")}: ${layered.length === 1 ? "that venue's" : "those venues'"} own policy layer is the egress control and holds the job's credentials (CONST-VENUE-EGRESS-LAYER), so it has no "egress off". ` +
+					"Arm PI_EGRESS, or remove that backend from PI_BACKENDS.",
+			);
+		}
 	}
 
 	return out;

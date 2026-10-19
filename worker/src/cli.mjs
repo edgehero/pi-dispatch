@@ -19,7 +19,7 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch doctor [--fix] [--live] [--openshell]
                            preflight Docker, Valkey, the job image, and your provider key; --fix offers to run each fix (y/N per action);
                            --live reads the backend declarations back off short-lived real containers (shown in docker ps while they run);
-                           --openshell says whether this host is ready for the openshell venue (built, not yet blessable)
+                           --openshell says whether this host is ready for the openshell venue (run anyway once PI_BACKENDS names it)
   pi-dispatch up [--yes]   one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
@@ -96,7 +96,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 	if (cmd === "doctor") {
 		const { runDoctor } = await import("./doctor.mjs");
 		// `fix` and `live` ride in the deps position (runDoctor(env, depsOrOpts)) — one options bag, no third arg.
-		// `--openshell` (issue #683): the openshell venue's lines, before PI_BACKENDS can bless it.
+		// `--openshell` (issue #683): the openshell venue's lines, before PI_BACKENDS blesses it (issue #684 made it blessable).
 		return runDoctor(env, { fix: argv.slice(1).includes("--fix"), live: argv.slice(1).includes("--live"), openshell: argv.slice(1).includes("--openshell") });
 	}
 

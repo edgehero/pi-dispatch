@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { judgeGatewayStatus, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
 
 /**
- * `pi-dispatch doctor --openshell` (issue #683): whether this host can run the `openshell` venue, BEFORE it is
- * blessable (`NOT_YET_BLESSABLE`, until issue #684), so an operator can set the gateway up and a reviewer can read what
- * the venue would meet. Every line is a free read; nothing creates a sandbox (the conformance run,
+ * `pi-dispatch doctor --openshell` (issue #683): whether this host can run the `openshell` venue, asked before
+ * blessing it in PI_BACKENDS (and run by plain `doctor` once it is, issue #684), so an operator can set the gateway up
+ * and read what the venue meets. Every line is a free read; nothing creates a sandbox (the conformance run,
  * `.github/scripts/openshell-conformance.mjs`, is the live half).
  *
  * The lines, each with what fixes it:
@@ -22,7 +22,7 @@ import { judgeGatewayStatus, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mj
  *   - the job image declares `sandboxLayout`, read on that engine, the store the gateway runs images from.
  */
 
-/** The settings this check reads. Both read here only, until #684 wires the venue into the worker's boot. */
+/** The settings this check reads, the same two the worker's boot reads (`config.mjs` `openshellFrom`, issue #684). */
 export const OPENSHELL_ENGINE_ENV = "PI_OPENSHELL_ENGINE";
 export const OPENSHELL_GATEWAY_ENV = "PI_OPENSHELL_GATEWAY";
 
@@ -65,7 +65,6 @@ export async function openshellChecks(env = {}, { run = runQuiet, platform = pro
 	const checks = [];
 	const engine = env.PI_OPENSHELL_ENGINE === undefined || env.PI_OPENSHELL_ENGINE === "" ? "docker" : env.PI_OPENSHELL_ENGINE;
 	const gateway = env.PI_OPENSHELL_GATEWAY || null;
-	checks.push({ ok: true, warn: true, label: "openshell: built but not yet blessable -- PI_BACKENDS refuses it until issue #684 ships its egress rules and credential providers; these lines say whether this host is ready" });
 	if (engine !== "docker" && engine !== "podman") {
 		checks.push({ ok: false, label: `openshell: ${OPENSHELL_ENGINE_ENV} names the gateway's engine`, fix: `set ${OPENSHELL_ENGINE_ENV} to docker or podman, the compute drivers v1 admits (it is ${JSON.stringify(engine)})` });
 		return checks;

@@ -9,7 +9,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } f
 import { homedir, hostname, tmpdir } from "node:os";
 import { delimiter, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { SESSION_KEY_PATTERN } from "./session-key.mjs";
-import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
+import { DEFAULT_BACKEND, OPENSHELL_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
@@ -315,6 +315,22 @@ function backendFloorOf(env) {
 	} catch (error) {
 		throw configError(error.message);
 	}
+}
+
+/**
+ * The openshell venue's two settings (issue #684): `PI_OPENSHELL_ENGINE`, the gateway's compute driver whose CLI reads the
+ * job image (`docker`, the default, or `podman`, the two v1 admits), and `PI_OPENSHELL_GATEWAY`, a registered gateway's
+ * name (unset: the CLI's active one). Judged only while the venue is blessed, as doctor judges them, so a value left in
+ * the env of a deployment that never chose the venue refuses nothing; while blessed a bad one stops the boot here rather
+ * than every job at its start.
+ */
+function openshellFrom(env, backends) {
+	const engine = env.PI_OPENSHELL_ENGINE === undefined || env.PI_OPENSHELL_ENGINE === "" ? "docker" : env.PI_OPENSHELL_ENGINE;
+	const gateway = env.PI_OPENSHELL_GATEWAY || null;
+	if (!backends.includes(OPENSHELL_BACKEND)) return { engine, gateway };
+	if (engine !== "docker" && engine !== "podman") throw configError(`PI_OPENSHELL_ENGINE must be docker or podman, the compute drivers the openshell venue admits (got ${JSON.stringify(engine)})`);
+	if (gateway !== null && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(gateway)) throw configError("PI_OPENSHELL_GATEWAY must be a registered gateway's name (`openshell gateway list`), or unset for the CLI's active gateway");
+	return { engine, gateway };
 }
 
 /**
@@ -651,6 +667,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		gitlab: loadGitLabAuth(env),
 		forgejo: loadForgejoAuth(env),
 		azure: loadAzureAuth(env),
+		openshell: openshellFrom(env, backends), // issue #684: the openshell venue's engine and gateway
 	};
 
 	// #227, and it runs AFTER the object is built rather than inside it: the refusal reads `egress` as well

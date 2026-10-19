@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
 import { makePodmanBackend as realPodmanBackend } from "../src/backend-podman.mjs";
+import { makeOpenshellBackend as realOpenshellBackend } from "../src/backend-openshell.mjs";
 import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
@@ -117,7 +118,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey, durable = {} } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey, durable = {} } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -238,6 +239,18 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			});
 		});
 
+	// Issue #684: the openshell venue's bundle is the REAL one too, every CLI and engine spawn replaced by a throw.
+	const openshellBackendCalls = [];
+	const openshellBackend =
+		makeOpenshellBackend ??
+		((opts) => {
+			openshellBackendCalls.push(opts);
+			const never = () => {
+				throw new Error("a wiring test must never spawn openshell");
+			};
+			return realOpenshellBackend({ ...opts, spawnFn: never, exec: never });
+		});
+
 	const from = bootLines.length;
 	let captured;
 	let booted = false;
@@ -284,6 +297,10 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			// Issue #596, never this machine's containers. Nothing left from a previous worker unless a test says so.
 			listJobContainers: listJobContainers ?? (() => async () => []),
 			makePodmanBackend: podmanBackend,
+			// Issue #684: never the real openshell CLI. The tested release on both ends unless a test says otherwise.
+			readOpenshellVersions: readOpenshellVersions ?? (async () => ({})),
+			makeOpenshellReaper: makeOpenshellReaper ?? (() => async () => ({ reaped: true })),
+			makeOpenshellBackend: openshellBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(makePrepareWorkspace ? { makePrepareWorkspace } : {}),
 			...(makeLiveTranscriptOpener ? { makeLiveTranscriptOpener } : {}),
@@ -384,7 +401,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	// Expose the registration map under both names: `handlers` for the completed/failed handler tests,
 	// `registered` for the scheduler stall-guard test. Same object, one capture path.
 	// `logs` is the boot's lines; `logsNow()` re-reads, for a line a job-path call writes after the boot returned.
-	return { captured, stopCalls, deps: captured?.deps, logs, logsNow: () => parseLines(bootLines.slice(from)), handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls, podmanBackendCalls };
+	return { captured, stopCalls, deps: captured?.deps, logs, logsNow: () => parseLines(bootLines.slice(from)), handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls, podmanBackendCalls, openshellBackendCalls };
 }
 
 // Capture the JSON log lines a synchronous fn emits through the injected writer.
@@ -3811,6 +3828,55 @@ test("podman unblessed: no podman info, no podman reaper, no podman bundle, and 
 	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["local"]);
 	const started = logs.find((l) => l.event === "worker_started");
 	for (const key of PODMAN_KEYS) assert.equal(started[key], null, key);
+});
+
+test("openshell blessed (#684): its versions read once with the gateway, its reaper and bundle registered from the deployment's settings", { skip }, async () => {
+	let registryArgs = null;
+	const versionCalls = [];
+	const reap = async () => ({ reaped: true });
+	const { openshellBackendCalls } = await runStart({
+		env: { PI_BACKENDS: "local,openshell", PI_OPENSHELL_ENGINE: "podman", PI_OPENSHELL_GATEWAY: "lab", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readOpenshellVersions: async (args) => (versionCalls.push(args), {}),
+		makeOpenshellReaper: (args) => (assert.equal(args.gateway, "lab"), reap),
+		makeBackendRegistry: (args) => ((registryArgs = args), realRegistry(args)),
+	});
+	assert.deepEqual(versionCalls, [{ gateway: "lab" }]);
+	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["local", "openshell"]);
+	assert.equal(registryArgs.reaps.openshell, reap);
+	assert.equal(openshellBackendCalls.length, 1);
+	const opts = openshellBackendCalls[0];
+	assert.equal(opts.engine, "podman");
+	assert.equal(opts.gateway, "lab");
+	assert.equal(opts.image, "pi-job:ci");
+	assert.equal(opts.reap, reap, "the boot sweep's reaper, not one of its own");
+	assert.equal(typeof opts.readAllowlist, "function");
+	assert.deepEqual(opts.readEndpoints(), [], "no model-endpoints.json declares none");
+});
+
+test("openshell unblessed: no version read, no reaper, no bundle (#684)", { skip }, async () => {
+	const seen = [];
+	const { openshellBackendCalls } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readOpenshellVersions: forbidden("readOpenshellVersions", seen),
+		makeOpenshellReaper: forbidden("makeOpenshellReaper", seen),
+	});
+	assert.deepEqual(seen, []);
+	assert.equal(openshellBackendCalls.length, 0);
+});
+
+test("openshell's boot releases (#684): another release refuses (exit 2), a silent CLI is restarted into (exit 1), a gateway down is said and boots", { skip }, async () => {
+	const base = { env: { PI_BACKENDS: "local,openshell" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
+	await assert.rejects(runStart({ ...base, readOpenshellVersions: async () => ({ refusal: "the CLI is 0.1.5", transient: false }) }), (e) => e.piDispatchConfig === true && /0\.1\.5/.test(e.message));
+	await assert.rejects(runStart({ ...base, readOpenshellVersions: async () => ({ refusal: "the CLI did not answer", transient: true }) }), (e) => e.piDispatchConfig !== true && /did not answer/.test(e.message));
+	const { logs } = await runStart({ ...base, readOpenshellVersions: async () => ({ gatewayDown: true }) });
+	assert.ok(logs.some((l) => l.event === "openshell_gateway_down_at_boot"));
+});
+
+test("openshell with PI_EGRESS=0 refuses the boot by name (#684, the operator's decision)", { skip }, async () => {
+	await assert.rejects(runStart({ env: { PI_BACKENDS: "local,openshell", PI_EGRESS: "0" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() }), (e) => e.piDispatchConfig === true && /^PI_EGRESS=0 cannot run openshell/.test(e.message));
 });
 
 test("podman as the only venue: one podman info at boot shared with the first job, its reaper and bundle registered, its facts on the boot line (#354)", { skip }, async () => {
