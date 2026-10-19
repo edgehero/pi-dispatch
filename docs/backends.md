@@ -557,6 +557,13 @@ What it is, in this page's terms:
   (`openshell-landlock-missing`).
 - **Not served yet**: the live transcript, progress, steering and recovery checkpoints (issue #686), a job's MCP
   servers and the egress rules (issue #684). No `pi-dispatch sandbox` shell either: the venue has no launcher.
+- **`pi-dispatch doctor --openshell`** says whether this host is ready: the CLI and the gateway at the tested release
+  (`OPENSHELL_TESTED_VERSION`, exactly, since OpenShell marks these interfaces experimental), the gateway on loopback,
+  its compute driver the engine `PI_OPENSHELL_ENGINE` names (`docker` by default, or `podman`), no gateway-wide policy,
+  Docker 28 or Podman 5 or later, Landlock in the kernel, and the job image declaring `sandboxLayout`.
+  `PI_OPENSHELL_GATEWAY` names a registered gateway when the CLI's active one is not it.
+- **CI**: `openshell-conformance.yml` runs `.github/scripts/openshell-conformance.mjs` against a real gateway on every
+  pull request, advisory for now.
 
 ## What is deliberately not yours to decide
 

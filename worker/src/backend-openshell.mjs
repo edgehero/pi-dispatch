@@ -7,6 +7,7 @@ import { BACKENDS, OPENSHELL_BACKEND } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { LAYOUTS } from "./job-layout.mjs";
+import { judgeGatewayStatus, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
 import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 
@@ -34,8 +35,6 @@ import { makeRunContainer } from "./run-container.mjs";
  * policy is empty (deny-all), and a job's MCP servers, live transcript and steering are not served here (#684, #686).
  */
 
-/** The OpenShell release this adapter was measured on: doctor's floor and ceiling (issue #683), one place. */
-export const OPENSHELL_TESTED_VERSION = "0.1.4";
 
 /** The label every sandbox this worker makes carries, which `list` selects on: a name alone is a substring world. */
 export const OPENSHELL_OWNER_LABEL = "pi.dispatch.owner";
@@ -44,6 +43,9 @@ export const OPENSHELL_OWNER = "pi-dispatch";
 /** The entrypoint and the confinement it is started through, both baked into the job image (image/Dockerfile). */
 export const OPENSHELL_ENTRYPOINT = "/entrypoint.sh";
 export const PI_LANDLOCK = "/opt/pi-dispatch/pi-landlock";
+
+// Re-exported: the adapter is where a reader looks for them, and doctor imports the leaf alone.
+export { judgeGatewayStatus, OPENSHELL_TESTED_VERSION };
 
 const SANDBOX = LAYOUTS.sandbox;
 
@@ -167,28 +169,6 @@ async function listOwned(run) {
 /** A label value as a positive integer, or null (the host budget's own rule for a size label). */
 const intLabel = (v) => (/^[1-9][0-9]{0,8}$/.test(String(v ?? "")) ? Number(v) : null);
 
-/**
- * The gateway's answer to "where are you" (`openshell status -o json`), judged: `{ connected, local, server, version }`.
- * `status` exits 0 even when the gateway is down (measured), so the JSON's own `status` decides `connected`. Local means
- * a loopback host or a unix socket; anything else, or a server this cannot parse, is not local.
- */
-export function judgeGatewayStatus(doc) {
-	const status = typeof doc?.status === "string" ? doc.status : null;
-	const server = typeof doc?.server === "string" ? doc.server : null;
-	let local = false;
-	if (server !== null) {
-		if (server.startsWith("unix:")) local = true;
-		else {
-			try {
-				const host = new URL(server).hostname.replace(/^\[|\]$/g, "");
-				local = host === "127.0.0.1" || host === "::1" || host === "localhost" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-			} catch {
-				local = false;
-			}
-		}
-	}
-	return { connected: status === "connected" || status === "connected_http", local, server, version: typeof doc?.version === "string" ? doc.version : null };
-}
 
 /**
  * The fixed comments of this venue's own refusals, by reason. Fixed text, so nothing the gateway said reaches a forge

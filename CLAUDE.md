@@ -102,6 +102,11 @@ Two consequences worth internalising before you design anything:
     Do not add `paths:` to either. The `push:` filters are unaffected and stay.
   - A job's `name:` IS its required context string: renaming either workflow's job renames the check, and
     the branch protection must be updated in the same breath or every PR waits forever on the old name.
+  - `the openshell venue holds its declarations` (`openshell-conformance.yml`, issue #683) reports on every PR and is
+    **advisory**: the `openshell` venue is not blessable until #684, and its gateway (OpenShell, pinned in
+    `.github/openshell.json`) is a 0.1.x vendor release. Read a red run as a finding. It becomes required in a later
+    issue once it has passed across a round, as the podman lane did, and its `pull_request` trigger is already
+    unfiltered so that change is branch protection alone.
   - Three PR-reporting checks are deliberately **not** required. `host-pi mirrors survive latest pi (canary)`
     is green-on-drift by design, so its red means pi failed to install (upstream flake, not a defect);
     `the job's MCP survives latest pi (canary)` is red on drift in a pi release the repository does not run yet,

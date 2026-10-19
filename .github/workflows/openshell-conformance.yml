@@ -1,0 +1,88 @@
+# The `openshell` venue's conformance run (issue #683), on a real NVIDIA OpenShell gateway.
+#
+# `.github/scripts/openshell-conformance.mjs` builds the REAL `openshell` bundle and runs the backend conformance
+# harness against it, reading the venue's properties back off a live sandbox, then runs the real job image's runner
+# through it, keyed and offline. The gateway is the OpenShell release `.github/openshell.json` pins (the version the
+# worker's OPENSHELL_TESTED_VERSION names, held to it by a test), installed from its checksum-pinned deb and started
+# without systemd, on the Docker driver: the runner's Docker 28 and its Linux 6.x kernel with Landlock are what the
+# venue needs (measured in the issue #683 lab).
+#
+# ADVISORY, NOT REQUIRED: the venue is not blessable until issue #684, and OpenShell is a 0.1.x vendor release whose
+# gateway setup in CI is new, so a red run here is a finding to read, not a merge blocker. It is promoted to a required
+# check by a later issue once it has passed across a round, as the podman lane was (issue #432). The pull_request
+# trigger is unfiltered for the reason the required lanes' are, so the day it is required nothing has to change here.
+
+name: openshell conformance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/src/**"
+      - "image/**"
+      - ".github/openshell.json"
+      - ".github/scripts/openshell-conformance.mjs"
+      - ".github/workflows/openshell-conformance.yml"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: the openshell venue holds its declarations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: The host the venue needs (Docker 28 or later, Landlock)
+        run: |
+          uname -r
+          v=$(docker version --format '{{.Server.Version}}')
+          echo "docker $v"
+          [ "${v%%.*}" -ge 28 ] || { echo "Docker $v is older than OpenShell supports"; exit 2; }
+          grep -q landlock /sys/kernel/security/lsm || { echo "this kernel offers no Landlock"; exit 2; }
+
+      - name: Install the pinned OpenShell (checksum checked)
+        run: |
+          version=$(jq -r .version .github/openshell.json)
+          file=$(jq -r .deb.amd64.file .github/openshell.json)
+          sum=$(jq -r .deb.amd64.sha256 .github/openshell.json)
+          curl -fsSLO "https://github.com/NVIDIA/OpenShell/releases/download/v${version}/${file}"
+          echo "${sum}  ${file}" | sha256sum -c
+          sudo apt-get install -y "./${file}"
+          openshell --version
+
+      # The deb's systemd user unit runs these three steps; a hosted runner has no user manager to run it in.
+      - name: Start the gateway on loopback, Docker driver
+        run: |
+          export OPENSHELL_LOCAL_TLS_DIR="$HOME/.local/state/openshell/tls"
+          mkdir -p "$OPENSHELL_LOCAL_TLS_DIR"
+          openshell-gateway config preflight
+          openshell-gateway generate-certs --output-dir "$OPENSHELL_LOCAL_TLS_DIR" --server-san host.openshell.internal
+          OPENSHELL_COMPUTE_DRIVER=docker nohup openshell-gateway > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/17670) 2>/dev/null && break; sleep 1; done
+          openshell gateway add https://127.0.0.1:17670 --local --name openshell
+          openshell status -o json
+
+      - name: Build the job image
+        run: docker build -f image/Dockerfile -t pi-job:ci .
+
+      - name: Conformance (the real bundle, the real runner)
+        run: PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
+
+      - name: Gateway log
+        if: always()
+        run: tail -100 "$RUNNER_TEMP/gateway.log" || true
