@@ -3,7 +3,7 @@ import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS
 import { test } from "node:test";
 import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { readFileSync, readdirSync } from "node:fs";
-import { InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, PARKED_COMMENT, PARKED_COMMENT_PR, parkedComment, TERMINAL_COMMENTS } from "../src/processor.mjs";
+import { HELD_TAKEN_COMMENT, InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, PARKED_COMMENT, PARKED_COMMENT_PR, parkedComment, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { MCP_REFUSAL_COMMENT } from "../src/mcp-preflight.mjs";
@@ -1486,35 +1486,56 @@ test("a parked run sets the marker, and its comment says how to continue by targ
 	assert.notEqual(PARKED_COMMENT, PARKED_COMMENT_PR);
 });
 
-test("a park closes the semantic window after the promotion and before the comment and the marker, a resumed park too, and only a park (DES-AWAIT-INPUT-ENDS-THE-JOB)", async () => {
-	const run = async (job, exitReason, releaseParkedWindow) => {
+test("the park sequence: promote, marker on, release the window, take the held replies, comment; a resumed park too, and only a park (DES-AWAIT-INPUT-ENDS-THE-JOB, issue #638)", async () => {
+	const run = async (job, exitReason, releaseParkedWindow, takeHeldReplies) => {
 		const order = [];
+		const posted = [];
 		const { deps: d } = deps({
 			prepareWorkspace: async () => ({ workspace: "/w", jobDir: "/j", session: { key: "abc", hostDir: "/j/session", resume: true, reason: "resumed", bytes: 1 } }),
 			promoteSession: (_s, opts) => (order.push(`promote:${opts.parked}`), { promoted: true, reason: "promoted", bytes: 1 }),
 			parkedLabel: async (_j, on) => order.push(`label:${on}`),
-			comment: async () => order.push("comment"),
+			comment: async (_j, text) => (order.push("comment"), posted.push(text)),
 			isParked: () => true,
 			sessionsDir: "/srv/pi-sessions",
 			imagePreflight: async () => ({ ok: true, piVersion: "0.80.7", capabilities: ["awaitInput"] }),
 			runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, exitReason }),
 			releaseParkedWindow: releaseParkedWindow ?? (async () => order.push("release")),
+			takeHeldReplies: takeHeldReplies ?? (async () => (order.push("take"), null)),
 		});
 		const r = await runJob(job, d);
-		return { r, order };
+		return { r, order, posted };
 	};
 	const armed = { ...ghJob, target: { type: "issue", number: 7 }, resume: true, awaitInput: true };
 
+	// The marker BEFORE the release: a phrase-free reply in between routes as a parked reply, meets the window this run
+	// still holds and is held for the take, so no reply slips past both. The comment LAST: it invites an answer.
 	const first = await run(armed, "awaiting-input");
-	assert.deepEqual(first.order, ["promote:true", "release", "comment", "label:true"]);
+	assert.deepEqual(first.order, ["promote:true", "label:true", "release", "take", "comment"]);
+	assert.deepEqual(first.posted, [PARKED_COMMENT], "nothing taken: the parked comment exactly as before");
+
+	// A held reply taken as the answer: the comment says the run continues, never "Reply here", and the marker stays on.
+	const took = await run(armed, "awaiting-input", undefined, async () => ({ resumed: 1, answered: 0, dropped: 0 }));
+	assert.deepEqual(took.posted, [HELD_TAKEN_COMMENT]);
+	assert.equal(took.order.includes("label:false"), false);
+	// Another job the window showed already holds the answer (it got in between the release and the take): the run has its
+	// resumed job, so "Reply here" would invite a second answer to an answered question (review round 2).
+	const other = await run(armed, "awaiting-input", undefined, async () => ({ resumed: 0, answered: 1, dropped: 0, taken: "other" }));
+	assert.deepEqual(other.posted, [HELD_TAKEN_COMMENT]);
+	const declined = await run(armed, "awaiting-input", undefined, async () => ({ resumed: 0, answered: 1, dropped: 0 }));
+	assert.deepEqual(declined.posted, [PARKED_COMMENT], "a take that started nothing leaves the parked comment");
+	const throwing = await run(armed, "awaiting-input", undefined, async () => {
+		throw new Error("x");
+	});
+	assert.deepEqual(throwing.posted, [PARKED_COMMENT], "a take that throws costs nothing");
 
 	// The answer's own run parks again: the same path, so its window closes too, or the second answer is swallowed.
 	const again = await run({ ...armed, parkedReply: true }, "awaiting-input");
-	assert.deepEqual(again.order, ["promote:true", "release", "comment", "label:true"]);
+	assert.deepEqual(again.order, ["promote:true", "label:true", "release", "take", "comment"]);
 
 	// A run that did not park keeps its window: coalescing rapid duplicates is what the window is for.
 	const done = await run(armed, null);
 	assert.equal(done.order.includes("release"), false);
+	assert.equal(done.order.includes("take"), false, "only a park takes held replies; the final settle drops them");
 	const unarmed = await run({ ...armed, awaitInput: undefined }, "awaiting-input");
 	assert.equal(unarmed.order.includes("release"), false, "a park line on a job never offered the tool is ignored");
 
@@ -1523,7 +1544,7 @@ test("a park closes the semantic window after the promotion and before the comme
 		throw new Error("valkey went away");
 	});
 	assert.equal(faulty.r.outcome, "completed");
-	assert.deepEqual(faulty.order, ["promote:true", "comment", "label:true"]);
+	assert.deepEqual(faulty.order, ["promote:true", "label:true", "take", "comment"]);
 });
 
 test("PARKED_COMMENT is fixed, path-free and carries no model text", () => {

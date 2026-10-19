@@ -119,7 +119,7 @@ export function makeLateForge({ redis, queues, comment = async () => {}, log = (
 		}
 	};
 
-	return async function onLateForge(entries, { job, runId = runIdOf(job), result = null, error = null, queueName = null } = {}) {
+	return async function onLateForge(entries, { job, runId = runIdOf(job), result = null, error = null, queueName = null, heldResumed = false } = {}) {
 		try {
 			if (job?.data?.steer !== true) return;
 			await release(job, log);
@@ -128,7 +128,9 @@ export function makeLateForge({ redis, queues, comment = async () => {}, log = (
 			const fresh = late.filter((e) => hopOf(e) === 0);
 			const answer = late.filter((e) => hopOf(e) >= 1);
 			const cancelled = result?.reason === "operator-cancel" || error?.reason === "operator-cancel";
-			const started = fresh.length > 0 && !cancelled ? await resume({ job, runId, first: fresh[0], queueName }) : null;
+			// Issue #638: a held reply already became this parked run's resumed job, so a late message is answered, never
+			// a second resumed job for the same run.
+			const started = fresh.length > 0 && !cancelled && heldResumed !== true ? await resume({ job, runId, first: fresh[0], queueName }) : null;
 			if (started === null) {
 				answer.push(...fresh);
 			} else {
@@ -163,7 +165,7 @@ export function makeLateForge({ redis, queues, comment = async () => {}, log = (
  * `settleInbox({ redis, job, runId, result, error, log, onLateForge, inbox })` -> `{ delivered, late, withdrawn }` or
  * null (not a steer job, not final, or the close failed). `job` is the BullMQ job (its `data.steer`, its attempts).
  */
-export async function settleInbox({ redis, job, runId = runIdOf(job), result = null, error = null, log = () => {}, onLateForge = null, inbox = inboxModule } = {}) {
+export async function settleInbox({ redis, job, runId = runIdOf(job), result = null, error = null, log = () => {}, onLateForge = null, inbox = inboxModule, lateContext = {} } = {}) {
 	try {
 		if (job?.data?.steer !== true) return null;
 		if (!isFinalOutcome({ job, result, error })) return null;
@@ -179,7 +181,7 @@ export async function settleInbox({ redis, job, runId = runIdOf(job), result = n
 		const lateForge = (closed.entries ?? []).filter((e) => e?.source === "forge" && closed.state?.[e.id] === "late");
 		if (closed.first === true) {
 			try {
-				await (typeof onLateForge === "function" ? onLateForge : defaultLateForge(log))(lateForge, { job, runId, result, error });
+				await (typeof onLateForge === "function" ? onLateForge : defaultLateForge(log))(lateForge, { ...lateContext, job, runId, result, error });
 			} catch {}
 		}
 		if (counts.late > 0) log("steer_settled_late", { jobId: sanitizeJobId(job.id), ...counts });

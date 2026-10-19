@@ -31,6 +31,7 @@ import { filterAzure } from "./filter-azure.mjs";
 import { parseAzureSubset } from "./azure-subset.mjs";
 import { makeAzureVerifiedHandler } from "./verify-azure.mjs";
 import { trySteer } from "./steer.mjs";
+import { holdAfterDedup, holdBeforeLabel, wantsHoldAfterDedup } from "./held.mjs";
 
 /** Write a small JSON body with an explicit status; a 204 carries no body. verify's `respond` is private. */
 function respond(res, status, obj) {
@@ -271,7 +272,7 @@ async function steerOrEnqueue({ steer, res, kind, delivery, job, target }) {
  * "queued", because a receiver that logs the swallow while answering success on the wire would be the
  * honest-log/lying-wire split this project refuses. Each arm passes its own target grammar.
  */
-function respondEnqueueOutcome({ log, res, delivery, repo, target, flow, outcome }) {
+function respondEnqueueOutcome({ log, res, delivery, repo, target, flow, outcome, held = null }) {
 	for (const d of outcome.deduplicated) {
 		log?.({ event: "deduplicated", delivery, repo, target, flow, jobId: d.jobId, survivingJobId: d.survivingJobId });
 	}
@@ -279,7 +280,52 @@ function respondEnqueueOutcome({ log, res, delivery, repo, target, flow, outcome
 		log?.({ event: "enqueued", delivery, repo, target, flow, replicas: outcome.created });
 		return respond(res, 202, { status: "queued" });
 	}
+	// Issue #638: a swallow a parking run took as its held answer is not "nothing happened" either; the `held` lines
+	// were written by held.mjs, and the wire says so the same honest way.
+	if (held !== null) return respond(res, 202, { status: "held", runs: held.held });
 	return respond(res, 202, { status: "deduplicated" });
+}
+
+/** The Valkey client held replies use: the steer one (`steer.steerClient()`), null when there is none. */
+async function heldClientOf(steer) {
+	try {
+		return (await steer?.steerClient?.()) ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The fanout outcome, answered, with held replies (issue #638) in between, shared by the four arms. Only a delivery
+ * `wantsHoldAfterDedup` names (a resume comment of an awaitInput trigger that the window swallowed) asks Valkey at all,
+ * so every other delivery's log lines and answer are exactly `respondEnqueueOutcome`'s as they were.
+ */
+async function answerEnqueueOutcome({ steer, kind, log, res, delivery, job, target, outcome }) {
+	let held = null;
+	if (wantsHoldAfterDedup(job, outcome)) {
+		held = await holdAfterDedup({ redis: await heldClientOf(steer), job, kind, outcome, now: steer?.now, log: (line) => log?.(line), delivery, target });
+	}
+	return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome, held });
+}
+
+/** The two target grammars the arms log in: `type#n` (github, forgejo) and `repo#n` / `repo!n` (gitlab, azure). */
+const hashTarget = (j) => `${j?.target?.type}#${j?.target?.number}`;
+const sepTarget = (j) => `${j?.repo}${j?.target?.type === "pull_request" ? "!" : "#"}${j?.target?.number}`;
+
+/**
+ * A filter drop that carries `heldCandidate` (issue #638): held under every awaitInput run live on its target, then
+ * answered `202 {status:"held", runs}` and "held". "enqueue" when a run parked on the target within the last minute
+ * (held.mjs): the caller enqueues the candidate as the parked reply it is. Null for every other drop, and for a
+ * candidate nothing took, and the caller answers its drop exactly as before. A missing client is today's behaviour.
+ */
+async function heldBeforeLabelOr({ steer, res, kind, delivery, result, targetOf }) {
+	if (result?.heldCandidate === undefined) return null;
+	const candidate = result.heldCandidate;
+	const held = await holdBeforeLabel({ redis: await heldClientOf(steer), candidate, kind, now: steer?.now, log: (line) => steer?.log?.(line), delivery, target: targetOf(candidate) });
+	if (held === null) return null;
+	if (held.enqueue === true) return "enqueue";
+	respond(res, 202, { status: "held", runs: held.held });
+	return "held";
 }
 
 /**
@@ -326,10 +372,18 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 			closerAuthorized = resolved.authorized;
 		}
 
-		const result = filter(event, subset, cfg, selfId, delivery, closerAuthorized);
+		let result = filter(event, subset, cfg, selfId, delivery, closerAuthorized);
 		if (!result.enqueue) {
-			log?.({ event: "dropped", delivery, reason: result.reason });
-			return respond(res, 204);
+			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
+			// enqueued as a parked reply when a run just parked there; otherwise this is today's drop, byte for byte.
+			const rescued = await heldBeforeLabelOr({ steer, res, kind: "github", delivery, result, targetOf: hashTarget });
+			if (rescued === "held") return;
+			if (rescued === "enqueue") {
+				result = { enqueue: true, job: result.heldCandidate };
+			} else {
+				log?.({ event: "dropped", delivery, reason: result.reason });
+				return respond(res, 204);
+			}
 		}
 
 		const target = `${result.job.target.type}#${result.job.target.number}`;
@@ -347,7 +401,7 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 			return respond(res, 503, { error: "enqueue-failed" }); // GitHub redelivers; dedup by GUID coalesces
 		}
 
-		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
+		return await answerEnqueueOutcome({ steer, kind: "github", log, res, delivery, job, target, outcome });
 	});
 }
 
@@ -381,10 +435,18 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 			return respond(res, 503, { error: "access-lookup-failed" });
 		}
 
-		const result = filterGitLab(subset, cfg.triggers?.gitlab, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
+		let result = filterGitLab(subset, cfg.triggers?.gitlab, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
 		if (!result.enqueue) {
-			log?.({ event: "dropped", delivery, reason: result.reason });
-			return respond(res, 204);
+			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
+			// enqueued as a parked reply when a run just parked there; otherwise this is today's drop, byte for byte.
+			const rescued = await heldBeforeLabelOr({ steer, res, kind: "gitlab", delivery, result, targetOf: sepTarget });
+			if (rescued === "held") return;
+			if (rescued === "enqueue") {
+				result = { enqueue: true, job: result.heldCandidate };
+			} else {
+				log?.({ event: "dropped", delivery, reason: result.reason });
+				return respond(res, 204);
+			}
 		}
 
 		// `!` for a merge request, `#` for an issue -- GitLab's own notation, and the same discrimination
@@ -403,7 +465,7 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 			return respond(res, 503, { error: "enqueue-failed" }); // GitLab redelivers; dedup by webhook-id coalesces
 		}
 
-		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
+		return await answerEnqueueOutcome({ steer, kind: "gitlab", log, res, delivery, job, target, outcome });
 	});
 }
 
@@ -437,10 +499,18 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 			return respond(res, 503, { error: "permission-lookup-failed" });
 		}
 
-		const result = filterForgejo(event, subset, cfg.triggers?.forgejo, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
+		let result = filterForgejo(event, subset, cfg.triggers?.forgejo, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
 		if (!result.enqueue) {
-			log?.({ event: "dropped", delivery, reason: result.reason });
-			return respond(res, 204);
+			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
+			// enqueued as a parked reply when a run just parked there; otherwise this is today's drop, byte for byte.
+			const rescued = await heldBeforeLabelOr({ steer, res, kind: "forgejo", delivery, result, targetOf: hashTarget });
+			if (rescued === "held") return;
+			if (rescued === "enqueue") {
+				result = { enqueue: true, job: result.heldCandidate };
+			} else {
+				log?.({ event: "dropped", delivery, reason: result.reason });
+				return respond(res, 204);
+			}
 		}
 
 		const target = `${result.job.target.type}#${result.job.target.number}`;
@@ -456,7 +526,7 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 			return respond(res, 503, { error: "enqueue-failed" }); // Forgejo redelivers; dedup by GUID coalesces
 		}
 
-		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
+		return await answerEnqueueOutcome({ steer, kind: "forgejo", log, res, delivery, job, target, outcome });
 	});
 }
 
@@ -499,10 +569,18 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 			return respond(res, 503, { error: "membership-lookup-failed" });
 		}
 
-		const result = filterAzure(subset, cfg.triggers?.azure, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
+		let result = filterAzure(subset, cfg.triggers?.azure, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
 		if (!result.enqueue) {
-			log?.({ event: "dropped", delivery, reason: result.reason });
-			return respond(res, 204);
+			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
+			// enqueued as a parked reply when a run just parked there; otherwise this is today's drop, byte for byte.
+			const rescued = await heldBeforeLabelOr({ steer, res, kind: "azure", delivery, result, targetOf: sepTarget });
+			if (rescued === "held") return;
+			if (rescued === "enqueue") {
+				result = { enqueue: true, job: result.heldCandidate };
+			} else {
+				log?.({ event: "dropped", delivery, reason: result.reason });
+				return respond(res, 204);
+			}
 		}
 
 		// `!` for a pull request, `#` for a work item -- Azure numbers them separately, and this is the same
@@ -521,6 +599,6 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 			return respond(res, 503, { error: "enqueue-failed" });
 		}
 
-		return respondEnqueueOutcome({ log, res, delivery, repo: job.repo, target, flow: job.flow, outcome });
+		return await answerEnqueueOutcome({ steer, kind: "azure", log, res, delivery, job, target, outcome });
 	});
 }

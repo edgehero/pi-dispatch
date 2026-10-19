@@ -24,7 +24,8 @@ import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableC
 import { makeWaitState } from "./wait-state.mjs";
 import { releaseSemanticWindow } from "./queue.mjs";
 import { runIdOf } from "./recovery-queue.mjs";
-import { settleInbox } from "./inbox-settle.mjs";
+import { isFinalOutcome, settleInbox } from "./inbox-settle.mjs";
+import { makeAwaitKeeper } from "./held-settle.mjs";
 
 
 export const QUEUE = "pi-jobs";
@@ -302,8 +303,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// nothing. `steerRan` is what this attempt's runContainer said about steering (null before any container).
 		let steerRan = null;
 		const settleSteer = async ({ result = null, error = null } = {}) => {
+			const held = await settleHeldReplies({ result, error });
 			if (job.data?.steer !== true) return;
-			const steered = await settleInbox({ redis, job, result, error, log: deps?.log ?? (() => {}), ...(typeof deps?.onLateForge === "function" ? { onLateForge: deps.onLateForge } : {}) });
+			// Issue #638: a run both steer-armed and awaitInput can end parked with a held reply AND a late steer message.
+			// Only one of them becomes the resumed job: the held reply, settled first, and the late messages are then
+			// answered (`heldResumed`), never a second job for the same parked run.
+			const steered = await settleInbox({ redis, job, result, error, log: deps?.log ?? (() => {}), lateContext: { heldResumed: Number(held?.resumed) > 0 || Number(heldTaken?.resumed) > 0 || heldTaken?.taken === "other" }, ...(typeof deps?.onLateForge === "function" ? { onLateForge: deps.onLateForge } : {}) });
 			const skipped = typeof steerRan?.steerSkipped === "string" ? steerRan.steerSkipped : null;
 			const target = result ?? error;
 			if (target === null || typeof target !== "object") return;
@@ -311,6 +316,34 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (steered) target.steered = steered;
 				if (skipped !== null) target.steerSkipped = skipped;
 			} catch {}
+		};
+
+		// HELD REPLIES AT THE SAME FINAL OUTCOME (issue #638, held-settle.mjs), called first by `settleSteer` so that every
+		// record site the bolt above holds to the steer settle settles an awaitInput run's held replies too: one call per
+		// site, so no site can be given one and not the other. At a final outcome the keeper stops BEFORE the close, so no
+		// refresh in flight can put the run back on its target after the close removed it. `deps.settleHeld` is start.mjs's
+		// `makeHeldSettle`; unwired, nothing is held and nothing is settled. Never throws.
+		let awaitKeeper = null;
+		// What the park's take started (issue #638 review, H1: the take runs INSIDE the park sequence, before this settle),
+		// kept so the steer settle can tell its late messages a held reply already became the resumed job.
+		let heldTaken = null;
+		// Whether the take ran at all: the backstop settle then only drops (a take whose close failed already answered).
+		let heldTakeRan = false;
+		const takeHeldReplies = async () => {
+			if (job.data?.awaitInput !== true || typeof deps?.takeHeld !== "function") return null;
+			heldTakeRan = true;
+			await awaitKeeper?.stop();
+			heldTaken = await deps.takeHeld({ job });
+			return heldTaken;
+		};
+		const settleHeldReplies = async ({ result = null, error = null } = {}) => {
+			if (job.data?.awaitInput !== true) return;
+			try {
+				if (!isFinalOutcome({ job, result, error })) return;
+				await awaitKeeper?.stop();
+				if (typeof deps?.settleHeld === "function") return await deps.settleHeld({ job, result, error, afterTake: heldTakeRan });
+			} catch {}
+			return null;
 		};
 
 		// THE EARLIER ATTEMPTS' SLOT TIME (issue #599): a retry, or a pickup after a stall, writes its record over the one
@@ -1226,6 +1259,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			throw error;
 		}
 
+		// HELD REPLIES (issue #638, DES-AWAIT-INPUT-ENDS-THE-JOB): an awaitInput run is live on its await target from here,
+		// after the pause, size, wait, scope, endpoint and host-slot gates have admitted it and right before the settings
+		// overlay check and `runJob` (so before the mint and the container), until the park's take or the settle stop it,
+		// so a reply posted between the agent's question and the park is held instead of being deduplicated against this
+		// run or dropped for the missing marker. Only with a wired settle (unwired, a held reply would never be answered)
+		// and a Valkey client that can hold one. Never throws.
+		if (job.data?.awaitInput === true && typeof deps?.settleHeld === "function" && typeof redis?.multi === "function" && typeof redis?.eval === "function") {
+			awaitKeeper = makeAwaitKeeper({ redis, job, host: hostName || "worker", now, log: deps?.log ?? (() => {}) });
+			await awaitKeeper.start().catch(() => {});
+		}
+
 		try {
 			// The read itself happened once, above the endpoint gate; its throw lands HERE, where it always did.
 			if (settingsThrew) throw settingsError;
@@ -1405,6 +1449,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// unconditionally, AFTER the `...deps` spread like the injections around it: whether the key may outlive a park
 				// is not a choice a wiring gets to make by omission.
 				releaseParkedWindow: () => releaseSemanticWindow(job, deps?.log),
+				// Issue #638: the held replies, taken at the park on the REAL job (its id is the run's, its `queueName` the queue
+				// the resumed job goes to), bound unconditionally like the release; it takes nothing unless wired.
+				takeHeldReplies: () => takeHeldReplies().catch(() => null),
 				// The plan collector (issue #505) the same way and for the same reason: the writer it records is the REAL job's
 				// `.id`, and the authority it checks is `.data` as queued. The pickup's `portfolio` decision rides in `ctx`.
 				...(deps.collectPlan ? { collectPlan: (ctx) => deps.collectPlan({ ...ctx, job }) } : {}),
@@ -1618,6 +1665,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			clearTimeout(timer);
 			clearInterval(cancelPoll);
 			signal.removeEventListener("abort", onAbort);
+			// After the settle (issue #638): a final outcome stopped it already; an attempt that will be retried leaves its
+			// keys to their 30 s expiry, so a reply in that gap is still held.
+			await awaitKeeper?.stop().catch(() => {});
 		}
 	};
 	return async function processor(job, token, signal) {

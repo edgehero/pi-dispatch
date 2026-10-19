@@ -78,3 +78,22 @@ export function steerModeOf(body, phrase) {
 	if (at < 0) return "steer";
 	return /^[ \t]+later(?=\s|$)/.test(body.slice(at + phrase.length)) ? "followUp" : "steer";
 }
+
+/**
+ * A filter's drop result as the receiver sees it (issue #638, DES-AWAIT-INPUT-ENDS-THE-JOB). A comment route that
+ * dropped a phrase-free reply ONLY because the parked marker was not on the issue yet returns `heldResolved`, the route
+ * it would have taken with the marker; this turns that into `heldCandidate`, the JOB that route builds, through the
+ * filter's own `build`, and returns every other drop exactly as it came (no key added, so its bytes are today's). A
+ * candidate whose build refuses (an Azure work item with no repository) is no candidate.
+ *
+ * Why the filter says it and not the receiver: the agent posts its question itself and only then calls the tool, so a
+ * person can answer in the seconds before the run has parked and the marker is set. Whether that reply would have
+ * resumed the run is a question about the trigger file and the payload, which only the filter reads; whether a run is
+ * parking right now is a Valkey question, which only the receiver asks. Still a drop: the filter stays pure.
+ */
+export function heldCandidateOr(dropped, build) {
+	if (dropped?.heldResolved === undefined) return dropped;
+	const { heldResolved, ...drop } = dropped;
+	const built = build(heldResolved);
+	return built?.enqueue === true ? { ...drop, heldCandidate: built.job } : drop;
+}

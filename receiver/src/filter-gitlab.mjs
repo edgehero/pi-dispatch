@@ -40,7 +40,7 @@
  * `changes.labels` matches nothing.
  */
 
-import { firstMatchingRule, labelSet, matchedLabel, steerModeOf } from "./predicate.mjs";
+import { firstMatchingRule, heldCandidateOr, labelSet, matchedLabel, steerModeOf } from "./predicate.mjs";
 import { findCloseRule } from "./close.mjs";
 import { hasParkedLabel } from "@edgehero/pi-dispatch/parked";
 
@@ -109,91 +109,100 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		return { enqueue: false, reason: "unhandled-event" };
 	}
 
-	if (!resolved.enqueue) return resolved; // carries the drop reason
+	// A drop is returned as it is, except a phrase-free reply that failed ONLY for the missing parked marker (issue #638,
+	// DES-AWAIT-INPUT-ENDS-THE-JOB): that one also carries `heldCandidate`, the job the parked-reply route would have
+	// built, through the SAME `build` below, so the receiver can hold it for a run that is parking right now and the job
+	// that run starts is byte for byte the one the marker would have produced. Still a drop: nothing here enqueues it.
+	if (!resolved.enqueue) return heldCandidateOr(resolved, build);
+	return build(resolved);
 
-	// (4) Build the job from the INT-GITLAB-PAYLOAD-SUBSET fields only. `user.username` is deliberately
-	// NOT carried: it exists so the receiver could resolve an access level, and it is personal data with no
-	// downstream reader (no-pii-in-logs). `projectId` rides the job because every GitLab API path the
-	// worker needs takes the numeric id -- a `group/subgroup/project` path has no fixed segment count, and
-	// splitting one is how a nested project silently becomes its own parent group.
-	const job = {
-		repo: subset.project?.path,
-		projectId: subset.project?.id,
-		target: resolved.target,
-		// EXACTLY ONE of flow/command, decided by the matched rule (issue #189; the shared parser enforces
-		// the exclusivity at load). A command rule dispatches a registered pi extension command instead of
-		// resolving a flow, and its job must carry NO flow key at all. The spread keeps a flow rule's
-		// literal byte-identical to what it always was -- the same move filter.mjs makes.
-		...(resolved.command !== undefined ? { command: resolved.command } : { flow: resolved.flow }),
-		...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
-		...(resolved.image !== undefined ? { image: resolved.image } : {}),
-		// #227. A SEPARATE spread, and this is the whole of the bug it replaces: folded into the `image`
-		// conditional above, a trigger that named a venue but no image had its venue silently dropped here --
-		// it loaded, validated, reached this function on the rule, and then ran on the default. That is
-		// exactly the destructive absence `validateBackend`'s near-miss sweep refuses a misspelling for,
-		// arriving through the plumbing instead of the spelling, one file downstream of the guard.
-		...(resolved.backend !== undefined ? { backend: resolved.backend } : {}),
-		// #291. A separate spread, filter.mjs's backend rule: a dropped exclusion runs the job WITH the tool.
-		...(resolved.excludeTools !== undefined ? { excludeTools: resolved.excludeTools } : {}),
-		// REQ-MCP-OPERATOR-SERVERS. Its own spread, the excludeTools rule above: a dropped list runs
-		// the job without its servers.
-		...(resolved.mcp !== undefined ? { mcp: resolved.mcp } : {}),
-		// #502. One spread PER FIELD, the excludeTools rule above: folded into one conditional, a trigger
-		// that named only a model would have its provider's absence decide whether the model survives,
-		// and a dropped model runs the job on the deployment default while the file reads as chosen.
-		...(resolved.provider !== undefined ? { provider: resolved.provider } : {}),
-		...(resolved.model !== undefined ? { model: resolved.model } : {}),
-		...(resolved.maxTurns !== undefined ? { maxTurns: resolved.maxTurns } : {}),
-		...(resolved.models !== undefined ? { models: resolved.models } : {}),
-		// #501. Its own spread, the rule above: a dropped cap runs the job under the deployment's cap, or none,
-		// while the file reads as narrowed.
-		...(resolved.maxCostUsd !== undefined ? { maxCostUsd: resolved.maxCostUsd } : {}),
-		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
-		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
-		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
-		// basename(folder) restraint already exists to prevent.
-		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
-		// REQ-TRIGGER-SECRETS. Conditional exactly like skillsDir above, so a trigger that binds no
-		// secret enqueues the job data it always has. The map holds REFERENCES, never values: the
-		// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
-		...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
-		...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
-		...(resolved.waitFor !== undefined ? { waitFor: resolved.waitFor } : {}),
-		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
-		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
-		// byte-identical to today's, so the key is absent rather than present-and-undefined.
-		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
-		// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
-		// resume's rule, so an unflagged job's data stays byte-identical.
-		...(resolved.awaitInput === true ? { awaitInput: true } : {}),
-		// Issue #644: the progress tool and the forge status comment, each present only when armed, awaitInput's rule.
-		...(resolved.progress === true ? { progress: true } : {}),
-		...(resolved.statusComment === true ? { statusComment: true } : {}),
-		// Issue #645: durable runs, present only when armed, the same rule.
-		...(resolved.recover === true ? { recover: true } : {}),
-		// Issue #646: steering a running job, present only when armed, the same rule.
-		...(resolved.steer === true ? { steer: true } : {}),
-		// Issue #646: how this phrase comment steers a job of its trigger that is already running, set only on the comment
-		// route of a steer-armed trigger (never a parked reply, never a command). The receiver reads it to try the run's
-		// inbox before it enqueues, and `enqueueForgeJob` names its fields, so it never reaches a queue. At JOB level, never
-		// inside `trigger`, which is copied verbatim into /job/event.json.
-		...(resolved.steerMode !== undefined ? { steerMode: resolved.steerMode } : {}),
-		// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
-		...(resolved.parkedReply === true ? { parkedReply: true } : {}),
-		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
-		// reasons filter.mjs states in full: receiver.mjs reads this to decide how many times to enqueue, and an
-		// unflagged job's data must stay byte-identical to today's.
-		...(resolved.replicas !== undefined ? { replicas: resolved.replicas } : {}),
-		trigger: {
-			event: kind,
-			action: subset.action,
-			deliveryId,
-			sender: { id: subset.user.id },
-			matched: resolved.matched,
-			...(resolved.comment ? { comment: resolved.comment } : {}),
-		},
-	};
-	return { enqueue: true, job };
+	// The job from a resolved route. One function for every route and for the held candidate (issue #638), declared
+	// here so it closes over this delivery's subset and ids.
+	function build(resolved) {
+		// (4) Build the job from the INT-GITLAB-PAYLOAD-SUBSET fields only. `user.username` is deliberately
+		// NOT carried: it exists so the receiver could resolve an access level, and it is personal data with no
+		// downstream reader (no-pii-in-logs). `projectId` rides the job because every GitLab API path the
+		// worker needs takes the numeric id -- a `group/subgroup/project` path has no fixed segment count, and
+		// splitting one is how a nested project silently becomes its own parent group.
+		const job = {
+			repo: subset.project?.path,
+			projectId: subset.project?.id,
+			target: resolved.target,
+			// EXACTLY ONE of flow/command, decided by the matched rule (issue #189; the shared parser enforces
+			// the exclusivity at load). A command rule dispatches a registered pi extension command instead of
+			// resolving a flow, and its job must carry NO flow key at all. The spread keeps a flow rule's
+			// literal byte-identical to what it always was -- the same move filter.mjs makes.
+			...(resolved.command !== undefined ? { command: resolved.command } : { flow: resolved.flow }),
+			...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
+			...(resolved.image !== undefined ? { image: resolved.image } : {}),
+			// #227. A SEPARATE spread, and this is the whole of the bug it replaces: folded into the `image`
+			// conditional above, a trigger that named a venue but no image had its venue silently dropped here --
+			// it loaded, validated, reached this function on the rule, and then ran on the default. That is
+			// exactly the destructive absence `validateBackend`'s near-miss sweep refuses a misspelling for,
+			// arriving through the plumbing instead of the spelling, one file downstream of the guard.
+			...(resolved.backend !== undefined ? { backend: resolved.backend } : {}),
+			// #291. A separate spread, filter.mjs's backend rule: a dropped exclusion runs the job WITH the tool.
+			...(resolved.excludeTools !== undefined ? { excludeTools: resolved.excludeTools } : {}),
+			// REQ-MCP-OPERATOR-SERVERS. Its own spread, the excludeTools rule above: a dropped list runs
+			// the job without its servers.
+			...(resolved.mcp !== undefined ? { mcp: resolved.mcp } : {}),
+			// #502. One spread PER FIELD, the excludeTools rule above: folded into one conditional, a trigger
+			// that named only a model would have its provider's absence decide whether the model survives,
+			// and a dropped model runs the job on the deployment default while the file reads as chosen.
+			...(resolved.provider !== undefined ? { provider: resolved.provider } : {}),
+			...(resolved.model !== undefined ? { model: resolved.model } : {}),
+			...(resolved.maxTurns !== undefined ? { maxTurns: resolved.maxTurns } : {}),
+			...(resolved.models !== undefined ? { models: resolved.models } : {}),
+			// #501. Its own spread, the rule above: a dropped cap runs the job under the deployment's cap, or none,
+			// while the file reads as narrowed.
+			...(resolved.maxCostUsd !== undefined ? { maxCostUsd: resolved.maxCostUsd } : {}),
+			// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
+			// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
+			// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
+			// basename(folder) restraint already exists to prevent.
+			...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
+			// REQ-TRIGGER-SECRETS. Conditional exactly like skillsDir above, so a trigger that binds no
+			// secret enqueues the job data it always has. The map holds REFERENCES, never values: the
+			// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
+			...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
+			...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
+			...(resolved.waitFor !== undefined ? { waitFor: resolved.waitFor } : {}),
+			...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
+			// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
+			// byte-identical to today's, so the key is absent rather than present-and-undefined.
+			...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
+			// REQ-AWAIT-INPUT (issue #625): whether the job may end awaiting a person's answer. Present only when armed,
+			// resume's rule, so an unflagged job's data stays byte-identical.
+			...(resolved.awaitInput === true ? { awaitInput: true } : {}),
+			// Issue #644: the progress tool and the forge status comment, each present only when armed, awaitInput's rule.
+			...(resolved.progress === true ? { progress: true } : {}),
+			...(resolved.statusComment === true ? { statusComment: true } : {}),
+			// Issue #645: durable runs, present only when armed, the same rule.
+			...(resolved.recover === true ? { recover: true } : {}),
+			// Issue #646: steering a running job, present only when armed, the same rule.
+			...(resolved.steer === true ? { steer: true } : {}),
+			// Issue #646: how this phrase comment steers a job of its trigger that is already running, set only on the comment
+			// route of a steer-armed trigger (never a parked reply, never a command). The receiver reads it to try the run's
+			// inbox before it enqueues, and `enqueueForgeJob` names its fields, so it never reaches a queue. At JOB level, never
+			// inside `trigger`, which is copied verbatim into /job/event.json.
+			...(resolved.steerMode !== undefined ? { steerMode: resolved.steerMode } : {}),
+			// A phrase-free reply to a parked issue (issue #625): the worker gates it on the `parked` sidecar before any spend.
+			...(resolved.parkedReply === true ? { parkedReply: true } : {}),
+			// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
+			// reasons filter.mjs states in full: receiver.mjs reads this to decide how many times to enqueue, and an
+			// unflagged job's data must stay byte-identical to today's.
+			...(resolved.replicas !== undefined ? { replicas: resolved.replicas } : {}),
+			trigger: {
+				event: kind,
+				action: subset.action,
+				deliveryId,
+				sender: { id: subset.user.id },
+				matched: resolved.matched,
+				...(resolved.comment ? { comment: resolved.comment } : {}),
+			},
+		};
+		return { enqueue: true, job };
+	}
 }
 
 /**
@@ -403,7 +412,7 @@ function routeMergeRequestClose(subset, triggers, authorized) {
  * issue branch for something that is already a merge request: wrong work, no error, and it looks like a
  * successful run.
  */
-function routeNote(subset, triggers, knownFlows) {
+function routeNote(subset, triggers, knownFlows, assumeParked = false) {
 	if (subset.action !== "create") return { enqueue: false, reason: "unhandled-event" };
 
 	const phrase = triggers?.comment?.phrase;
@@ -414,8 +423,17 @@ function routeNote(subset, triggers, knownFlows) {
 	// trigger arms run.resume and is not a command, and only when the forge says the issue carries the marker. The
 	// author gate above already ran: this widens WHICH comments start a job, never WHO may. The marker is a hint; the
 	// worker refuses the job before any spend unless the key's `parked` sidecar exists.
-	const parkedReply = !phraseHit && typeof phrase === "string" && typeof body === "string" && triggers?.comment?.resume === true && triggers?.comment?.command === undefined && subset.noteableType !== "MergeRequest" && hasParkedLabel(subset.target?.labels);
+	const parkedCandidate = !phraseHit && typeof phrase === "string" && typeof body === "string" && triggers?.comment?.resume === true && triggers?.comment?.command === undefined && subset.noteableType !== "MergeRequest";
+	const parkedReply = parkedCandidate && (assumeParked || hasParkedLabel(subset.target?.labels));
 	if (!phraseHit && !parkedReply) {
+		// Issue #638: a reply that fails ONLY for the missing marker (the run asked its question and is still parking, so
+		// the label is not on yet) is still a drop, but it carries the route the marker would have taken, built by this
+		// same function with the marker assumed (so every other rule above still decided it). The receiver holds it for a
+		// run that is parking on this target, or drops it exactly as today.
+		if (parkedCandidate) {
+			const held = routeNote(subset, triggers, knownFlows, true);
+			if (held.enqueue) return { enqueue: false, reason: "no-trigger-phrase", heldResolved: held };
+		}
 		return { enqueue: false, reason: "no-trigger-phrase" };
 	}
 	// On a COMMAND rule (issue #189) the flow-resolution block below -- default flow, the `<phrase> <flow>`
