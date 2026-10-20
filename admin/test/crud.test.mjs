@@ -121,7 +121,8 @@ test("editTrigger: an existing run.packages opt-in survives the write round-trip
 test("editTrigger and deleteTrigger keep every other top-level key of the file (#704)", async () => {
   // The project secret bundles live beside the triggers array, so a console write that rebuilt the file as
   // `{ triggers }` would delete them on every edit. Both keys must come back with identical content.
-  const bundles = { acme: { from: "op", items: { GH_TOKEN: "op://vault/item/field" } } };
+  // A VALID bundle since the loader validates `secretBundles` strictly (#704 part 2): every write re-validates the file.
+  const bundles = { acme: { profile: "op", ref: "op://vault/item", project: "acme", forkReviews: false } };
   const path = tmpTriggers({
     secretBundles: bundles,
     triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old" } }, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "f2" } }],
@@ -520,7 +521,7 @@ test("dispatch_trigger_add: a webhook trigger keeps the model it was given (#502
   process.env.PI_TRIGGERS_FILE = path;
   const { ctx } = toolCtx({ answer: true });
   await toolByName("dispatch_trigger_add").execute("id", { kind: "label", labels: ["pi:go"], flow: "fix", provider: "openai", model: "gpt-5.4", maxTurns: 4 }, undefined, undefined, ctx);
-  assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "fix", model: "gpt-5.4", provider: "openai", maxTurns: 4 });
+  assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "fix", model: "gpt-5.4", provider: "openai", maxTurns: 4, secretBundle: false });
   // And a malformed one is the loader's own refusal BEFORE the confirm, never an approval wasted on an
   // entry the write then refuses, and never a silent drop.
   for (const bad of [{ model: "gpt 5" }, { provider: "open/ai" }, { maxTurns: 0 }]) {

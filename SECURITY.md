@@ -58,6 +58,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A local folder's `.pi/` | **Whatever can write that folder** | No merge gate, no reviewer, no history |
 | A local folder's `.git/` (config, attributes, index, exclude list) | **Whatever can write that folder**, which includes the local job's own agent | The host reads the folder's dirty state before a local run (`pi-dispatch run`, the console, `/dispatch run`). That read never uses the folder's own git config, `info/attributes` or `info/exclude`, and clears the index's assume-unchanged and skip-worktree bits in a copy, so nothing in that directory runs on the host or hides uncommitted work from the guard. The operator's own global git config still applies |
 | A trigger's `run.secrets` and `run.secretsProfile` | **Operator — the same trust as the triggers file, plus a host exec** | The references are named in the reviewed file; the resolver that reads them is a script the operator wrote and declared. The job receives VALUES and never a manager credential, so it cannot enumerate a vault, but it can spend what it was given. |
+| A project's `secretBundles` entry and its bundle resolver (issue #704) | **Operator, the same trust as the triggers file, plus a host exec, plus whoever can write the manager the resolver reads** | The binding (project, profile, reference) is in the reviewed file; the variables are NOT. The resolver prints whatever the manager (or file) holds at each job start, so a variable added there reaches the next job of the project with no review of `triggers.json`. The job still receives values and never the manager's credential. Trigger-made jobs only: never a chained child, a manual run or a fork pull request (unless `forkReviews`), and every run record lists the variable NAMES it received. |
 | A trigger's `run.skillsDir` and `run.instructions` | **Operator — the same trust as the triggers file** | Both are instructions, and both come from the reviewed `triggers.json` on the worker host rather than from any payload. Nothing reachable from a webhook, an issue or comment body, or `dispatch_run` can set either, and no panel key or AI tool writes them. The skills are copied per job into `/job` (adding no mount) and are layered UNDER the repo's own `.pi/`, so a serviced repo still wins a name collision; the instruction text lands in the user prompt above the issue text and never in the system prompt |
 | The job image (`PI_JOB_IMAGE`, or a trigger's `run.image`) | **Operator, the same trust as baking it** | It *is* the code every job executes: the pi version, the runner and its exit codes, the guardrail floor, the loader's discovery posture and, where the argv carries no `--user` (Docker Desktop, or a worker running as uid 1001), the non-root user all come from it. Nothing here verifies an image this project did not build. The isolation flags are applied by the worker's argv and hold for **any** image; the **contents** do not. |
 | The allocation envelope (`PI_ENVELOPE_FILE`) | **Operator, the same trust as the scoped-limits file** | It bounds what a priorities plan may move: the total, the floors and the step. The worker refuses to boot when the file lies inside any path a job container can see, and re-checks that at every reload, keeping the last good envelope when it fails; a local job's folder is re-judged at prepare and refused when it resolves to the envelope's folder or above it. The plan itself, which is agent text, gets no trust |
@@ -576,6 +577,13 @@ Stated openly rather than discovered later:
   reduce the paths. The value enters the model's context on the first turn after it is read, the agent
   holds a write-capable forge token, and your forge is on the egress allowlist by necessity. What bounds
   the damage is what it always was: how narrow the thing you named is, and what it can do if spent.
+  **A project secret bundle (issue #704) does not reduce the kind or the quantity the way `run.secrets` does.**
+  It hands every trigger-made job of the project the whole environment its resolver prints, and the reviewed file
+  names no field of it, so a capability review of `triggers.json` no longer says what a job holds: the record's
+  `bundle.variables` does, after the fact. That is the trade the feature makes on purpose (`DES-PROJECT-SECRET-BUNDLES`).
+  A prompt injection in one issue can reach every variable of the bundle. Keep bundles small and per project, keep
+  `forkReviews` off, and keep a credential only one trigger needs in that trigger's `run.secrets`. On `local` and
+  `podman` every bundle variable is one more `-e NAME=VALUE` in the argv the next sentences describe (`OQ-028`).
   Two further exposures are worth stating plainly. Every environment value reaches the container as
   `-e NAME=VALUE` in the worker's own `docker run` argv, sent to whichever daemon the docker CLI resolves, so under a default `hidepid` any local user can
   read it from `/proc/<pid>/cmdline` for the container's lifetime; that is already true of the provider key
@@ -1090,7 +1098,7 @@ Stated openly rather than discovered later:
   beside it). Every job's forge token rests there. pi-dispatch cannot stop that and does not scrub it. A
   minted App installation token expires in about an hour, so its copy is dead soon after; a long-lived PAT,
   a `gh` login, a GitLab or a Forgejo token stays usable there for as long as the token does. The provider
-  API key, every `run.secretsProfile` value and every `PI_FORWARD_ENV` value a job carries rest there too, as the same `-e NAME=VALUE`
+  API key, every `run.secretsProfile` value, every project secret bundle value and every `PI_FORWARD_ENV` value a job carries rest there too, as the same `-e NAME=VALUE`
   the paragraph on secret profiles describes, and those have no expiry at all; the provider key can spend
   money. The App path does not close that. Set a spend limit on the provider key, rotate any key or secret
   you suspect, and treat that folder as a secret store. Outside jobs, the same log gets the Valkey password

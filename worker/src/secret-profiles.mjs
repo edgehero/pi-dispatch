@@ -163,3 +163,58 @@ export function servableSecretProfiles({ envProfiles = {}, overlayProfiles = {},
 	}
 	return { profiles };
 }
+
+/**
+ * The output formats a bundle resolver may declare (issue #704). DECLARED, never sniffed: `{"A":"1"}` is one
+ * malformed dotenv line and `A=1` is malformed JSON, so a sniffer would have to pick, and the pick would change
+ * the day a manager prints a JSON-looking value. The operator says which one their script prints.
+ */
+export const BUNDLE_FORMATS = Object.freeze(["dotenv", "json"]);
+
+/**
+ * Parse `PI_SECRET_BUNDLES`: `name:/abs/path:format,other:/abs/other:format` (issue #704). Returns
+ * `{ [name]: { path, format } }`, empty when unset. Throws (config-tagged, so the worker refuses to boot) on
+ * anything malformed, `parseSecretProfiles`' doctrine and for its reason.
+ *
+ * ITS OWN NAMESPACE, never a flag on a `PI_SECRET_PROFILES` entry. The two scripts answer different questions
+ * (one prints one value for one reference, the other prints a whole environment) and are called with different
+ * caps and parsers: a profile reachable as a bundle would have its single value parsed as dotenv and refused
+ * as `malformed` on every job, and a bundle reachable as a profile would put its whole environment into ONE
+ * variable. Two variables keep each script reachable only as what it was written to be, the reason
+ * `PI_WAIT_PROFILES` is separate from both.
+ *
+ * The NAME splits on the FIRST colon and the FORMAT on the LAST one, so `shop:C:\pi\shop.cmd:json` keeps its
+ * drive letter (the hazard `parseSecretProfiles` states). The format is REQUIRED: a missing one is a boot
+ * refusal naming the two choices, never a default, because a default would be the sniffing above with a
+ * slower fuse (the first operator whose script prints JSON gets every job refused as `malformed`).
+ */
+export function parseSecretBundleProfiles(raw) {
+	if (raw === undefined || raw === null || String(raw).trim() === "") return {};
+	const bundles = {};
+	for (const entry of String(raw).split(",")) {
+		const text = entry.trim();
+		if (text === "") continue;
+		const cut = text.indexOf(":");
+		const last = text.lastIndexOf(":");
+		if (cut <= 0 || last === cut) {
+			throw configError(`PI_SECRET_BUNDLES entries must be name:/absolute/path:format (format ${BUNDLE_FORMATS.join(" or ")}), got ${JSON.stringify(text)}`);
+		}
+		const name = text.slice(0, cut).trim();
+		const path = text.slice(cut + 1, last).trim();
+		const format = text.slice(last + 1).trim();
+		if (!PROFILE_NAME.test(name)) {
+			throw configError(`PI_SECRET_BUNDLES profile name ${JSON.stringify(name)} may use letters, digits, dot, dash and underscore only`);
+		}
+		if (!BUNDLE_FORMATS.includes(format)) {
+			throw configError(`PI_SECRET_BUNDLES profile ${JSON.stringify(name)} must end in :dotenv or :json, the format its resolver prints -- it is never guessed from the output`);
+		}
+		if (Object.hasOwn(bundles, name)) {
+			throw configError(`PI_SECRET_BUNDLES declares ${JSON.stringify(name)} twice -- one of the two is not the resolver you think is running`);
+		}
+		if (path === "" || !isAbsolutePath(path)) {
+			throw configError(`PI_SECRET_BUNDLES profile ${JSON.stringify(name)} needs an ABSOLUTE path to its resolver -- a service manager's working directory is not your shell's, so a relative path is a different file on every host`);
+		}
+		Object.defineProperty(bundles, name, { value: Object.freeze({ path, format }), enumerable: true, writable: true, configurable: true });
+	}
+	return bundles;
+}

@@ -13,7 +13,7 @@ import { DEFAULT_BACKEND, OPENSHELL_BACKENDS, OPENSHELL_BIND_BACKEND, backendRef
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
-import { parseSecretProfiles } from "./secret-profiles.mjs";
+import { parseSecretBundleProfiles, parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { jobSizeDefaults } from "./job-size.mjs";
@@ -614,6 +614,12 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// hazard `delimitedList` above exists for, arriving from the other side. Unset = the feature is off and
 		// any trigger naming secrets refuses pre-spend, which is why there is no default profile to fall into.
 		secretProfiles: parseSecretProfiles(env.PI_SECRET_PROFILES),
+		// Issue #704. The operator's declared BUNDLE resolvers, `name:absolute-path:format` (dotenv or json, required).
+		// Its own variable, never a flag on PI_SECRET_PROFILES (secret-profiles.mjs says why). Unset = no bundle can
+		// resolve on this host, so a project bound to one refuses pre-spend as secret-bundle-profile-unknown. Bounded by
+		// the same PI_SECRET_RESOLVER_ROOTS below for its overlay half, and timed by PI_SECRET_RESOLVE_TIMEOUT_MS: one
+		// call per job, so one timeout, never a multiple of it.
+		secretBundleProfiles: parseSecretBundleProfiles(env.PI_SECRET_BUNDLES),
 		// The directories a resolver may live in. Default [] FAILS CLOSED exactly as dispatchRunRoots does, and
 		// for a sharper version of its reason: this bounds paths that can arrive from the settings overlay,
 		// which is not the reviewed artifact `triggers.json` is. Unset means the panel can declare no profile

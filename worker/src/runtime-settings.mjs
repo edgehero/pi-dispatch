@@ -6,6 +6,7 @@ import { expectRefusal } from "./file-expect.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
 import { checkDollarInvariant, parseUsdMicros } from "./money.mjs";
+import { BUNDLE_FORMATS } from "./secret-profiles.mjs";
 
 /**
  * Runtime-settings overlay: the shared, durable truth between the admin extension and the worker
@@ -48,8 +49,11 @@ export const KNOWN_KEYS = ["model", "provider", "maxTurns", "dailyCap", "weeklyC
  *
  * A profile is declared through the operator-typed `/dispatch` command instead, which pi reaches only from
  * its own user-input path, and every declared path is bounded by PI_SECRET_RESOLVER_ROOTS in the worker.
+ *
+ * `secretBundles` (issue #704) is the same capability for a bundle resolver, `{ [name]: { path, format } }`, and is
+ * operator-only for the same reason: its path is an exec, bounded by the same roots.
  */
-export const OPERATOR_ONLY_KEYS = ["secretProfiles"];
+export const OPERATOR_ONLY_KEYS = ["secretProfiles", "secretBundles"];
 
 // The dollar keys' near-miss spellings (issue #501), already normalised (`overlayKeyShape`), each mapped to the key it
 // meant: the four keys, their env names (`PI_MAX_COST_USD` pasted into settings.json is the likeliest slip of all),
@@ -172,6 +176,37 @@ function validateOverlay(candidate, log) {
 				overlay[key] = { ...value };
 				break;
 			}
+			case "secretBundles": {
+				// Issue #704. `{ [name]: { path: "/abs/path", format: "dotenv" | "json" } }`, the panel-authored half of
+				// PI_SECRET_BUNDLES. `secretProfiles`' rules (shape here, the path bound in the worker, an invalid value
+				// fails the whole overlay), plus two of its own: the format is REQUIRED and never guessed (secret-profiles.mjs
+				// `parseSecretBundleProfiles` says why), and an unknown field refuses rather than drops, because a misspelt
+				// `fromat` would otherwise read as declared while the entry has no format at all.
+				if (value === null || typeof value !== "object" || Array.isArray(value)) {
+					return { invalid: "secretBundles must be an object mapping bundle profile names to { path, format }" };
+				}
+				const bundles = {};
+				for (const name of Object.keys(value)) {
+					if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+						return { invalid: "secretBundles names may use letters, digits, dot, dash and underscore only" };
+					}
+					const entry = value[name];
+					if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+						return { invalid: `secretBundles.${name} must be an object { path, format }` };
+					}
+					const extra = Object.keys(entry).find((k) => k !== "path" && k !== "format");
+					if (extra !== undefined) return { invalid: `secretBundles.${name} has an unknown field (only path and format are read)` };
+					if (typeof entry.path !== "string" || entry.path.trim() === "") {
+						return { invalid: `secretBundles.${name}.path must be a non-empty absolute path` };
+					}
+					if (!BUNDLE_FORMATS.includes(entry.format)) {
+						return { invalid: `secretBundles.${name}.format must be ${BUNDLE_FORMATS.join(" or ")}` };
+					}
+					Object.defineProperty(bundles, name, { value: { path: entry.path, format: entry.format }, enumerable: true, writable: true, configurable: true });
+				}
+				overlay[key] = bundles;
+				break;
+			}
 			case "maxCostUsd":
 			case "dailyCostUsd":
 			case "weeklyCostUsd":
@@ -281,14 +316,14 @@ export function effectiveSettings(config, overlay) {
  * `secretProfiles` (REQ-TRIGGER-SECRETS) rides ALONGSIDE the effective keys rather than inside them:
  * `effectiveSettings` resolves `overlay > env` over a fixed literal whose tests pin its key set, and this key
  * deliberately has no such precedence (a name declared in both sources is refused per delivery, not silently
- * won by either).
+ * won by either). `secretBundles` (issue #704) rides beside it for the same reason, under the same rule.
  */
 export function resolveSettings(config, read) {
 	if (read.invalid) return { invalid: read.invalid };
 	const settings = effectiveSettings(config, read.overlay);
 	const broken = checkDollarInvariant(settings);
 	if (broken) return broken;
-	return { ...settings, secretProfiles: read.overlay?.secretProfiles ?? {} };
+	return { ...settings, secretProfiles: read.overlay?.secretProfiles ?? {}, secretBundles: read.overlay?.secretBundles ?? {} };
 }
 
 /**

@@ -274,7 +274,7 @@ test("the near-miss refusal leaves the ordinary model fields alone", async () =>
   const path = tmpFile("triggers.json", { triggers: [] }, "PI_TRIGGERS_FILE");
   const { ctx } = toolCtx({ answer: true });
   await toolByName("dispatch_trigger_add").execute("id", { kind: "label", flow: "fix", labels: ["bug"], provider: "openai", model: "gpt-x", maxTurns: 4 }, undefined, undefined, ctx);
-  assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "fix", model: "gpt-x", provider: "openai", maxTurns: 4 });
+  assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "fix", model: "gpt-x", provider: "openai", maxTurns: 4, secretBundle: false });
 });
 
 test("with no dollar setting, dispatch_costs and dispatch_limits return exactly main's shapes", async () => {

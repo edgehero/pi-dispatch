@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { isJobNamespace, jobContainerName, JOB_NAME_PREFIX, reaperExec } from "./backend-local.mjs";
 import { FORGES } from "./forges.mjs";
 import { NON_SECRET_ENV_KEYS } from "./redact-secrets.mjs";
-import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, OPENSHELL_BIND_LINGERING } from "./backends.mjs";
+import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, OPENSHELL_BIND_LINGERING, OPENSHELL_BUNDLE_UNSUPPORTED } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
 import { makeImagePreflight, normalizeImageId, resolveJobImage } from "./image-preflight.mjs";
 import { LAYOUTS } from "./job-layout.mjs";
@@ -552,6 +552,8 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
 	// Issue #686 part 3, review round 2 of #714: the bind venue's named result for a sandbox not confirmed gone (backends.mjs).
 	[OPENSHELL_BIND_LINGERING.reason]: OPENSHELL_BIND_LINGERING.comment,
+	// Issue #704 part 2: refused by the processor's bundle gate, before spend, until part 3 gives this venue bundle keys.
+	[OPENSHELL_BUNDLE_UNSUPPORTED.reason]: OPENSHELL_BUNDLE_UNSUPPORTED.comment,
 	// Issue #686 part 3, bind mode only. The setting goes to the operator's log (`openshell_bind_mounts_disabled`).
 	"openshell-bind-mounts-disabled": "Refused: this job's venue mounts its files into an OpenShell sandbox, and the OpenShell gateway is not configured to allow that (its gateway.toml must allow driver config and bind mounts, and turn resource admission off), so the operator must change it before jobs run there. Not run.",
 });

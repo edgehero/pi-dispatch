@@ -16,10 +16,11 @@ const FLEET_READ_TIMEOUT_MS = 2_000;
 const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
 
   pi-dispatch init         scaffold .env + triggers.json + pause-windows.json + pi-packages.json + subscriptions.json here
-  pi-dispatch doctor [--fix] [--live] [--openshell]
+  pi-dispatch doctor [--fix] [--live] [--openshell] [--secrets]
                            preflight Docker, Valkey, the job image, and your provider key; --fix offers to run each fix (y/N per action);
                            --live reads the backend declarations back off short-lived real containers (shown in docker ps while they run);
-                           --openshell says whether this host is ready for the openshell venue (run anyway once PI_BACKENDS names it)
+                           --openshell says whether this host is ready for the openshell venue (run anyway once PI_BACKENDS names it);
+                           --secrets resolves each project secret bundle here and prints its variable names, never values
   pi-dispatch up [--yes]   one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
@@ -97,7 +98,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		const { runDoctor } = await import("./doctor.mjs");
 		// `fix` and `live` ride in the deps position (runDoctor(env, depsOrOpts)) — one options bag, no third arg.
 		// `--openshell` (issue #683): the openshell venue's lines, before PI_BACKENDS blesses it (issue #684 made it blessable).
-		return runDoctor(env, { fix: argv.slice(1).includes("--fix"), live: argv.slice(1).includes("--live"), openshell: argv.slice(1).includes("--openshell") });
+		// `--secrets` (issue #704): resolve each project secret bundle on this host, printing variable names and a count only.
+		return runDoctor(env, { fix: argv.slice(1).includes("--fix"), live: argv.slice(1).includes("--live"), openshell: argv.slice(1).includes("--openshell"), secrets: argv.slice(1).includes("--secrets") });
 	}
 
 	if (cmd === "up") {

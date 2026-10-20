@@ -169,8 +169,10 @@ test("resolveSettings: the dollar invariant runs on MERGED values, never on the 
 test("resolveSettings: an invalid read passes through; a valid one is the effective settings plus secretProfiles", () => {
 	const config = { provider: "p", model: "m", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null, maxCostUsd: "5", dailyCostUsd: null, weeklyCostUsd: null, monthlyCostUsd: null };
 	assert.deepEqual(resolveSettings(config, { invalid: "settings file is not valid JSON" }), { invalid: "settings file is not valid JSON" });
-	assert.deepEqual(resolveSettings(config, { overlay: {} }), { ...config, secretProfiles: {} });
-	assert.deepEqual(resolveSettings(config, { overlay: { maxCostUsd: "1", secretProfiles: { a: "/x" } } }), { ...config, maxCostUsd: "1", secretProfiles: { a: "/x" } });
+	assert.deepEqual(resolveSettings(config, { overlay: {} }), { ...config, secretProfiles: {}, secretBundles: {} });
+	assert.deepEqual(resolveSettings(config, { overlay: { maxCostUsd: "1", secretProfiles: { a: "/x" } } }), { ...config, maxCostUsd: "1", secretProfiles: { a: "/x" }, secretBundles: {} });
+	// Issue #704: the bundle profiles ride beside them, under the same no-precedence rule.
+	assert.deepEqual(resolveSettings(config, { overlay: { secretBundles: { b: { path: "/y", format: "json" } } } }).secretBundles, { b: { path: "/y", format: "json" } });
 });
 
 test("readOverlay: softHoldPct boundaries 1 and 99 are accepted", () => {

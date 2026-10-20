@@ -4389,6 +4389,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   state, declared in `PI_SECRET_PROFILES` or through the operator-typed `/dispatch secrets` command, never
   by a tool. A chained child inherits neither field.
 
+  AMENDED 2026-10-19 (#704): the scope gains **project secret bundles** (`DES-PROJECT-SECRET-BUNDLES`): the
+  triggers file's top-level `secretBundles` binds a projects.json project to a bundle profile and a reference, and
+  every TRIGGER-MADE job of that project (cron and forge) SHALL have every variable the bundle's resolver prints
+  injected exactly as `run.secrets` values are, resolved by ONE call per job start, before the clone and every
+  reserve. The same exclusions hold, by a test each: no `dispatch_run` or manual run, no chained child, no
+  model-callable tool writes `secretBundles` or a bundle profile (the overlay's `secretBundles` is operator-only),
+  and a trigger opts out with `run.secretBundle: false`. No model-callable tool may WIDEN a grant: a trigger
+  `dispatch_trigger_add` writes always carries `secretBundle: false`, no trigger tool call may carry the field, and the
+  project tools refuse any change to the membership of a project a bundle names (a new project under a bundled id
+  included), before the confirm and again at the write. A job on a fork's pull request gets none unless the bundle
+  sets `forkReviews: true`. A trigger's own `run.secrets` win a name clash.
+
 - **Why**: **The reference grammar belongs to the resolver, and never to this project.** `op://vault/item`,
   `secret/data/ci#stripe` and a bare name are all correct inputs, because what parses them is a script the
   operator wrote. This is `DES-SERVICE-ENV-SETUP-SEAM`'s posture moved from boot time to job time, and the
@@ -4404,6 +4416,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   **The reviewed artifact names FIELDS, and that is the point.** A trigger enumerating
   `op://vault/item/field` stays true as the vault grows, which is the property a vault-name grant
   structurally cannot have: naming a vault is how a capability review decays silently.
+  AMENDED 2026-10-19 (#704): this stays true for `run.secrets` and is explicitly NOT true for a bundle. A bundle
+  is the named environment as the unit of grant, chosen on purpose: the reviewed file names the project, the
+  profile and the reference, never the fields, and a variable added at the source reaches the next job. The
+  review of what a project holds moves to the manager; the run record lists the variable names each job received.
 
   **Resolution is pre-spend because a refusal must be free.** A missing item, a wrong reference or an
   expired worker credential costs no token mint, no clone and no budget slot. The alternative, discovering
@@ -4450,6 +4466,24 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   worker would not use. A forge delivery binding `run.secrets` without `run.secretsProfile` is routed as needing
   the `default` profile, and a host advertises the overlay profiles it would resolve, so routing and the
   pre-spend lookup read one table.
+  AMENDED 2026-10-19 (#704), for bundles: **at load**, a malformed `secretBundles` refuses the whole file (an unknown
+  field, a second bundle for one project, a `ref` breaking the reference rules, a project that is not a projects.json
+  id, a non-boolean `forkReviews`, a malformed `endpoints` entry), and a non-boolean `run.secretBundle` refuses.
+  **Pre-spend, before the mint**: `secret-bundle-profile-unknown` / `-ambiguous`, `secret-bundle-resume`,
+  `secret-bundle-trigger-changed` (the job's trigger is no longer in the file, so its opt-out is unknown), and
+  `openshell-bundle-unsupported` on either OpenShell venue. A profile this host lacks DEFERS a job on a multi-host
+  worker's shared queue instead of refusing it. A triggers file that does not read or validate is answered from the
+  worker's last good read; a process that has never had one retries a job with a project. **Before the mint** for a
+  job that needs no fork check, and **after the mint for a pull request** (before branch protection, the clone and
+  every reserve, after the head is read from the forge: a 401, 403 or 404 runs it without the bundle as
+  `head-unverified`, any other failure retries, and a fork skips the bundle), the read: exit 2, an empty, oversized (256 KiB),
+  malformed or non-string output, more than 64 variables, a duplicate, an empty or NUL value refuse as
+  `secret-unresolved`, exit 1 retries as `secret-resolver-unreachable`, and a reserved name (the static set, the
+  provider's variables, `PI_FORWARD_ENV`, and for bundles the loader and steering names) refuses as
+  `secret-name-reserved`, the log naming the variable. The record
+  carries `bundle: { id, variables, shadowed }` or `bundleSkipped`, names only; no value reaches a record, a log line
+  or a comment. `doctor` fails on an undeclared bundle profile and an unknown project, and `doctor --secrets` prints
+  each bundle's variable names and count.
 
 ## REQ-DEPLOYMENT-BOOTSTRAP
 
@@ -5139,6 +5173,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-19 | Issue #704, part 2, review round 1. **`REQ-TRIGGER-SECRETS` AMENDED**, its bundle scope and acceptance: no model-callable tool may widen a grant (an added trigger carries `secretBundle: false`, no trigger tool call may carry the field, the project tools refuse a bundled project's membership change); `openshell-bundle-unsupported`; a profile this host lacks defers a multi-host shared-queue job; the last good triggers read, and a retry only before the first; the read before the mint unless a fork check is needed; a 401, 403 or 404 head read is `head-unverified`; bundle-only loader and steering names refuse. |
+| 2026-10-19 | Issue #704, part 2: project secret bundles. **`REQ-TRIGGER-SECRETS` AMENDED**, three dated paragraphs: the scope gains bundles (trigger-made jobs of the bound project, one resolver call per job start, the same exclusions: no `dispatch_run` or manual run, no chained child, no model-callable writer; the `run.secretBundle: false` opt-out; no fork pull request without `forkReviews`; `run.secrets` win a clash); "names FIELDS" stays true for `run.secrets` and is explicitly not true for bundles; the acceptance gains the load-time refusals, the pre-mint and post-mint refusals and retries, the names-only record and doctor's lines. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: a bundle is not routed (`DES-PROJECT-SECRET-BUNDLES` says why); the worker's pre-spend refusal is the backstop. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: `doctor --secrets` reads and never writes. **Code evidence**: worker/src/processor.mjs -> the bundle gates; worker/src/secret-bundles.mjs; worker/src/triggers.mjs -> validateSecretBundles; worker/src/run-history.mjs -> recordedBundle. |
 | 2026-10-19 | Issue #704, the standalone fixes found while researching project secret bundles. **`REQ-TRIGGER-SECRETS` AMENDED**, its acceptance: a deployment entry is one in `PI_SECRET_PROFILES` or an overlay `secretProfiles` entry whose resolver is an executable inside `PI_SECRET_RESOLVER_ROOTS`; `doctor` fails on every name declared in both and on a named overlay profile the worker would not use; a forge delivery with `run.secrets` and no profile is routed as needing `default`, and hosts advertise the overlay profiles they would resolve. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: the registry and the routing rule keep their shape; only the tokens read and written are wider. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor still reads and never writes. **Code evidence**: worker/src/capabilities.mjs -> jobNeeds; worker/src/secret-profiles.mjs -> servableSecretProfiles; worker/src/doctor.mjs -> the secrets section; worker/src/triggers-file.mjs -> serialize. |
 | 2026-10-19 | Issue #707, review round 1 of #715. **`REQ-DEPLOYMENT-BOOTSTRAP` CORRECTED**, its openshell sentence: the start is offered only where the gateway's unit (`systemctl --user cat`) or Homebrew service (`brew services info openshell`, which only OpenShell's release formula defines) exists, and the registration only where the CLI has no gateway registered at all, the command printed as the fix otherwise. Everything else in the entry UNCHANGED, checked. |
 | 2026-10-19 | Issue #707: `up` and `service install` learn the `openshell` venues. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: an "On the `openshell` venues" sentence: the gate (the engine, the CLI and the gateway judged as the boot judges them), read-only unless one of two shown and asked offers is accepted (the gateway's start, waited for a bounded 30 s, and its loopback registration when the CLI has none), never an install (the pinned release's URL, exit 1) and never an edit of the gateway's configuration; the image into the gateway's engine unless `local` or `podman` already filled that store; Valkey on that engine where neither is blessed; no egress proxy for these venues. The venue keys `up` reads from `.env` gain `PI_OPENSHELL_ENGINE` and `PI_OPENSHELL_GATEWAY`; `init`'s next steps gain the openshell ladder. Everything else in the entry (never an unshown mutation, never a touched value, no token spent, the image rule, the docker and podman venues' steps) UNCHANGED, checked. |

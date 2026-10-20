@@ -1,4 +1,4 @@
-import { ABSENT, OPENSHELL_BIND_LINGERING, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
+import { ABSENT, OPENSHELL_BIND_LINGERING, OPENSHELL_BUNDLE_UNSUPPORTED, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseLedgers, reserveLedgers } from "./budget.mjs";
@@ -6,6 +6,7 @@ import { configError } from "./config.mjs";
 import { unqualifiedScope } from "./pause-windows.mjs";
 import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
+import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { MCP_REFUSAL_COMMENT } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
@@ -383,11 +384,14 @@ async function endDurableRun(d, deps) {
 
 export async function runJob(job, deps) {
 	const durable = durableOf(job);
+	// Issue #704: what this attempt did with the project's secret bundle, for the record (`bundle` or `bundleSkipped`).
+	const bundleFacts = { bundle: null, bundleSkipped: null };
 	let result;
 	try {
-		result = await runAttempt(job, deps, durable);
+		result = await runAttempt(job, deps, durable, bundleFacts);
 	} catch (e) {
 		tagDurable(e, durable);
+		tagBundle(e, bundleFacts);
 		// A RECOVERY job has one attempt (recovery-queue.mjs), so a never-started retry would fail it for good over a
 		// blip (a pointer read, a ledger write, a restore that met a lock). Every such throw becomes a wait hold instead:
 		// `makeProcessor` delays it without spending the attempt, and the run's recovery deadline (`recoverBy`, the
@@ -395,6 +399,7 @@ export async function runJob(job, deps) {
 		if (durable.isRecovery && e instanceof InfraRetry && e.reason === "container-never-started" && !(e instanceof RecoveryWaitHold)) {
 			const hold = new RecoveryWaitHold(e.message, { cause: e, reason: e.reason, provider: e.provider, model: e.model, budgetReserved: e.budgetReserved, dollars: e.dollars, resources: e.resources, exitCode: e.exitCode, turns: e.turns, tokens: e.tokens, session: e.session, usage: e.usage, waitMs: RECOVERY_RETRY_WAIT_MS });
 			tagDurable(hold, durable);
+			tagBundle(hold, bundleFacts);
 			deps?.log?.("recovery_retry_held", { delayMs: RECOVERY_RETRY_WAIT_MS });
 			throw hold;
 		}
@@ -404,10 +409,31 @@ export async function runJob(job, deps) {
 	// and not `recovery-superseded`: that one is decided on a pointer read that came back empty, and an empty read must
 	// never be the reason another run's store is deleted; the run that settled cleaned up after itself.
 	if (durable.armed && result?.reason !== RECOVERY_ENQUEUED && result?.reason !== RECOVERY_SUPERSEDED) await endDurableRun(durable, deps);
-	return withDurable(result, durable);
+	return withBundle(withDurable(result, durable), bundleFacts);
 }
 
-async function runAttempt(job, deps, durable) {
+/**
+ * The secret-bundle facts the record carries (issue #704), added to a result only when there are any, so every other
+ * result is unchanged. NAMES only: `bundle` is `{ id, variables, shadowed }`, never a value.
+ */
+function withBundle(result, b) {
+	if (result === null || typeof result !== "object") return result;
+	if (b.bundle === null && b.bundleSkipped === null) return result;
+	return { ...result, ...(b.bundle !== null ? { bundle: b.bundle } : {}), ...(b.bundleSkipped !== null ? { bundleSkipped: b.bundleSkipped } : {}) };
+}
+
+/** The same on a throw, so a retried or failed attempt's record says what it held (buildRecord reads the error). */
+function tagBundle(e, b) {
+	if (e === null || typeof e !== "object") return;
+	try {
+		if (b.bundle !== null && e.bundle === undefined) e.bundle = b.bundle;
+		if (b.bundleSkipped !== null && e.bundleSkipped === undefined) e.bundleSkipped = b.bundleSkipped;
+	} catch {
+		// a frozen error keeps its own fields
+	}
+}
+
+async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bundleSkipped: null }) {
 	const {
 		redis,
 		caps, // { day, week, month }; week/month null when that window is disabled (REQ-SPEND-CAPS-MULTI-WINDOW)
@@ -516,6 +542,24 @@ async function runAttempt(job, deps, durable) {
 		// would leave an INJECTED resolver running on every job, which is how a probe nobody wanted starts
 		// spawning a subprocess per delivery to learn nothing.
 		resolveSecrets = async (job) => ({ profileUnknown: job.secretsProfile ?? DEFAULT_SECRETS_PROFILE }),
+		// Issue #704, project secret bundles. `findSecretBundle(job, { project })` is the worker's own read of the triggers
+		// file's `secretBundles` (triggers-file.mjs `makeFindSecretBundle`); the default finds none, so a bare processor
+		// and every deployment without the key run exactly as before. `secretBundles` is the bundle seam
+		// (secret-bundles.mjs `makeBundleResolver`, its overlay and signal bound by the wiring): `lookup(profile)` with
+		// no spawn, `resolve(job, binding)` with one. Its default FAILS CLOSED, `resolveSecrets`' posture and reason:
+		// a wiring that finds a bundle and cannot resolve one must refuse, never start the job without the environment.
+		findSecretBundle = () => ({ none: true }),
+		secretBundles = { lookup: (profile) => ({ profileUnknown: profile }), resolve: async (_job, binding) => ({ profileUnknown: binding?.profile ?? null }) },
+		// `(job, token) => { headRef, headRepo }` for a pull-request target, the forge host's own (prepare-github.mjs reads
+		// the same seam for run.resume): whether the head lives in the base repository, answered by the FORGE, never the
+		// payload. Asked only for a job whose project has a bundle without `forkReviews`. Null on a bare wiring, which
+		// can confirm no head and so grants no bundle to a pull request (`bundleSkipped: "fork"`, the direction that
+		// grants nothing).
+		resolvePullRequestHead = null,
+		// Issue #704 review: whether a profile this host lacks DEFERS the job rather than refusing it: true only for a job
+		// on a multi-host worker's shared queue (index.mjs, the never-fits gate's predicate), where another host may serve
+		// it. False by default, so a single host refuses, as it always did.
+		bundleProfileDeferrable = false,
 		// (job) => { ok, document } | { refused, name, why } | { unavailable: code } (REQ-MCP-OPERATOR-SERVERS,
 		// mcp-preflight.mjs). The default passes a job that names no server and refuses one that does, so a wiring that
 		// forgot the check can never run a job without the servers its trigger names.
@@ -1392,6 +1436,83 @@ async function runAttempt(job, deps, durable) {
 			return { outcome: "policy", reason: mcpChecked.refused, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
+		// PROJECT SECRET BUNDLES, the free half (issue #704, REQ-TRIGGER-SECRETS, DES-PROJECT-SECRET-BUNDLES). WHICH jobs
+		// get their project's bundle is decided here, before the mint, the clone and every reserve, from one cached read
+		// of the triggers file and the host's declarations: no spawn, no network (CONST-BUDGET-BEFORE-TOKENS). The read
+		// itself comes after the run.secrets resolver and, like it, before the mint, except for a pull request that needs
+		// the fork check: that one needs the forge and the job's token, so its read follows the mint (below).
+		//
+		// TRIGGER-MADE JOBS ONLY, and the predicate is the portfolio gate's: a chained `/outbox` child and every manual
+		// run (`pi-dispatch run`, `/dispatch run`, `dispatch_run`) hold none, each recorded as `bundleSkipped`. The
+		// operator's grant was to the triggers they reviewed, not to what a job queues next or what a model asks for
+		// (outbox.mjs keeps `run.secrets` off children for the same reason). Chained is asked first: a child may carry
+		// its parent's trigger context, and it must never read as manual. A trigger's `run.secretBundle: false` is
+		// `opted-out`, read from the live file rather than the job data (triggers-file.mjs says why).
+		//
+		// Every refusal RETURNS (CONST-RETRY-INFRA-ONLY): an undeclared or doubly declared profile, a resumed job
+		// (`run.resume` would replay a transcript that may hold an echoed value into every later job on its key, the
+		// rule that refuses `run.secrets` beside it at load, which cannot be applied at load here because the file
+		// cannot know a job's project), a trigger the file no longer holds, and a bundle on a venue that cannot hold one
+		// yet (`openshell-bundle-unsupported`). A file that has never been read and validated in this process RETRIES a
+		// job with a project (the finder answers from its last good read otherwise), and a profile this host lacks is
+		// DEFERRED on a multi-host worker's shared queue, the never-fits gate's rule, since another host may serve it.
+		const bundleChained = job.parentJobId !== undefined || job.chainDepth !== undefined;
+		const bundleManual = job.trigger === undefined || job.trigger === null;
+		let bundleBinding = null;
+		const bundleFound = await Promise.resolve()
+			.then(() => findSecretBundle(job, { project: pickupProject }))
+			.catch(() => ({ unreadable: "read-error", transient: true }));
+		if (bundleFound?.unreadable !== undefined) {
+			// Never a good read in this process, and the job has a project: which bundle it would hold is unknown. RETRIED,
+			// never refused (a refused webhook delivery is gone, and the fix is the operator's next save) and never run
+			// without (the silent no-op). A chained or manual job could hold none whatever the file says, so it runs.
+			if (!bundleChained && !bundleManual) {
+				// The errno or our own word (`invalid`), never a path or file text.
+				log("secret_bundles_unreadable", { kind: job.kind ?? null, why: String(bundleFound.unreadable).slice(0, 40) });
+				throw new InfraRetry("the triggers file's secretBundles could not be read, and has not been in this process", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+		} else if (bundleFound && bundleFound.none !== true) {
+			if (bundleChained) bundleFacts.bundleSkipped = "chained";
+			else if (bundleManual) bundleFacts.bundleSkipped = "manual";
+			else if (bundleFound.triggerChanged === true) {
+				await comment(job, BUNDLE_COMMENTS["secret-bundle-trigger-changed"]);
+				log("refused_secret_bundle_trigger_changed", { kind: job.kind ?? null, bundle: bundleFound.id });
+				return { outcome: "policy", reason: "secret-bundle-trigger-changed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			} else if (bundleFound.optedOut === true) bundleFacts.bundleSkipped = "opted-out";
+			else {
+				if (job.resume === true) {
+					await comment(job, BUNDLE_COMMENTS["secret-bundle-resume"]);
+					log("refused_secret_bundle_resume", { kind: job.kind ?? null, bundle: bundleFound.id });
+					return { outcome: "policy", reason: "secret-bundle-resume", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				}
+				const looked = secretBundles.lookup(bundleFound.bundle.profile);
+				if (looked?.ok !== true && bundleProfileDeferrable === true) {
+					// A multi-host worker's SHARED queue: another host may declare the profile, and routing does not steer a
+					// bundled job there (DES-PROJECT-SECRET-BUNDLES says why). So this host does not refuse a job it merely
+					// cannot serve: it hands it back, the never-fits gate's deferral, without spending an attempt.
+					log("secret_bundle_profile_deferred", { kind: job.kind ?? null, bundle: bundleFound.id, profile: bundleFound.bundle.profile, ambiguous: looked?.ambiguous !== undefined });
+					throw new SecretBundleProfileHold("this host cannot serve the job's secret bundle profile; another host may", { reason: looked?.ambiguous !== undefined ? "secret-bundle-profile-ambiguous" : "secret-bundle-profile-unknown", provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false });
+				}
+				if (looked?.ok !== true) {
+					// The profile LABEL in the log only, and the bundle id: both operator config. The comment names neither,
+					// the run.secrets refusals' restraint (the declared names would publish the operator's vault topology).
+					const reason = looked?.ambiguous !== undefined ? "secret-bundle-profile-ambiguous" : "secret-bundle-profile-unknown";
+					await comment(job, BUNDLE_COMMENTS[reason]);
+					log(reason === "secret-bundle-profile-ambiguous" ? "refused_secret_bundle_profile_ambiguous" : "refused_secret_bundle_profile_unknown", { kind: job.kind ?? null, bundle: bundleFound.id, profile: bundleFound.bundle.profile });
+					return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				}
+				// Issue #704 review: a venue whose own layer holds the credentials (both OpenShell venues) would take the
+				// bundle down the run.secrets provider path, bound to every endpoint, or nowhere at all without a network
+				// rule, while the record said the job received it. Refused before spend until #704 part 3 gives it bundle keys.
+				if (backendFor(resolveBackendName(job, blessedBackends[0]))?.credentialCustody === "layer") {
+					await comment(job, OPENSHELL_BUNDLE_UNSUPPORTED.comment);
+					log("refused_openshell_bundle_unsupported", { kind: job.kind ?? null, bundle: bundleFound.id });
+					return { outcome: "policy", reason: OPENSHELL_BUNDLE_UNSUPPORTED.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				}
+				bundleBinding = { id: bundleFound.id, ...bundleFound.bundle };
+			}
+		}
+
 		// REQ-TRIGGER-SECRETS. A trigger that named secret references the worker cannot resolve would run its
 		// flow with those variables UNSET, get a 401 from whatever it was meant to reach, write a plausible
 		// report about why the integration is down, and exit 0.
@@ -1496,7 +1617,60 @@ async function runAttempt(job, deps, durable) {
 			log("secret_resolver_unreachable", { kind: job.kind ?? null, name: resolved.unreachable, failure: resolved.failure ?? null, code: resolved.code ?? null, stderrBytes: resolved.stderrBytes ?? 0 });
 			throw new InfraRetry(`secret resolver could not answer for ${resolved.unreachable}`, { reason: "secret-resolver-unreachable", provider: job.provider ?? null, model: job.model ?? null });
 		}
-		const secrets = resolved.secrets ?? {};
+		// `let`: a project bundle's variables join it after the mint (below), under the trigger's own values.
+		let secrets = resolved.secrets ?? {};
+
+		// PROJECT SECRET BUNDLES, the read (issue #704). ONE resolver call, then the strict parse, the reserved names and
+		// the merge. BEFORE the mint for every job that needs no fork check (CONST-BUDGET-BEFORE-TOKENS: its determinate
+		// refusals spend nothing, not even a token), and right after the mint for a pull request whose head must be asked
+		// of the forge first; either way before branch protection, the clone, the token-cap read and every reserve.
+		// Returns null, or the result to return.
+		const readBundle = async () => {
+			if (bundleBinding === null) return null;
+			const bundleRead = await secretBundles.resolve(job, bundleBinding);
+			if (bundleRead?.ok !== true) {
+				if (bundleRead?.unreachable) {
+					// INDETERMINATE (exit 1, an unknown exit, a spawn fault, a timeout): retried, the run.secrets rule. A
+					// rate-limited manager read lands here, which is why its documented resolvers exit 1 for one.
+					log("secret_bundle_resolver_unreachable", { kind: job.kind ?? null, bundle: bundleBinding.id, failure: bundleRead.failure ?? null, code: bundleRead.code ?? null, stderrBytes: bundleRead.stderrBytes ?? 0 });
+					throw new InfraRetry(`the secret bundle's resolver could not answer for bundle ${bundleBinding.id}`, { reason: "secret-resolver-unreachable", provider: job.provider ?? null, model: job.model ?? null });
+				}
+				if (bundleRead?.reserved !== undefined) {
+					// The variable NAME, in the log, so the operator can rename it in their manager. Not in the public
+					// comment: a bundle's names are the contents of the operator's manager, not of the reviewed file.
+					await comment(job, BUNDLE_COMMENTS["secret-name-reserved"]);
+					log("refused_secret_bundle_name_reserved", { kind: job.kind ?? null, bundle: bundleBinding.id, name: bundleRead.reserved });
+					return { outcome: "policy", reason: "secret-name-reserved", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				}
+				if (bundleRead?.profileUnknown !== undefined || bundleRead?.ambiguous !== undefined) {
+					// Only if the declarations changed between the lookup above and this read: refused as there.
+					const reason = bundleRead.ambiguous !== undefined ? "secret-bundle-profile-ambiguous" : "secret-bundle-profile-unknown";
+					await comment(job, BUNDLE_COMMENTS[reason]);
+					log(reason === "secret-bundle-profile-ambiguous" ? "refused_secret_bundle_profile_ambiguous" : "refused_secret_bundle_profile_unknown", { kind: job.kind ?? null, bundle: bundleBinding.id, profile: bundleBinding.profile });
+					return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				}
+				// DETERMINATE: exit 2, an empty, oversized or malformed output, a bad name or value. `name` and `line`
+				// ride the log only, for the reason above; the comment says which rule, in our words.
+				const why = BUNDLE_FAILURES[bundleRead?.failure] ?? "did not return a usable environment";
+				await comment(job, `Refused: this job's project has a secret bundle, and its resolver ${why}. The job would have started without the project's environment, and an agent that gets a 401 writes a plausible report and exits 0. Run the bundle's resolver by hand against its reference to see why: this comment carries neither the reference, nor the resolver's path, nor a byte of what it printed. Not run.`);
+				log("refused_secret_bundle_unresolved", { kind: job.kind ?? null, bundle: bundleBinding.id, failure: bundleRead?.failure ?? null, name: bundleRead?.name ?? null, line: bundleRead?.line ?? null, code: bundleRead?.code ?? null, stderrBytes: bundleRead?.stderrBytes ?? 0 });
+				return { outcome: "policy", reason: "secret-unresolved", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			// THE MERGE: the trigger's own run.secrets win a clash (secret-bundles.mjs `mergeBundleSecrets`), and the
+			// shadowed names are recorded. The values join `secrets`, so every path that already treats a run.secrets
+			// value as a secret treats these alike: buildContainerEnv injects them, the redaction covers every
+			// non-NON_SECRET_ENV_KEYS name (run-container.mjs), and a checkpoint refuses to store any of them.
+			const merged = mergeBundleSecrets(bundleRead.vars, secrets);
+			secrets = merged.secrets;
+			bundleFacts.bundle = { id: bundleBinding.id, variables: Object.keys(bundleRead.vars).sort(), shadowed: merged.shadowed };
+			log("secret_bundle_applied", { kind: job.kind ?? null, bundle: bundleBinding.id, count: bundleFacts.bundle.variables.length, shadowed: merged.shadowed.length });
+			return null;
+		};
+		const bundleHeadCheck = bundleBinding !== null && job.target?.type === "pull_request" && bundleBinding.forkReviews !== true;
+		if (bundleBinding !== null && !bundleHeadCheck) {
+			const refused = await readBundle();
+			if (refused !== null) return refused;
+		}
 
 		if (wantsForgeToken) {
 			token = await mintToken(job);
@@ -1508,6 +1682,53 @@ async function runAttempt(job, deps, durable) {
 			if (typeof token !== "string" || token.trim() === "") {
 				throw configError("mintToken returned an empty credential");
 			}
+		}
+
+		// PROJECT SECRET BUNDLES, the fork check (issue #704). AFTER the mint, because it needs the job's own token, and
+		// BEFORE branch protection, the clone, the token-cap read and every reserve, so a refusal of the read that follows
+		// still spends nothing but the minted token (CONST-BUDGET-BEFORE-TOKENS: every free refusal stays above the mint,
+		// and so does the read of every job that needs no fork check). A refusal past the mint leaves that token to
+		// expire, exactly as the unprotected-branch refusal below does: it is scoped to this job's repository and
+		// short-lived (CONST-TOKEN-SCOPED-PER-JOB), and no path in this project revokes one, so this adds no second rule.
+		//
+		// A job on a pull request whose head lives in another repository reads a stranger's text (CONST-TRIGGER-AUTHOR-GATE
+		// admits a collaborator's review of a fork), and must not hold every project secret while it does, so it runs
+		// WITHOUT the bundle (`bundleSkipped: "fork"`) unless the bundle opted in with `forkReviews: true`. Answered by the
+		// forge's own `resolvePullRequestHead`, the seam run.resume's fork gate already uses: the head repository must
+		// EQUAL the job's, case-insensitively on GitHub and Forgejo, whose repository names are (GitLab and Azure answer by
+		// project or repository id and report the job's own name back, so their comparison is exact). A webhook's
+		// `head.repo` is attacker-supplied, and an `issue_comment` on a pull request carries no head at all, so the
+		// payload cannot answer. A DETERMINATE forge answer (401, 403, 404: the token cannot see the pull request, or it
+		// is gone) cannot become a yes by retrying, so the job runs without the bundle (`bundleSkipped:
+		// "head-unverified"`); a network fault, a 5xx or a timeout RETRIES (InfraRetry), so a blip neither grants a bundle
+		// nor drops one.
+		if (bundleHeadCheck) {
+			let head = null;
+			let unverified = false;
+			if (typeof resolvePullRequestHead === "function") {
+				try {
+					head = (await resolvePullRequestHead(job, token)) ?? {};
+				} catch (error) {
+					const status = headReadStatus(error);
+					// A GitHub rate limit answers 403 (or 429) with `x-ratelimit-remaining: 0` or a `retry-after`: not a
+					// determinate "you cannot see this pull request", so it RETRIES like any other transient answer.
+					const rateLimited = headReadRateLimited(error);
+					log("secret_bundle_head_unreadable", { kind: job.kind ?? null, status, rateLimited });
+					if (rateLimited || (status !== 401 && status !== 403 && status !== 404)) throw new InfraRetry("the pull request's head could not be read to decide whether it is a fork", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+					unverified = true;
+				}
+			}
+			const fold = job.kind === "github" || job.kind === "forgejo" ? (v) => v.toLowerCase() : (v) => v;
+			const same = !unverified && typeof head?.headRepo === "string" && typeof job.repo === "string" && fold(head.headRepo) === fold(job.repo);
+			if (!same) {
+				bundleFacts.bundleSkipped = unverified ? "head-unverified" : "fork";
+				log("secret_bundle_skipped", { kind: job.kind ?? null, bundle: bundleBinding.id, reason: bundleFacts.bundleSkipped });
+				bundleBinding = null;
+			}
+		}
+		if (bundleHeadCheck) {
+			const refused = await readBundle();
+			if (refused !== null) return refused;
 		}
 
 		if (isForgeBacked) {
@@ -2432,6 +2653,34 @@ const SECRET_FAILURES = {
 };
 
 /**
+ * The bundle resolver's failures (issue #704, secret-bundles.mjs), our words, the `SECRET_FAILURES` rule: an unknown
+ * code degrades to the caller's generic sentence. None names a variable or a value: this text is posted publicly.
+ */
+const BUNDLE_FAILURES = {
+	exit: "refused the bundle's reference",
+	empty: "printed no variable",
+	overflow: "printed more than the bundle size cap allows",
+	nul: "printed output containing a NUL byte",
+	malformed: "printed output that is not in the format its profile declares",
+	quoted: "printed a quoted dotenv value, and the dotenv grammar takes no quotes (declare the profile as json instead)",
+	"not-string": "printed a JSON value that is not a string",
+	"bad-name": "printed a name that is not an environment variable name",
+	duplicate: "printed one variable twice",
+	"empty-value": "printed a variable with an empty value",
+	"value-too-large": "printed a value larger than one secret may be",
+	"too-many": "printed more variables than one bundle may carry",
+};
+
+/** The public comments of the bundle refusals (issue #704). Fixed text: no bundle id, profile, variable or path. */
+const BUNDLE_COMMENTS = Object.freeze({
+	"secret-bundle-trigger-changed": "Refused: this job's project has a secret bundle, and the trigger that queued this job is no longer in the triggers file as it was, so whether it opted out of the bundle is unknown. Re-run it from the current trigger. Not run.",
+	"secret-bundle-resume": "Refused: this trigger sets `run.resume`, and the job's project has a secret bundle. A resumed job replays a transcript kept on host disk, and anything the agent echoed from the bundle would be prefilled into every later job on that key. Set `\"secretBundle\": false` on this trigger, or drop `run.resume`. Not run.",
+	"secret-bundle-profile-unknown": "Refused: this job's project has a secret bundle, and the bundle resolver profile it names is not usable on this worker host. No profile of that name is declared, or its resolver is absent or not executable. Run `pi-dispatch doctor` on the worker to see which bundle profiles it has. Not run.",
+	"secret-bundle-profile-ambiguous": "Refused: this job's project has a secret bundle, and the bundle resolver profile it names is declared twice on this worker host, once in the environment and once in the settings overlay. Neither wins, on purpose. Remove one of the two. Not run.",
+	"secret-name-reserved": "Refused: this job's project has a secret bundle, and one of its variables uses a name this deployment already uses for the job's own credentials or configuration. Whichever value reached the container, one would be silently ignored. The worker's log names the variable (`refused_secret_bundle_name_reserved`); rename it in the secrets manager. Not run.",
+});
+
+/**
  * Is this throw the "the runner never ran" retry (issue #227), whichever path raised it: a never-started exit
  * (`isNeverStartedExit`), a spawn fault, or a pre-start gate? The catch's refunds (the job-count slots and, issue
  * #501, the dollar hold) key off this one test.
@@ -2501,6 +2750,45 @@ export class NetnsKeeperYoungHold extends InfraRetry {
  * not take; `makeProcessor` knows it by `recoveryWaitMs`, and moves the job to the delayed set for that long without
  * spending an attempt (a recovery job has one), the move the two holds above make.
  */
+/**
+ * A job whose project's secret bundle names a profile this host does not serve, on a multi-host worker's SHARED queue
+ * (issue #704 review). An `InfraRetry`, so any path that does not know it still retries; `makeProcessor` knows it by
+ * `bundleProfileHold`, and moves the job to the delayed set for the never-fits gate's recheck without spending an
+ * attempt, so a host that declares the profile can take it.
+ */
+export class SecretBundleProfileHold extends InfraRetry {
+	constructor(message, options) {
+		super(message, options);
+		this.name = "SecretBundleProfileHold";
+		this.bundleProfileHold = true;
+	}
+}
+
+/**
+ * The HTTP status of a failed pull-request head read, or null: octokit's `status`, else the `returned <code>` the
+ * fetch-based forge hosts put in their InfraRetry message (status only, never the body). Read only to tell a
+ * determinate 401/403/404 from a fault worth retrying.
+ */
+function headReadStatus(error) {
+	if (Number.isInteger(error?.status)) return error.status;
+	const m = /\breturned (\d{3})\b/.exec(String(error?.message ?? ""));
+	return m ? Number(m[1]) : null;
+}
+
+/**
+ * Whether a failed head read is a RATE LIMIT (issue #704 review round 2): octokit's error carries the response headers,
+ * and GitHub's primary limit answers 403 with `x-ratelimit-remaining: 0`, its secondary limit 403 or 429 with a
+ * `retry-after`. A header is read by name only, never echoed. The fetch-based hosts surface no headers, and their
+ * 429 is already outside the determinate set.
+ */
+function headReadRateLimited(error) {
+	const headers = error?.response?.headers;
+	if (headers === null || typeof headers !== "object") return false;
+	const get = (name) => (typeof headers.get === "function" ? headers.get(name) : headers[name]);
+	const remaining = get("x-ratelimit-remaining");
+	return String(remaining ?? "") === "0" || (get("retry-after") !== undefined && get("retry-after") !== null);
+}
+
 export class RecoveryWaitHold extends InfraRetry {
 	constructor(message, { waitMs = RECOVERY_WAIT_MS, ...options } = {}) {
 		super(message, options);

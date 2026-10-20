@@ -9374,6 +9374,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		/^const probe = await runCmdCapture\(spawn, ghProbeBin, ghProbeArgs\(jobImage, ghProbeBin\), \{ env: spawnEnv, input: `\$\{token\}\\n` \}\);$/,
 		/^const res = await runCmdCapture\(spawn, process\.execPath, \[cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay\], \{ env: spawnEnv, cwd, timeoutMs: 600000 \}\);$/,
 		/^const res = await runCmdCapture\(spawn, file, args, \{ env: spawnEnv, cwd, timeoutMs: 15000 \}\);$/,
+		// Issue #704: `--secrets` hands a bundle resolver the environment every other child doctor starts gets, whole.
+		/^const resolver = makeBundleResolver\(\{ envBundles: parseSecretBundleProfilesSafe\(env\.PI_SECRET_BUNDLES\)\.bundles, .*hostEnv: spawnEnv, /,
 	];
 	assert.equal(sites.length, allowed.length, `the shell's environment is touched at exactly the pinned sites:\n${sites.join("\n")}`);
 	sites.forEach((line, n) => assert.match(line, allowed[n]));
@@ -12649,4 +12651,36 @@ test("an ABSENT declaration is a warning, first, ahead of the gate; only a floor
 	assert.ok(!lines.some((c) => c.ok === false && !c.warn), "a blessed venue's declared absences fail nothing");
 	const floored = backendChecks({ PI_BACKENDS: "openshell", PI_BACKEND_FLOOR: "pausable=asserted" }, {});
 	assert.ok(floored.some((c) => c.ok === false && !c.warn && /PI_BACKEND_FLOOR is not met/.test(c.label)), "the floor's refusal stays the ✗");
+});
+
+// Issue #704: the bundle lines reach doctor's run, and `--secrets` resolves through the real wiring, names only.
+test("doctor: a project secret bundle is listed, and --secrets prints its variable names and never a value (#704)", async () => {
+	const dir = tempDir("pi-doctor-bundle-");
+	const resolver = join(dir, "resolve.sh");
+	writeFileSync(resolver, `#!/bin/sh\nexec cat "${dir}/$1.env"\n`);
+	chmodSync(resolver, 0o755);
+	writeFileSync(join(dir, "shop.env"), "STRIPE_KEY=sk_live_doctor_wired\n");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [], secretBundles: { shop: { profile: "shop-env", ref: "shop", project: "shop" } } }));
+	const projectsFile = join(dir, "projects.json");
+	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/shop"] }] }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: triggers, PI_PROJECTS_FILE: projectsFile, PI_SECRET_BUNDLES: `shop-env:${resolver}:dotenv`, PI_SECRET_RESOLVE_TIMEOUT_MS: "120000" };
+	const plain = await collectChecks(env, secretsSeams());
+	assert.ok(plain.some((c) => c.label === "secret bundle shop: profile shop-env (dotenv), project shop"));
+	assert.ok(!plain.some((c) => /resolved on this host/.test(c.label)), "without --secrets nothing is spawned");
+	const resolved = await collectChecks(env, { ...secretsSeams(), secrets: true });
+	assert.ok(resolved.some((c) => c.ok && c.label === "secret bundle shop resolved on this host: 1 variable(s): STRIPE_KEY"));
+	assert.ok(!JSON.stringify(resolved).includes("sk_live_doctor_wired"));
+});
+
+test("doctor: a fleet worker with projects and no triggers file warns that it applies no bundle (#704)", async () => {
+	const dir = tempDir("pi-doctor-fleet-");
+	const projectsFile = join(dir, "projects.json");
+	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/shop"] }] }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_PROJECTS_FILE: projectsFile, PI_WORKER_NAME: "mini2", PI_TRIGGERS_FILE: join(dir, "absent.json") };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /applies no project secret bundle/.test(c.label));
+	assert.ok(hit && hit.warn === true, JSON.stringify(checks.filter((c) => !c.ok || c.warn).map((c) => c.label)));
+	const single = await collectChecks({ ...env, PI_WORKER_NAME: "" }, secretsSeams());
+	assert.ok(!single.some((c) => /applies no project secret bundle/.test(c.label)), "a single host is not warned");
 });

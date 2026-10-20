@@ -34,6 +34,7 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 // The projects parser, for the same anti-drift reason: a `project:<id>` row is written only when the id is a project the
 // worker would load (issue #499 part B).
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
+import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
 // `revert`, so the ladder, the step and the compare-and-set are one implementation.
@@ -1186,7 +1187,7 @@ export function readProjects({ projectsPath, fs = nodeFs }) {
  *
  * Returns `{ text, projects, pending? }` or `{ invalid }`. No message quotes a `name`.
  */
-export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutate, envelope = null, fs = nodeFs }) {
+export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, triggersPath = null, mutate, envelope = null, fs = nodeFs }) {
   if (projectsPath === null || projectsPath === undefined) return { invalid: PROJECTS_UNSET };
   const link = symlinkRefusal(fs, projectsPath, "PI_PROJECTS_FILE");
   if (link) return { invalid: link };
@@ -1235,9 +1236,43 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutat
       }
     }
   }
-  // The two files this plan was judged against, as read: `writeProjects` re-reads both right before its rename.
+  // The files this plan was judged against, as read: `writeProjects` re-reads each right before its rename.
   const inputs = [{ path: projectsPath, text: existing }];
   if (scopedLimitsPath !== null && scopedLimitsPath !== undefined) inputs.push({ path: scopedLimitsPath, text: raw });
+  // Issue #704: a project a secret bundle names keeps its membership. Which jobs hold a bundle is decided by which
+  // project they are in, so a member added (or a project created under a bundled id) would hand those jobs the
+  // project's whole environment, and the confirm-gated project tools are model-callable: a model must not widen a
+  // secret grant by editing a list. The scoped-limits "names this project" rule's shape, judged on the triggers file
+  // the worker reads, before the confirm and again by `writeProjects` after it.
+  if (triggersPath !== null && triggersPath !== undefined) {
+    const triggersText = fileSnapshot(fs, triggersPath);
+    inputs.push({ path: triggersPath, text: triggersText });
+    const touched = (ids) => {
+      const before = new Map(current.map((p) => [p.id, [...p.members].sort().join("\n")]));
+      const after = new Map(written.map((p) => [p.id, [...p.members].sort().join("\n")]));
+      return ids.filter((id) => (before.get(id) ?? null) !== (after.get(id) ?? null));
+    };
+    if (isUnreadable(triggersText)) {
+      const changed = touched([...new Set([...current, ...written].map((p) => p.id))]);
+      if (changed.length > 0) return { invalid: `the triggers file ${triggersPath} could not be read (${unreadableCode(triggersText)}), so a secret bundle naming ${changed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+    } else if (triggersText !== null) {
+      let bundles = null;
+      try {
+        bundles = parseTriggersDocument(triggersText, triggersPath).secretBundles;
+      } catch (e) {
+        const changed = touched([...new Set([...current, ...written].map((p) => p.id))]);
+        if (changed.length > 0) return { invalid: `the triggers file does not load (${e?.message ?? String(e)}), so a secret bundle naming ${changed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+      }
+      if (bundles !== null) {
+        const byProject = new Map(Object.entries(bundles).map(([id, b]) => [b.project, id]));
+        const changed = touched([...byProject.keys()]);
+        if (changed.length > 0) {
+          const named = changed.map((p) => `secretBundles ${JSON.stringify(byProject.get(p))} (project ${p})`).join(", ");
+          return { invalid: `${named} in ${triggersPath} names this project, and a change to its members would change which jobs hold that bundle's secrets; change the bundle in triggers.json first. Nothing was written` };
+        }
+      }
+    }
+  }
   // Issue #504 part C: a project removed or renamed that the allocation envelope floors would leave the envelope
   // invalid (`envelopeRefusal`), so it is refused here, before the confirm and again after it, naming the conflict.
   const broken = envelope ? envelopeRefusal({ envelopeFile: envelope.file, projectsPath, scopedLimitsPath, maxCostMicros: envelope.maxCostMicros, next: { projects: written }, fs }) : null;
@@ -1261,8 +1296,8 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutat
  * tool's pre-confirm plan's `inputs`), so the worker's live-reload watcher never reads half a file. Reached only from
  * the confirm-gated `dispatch_project_*` tools. Returns `{ ok, pending? }` or `{ invalid }`.
  */
-export function writeProjects({ projectsPath, scopedLimitsPath = null, mutate, expect = null, envelope = null, fs = nodeFs }) {
-  const plan = planProjectsWrite({ projectsPath, scopedLimitsPath, mutate, envelope, fs });
+export function writeProjects({ projectsPath, scopedLimitsPath = null, triggersPath = null, mutate, expect = null, envelope = null, fs = nodeFs }) {
+  const plan = planProjectsWrite({ projectsPath, scopedLimitsPath, triggersPath, mutate, envelope, fs });
   if (plan.invalid) return { invalid: plan.invalid };
   const replaced = replaceFile({ path: projectsPath, text: plan.text, inputs: plan.inputs, expect, envName: "PI_PROJECTS_FILE", fs });
   if (replaced.invalid) return replaced;

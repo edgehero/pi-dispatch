@@ -1353,6 +1353,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// folder it RESOLVES. The processor asks which project the resolved folder belongs to, from the same projects
 				// snapshot, and refuses before any reserve when it is another project's.
 				pickupProject: project,
+				// Issue #704 review: a bundle profile this host lacks defers a job on a multi-host worker's SHARED queue
+				// (another host may serve it), the never-fits gate's predicate above; elsewhere it refuses.
+				bundleProfileDeferrable: multiHost && (job.queueName ?? QUEUE) === QUEUE,
 				folderProject: (folder) => projectOf({ kind: "local", folder }, pickupProjects),
 				// Issue #596: the size resolved at pickup above, for the retained run's manifest and the container's argv.
 				jobSize: size,
@@ -1438,6 +1441,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// tunables above. It is bound here rather than at construction for the reason the overlay exists:
 				// an operator who declares a profile in the panel must not have to restart the worker.
 				...(deps.resolveSecrets ? { resolveSecrets: (j) => deps.resolveSecrets(j, { signal, overlayProfiles: settings.secretProfiles ?? {} }) } : {}),
+				// Issue #704: the bundle seam, bound the same way and for the same two reasons: the read runs inside the kill
+				// timer, so it takes the signal, and the overlay half of the bundle profiles is this job-start's settings read.
+				...(deps.secretBundles ? { secretBundles: { lookup: (profile) => deps.secretBundles.lookup(profile, { overlayBundles: settings.secretBundles ?? {} }), resolve: (j, binding) => deps.secretBundles.resolve(j, binding, { signal, overlayBundles: settings.secretBundles ?? {} }) } } : {}),
 				// collectChain (INT-OUTBOX-CONTRACT) reads the completed parent's REAL BullMQ job: its `.id`
 				// (the parent id children carry) and `.data` (kind/chainDepth). runJob's own `job` is the
 				// effectiveJob -- a spread of job.data with no `.id`/`.data` -- so inject the real wrapper here,
@@ -1594,6 +1600,25 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// never-started InfraRetry carrying `recoveryWaitMs`). A recovery job has ONE attempt, so a plain throw would fail
 			// it while the run is alive; the delay costs no attempt. It ends when the base settles, or at the run's recovery
 			// deadline, which the host-lost sweep enforces.
+			// Issue #704 review: a secret bundle profile this host does not serve (or declares twice), on a multi-host
+			// worker's SHARED queue (`SecretBundleProfileHold`): handed back for the never-fits gate's recheck without
+			// spending an attempt, so a host that declares the profile can take it. On a single host, or for a job on a
+			// host's own queue, the processor refuses it instead (`secret-bundle-profile-unknown` / `-ambiguous`). Like
+			// the never-fits deferral it waits for as long as no host serves it, and doctor fails on every host that
+			// takes the project's jobs without the profile.
+			//
+			// RAISED IN THE PROCESSOR, not beside the never-fits gate above, deliberately (review round 2 asked): the
+			// decision needs the per-job settings read (the overlay half of the bundle profiles), which comes after the
+			// wait gate and the scope acquire, and the skip rules (chained, manual, opted-out, a changed trigger) that
+			// must run first live in the processor's free gate. Hoisting the lookup alone would judge a job the processor
+			// then skips, and would read the overlay a second time per pickup. The cost of staying is that each recheck
+			// re-runs the gates above it (a held wait is re-asked, the scope is re-acquired, the image and egress
+			// preflights re-run), all free reads, once a minute per held job.
+			if (error?.bundleProfileHold === true) {
+				deps?.log?.("secret_bundle_profile_hold", { jobId: job.id, delayMs: NEVER_FITS_RECHECK_MS, reason: typeof error.reason === "string" ? error.reason : null });
+				await job.moveToDelayed(now() + NEVER_FITS_RECHECK_MS, token);
+				throw new DelayedError();
+			}
 			if (Number.isFinite(error?.recoveryWaitMs) && error.recoveryWaitMs > 0) {
 				deps?.log?.("recovery_wait_hold", { jobId: job.id, delayMs: error.recoveryWaitMs });
 				await job.moveToDelayed(now() + error.recoveryWaitMs, token);

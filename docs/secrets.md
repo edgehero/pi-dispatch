@@ -28,6 +28,15 @@ console. An older worker does not offer a profile declared through the panel, so
 routing a job that binds `run.secrets` without naming a profile and also waits on a `run.waitFor` profile to the
 one host that serves both, and the job can land on a host that refuses it.
 
+A project secret bundle (Recipe D) is **not** routed: which project a job belongs to is decided on the worker,
+from its `projects.json`, and the receiver reads no `projects.json`. Declare every bundle profile, and keep the same
+`triggers.json`, on every host that takes the project's jobs. On a multi-host worker a job from the shared queue that
+this host cannot serve is handed back and tried again a minute later, so a host that declares the profile can take
+it; a single host, or a job on a host's own queue, refuses it as `secret-bundle-profile-unknown` before it spends.
+`pi-dispatch doctor` on such a host fails until it declares the profile. One gap remains: a host that declares no
+bundle profile AND has no triggers file applies no bundle at all, so a bundled project's job that lands there runs
+without its environment. Doctor warns about that shape on a fleet worker with projects.
+
 ## The one fact everything follows from
 
 **The worker parses no `.env` file.** It reads the environment:
@@ -484,6 +493,205 @@ in the panel would prove nothing on a shared host.
 
 **Binding a secret to a trigger stays a file edit.** The panel declares managers; `triggers.json` says which
 job reaches one. No `dispatch_*` tool has a `secrets` parameter.
+
+## Recipe D: one environment for a whole project
+
+Recipe C grants one field to one trigger, and that is the point of it. When a project simply has an
+environment (an API key, a database URL, a feature flag or two) and every job of the project should get it,
+naming each field on each trigger turns every new variable into an edit of every trigger. A **secret bundle**
+grants the project's environment **once**:
+
+```jsonc
+// triggers.json, top level, beside "triggers"
+{ "triggers": [ … ],
+  "secretBundles": {
+    "shop": { "profile": "shop-env", "ref": "shop", "project": "shop" }
+  } }
+```
+
+`project` is an id from `projects.json` ([projects](projects.md)). Every job whose project is `shop` gets the
+bundle, whichever trigger made it: a new trigger or a new repository in the project needs no secrets edit. You
+declare the bundle resolver once, with the **format** it prints:
+
+```sh
+# /etc/pi-dispatch/pi-dispatch.env
+PI_SECRET_BUNDLES=shop-env:/etc/pi-dispatch/resolvers/shop-env.sh:dotenv
+```
+
+The worker runs it **once per job start**, on the host, before the container starts, with the bundle's `ref`
+as its only argument. It prints the whole environment on stdout, and its exit code means what Recipe C's does:
+0 for the environment, 2 for a wrong reference (refused, never retried), anything else for a manager it could
+not reach (retried). A variable you add, change or remove at the source reaches the **next** job of the project
+with no edit to `triggers.json`, no panel step and no restart.
+
+### The two formats, declared, never guessed
+
+- `dotenv`: strict `NAME=value` lines, the value verbatim to the end of the line. Blank lines and `#` comment
+  lines are allowed. Nothing else is: no quotes, no `export `, no spaces around `=`, no `$VAR` expansion, no
+  multi-line values. A quoted value is refused (`quoted`) rather than handed to the job with its quotes.
+- `json`: one object whose every value is a non-empty string. Use it for PEMs and anything else with a
+  newline, a leading quote or a `\r` in it.
+
+**Names a bundle may not carry.** Every name `run.secrets` may not bind (docs above), and also, because a bundle's
+contents are not reviewed, the names that change what code runs in the job or how it trusts the network. Each
+refuses the job as `secret-name-reserved`, the worker's log naming it; a trigger that genuinely needs one binds it
+in its own reviewed `run.secrets`. `NODE_OPTIONS` also carries the job image runner's child-meter preload, and
+`npm_config_*` is matched in any case, as npm reads it. A test holds this list to the worker's table:
+
+<!-- bundle-loader-names:start -->
+`PATH`, `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED`,
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+`GIT_EXEC_PATH`, `GIT_PROXY_COMMAND`, `GIT_TEMPLATE_DIR`, `GIT_SSL_NO_VERIFY`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`,
+`GIT_CONFIG*`, `SSH_ASKPASS`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`,
+`PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `RUBYLIB`, `JAVA_TOOL_OPTIONS`, `npm_config_*`
+<!-- bundle-loader-names:end -->
+
+Either way: at most **64 variables**, at most **256 KiB** of output in all, each value at most 64 KiB, every name
+an environment variable name, no name twice, no empty value. Anything else refuses the job before it spends,
+and the refusal says which rule (and the worker's log names the variable or the dotenv line, never a value).
+
+### Worked examples
+
+A plain file, no manager at all (`:dotenv`):
+
+```sh
+#!/bin/sh
+# /etc/pi-dispatch/resolvers/shop-env.sh. Owned by the worker's account, writable by nobody else.
+[ -e "/etc/pi-dispatch/bundles/$1.env" ] || exit 2
+exec cat "/etc/pi-dispatch/bundles/$1.env"
+```
+
+Doppler (`:json`, because an `env` format that quotes its values is refused by the strict `dotenv` grammar, and JSON needs no quoting rules at all):
+
+```sh
+exec doppler secrets download --project "$1" --config prd --format json --no-file
+```
+
+#### 1Password: a read-only, Environment-scoped service account
+
+A service account reads an Environment with no prompt, which is what an unattended service needs. Once per
+project:
+
+1. Turn on the Environments policy in the 1Password admin console (Owner or Administrator).
+2. In the desktop app, create the project's Environment (Developer, View Environments, New environment) and add
+   its variables, or import the existing `.env`. Copy the Environment's ID.
+3. On 1Password.com, create a service account with **read access to that Environment only**. Its access is
+   fixed at creation, so one service account per project keeps projects apart, and widening one means a new
+   account.
+4. Store its token on each worker host in a file the worker's account can read and no job can see, for example
+   `/etc/pi-dispatch/op/<project>.token` with mode `0400`. Never in `.env`, `PI_FORWARD_ENV` or the overlay.
+5. Declare the resolver below as a bundle profile (`:json`) and bind it with the Environment's ID as `ref`.
+
+The resolver uses the SDK's `getVariables`. Install `@1password/sdk` beside it at an **exact** version, never a
+range, the rule this project keeps for every dependency it runs:
+
+```js
+#!/usr/bin/env node
+// /etc/pi-dispatch/resolvers/op-<project>.mjs <environment id>
+// One script, and one bundle profile, per project: each project has its own service account.
+// Beside it: package.json with "@1password/sdk": "<exact version>", installed with `npm ci`.
+import { readFileSync } from "node:fs";
+import { createClient } from "@1password/sdk";
+let client;
+try {
+	const auth = readFileSync("/etc/pi-dispatch/op/<project>.token", "utf8").trim();
+	client = await createClient({ auth, integrationName: "pi-dispatch", integrationVersion: "1" });
+} catch {
+	process.exit(1); // could not reach the manager: retried
+}
+let vars;
+try {
+	vars = await client.environments.getVariables(process.argv[2]);
+} catch (err) {
+	// Exit 2 ONLY for an error you have confirmed means "no such Environment, or no access to it": refused, never
+	// retried. Everything else (a rate limit, a network fault, an outage, an error you do not recognise) exits 1 and
+	// is retried. <wrong-reference test> is a placeholder: check on your own account what the SDK raises for a wrong
+	// Environment ID and for a rate limit, and match the first one alone.
+	process.exit(<wrong-reference test> ? 2 : 1);
+}
+process.stdout.write(JSON.stringify(Object.fromEntries(vars.map((v) => [v.name, v.value]))));
+```
+
+`op environment read` prints `NAME=value` lines and would fit `:dotenv`, but it is still a beta command; the
+SDK's call is the stable one. A rate-limited read must exit 1 so it retries rather than refusing, which is why the
+recipe exits 2 for one recognised error only. This project ran no lab against 1Password: how its SDK reports a wrong
+reference apart from an outage is for you to check on your account before you rely on it.
+
+**One resolver call per job start**, never one per variable, and that is what a manager's rate limit counts.
+`pi-dispatch doctor` states it whenever a bundle profile is declared. Size the limit for your busiest hour of job
+starts across every bundled project.
+
+**1Password's own OpenShell provider integration is declined for this.** It is created in the desktop app with a
+human approval per connection, and its access expires after a TTL, after which the placeholders stop resolving
+until someone approves again. The local `.env` named pipe and the CLI's desktop-app sign-in are interactive in
+the same way. None of those suits a service that starts jobs at 3 a.m. Whether a later OpenShell-side route
+(an operator-owned provider, or the gateway's credential driver) can serve unattended jobs is an open question,
+recorded with what it would need; the resolver seam above already covers the service-account route.
+
+### Who gets the bundle, and who does not
+
+- **Every trigger-made job of the project**: its cron jobs (and `pi-dispatch run --trigger`, which fires a cron
+  trigger as its schedule would) and its forge jobs, including a console re-run of a trigger's run.
+- **Not a chained `/outbox` child, and not a manual run** (`pi-dispatch run <folder>`, `/dispatch run`,
+  `dispatch_run`). Your grant was to the triggers you reviewed, not to what a job queues next or what a model
+  asks for. The run record says `bundleSkipped: "chained"` or `"manual"`.
+- **Not a trigger that opts out** with `"run": { "secretBundle": false }` (`bundleSkipped: "opted-out"`). The
+  worker reads that flag from its own triggers file, so no receiver needs to carry it.
+- **Not a stranger's pull request.** A job on a pull request whose head is in another repository runs WITHOUT
+  the bundle (`bundleSkipped: "fork"`), decided by asking the forge, never the webhook payload. A bundle opts in
+  with `"forkReviews": true`; think hard first, because that job reads text a stranger wrote while it holds
+  every variable of the project.
+  If the forge answers 401, 403 or 404 when asked for the head, the job is treated the same way
+  (`bundleSkipped: "head-unverified"`); any other failure retries.
+- **Not a `run.resume` trigger.** A job of such a trigger is refused (`secret-bundle-resume`), for the reason
+  `run.secrets` cannot sit beside `run.resume`; opt the trigger out instead.
+- **Not a trigger a tool wrote.** `dispatch_trigger_add` always writes `"secretBundle": false` on the entry it adds,
+  because its task or flow is the model's choice, and no tool can remove the flag or set it. When you mean that
+  trigger's jobs to hold the bundle, delete the line by hand in `triggers.json`. For the same reason the project tools
+  refuse to change the members of a project a bundle names (or to create one under a bundled id): change the bundle
+  first, or edit `projects.json` by hand.
+- **Not on an OpenShell venue, yet.** A job that would carry a bundle on `openshell` or `openshell-bind` is refused
+  before it spends (`openshell-bundle-unsupported`), until those venues can hold a bundle's variables.
+
+A trigger's own `run.secrets` **win** over a bundle variable of the same name, and the run record names the
+shadowed variables. The record also lists, by name, every variable a job received from its bundle
+(`bundle: { id, variables, shadowed }`), never a value: since a grant now changes outside review, each run says
+exactly what it held.
+
+### The traps of a bundle
+
+1. **The blast radius is the whole bundle.** A prompt injection in an issue or a pull request can exfiltrate
+   every variable of the project through the forge, which is always reachable. Redaction bounds an accident;
+   it is not a boundary. Keep bundles small and per project, and keep a deploy key that only one trigger should
+   hold in that trigger's `run.secrets` instead.
+2. **The grant now changes outside review.** A variable added in your manager reaches the next job. The review
+   of what a project may hold moves to whoever can write the manager (or the file): give that the care you give
+   `triggers.json`.
+3. **Fork reviews are off by default**, and `forkReviews: true` turns them on for the whole bundle.
+4. **More values in the host argv.** On `local` and `podman` every variable goes into `docker run` / `podman
+   run` as `-e NAME=VALUE`, so a bundle widens `OQ-028` by its count: a process on the host that can read
+   another's command line sees them while the container starts.
+5. **A project with folders.** A local job's `/workspace` is your own folder, so a value the agent writes to a
+   `.env` there lands in your real repository. `doctor` warns per bundle whose project holds a folder.
+6. **Declare the profile on every host that takes the project's jobs.** A bundle profile is a path on one
+   machine, and routing does not yet steer a job to a host that declares it. On a multi-host worker a job from the
+   shared queue that this host cannot serve is handed back and tried again a minute later, so a host that declares
+   the profile can take it; a single host, or a job on a host's own queue, refuses it as
+   `secret-bundle-profile-unknown`. Every host also reads which project holds a bundle from its own triggers file
+   (`PI_TRIGGERS_FILE`), so keep the same `triggers.json` on every host. While the file does not validate, the
+   worker keeps using the last version that did, and a worker that has never read a valid one since it started
+   retries a project's jobs until it can. A MISSING file is the same failure on a host that declares a bundle
+   profile; on a host that declares none it means no bundles, which is the one way a bundled job can run without
+   its environment (doctor warns on a fleet worker with projects and no triggers file).
+7. **An MCP server cannot take a bundle variable.** A trigger's MCP servers reference names from its own
+   `run.secrets` or `PI_FORWARD_ENV`, and the MCP check runs before the bundle is read, so a server naming a bundle
+   variable is refused as `mcp-secret-unmapped`. Bind that one value in the trigger's `run.secrets` instead.
+8. **Short values are not redacted.** Redaction of the job's output skips values shorter than 8 characters, as it
+   does for every secret: a short value the agent prints stays in the transcript.
+
+`pi-dispatch doctor` lists every bundle with its profile, format and project, fails on a profile this host does
+not declare or a project `projects.json` does not hold, and `pi-dispatch doctor --secrets` resolves each bundle
+on this host and prints its variable names and their count, never a value.
 
 ## The traps
 

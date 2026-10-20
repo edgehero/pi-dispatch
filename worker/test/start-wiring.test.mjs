@@ -899,6 +899,8 @@ test("runtime settings: getSettings is a top-level createWorker arg resolving ef
 			maxTokens: null,
 			dailyTokenCap: null,
 			secretProfiles: {},
+			// Issue #704: the bundle profiles ride beside secretProfiles, for its reason.
+			secretBundles: {},
 			concurrency: 3,
 			softHoldPct: null,
 			// Issue #501: the four dollar keys, all unset by default.

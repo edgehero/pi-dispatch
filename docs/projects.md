@@ -122,6 +122,10 @@ Caps live in [`scoped-limits.json`](scoped-limits.md#project-rows), never in thi
   project's share of the split narrows the envelope's window, and a refusal by the share is `allocation-cap`
   ([allocation](allocation.md)). Under an envelope the project tools refuse a change that would leave it invalid
   (a project the envelope floors removed), naming the conflict: edit the envelope first.
+- A project a secret bundle names (`secretBundles` in `triggers.json`, [secrets](secrets.md#recipe-d-one-environment-for-a-whole-project))
+  keeps its members: the project tools refuse to add or remove a member, delete it, or create a project under a
+  bundled id, because the members decide which jobs hold the bundle. Change the bundle in `triggers.json` first, or
+  edit `projects.json` by hand.
 - A project row needs `"version": 2` in `scoped-limits.json`, even with counts only. The panel and the tools write it.
 - The same row can set the size of every member's job container: `"memory": "8g"` and `"cpus": 4` (file version
   3). Without it a job gets `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`). See
