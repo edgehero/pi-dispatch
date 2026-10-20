@@ -51,9 +51,10 @@ anywhere, but the declaration lands here.
   listJobContainers,  // host budget, at boot: your job containers that may still run, with their sizes
   containerGone,      // host budget: is this orphan's container gone, so its room can be given back?
 
-  // OPTIONAL. Leave either out and your venue gets the answer every non-local venue has always had.
+  // OPTIONAL. Leave any out and your venue gets the answer every non-local venue has always had.
   observationPreflight,   // free: does this host still show what your `observedBy` words need?
   jobUserPreflight,       // free: which uid this job's container runs as
+  bundleGate,             // free: can this venue hold this job's project secret bundle as declared? (issue #704)
 }
 ```
 
@@ -71,9 +72,10 @@ worker starts, and whether a container whose stop did not take is gone before it
 can answer for your runtime. The worker used to guess from the venue's name and asked docker about every venue but
 `podman`, so another venue's container could be counted as gone while it still ran.
 
-The two optional members are optional for a reason: an adapter written against the other required functions keeps
-working, unchanged. Absent, `observationPreflight` admits every job and `jobUserPreflight` runs the image's own
-`USER`. The one exception is a venue whose table entry names an `observedBy`: its words hold only while
+The optional members are optional for a reason: an adapter written against the other required functions keeps
+working, unchanged. Absent, `observationPreflight` admits every job, `jobUserPreflight` runs the image's own
+`USER`, and `bundleGate` admits every secret bundle (right for a venue whose container holds its env as values, where a
+bundle's variables simply join the env). The one exception is a venue whose table entry names an `observedBy`: its words hold only while
 something is observed, so the worker refuses to boot with that venue registered and no `observationPreflight`
 to observe it. A venue that carries one is dispatched to it per job, through the registry, exactly like the
 required functions.
@@ -94,6 +96,7 @@ worse.
 | `listJobContainers` | nothing | `[{ name, memMiB, cpuCenti }]`: every job container of yours that may still run (leave out the ones in a state that runs nothing), with the size it was started at. **Throw when your runtime does not answer.** An empty array says you hold none, so the budget admits jobs on your venue as if nothing ran there. |
 | `containerGone` | the container name | `true` when it is gone (no such container, one in a state that runs nothing, or one not started and removed), `false` when it is listed in any other state, `null` when you could not ask. Only `true` gives the orphan's room back. |
 | `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. Beside `ok`, `jobUserRefused: { refused: "job-user-unmappable", cause }` refuses the job before the image preflight, for a venue that already knows no uid can run there whatever the image (the `podman` venue uses it: its image probe asks the same runtime and would otherwise misname the fault), and so does `podmanConfRefused: { reason, key, message }`, the `podman` venue's refusal of a widening containers.conf (`podman-conf-widens-job`, issue #428), which `local` also hands back, marked `rootful: true`, for rootful Podman's own containers.conf (issue #448). |
+| `bundleGate` (optional, issue #704) | `(job, { endpoints, vars, shadowed })`, asked twice inside the bundle read: `vars` null before the resolver runs (judge the hosts), then the received variables | `{ ok: true }` to admit, optionally with `placeholders` and `plain` counts for the run record; `{ venueRefused: { reason, comment } }` to refuse before spend (the comment is fixed text); `{ unavailable: true }` when a source could not be read (retried). The call bag of `runContainer` then carries `bundleKeys: { endpoints, plain }`, the received variables' split, which a venue holding its env as values ignores. The ask also carries `credentialHosts` (the hosts the job's own model and MCP credentials go to) and the image's `capabilities`. |
 | `jobUserPreflight` (optional) | `(job, { capabilities, observed })` | `{ user, home }` (`user` null means the image's own `USER`), plus `relabel: true` where the job's own mounts must carry a private SELinux label (the processor hands it to `runContainer`), `{ refused: "job-user-unmappable", cause }` or `{ refused: "job-image-any-uid-unsupported" }` to refuse, `{ unavailable: true, reason }` to retry. |
 
 ## What a backend declares
@@ -596,6 +599,21 @@ the policy admits (measured for headers and for git's Basic auth). A job whose p
 nothing, so no provider is made and its secrets go nowhere (logged `openshell_secrets_unbound`). The teardown deletes
 the provider and its profile after the sandbox; a crashed job's are deleted by the boot sweep, by the owner label.
 Rotation does not reach a running job: a job is bounded at 30 minutes and an App token lives about an hour.
+
+**A project secret bundle** (issue #704, [`docs/secrets.md`](secrets.md#on-an-openshell-venue-placeholders-for-the-variables-you-bind-to-a-host)).
+A bundle variable the bundle's `endpoints` binds to a host goes into a provider of that host's own (`<sandbox>-b<n>`,
+one per host, created, labelled and deleted like the job's, swept after a crash), and only that host's endpoints of
+the policy are bound to it: the agent sees its placeholder, and the value is swapped in only in a request to that host.
+OpenShell 0.1.4 binds one provider per endpoint, so at that host nothing else of the job resolves (another credential
+sent there is answered 403). Every other bundle variable is a value the agent reads as on every other venue, handed in
+`bundle-env.json` in the job directory (0600, removed at teardown, or with the job directory by the next start's
+salvage or orphan sweep after a worker crash) and read into the runner's environment by an image
+declaring `bundleEnvFile`, never on the exec's command line, whose env the gateway logs. The host must already be
+exactly a host of the job's policy and not one the job's own forge, model or MCP credentials go to, an `endpoints` name
+the bundle lacks refuses the job, and so do a value OpenShell cannot carry and plain variables on an older image, each
+before the sandbox exists and before spend (`openshell-bundle-endpoint-not-allowed`, `-endpoint-shared`,
+`-endpoint-unknown`, `-name-taken`, `-unpassable`, `-image-too-old`). The read-back expects exactly one `_provider_*`
+layer per provider the job attached.
 
 **git push.** The clone's remote carries no token, so a forge job's exec gets a git credential helper (through
 `GIT_CONFIG_COUNT`) that prints the forge token's placeholder as the password, the supervisor rewriting it in a request to

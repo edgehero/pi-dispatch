@@ -610,6 +610,34 @@ STPROBE
 				[ "$st_probe" = "steer-stdin-probe bash=/dev/null,no-fd3 inherit=/dev/null,no-fd3" ] && ! echo "$st_out" | grep -q '"event":"steer_stdin_shared"' \
 					|| fail "the image declares 'steerStdin' but a tool child of the steered runner does not see /dev/null on stdin, or holds an fd 3 (${st_probe:-no probe line}): the frames are reachable from it"
 				;;
+			bundleEnvFile)
+				# Issue #704 part 3. The runner reads a project secret bundle's plain variables from /job/bundle-env.json on
+				# PI_BUNDLE_ENV=1, into its own environment, which pi and its tools inherit. Proved by running it: the offline
+				# job under a cap of 0 (stopped before any model call, after pi started the agent), a JSON file with one plain
+				# and one multi-line variable, and a workspace extension printing what it sees at agent_start.
+				be_dir=$(mktemp -d)
+				mkdir -p "$be_dir/job" "$be_dir/ws/.pi/extensions"
+				echo "Reply with the single word ok." >"$be_dir/job/prompt.md"
+				printf '%s' '{"VERIFY_PLAIN":"plain-value","VERIFY_PEM":"line1\nline2"}' >"$be_dir/job/bundle-env.json"
+				cat >"$be_dir/ws/.pi/extensions/bundle-env-probe.ts" <<'BEPROBE'
+export default function (pi) {
+	pi.on("agent_start", async () => {
+		const pem = String(process.env.VERIFY_PEM ?? "").split("\n").join("|");
+		console.log(`bundle-env-probe plain=${process.env.VERIFY_PLAIN ?? "unset"} pem=${pem} flag=${process.env.PI_BUNDLE_ENV ?? "gone"}`);
+	});
+}
+BEPROBE
+				chmod -R a+rX "$be_dir/job"
+				chmod -R a+rwX "$be_dir/ws"
+				be_out=$(docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$be_dir/job:/job:ro" -v "$be_dir/ws:/workspace" --workdir /workspace \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_BUNDLE_ENV=1 \
+					"$IMAGE_REF" 2>&1) || true
+				rm -rf "$be_dir"
+				echo "$be_out" | grep -q '^bundle-env-probe plain=plain-value pem=line1|line2 flag=gone$' \
+					|| fail "the image declares 'bundleEnvFile' but a job with PI_BUNDLE_ENV=1 did not see the bundle's variables from /job/bundle-env.json in its environment ($(echo "$be_out" | grep '^bundle-env-probe' | tail -1))"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

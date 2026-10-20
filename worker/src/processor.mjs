@@ -1,4 +1,4 @@
-import { ABSENT, OPENSHELL_BIND_LINGERING, OPENSHELL_BUNDLE_UNSUPPORTED, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
+import { ABSENT, OPENSHELL_BIND_LINGERING, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseLedgers, reserveLedgers } from "./budget.mjs";
@@ -24,6 +24,7 @@ export const LOCAL_FOLDER_PROJECT_CHANGED = "local-folder-project-changed";
 export const PORTFOLIO_NO_ENVELOPE = "portfolio-no-envelope";
 import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
 import { callableModelRefs, zeroRatedFor } from "./reserve-estimate.mjs";
+import { outputCapView } from "./output-cap.mjs";
 import { answerTrailComment, consoleAnswerBy } from "./console-answer.mjs";
 import { forgeDeliveryJobId } from "./job-id.mjs";
 
@@ -560,6 +561,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// on a multi-host worker's shared queue (index.mjs, the never-fits gate's predicate), where another host may serve
 		// it. False by default, so a single host refuses, as it always did.
 		bundleProfileDeferrable = false,
+		// Issue #704 part 3: the job's venue's judgement of its project secret bundle (the registry's `bundleGate`,
+		// backend-openshell.mjs's for both OpenShell venues), `(job, { endpoints, vars, shadowed })` => `{ ok, placeholders?,
+		// plain? }`, `{ venueRefused: { reason, comment } }` or `{ unavailable }`. The default admits, which is every venue
+		// that holds its env as values: there a bundle's variables simply join the env.
+		bundleGate = async () => ({ ok: true }),
 		// (job) => { ok, document } | { refused, name, why } | { unavailable: code } (REQ-MCP-OPERATOR-SERVERS,
 		// mcp-preflight.mjs). The default passes a job that names no server and refuses one that does, so a wiring that
 		// forgot the check can never run a job without the servers its trigger names.
@@ -1452,10 +1458,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Every refusal RETURNS (CONST-RETRY-INFRA-ONLY): an undeclared or doubly declared profile, a resumed job
 		// (`run.resume` would replay a transcript that may hold an echoed value into every later job on its key, the
 		// rule that refuses `run.secrets` beside it at load, which cannot be applied at load here because the file
-		// cannot know a job's project), a trigger the file no longer holds, and a bundle on a venue that cannot hold one
-		// yet (`openshell-bundle-unsupported`). A file that has never been read and validated in this process RETRIES a
-		// job with a project (the finder answers from its last good read otherwise), and a profile this host lacks is
-		// DEFERRED on a multi-host worker's shared queue, the never-fits gate's rule, since another host may serve it.
+		// cannot know a job's project), and a trigger the file no longer holds. A file that has never been read and
+		// validated in this process RETRIES a job with a project (the finder answers from its last good read otherwise),
+		// and a profile this host lacks is DEFERRED on a multi-host worker's shared queue, the never-fits gate's rule,
+		// since another host may serve it. A venue's refusal of the bundle itself comes with the read (`readBundle`).
 		const bundleChained = job.parentJobId !== undefined || job.chainDepth !== undefined;
 		const bundleManual = job.trigger === undefined || job.trigger === null;
 		let bundleBinding = null;
@@ -1501,14 +1507,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 					log(reason === "secret-bundle-profile-ambiguous" ? "refused_secret_bundle_profile_ambiguous" : "refused_secret_bundle_profile_unknown", { kind: job.kind ?? null, bundle: bundleFound.id, profile: bundleFound.bundle.profile });
 					return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 				}
-				// Issue #704 review: a venue whose own layer holds the credentials (both OpenShell venues) would take the
-				// bundle down the run.secrets provider path, bound to every endpoint, or nowhere at all without a network
-				// rule, while the record said the job received it. Refused before spend until #704 part 3 gives it bundle keys.
-				if (backendFor(resolveBackendName(job, blessedBackends[0]))?.credentialCustody === "layer") {
-					await comment(job, OPENSHELL_BUNDLE_UNSUPPORTED.comment);
-					log("refused_openshell_bundle_unsupported", { kind: job.kind ?? null, bundle: bundleFound.id });
-					return { outcome: "policy", reason: OPENSHELL_BUNDLE_UNSUPPORTED.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
-				}
+				// Issue #704 part 3: no venue refusal here any more. Part 2 refused a bundled job on both OpenShell venues at
+				// this point, which was AHEAD of the fork check, so a fork's job that would have run without the bundle was
+				// refused for it. The venue's own judgement of the bundle (`bundleGate`) now runs inside the read below,
+				// which a fork's job never reaches.
 				bundleBinding = { id: bundleFound.id, ...bundleFound.bundle };
 			}
 		}
@@ -1619,7 +1621,46 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		// `let`: a project bundle's variables join it after the mint (below), under the trigger's own values.
 		let secrets = resolved.secrets ?? {};
+		// Issue #704 part 3: the bundle's `{ endpoints, plain }` split, for the venue (null: no bundle reached this job).
+		let bundleKeys = null;
 
+		// Issue #704 part 3: the venue's answer, the same handling for both of its asks below. A refusal RETURNS with the
+		// venue's fixed sentence (its log names the variable and host, never the comment); a source it could not read
+		// RETRIES, as the observation preflight's does.
+		// The hosts this job's OWN credentials are sent to beyond the forge's (issue #704 part 3, review round 1, H2), which a
+		// bundle endpoint may not claim on a venue that binds one provider per host: the composed `baseUrl` of every model
+		// the job may call (the overlay's models.json over pi's catalog, `outputCapView`, the composition the output cap and
+		// the zero-rated check read), every declared model endpoint's host (keyed or not: the simple rule), and every
+		// HTTP MCP server's host (its headers may carry a run.secrets value). A model whose baseUrl cannot be composed adds
+		// nothing, and is said so in DES-OPENSHELL-VENUE.
+		const credentialHosts = () => {
+			const hosts = new Set();
+			const add = (url) => {
+				try {
+					if (typeof url === "string" && url !== "") hosts.add(new URL(url).hostname.toLowerCase());
+				} catch {}
+			};
+			for (const ref of callableModelRefs(job)) {
+				if (ref === null) continue;
+				try {
+					add(outputCapView({ models: modelEndpoints?.models ?? null, provider: ref.provider, modelId: ref.id, builtinModel })?.baseUrl);
+				} catch {}
+			}
+			for (const ep of modelEndpoints?.endpoints ?? []) if (typeof ep?.host === "string") hosts.add(ep.host.toLowerCase());
+			for (const server of Object.values(mcpChecked?.document?.servers ?? {})) add(server?.url);
+			return [...hosts].sort();
+		};
+		const askBundleGate = async (ask) => {
+			const judged = await bundleGate(job, { ...ask, credentialHosts: credentialHosts(), capabilities: img.capabilities ?? [] });
+			if (judged?.venueRefused && typeof judged.venueRefused.reason === "string") {
+				const { reason, comment: text } = judged.venueRefused;
+				await comment(job, typeof text === "string" && text !== "" ? text : "Refused: this job's venue cannot hold its project's secret bundle as declared. Not run.");
+				log("refused_venue", { reason, bundle: bundleBinding.id });
+				return { refused: { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false } }; // return => not retried
+			}
+			if (judged?.unavailable) throw new InfraRetry("the job's venue could not judge its secret bundle", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			return { judged };
+		};
 		// PROJECT SECRET BUNDLES, the read (issue #704). ONE resolver call, then the strict parse, the reserved names and
 		// the merge. BEFORE the mint for every job that needs no fork check (CONST-BUDGET-BEFORE-TOKENS: its determinate
 		// refusals spend nothing, not even a token), and right after the mint for a pull request whose head must be asked
@@ -1627,6 +1668,15 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Returns null, or the result to return.
 		const readBundle = async () => {
 			if (bundleBinding === null) return null;
+			// Issue #704 part 3: the hosts first, before the resolver runs, so a file naming a host this job's venue cannot
+			// bind costs no read of the operator's manager. Here rather than among the free gates above (where part 2
+			// refused every OpenShell bundle), because only here is the fork check behind it: a fork's job runs without
+			// the bundle, so nothing about the bundle may refuse it.
+			const endpoints = bundleBinding.endpoints ?? {};
+			if (Object.keys(endpoints).length > 0) {
+				const pre = await askBundleGate({ endpoints, vars: null });
+				if (pre.refused) return pre.refused;
+			}
 			const bundleRead = await secretBundles.resolve(job, bundleBinding);
 			if (bundleRead?.ok !== true) {
 				if (bundleRead?.unreachable) {
@@ -1661,8 +1711,28 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// value as a secret treats these alike: buildContainerEnv injects them, the redaction covers every
 			// non-NON_SECRET_ENV_KEYS name (run-container.mjs), and a checkpoint refuses to store any of them.
 			const merged = mergeBundleSecrets(bundleRead.vars, secrets);
+			// Issue #704 part 3: which received variables the bundle binds to a host (`endpoints`) and which go in plain; a
+			// variable a run.secrets value shadowed is in neither unless `endpoints` names it (below). Said to every
+			// venue (`bundleKeys` on the call bag); only a venue whose layer holds credentials reads it, and it judges the
+			// split first, now with the values (`bundleGate`): a value its gateway would refuse is a refusal here, before
+			// spend, never a create that fails as infrastructure and is retried into the same answer.
+			const received = Object.fromEntries(Object.entries(bundleRead.vars).filter(([name]) => !merged.shadowed.includes(name)));
+			const post = await askBundleGate({ endpoints, vars: received, shadowed: merged.shadowed });
+			if (post.refused) return post.refused;
+			// Review round 1, M2: a declared endpoint name a run.secrets value shadowed stays on that host's provider, now with
+			// the trigger's value (the one that wins), so it resolves at the host the reviewed file binds the name to.
+			bundleKeys = {
+				endpoints: Object.fromEntries([...Object.keys(received), ...merged.shadowed].filter((name) => Object.hasOwn(endpoints, name)).map((name) => [name, endpoints[name]])),
+				plain: Object.keys(received).filter((name) => !Object.hasOwn(endpoints, name)).sort(),
+			};
 			secrets = merged.secrets;
 			bundleFacts.bundle = { id: bundleBinding.id, variables: Object.keys(bundleRead.vars).sort(), shadowed: merged.shadowed };
+			// On a venue whose own layer holds the credentials, the record says how many reached the agent as placeholders
+			// and how many as values (INT-RUN-HISTORY-FILE-CONTRACT), the venue's own counts.
+			if (backendFor(resolveBackendName(job, blessedBackends[0]))?.credentialCustody === "layer" && Number.isSafeInteger(post.judged?.placeholders) && Number.isSafeInteger(post.judged?.plain)) {
+				bundleFacts.bundle.placeholders = post.judged.placeholders;
+				bundleFacts.bundle.plain = post.judged.plain;
+			}
 			log("secret_bundle_applied", { kind: job.kind ?? null, bundle: bundleBinding.id, count: bundleFacts.bundle.variables.length, shadowed: merged.shadowed.length });
 			return null;
 		};
@@ -2123,7 +2193,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
 			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
 		}
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		containerRan = true;
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.

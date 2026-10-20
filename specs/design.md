@@ -1643,7 +1643,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     the skip reasons, `secret-bundle-trigger-changed`, `secret-bundle-resume`, the profile lookup
     (`secret-bundle-profile-unknown` / `-ambiguous`) and `openshell-bundle-unsupported`, ahead of the `run.secrets`
     resolver, the one earlier gate that spawns. The READ comes after that resolver and BEFORE the mint for every job
-    that needs no fork check, so its determinate refusals cost not even a token. Only a pull request without
+    that needs no fork check, so its determinate refusals cost not even a token. **AMENDED 2026-10-20 (#704)**: the
+    venue's judgement of the bundle (`bundleGate`, the openshell venues' only) moved INTO the read, the hosts before
+    the resolver runs and the received variables after it, so it is behind the fork check and before every spend;
+    `openshell-bundle-unsupported` is retired. Only a pull request without
     `forkReviews` needs the job's own token for the fork check, so its check and read come right AFTER the mint, both
     BEFORE branch protection, the clone, the token-cap read and every reserve. A refusal there leaves the minted token
     to expire, the unprotected-branch refusal's existing path: it is scoped and short-lived
@@ -1683,11 +1686,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     treat them as they treat `run.secrets` values.
   - **The record names, never values**: `bundle: { id, variables, shadowed }` or `bundleSkipped`
     (`INT-RUN-HISTORY-FILE-CONTRACT`). Since a grant now changes outside review, each run says what it held.
+    **AMENDED 2026-10-20 (#704)**: on the openshell venues also `placeholders` and `plain`, two counts.
   - **Per venue**: on `local` and `podman` the values are `-e NAME=VALUE` in the host argv like every other
     (`OQ-028`, widened by the count). On the openshell venues a job that would carry a bundle is REFUSED before spend
     (`openshell-bundle-unsupported`, review round 1): the `run.secrets` provider path binds every key to every
     endpoint, and to nothing without a network rule, while the record would say the job received it. The per-endpoint
-    provider keys `endpoints` declares are #704 part 3; the field is shape-validated now.
+    provider keys `endpoints` declares are #704 part 3; the field is shape-validated now. **AMENDED 2026-10-20
+    (#704): built, the refusal retired.** The processor hands every venue the received variables' split
+    (`bundleKeys`: `{ endpoints, plain }`; a variable a run.secrets value shadowed is in `plain` never, and in
+    `endpoints` only when `endpoints` declares it, carrying the trigger's value, which wins, to that host), and every
+    venue but the openshell ones ignores it. There a variable `endpoints` names becomes a key of
+    a per-job provider of its own host, bound to that host's endpoints only, its auth scheme documented in the profile,
+    and every other variable reaches the runner by a file in the job directory, never the exec's argv (review round 1:
+    the gateway logs an exec's env; an image declaring `bundleEnvFile` is needed); the host must already be an exact
+    endpoint of the job's policy and not one the job's own credentials use (a forge's, a callable model's, a model
+    endpoint's, an HTTP MCP server's), and an `endpoints` name the bundle did not
+    deliver refuses, each before the sandbox and before spend (`DES-OPENSHELL-VENUE`, "Project secret bundles"). An
+    `endpoints` name stays meaningless on `local` and `podman`: a variable it names goes in plain there like the rest,
+    and one it names that the bundle lacks is not refused there (nothing would be held as a placeholder).
   - **Residuals, stated**:
     - an MCP server cannot reference a bundle variable (the MCP check runs before the read and knows only
       `run.secrets` and `PI_FORWARD_ENV` names, so it refuses `mcp-secret-unmapped`; bind that one value in
@@ -1697,9 +1713,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
       there (a fleet's shared queue) runs without its environment and records no `bundleSkipped`. Keep the same
       `triggers.json` on every host; doctor warns on a fleet worker (`PI_WORKER_NAME`) with projects and no file;
     - the openshell refusal precedes the fork check, so a fork's pull request that would have run WITHOUT the bundle
-      is refused on an OpenShell venue until #704 part 3;
+      is refused on an OpenShell venue until #704 part 3; **AMENDED 2026-10-20 (#704): GONE**, checked by a test: the
+      venue's judgement now runs inside the read, which a fork's job never reaches;
     - a shared-queue job naming no backend is judged against THIS host's default venue, so a host whose default is an
-      OpenShell venue refuses a bundled job another host would have run;
+      OpenShell venue refuses a bundled job another host would have run; **AMENDED 2026-10-20 (#704): narrowed** to a
+      bundle that venue cannot hold as declared (`bundleGate`'s refusals), since every other bundle now runs there;
     - `dispatch_trigger_edit` can still change the flow, backend, provider and model of an operator-written trigger in
       a bundled project, exactly as it can for a trigger with `run.secrets` today; freezing bundled triggers against
       the tools would be a new rule, not this one;
@@ -10888,7 +10906,9 @@ a tunnel.
   is refused on both OpenShell venues before spend, `openshell-bundle-unsupported` (`OPENSHELL_BUNDLE_UNSUPPORTED`, one
   sentence shared with `OPENSHELL_REFUSALS`), because the per-job provider would bind every bundle variable to every
   endpoint, or to nothing without a network rule, while the record said the job received it. #704 part 3 lifts it
-  with per-endpoint bundle keys. `run.secrets` keep today's path unchanged.
+  with per-endpoint bundle keys. `run.secrets` keep today's path unchanged. **AMENDED 2026-10-20 (#704): SUPERSEDED**
+  by "Project secret bundles (#704 part 3)" below: both venues hold a bundle, and `openshell-bundle-unsupported` is
+  retired (it shipped in no release).
 - **Why**: the custody. On `local` and `podman` the provider key and the forge token sit in the job's environment,
   where the agent reads them, and in the host's argv (`OQ-028`); on this venue they never enter the agent's
   container, the provider is to be created with no value on any command line (#684, so `OQ-028` is not reproduced on
@@ -11034,7 +11054,9 @@ a tunnel.
   above, as built and measured on OpenShell 0.1.4. Per job, `secretNamesOf` takes every env name the redactor does not
   list as non-secret (`NON_SECRET_ENV_KEYS`, the one list), and the adapter imports an ENDPOINTLESS profile for them
   (`providerProfileFor`, no endpoints and no binaries of its own, written 0600 at `<job dir>.openshell-profile.json`
-  beside the job dir, never uploaded; `provider profile import -f`), then creates a provider named like the sandbox
+  beside the job dir, never uploaded; `provider profile import -f`; AMENDED 2026-10-20 (#704): one file per provider,
+  `<job dir>.openshell-profile-<provider>.json`, deleted as soon as its import answers, either way, the teardown's
+  removal kept as the backstop), then creates a provider named like the sandbox
   with `--credential NAME` per secret and the owner label. `--credential NAME` reads `$NAME` from the CLI's own
   environment (measured), so the values ride the CLI child's environment (PATH, HOME, XDG_CONFIG_HOME and the values,
   nothing else of the worker's), never an argv and never a file: `OQ-028` is not reproduced on the CLI. The provider is
@@ -11232,7 +11254,10 @@ a tunnel.
     leaves alone), a path the engine sees; doctor's stays under the worker's tmp dir, since its target is refused anyway.
     Each probe logs `openshell_bind_probed` with its answer; doctor's probe takes the adapter's 60 s bound.
   - `BESIDE_JOB_DIR` gains `.openshell-profile.json`, so a salvage and the orphan sweep remove the provider profile
-    beside a job dir too.
+    beside a job dir too. **AMENDED 2026-10-20 (#704)**: since #704 part 3 the file is named per provider
+    (`.openshell-profile-<provider>.json`), which no fixed suffix matches, so it is deleted right after its import
+    answers instead (nothing reads it later); the window a crash can leave one in is the import call alone, and the
+    teardown still removes it. The `.openshell-profile.json` suffix stays, for a job dir an older worker left.
   - The lane adds: the gate's probe must have RUN (`openshell_bind_probed: admitted`), every leftover check polls the
     listing until empty, `/inbox` and the overlay refuse a write (EROFS), a backgrounded `setsid` writer leaves the
     host file unchanged after the run returned, and one run as `run_as_user` 2000 writes its bound file as uid 2000.
@@ -11344,6 +11369,148 @@ a tunnel.
     openshellUnitOrderChecks, CLI_SERVICE_KEYS, valkeyVenues; worker/test/up.test.mjs, service.test.mjs,
     podman-stack.test.mjs, backends.test.mjs, init.test.mjs, doctor-openshell.test.mjs;
     .github/workflows/openshell-conformance.yml.
+- **Project secret bundles (#704 part 3, AMENDED 2026-10-20 (#704))**: both venues hold a project's secret bundle
+  (`DES-PROJECT-SECRET-BUNDLES`), replacing part 2's refusal. Read at the pin (v0.1.4, `5a7728c`), the model is:
+  - **One provider per endpoint, every key of a provider on every endpoint naming it.** A policy endpoint's
+    `credential_binding` names one provider and nothing else (proto/sandbox.proto `NetworkCredentialBinding`); the
+    gateway binds EVERY static key of that provider to the union of the endpoints naming it
+    (crates/openshell-server/src/grpc/policy.rs `policy_static_credential_endpoint_bindings`, provider.rs
+    `resolve_provider_environment_from_records_with_policy_bindings_and_credentials`); a key's placeholder is resolved
+    only where it is bound (crates/openshell-core/src/provider_credentials.rs `resolver_and_body_classifier_for_endpoint`)
+    and, sent anywhere else, answered 403 `credential_endpoint_mismatch` and never forwarded
+    (crates/openshell-supervisor-network/src/l7/relay.rs `reject_credential_resolution`); two attached providers may not
+    expose one env key (provider.rs `validate_provider_environment_key_ownership`); and two endpoints that can match one
+    request may not name different providers (crates/openshell-policy/src/ambiguity.rs, the
+    `credential_binding.provider` conflict). So a variable bound to ONE host needs a provider of its own.
+  - **So, per job**: the job's own provider (named as the sandbox, #684's, its profile unchanged) holds every secret
+    but the bundle's, `run.secrets`, the forge token, the model key and the forwarded secrets; each distinct bundle
+    HOST gets a provider `<sandbox>-b<n>` (sorted by host, so every attempt names them alike) holding the variables the
+    bundle's `endpoints` bind to it, attached with a second `--provider` and labelled with the owner label; the
+    endpoints whose host is that host are bound to it, every other endpoint to the job's provider as before
+    (`bundleProviderPlan`). The values travel as #684's do, `--credential NAME` from the CLI child's environment.
+    **What that costs, stated**: at a bundle host only that host's bundle variables resolve, so a run.secrets value,
+    a forwarded secret or the model key sent there is refused 403 by the supervisor; loud, before any spend at the
+    provider, never a leak. So every host the job's own credentials are known to go to is refused as a bundle host
+    (below). **CORRECTED in review round 1 (H2)**: this sentence first said a model's host was not judged because the
+    catalog host could not be known; it can (`outputCapView` composes it), and a bundle endpoint on `api.anthropic.com`
+    took the model key's binding and failed the run after spend.
+  - **`auth` documents, the binding narrows.** The `endpoints` entry's `auth` becomes the profile credential's
+    `auth_style` and `header_name` (`bearer` -> `bearer` + `authorization`, `basic` -> `basic`, `header:<Name>` ->
+    `header` + the name lowercased; `bundleAuthFields`). At the pin these change nothing a static credential does: the
+    supervisor swaps a placeholder wherever a request carries it (a whole header value, after a `Bearer `-style
+    prefix, inside Basic's decoded `user:pass`, the path or the query; crates/openshell-core/src/secrets.rs
+    `rewrite_header_value`), and no supervisor code reads either field for a static credential (only token grants,
+    crates/openshell-supervisor-network/src/l7/token_grant_injection.rs). The gateway validates them at import
+    (crates/openshell-providers/src/profiles.rs: empty or `basic` free, `bearer` and `header` need a `header_name`) and
+    `provider profile get` prints them, so the reviewed file's intent is visible in the gateway's own view. Rejected:
+    leaving them out because they do nothing.
+  - **The plain variables** (every bundle variable `endpoints` does not name). **SUPERSEDED in review round 1 (H1)** by
+    the file channel below: as first built they reached the exec as `--env NAME=VALUE`, values the agent reads, as on
+    every other venue. Measured at the pin: `sandbox exec --env` takes `KEY=VALUE` only
+    (crates/openshell-cli/src/main.rs `SandboxCommands::Exec`, commands/common.rs `parse_key_value_pairs`: "--env
+    expects KEY=VALUE"), with no bare `KEY` that reads the CLI's environment (as `provider create --credential KEY`
+    has) and no file; `sandbox create --env` is the same flag and would keep the values in the gateway's sandbox spec.
+    So those values were on the host's argv for the exec's lifetime, and (found in review round 1) in the gateway's
+    log: crates/openshell-server/src/grpc/sandbox.rs `build_remote_exec_command` puts the env pairs first, sorted by
+    key, and `stream_exec_over_relay` and the interactive path log the command's first 120 characters at INFO as
+    `command_preview`, so `DB_URL=postgres://u:secret@...` reached the journal.
+    The exec's other `--env` names are unchanged (`NON_SECRET_ENV_KEYS`, the git helper, `HOME`). Rejected: a provider
+    for them (the agent would hold placeholders, useless for a value it must use itself: an HMAC key, a PEM, a
+    database URL). The env file, rejected at first as a job-image change, is what review round 1 chose:
+  - **The file channel (review round 1, H1)**: the stage writes the plain variables as one JSON object to
+    `<job dir>/bundle-env.json` (`BUNDLE_ENV_FILE`, 0600, before the upload in copy mode and before the exec in bind
+    mode, so `/sandbox/job/bundle-env.json` or the read-only `/job/bundle-env.json`), run-container (told
+    `bundleEnvFile: true` by this venue alone) puts `PI_BUNDLE_ENV=1` in the closed env map (reserved, non-secret, so
+    it is the only bundle trace on the exec), the runner of an image declaring the new capability `bundleEnvFile` reads
+    the file before pi's runtime exists into its own environment, which pi and its tools inherit
+    (image/runner/src/bundle-env.mjs: a flag without a readable file, a non-object, a non-string or empty value, a name
+    that is not an env name, starts `PI_` or `OPENSHELL_`, is in the closed `BUNDLE_ENV_PROTECTED` list (what the
+    runtime and the sandbox set) or holds an OpenShell placeholder each refuse, exit 2, before spend; any other name
+    an image `ENV` set is replaced, as `-e` replaces it on `local`, the final review round's narrowing of an earlier
+    "already set" rule that failed admitted jobs), and the
+    teardown removes the host file. JSON carries a newline, so a PEM is a plain variable now. Copy mode's upload is tar
+    over the sandbox's SSH extracted by the sandbox's own user (crates/openshell-cli/src/ssh.rs
+    `sandbox_sync_up_files`), so the 0600 file is the job's to read, and it has no size cap at the pin: the bundle's
+    own caps (64 variables, 256 KiB) are its only bounds (review round 1, M1). An image without the capability
+    refuses a job that would need the file before spend (`openshell-bundle-image-too-old`). The agent can read the
+    file, as it reads the values in its env. After a worker crash the host file stays in the job directory until the
+    next start's salvage or the orphan sweep removes that directory (`BESIDE_JOB_DIR`'s sweep, recovery-queue.mjs),
+    the window every job input has. **RELEASE OBLIGATION**: a job image release carrying `bundleEnvFile` is
+    owed (beside #695's) before plain bundle variables can run on an OpenShell venue; until then such a job is refused,
+    never run without them.
+  - **Judged before the sandbox and before spend** (`bundleGate`, `judgeBundle`, refusals in `OPENSHELL_REFUSALS`,
+    fixed text, the names and host in `refused_openshell_bundle`), asked twice by the processor inside its bundle read:
+    with the hosts alone before the resolver runs, then with the received variables.
+    `openshell-bundle-endpoint-not-allowed`: the host is not EXACTLY an endpoint host of the generated policy (a reviewed file may not widen egress),
+    or a wildcard endpoint covers it (an allowlist `.example.com` is `*.example.com`, bound to the job's provider: the
+    ambiguity OpenShell refuses). `openshell-bundle-endpoint-shared`: a host the job's own credentials go to
+    (`credentialHostsOf`): every forge's (GitHub's three with `uploads.github.com`, gitlab.com, dev.azure.com, each
+    configured instance URL's), and, from the processor (review round 1, H2), the composed `baseUrl` host of every model
+    the job may call (`outputCapView` over the overlay's models.json and pi's catalog through `builtinModel`, as the
+    output cap and the zero-rated check compose it), every model endpoint's host keyed or not (the simple rule), and
+    every HTTP MCP server's host the job names (its headers may carry a run.secrets value). Gaps left, each refused
+    loudly at run time by the supervisor's 403 and never a leak: a model whose `baseUrl` cannot be composed (no
+    catalog entry, no overlay definition) adds no host; an agent switching to another overlay model whose `baseUrl`
+    is a bundle host, on a trigger with no allowed-model list (the callable set is then open, so it cannot be listed;
+    `run.models` or `PI_ALLOWED_MODELS` closes it); and a stdio MCP server's own HTTP calls with a secret to a bundle
+    host (its destinations are its own, not in its configuration).
+    `openshell-bundle-endpoint-unknown`: an `endpoints` name the bundle did not deliver (and no run.secrets value
+    shadowed): a typo would otherwise send the real variable in PLAIN while the file reads as holding it as a
+    placeholder. `openshell-bundle-name-taken`: the `PI_` prefix (the worker's and the runner's own, final review round), a
+    name the sandbox sets itself (`USER`, `SHELL` and `TERM` for every exec, crates/openshell-sandbox/src/process.rs and
+    boundary_exec.rs, and `LOGNAME` beside them), the `OPENSHELL_` prefix (common.rs
+    `parse_env_pairs`; crates/openshell-server/src/grpc/validation.rs `validate_env_entries_inner`;
+    crates/openshell-sandbox/src/process.rs `RESERVED_ENV_PREFIX`), the CA variables
+    (crates/openshell-sandbox/src/child_env.rs `tls_env_vars`), the proxy variables (process.rs `PROXY_ENV_VARS`), `HOME` and the git helper's
+    `GIT_CONFIG_*` (`OPENSHELL_SET_ENV_NAMES`). `openshell-bundle-unpassable`: what the gateway would refuse
+    (`OPENSHELL_LIMITS`, from crates/openshell-server/src/grpc/mod.rs and validation.rs): a placeholder value over 8 KiB
+    (`MAX_MAP_VALUE_LEN`), more than 32 placeholders for one host (`MAX_PROVIDER_CREDENTIALS_ENTRIES`), more than 31
+    bundle hosts (`MAX_PROVIDERS` 32 per sandbox, one is the job's); the plain-value limits it first had (32 KiB, no
+    line break, the exec's) are gone with the exec path. `openshell-bundle-image-too-old`: plain variables on an image
+    without `bundleEnvFile`. The wildcard check ignores ports (an allowlist wildcard is 443, a model endpoint may not
+    be) and errs toward refusing, as its any-depth suffix match does (review round 1, L3). **A shadowed endpoint name**
+    (review round 1, M2): a trigger's run.secrets value for a name the bundle's `endpoints` declare goes into THAT host's
+    provider, since it is the value that wins and the reviewed file binds the name to the host; it counts among the
+    placeholders. A
+    source the gate cannot read retries. A plan the stage still cannot build (a key in two places, a bundle host
+    without an endpoint) is a defect refused as infrastructure (`openshell_bundle_collision`,
+    `openshell_bundle_host_unbound`), never run around.
+  - **Read-back**: `expectedPolicies(policy, { providers })` adds one `_provider_<name>` layer per attached provider and
+    nothing else, read at the pin (crates/openshell-policy/src/compose.rs `provider_rule_name`, `compose_effective_policy`:
+    each layer under its own key, a numeric suffix only on a clash these names cannot have;
+    policy.rs `provider_policy_context_from_records`: an endpointless profile's layer is the measured `{ name }`).
+    `--full` is kept rather than `--base`: the base alone would no longer see a layer this job did not attach, the one
+    difference a read-back exists for. A missing or an extra layer never starts the job (unit-tested).
+  - **Lifecycle**: teardown deletes every provider the attempt created, after the sandbox, by #684's bounded retry,
+    and every profile it imported; an attempt removes its earlier attempt's leftovers by name first; the boot sweep
+    deletes owner-labelled providers named like a job's or a bundle host's (`isJobProviderName`, `BUNDLE_PROVIDER_NAME`
+    `pi-job-s<11 hex>-b<n>`, sandboxes first since a provider still attached is refused deletion), then (review round
+    1, L4) every profile named in the job namespace, which a provider never created for (an import, then a crash)
+    would otherwise leave: `provider profile list -o json` is the whole catalog as one array
+    (crates/openshell-cli/src/commands/provider.rs `provider_list_profiles_text`,
+    crates/openshell-providers/src/profiles.rs `profiles_to_json`), and a failed listing leaves the sweep's answer as it is; the gone-check deletes a
+    gone sandbox's bundle providers too. Still one set per job, never shared (`OQ-047`).
+  - **The record** gains `bundle.placeholders` and `bundle.plain` on both venues (`INT-RUN-HISTORY-FILE-CONTRACT`).
+    The redactor still holds every placeholder variable's real value (it is in the job's env as every secret is), so a
+    value that came back some other way is still masked.
+  - **CI** (advisory lane): the copy pass binds a bundle variable to the stand-in's second alias (`host.docker.internal`)
+    and reads from inside: the placeholder in the env and `/proc/self/environ` and no process holding the value, the
+    plain value in `/sandbox/job/bundle-env.json` with `PI_BUNDLE_ENV=1` and on no process's command line, neither value
+    in the gateway's log (the probe replaces the runner, so the runner's own read is `verify-image.sh`'s `bundleEnvFile`
+    check), the real value received by the stand-in at that host, the same placeholder refused at the
+    first alias (the job provider's endpoint) and the job's model key refused at the bundle's host; then a worker
+    process SIGKILLed while its bundled sandbox runs, and the reaper's sweep leaving neither the sandbox nor its two
+    providers. The bind pass repeats the inside reads and the swap. Only that lane, on Linux with a gateway, can prove
+    them; the unit tests drive the adapter against a fake CLI.
+  - **Code evidence**: worker/src/backend-openshell.mjs -> judgeBundle, bundleProviderPlan, bundleAuthFields,
+    providerProfileFor, credentialHostsOf, OPENSHELL_LIMITS, OPENSHELL_SET_ENV_NAMES, BUNDLE_PROVIDER_NAME,
+    isJobProviderName, expectedPolicies, openshellExecArgs, BUNDLE_ENV_FILE, the bundle's `bundleGate`;
+    worker/src/processor.mjs -> readBundle, askBundleGate, credentialHosts; image/runner/src/bundle-env.mjs ->
+    applyBundleEnv; worker/src/env-allowlist.mjs (`PI_BUNDLE_ENV`); image/Dockerfile and image/verify-image.sh
+    (`bundleEnvFile`); worker/src/backend-registry.mjs -> OPTIONAL_PREFLIGHT_DEFAULTS.bundleGate;
+    worker/src/run-container.mjs (`bundleKeys`); worker/src/run-history.mjs -> recordedBundle;
+    worker/test/backend-openshell.test.mjs, backend-openshell-bind.test.mjs, processor-bundles.test.mjs;
+    .github/scripts/openshell-conformance.mjs, openshell-bind-conformance.mjs.
 
 ## DES-OOM-CONFIRMED-BY-AN-IN-IMAGE-SUPERVISOR
 
@@ -13165,3 +13332,4 @@ a tunnel.
 | 2026-10-19 | Issue #704, part 2: project secret bundles on the worker, `local` and `podman`. **NEW `DES-PROJECT-SECRET-BUNDLES`**: a project's environment granted once in `triggers.json`'s `secretBundles`, read by one resolver call per job start (`PI_SECRET_BUNDLES`, `name:/abs/path:dotenv\|json`, the overlay's operator-only `secretBundles`), the worker reading the binding and the `run.secretBundle: false` opt-out from its own file, trigger-made jobs only (`bundleSkipped` `manual`, `chained`, `opted-out`, `fork`), the free refusals before the mint and the fork check and read after it, strict declared formats, reserved names refused by name, `run.secrets` winning a clash, names-only record; seven rejected alternatives (projects.json as home, per-reference reads, dropping reserved names, sniffing formats, receiver-carried binding, `b:` routing, several bundles per project). **`DES-PER-TRIGGER-SECRET-PROFILE` REVERSED in part**: its rejected bullet "A vault name as the unit of grant" is reversed for bundles only, with the trade stated (the reviewed file no longer lists the fields; the record does, after the fact); it stands for `run.secrets`. **`DES-SERVICE-ENV-SETUP-SEAM` UNCHANGED, checked**: it stays boot time only; a bundle profile is a name selecting among execs the operator declared, the same argument `DES-PER-TRIGGER-SECRET-PROFILE` makes, and a trigger file names no path. **`DES-TRIGGERS-UNIFIED-FILE` UNCHANGED, checked**: still one file read by both services, refused whole when any part is malformed. **Code evidence**: worker/src/secret-bundles.mjs -> parseBundleOutput, makeBundleResolver, mergeBundleSecrets; worker/src/secret-profiles.mjs -> parseSecretBundleProfiles; worker/src/triggers.mjs -> parseTriggersDocument, validateSecretBundles; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/processor.mjs -> the two bundle gates; worker/src/doctor-bundles.mjs -> secretBundleChecks. |
 | 2026-10-19 | Issue #704, part 2, review round 1. **`DES-PROJECT-SECRET-BUNDLES` AMENDED**: no model-callable tool widens a grant (an entry `dispatch_trigger_add` writes carries `secretBundle: false`, no trigger tool call may carry the field, and the project tools refuse a membership change of a bundled project); the worker keeps its last good triggers read and retries a project job only while it has never had one (replacing the `secret-bundles-unreadable` refusal, which lost deliveries and was silent on hosts with no profile); a profile this host lacks is deferred on a multi-host shared queue (`SecretBundleProfileHold`); the read moves before the mint for every job that needs no fork check; the fork comparison is case-insensitive on GitHub and Forgejo and a 401/403/404 head read is `head-unverified`, not a retry; bundle-only loader and steering names refuse; bundle ids are capped at 128; two residuals stated (MCP servers cannot reference a bundle variable; values under 8 characters are not redacted). **`DES-OPENSHELL-VENUE` AMENDED**: a bundled job is refused on both OpenShell venues before spend (`openshell-bundle-unsupported`) until #704 part 3. **Code evidence**: admin/src/write-plans.mjs -> secretBundleFieldRefusal, planTriggerAdd; admin/src/read-model.mjs -> planProjectsWrite; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/processor.mjs -> the bundle gates, SecretBundleProfileHold, headReadStatus; worker/src/index.mjs -> the hold's hand-back; worker/src/secret-bundles.mjs -> bundleLoaderName; worker/src/backends.mjs -> OPENSHELL_BUNDLE_UNSUPPORTED. |
 | 2026-10-19 | Issue #704, part 2, review round 2. **`DES-PROJECT-SECRET-BUNDLES` AMENDED**: a missing triggers file is a failure (last good read, else retry) on a host that declares a bundle profile and "no bundles" only on one that declares none; the free profile lookup stays in the processor, with the reason; `run.secretBundle`, the top-level `secretBundles` and their spellings get the loader's near-miss sweep; a rate-limited head read retries; the bundle-only reserved names gain the remaining TLS-trust, template, interpreter and `npm_config_*` names, held to `docs/secrets.md` by a test; five residuals named (no profile and no file on a fleet host, the openshell refusal before the fork check, a shared-queue job judged against this host's default venue, `dispatch_trigger_edit` on a bundled project's operator trigger, the save-by-rename instant). **Code evidence**: worker/src/triggers.mjs -> isSecretBundleNearMiss; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/processor.mjs -> headReadRateLimited; worker/src/secret-bundles.mjs -> BUNDLE_LOADER_NAMES; worker/src/doctor.mjs -> the fleet warning. |
+| 2026-10-20 | Issue #704, part 3: project secret bundles on both OpenShell venues. **`DES-OPENSHELL-VENUE` AMENDED**, a dated "Project secret bundles (#704 part 3)" bullet, and part 2's refusal paragraph marked SUPERSEDED: read at the pin (v0.1.4, `5a7728c`), a policy endpoint's `credential_binding` names ONE provider, a provider binds every key to every endpoint naming it, two providers may not expose one key and two overlapping endpoints may not name different providers, so each bundle HOST gets a per-job provider `<sandbox>-b<n>` bound to that host's endpoints only, and the job's own provider keeps every other secret and every other endpoint; at a bundle host only its bundle variables resolve (anything else sent there is refused 403 `credential_endpoint_mismatch`, stated). `auth` documents (`auth_style`, `header_name`, validated and printed by the gateway, read by no supervisor code for a static credential), the binding narrows. Plain variables reach the exec as `--env NAME=VALUE`, since 0.1.4's exec takes nothing else (measured), so `OQ-028` re-opens on the venue for exactly them. Five refusals before the sandbox and before spend (`openshell-bundle-endpoint-not-allowed`, `-endpoint-shared`, `-endpoint-unknown`, `-name-taken`, `-unpassable`, each with the pinned source it rests on); the read-back accepts exactly the attached providers' layers (`--full` kept, `--base` rejected); teardown, the boot sweep and the gone-check delete the bundle providers; the record counts placeholders and plain variables. **`DES-PROJECT-SECRET-BUNDLES` AMENDED**: the venue's judgement runs inside the read (hosts before the resolver, variables after), behind the fork check, so part 2's "refused before the fork check" residual is GONE (a test) and the shared-queue residual narrows to a bundle the venue cannot hold; `openshell-bundle-unsupported` retired; the record's counts. **Review round 1** (same PR): H1, plain values no longer travel as `exec --env` (the gateway logs an exec's env: `build_remote_exec_command`, `stream_exec_over_relay`) but in `<job dir>/bundle-env.json`, read by a runner declaring the new capability `bundleEnvFile` on `PI_BUNDLE_ENV=1`, an image without it refused before spend (`openshell-bundle-image-too-old`), a job image release owed; H2, the credential hosts a bundle may not claim gain every callable model's composed `baseUrl` host, every model endpoint's and every HTTP MCP server's, and `uploads.github.com` (the earlier "a model's host is not judged" CORRECTED); M1, no exec limit is left on a plain value (the upload has none at the pin, the bundle caps bound the file); M2, a run.secrets value shadowing a declared endpoint name goes into that host's provider; L3, the wildcard check ignores ports and errs safe, said; L4, the boot sweep deletes job-namespace profiles left without a provider. **Final review round**: the `PI_` prefix and `USER`, `SHELL`, `TERM`, `LOGNAME` (the sandbox's session names) refused before spend, and the runner's backstop narrowed from "already set" to a closed list plus placeholders, so an image `ENV` name is replaced as on local; each per-provider profile file deleted right after its import (no `BESIDE_JOB_DIR` suffix matches it); the crash window of `bundle-env.json` and the remaining run-time 403 cases (an unlisted overlay model, a stdio MCP server's own calls) stated. Rejected: a provider for plain values (useless placeholders), `policy get --base` (blind to a layer this job did not attach), refusing a model endpoint's host (the catalog host cannot be known, so the rule would read as protecting the model key and not). **`CONST-VENUE-EGRESS-LAYER` UNCHANGED, checked**: the providers are still per job and the layer still the deployment's, and a bundle may not widen the generated policy by a host. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: every refusal is before the clone, the token-cap read and the reservation (a pull request's after the mint, as its read already was). **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the refusals return, an unreadable source and an unbuildable plan retry. **`CONST-TOKEN-SCOPED-PER-JOB`, `CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked.** **Code evidence**: worker/src/backend-openshell.mjs -> judgeBundle, bundleProviderPlan, bundleAuthFields, expectedPolicies, openshellExecArgs, isJobProviderName, the bundle's bundleGate; worker/src/processor.mjs -> readBundle, askBundleGate; worker/src/backend-registry.mjs -> OPTIONAL_PREFLIGHT_DEFAULTS; worker/src/run-history.mjs -> recordedBundle; .github/scripts/openshell-conformance.mjs, openshell-bind-conformance.mjs. |

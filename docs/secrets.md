@@ -626,7 +626,8 @@ human approval per connection, and its access expires after a TTL, after which t
 until someone approves again. The local `.env` named pipe and the CLI's desktop-app sign-in are interactive in
 the same way. None of those suits a service that starts jobs at 3 a.m. Whether a later OpenShell-side route
 (an operator-owned provider, or the gateway's credential driver) can serve unattended jobs is an open question,
-recorded with what it would need; the resolver seam above already covers the service-account route.
+recorded with what it would need (`OQ-048` in `specs/open-questions.md`); the resolver seam above already covers the
+service-account route, and on an OpenShell venue its values can still be placeholders (below).
 
 ### Who gets the bundle, and who does not
 
@@ -650,13 +651,80 @@ recorded with what it would need; the resolver seam above already covers the ser
   trigger's jobs to hold the bundle, delete the line by hand in `triggers.json`. For the same reason the project tools
   refuse to change the members of a project a bundle names (or to create one under a bundled id): change the bundle
   first, or edit `projects.json` by hand.
-- **Not on an OpenShell venue, yet.** A job that would carry a bundle on `openshell` or `openshell-bind` is refused
-  before it spends (`openshell-bundle-unsupported`), until those venues can hold a bundle's variables.
 
 A trigger's own `run.secrets` **win** over a bundle variable of the same name, and the run record names the
 shadowed variables. The record also lists, by name, every variable a job received from its bundle
 (`bundle: { id, variables, shadowed }`), never a value: since a grant now changes outside review, each run says
 exactly what it held.
+
+### On an OpenShell venue: placeholders for the variables you bind to a host
+
+On `openshell` and `openshell-bind` ([backends](backends.md)) the job's own credentials are already placeholders the
+gateway swaps for the real value at the hosts the job may reach. A bundle can put its variables on that path too, one
+host per variable, with `endpoints`:
+
+```jsonc
+"secretBundles": {
+  "shop": {
+    "profile": "shop-env", "ref": "shop", "project": "shop",
+    "endpoints": {
+      "STRIPE_KEY":  { "host": "api.stripe.com", "auth": "bearer" },
+      "SENTRY_AUTH": { "host": "sentry.io",      "auth": "header:X-Sentry-Token" }
+    }
+  }
+}
+```
+
+What the agent sees:
+
+- **A variable `endpoints` names is a placeholder** (`openshell:resolve:env:...`) in the job's environment and in
+  `/proc/self/environ`. The gateway swaps in the real value only in an HTTP request to that host (a header, after
+  `Bearer `, inside Basic auth, in the path or the query); sent anywhere else it is refused with a 403
+  (`credential_endpoint_mismatch`), never forwarded. The worker gives each host its own per-job provider, created
+  and deleted with the job's sandbox and swept after a crash.
+- **Every other bundle variable is its value**, as on `local` and `podman`. That is the right place for a value the
+  agent must use itself (an HMAC key, a PEM, a database URL): a placeholder only works in an HTTP request. A multi-line
+  value works. The worker hands these values to the job in a file in the job's own directory (`bundle-env.json`, mode
+  0600, removed when the job ends, or, if the worker crashes mid-job, when the next start's salvage or orphan sweep
+  removes the job directory), which the job image's runner reads into the agent's environment; they are on no
+  command line on this host and not in the OpenShell gateway's log (it logs the start of every exec command, which is
+  why the values do not travel there). The job image must declare `bundleEnvFile` ([job-image](job-image.md)); on an
+  older image such a job is refused before it spends (`openshell-bundle-image-too-old`).
+- **`auth`** says how the value is sent (`bearer`, `basic`, or `header:<Name>`) and is recorded in the gateway's
+  provider profile. At OpenShell 0.1.4 it does not change where the swap happens: the agent's own request must carry
+  the placeholder where the service expects the key.
+- The run record also counts them: `bundle.placeholders` and `bundle.plain`.
+
+What refuses the job, before the sandbox exists and before it spends (the worker's log names the variable and the
+host, the comment names neither):
+
+- `openshell-bundle-endpoint-not-allowed`: the host is not exactly a host the job may already reach (an
+  `egress-allowlist.conf` line, a `model-endpoints.json` entry, the forge's own). A bundle never widens egress. A host
+  admitted only by a wildcard line (`.example.com`) does not count: add the host on a line of its own.
+- `openshell-bundle-endpoint-shared`: the host is one the job's own credentials are sent to: the forge's
+  (`github.com`, `api.github.com`, `uploads.github.com`, `gitlab.com`, `dev.azure.com`, or your instance's), the model
+  provider's (`api.anthropic.com` and the like, for every model the job may call), any `model-endpoints.json` host, or
+  an HTTP MCP server the job names. OpenShell binds one provider per host, so the bundle would take the host from them.
+- `openshell-bundle-endpoint-unknown`: `endpoints` names a variable the resolver did not print. A typo would otherwise
+  hand the real variable to the agent as a value while the file reads as holding it as a placeholder.
+- `openshell-bundle-name-taken`: a bundle variable is named like one the sandbox sets itself (`OPENSHELL_*`, its CA
+  variables such as `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE`, the proxy variables, `HOME`, `USER`, `SHELL`, `TERM`,
+  `LOGNAME`, `GIT_CONFIG_*`), or under `PI_`, which is pi-dispatch's own.
+- `openshell-bundle-unpassable`: what OpenShell 0.1.4 cannot carry as a placeholder: a value in `endpoints` over
+  8 KiB, more than 32 `endpoints` variables for one host, or more than 31 hosts.
+- `openshell-bundle-image-too-old`: the bundle has variables outside `endpoints` and the job image does not declare
+  `bundleEnvFile`. Rebuild the image from a release that does.
+
+One thing to know: **a host in `endpoints` is the bundle's alone for that job.** A forwarded secret or another
+`run.secrets` value sent to that host gets the 403 above (the hosts the worker knows the job's own credentials use are
+refused up front). A trigger's `run.secrets` value for a name the bundle's `endpoints` declare wins as usual, and is
+held as that host's placeholder. Two cases the worker cannot see before the job runs, both refused loudly by
+OpenShell (a 403, nothing forwarded): an agent that switches to another model defined in the overlay's `models.json`
+whose `baseUrl` is a bundle host, on a trigger with no allowed-model list (set `run.models` or `PI_ALLOWED_MODELS` to
+close it), and a stdio MCP server's own HTTP calls to a bundle host carrying a secret.
+
+`endpoints` means nothing on `local` and `podman`: every variable goes in as its value there, and a name `endpoints`
+lists that the bundle lacks is not refused.
 
 ### The traps of a bundle
 
@@ -670,7 +738,8 @@ exactly what it held.
 3. **Fork reviews are off by default**, and `forkReviews: true` turns them on for the whole bundle.
 4. **More values in the host argv.** On `local` and `podman` every variable goes into `docker run` / `podman
    run` as `-e NAME=VALUE`, so a bundle widens `OQ-028` by its count: a process on the host that can read
-   another's command line sees them while the container starts.
+   another's command line sees them while the container starts. On an OpenShell venue none is on a command line: the
+   ones `endpoints` names are placeholders, and the rest travel in a file in the job's directory.
 5. **A project with folders.** A local job's `/workspace` is your own folder, so a value the agent writes to a
    `.env` there lands in your real repository. `doctor` warns per bundle whose project holds a folder.
 6. **Declare the profile on every host that takes the project's jobs.** A bundle profile is a path on one

@@ -66,6 +66,11 @@ export const BACKEND_NOT_REGISTERED = "BACKEND_NOT_REGISTERED";
 export const OPTIONAL_PREFLIGHT_DEFAULTS = Object.freeze({
 	observationPreflight: () => ({ ok: true }),
 	jobUserPreflight: () => ({ user: null, home: null }),
+	// Issue #704 part 3: a project secret bundle judged against the venue (`(job, { endpoints, vars, shadowed })`). A
+	// venue that carries none admits every bundle, which is what a venue whose container holds its env as values does:
+	// the variables join the env, and `endpoints` means nothing there. Only a venue whose own layer holds credentials
+	// (both OpenShell venues, which carry one) has a narrower answer.
+	bundleGate: () => ({ ok: true }),
 });
 
 /** The freezer verbs a bundle MAY carry (issue #645, the `pausable` row), always as a pair. */
@@ -247,11 +252,12 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		},
 		imagePreflight: (job) => backendFor(job).imagePreflight(job),
 		egressPreflight: (job) => backendFor(job).egressPreflight(job),
-		// The two OPTIONAL per-venue preflights (issue #354), dispatched through the same resolution as every
-		// required one, so an unregistered name still throws BACKEND_NOT_REGISTERED rather than being waved
+		// The OPTIONAL per-venue preflights (issue #354; `bundleGate`, #704 part 3), dispatched through the same
+		// resolution as every required one, so an unregistered name still throws BACKEND_NOT_REGISTERED rather than being waved
 		// through by a default. A venue that carries none gets the answer the processor's own defaults give.
 		observationPreflight: (job) => optionalPreflight(backendFor(job), "observationPreflight", job),
 		jobUserPreflight: (job, opts) => optionalPreflight(backendFor(job), "jobUserPreflight", job, opts),
+		bundleGate: (job, opts) => optionalPreflight(backendFor(job), "bundleGate", job, opts),
 		stopContainer: (name, job) => backendFor(job).stopContainer(name, job),
 		// Issue #645: whether this job's venue can freeze it, and the verbs themselves, dispatched like every per-job
 		// function. A venue without verbs answers `{ ok: false, reason: "not-pausable" }`, never a throw: the caller is a

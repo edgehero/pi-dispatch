@@ -194,7 +194,7 @@ test("no bundle value reaches the record, a log line or a comment, on success or
 	for (const v of values) assert.ok(!surfaces.includes(v), v);
 });
 
-test("the free refusals come before the mint: an undeclared profile, run.resume, a changed trigger, an openshell venue", async () => {
+test("the free refusals come before the mint: an undeclared profile, run.resume, a changed trigger", async () => {
 	const undeclared = deployment({ declared: false });
 	const r1 = await runJob(prJob, undeclared.deps);
 	assert.deepEqual([r1.reason, undeclared.calls], ["secret-bundle-profile-unknown", []]);
@@ -204,13 +204,78 @@ test("the free refusals come before the mint: an undeclared profile, run.resume,
 	const changed = deployment({ triggers: [cron] });
 	const r3 = await runJob(prJob, changed.deps);
 	assert.deepEqual([r3.reason, changed.calls], ["secret-bundle-trigger-changed", []]);
-	// Both OpenShell venues (a layer holds the credentials) refuse a bundled job until #704 part 3.
+});
+
+// Issue #704 part 3: both OpenShell venues hold a bundle now. The venue judges it twice inside the read (`bundleGate`):
+// the hosts before the resolver runs, then the received variables, and its counts reach the record.
+// A forge job that needs no fork check (an issue), since the copy venue refuses a local folder job before any of this.
+const issueOn = { ...prJob, target: { type: "issue", number: 7 }, trigger: { deliveryId: "d3", matched: { index: 1, type: "pull_request", action: "opened" } } };
+const endpointBundles = { shop: { profile: "shop-env", ref: "shop", project: "shop", endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } } } };
+function gated(answer = () => ({ ok: true, placeholders: 1, plain: 1 }), over = {}) {
+	const asks = [];
+	const kept = [];
+	const d = deployment({ bundles: endpointBundles, over: { blessedBackends: ["local", "openshell", "openshell-bind"], ...over } });
+	// The venue's own facts ride every ask (the job's credential hosts and the image's capabilities), kept apart here.
+	d.deps.bundleGate = async (job, ask) => {
+		const { credentialHosts, capabilities, ...rest } = ask;
+		asks.push({ ask: JSON.parse(JSON.stringify(rest)), calls: [...d.calls], credentialHosts, capabilities });
+		return answer(ask);
+	};
+	const run = d.deps.runContainer;
+	d.deps.runContainer = async (args) => (kept.push(args.bundleKeys ?? null), run(args));
+	return { ...d, asks, kept };
+}
+
+test("on both OpenShell venues a bundled job runs: hosts judged before the read, variables after, the split handed on and counted", async () => {
 	for (const backend of ["openshell", "openshell-bind"]) {
-		const venue = deployment({ over: { blessedBackends: ["local", backend] } });
-		const r = await runJob({ ...prJob, backend }, venue.deps);
-		assert.deepEqual([r.reason, r.budgetReserved, venue.calls], ["openshell-bundle-unsupported", false, []], backend);
-		assert.match(venue.comments.at(-1), /cannot hold a bundle's variables yet/);
+		const g = gated();
+		const job = { ...issueOn, backend };
+		const r = await runJob(job, g.deps);
+		assert.equal(r.outcome, "completed", backend);
+		assert.deepEqual(g.asks.map((a) => a.ask), [
+			{ endpoints: endpointBundles.shop.endpoints, vars: null },
+			{ endpoints: endpointBundles.shop.endpoints, vars: { STRIPE_KEY: "sk_live_value", DB_URL: "postgres://u:pw@db/shop" }, shadowed: [] },
+		], backend);
+		assert.deepEqual(g.asks.map((a) => a.calls), [[], []], "both asks come before the mint for a job that needs no fork check");
+		assert.deepEqual(g.kept[0], { endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } }, plain: ["DB_URL"] });
+		assert.deepEqual(record(job, r).bundle, { id: "shop", variables: ["DB_URL", "STRIPE_KEY"], shadowed: [], placeholders: 1, plain: 1 });
 	}
+	// On local the same gate admits (a venue without one), the split still rides the call bag, and the record has no counts.
+	const local = gated(() => ({ ok: true }));
+	const r = await runJob(cronJob, local.deps);
+	assert.deepEqual(record(cronJob, r).bundle, { id: "shop", variables: ["DB_URL", "STRIPE_KEY"], shadowed: [] });
+});
+
+test("an OpenShell venue's refusal of the bundle returns before the resolver, the mint and every reserve, with its fixed sentence", async () => {
+	const g = gated((ask) => (ask.vars === null ? { venueRefused: { reason: "openshell-bundle-endpoint-not-allowed", comment: "Refused: fixed. Not run." } } : assert.fail("never read")));
+	const r = await runJob({ ...issueOn, backend: "openshell" }, g.deps);
+	assert.deepEqual([r.outcome, r.reason, r.budgetReserved, g.calls], ["policy", "openshell-bundle-endpoint-not-allowed", false, []]);
+	assert.equal(g.comments.at(-1), "Refused: fixed. Not run.");
+	assert.equal(g.redis.incrCalls, 0);
+	assert.equal(g.logs.some((l) => l.event === "secret_bundle_applied"), false, "the resolver never ran");
+	// The second ask's refusal: after the read, still before the mint.
+	const after = gated((ask) => (ask.vars === null ? { ok: true } : { venueRefused: { reason: "openshell-bundle-endpoint-unknown", comment: "Refused: fixed. Not run." } }));
+	const r2 = await runJob({ ...issueOn, backend: "openshell" }, after.deps);
+	assert.deepEqual([r2.reason, after.calls, after.ran], ["openshell-bundle-endpoint-unknown", [], []]);
+	// A source the venue could not read retries.
+	const down = gated(() => ({ unavailable: true }));
+	await assert.rejects(runJob({ ...issueOn, backend: "openshell" }, down.deps), (e) => e instanceof InfraRetry);
+	assert.deepEqual(down.calls, []);
+});
+
+test("part 2's residual is gone: a fork's pull request on OpenShell runs without the bundle, never refused for it", async () => {
+	const g = gated(() => assert.fail("a fork's job never reaches the bundle gate"), { resolvePullRequestHead: async () => ({ headRef: "x", headRepo: "stranger/shop" }) });
+	const r = await runJob({ ...prJob, backend: "openshell" }, g.deps);
+	assert.deepEqual([r.outcome, r.bundleSkipped, g.kept], ["completed", "fork", [null]]);
+});
+
+test("a run.secrets value that shadows an endpoint variable keeps the declared host binding with the trigger's value, and the venue is told which", async () => {
+	const g = gated(() => ({ ok: true, placeholders: 0, plain: 1 }), { resolveSecrets: async () => ({ ok: true, secrets: { STRIPE_KEY: "sk_trigger_value" } }) });
+	const job = { ...issueOn, backend: "openshell", secrets: { STRIPE_KEY: "op://ci/stripe" } };
+	const r = await runJob(job, g.deps);
+	assert.deepEqual(g.asks[1].ask, { endpoints: endpointBundles.shop.endpoints, vars: { DB_URL: "postgres://u:pw@db/shop" }, shadowed: ["STRIPE_KEY"] });
+	assert.deepEqual(g.kept[0], { endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } }, plain: ["DB_URL"] }, "review round 1, M2: the trigger's STRIPE_KEY stays on the host the bundle binds the name to");
+	assert.deepEqual(record(job, r).bundle, { id: "shop", variables: ["DB_URL", "STRIPE_KEY"], shadowed: ["STRIPE_KEY"], placeholders: 0, plain: 1 });
 });
 
 test("on a multi-host worker's shared queue a profile this host lacks defers the job; a single host refuses it", async () => {
@@ -322,4 +387,18 @@ test("makeProcessor hands a shared-queue job back for the never-fits recheck whe
 	const single = await run(false);
 	assert.equal(single.outcome?.reason, "secret-bundle-profile-unknown");
 	assert.deepEqual(single.moves, []);
+});
+
+test("review round 1, H2: the bundle gate is told every host the job's own credentials go to, and the image's capabilities", async () => {
+	const g = gated(() => ({ ok: true, placeholders: 1, plain: 1 }), {
+		modelEndpoints: { models: null, endpoints: [{ id: "lab-a", host: "llm.lan", port: 8000 }, { id: "other", host: "Other.Lan", port: 9000 }] },
+		builtinModel: (provider) => (provider === "anthropic" ? { api: "anthropic-messages", baseUrl: "https://api.anthropic.com" } : null),
+		imagePreflight: async () => ({ ok: true, capabilities: ["bundleEnvFile"] }),
+	});
+	const r = await runJob({ ...issueOn, backend: "openshell" }, g.deps);
+	assert.equal(r.outcome, "completed", r.reason);
+	for (const ask of g.asks) {
+		assert.deepEqual(ask.credentialHosts, ["api.anthropic.com", "llm.lan", "other.lan"]);
+		assert.deepEqual(ask.capabilities, ["bundleEnvFile"]);
+	}
 });

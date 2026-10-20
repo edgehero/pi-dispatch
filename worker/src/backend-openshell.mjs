@@ -6,9 +6,9 @@ import { basename, dirname, join } from "node:path";
 import { isJobNamespace, jobContainerName, JOB_NAME_PREFIX, reaperExec } from "./backend-local.mjs";
 import { FORGES } from "./forges.mjs";
 import { NON_SECRET_ENV_KEYS } from "./redact-secrets.mjs";
-import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, OPENSHELL_BIND_LINGERING, OPENSHELL_BUNDLE_UNSUPPORTED } from "./backends.mjs";
+import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, OPENSHELL_BIND_LINGERING } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
-import { makeImagePreflight, normalizeImageId, resolveJobImage } from "./image-preflight.mjs";
+import { BUNDLE_ENV_FILE_CAPABILITY, makeImagePreflight, normalizeImageId, resolveJobImage } from "./image-preflight.mjs";
 import { LAYOUTS } from "./job-layout.mjs";
 import { DAEMON_FACTS_MAX_BUFFER, DAEMON_FACTS_TIMEOUT_MS } from "./daemon-facts.mjs";
 import { JOB_USER_FACTS_MAX_AGE_MS, decideJobUser, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
@@ -38,7 +38,9 @@ import { makeRunContainer } from "./run-container.mjs";
  *
  * BLESSABLE SINCE ISSUE #684: the sandbox's network policy is generated per job (openshell-policy.mjs) and the job's
  * credentials live in a per-job provider, placeholders in the agent (`CONST-VENUE-EGRESS-LAYER`); only names the
- * redactor treats as not secret reach the exec's `--env`.
+ * redactor treats as not secret reach the exec's `--env`. A project secret bundle's PLAIN variables (issue #704 part 3),
+ * which the operator hands the agent as values, reach it in a file in the job directory (`BUNDLE_ENV_FILE`), never the
+ * exec, whose env the gateway logs (`bundleProviderPlan` below says which variable goes where).
  *
  * THE LIVE TRANSCRIPT (issue #686): the session file is in the sandbox until the download, so no host tail can read it.
  * The runner mirrors its lines over the exec's STDERR as records signed with the exit key (transcript-mirror.mjs), and
@@ -170,14 +172,24 @@ export function expectedPolicy(policy) {
  * baseline path only where the image HAS it (an operator-built image without `/var/log` reads back as written).
  * Nothing else: any other difference never starts the job.
  */
-export function expectedPolicies(policy, { provider = null } = {}) {
+export function expectedPolicies(policy, { providers = [] } = {}) {
 	const withBaseline = expectedPolicy(policy);
 	const bodies = withBaseline === policy ? [policy] : [withBaseline, policy];
-	if (provider === null) return bodies;
+	if (providers.length === 0) return bodies;
 	// Issue #684: an attached provider adds one layer of its own to the full read-back (measured: a rule named
-	// `_provider_<name, its dashes as underscores>` holding only its name, for an endpointless profile).
-	const key = `_provider_${provider.replace(/-/g, "_")}`;
-	return bodies.map((b) => ({ ...b, network_policies: { ...b.network_policies, [key]: { name: key } } }));
+	// `_provider_<name, its dashes as underscores>` holding only its name, for an endpointless profile). Issue #704 part
+	// 3: one layer per attached provider, EXACTLY the providers this job attached and nothing else. Read at the pin
+	// (openshell-policy/src/compose.rs `provider_rule_name`: lowercased, every character but [a-z0-9_] an underscore;
+	// `compose_effective_policy` adds each under its own key, a numeric suffix only on a clash, which names of the shape
+	// `pi-job-s<11 hex>` and `pi-job-s<11 hex>-b<n>` cannot have; openshell-server/src/grpc/policy.rs
+	// `provider_policy_context_from_records` pushes a layer for an endpointless profile with an empty rule, which is the
+	// measured `{ name }`). `--full` is kept rather than `--base`: comparing the base alone would no longer see a layer
+	// this job did not attach, which is the one difference a read-back exists to catch.
+	const layers = Object.fromEntries(providers.map((p) => {
+		const key = `_provider_${p.replace(/-/g, "_")}`;
+		return [key, { name: key }];
+	}));
+	return bodies.map((b) => ({ ...b, network_policies: { ...b.network_policies, ...layers } }));
 }
 
 /** How often, and how far apart, a provider's delete is asked again while its sandbox's cleanup finishes. */
@@ -255,14 +267,225 @@ export function unbindableSecretNamesOf(env = {}) {
  * no endpoints and no binaries of its own, so the credentials resolve only where the job's own policy binds them
  * (`credential_binding.provider`). Named by the sandbox, so the reaper finds a crashed job's.
  */
-export function providerProfileFor(name, secretNames) {
+export function providerProfileFor(name, secretNames, { auth = {} } = {}) {
 	return {
 		id: name,
 		display_name: name,
 		description: "pi-dispatch per-job credentials",
 		category: "other",
-		credentials: secretNames.map((env, i) => ({ name: `c${i}`, env_vars: [env], required: true })),
+		credentials: secretNames.map((env, i) => ({ name: `c${i}`, env_vars: [env], required: true, ...bundleAuthFields(auth[env]) })),
 	};
+}
+
+/**
+ * A bundle endpoint's `auth` (triggers.mjs `BUNDLE_ENDPOINT_AUTH`) in the profile's own words (issue #704 part 3), read
+ * at the pin. On OpenShell 0.1.4 these fields DOCUMENT the scheme and change nothing a static credential does: the
+ * supervisor swaps a placeholder wherever a request carries it (a header value whole, after a `Bearer `-style prefix,
+ * inside Basic's decoded `user:pass`, in the path or query; openshell-core/src/secrets.rs `rewrite_header_value`), and
+ * no supervisor code reads `auth_style` or `header_name` for a static credential (they drive only token grants,
+ * openshell-supervisor-network/src/l7/token_grant_injection.rs). The gateway validates them at import
+ * (openshell-providers/src/profiles.rs, the `auth_style` match: empty or `basic` free, `bearer` and `header` need a
+ * `header_name`) and `provider profile get` prints them ("Authentication: bearer"), so the operator's declaration is
+ * visible in the gateway's own view of the credential. Rejected: leaving them out because they do nothing; the profile
+ * is the one place an operator reading the gateway sees what the reviewed file meant. The binding, which DOES narrow,
+ * is per endpoint (`credential_binding`), below.
+ */
+export function bundleAuthFields(auth) {
+	if (auth === "bearer") return { auth_style: "bearer", header_name: "authorization" };
+	if (auth === "basic") return { auth_style: "basic" };
+	const header = /^header:([A-Za-z0-9-]{1,64})$/.exec(String(auth ?? ""));
+	return header ? { auth_style: "header", header_name: header[1].toLowerCase() } : {};
+}
+
+/**
+ * A bundle provider's name (issue #704 part 3): the sandbox's name and `-b<n>`, one per bundle host, so the reaper's
+ * namespace match (`isJobProviderName`) finds a crashed job's, and every attempt of one job uses the same names (an
+ * earlier attempt's leftover is removed first, as the job provider's is). A valid profile id at the pin (lowercase
+ * kebab-case, openshell-providers/src/profiles.rs `is_valid_profile_id`), 22 to 23 characters, inside the 64 a provider
+ * type may have (openshell-server/src/grpc/mod.rs `MAX_PROVIDER_TYPE_LEN`).
+ */
+export const BUNDLE_PROVIDER_NAME = /^pi-job-s[0-9a-f]{11}-b[0-9]{1,2}$/;
+export const bundleProviderNameOf = (sandbox, index) => `${sandbox}-b${index}`;
+/** Whether a provider is one this worker makes per job: the job's own (named as its sandbox) or a bundle host's. */
+export const isJobProviderName = (name) => typeof name === "string" && (SANDBOX_NAME.test(name) || BUNDLE_PROVIDER_NAME.test(name));
+
+/**
+ * What OpenShell 0.1.4 can carry, read at the pin, and what a bundle is judged against before the sandbox exists
+ * (issue #704 part 3), so a value the gateway would refuse is a determinate refusal before spend rather than a create
+ * that fails as infrastructure and is retried into the same answer: a provider credential value is at most 8 KiB, a
+ * provider holds at most 32, a sandbox at most 32 providers (openshell-server/src/grpc/mod.rs `MAX_MAP_VALUE_LEN`,
+ * `MAX_PROVIDER_CREDENTIALS_ENTRIES`, `MAX_PROVIDERS`; validation.rs `validate_provider_mutable_fields`, sandbox.rs's
+ * attach check). A PLAIN variable meets none of these (review round 1, M1): it travels in `BUNDLE_ENV_FILE`, which
+ * copy mode uploads with the job directory as tar over the sandbox's SSH, extracted by the sandbox's own user
+ * (openshell-cli/src/ssh.rs `sandbox_sync_up_files`, no size cap at the pin) and bind mode binds, so its only bounds
+ * are the bundle's own (64 variables, 256 KiB, secret-bundles.mjs), judged before the read is accepted. What stays on
+ * the exec is the closed set of non-secret names (`NON_SECRET_ENV_KEYS`), which no bundle can grow.
+ */
+export const OPENSHELL_LIMITS = Object.freeze({ credentialBytes: 8192, credentialsPerProvider: 32, providersPerSandbox: 32 });
+
+/**
+ * The job-directory file a bundle's plain variables reach the runner by on this venue (issue #704 part 3, review round
+ * 1, H1): one JSON object, written 0600 by the stage beside the job's other inputs (so `/sandbox/job/bundle-env.json` in
+ * copy mode, the read-only `/job/bundle-env.json` bind in bind mode), read by an image declaring `bundleEnvFile` on
+ * PI_BUNDLE_ENV=1 (image/runner/src/bundle-env.mjs), and removed at teardown. JSON carries a newline as `\n`, so a PEM
+ * arrives intact. The agent can read it: these are values the operator hands the agent on every venue.
+ */
+export const BUNDLE_ENV_FILE = "bundle-env.json";
+
+/**
+ * The variable names a bundle variable may not take on this venue (issue #704 part 3), because the sandbox already
+ * sets them and two writers of one name means one is silently lost: the `OPENSHELL_` prefix, which the CLI and the
+ * gateway refuse on an exec (openshell-cli/src/commands/common.rs `parse_env_pairs`; openshell-server
+ * validation.rs `validate_env_entries_inner`) and the sandbox reserves (openshell-sandbox/src/process.rs
+ * `RESERVED_ENV_PREFIX`); the CA variables the sandbox writes for its TLS-terminating proxy
+ * (openshell-sandbox/src/child_env.rs `tls_env_vars`) and the proxy variables it strips (process.rs `PROXY_ENV_VARS`);
+ * the session names the sandbox sets for every exec, `USER`, `SHELL` and `TERM` (openshell-sandbox/src/process.rs, the
+ * `HOME`/`USER`/`SHELL`/`TERM` loop; boundary_exec.rs, the `env_clear` builder), with `LOGNAME`, which 0.1.4 does not
+ * set but a login shell does, beside them; and the names this adapter's own exec sets (`HOME`, the git helper's
+ * `GIT_CONFIG_*`, `gitCredentialEnv`). The `PI_` prefix is refused here too (final review round): it is the worker's and
+ * the runner's own namespace, which the runner refuses at start, so a bundle name in it would otherwise pass this gate
+ * and fail after spend. Refused
+ * by NAME before spend, never dropped. Most are reserved on every venue already (HOME, the proxy names); listed whole
+ * so this venue's answer does not lean on another module's list staying what it is. The runner refuses any name already
+ * set in its environment besides (bundle-env.mjs), the backstop for a name this list misses.
+ */
+export const OPENSHELL_RESERVED_ENV_PREFIX = "OPENSHELL_";
+export const OPENSHELL_SET_ENV_NAMES = Object.freeze(["HOME", "USER", "SHELL", "TERM", "LOGNAME", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "NODE_EXTRA_CA_CERTS", "DENO_CERT", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "all_proxy", "http_proxy", "https_proxy", "no_proxy", "grpc_proxy", "NODE_USE_ENV_PROXY"]);
+const isSandboxSetName = (name) => name.startsWith(OPENSHELL_RESERVED_ENV_PREFIX) || name.startsWith("PI_") || OPENSHELL_SET_ENV_NAMES.includes(name);
+
+/**
+ * The hosts a job's own credentials are sent to, which a bundle endpoint may not claim (issue #704 part 3, review round
+ * 1, H2), since at a bundle host only that host's bundle variables resolve (`judgeBundle`):
+ *   - every forge's API, upload and git hosts this deployment can serve (GitHub's three, GitLab's and Azure's public
+ *     ones, and each configured instance URL's host), which every forge job's git, CLI and API use;
+ *   - `extra`, the processor's: the composed `baseUrl` host of every model the job may call (the overlay's models.json
+ *     over pi's catalog, output-cap.mjs `outputCapView`), every declared model endpoint's host whether keyed or not (the
+ *     simple rule: a keyless one costs the operator nothing to keep off a bundle), and every HTTP MCP server's host the
+ *     job names (its headers may carry a run.secrets value).
+ * Before review round 1 the model's hosts were left out on the reasoning that the catalog host could not be known; it
+ * can (`outputCapView` composes it, as the output cap and the zero-rated check already do), and leaving it out let a
+ * bundle endpoint on `api.anthropic.com` take the model key's binding, so the run failed `provider-auth-refused` after
+ * spend.
+ */
+export const FORGE_CREDENTIAL_HOSTS = Object.freeze(["github.com", "api.github.com", "uploads.github.com", "gitlab.com", "dev.azure.com"]);
+export function credentialHostsOf({ forgeHosts = {}, extra = [] } = {}) {
+	const hosts = new Set(FORGE_CREDENTIAL_HOSTS);
+	for (const url of Object.values(forgeHosts ?? {})) {
+		try {
+			if (typeof url === "string" && url !== "") hosts.add(new URL(url).hostname.toLowerCase());
+		} catch {}
+	}
+	for (const host of Array.isArray(extra) ? extra : []) if (typeof host === "string" && host !== "") hosts.add(host.toLowerCase());
+	return hosts;
+}
+
+/**
+ * Judge a job's bundle against this venue (issue #704 part 3, `DES-OPENSHELL-VENUE`), pure: `{ ok, placeholders, plain }`
+ * or `{ refused: reason, name?, host? }`. `network` is the job's generated `{ network_policies }`; `vars` the bundle
+ * variables the job receives (NOT the ones its own run.secrets shadowed), null before the bundle is read, when only
+ * the hosts can be judged; `shadowed` the names run.secrets took; `capabilities` the job image's.
+ *
+ * WHY A HOST IS CLAIMED WHOLE. At the pin a policy endpoint names ONE provider (sandbox.proto `NetworkCredentialBinding`
+ * has a `provider` and nothing else), a provider binds EVERY one of its keys to every endpoint naming it
+ * (openshell-server/src/grpc/policy.rs `policy_static_credential_endpoint_bindings`, then provider.rs's
+ * `resolve_provider_environment_from_records_with_policy_bindings_and_credentials`), two attached providers may not
+ * expose one env key (provider.rs `validate_provider_environment_key_ownership`: "is provided by both provider"), and
+ * two endpoints that can match one request may not name different providers (openshell-policy/src/ambiguity.rs, the
+ * `credential_binding.provider` conflict). So a variable bound to ONE host needs a provider of its own whose binding is
+ * on that host's endpoints, and those endpoints then carry no binding to the job's own provider: at a bundle host only
+ * that host's bundle variables resolve. A placeholder of any other credential sent there is refused by the supervisor,
+ * 403 `credential_endpoint_mismatch`, never forwarded (openshell-supervisor-network/src/l7/relay.rs
+ * `reject_credential_resolution`): loud, never a leak. Hence the refusals:
+ *   - `openshell-bundle-endpoint-not-allowed`: the host is not EXACTLY an endpoint host of the generated policy (a
+ *     reviewed file may not widen egress), or a wildcard endpoint of the policy covers it (`.example.com` in the
+ *     allowlist admits `*.example.com`, which would match the host's requests too and is bound to the job's provider:
+ *     the ambiguity OpenShell refuses at create);
+ *   - `openshell-bundle-endpoint-shared`: the host is one the job's own credentials are sent to (`credentialHostsOf`),
+ *     which the claim would take from them;
+ *   - `openshell-bundle-endpoint-unknown`: an `endpoints` key names no variable the bundle delivered (a typo, or one
+ *     removed in the manager) and no run.secrets value shadowed. The named variable would otherwise be missing and a
+ *     misspelt one would go in PLAIN, visible to the agent, while the reviewed file reads as holding it as a placeholder;
+ *   - `openshell-bundle-name-taken`: a bundle variable is named as one the sandbox sets itself (`OPENSHELL_SET_ENV_NAMES`);
+ *   - `openshell-bundle-unpassable`: what the gateway would refuse (`OPENSHELL_LIMITS`): a placeholder value over 8 KiB,
+ *     more than 32 placeholders for one host, more bundle hosts than a sandbox's providers leave room for, or a name no
+ *     provider can carry;
+ *   - `openshell-bundle-image-too-old`: plain variables, and a job image that does not declare `bundleEnvFile`, whose
+ *     runner would ignore `BUNDLE_ENV_FILE` and run the job without them.
+ * A shadowed endpoint name (review round 1, M2) is still a placeholder at its host: the run.secrets value, which is the
+ * one that wins, goes into that host's provider (`bundleProviderPlan`), so it counts among the placeholders here.
+ */
+export function judgeBundle({ endpoints = {}, vars = null, shadowed = [], network = { network_policies: {} }, credentialHosts = new Set(), capabilities = [] } = {}) {
+	const policyHosts = Object.values(network?.network_policies ?? {}).flatMap((rule) => (rule?.endpoints ?? []).map((e) => String(e?.host ?? "").toLowerCase()));
+	const exact = new Set(policyHosts.filter((h) => !h.startsWith("*.")));
+	const wildcards = policyHosts.filter((h) => h.startsWith("*.")).map((h) => h.slice(1));
+	const names = Object.keys(endpoints ?? {}).sort();
+	for (const name of names) {
+		const host = String(endpoints[name]?.host ?? "").toLowerCase();
+		// Conservative on the wildcard twice over (review round 1, L3): any `*.base` the host ends under, though a single
+		// star crosses no dot at the pin, and whatever its PORT, though OpenShell's ambiguity check compares ports too
+		// (an allowlist wildcard is 443, a model endpoint may be another): both err toward refusing, never toward a create
+		// the gateway refuses after the read.
+		if (!exact.has(host) || wildcards.some((w) => host.endsWith(w))) return { refused: "openshell-bundle-endpoint-not-allowed", name, host };
+		if (credentialHosts.has(host)) return { refused: "openshell-bundle-endpoint-shared", name, host };
+	}
+	const hosts = new Set(names.map((n) => String(endpoints[n].host).toLowerCase()));
+	// One provider per bundle host, beside the job's own.
+	if (hosts.size > OPENSHELL_LIMITS.providersPerSandbox - 1) return { refused: "openshell-bundle-unpassable", name: null, host: null };
+	if (vars === null) return { ok: true };
+	const delivered = new Set(Object.keys(vars));
+	const unknown = names.find((n) => !delivered.has(n) && !shadowed.includes(n));
+	if (unknown !== undefined) return { refused: "openshell-bundle-endpoint-unknown", name: unknown };
+	const placeholders = names.filter((n) => delivered.has(n) || shadowed.includes(n));
+	const plain = [...delivered].filter((n) => !Object.hasOwn(endpoints ?? {}, n)).sort();
+	const taken = [...placeholders, ...plain].find(isSandboxSetName);
+	if (taken !== undefined) return { refused: "openshell-bundle-name-taken", name: taken };
+	for (const n of placeholders) {
+		// A shadowed name's value is the trigger's own, which #684's path already carried at any size; judged as before.
+		if (!PROVIDER_ENV_NAME.test(n) || (delivered.has(n) && Buffer.byteLength(vars[n]) > OPENSHELL_LIMITS.credentialBytes)) return { refused: "openshell-bundle-unpassable", name: n };
+	}
+	for (const host of hosts) {
+		if (placeholders.filter((n) => String(endpoints[n].host).toLowerCase() === host).length > OPENSHELL_LIMITS.credentialsPerProvider) return { refused: "openshell-bundle-unpassable", name: null, host };
+	}
+	if (plain.length > 0 && !(Array.isArray(capabilities) && capabilities.includes(BUNDLE_ENV_FILE_CAPABILITY))) return { refused: "openshell-bundle-image-too-old", name: null };
+	return { ok: true, placeholders: placeholders.length, plain: plain.length };
+}
+
+/**
+ * Which provider holds which of a job's secrets, and which bundle variables go in plain (issue #704 part 3), pure:
+ * `{ job: { name, keys }, bundles: [{ name, host, keys, auth }], plain }` or `{ collision: name }`.
+ *   - the job's own provider (named as its sandbox, #684's, unchanged): every secret of the env (`secretNamesOf`) that is
+ *     not a bundle variable, so run.secrets, the forge token, the model key and the forwarded secrets keep their path;
+ *   - one provider per bundle HOST (`bundleProviderNameOf`, sorted by host so every attempt names them alike): the
+ *     variables the bundle's `endpoints` declare for that host, each with its `auth` documented in the profile. The
+ *     processor includes a declared name a run.secrets value shadowed (review round 1, M2), so that value, the one that
+ *     wins, resolves at the host the reviewed file binds the name to, and not in the job's provider bound elsewhere;
+ *   - `plain`: every other bundle variable, which reaches the runner in `BUNDLE_ENV_FILE`, its value visible to the agent
+ *     as on every other venue.
+ * `bundleKeys` is the processor's `{ endpoints, plain }`, null for a job without a bundle, which plans exactly #684's
+ * one provider. An env key in two places is a `collision`, named, never a guess at which wins: OpenShell refuses two
+ * providers exposing one key, and a plain variable beside a placeholder of the same name would shadow one of them. The
+ * processor's split and the reserved names make it unreachable; checked anyway.
+ */
+export function bundleProviderPlan({ name, env = {}, bundleKeys = null } = {}) {
+	const endpoints = bundleKeys?.endpoints ?? {};
+	const plainNames = Array.isArray(bundleKeys?.plain) ? bundleKeys.plain : [];
+	const has = (k) => typeof env?.[k] === "string" && env[k] !== "";
+	const bundleNames = new Set([...Object.keys(endpoints), ...plainNames]);
+	const jobKeys = secretNamesOf(env).filter((k) => !bundleNames.has(k));
+	const endpointNames = Object.keys(endpoints).filter(has).sort();
+	const hostOf = (k) => String(endpoints[k].host).toLowerCase();
+	const hosts = [...new Set(endpointNames.map(hostOf))].sort();
+	const bundles = hosts.map((host, i) => {
+		const keys = endpointNames.filter((k) => hostOf(k) === host);
+		return { name: bundleProviderNameOf(name, i), host, keys, auth: Object.fromEntries(keys.map((k) => [k, endpoints[k].auth])) };
+	});
+	const plain = [...new Set(plainNames)].filter(has).sort();
+	const seen = new Set();
+	for (const k of [...jobKeys, ...bundles.flatMap((b) => b.keys), ...plain]) {
+		if (seen.has(k)) return { collision: k };
+		seen.add(k);
+	}
+	return { job: { name, keys: jobKeys }, bundles, plain };
 }
 
 /**
@@ -371,6 +594,14 @@ export function openshellExecArgs({ name, env = {}, gateway = null, mode = "copy
 	// could not carry (a name no shell can spell) would otherwise fall through to this argv as a value (review H1). Every
 	// other name is the provider's, its placeholder in the sandbox's env already; the git helper names the forge token's
 	// placeholder, never its value.
+	//
+	// Issue #704 part 3: a project secret bundle's PLAIN variables never travel here either (review round 1, H1). The
+	// gateway puts an exec's env pairs at the head of the remote command and logs its first 120 characters at INFO
+	// (openshell-server/src/grpc/sandbox.rs `build_remote_exec_command`, `stream_exec_over_relay` and the interactive
+	// path), so a value here would be on the host's argv AND in the gateway's journal. They go by file instead
+	// (`BUNDLE_ENV_FILE` in the job directory, read by the runner on PI_BUNDLE_ENV=1, which rides here as a non-secret
+	// name). Rejected: `--env` as built first (the log), a provider (the agent would hold useless placeholders for a
+	// value it must use itself), `sandbox create --env` (the same flag, kept in the gateway's sandbox spec besides).
 	const envArgs = [];
 	const carried = Object.fromEntries(Object.entries(env ?? {}).filter(([key]) => NON_SECRET_ENV_KEYS.has(key)));
 	for (const [key, value] of Object.entries({ ...carried, ...(gitCredentialEnv(env) ?? {}), HOME: "/home/pi" })) {
@@ -467,9 +698,23 @@ function reapWith(run, deleteProvider, log) {
 			const owned = (await listOwned(run)).filter((s) => isJobNamespace(s.name));
 			for (const s of owned) await run(["sandbox", "delete", s.name]);
 			if (owned.length > 0) log("reaped_sandboxes", { count: owned.length });
-			// Issue #684: a crashed job's provider and profile, by the owner label and the job namespace.
+			// Issue #684: a crashed job's provider and profile, by the owner label and the job namespace. Issue #704 part 3:
+			// its bundle hosts' providers too (`<sandbox>-b<n>`, `isJobProviderName`), after the sandboxes above, since a
+			// provider still attached is refused deletion.
 			const providers = parseJson((await run(["provider", "list", "--label-selector", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "-o", "json"])).stdout, "provider list");
-			for (const p of (providers?.providers ?? []).filter((x) => typeof x?.name === "string" && SANDBOX_NAME.test(x.name))) await deleteProvider(p.name);
+			for (const p of (providers?.providers ?? []).filter((x) => isJobProviderName(x?.name))) await deleteProvider(p.name);
+			// Review round 1, L4: a profile whose provider never existed (an import, then a crash or a refused create) is
+			// not reached through the providers, so the profiles are swept too, by the same names: a profile carries no
+			// label, and only a name of this worker's job namespace (`isJobProviderName`) is ever deleted. `-o json` is every
+			// page of the catalog as one array of profiles (openshell-cli/src/commands/provider.rs
+			// `provider_list_profiles_text`, openshell-providers/src/profiles.rs `profiles_to_json`). A listing that fails
+			// leaves the answer as it is: the sandboxes are what the tri-state is about, and the next sweep asks again.
+			try {
+				const profiles = parseJson((await run(["provider", "profile", "list", "-o", "json"])).stdout, "provider profile list");
+				for (const prof of (Array.isArray(profiles) ? profiles : []).filter((x) => isJobProviderName(x?.id))) await run(["provider", "profile", "delete", prof.id]).catch(() => {});
+			} catch {
+				log("openshell_profiles_unswept", {});
+			}
 			return { reaped: true };
 		} catch {
 			return { reaped: false };
@@ -552,8 +797,15 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
 	// Issue #686 part 3, review round 2 of #714: the bind venue's named result for a sandbox not confirmed gone (backends.mjs).
 	[OPENSHELL_BIND_LINGERING.reason]: OPENSHELL_BIND_LINGERING.comment,
-	// Issue #704 part 2: refused by the processor's bundle gate, before spend, until part 3 gives this venue bundle keys.
-	[OPENSHELL_BUNDLE_UNSUPPORTED.reason]: OPENSHELL_BUNDLE_UNSUPPORTED.comment,
+	// Issue #704 part 3: a project secret bundle this venue cannot hold as declared (`judgeBundle` says why for each), each
+	// refused before the sandbox exists and before spend. The variable's name and the host go to the operator's log
+	// (`refused_openshell_bundle`), never to a forge comment: a bundle's names are its manager's contents.
+	"openshell-bundle-endpoint-not-allowed": "Refused: this job's project has a secret bundle whose endpoints name a host the job's network policy does not admit by that exact name, and a bundle may not widen what the job reaches. Add the host to egress-allowlist.conf (as itself, not under a wildcard entry), or remove it from the bundle's endpoints. Not run.",
+	"openshell-bundle-endpoint-shared": "Refused: this job's project has a secret bundle whose endpoints name a host the job's own forge, model or MCP credentials are sent to, and on the OpenShell venue a host is bound to one credential provider, so the job's own would stop working there. Remove that host from the bundle's endpoints. Not run.",
+	"openshell-bundle-endpoint-unknown": "Refused: this job's project has a secret bundle whose endpoints name a variable the bundle's resolver did not deliver, so a variable meant to be held as a placeholder could be missing or reach the agent as a value. Fix the name in the bundle's endpoints, or add the variable in the manager. Not run.",
+	"openshell-bundle-name-taken": "Refused: this job's project has a secret bundle with a variable the OpenShell sandbox already sets itself, so one of the two would be silently lost. Rename the variable in the manager. Not run.",
+	"openshell-bundle-unpassable": "Refused: this job's project has a secret bundle with a variable the OpenShell venue cannot hold as a placeholder (a value over 8 KiB, or more endpoint variables or hosts than a sandbox's providers hold). Run the project on another venue, or change the bundle's endpoints. Not run.",
+	"openshell-bundle-image-too-old": "Refused: this job's project has a secret bundle whose variables reach the job as values, and on the OpenShell venue they reach it by a file only a newer job image reads, so this image would run the job without them. Rebuild the job image from a version that declares bundleEnvFile. Not run.",
 	// Issue #686 part 3, bind mode only. The setting goes to the operator's log (`openshell_bind_mounts_disabled`).
 	"openshell-bind-mounts-disabled": "Refused: this job's venue mounts its files into an OpenShell sandbox, and the OpenShell gateway is not configured to allow that (its gateway.toml must allow driver config and bind mounts, and turn resource admission off), so the operator must change it before jobs run there. Not run.",
 });
@@ -760,7 +1012,9 @@ export function makeOpenshellBackend(opts = {}) {
 	const stageRun = async ({ opts: built, signal = null, job = null, modelEndpoints = null }) => {
 		const { jobDir, size = DEFAULT_JOB_SIZE } = built;
 		const name = sandboxNameOf(built.name);
-		const at = { name, jobDir, policyFile: `${jobDir}.openshell-policy.json`, profileFile: `${jobDir}.openshell-profile.json`, uploadDir: `${jobDir}.openshell-up`, downloadDir: `${jobDir}.openshell-down`, transfers: [], provider: null };
+		// `providers` and `profiles`: what this attempt created and imported (issue #704 part 3: the job's own and one per
+		// bundle host), so the teardown deletes exactly those; `profileFiles`, the files the imports read.
+		const at = { name, jobDir, policyFile: `${jobDir}.openshell-policy.json`, uploadDir: `${jobDir}.openshell-up`, downloadDir: `${jobDir}.openshell-down`, transfers: [], providers: [], profiles: [], profileFiles: [] };
 		attempts.set(built, at);
 		at.signal = signal;
 		live.set(name, (live.get(name) ?? 0) + 1);
@@ -815,28 +1069,77 @@ export function makeOpenshellBackend(opts = {}) {
 		// ENVIRONMENT (`--credential NAME` reads `$NAME`, measured), never its argv, and every endpoint of the policy
 		// bound to it, so a placeholder resolves only in a request to a host the policy admits. With no rule the job
 		// reaches nothing, so no provider is made and the secrets go nowhere.
-		const secrets = secretNamesOf(built.env ?? {});
-		const unbindable = unbindableSecretNamesOf(built.env ?? {});
+		//
+		// Issue #704 part 3: a project secret bundle splits that (`bundleProviderPlan`). The job's own provider keeps every
+		// secret but the bundle's; each bundle HOST gets a provider of its own holding the variables the bundle binds to
+		// it, and only that host's endpoints are bound to it (one provider per endpoint at the pin, `judgeBundle` says
+		// why); every other bundle variable goes in plain, by file (`BUNDLE_ENV_FILE`). The bundle was judged before
+		// spend (`bundleGate`), so a plan this cannot build here is a defect, refused as infrastructure, never run around.
+		const plan = bundleProviderPlan({ name, env: built.env ?? {}, bundleKeys: built.bundleKeys ?? null });
+		if (plan.collision) {
+			log("openshell_bundle_collision", { container: name, name: plan.collision });
+			throw new Error(`openshell: ${plan.collision} would be exposed twice in the sandbox`);
+		}
+		const secrets = plan.job.keys;
+		// Review round 1, L5: a bundle's variables are judged by name before spend (`judgeBundle`), and a plain one is never
+		// a provider key, so none is said here as a secret this venue could not carry.
+		const bundleNames = new Set([...Object.keys(built.bundleKeys?.endpoints ?? {}), ...(built.bundleKeys?.plain ?? [])]);
+		const unbindable = unbindableSecretNamesOf(built.env ?? {}).filter((k) => !bundleNames.has(k));
+		// Review round 1, H1: the plain variables, by file in the job directory, never on the exec. Written before the
+		// upload (copy mode carries the job directory) or the create (bind mode binds it), 0600, removed at teardown.
+		if (plan.plain.length > 0) {
+			at.bundleEnvFile = join(jobDir, BUNDLE_ENV_FILE);
+			fs.writeFileSync(at.bundleEnvFile, `${JSON.stringify(Object.fromEntries(plan.plain.map((k) => [k, built.env[k]])))}\n`, { mode: 0o600 });
+		}
 		if (unbindable.length > 0) log("openshell_secret_unbindable", { container: name, names: unbindable });
 		const rules = policy.network_policies ?? {};
-		if (secrets.length > 0 && Object.keys(rules).length > 0) {
-			// Named by the sandbox, so every attempt of one job uses the same name: an earlier attempt's leftover (a delete
-			// refused while its sandbox lingered, a crash between import and create) is removed first, once, or this create
-			// would collide with it until the next boot's reap (review M2).
-			await run(["provider", "delete", name]).catch(() => {});
-			await run(["provider", "profile", "delete", name]).catch(() => {});
-			fs.writeFileSync(at.profileFile, `${JSON.stringify(providerProfileFor(name, secrets))}\n`, { mode: 0o600 });
-			await run(["provider", "profile", "import", "-f", at.profileFile]);
-			at.profile = name;
+		const hasRules = Object.keys(rules).length > 0;
+		const endpointHosts = new Set(Object.values(rules).flatMap((rule) => rule.endpoints.map((e) => String(e.host).toLowerCase())));
+		const unbound = plan.bundles.find((b) => !endpointHosts.has(b.host));
+		if (unbound) {
+			log("openshell_bundle_host_unbound", { container: name, host: unbound.host });
+			throw new Error("openshell: a bundle host is not an endpoint of the job's policy");
+		}
+		// Named by the sandbox, so every attempt of one job uses the same names: an earlier attempt's leftover (a delete
+		// refused while its sandbox lingered, a crash between import and create) is removed first, once, or this create
+		// would collide with it until the next boot's reap (review M2).
+		const makeProvider = async ({ name: provider, keys, auth = {} }) => {
+			await run(["provider", "delete", provider]).catch(() => {});
+			await run(["provider", "profile", "delete", provider]).catch(() => {});
+			// Final review round: the file is deleted as soon as the import has answered, either way, since nothing reads it
+			// after the import. A name per provider (`.openshell-profile-<name>.json`) is not one `BESIDE_JOB_DIR`'s fixed
+			// suffixes match, so a worker that died between the write and the import would leave it for good; deleting it at
+			// once makes that window the import's alone, and the teardown's removal stays the backstop. Names only.
+			const file = `${jobDir}.openshell-profile-${provider}.json`;
+			at.profileFiles.push(file);
+			fs.writeFileSync(file, `${JSON.stringify(providerProfileFor(provider, keys, { auth }))}\n`, { mode: 0o600 });
+			try {
+				await run(["provider", "profile", "import", "-f", file]);
+			} finally {
+				try {
+					fs.rmSync(file, { force: true });
+				} catch {}
+			}
+			at.profiles.push(provider);
 			// The CLI child's environment is the worker's own, as on every other step (so it reaches the same gateway with
 			// the same settings), plus the values; never its argv.
-			const valueEnv = { ...process.env, ...Object.fromEntries(secrets.map((k) => [k, built.env[k]])) };
-			await run(["provider", "create", "--name", name, "--type", name, ...secrets.flatMap((k) => ["--credential", k]), "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`], { env: valueEnv });
-			at.provider = name;
-			for (const rule of Object.values(rules)) for (const endpoint of rule.endpoints) endpoint.credential_binding = { provider: name };
-		} else if (secrets.length > 0) {
-			log("openshell_secrets_unbound", { container: name, n: secrets.length });
+			const valueEnv = { ...process.env, ...Object.fromEntries(keys.map((k) => [k, built.env[k]])) };
+			await run(["provider", "create", "--name", provider, "--type", provider, ...keys.flatMap((k) => ["--credential", k]), "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`], { env: valueEnv });
+			at.providers.push(provider);
+		};
+		const jobProvider = secrets.length > 0 && hasRules ? name : null;
+		if (jobProvider !== null) await makeProvider({ name, keys: secrets });
+		else if (secrets.length > 0) log("openshell_secrets_unbound", { container: name, n: secrets.length });
+		for (const b of plan.bundles) await makeProvider(b);
+		// The bindings: a bundle host's endpoints to its own provider, every other endpoint to the job's, as before.
+		const byHost = new Map(plan.bundles.map((b) => [b.host, b.name]));
+		for (const rule of Object.values(rules)) {
+			for (const endpoint of rule.endpoints) {
+				const provider = byHost.get(String(endpoint.host).toLowerCase()) ?? jobProvider;
+				if (provider !== null) endpoint.credential_binding = { provider };
+			}
 		}
+		if (plan.bundles.length > 0 || plan.plain.length > 0) log("openshell_bundle_bound", { container: name, providers: plan.bundles.length, placeholders: plan.bundles.reduce((n, b) => n + b.keys.length, 0), plain: plan.plain.length });
 		if (stopped()) return;
 		fs.writeFileSync(at.policyFile, `${JSON.stringify(policy)}\n`, { mode: 0o600 });
 		// Issue #686 part 3: the mode label and the binds, bind mode only, so copy mode's create is unchanged.
@@ -845,7 +1148,7 @@ export function makeOpenshellBackend(opts = {}) {
 		const bindArgs = binding ? ["--label", `${OPENSHELL_MODE_LABEL}=bind`, "--label", `${OPENSHELL_JOB_DIR_LABEL}=${basename(jobDir)}`, "--driver-config-json", driverConfigFor(engine, binds)] : [];
 		let createdOut;
 		try {
-			createdOut = await run(["sandbox", "create", "--detach", "--name", name, "--from", imageId, "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "--label", `${SIZE_LABEL_MEM}=${size.memMiB}`, "--label", `${SIZE_LABEL_CPU}=${size.cpuCenti}`, ...bindArgs, ...sizeArgs(size), "--policy", at.policyFile, ...(at.provider ? ["--provider", at.provider] : []), "--no-auto-providers", "-o", "json"], { timeoutMs: 360_000 });
+			createdOut = await run(["sandbox", "create", "--detach", "--name", name, "--from", imageId, "--label", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "--label", `${SIZE_LABEL_MEM}=${size.memMiB}`, "--label", `${SIZE_LABEL_CPU}=${size.cpuCenti}`, ...bindArgs, ...sizeArgs(size), "--policy", at.policyFile, ...at.providers.flatMap((p) => ["--provider", p]), "--no-auto-providers", "-o", "json"], { timeoutMs: 360_000 });
 		} catch (err) {
 			// The backstop for a probe that admitted: the gateway refused the binds at the create, with one of its settings
 			// sentences. This attempt is infrastructure (nothing ran, refunded), and the verdict is held so the next attempt's
@@ -865,7 +1168,7 @@ export function makeOpenshellBackend(opts = {}) {
 		// plus exactly that (`expectedPolicy`), never to "close enough".
 		const effective = parseJson((await run(["policy", "get", name, "--full", "-o", "json"])).stdout, "policy get");
 		const readBack = JSON.stringify(canonical(effective?.policy));
-		if (effective?.policy_source !== "sandbox" || !expectedPolicies(policy, { provider: at.provider }).some((p) => JSON.stringify(canonical(p)) === readBack)) {
+		if (effective?.policy_source !== "sandbox" || !expectedPolicies(policy, { providers: at.providers }).some((p) => JSON.stringify(canonical(p)) === readBack)) {
 			log("openshell_policy_mismatch", { container: name, source: typeof effective?.policy_source === "string" ? effective.policy_source : null });
 			throw new Error("openshell: the sandbox's policy read back differs from the one the worker wrote");
 		}
@@ -928,6 +1231,14 @@ export function makeOpenshellBackend(opts = {}) {
 	};
 
 	const deleteProvider = providerDeleter(run, { log, delay });
+	// The bundle hosts' providers of one sandbox, by the owner label and their names, each once (the gone-check's).
+	const deleteBundleProvidersOf = async (sandbox) => {
+		const listed = parseJson((await run(["provider", "list", "--label-selector", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "-o", "json"])).stdout, "provider list");
+		for (const p of (listed?.providers ?? []).filter((x) => BUNDLE_PROVIDER_NAME.test(x?.name ?? "") && x.name.startsWith(`${sandbox}-b`))) {
+			await run(["provider", "delete", p.name]).catch(() => {});
+			await run(["provider", "profile", "delete", p.name]).catch(() => {});
+		}
+	};
 
 	const teardownRun = async ({ opts: built }) => {
 		const name = sandboxNameOf(built.name);
@@ -952,9 +1263,11 @@ export function makeOpenshellBackend(opts = {}) {
 		// Issue #684: the provider and its profile, after the sandbox. A provider still attached is refused (measured:
 		// "is attached to sandbox(es)"), and a sandbox delete is accepted before its cleanup ends, so the provider's
 		// delete is asked again for a bounded while; what is left, the reaper deletes by the owner label.
-		if (at?.provider) await deleteProvider(at.provider);
-		else if (at?.profile) await run(["provider", "profile", "delete", at.profile]).catch(() => {});
-		for (const path of at ? [at.policyFile, at.profileFile, at.uploadDir, at.downloadDir] : []) {
+		// Issue #704 part 3: every provider this attempt made (the job's and each bundle host's), then any profile imported
+		// for a provider whose create never answered.
+		for (const provider of at?.providers ?? []) await deleteProvider(provider);
+		for (const profile of (at?.profiles ?? []).filter((p) => !at.providers.includes(p))) await run(["provider", "profile", "delete", profile]).catch(() => {});
+		for (const path of at ? [at.policyFile, ...at.profileFiles, at.uploadDir, at.downloadDir, ...(at.bundleEnvFile ? [at.bundleEnvFile] : [])] : []) {
 			try {
 				fs.rmSync(path, { recursive: true, force: true });
 			} catch {}
@@ -987,6 +1300,8 @@ export function makeOpenshellBackend(opts = {}) {
 		bin: "openshell",
 		// The sandbox's own name; PI_JOB_ID in the env stays the container name, which the exit line and its MAC carry.
 		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway, mode }),
+		// Issue #704 part 3: a bundle's plain variables reach the runner by file (`BUNDLE_ENV_FILE`), never the exec.
+		bundleEnvFile: true,
 		memoryLimitOf: (_args, built) => (built.size?.memMiB ?? DEFAULT_JOB_SIZE.memMiB) * 1024 * 1024,
 		// Copy mode: no recovery staging, since the session file is in the sandbox until the download, so a tail on the host
 		// reads nothing. The live transcript comes over the exec's stderr instead, and steering over its stdin (issue #686).
@@ -1087,6 +1402,29 @@ export function makeOpenshellBackend(opts = {}) {
 		return { observations: { openshellGatewayLocal: true } };
 	};
 
+	// Issue #704 part 3: a project secret bundle judged against this venue before the sandbox exists and before spend
+	// (`judgeBundle`), from the same sources the policy is generated from. The processor asks it twice, inside its bundle
+	// read: with the hosts alone before the resolver runs (a file that names a host this job cannot bind costs no read of
+	// the operator's manager), then with the variables. `{ ok, placeholders?, plain? }`, `{ venueRefused }`, or
+	// `{ unavailable }` when a source cannot be read (retried, as the observation preflight's own read is).
+	const bundleGate = async (job, { endpoints = {}, vars = null, shadowed = [], credentialHosts = [], capabilities = [] } = {}) => {
+		let network;
+		try {
+			network = networkFor(job, readEndpoints(), []);
+		} catch {
+			log("openshell_unavailable", { reason: "egress-sources-unread" });
+			return { unavailable: true };
+		}
+		if (network.refused) return { venueRefused: { reason: "openshell-egress-untranslatable", comment: OPENSHELL_REFUSALS["openshell-egress-untranslatable"] } };
+		const judged = judgeBundle({ endpoints, vars, shadowed, network, credentialHosts: credentialHostsOf({ forgeHosts, extra: credentialHosts }), capabilities });
+		if (judged.refused) {
+			// Names and the host only: operator config and the manager's names, never a value.
+			log("refused_openshell_bundle", { reason: judged.refused, name: judged.name ?? null, host: judged.host ?? null });
+			return { venueRefused: { reason: judged.refused, comment: OPENSHELL_REFUSALS[judged.refused] } };
+		}
+		return judged;
+	};
+
 	// Issue #686 part 3: who a bind-mode job runs as, after the image probe (its `anyUid`). Copy mode carries none, so the
 	// registry's default (the image's own user) stands, exactly as before.
 	// Review round 1 (#714), M2: the engine's `docker info`, read through this bundle's exec, cached like `local`'s (an
@@ -1177,8 +1515,11 @@ export function makeOpenshellBackend(opts = {}) {
 					// Issue #684 (review M3): the gone sandbox's provider goes too, so a teardown that could not delete it does
 					// not leave the job's credentials in the gateway until the next boot's reap. Once, not awaited: the
 					// budget's question is about the sandbox, and the boot reap is the backstop.
+					// Issue #704 part 3: and its bundle hosts' providers, found by the owner label and named `<sandbox>-b<n>`.
 					run(["provider", "delete", sandbox])
 						.then(() => run(["provider", "profile", "delete", sandbox]))
+						.catch(() => {})
+						.then(() => deleteBundleProvidersOf(sandbox))
 						.catch(() => {});
 					return true;
 				}
@@ -1193,5 +1534,6 @@ export function makeOpenshellBackend(opts = {}) {
 			}
 		},
 		observationPreflight,
+		bundleGate,
 	};
 }

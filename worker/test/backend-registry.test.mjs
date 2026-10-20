@@ -315,6 +315,9 @@ test("the two OPTIONAL preflights: absent gives the non-local answers, present i
 	// The defaults are the processor's own, so an omitted registry and an omitted member agree.
 	assert.deepEqual(OPTIONAL_PREFLIGHT_DEFAULTS.observationPreflight(), { ok: true });
 	assert.deepEqual(OPTIONAL_PREFLIGHT_DEFAULTS.jobUserPreflight(), { user: null, home: null });
+	// Issue #704 part 3: a venue without a bundle gate admits every bundle (its container holds the env as values).
+	assert.deepEqual(OPTIONAL_PREFLIGHT_DEFAULTS.bundleGate(), { ok: true });
+	assert.deepEqual(await reg.bundleGate({ id: "a" }, { endpoints: {} }), { ok: true });
 	// A fresh object each call: a caller that decorates the answer must not decorate every later venue's.
 	assert.notEqual(OPTIONAL_PREFLIGHT_DEFAULTS.jobUserPreflight(), OPTIONAL_PREFLIGHT_DEFAULTS.jobUserPreflight());
 	// An unregistered name is still the registry's refusal, never waved through by the absent answer.

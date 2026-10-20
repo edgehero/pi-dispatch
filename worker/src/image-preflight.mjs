@@ -306,6 +306,17 @@ export const TRANSCRIPT_STDERR_CAPABILITY = "transcriptStderr";
 export const STEER_STDIN_CAPABILITY = "steerStdin";
 
 /**
+ * The capability an image declares when its runner reads PI_BUNDLE_ENV=1: a project secret bundle's plain variables
+ * from `bundle-env.json` in the job directory into its own environment (issue #704 part 3, image/runner/src/
+ * bundle-env.mjs). A gate on the OpenShell venues only, judged by their bundle gate rather than a CAPABILITY_GATES row
+ * (the need is known only once the bundle is read, which is after those rows run): a job there that would carry plain
+ * bundle variables on an image without it is refused before spend (`openshell-bundle-image-too-old`), since an older
+ * runner would ignore the file and the job would run without them. Every other venue hands the values as env and never
+ * reads it.
+ */
+export const BUNDLE_ENV_FILE_CAPABILITY = "bundleEnvFile";
+
+/**
  * Exported so the test cannot drift from the format string above. `|` because an image id is
  * `sha256:<hex>` and a version is a version, so neither can contain one -- and because a literal control
  * character in source is the kind of thing that survives a copy/paste and then does not.

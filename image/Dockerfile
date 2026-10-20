@@ -414,7 +414,13 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # verify-image.sh feeds an offline steered job a key frame and one message frame on a held-open stdin, and checks that
 # the key read took exactly frame 1, that pi's bash tool child and an inheriting child see /dev/null on fd 0, and that
 # the message came back acked under the key on the signed exit line.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin"
+# `bundleEnvFile` (issue #704 part 3) tells the worker this runner reads PI_BUNDLE_ENV=1: a project secret bundle's plain
+# variables as one JSON object in the job directory's bundle-env.json, put into the runner's own environment before pi's
+# runtime exists (image/runner/src/bundle-env.mjs). It is how an OpenShell venue hands those values to a job without its
+# exec's argv, which the gateway logs. A gate on those venues only: a job there that would carry plain bundle variables
+# on an image without it is refused before spend (openshell-bundle-image-too-old). verify-image.sh runs an offline job
+# with such a file and checks a workspace extension sees the variable, a multi-line one intact.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

@@ -4484,6 +4484,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   carries `bundle: { id, variables, shadowed }` or `bundleSkipped`, names only; no value reaches a record, a log line
   or a comment. `doctor` fails on an undeclared bundle profile and an unknown project, and `doctor --secrets` prints
   each bundle's variable names and count.
+  AMENDED 2026-10-20 (#704 part 3): `openshell-bundle-unsupported` is retired; both OpenShell venues hold a bundle.
+  Inside the read (before the resolver for its hosts, after it for its variables, so behind the fork check and before
+  the clone and every reserve), the venue refuses as `policy` a bundle it cannot hold as declared:
+  `openshell-bundle-endpoint-not-allowed` (an `endpoints` host that is not exactly an endpoint of the job's generated
+  policy, or sits under a wildcard entry), `openshell-bundle-endpoint-shared` (a forge's host),
+  `openshell-bundle-endpoint-unknown` (an `endpoints` name the bundle did not deliver), `openshell-bundle-name-taken`
+  (a name the sandbox sets itself), `openshell-bundle-unpassable` (a value or a count OpenShell 0.1.4 cannot carry) and
+  `openshell-bundle-image-too-old` (plain variables on a job image without `bundleEnvFile`); a source it cannot read
+  retries. On those venues a variable `endpoints` names is a placeholder in the job, its value used only at its own
+  host (a trigger's run.secrets value for that name too), the host never one the job's own forge, model or MCP
+  credentials go to; every other bundle variable is a value, handed by a file in the job directory and never on the
+  exec's command line or in the gateway's log; and the record's `bundle` also counts the two (`placeholders`, `plain`).
 
 ## REQ-DEPLOYMENT-BOOTSTRAP
 
@@ -5173,6 +5185,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-20 | Issue #704, part 3: project secret bundles on both OpenShell venues. **`REQ-TRIGGER-SECRETS` AMENDED**, its bundle acceptance: `openshell-bundle-unsupported` retired; six venue refusals inside the read (`openshell-bundle-endpoint-not-allowed`, `-endpoint-shared`, `-endpoint-unknown`, `-name-taken`, `-unpassable`, `-image-too-old`, the last and the model and MCP hosts of `-endpoint-shared` from review round 1), plain values by a job-directory file and never the exec, behind the fork check and before every reserve, an unreadable source retried; an `endpoints` variable a placeholder used only at its host, the rest values, and the record's two counts. The statement, the per-trigger `run.secrets` rules and every other acceptance line UNCHANGED, checked. |
 | 2026-10-19 | Issue #704, part 2, review round 1. **`REQ-TRIGGER-SECRETS` AMENDED**, its bundle scope and acceptance: no model-callable tool may widen a grant (an added trigger carries `secretBundle: false`, no trigger tool call may carry the field, the project tools refuse a bundled project's membership change); `openshell-bundle-unsupported`; a profile this host lacks defers a multi-host shared-queue job; the last good triggers read, and a retry only before the first; the read before the mint unless a fork check is needed; a 401, 403 or 404 head read is `head-unverified`; bundle-only loader and steering names refuse. |
 | 2026-10-19 | Issue #704, part 2: project secret bundles. **`REQ-TRIGGER-SECRETS` AMENDED**, three dated paragraphs: the scope gains bundles (trigger-made jobs of the bound project, one resolver call per job start, the same exclusions: no `dispatch_run` or manual run, no chained child, no model-callable writer; the `run.secretBundle: false` opt-out; no fork pull request without `forkReviews`; `run.secrets` win a clash); "names FIELDS" stays true for `run.secrets` and is explicitly not true for bundles; the acceptance gains the load-time refusals, the pre-mint and post-mint refusals and retries, the names-only record and doctor's lines. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: a bundle is not routed (`DES-PROJECT-SECRET-BUNDLES` says why); the worker's pre-spend refusal is the backstop. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: `doctor --secrets` reads and never writes. **Code evidence**: worker/src/processor.mjs -> the bundle gates; worker/src/secret-bundles.mjs; worker/src/triggers.mjs -> validateSecretBundles; worker/src/run-history.mjs -> recordedBundle. |
 | 2026-10-19 | Issue #704, the standalone fixes found while researching project secret bundles. **`REQ-TRIGGER-SECRETS` AMENDED**, its acceptance: a deployment entry is one in `PI_SECRET_PROFILES` or an overlay `secretProfiles` entry whose resolver is an executable inside `PI_SECRET_RESOLVER_ROOTS`; `doctor` fails on every name declared in both and on a named overlay profile the worker would not use; a forge delivery with `run.secrets` and no profile is routed as needing `default`, and hosts advertise the overlay profiles they would resolve. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: the registry and the routing rule keep their shape; only the tokens read and written are wider. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor still reads and never writes. **Code evidence**: worker/src/capabilities.mjs -> jobNeeds; worker/src/secret-profiles.mjs -> servableSecretProfiles; worker/src/doctor.mjs -> the secrets section; worker/src/triggers-file.mjs -> serialize. |

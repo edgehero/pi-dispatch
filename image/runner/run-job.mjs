@@ -56,6 +56,7 @@ import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/stee
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 import { LAYOUT } from "./src/layout.mjs";
+import { applyBundleEnv } from "./src/bundle-env.mjs";
 import { createTranscriptMirror, transcriptMirrorWanted } from "./src/transcript-mirror.mjs";
 // NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
 // and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
@@ -179,6 +180,11 @@ async function main() {
 	// UNWRITABLE stays advisory (mountAdvisories below): "a read-only review of a folder the job user cannot write
 	// is a legitimate job", so only a workspace the job cannot even read is refused here.
 	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);
+	// Issue #704 part 3: a project secret bundle's plain variables on a gateway venue, from the job's own directory into
+	// this process's environment (pi's), before any runtime or request exists. Same moment, same exit code: a flag
+	// without a usable file refuses before spend rather than running the job without a variable it was given.
+	const bundleVars = applyBundleEnv();
+	if (bundleVars > 0) log("bundle_env_applied", { count: bundleVars });
 	// Offline is a property of the RUNNER, not of whoever started it. Set before the loader is built,
 	// because the loader is what resolves package sources: with offline off, an unresolved source is a
 	// live `npm install` at agent runtime, from inside the job, against a network the job's own input

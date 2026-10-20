@@ -492,8 +492,9 @@ const BUNDLE_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BUNDLE_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
 /**
- * The record's `bundle` (issue #704): `{ id, variables, shadowed }`, the bundle's id and the variable NAMES the job
- * received from it and the ones the trigger's own run.secrets shadowed, sorted, or null on any violation. REBUILT,
+ * The record's `bundle` (issue #704): `{ id, variables, shadowed, placeholders?, plain? }`, the bundle's id and the
+ * variable NAMES the job received from it and the ones the trigger's own run.secrets shadowed, sorted, and on an
+ * OpenShell venue two counts (below), or null on any violation. REBUILT,
  * never the source's object, and NAMES ONLY: each is held to the environment-name charset, so no value, no
  * reference and no free text can reach a record by this key. The names are the operator's own, from their own
  * manager, the class the record already holds in `project` and the run.secrets names doctor prints; a record says
@@ -506,7 +507,13 @@ export function recordedBundle(b) {
 	const variables = names(b.variables);
 	const shadowed = names(b.shadowed ?? []);
 	if (variables === null || shadowed === null) return null;
-	return { id: b.id, variables, shadowed };
+	// Issue #704 part 3: on a venue whose own layer holds the credentials (both OpenShell venues), how many of the
+	// received variables the agent saw as placeholders and how many as values. A PAIR of integers, each 0 to the
+	// variable cap, or neither key: a record never says one without the other, and every other venue's record is
+	// byte-identical to before.
+	const count = (n) => Number.isSafeInteger(n) && n >= 0 && n <= BUNDLE_NAMES_MAX;
+	const counted = count(b.placeholders) && count(b.plain) && b.placeholders + b.plain <= variables.length;
+	return { id: b.id, variables, shadowed, ...(counted ? { placeholders: b.placeholders, plain: b.plain } : {}) };
 }
 
 /**
@@ -1047,7 +1054,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(steerSkipped !== null ? { steerSkipped } : {}),
 		// Project secret bundles (issue #704, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after the steering keys,
 		// CONDITIONAL like them, so a record of a job whose project has no bundle is byte-identical to before:
-		//   - `bundle`: `{ id, variables, shadowed }`, NAMES only, REBUILT (`recordedBundle`);
+		//   - `bundle`: `{ id, variables, shadowed }`, NAMES only, REBUILT (`recordedBundle`), and on an OpenShell venue
+		//     `placeholders` and `plain`, two counts (issue #704 part 3);
 		//   - `bundleSkipped`: why the job ran without its project's bundle (BUNDLE_SKIPPED_REASONS), a fixed enum.
 		...(bundle !== null ? { bundle } : {}),
 		...(bundleSkipped !== null ? { bundleSkipped } : {}),

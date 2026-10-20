@@ -231,6 +231,11 @@ test("the record's bundle is rebuilt from names only: anything that is not an en
 	assert.equal(recordedBundle({ id: "shop prod", variables: ["A"] }), null);
 	assert.equal(recordedBundle({ id: "shop", variables: Array.from({ length: 65 }, (_, i) => `V${i}`) }), null);
 	assert.equal(recordedBundle(null), null);
+	// Issue #704 part 3: the OpenShell counts, as a pair of bounded integers or not at all.
+	assert.deepEqual(recordedBundle({ id: "shop", variables: ["A", "B"], shadowed: [], placeholders: 1, plain: 1 }), { id: "shop", variables: ["A", "B"], shadowed: [], placeholders: 1, plain: 1 });
+	for (const bad of [{ placeholders: 1 }, { placeholders: -1, plain: 1 }, { placeholders: 1.5, plain: 0 }, { placeholders: "1", plain: 1 }, { placeholders: 2, plain: 1 }]) {
+		assert.deepEqual(recordedBundle({ id: "shop", variables: ["A", "B"], shadowed: [], ...bad }), { id: "shop", variables: ["A", "B"], shadowed: [] }, JSON.stringify(bad));
+	}
 });
 
 test("docs/secrets.md's list of names a bundle may not carry is the worker's table, both directions", async () => {

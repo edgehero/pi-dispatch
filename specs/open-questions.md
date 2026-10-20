@@ -1504,6 +1504,38 @@ adversarial passes did.
   readers and what bounds it are unchanged; the quantity is not, and `docs/secrets.md` (Recipe D's traps) and
   `SECURITY.md` say so. On the openshell venues the bundle's values take the `run.secrets` path, so the closure above
   holds for them. **Status: ACCEPTED RISK for Docker and Podman, UNCHANGED.**
+- **AMENDED 2026-10-20 (#704 part 3): RE-OPENED on the `openshell` venues for a bundle's PLAIN variables, and only
+  them.** The sentence just above ("the bundle's values take the `run.secrets` path") is CORRECTED: part 2 refused a
+  bundled job there instead, and part 3 gives a bundle two paths. A variable the bundle's `endpoints` binds to a host
+  is a provider key, by `--credential NAME` from the CLI child's environment, so the closure holds for it. Every other
+  bundle variable is a value the agent reads by design, and it reaches the sandbox as `openshell sandbox exec --env
+  NAME=VALUE`, on that CLI's argv for the exec's lifetime, readable from `/proc/<pid>/cmdline` by any local user under
+  a default `hidepid`, as `-e` is on docker's. **Measured at the pin** (OpenShell v0.1.4, `5a7728c`): the exec's
+  `--env` takes `KEY=VALUE` only, refusing a bare `KEY` ("--env expects KEY=VALUE",
+  crates/openshell-cli/src/commands/common.rs `parse_key_value_pairs`, through `parse_env_pairs`), and the exec has no
+  env-file flag (crates/openshell-cli/src/main.rs `SandboxCommands::Exec`); the bare form that reads the CLI's own
+  environment exists only for `provider create --credential KEY` (main.rs: "Provider credential pair (`KEY=VALUE`) or
+  env lookup key (`KEY`)"); `sandbox create --env` is the same `KEY=VALUE` flag and would also keep the values in the
+  gateway's sandbox spec. The gateway further refuses an exec value with a NUL, LF or CR or over 32 KiB
+  (crates/openshell-server/src/grpc/validation.rs `validate_exec_request_fields`), which the venue turns into a
+  pre-spend refusal (`openshell-bundle-unpassable`) rather than a failed exec. **What bounds it**: the same as on
+  docker (a trusted worker host), plus a narrower set: only the variables the operator left out of `endpoints`, and
+  the operator can move any of them into it to take it off the argv. **What would close it**: an exec that reads env
+  from its own environment or a file (an upstream change, checked at each OpenShell bump), or the runner reading the
+  plain values from a file uploaded beside `/job` (a job-image change). **Status: ACCEPTED RISK for Docker and Podman,
+  UNCHANGED; on `openshell` and `openshell-bind` CLOSED for every credential the provider path carries and ACCEPTED
+  RISK for a bundle's plain variables.**
+- **AMENDED 2026-10-20 (#704 part 3, review round 1): CLOSED again on `openshell` and `openshell-bind`.** The bullet
+  above is SUPERSEDED. Review found the exec's `--env` worse than argv exposure: the gateway puts an exec's env pairs at
+  the head of the remote command and logs its first 120 characters at INFO (crates/openshell-server/src/grpc/sandbox.rs
+  `build_remote_exec_command`, `stream_exec_over_relay`, the interactive path), so a plain value reached the gateway's
+  journal. Plain bundle variables now travel in a 0600 file in the job directory (`bundle-env.json`), uploaded with the
+  job's inputs in copy mode (tar over the sandbox's SSH, crates/openshell-cli/src/ssh.rs) or bound read-only in bind mode,
+  read by a runner declaring `bundleEnvFile` into its own environment, and removed from the host at teardown; the exec
+  carries only `PI_BUNDLE_ENV=1`. So no bundle value is on any host argv or in the gateway's log on these venues. What
+  remains: the file on the worker host for the job's lifetime, in the worker's own 0700 job directory, readable by the
+  worker's uid (which holds every value anyway) and root, the exposure the job directory's other inputs already have.
+  **Status: ACCEPTED RISK for Docker and Podman, UNCHANGED; CLOSED for `openshell` and `openshell-bind`.**
 - **Raised by**: issue #225.
 
 ## OQ-029 — A held job's WAKE has no authorizing actor, and the moment picks the commit
@@ -2326,13 +2358,72 @@ adversarial passes did.
   within the probe's ten-minute cache can still refuse a job's create (one infrastructure retry, then refused before
   spend). A worker uid other than 1001 is MEASURED to work (`run_as_user` 2000 ran as 2000 and wrote a bind as 2000);
   the Podman driver is refused for bind mode outright. The other residuals UNCHANGED, checked.
+- **Added in #704 part 3** (2026-10-20, AMENDED 2026-10-20 (#704), read at the pin v0.1.4): **more values in the
+  supervisor, still no shared provider.** A project secret bundle's `endpoints` variables become keys of per-job
+  providers, one per bundle host (`<sandbox>-b<n>`, `DES-OPENSHELL-VENUE`, "Project secret bundles"), so the
+  supervisor holds up to 64 more values than a trigger's `run.secrets` could put there, whatever the operator's
+  manager held at the job's start: the "Supervisor compromise" residual's quantity widens, its kind does not (every one
+  is a value the job would have held on any venue). Each such provider is created, labelled, attached and deleted per
+  job exactly as the job's own is, and swept by the boot reaper; none is shared across jobs, so this row's "What would
+  reopen or widen it" (a layer holding a credential the job would not have held) is NOT reached. NEW residual, stated:
+  at a bundle host only that host's bundle variables resolve, because the pinned model binds one provider per
+  endpoint (proto/sandbox.proto `NetworkCredentialBinding`), so another credential sent there is refused 403
+  `credential_endpoint_mismatch` by the supervisor (crates/openshell-supervisor-network/src/l7/relay.rs) rather than
+  swapped: loud, never a leak; every host the job's own credentials are known to go to (a forge's, a callable model's
+  composed `baseUrl`, a model endpoint's, an HTTP MCP server's) is refused as a bundle host for it (review round 1). The
+  other residuals UNCHANGED, checked.
 - **Related**: `OQ-011` (the custody half of its close condition is admitted on this venue, the accounting half
   stays open), `OQ-012` (a vendor runtime builds the box itself, so its isolation words are `asserted`), `OQ-028`
-  (closes on this venue once #684 ships; **closed there since #684 part 2, AMENDED 2026-10-19**). `OQ-004` is not related in the sense its warning names: this is the
+  (closes on this venue once #684 ships; **closed there since #684 part 2, AMENDED 2026-10-19**; a secret bundle's plain
+  variables travel by file there, so it stays closed, **AMENDED 2026-10-20 (#704)**), `OQ-048` (a manager through OpenShell itself). `OQ-004` is not related in the sense its warning names: this is the
   secrets proxy, and the allowlist proxy stays squid on Docker and Podman.
 - **Needs**: maintainer ratification that a vendor supervisor may hold the job's credentials and see its provider
   and forge plaintext, bounded by token scope and the provider spend limit rather than by trusting its code, given
   that the venue is opt-in and Docker and Podman keep the agent-held key.
+
+## OQ-048: 1Password (or any manager) through OpenShell itself
+
+- **Status**: **OPEN**, not built (2026-10-20, issue #704 part 3). Recorded so both later routes stay possible and
+  neither is mistaken for something this repository ships.
+- **Position**: a project secret bundle (`DES-PROJECT-SECRET-BUNDLES`) reads the operator's manager through the
+  RESOLVER SEAM, a command the operator writes that runs on the worker host once per job start and prints the
+  environment. That seam already covers 1Password's unattended route, a read-only, Environment-scoped service
+  account whose token stays in a host file the job cannot see (`docs/secrets.md`'s recipe, placeholder paths only),
+  and on the OpenShell venues the values it prints then take the per-job provider path (`DES-OPENSHELL-VENUE`). What
+  is NOT built is a route where OpenShell itself, rather than the worker, talks to the manager. Two exist at the pin
+  (v0.1.4, `5a7728c`), and each needs something this project does not have:
+  - **An operator-owned provider attached per job.** 1Password's OpenShell integration (Beta, 1password.dev,
+    "nvidia-openshell") creates a provider from the desktop app; the worker would attach that one provider to every
+    job's sandbox (`sandbox create --provider`, repeatable; `sandbox provider attach` works on a running sandbox). It
+    collides with `OQ-047`'s rule that no provider is shared across jobs (a long-lived provider is "a layer that holds
+    a credential the job would not have held", and its endpoints would be the vendor's profile, not the worker's
+    generated policy, `CONST-VENUE-EGRESS-LAYER`'s second condition), and with the integration's own terms: an
+    approval per connection in the desktop app and access that lasts a TTL, after which "OpenShell stops resolving
+    the placeholders" (the declined route of #704's 2026-10-19 decision). Unattended jobs cannot wait on either.
+  - **The gateway's external credential driver.** A gateway can store provider secrets through one external
+    credential driver over a Unix socket (gateway.toml `[openshell.gateway] credential_drivers = ["<name>"]` and a
+    `[openshell.credential_drivers.<name>]` table with `transport = "uds"`, an absolute `socket_path` and an optional
+    absolute `command`; at most one enabled driver per gateway: crates/openshell-core/src/config.rs,
+    crates/openshell-server/src/credentials.rs). The contract is proto/credential_driver.proto (service
+    `CredentialDriver`: `GetCapabilities` with protocol 1.0 metadata and the `openshell.credentials.contract`
+    capability, `StoreCredential`, `DeleteCredential`, `ResolveCredentials` by gateway-issued handle, an optional
+    `ListCredentials`). Handles are resolved when a sandbox's provider environment is built
+    (crates/openshell-server/src/grpc/policy.rs `load_sandbox_provider_environment`, through
+    `resolve_provider_handles`), so a value would be fetched per sandbox, not per worker read. What it would need: a
+    driver process on the gateway host holding the manager's credential (for 1Password, the service-account token);
+    a mapping from the gateway's `StoreCredential` (which hands the driver the VALUE, at `provider create`) to a
+    read-only manager, which has nothing to store into, so the driver would have to keep per-job values itself and
+    resolve only those, or a provider created from handles rather than values, which the 0.1.4 CLI does not offer;
+    and acceptance that the driver is gateway-WIDE, replacing the default encrypted storage for every provider,
+    the worker's per-job ones included. A driver is code that would live outside this repository, per manager.
+- **Decision recorded, not reversed here**: nothing 1Password-specific is in this repository, by decision (the
+  repository is public: no keys, no account, no lab). The seam stays a command (`#206`, `#209`), and the recipe in
+  `docs/secrets.md` uses placeholder paths only.
+- **What would move it**: a manager integration that works headless with a per-job scope (no per-connection approval,
+  no TTL shorter than a job), or an OpenShell release whose credential driver can resolve a reference the worker names
+  per job without being handed the value; either is measured at its pin before any code.
+- **Related**: `OQ-047` (no shared provider), `OQ-028` (what the resolver seam's values cost on each venue),
+  `DES-PROJECT-SECRET-BUNDLES`, `DES-OPENSHELL-VENUE`.
 
 ## Revision History
 
@@ -2459,3 +2550,4 @@ adversarial passes did.
 | 2026-10-19 | Issue #686, part 3: bind mode, the `openshell-bind` venue. **`OQ-047` AMENDED**: a dated "Added in #686 part 3" bullet: the bind residual is real and measured (upstream's warning quoted; what holds is the worker's read-only binds and the policy entries, each measured), and NEW residuals: `--driver-config-json` is experimental upstream; the gateway's bind settings are learned from a probe create (the check order measured) whose admitting answer leaves a sandbox in phase `Error` (measured), deleted on every answer and by the boot reaper after a crash; a gateway reconfigured within the probe's cache costs one infrastructure retry, then refused before spend. A worker uid other than 1001 is measured to work; the Podman driver is refused for bind mode. The other residuals UNCHANGED, checked. **Review round 1 (#714)**: UNCHANGED, checked: the residuals stand; a sandbox that outlives its exec is now ended before its tree is read (60 s at most, then infrastructure), so that is no residual. **Review round 2 (#714)**: UNCHANGED, checked: the lingering-sandbox path is now a named result or a retry by exit, with no exit checkpoint; the session tail's final read now follows the settle, so no residual remains there. |
 | 2026-10-19 | Issue #704, the routing fixes found while researching it. **`OQ-032` AMENDED** (it stays CLOSED): a job with `run.secrets` and no `run.secretsProfile` now needs `s:default`, by `secretsArmed`'s rule, and a host advertises each overlay-declared profile it would resolve (resolver realpath an executable inside `PI_SECRET_RESOLVER_ROOTS`, read each beat) and no secret profile while one name is declared in both env and the overlay. The rule routes only to a host that advertises every need, but an older worker serving `default` from its overlay does not advertise it, so a job that also needs a profile only that host declares loses its route on a mixed fleet: the workers upgrade before the receiver and the console. Such jobs are now routed, so the stopped-host residual covers them too. **`OQ-031` UNCHANGED, checked**: folder identity is untouched. **`OQ-008` UNCHANGED, checked**: `caps` stays a per-beat self-description, and deleting the `host:*` keyspace still sends every delivery to the shared queue. **Code evidence**: worker/src/capabilities.mjs -> jobNeeds, IMPLICIT_SECRET_PROFILE; worker/src/secret-profiles.mjs -> servableSecretProfiles; worker/src/start.mjs -> the registry `caps` thunk. |
 | 2026-10-19 | Issue #704, part 2: project secret bundles. **`OQ-028` AMENDED** (status stays ACCEPTED RISK for Docker and Podman): a bundled job's host argv carries up to 64 more `-e NAME=VALUE` elements, whatever the manager holds at the job's start; the mechanism and its bounds are unchanged, the quantity is not, and the docs say so; on the openshell venues the closure holds, since bundle values take the `run.secrets` path there. **`OQ-032` UNCHANGED, checked** (it stays CLOSED): a bundle is deliberately not routed, because the need depends on the job's project, which only the worker resolves; the worker's pre-spend `secret-bundle-profile-unknown` refusal is the backstop, and doctor fails on a host that lacks a bound profile. **`OQ-027` UNCHANGED, checked**: a bundle resolver's exit code is the same convention, and the recipes say what each must exit. **`OQ-047` UNCHANGED, checked**: no shared provider is introduced; the openshell bundle endpoints are #704 part 3. |
+| 2026-10-20 | Issue #704, part 3: project secret bundles on both OpenShell venues. **`OQ-028` AMENDED twice in this PR** (review round 1 closed it again on the OpenShell venues: plain values moved off the exec, whose env the gateway logs, into a job-directory file a `bundleEnvFile` runner reads), its part 2 bullet's "the bundle's values take the `run.secrets` path" CORRECTED: it RE-OPENS on `openshell` and `openshell-bind` for a bundle's plain variables only, which reach the sandbox as `sandbox exec --env NAME=VALUE` on the CLI's argv; measured at the pin (v0.1.4) that the exec takes `KEY=VALUE` only, with no bare form and no env file (the bare form is `provider create --credential KEY`'s), and that the gateway refuses an exec value with a line break or over 32 KiB (turned into a pre-spend refusal); what would close it named. Status: closed there for every credential the provider path carries, ACCEPTED RISK for plain bundle variables; Docker and Podman UNCHANGED. **`OQ-047` AMENDED**, a dated "Added in #704 part 3" bullet: the supervisor holds up to 64 more values (per-job providers, one per bundle host), the kind of the custody residual unchanged and no provider shared, so its widening condition is not reached; NEW residual, one provider per endpoint at the pin, so another credential sent to a bundle host is refused 403 by the supervisor; the other residuals UNCHANGED, checked. **NEW `OQ-048`**: a manager through OpenShell itself, OPEN and not built: an operator-owned provider attached per job (collides with `OQ-047` and with 1Password's per-connection approval and TTL) or the gateway's external credential driver (proto/credential_driver.proto, one per gateway, handed values at `provider create`, so a read-only manager needs a driver that keeps per-job values or a handle-based create the 0.1.4 CLI lacks); the resolver seam already covers the read-only service account; nothing 1Password-specific in the repository, by decision. |
