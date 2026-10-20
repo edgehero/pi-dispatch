@@ -941,19 +941,6 @@ export const OPENSHELL_BIND_LINGERING = Object.freeze({
 	comment: "Stopped: this job ran in an OpenShell sandbox with its files bound from this machine, and the sandbox could not be confirmed gone after the run, so something in it may still be changing those files. The run's result is not used and it is not run again; what it already changed stays as it is. The operator must check the sandbox on the gateway.",
 });
 
-/**
- * Issue #704 part 2: a job that would carry its project's secret bundle on a venue whose own layer holds the credentials
- * (`credentialCustody: "layer"`, both OpenShell venues). There every secret becomes a key of one per-job provider bound
- * to every endpoint of the policy, and with no network rule it reaches nothing, while the record would say the job
- * received the bundle. The per-endpoint bundle keys that venue needs are #704 part 3; until then such a job is refused
- * before spend rather than run with an environment it may not hold. Shared by the processor's gate and the adapter's
- * `OPENSHELL_REFUSALS`, `OPENSHELL_BIND_LINGERING`'s pattern, so the two say one sentence.
- */
-export const OPENSHELL_BUNDLE_UNSUPPORTED = Object.freeze({
-	reason: "openshell-bundle-unsupported",
-	comment: "Refused: this job's project has a secret bundle, and the OpenShell venue this job runs on cannot hold a bundle's variables yet. Run the project's jobs on another venue, or set \"secretBundle\": false on this trigger. Not run.",
-});
-
 /** Both OpenShell venues, the copy mode first: what "is any OpenShell venue blessed" asks of a list. */
 export const OPENSHELL_BACKENDS = Object.freeze([OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND]);
 

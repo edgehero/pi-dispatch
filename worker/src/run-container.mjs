@@ -132,6 +132,11 @@ export function makeRunContainer({
 	// `lingering: true` on the result, which the processor reads (no exit checkpoint; the named result where a retry
 	// would be wrong). Absent, every venue's run is exactly what it was.
 	settleRun = null,
+	// Issue #704 part 3: this venue hands a project secret bundle's plain variables to the runner by FILE (the job
+	// directory's bundle-env.json, which its `stageRun` writes), so an attempt with plain bundle variables gets
+	// PI_BUNDLE_ENV=1. A construction option, the venue's own statement like `transcript`: every binding venue passes
+	// them as env and leaves it off, so its env is byte-identical.
+	bundleEnvFile = false,
 }) {
 	// Refused at construction rather than written into a job's env: a guessed layout reads nothing.
 	const paths = layoutFor(layout);
@@ -170,7 +175,10 @@ export function makeRunContainer({
 	// `steerStdin` (issue #686, part 2) is the processor's too: true when the job image declares `steerStdin`, so its
 	// runner reads steer messages as MAC'd frames on stdin. Read only for a steer job on a venue that copies (`binds` not
 	// true); a binding venue keeps the read-only mount whatever the image declares.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
+	// `bundleKeys` (issue #704 part 3) is the processor's `{ endpoints, plain }` split of a project secret bundle's received
+	// variables: handed on in the build options for a venue whose own layer holds credentials (openshell), which binds the
+	// first kind to their hosts and passes the second as values. Every other venue ignores it: the values are in `secrets`.
+	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -380,6 +388,7 @@ export function makeRunContainer({
 			transcriptStderr: stdioArmed,
 			// Issue #686: PI_EXIT_AUTH=stdin-frames, only for an attempt armed above for stdin steering (beside PI_STEER=1).
 			steerStdin: stdinSteered,
+			bundleEnvFile: bundleEnvFile === true && Array.isArray(bundleKeys?.plain) && bundleKeys.plain.length > 0,
 		}));
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
@@ -429,6 +438,8 @@ export function makeRunContainer({
 			// Issue #545: `-i`, so the container's stdin is the pipe the key is written to. Absent otherwise, and the argv is
 			// byte-identical to one built before the signed exit line.
 			...(exitKey !== null ? { extraFlags: ["-i"] } : {}),
+			// Issue #704 part 3: absent without a bundle, so every other build is byte-identical.
+			...(bundleKeys !== null && typeof bundleKeys === "object" ? { bundleKeys } : {}),
 		};
 		const args = beforeSpawn(() => buildArgs(buildOpts));
 

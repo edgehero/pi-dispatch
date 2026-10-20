@@ -124,6 +124,16 @@ case "$c" in
 		echo "probe uid=$(id -u) gid=$(id -g)"
 		echo mine > /workspace/owned.txt && echo "probe home=$(touch "$HOME/.probe" 2>/dev/null && echo writable || echo denied)"
 		exit 0 ;;
+	bundle)
+		# Issue #704 part 3: the copy pass's bundle case, through the bind stage (one stage for both modes).
+		echo "probe btoken=$(case "$BUNDLE_TOKEN" in openshell:resolve:env:*) echo placeholder ;; conformance-bundle-not-a-token) echo value ;; '') echo unset ;; *) echo other ;; esac)"
+		echo "probe bplain=$(if [ "$PI_BUNDLE_ENV" = 1 ] && grep -q conformance-bundle-plain-value /job/bundle-env.json 2>/dev/null; then echo file; else echo other; fi)"
+		# Readable means NON-EMPTY, read the way the count below reads it (a redirect, so the subshell's own environ, not a
+		# fresh child's): under OpenShell 0.1.4 that file opens and reads as nothing, as the credentials case measured.
+		echo "probe benviron-readable=$(if [ "$(tr '\\0' '\\n' < /proc/self/environ 2>/dev/null | wc -c)" -gt 0 ]; then echo yes; else echo no; fi)"
+		echo "probe benviron=$(tr '\\0' '\\n' < /proc/self/environ | grep -c -e '^BUNDLE_TOKEN=openshell:resolve:env:')"
+		echo "probe bown=$(node -e 'fetch("http://host.docker.internal:18080/bundle-bind",{headers:{authorization:"Bearer "+process.env.BUNDLE_TOKEN},signal:AbortSignal.timeout(10000)}).then(r=>console.log(r.status),e=>console.log("refused",e.cause?.code??e.name))')"
+		exit 0 ;;
 	readback)
 		echo "probe uid=$(id -u)"
 		grep -E '^(CapEff|NoNewPrivs|Seccomp):' /proc/self/status | tr -d '\\t' | sed 's/^/probe /'
@@ -308,6 +318,28 @@ if (!readings.readOnlyJobInputs?.ok) failed = true;
 	const got = said(output.get("last"));
 	const ok = ["inbox", "optpiglobal"].every((k) => got[`mount.${k}`] === "yes" && got[`read.${k}`] === "from-host" && got[`write.${k}`] === "erofs") && !nodeFs.existsSync(join(overlay, "planted"));
 	console.log(`${ok ? "ok     " : "FAIL   "} /inbox and the overlay are read-only binds (mount points, host files read through, EROFS on a write): ${JSON.stringify(got)}`);
+	if (!ok) failed = true;
+}
+
+// Issue #704 part 3: a project secret bundle in bind mode: the placeholder in the env and /proc/self/environ, the plain
+// value in the bound job directory's bundle-env.json (review round 1, H1: never the exec), the real value at the stand-in's host (the workflow's, still running across the gateway restart), and
+// the providers gone after the run.
+{
+	const values = { BUNDLE_TOKEN: "conformance-bundle-not-a-token", BUNDLE_PLAIN: "conformance-bundle-plain-value" };
+	const b = bundleFor("bind", probeImage, { readEndpoints: () => [{ id: "lab-b", host: "host.docker.internal", port: 18080, slots: 1 }] });
+	const name = `pi-job-bind-conformance-${nonce}-bundle`;
+	output.set("last", "");
+	const result = await b.runContainer({ job: JOB, prepared: jobDirFor("bundle"), name, signal: new AbortController().signal, secrets: values, bundleKeys: { endpoints: { BUNDLE_TOKEN: { host: "host.docker.internal", auth: "bearer" } }, plain: ["BUNDLE_PLAIN"] }, size: { memMiB: 1024, cpuCenti: 100 } });
+	const got = said(output.get("last"));
+	let seen = [];
+	try {
+		seen = nodeFs.readFileSync(process.env.STANDIN_LOG ?? "", "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	} catch {}
+	const swapped = seen.some((e) => e.path === "/bundle-bind" && e.authorization === `Bearer ${values.BUNDLE_TOKEN}`);
+	const listed = await run("openshell", ["provider", "list", "--label-selector", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "-o", "json"], 30_000);
+	const left = listed.code === 0 ? (JSON.parse(listed.stdout).providers ?? []).map((p) => p.name).filter((p) => p.startsWith(sandboxNameOf(name))) : null;
+	const ok = result.code === 0 && got.btoken === "placeholder" && (got["benviron-readable"] === "no" || got.benviron === "1") && got.bplain === "file" && got.bown === "200" && swapped && Array.isArray(left) && left.length === 0;
+	console.log(`${ok ? "ok     " : "FAIL   "} a secret bundle in bind mode: ${JSON.stringify({ exit: result.code, ...got, swapped, providersLeft: left })}`);
 	if (!ok) failed = true;
 }
 

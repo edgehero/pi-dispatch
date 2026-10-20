@@ -81,12 +81,14 @@ function fakeOpenshell({ probe = "admitted", createRefusal = null, imageMissing 
 			state.creates.push({ args: rest, config });
 			if (createRefusal) return reject(SENTENCES[createRefusal]);
 			state.policy = JSON.parse(readFileSync(rest[rest.indexOf("--policy") + 1], "utf8"));
+			// Issue #704 part 3: what the read-back adds, one layer per attached provider (measured in #684 for one).
+			state.layers = Object.fromEntries(rest.flatMap((x, i) => (x === "--provider" ? [`_provider_${rest[i + 1].replace(/-/g, "_")}`] : [])).map((k) => [k, { name: k }]));
 			const labels = Object.fromEntries(rest.flatMap((x, i) => (x === "--label" ? [rest[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
 			const created = rest[rest.indexOf("--name") + 1];
 			state.live.set(created, { name: created, phase: "Ready", labels, lag: null });
 			return { stdout: JSON.stringify({ phase: "Ready" }), stderr: "" };
 		}
-		if (a === "policy" && b === "get") return { stdout: JSON.stringify({ policy_source: "sandbox", policy: state.policy }), stderr: "" };
+		if (a === "policy" && b === "get") return { stdout: JSON.stringify({ policy_source: "sandbox", policy: state.layers && Object.keys(state.layers).length > 0 ? { ...state.policy, network_policies: { ...state.policy.network_policies, ...state.layers } } : state.policy }), stderr: "" };
 		if (a === "sandbox" && b === "delete") {
 			state.leftover.delete(rest[2]);
 			state.deleted.push(rest[2]);
@@ -105,7 +107,10 @@ function fakeOpenshell({ probe = "admitted", createRefusal = null, imageMissing 
 			}
 			return { stdout: JSON.stringify({ sandboxes: out, next_page_token: "" }), stderr: "" };
 		}
-		if (a === "provider") return { stdout: JSON.stringify({ providers: [] }), stderr: "" };
+		if (a === "provider") {
+			if (b === "create") (state.made ??= []).push({ args: rest });
+			return { stdout: JSON.stringify({ providers: [] }), stderr: "" };
+		}
 		return reject(`unexpected ${args.join(" ")}`);
 	};
 	const spawnFn = (cmd, args) => {
@@ -579,4 +584,29 @@ test("the bind-settings reader and the gateway.toml: the three sentences, the ad
 	assert.equal(gatewayTomlFor("docker"), "[openshell]\nversion = 2\n\n[openshell.drivers.docker]\nallow_driver_config = true\nenable_bind_mounts = true\n\n[openshell.drivers.docker.resource_admission]\nenabled = false\n");
 	assert.match(gatewayTomlFor("podman"), /\[openshell\.drivers\.podman\]/);
 	assert.equal(UPSTREAM_BIND_WARNING, "Bind mounts expose gateway-host files to the sandbox and can bypass workspace isolation and filesystem policy.");
+});
+
+test("a bundle on the bind venue (#704 part 3): the same per-host provider as copy mode, and the plain variable in the bound job dir's file, never the exec", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const dirs = jobDirs();
+	// What the bound /job holds when the exec starts (review round 1, H1).
+	const spawnFn = (cmd, args) => {
+		const file = join(dirs.jobDir, "bundle-env.json");
+		fake.state.bundleEnv = existsSync(file) ? readFileSync(file, "utf8") : null;
+		return fake.spawnFn(cmd, args);
+	};
+	const b = bundle({ ...fake, spawnFn }, { readAllowlist: () => ["api.anthropic.com", "api.stripe.com"] });
+	const result = await b.runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal, user: "1234:1235", home: "/home/pi", secrets: { STRIPE_KEY: "sk_bind_0005", DB_URL: "plain_bind_0006" }, bundleKeys: { endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } }, plain: ["DB_URL"] } });
+	assert.equal(result.code, 0);
+	const sb = mod.sandboxNameOf("pi-job-j1");
+	assert.deepEqual(fake.state.made.map((m) => m.args[m.args.indexOf("--name") + 1]), [sb, `${sb}-b0`]);
+	const [{ args: create }] = fake.state.creates;
+	assert.deepEqual(create.flatMap((a, i) => (a === "--provider" ? [create[i + 1]] : [])), [sb, `${sb}-b0`]);
+	for (const rule of Object.values(fake.state.policy.network_policies)) for (const e of rule.endpoints) assert.equal(e.credential_binding.provider, e.host === "api.stripe.com" ? `${sb}-b0` : sb);
+	const execCall = fake.state.calls.find((c) => c[2] === "exec");
+	assert.equal(fake.state.bundleEnv, `${JSON.stringify({ DB_URL: "plain_bind_0006" })}\n`);
+	assert.ok(execCall.includes("PI_BUNDLE_ENV=1"));
+	assert.ok(!execCall.join(" ").includes("sk_bind_0005") && !execCall.join(" ").includes("plain_bind_0006"));
+	assert.equal(existsSync(join(dirs.jobDir, "bundle-env.json")), false, "removed at teardown");
+	assert.equal(typeof b.bundleGate, "function", "the bind bundle judges bundles as the copy one does");
 });

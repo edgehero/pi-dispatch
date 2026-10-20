@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BACKENDS, OPENSHELL_BACKEND } from "../src/backends.mjs";
@@ -40,26 +40,38 @@ function fakeOpenshell({ phase = "Ready", policyBack = null, sandboxes = [], fai
 		if (a === "status") return { stdout: JSON.stringify(status), stderr: "" };
 		if (a === "policy" && rest.includes("--global")) return globalPolicy ? { stdout: JSON.stringify({ policy: {} }), stderr: "" } : reject("no global", "Error:   × code: 'Some requested entity was not found', message: \"no global policy\n  │ revision found\"");
 		if (a === "provider" && b === "profile") {
-			if (rest[2] === "import") state.written.profile = JSON.parse(readFileSync(rest[rest.indexOf("-f") + 1], "utf8"));
+			if (rest[2] === "import") {
+				(state.profileFilesSeen ??= []).push(rest[rest.indexOf("-f") + 1]);
+				if (state.failImport) return reject("import failed");
+				state.written.profile = JSON.parse(readFileSync(rest[rest.indexOf("-f") + 1], "utf8"));
+				(state.written.profiles ??= []).push(state.written.profile);
+			}
+			// Issue #704 part 3, review round 1 (L4): every page of the catalog as one array, the reaper's profile sweep.
+			if (rest[2] === "list") return { stdout: JSON.stringify(state.profiles ?? []), stderr: "" };
 			return { stdout: "", stderr: "" };
 		}
 		if (a === "provider" && b === "create") {
 			state.provider = { args: rest, env: opts.env ?? null };
+			(state.made ??= []).push(state.provider);
 			return { stdout: "", stderr: "" };
 		}
 		if (a === "provider" && b === "list") return { stdout: JSON.stringify({ providers: state.providers ?? [], next_page_token: "" }), stderr: "" };
 		if (a === "provider" && b === "delete") return { stdout: "", stderr: "" };
 		if (a === "sandbox" && b === "create") {
+			// Final review round: whether every profile file this run wrote was already gone when the sandbox was created.
+			state.profileGoneAtCreate = (state.profileFilesSeen ?? []).every((f) => !existsSync(f));
 			if (failCreate) return reject("create failed", "ImagePullFailed");
 			const file = rest[rest.indexOf("--policy") + 1];
 			state.written.policy = JSON.parse(readFileSync(file, "utf8"));
 			state.attached = rest.includes("--provider") ? rest[rest.indexOf("--provider") + 1] : null;
+			state.attachedAll = rest.flatMap((a, i) => (a === "--provider" ? [rest[i + 1]] : []));
 			return { stdout: JSON.stringify({ name: rest[rest.indexOf("--name") + 1], phase }), stderr: "" };
 		}
 		if (a === "policy" && b === "get") {
 			// What OpenShell reads back: the body, plus an attached provider's own layer (measured).
 			const body = policyBack ?? JSON.parse(JSON.stringify(state.written.policy));
-			if (!policyBack && state.attached) { const key = `_provider_${state.attached.replace(/-/g, "_")}`; body.network_policies = { ...body.network_policies, [key]: { name: key } }; }
+			// Issue #704 part 3: one layer per attached provider.
+			if (!policyBack) for (const p of state.attachedAll ?? []) { const key = `_provider_${p.replace(/-/g, "_")}`; body.network_policies = { ...body.network_policies, [key]: { name: key } }; }
 			return { stdout: JSON.stringify({ policy_source: "sandbox", policy: body }), stderr: "" };
 		}
 		if (a === "sandbox" && b === "upload") return { stdout: "", stderr: "" };
@@ -484,7 +496,10 @@ test("credentials (#684): every secret goes into a per-job provider by the CLI's
 	const order = fake.state.calls.map((c) => c.slice(1, 4).join(" ")).filter((s) => /delete/.test(s));
 	assert.deepEqual(order, [`provider delete ${sb}`, `provider profile delete`, `sandbox delete ${sb}`, `provider delete ${sb}`, `provider profile delete`]);
 	assert.ok(fake.state.calls.findIndex((c) => c[1] === "provider" && c[2] === "profile" && c[3] === "import") > fake.state.calls.findIndex((c) => c[1] === "provider" && c[2] === "profile" && c[3] === "delete"), "the stale removal comes before the import");
-	for (const suffix of [".openshell-profile.json", ".openshell-policy.json"]) assert.equal(existsSync(`${dirs.jobDir}${suffix}`), false, suffix);
+	for (const suffix of [`.openshell-profile-${sb}.json`, ".openshell-policy.json"]) assert.equal(existsSync(`${dirs.jobDir}${suffix}`), false, suffix);
+	// Final review round: the profile file is gone once its import answered, before the sandbox even exists (the fake read
+	// it at the import), so a crash after that leaves nothing beside the job dir that BESIDE_JOB_DIR does not sweep.
+	assert.ok(fake.state.profileGoneAtCreate, "deleted right after the import, not only at teardown");
 });
 
 test("no rule, no provider: a deny-all job's secrets go nowhere, said in the log (#684)", { skip }, async () => {
@@ -639,4 +654,229 @@ test("steering over the exec's stdin (#686 part 2): the relay opener handed thro
 	assert.ok(execOf(fake2.state).includes("PI_EXIT_AUTH=stdin"));
 	assert.ok(!execOf(fake2.state).some((a) => a === "PI_STEER=1"));
 	assert.equal(opened.length, 1);
+});
+
+// Issue #704 part 3: a project secret bundle on this venue. The processor hands the venue its `bundleKeys`
+// (`{ endpoints, plain }`), and its values ride `secrets` as every secret's do.
+const BUNDLE_KEYS = { endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } }, plain: ["DB_URL"] };
+const BUNDLE_SECRETS = { STRIPE_KEY: "sk_bundle_value_0003", DB_URL: "postgres://plain_value_0004" };
+const runBundled = (fake, over = {}, call = {}) => {
+	const dirs = jobDirs();
+	// What the job directory held when it was uploaded: the bundle env file, read at that moment (review round 1, H1).
+	const inner = fake.exec;
+	const exec = async (bin, args, opts) => {
+		const rest = args[0] === "--gateway" ? args.slice(2) : args;
+		if (rest[0] === "sandbox" && rest[1] === "upload" && rest[4] === "/sandbox") {
+			const file = join(rest[3], "bundle-env.json");
+			if (existsSync(file)) fake.state.bundleEnv = { text: readFileSync(file, "utf8"), mode: statSync(file).mode & 0o777 };
+		}
+		return inner(bin, args, opts);
+	};
+	fake = { ...fake, exec };
+	const b = bundle(fake, { readAllowlist: () => ["api.anthropic.com", "api.stripe.com", ".github.com"], hostEnv: { ANTHROPIC_API_KEY: "sk-ant-real-provider-key-0001" }, delay: async () => {}, ...over });
+	return { dirs, run: b.runContainer({ job: { ...JOB, repo: "acme/widget" }, token: "ghs_real_forge_token_0002", prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal, exitAuth: true, secrets: BUNDLE_SECRETS, bundleKeys: BUNDLE_KEYS, ...call }) };
+};
+
+test("bundle (#704 part 3): an endpoint variable is its host's own provider key, bound to that host's endpoints only; a plain one goes by file, never the exec; the job's provider keeps the rest", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const { dirs, run } = runBundled(fake);
+	assert.equal((await run).code, 0);
+	const sb = mod.sandboxNameOf("pi-job-j1");
+	const hostProvider = `${sb}-b0`;
+	// Two profiles: the job's own, unchanged in shape, without either bundle variable; the host's, with its auth said.
+	assert.deepEqual(fake.state.written.profiles.map((p) => [p.id, p.credentials.map((c) => c.env_vars[0]).sort()]), [
+		[sb, ["ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"]],
+		[hostProvider, ["STRIPE_KEY"]],
+	]);
+	assert.deepEqual(fake.state.written.profiles[1].credentials[0], { name: "c0", env_vars: ["STRIPE_KEY"], required: true, auth_style: "bearer", header_name: "authorization" });
+	assert.deepEqual(fake.state.made.map((p) => p.args[p.args.indexOf("--name") + 1]), [sb, hostProvider]);
+	assert.equal(fake.state.made[1].env.STRIPE_KEY, "sk_bundle_value_0003", "the placeholder's value travels in the CLI's env");
+	assert.equal(fake.state.made[0].env.STRIPE_KEY, undefined, "and only to its host's provider");
+	assert.ok(fake.state.made[1].args.includes("pi.dispatch.owner=pi-dispatch"), "labelled, so the reaper finds it");
+	// The bindings: api.stripe.com to the host's provider, every other endpoint to the job's.
+	for (const rule of Object.values(fake.state.written.policy.network_policies)) {
+		for (const e of rule.endpoints) assert.deepEqual(e.credential_binding, { provider: e.host === "api.stripe.com" ? hostProvider : sb }, e.host);
+	}
+	const create = fake.state.calls.find((c) => c[1] === "sandbox" && c[2] === "create");
+	assert.deepEqual(create.flatMap((a, i) => (a === "--provider" ? [create[i + 1]] : [])), [sb, hostProvider]);
+	// Review round 1, H1: the plain variable is in the job directory's bundle-env.json (0600) when it is uploaded, and the
+	// exec carries only the flag: no bundle value, and no other value, on any argv (the gateway logs an exec's env).
+	assert.deepEqual(fake.state.bundleEnv, { text: `${JSON.stringify({ DB_URL: "postgres://plain_value_0004" })}\n`, mode: 0o600 });
+	const execCall = fake.state.calls.find((c) => c[2] === "exec");
+	const env = Object.fromEntries(execCall.flatMap((a, i) => (a === "--env" ? [execCall[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
+	assert.equal(env.PI_BUNDLE_ENV, "1");
+	assert.equal(env.DB_URL, undefined);
+	assert.equal(env.STRIPE_KEY, undefined);
+	for (const call of fake.state.calls) {
+		const flat = call.join(" ");
+		for (const v of ["postgres://plain_value_0004", "sk_bundle_value_0003", "sk-ant-real-provider-key-0001", "ghs_real_forge_token_0002"]) assert.ok(!flat.includes(v), `${v} on no argv: ${call.slice(0, 4).join(" ")}`);
+	}
+	assert.equal(existsSync(join(dirs.jobDir, "bundle-env.json")), false, "removed at teardown");
+	// Teardown: the sandbox, then both providers and their profiles; no profile file left.
+	const deletes = fake.state.calls.map((c) => c.slice(1, 4).join(" ")).filter((s) => / delete/.test(s));
+	assert.deepEqual(deletes.slice(-5), [`sandbox delete ${sb}`, `provider delete ${sb}`, "provider profile delete", `provider delete ${hostProvider}`, "provider profile delete"]);
+	assert.ok(deletes.slice(0, 4).join(" ").includes(hostProvider), "an earlier attempt's leftover of the host's provider is removed first too");
+	for (const p of [sb, hostProvider]) assert.equal(existsSync(`${dirs.jobDir}.openshell-profile-${p}.json`), false, p);
+});
+
+test("bundle read-back (#704 part 3): exactly the layers this job attached, a missing or an extra one never starts the job", { skip }, async () => {
+	const policy = { version: 1, network_policies: { a: { name: "a", endpoints: [{ host: "x" }] } }, filesystem_policy: { read_only: ["/var/log"], read_write: [] } };
+	const [only] = mod.expectedPolicies(policy, { providers: ["pi-job-s0123456789a", "pi-job-s0123456789a-b0"] });
+	assert.deepEqual(Object.keys(only.network_policies).sort(), ["_provider_pi_job_s0123456789a", "_provider_pi_job_s0123456789a_b0", "a"]);
+	for (const tamper of [(body) => delete body.network_policies[Object.keys(body.network_policies).find((k) => k.endsWith("_b0"))], (body) => (body.network_policies._provider_someone = { name: "_provider_someone" })]) {
+		const fake = fakeOpenshell();
+		const exec = async (bin, args, opts) => {
+			const out = await fake.exec(bin, args, opts);
+			if (args[0] === "policy" && args[1] === "get" && !args.includes("--global")) {
+				const doc = JSON.parse(out.stdout);
+				tamper(doc.policy);
+				return { stdout: JSON.stringify(doc), stderr: "" };
+			}
+			return out;
+		};
+		const { run } = runBundled({ ...fake, exec });
+		await assert.rejects(run, (e) => e.reason === "container-never-started");
+		assert.equal(fake.state.calls.some((c) => c[2] === "exec"), false, "never exec'd");
+	}
+});
+
+test("judgeBundle (#704 part 3): the host must be exactly a policy endpoint, not under a wildcard, not the forge's", { skip }, () => {
+	const network_policies = { a: { endpoints: [{ host: "api.stripe.com" }, { host: "github.com" }, { host: "api.github.com" }] }, w: { endpoints: [{ host: "example.org" }, { host: "*.example.org" }] }, m: { endpoints: [{ host: "llm.internal", port: 8080 }] } };
+	const judge = (host, extra = {}) => mod.judgeBundle({ endpoints: { K: { host, auth: "bearer" } }, network: { network_policies }, credentialHosts: mod.credentialHostsOf({}), ...extra });
+	assert.deepEqual(judge("api.stripe.com"), { ok: true });
+	assert.deepEqual(judge("api.unlisted.com"), { refused: "openshell-bundle-endpoint-not-allowed", name: "K", host: "api.unlisted.com" });
+	assert.deepEqual(judge("api.example.org"), { refused: "openshell-bundle-endpoint-not-allowed", name: "K", host: "api.example.org" }, "admitted only by a wildcard");
+	assert.equal(judge("example.org").refused, undefined, "the apex is its own endpoint, which a single-label wildcard does not cover");
+	for (const host of ["github.com", "api.github.com"]) assert.equal(judge(host).refused, "openshell-bundle-endpoint-shared", host);
+	assert.deepEqual(judge("llm.internal"), { ok: true }, "a model endpoint's host is not the forge's: claimable (credentialHostsOf says why)");
+	assert.ok(mod.credentialHostsOf({ forgeHosts: { gitlab: "https://git.acme.test/api/v4", forgejo: null } }).has("git.acme.test"), "a configured instance's host");
+	assert.deepEqual(mod.judgeBundle({ endpoints: {}, network: { network_policies: {} } }), { ok: true }, "no endpoints, nothing to bind");
+});
+
+test("judgeBundle (#704 part 3): with the variables, an undelivered endpoint name, a name the sandbox sets, and what the gateway cannot carry each refuse by name", { skip }, () => {
+	const network = { network_policies: { a: { endpoints: [{ host: "api.stripe.com" }, { host: "api.other.com" }] } } };
+	const endpoints = { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } };
+	const judge = (vars, extra = {}) => mod.judgeBundle({ endpoints, vars, network, ...extra });
+	const capable = { capabilities: ["bundleEnvFile"] };
+	assert.deepEqual(judge({ STRIPE_KEY: "s", DB_URL: "d", FLAG: "on" }, capable), { ok: true, placeholders: 1, plain: 2 });
+	assert.deepEqual(judge({ DB_URL: "d" }), { refused: "openshell-bundle-endpoint-unknown", name: "STRIPE_KEY" });
+	// Review round 1, M2: a shadowed endpoint name is still its host's placeholder, with the trigger's value.
+	assert.deepEqual(judge({ DB_URL: "d" }, { shadowed: ["STRIPE_KEY"], ...capable }), { ok: true, placeholders: 1, plain: 1 }, "shadowed by run.secrets is not unknown");
+	// Review round 1, H1: plain variables go by file, which only an image declaring bundleEnvFile reads.
+	assert.deepEqual(judge({ STRIPE_KEY: "s", DB_URL: "d" }), { refused: "openshell-bundle-image-too-old", name: null });
+	assert.deepEqual(judge({ STRIPE_KEY: "s", DB_URL: "d" }, { capabilities: ["steerStdin"] }), { refused: "openshell-bundle-image-too-old", name: null });
+	assert.deepEqual(judge({ STRIPE_KEY: "s" }), { ok: true, placeholders: 1, plain: 0 }, "no plain variable, no file, any image");
+	for (const taken of ["OPENSHELL_THING", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "GIT_CONFIG_COUNT", "grpc_proxy"]) {
+		assert.deepEqual(judge({ STRIPE_KEY: "s", [taken]: "v" }), { refused: "openshell-bundle-name-taken", name: taken }, taken);
+	}
+	// Review round 1, M1 and L1: a plain value meets no exec limit any more, a PEM and a large value included.
+	assert.equal(judge({ STRIPE_KEY: "s", PEM: "-----BEGIN\nx\n-----END" }, capable).ok, true);
+	assert.equal(judge({ STRIPE_KEY: "s", BIG: "x".repeat(64 * 1024) }, capable).ok, true);
+	assert.deepEqual(judge({ STRIPE_KEY: "x".repeat(8193) }), { refused: "openshell-bundle-unpassable", name: "STRIPE_KEY" }, "a placeholder over a provider value's 8 KiB");
+	// A multi-line value is fine as a placeholder: it never reaches an argv.
+	assert.equal(judge({ STRIPE_KEY: "line1\nline2" }).ok, true);
+	const many = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`K${i}`, { host: "api.stripe.com", auth: "basic" }]));
+	assert.equal(mod.judgeBundle({ endpoints: many, vars: Object.fromEntries(Object.keys(many).map((k) => [k, "v"])), network }).refused, "openshell-bundle-unpassable", "33 placeholders for one host");
+	const hosts = Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`H${i}`, { host: `h${i}.test`, auth: "bearer" }]));
+	const wide = { network_policies: { a: { endpoints: Object.values(hosts).map((e) => ({ host: e.host })) } } };
+	assert.equal(mod.judgeBundle({ endpoints: hosts, network: wide }).refused, "openshell-bundle-unpassable", "32 hosts and the job's own provider is 33");
+	assert.equal(mod.judgeBundle({ endpoints: Object.fromEntries(Object.entries(hosts).slice(0, 31)), network: wide }).ok, true, "31 hosts fit");
+});
+
+test("bundleGate (#704 part 3): the venue's own refusal with its fixed sentence and the names in the log, before any sandbox; an unreadable source retries", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const logs = [];
+	const b = bundle(fake, { readAllowlist: () => ["api.anthropic.com"], log: (e, f) => logs.push([e, f]) });
+	const job = { ...JOB, repo: "acme/widget" };
+	const r = await b.bundleGate(job, { endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } }, vars: null });
+	assert.equal(r.venueRefused.reason, "openshell-bundle-endpoint-not-allowed");
+	assert.equal(r.venueRefused.comment, mod.OPENSHELL_REFUSALS["openshell-bundle-endpoint-not-allowed"]);
+	assert.ok(!r.venueRefused.comment.includes("STRIPE_KEY") && !r.venueRefused.comment.includes("api.stripe.com"), "the comment names neither");
+	assert.deepEqual(logs.find(([e]) => e === "refused_openshell_bundle")[1], { reason: "openshell-bundle-endpoint-not-allowed", name: "STRIPE_KEY", host: "api.stripe.com" });
+	assert.equal(fake.state.calls.length, 0, "a pure read of the deployment's sources: no gateway call, no sandbox");
+	// A configured forge instance's host is the forge token's.
+	const forge = bundle(fake, { readAllowlist: () => ["git.acme.test"], forgeHosts: { gitlab: "https://git.acme.test" } });
+	assert.equal((await forge.bundleGate(job, { endpoints: { K: { host: "git.acme.test", auth: "bearer" } } })).venueRefused.reason, "openshell-bundle-endpoint-shared");
+	assert.deepEqual(await bundle(fake, { readAllowlist: () => ["api.stripe.com"] }).bundleGate(job, { endpoints: BUNDLE_KEYS.endpoints, vars: BUNDLE_SECRETS, capabilities: ["bundleEnvFile"] }), { ok: true, placeholders: 1, plain: 1 });
+	// Review round 1, H2: the processor's credential hosts (a model's composed baseUrl, a model endpoint, an MCP server).
+	const modelHost = bundle(fake, { readAllowlist: () => ["api.anthropic.com"] });
+	assert.equal((await modelHost.bundleGate(job, { endpoints: { K: { host: "api.anthropic.com", auth: "bearer" } }, credentialHosts: ["api.anthropic.com"] })).venueRefused.reason, "openshell-bundle-endpoint-shared");
+	const down = bundle(fake, { readAllowlist: () => { throw new Error("EACCES"); } });
+	assert.deepEqual(await down.bundleGate(job, { endpoints: BUNDLE_KEYS.endpoints }), { unavailable: true });
+	assert.equal(mod.OPENSHELL_REFUSALS["openshell-bundle-unsupported"], undefined, "part 2's refusal is retired");
+});
+
+test("bundleProviderPlan (#704 part 3): one provider per bundle host, sorted, the job's keeps the rest, and a key in two places is a collision by name", { skip }, async () => {
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "k", A: "1", B: "2", C: "3", D: "4" };
+	const plan = mod.bundleProviderPlan({ name: "pi-job-s0123456789a", env, bundleKeys: { endpoints: { B: { host: "z.test", auth: "basic" }, A: { host: "a.test", auth: "header:X-Api-Key" }, C: { host: "a.test", auth: "bearer" } }, plain: ["D"] } });
+	assert.deepEqual(plan, {
+		job: { name: "pi-job-s0123456789a", keys: ["ANTHROPIC_API_KEY"] },
+		bundles: [
+			{ name: "pi-job-s0123456789a-b0", host: "a.test", keys: ["A", "C"], auth: { A: "header:X-Api-Key", C: "bearer" } },
+			{ name: "pi-job-s0123456789a-b1", host: "z.test", keys: ["B"], auth: { B: "basic" } },
+		],
+		plain: ["D"],
+	});
+	assert.deepEqual(mod.providerProfileFor("p", ["A"], { auth: { A: "header:X-Api-Key" } }).credentials[0], { name: "c0", env_vars: ["A"], required: true, auth_style: "header", header_name: "x-api-key" });
+	assert.deepEqual(mod.bundleAuthFields("basic"), { auth_style: "basic" });
+	assert.deepEqual(mod.bundleProviderPlan({ name: "pi-job-s0123456789a", env, bundleKeys: { endpoints: { A: { host: "a.test", auth: "bearer" } }, plain: ["A"] } }), { collision: "A" });
+	// The stage refuses such a plan as infrastructure, before any sandbox or provider exists.
+	const fake = fakeOpenshell();
+	const { run } = runBundled(fake, {}, { bundleKeys: { endpoints: BUNDLE_KEYS.endpoints, plain: ["STRIPE_KEY"] } });
+	await assert.rejects(run, (e) => e.reason === "container-never-started");
+	assert.equal(fake.state.calls.some((c) => (c[1] === "sandbox" && c[2] === "create") || (c[1] === "provider" && c[2] === "create")), false);
+	// A job with no bundle plans #684's one provider, exactly.
+	assert.deepEqual(mod.bundleProviderPlan({ name: "n", env }), { job: { name: "n", keys: ["ANTHROPIC_API_KEY", "A", "B", "C", "D"] }, bundles: [], plain: [] });
+	// Review round 1, M2: a declared name whose env value is a run.secrets one (it shadowed the bundle's) still goes into
+	// its host's provider, so the winning value resolves at the host the reviewed file binds the name to.
+	const shadowedPlan = mod.bundleProviderPlan({ name: "n", env: { STRIPE_KEY: "sk_trigger_value" }, bundleKeys: { endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } }, plain: [] } });
+	assert.deepEqual([shadowedPlan.job.keys, shadowedPlan.bundles.map((b) => [b.host, b.keys])], [[], [["api.stripe.com", ["STRIPE_KEY"]]]]);
+});
+
+test("bundle providers are reaped (#704 part 3): the boot sweep and the gone-check find <sandbox>-b<n> by the owner label, nobody else's", { skip }, async () => {
+	const sb = mod.sandboxNameOf("pi-job-old");
+	const reaping = fakeOpenshell();
+	reaping.state.providers = [{ name: sb }, { name: `${sb}-b0` }, { name: `${sb}-b12` }, { name: "someone-elses-b0" }, { name: `${sb}-bx` }];
+	assert.deepEqual(await bundle(reaping, { delay: async () => {} }).reap(), { reaped: true });
+	assert.deepEqual(reaping.state.calls.filter((c) => c[1] === "provider" && c[2] === "delete").map((c) => c[3]), [sb, `${sb}-b0`, `${sb}-b12`]);
+	assert.ok(mod.isJobProviderName(`${sb}-b3`) && !mod.isJobProviderName("pi-job-old-b3") && !mod.isJobProviderName(null));
+	// Review round 1, L4: a profile left without a provider (an import, then a crash) is swept by its name too, never
+	// a profile outside the job namespace.
+	const profiled = fakeOpenshell();
+	profiled.state.profiles = [{ id: `${sb}-b1` }, { id: sb }, { id: "anthropic" }, { id: "someone-elses-b0" }];
+	assert.deepEqual(await bundle(profiled, { delay: async () => {} }).reap(), { reaped: true });
+	assert.deepEqual(profiled.state.calls.filter((c) => c[1] === "provider" && c[2] === "profile" && c[3] === "delete").map((c) => c[4]), [`${sb}-b1`, sb]);
+	const gone = fakeOpenshell({ sandboxes: [] });
+	const other = mod.sandboxNameOf("pi-job-other");
+	gone.state.providers = [{ name: `${mod.sandboxNameOf("pi-job-gone")}-b0` }, { name: `${other}-b0` }];
+	assert.equal(await bundle(gone).containerGone("pi-job-gone"), true);
+	for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+	const deleted = gone.state.calls.filter((c) => c[1] === "provider" && c[2] === "delete").map((c) => c[3]);
+	assert.deepEqual(deleted, [mod.sandboxNameOf("pi-job-gone"), `${mod.sandboxNameOf("pi-job-gone")}-b0`], "its own bundle provider, not another sandbox's");
+});
+
+test("bundle: the redactor still holds a placeholder variable's real value, and no bundle value rides the exec (#704 part 3, review round 1)", { skip }, async () => {
+	const args = mod.openshellExecArgs({ name: "pi-job-sx", env: { PI_PROVIDER: "anthropic", PI_BUNDLE_ENV: "1", STRIPE_KEY: "s3cret", DB_URL: "plainval", OTHER_SECRET: "o" } });
+	assert.ok(args.includes("PI_BUNDLE_ENV=1"), "the flag is a non-secret name");
+	assert.ok(!args.join(" ").includes("plainval") && !args.join(" ").includes("s3cret") && !args.join(" ").includes("=o"));
+	const { secretValuesOf } = await import("../src/redact-secrets.mjs");
+	assert.ok(secretValuesOf({ STRIPE_KEY: "s3cret-value-long", DB_URL: "plainval-long" }, []).includes("s3cret-value-long"), "a placeholder variable's value is in the env the redactor is built from");
+});
+
+test("final review round: the PI_ prefix and the sandbox's session names are refused before spend, and the runner's backstop list covers every name this gate refuses", { skip }, async () => {
+	const network = { network_policies: { a: { endpoints: [{ host: "api.stripe.com" }] } } };
+	for (const name of ["PI_ANYTHING", "USER", "SHELL", "TERM", "LOGNAME"]) {
+		assert.deepEqual(mod.judgeBundle({ endpoints: {}, vars: { [name]: "v" }, network, capabilities: ["bundleEnvFile"] }), { refused: "openshell-bundle-name-taken", name }, name);
+	}
+	const { BUNDLE_ENV_PROTECTED } = await import("../../image/runner/src/bundle-env.mjs");
+	for (const name of mod.OPENSHELL_SET_ENV_NAMES) assert.ok(BUNDLE_ENV_PROTECTED.includes(name), `${name}: refused by the worker's gate, so the runner's backstop must protect it too`);
+});
+
+test("final review round: a refused profile import leaves no profile file beside the job dir", { skip }, async () => {
+	const fake = fakeOpenshell();
+	fake.state.failImport = true;
+	const dirs = jobDirs();
+	await assert.rejects(bundle(fake, { readAllowlist: () => ["api.anthropic.com"] }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal }), (e) => e.reason === "container-never-started");
+	assert.equal(fake.state.profileFilesSeen.length, 1);
+	assert.equal(existsSync(fake.state.profileFilesSeen[0]), false);
 });

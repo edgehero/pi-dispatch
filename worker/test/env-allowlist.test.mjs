@@ -1107,8 +1107,9 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, transcriptStderr: true, reportProgress: true, recover: true, recovering: true, steer: true });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, transcriptStderr: true, reportProgress: true, recover: true, recovering: true, steer: true, bundleEnvFile: true });
 	assert.equal(env.PI_STEER, "1", "the drift check must see PI_STEER (issue #646)");
+	assert.equal(env.PI_BUNDLE_ENV, "1", "the drift check must see PI_BUNDLE_ENV (issue #704 part 3)");
 	assert.equal(env.PI_TRANSCRIPT, "stderr", "the drift check must see PI_TRANSCRIPT (issue #686)");
 	assert.equal(env.PI_REPORT_PROGRESS, "1", "the drift check must see PI_REPORT_PROGRESS (issue #644)");
 	assert.equal(env.PI_RECOVER, "1", "the drift check must see PI_RECOVER (issue #645)");

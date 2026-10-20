@@ -2748,6 +2748,8 @@ export async function startWorker(
 			// `local`'s are the closures built beside its bundle below, unchanged.
 			observationPreflight: backends.observationPreflight,
 			jobUserPreflight: backends.jobUserPreflight,
+			// Issue #704 part 3: the venue's judgement of a project secret bundle, dispatched like the two above.
+			bundleGate: backends.bundleGate,
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,

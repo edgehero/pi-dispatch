@@ -29,7 +29,7 @@
  * Exit 0 when everything held, 1 when anything failed or was not read, 2 when the host is not one this can run on.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,7 +39,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const load = (path) => import(pathToFileURL(join(root, path)).href);
 
-const { makeOpenshellBackend, OPENSHELL_OWNER, OPENSHELL_OWNER_LABEL } = await load("worker/src/backend-openshell.mjs");
+const { makeOpenshellBackend, OPENSHELL_OWNER, OPENSHELL_OWNER_LABEL, sandboxNameOf } = await load("worker/src/backend-openshell.mjs");
 const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
 const { makeLogSink } = await load("worker/src/run-history.mjs");
 const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs");
@@ -100,6 +100,25 @@ case "$c" in
 		for u in https://github.com/octocat/Hello-World.git/git-receive-pack; do
 			echo "probe push $u=$(node -e 'fetch(process.argv[1],{method:"POST",signal:AbortSignal.timeout(10000)}).then(async r=>console.log(r.status,/policy/i.test(await r.text())?"policy":"upstream"),e=>console.log("refused",e.cause?.code??e.name))' "$u")"
 		done
+		exit 0 ;;
+	bundle)
+		# Issue #704 part 3: a project secret bundle. BUNDLE_TOKEN is bound to host.docker.internal (its own provider) and
+		# is a placeholder here and in /proc/self/environ; BUNDLE_PLAIN is a value. The placeholder is swapped at its own
+		# host only: sent to the other alias (the job provider's endpoint) it is refused, and the job's own model key sent
+		# to the bundle's host is refused too, since an endpoint binds one provider.
+		echo "probe btoken=$(case "$BUNDLE_TOKEN" in openshell:resolve:env:*) echo placeholder ;; conformance-bundle-not-a-token) echo value ;; '') echo unset ;; *) echo other ;; esac)"
+		# Review round 1, H1: the plain one reaches the runner by FILE (this probe replaces the runner, so it reads the file
+		# itself; verify-image.sh proves the runner applies it), never the exec: no process's command line holds it.
+		echo "probe bplain=$(if [ "$PI_BUNDLE_ENV" = 1 ] && grep -q conformance-bundle-plain-value /sandbox/job/bundle-env.json 2>/dev/null; then echo file; elif [ -n "$BUNDLE_PLAIN" ]; then echo env; else echo other; fi)"
+		echo "probe bcmdline=$(cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\0' '\\n' | grep -c -e 'conformance-bundle-plain-valu[e]')"
+		# Readable means NON-EMPTY, read the way the count below reads it (a redirect, so the subshell's own environ, not a
+		# fresh child's): under OpenShell 0.1.4 that file opens and reads as nothing, as the credentials case measured.
+		echo "probe benviron-readable=$(if [ "$(tr '\\0' '\\n' < /proc/self/environ 2>/dev/null | wc -c)" -gt 0 ]; then echo yes; else echo no; fi)"
+		echo "probe benviron=$(tr '\\0' '\\n' < /proc/self/environ | grep -c -e '^BUNDLE_TOKEN=openshell:resolve:env:')"
+		echo "probe benviron-values=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c -e conformance-bundle-not-a-token)"
+		echo "probe bown=$(node -e 'fetch("http://host.docker.internal:18080/bundle-own",{headers:{authorization:"Bearer "+process.env.BUNDLE_TOKEN},signal:AbortSignal.timeout(10000)}).then(r=>console.log(r.status),e=>console.log("refused",e.cause?.code??e.name))')"
+		echo "probe bother=$(node -e 'fetch("http://host.openshell.internal:18080/bundle-elsewhere",{headers:{authorization:"Bearer "+process.env.BUNDLE_TOKEN},signal:AbortSignal.timeout(10000)}).then(r=>console.log(r.status),e=>console.log("refused",e.cause?.code??e.name))')"
+		echo "probe bkey=$(node -e 'fetch("http://host.docker.internal:18080/key-at-bundle-host",{headers:{"x-api-key":process.env.ANTHROPIC_API_KEY},signal:AbortSignal.timeout(10000)}).then(r=>console.log(r.status),e=>console.log("refused",e.cause?.code??e.name))')"
 		exit 0 ;;
 	*) exit "$c" ;;
 esac
@@ -227,6 +246,95 @@ for (const f of r.findings) {
 	console.log(`${ok ? "ok     " : "FAIL   "} the credentials: ${JSON.stringify({ envkey: said.envkey, envtoken: said.envtoken, environReadable: said["environ-readable"], environSelf: said["environ-self"], environValues: said["environ-values"], header: said.header, git: said.git, swapped, leaked, gitBasic: git })}`);
 	if (!ok) failed = true;
 }
+// Issue #704 part 3: a project secret bundle, through the bundle's own gate and stage as the processor drives them: one
+// variable bound to host.docker.internal (the stand-in's second alias, a model endpoint of this policy) as a
+// placeholder, one plain. The stand-in is reachable only as a model endpoint (a port other than 443), which the
+// processor's credential-host rule (review round 1, H2) refuses as a bundle host, so the gate is asked here without the
+// processor's hosts: what this case proves is the venue's binding and file channel beneath that rule. The plain value
+// must reach the job directory's bundle-env.json and no command line, and neither value the gateway's own log (H1). Read from inside: the placeholder in the env and in /proc/self/environ and no process holding
+// its value, the plain value visible, the real value received by the stand-in at its own host only, and the job's own
+// model key refused at the bundle's host (an endpoint binds one provider). Then a KILLED job's providers: a worker
+// process that dies with a bundled sandbox running leaves the sandbox and both its providers, and the reaper's sweep
+// removes all three.
+const BUNDLE_ENDPOINTS = { BUNDLE_TOKEN: { host: "host.docker.internal", auth: "bearer" } };
+const BUNDLE_VALUES = { BUNDLE_TOKEN: "conformance-bundle-not-a-token", BUNDLE_PLAIN: "conformance-bundle-plain-value" };
+const BUNDLE_KEYS = { endpoints: BUNDLE_ENDPOINTS, plain: ["BUNDLE_PLAIN"] };
+const providersListed = async () => {
+	const listed = await run("openshell", ["provider", "list", "--label-selector", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "-o", "json"], 30_000);
+	return listed.code === 0 ? (JSON.parse(listed.stdout).providers ?? []).map((p) => p.name) : null;
+};
+{
+	const gate = await backend.bundleGate(JOB, { endpoints: BUNDLE_ENDPOINTS, vars: BUNDLE_VALUES, shadowed: [], capabilities: ["bundleEnvFile"] });
+	const refusedWide = await backend.bundleGate(JOB, { endpoints: { BUNDLE_TOKEN: { host: "example.com", auth: "bearer" } }, vars: null });
+	output.set("last", "");
+	const name = `pi-job-conformance-${nonce}-bundle`;
+	const result = await backend.runContainer({ job: JOB, token: "conformance-probe-not-a-token", prepared: jobDirFor("bundle"), name, signal: new AbortController().signal, secrets: BUNDLE_VALUES, bundleKeys: BUNDLE_KEYS, size: { memMiB: 1024, cpuCenti: 100 } });
+	const said = Object.fromEntries([...String(output.get("last")).matchAll(/^probe ([A-Za-z.-]+)[=:][ \t]*(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
+	let seen = [];
+	try {
+		seen = nodeFs.readFileSync(process.env.STANDIN_LOG ?? "", "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	} catch {}
+	const at = (path) => seen.filter((e) => e.path === path);
+	const swapped = at("/bundle-own").some((e) => e.authorization === `Bearer ${BUNDLE_VALUES.BUNDLE_TOKEN}`);
+	// Refused by the supervisor before it forwards (403 credential_endpoint_mismatch), so the stand-in never saw them.
+	const elsewhere = /^403$/.test(said.bother ?? "") && at("/bundle-elsewhere").length === 0;
+	const keyRefused = /^403$/.test(said.bkey ?? "") && at("/key-at-bundle-host").length === 0;
+	const leaked = seen.some((e) => /openshell:resolve/.test(e.authorization ?? ""));
+	let gatewayLog = "";
+	try {
+		gatewayLog = nodeFs.readFileSync(process.env.GATEWAY_LOG ?? "", "utf8");
+	} catch {}
+	const logged = Object.values(BUNDLE_VALUES).some((v) => gatewayLog.includes(v));
+	const ok = !logged && said.bcmdline === "0" && gate?.ok === true && gate.placeholders === 1 && gate.plain === 1 && refusedWide?.venueRefused?.reason === "openshell-bundle-endpoint-not-allowed" && result.code === 0 && said.btoken === "placeholder" && (said["benviron-readable"] === "no" || said.benviron === "1") && said["benviron-values"] === "0" && said.bplain === "file" && said.bown === "200" && swapped && elsewhere && keyRefused && !leaked;
+	console.log(`${ok ? "ok     " : "FAIL   "} a secret bundle: ${JSON.stringify({ gate, wide: refusedWide?.venueRefused?.reason ?? null, exit: result.code, btoken: said.btoken, benvironReadable: said["benviron-readable"], benviron: said.benviron, benvironValues: said["benviron-values"], bplain: said.bplain, bcmdline: said.bcmdline, gatewayLogRead: gatewayLog.length > 0, logged, bown: said.bown, bother: said.bother, bkey: said.bkey, swapped, elsewhere, keyRefused, leaked })}`);
+	if (!ok) failed = true;
+	const left = await providersListed();
+	const tidy = left !== null && !left.some((p) => p.startsWith(sandboxNameOf(name)));
+	console.log(`${tidy ? "ok     " : "FAIL   "} the bundle run's teardown deleted its providers: ${JSON.stringify(left)}`);
+	if (!tidy) failed = true;
+}
+{
+	// The killed job: a worker of its own, SIGKILLed while its bundled sandbox runs, so nothing of its teardown runs.
+	const name = `pi-job-conformance-${nonce}-killed`;
+	const sandbox = sandboxNameOf(name);
+	const dirs = jobDirFor("sleep");
+	const child = join(scratch, "killed-worker.mjs");
+	nodeFs.writeFileSync(
+		child,
+		`import { pathToFileURL } from "node:url";
+const [root, image, engine, name, jobDir] = process.argv.slice(2);
+const { makeOpenshellBackend } = await import(pathToFileURL(root + "/worker/src/backend-openshell.mjs").href);
+const b = makeOpenshellBackend({ image, engine, hostEnv: { ANTHROPIC_API_KEY: "conformance-probe-not-a-key" }, onOutput: () => {}, readAllowlist: () => ["api.anthropic.com", ".github.com"], readEndpoints: () => [{ id: "lab-a", host: "host.openshell.internal", port: 18080, slots: 1 }, { id: "lab-b", host: "host.docker.internal", port: 18080, slots: 1 }] });
+await b.runContainer({ job: ${JSON.stringify(JOB)}, token: "conformance-probe-not-a-token", prepared: { jobDir, workspace: jobDir + "/workspace", live: { hostDir: jobDir + "/session" } }, name, signal: new AbortController().signal, secrets: ${JSON.stringify(BUNDLE_VALUES)}, bundleKeys: ${JSON.stringify(BUNDLE_KEYS)}, size: { memMiB: 1024, cpuCenti: 100 } });
+`,
+	);
+	const worker = spawn(process.execPath, [child, root, probeImage, engine, name, dirs.jobDir], { stdio: "ignore" });
+	let ready = false;
+	for (let i = 0; i < 180 && !ready; i++) {
+		const got = await run("openshell", ["sandbox", "get", sandbox, "-o", "json"], 15_000);
+		ready = got.code === 0 && JSON.parse(got.stdout).phase === "Ready";
+		if (!ready) await new Promise((r) => setTimeout(r, 1000));
+	}
+	// Running, not merely created: the exec has started once its sleep is in the sandbox's process list is not readable
+	// from here, so a few seconds past Ready, as the abort probe waits.
+	await new Promise((r) => setTimeout(r, 5000));
+	const before = await providersListed();
+	worker.kill("SIGKILL");
+	const reaped = await backend.reap();
+	let after = null;
+	let sandboxGone = false;
+	for (let i = 0; i < 30; i++) {
+		after = await providersListed();
+		sandboxGone = (await run("openshell", ["sandbox", "get", sandbox, "-o", "json"], 15_000)).code !== 0;
+		if (after !== null && sandboxGone && !after.some((p) => p.startsWith(sandbox))) break;
+		await new Promise((r) => setTimeout(r, 2000));
+	}
+	const held = before !== null && before.includes(sandbox) && before.includes(`${sandbox}-b0`);
+	const ok = ready && held && reaped?.reaped === true && sandboxGone && after !== null && !after.some((p) => p.startsWith(sandbox));
+	console.log(`${ok ? "ok     " : "FAIL   "} a killed bundled job's sandbox and providers are gone after the sweep: ${JSON.stringify({ ready, before, reaped, sandboxGone, after })}`);
+	if (!ok) failed = true;
+}
+
 // readOnlyJobInputs is not in the harness's read-back list (the transfer check covers its word); this script reads it.
 console.log(`${readings.readOnlyJobInputs?.ok ? "ok     " : "FAIL   "} readOnlyJobInputs (live): ${readings.readOnlyJobInputs?.detail}`);
 if (!readings.readOnlyJobInputs?.ok) failed = true;

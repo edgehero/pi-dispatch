@@ -95,7 +95,8 @@ jobs:
 
       # Issue #684: a model server stand-in on the gateway host, which the generated policy reaches through OpenShell's
       # host aliases. It records what each request carried in its credential headers (only fake values reach it), so the
-      # script can tell a swapped value from a placeholder, and asks git for Basic auth on info/refs.
+      # script can tell a swapped value from a placeholder, and asks git for Basic auth on info/refs. Issue #704 part 3:
+      # its second alias (host.docker.internal) is the secret-bundle case's endpoint host, read off the same log.
       - name: A stand-in server on the gateway host
         run: |
           cat > "$RUNNER_TEMP/standin.mjs" <<'JS'
@@ -114,7 +115,7 @@ jobs:
           STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" nohup node "$RUNNER_TEMP/standin.mjs" > "$RUNNER_TEMP/standin.log" 2>&1 &
 
       - name: Conformance (the real bundle, the real runner)
-        run: STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
+        run: STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" GATEWAY_LOG="$RUNNER_TEMP/gateway.log" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
 
       # Issue #686 part 3: bind mode. First on the gateway as it is, whose default settings must refuse it before spend
       # (the probe create refused with upstream's allow_driver_config sentence).
@@ -146,9 +147,10 @@ jobs:
           for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/17670) 2>/dev/null && break; sleep 1; done
           openshell status -o json
 
+      # Issue #704 part 3: its secret-bundle case reads the stand-in's log too (the stand-in outlives the restart).
       - name: Bind-mode conformance (the real bind bundle, the real runner)
         if: always()
-        run: PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs
+        run: STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs
 
       # Issue #707: the setup commands on the real host. `pi-dispatch up --yes` in a scratch deployment folder whose .env
       # blesses only the openshell venue: the gateway is already running and registered here, so the gate reads it and
