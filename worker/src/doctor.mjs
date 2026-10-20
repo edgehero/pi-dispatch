@@ -113,7 +113,15 @@ import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
-import { parseTriggers } from "./triggers.mjs";
+import { parseTriggersDocument } from "./triggers.mjs";
+import { secretBundleChecks } from "./doctor-bundles.mjs";
+
+/**
+ * How long `doctor --secrets` waits for one bundle resolver (issue #704): doctor's own 30 s capture bound, not the
+ * job path's tighter PI_SECRET_RESOLVE_TIMEOUT_MS. A job's read sits in front of a paid container and holds a slot;
+ * doctor's is an operator at a prompt asking whether the wiring works, and a slow manager is an answer, not a fault.
+ */
+const BUNDLE_DOCTOR_TIMEOUT_MS = 30_000;
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
 import { dayKey, monthKey, weekKey } from "./budget.mjs";
@@ -238,6 +246,11 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Issue #683: `--openshell`, the openshell venue's lines (doctor-openshell.mjs), strictly `=== true` as `live`.
 		// `openshellRun` is their spawn seam, for the tests.
 		openshell = false,
+		// Issue #704: `--secrets`, resolve each project secret bundle on this host and print its variable names and count,
+		// never a value (doctor-bundles.mjs). Strictly `=== true`, as `live`: it spawns every bundle resolver, which reads
+		// the operator's manager. `bundleSpawn` is its spawn seam, for the tests.
+		secrets = false,
+		bundleSpawn,
 		openshellRun,
 		liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync },
 		// Issue #341: who a job on this host would run as, decided from the same facts the worker reads. Seams because
@@ -398,7 +411,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -610,7 +623,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -1661,7 +1674,7 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const { secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
@@ -3636,6 +3649,59 @@ export async function collectChecks(shellVars, seams) {
 				ok: true,
 				label: `${localSecretFolders.length} local trigger(s) bind secrets and run IN the operator's own folder: ${localSecretFolders.join(", ")} -- a credential the agent writes to .env, .netrc or .git-credentials there lands in your real repository (and in a retained sandbox). Nothing scans for that: keep those folders out of anything you push`,
 			});
+		}
+	}
+
+	// Issue #704: the project secret bundles (doctor-bundles.mjs says what each line is for). Silent on a deployment that
+	// binds no bundle and declares no bundle profile. The overlay and the probe are read the way the run.secrets block
+	// above reads them, and `--secrets` (seams.secrets) resolves each bundle here, names only.
+	{
+		const bundleSettingsPath = settingsFilePath(env, home);
+		const bundleSettings = fileExists(bundleSettingsPath) ? readOverlay(bundleSettingsPath) : { overlay: {} };
+		const overlayBundles = bundleSettings.invalid ? {} : (bundleSettings.overlay?.secretBundles ?? {});
+		const anyBundle = Object.keys(triggerBundles ?? {}).length > 0 || (env.PI_SECRET_BUNDLES ?? "").trim() !== "" || Object.keys(overlayBundles).length > 0;
+		// Review round 2: the named residual. A worker that declares no bundle profile and has no triggers file reads "no
+		// bundles", so on a fleet a project another host's file binds would run here without its environment, with no
+		// skip reason. Doctor cannot see another host's file, so it warns where the shape allows it: a multi-host worker
+		// (PI_WORKER_NAME) with projects and no triggers file of its own.
+		if (!anyBundle && typeof env.PI_WORKER_NAME === "string" && env.PI_WORKER_NAME.trim() !== "" && !fileExists(triggersPath(env, cwd))) {
+			const fleetProjects = readProjectFacts(env, fileExists);
+			if (fleetProjects.parseError === null && fleetProjects.projects.length > 0) {
+				checks.push({ ok: true, warn: true, label: "this fleet worker has projects but no triggers file, so it applies no project secret bundle: a project another host's triggers.json binds would run here without its environment", fix: "keep the same triggers.json on every host (PI_TRIGGERS_FILE), or declare the bundle profiles here, which makes a missing file a retry instead" });
+			}
+		}
+		if (anyBundle) {
+			let realExecutablePath = null;
+			try {
+				({ realExecutable: realExecutablePath } = await import("./secrets.mjs"));
+			} catch {
+				realExecutablePath = null;
+			}
+			const projectFacts = readProjectFacts(env, fileExists);
+			let resolveBundle = null;
+			if (seams.secrets === true) {
+				try {
+					const { makeBundleResolver } = await import("./secret-bundles.mjs");
+					const { parseSecretBundleProfilesSafe } = await import("./doctor-bundles.mjs");
+					const resolver = makeBundleResolver({ envBundles: parseSecretBundleProfilesSafe(env.PI_SECRET_BUNDLES).bundles, roots: delimitedList(env.PI_SECRET_RESOLVER_ROOTS), forwardEnv: (env.PI_FORWARD_ENV ?? "").split(",").map((n) => n.trim()).filter((n) => n !== ""), hostEnv: spawnEnv, timeoutMs: Math.max(BUNDLE_DOCTOR_TIMEOUT_MS, Number(env.PI_SECRET_RESOLVE_TIMEOUT_MS) || 0), ...(seams.bundleSpawn ? { spawnFn: seams.bundleSpawn } : {}) });
+					resolveBundle = (binding) => resolver.resolve({ provider }, binding, { overlayBundles });
+				} catch {
+					checks.push({ ok: false, label: "--secrets could not load the bundle resolver (pi did not load; its own line above says why)" });
+				}
+			}
+			checks.push(
+				...(await secretBundleChecks({
+					bundles: triggerBundles ?? {},
+					triggersPresent: fileExists(triggersPath(env, cwd)),
+					projects: projectFacts.projects,
+					projectsError: projectFacts.parseError,
+					envRaw: env.PI_SECRET_BUNDLES,
+					overlayBundles,
+					roots: delimitedList(env.PI_SECRET_RESOLVER_ROOTS),
+					realExecutablePath,
+					resolveBundle,
+				})),
+			);
 		}
 	}
 
@@ -5884,7 +5950,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
+	const none = { secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -5895,7 +5961,8 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		// naming a FIFO hangs the command with no output and no timeout that can reach it.
 		if (!statSync(path).isFile()) return { ...none, parseError: `triggers file is not a regular file: ${path}`, path };
 		const text = readFileSync(path, "utf8");
-		const triggers = parseTriggers(text, path);
+		// The document parser, so the file's `secretBundles` (issue #704) is judged by the loaders' one rule too.
+		const { triggers, secretBundles } = parseTriggersDocument(text, path);
 		// The one-shot facts are counted from the RAW entries, not the parsed records, because the
 		// validator collapses a disarmed entry to a sentinel that carries neither `once` nor
 		// `disarmed` -- exactly so nothing can match it -- which also erases it from every parsed
@@ -5916,6 +5983,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		const fleet = Boolean(declaredWorkerName);
 		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
 		return {
+			secretBundles,
 			onceArmed: rawEntries.filter((t) => t?.on?.once === true && t.on.disarmed === undefined).length,
 			onceSpent: rawEntries.filter((t) => t?.on?.disarmed !== undefined).length,
 			requiring: triggers.filter((t) => t.run.packages === true).length,

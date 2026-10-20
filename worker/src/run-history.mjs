@@ -477,6 +477,39 @@ export const RECOVER_SKIPPED_REASONS = Object.freeze(["local", "no-run-id", "bas
 export const STEER_SKIPPED_REASONS = Object.freeze(["venue-copies", "no-exit-key", "no-transcript", "no-inbox"]);
 
 /**
+ * Why a job whose project has a secret bundle ran without it (issue #704), the record's `bundleSkipped`. A fixed enum:
+ * `manual` (a run nobody's trigger made: `pi-dispatch run`, `/dispatch run`, `dispatch_run`), `chained` (an `/outbox`
+ * child), `opted-out` (its trigger sets `run.secretBundle: false`), `fork` (a pull request whose head is in another
+ * repository, on a bundle without `forkReviews`), `head-unverified` (the forge answered 401, 403 or 404 when asked for
+ * the pull request's head, so whether it is a fork could not be known and the job is treated as one). The job still
+ * runs, without the bundle.
+ */
+export const BUNDLE_SKIPPED_REASONS = Object.freeze(["manual", "chained", "opted-out", "fork", "head-unverified"]);
+
+/** The most variable names the record's `bundle` lists: the bundle's own cap (triggers.mjs `SECRET_BUNDLE_VARS_MAX`). */
+const BUNDLE_NAMES_MAX = 64;
+const BUNDLE_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const BUNDLE_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * The record's `bundle` (issue #704): `{ id, variables, shadowed }`, the bundle's id and the variable NAMES the job
+ * received from it and the ones the trigger's own run.secrets shadowed, sorted, or null on any violation. REBUILT,
+ * never the source's object, and NAMES ONLY: each is held to the environment-name charset, so no value, no
+ * reference and no free text can reach a record by this key. The names are the operator's own, from their own
+ * manager, the class the record already holds in `project` and the run.secrets names doctor prints; a record says
+ * exactly what a run held, which is the answer to "a grant now changes outside review".
+ */
+export function recordedBundle(b) {
+	if (b === null || typeof b !== "object" || Array.isArray(b)) return null;
+	if (typeof b.id !== "string" || !BUNDLE_ID.test(b.id)) return null;
+	const names = (list) => (Array.isArray(list) && list.length <= BUNDLE_NAMES_MAX && list.every((n) => typeof n === "string" && BUNDLE_VAR_NAME.test(n)) ? [...new Set(list)].sort() : null);
+	const variables = names(b.variables);
+	const shadowed = names(b.shadowed ?? []);
+	if (variables === null || shadowed === null) return null;
+	return { id: b.id, variables, shadowed };
+}
+
+/**
  * The record's `steered` (issue #646): `{ delivered, late, withdrawn }`, three non-negative safe integers counted off the
  * run's inbox at its final outcome (inbox-settle.mjs), or null on any violation. Rebuilt, never the source's object.
  */
@@ -795,6 +828,9 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	// Issue #646: only for a job that armed `run.steer`, so no other record can carry either key.
 	const steered = data.steer === true ? recordedSteered(source.steered) : null;
 	const steerSkipped = data.steer === true && STEER_SKIPPED_REASONS.includes(source.steerSkipped) ? source.steerSkipped : null;
+	// Issue #704: only for a job whose project has a secret bundle, so no other record can carry either key.
+	const bundle = recordedBundle(source.bundle);
+	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
 	return {
 		jobId: job.id,
 		kind: kind ?? null,
@@ -1009,6 +1045,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		//   - `steerSkipped`: why an armed job ran without steering (STEER_SKIPPED_REASONS), a fixed enum.
 		...(steered !== null ? { steered } : {}),
 		...(steerSkipped !== null ? { steerSkipped } : {}),
+		// Project secret bundles (issue #704, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after the steering keys,
+		// CONDITIONAL like them, so a record of a job whose project has no bundle is byte-identical to before:
+		//   - `bundle`: `{ id, variables, shadowed }`, NAMES only, REBUILT (`recordedBundle`);
+		//   - `bundleSkipped`: why the job ran without its project's bundle (BUNDLE_SKIPPED_REASONS), a fixed enum.
+		...(bundle !== null ? { bundle } : {}),
+		...(bundleSkipped !== null ? { bundleSkipped } : {}),
 	};
 }
 

@@ -632,7 +632,7 @@ const configActions = [
   fileAction({
     name: "trigger-add",
     kind: "trigger-add",
-    build: (body, ctx) => ctx.a.plans.planTriggerAdd({ params: { ...obj(body, "trigger") }, paths: ctx.a.paths, env: ctx.a.env, fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planTriggerAdd({ params: { ...obj(body, "trigger") }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.triggersPath,
     write: writeTriggersOf,
   }),

@@ -4052,6 +4052,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>",
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>],
                "portfolio": <optional boolean; cron only, never beside command; reviewed-file-only> } },
     { "on": { "type": "label", "any": [...], "all": [...], "none": [...] },
@@ -4064,6 +4065,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "replicas": <optional int 2..3; webhook kinds only>,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>",
@@ -4075,6 +4077,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "replicas": <optional int 2..3; webhook kinds only>,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
     { "on": { "type": "pull_request",
               "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted"|"closed", ...],
@@ -4096,6 +4099,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "replicas": <optional int 2..3; webhook kinds only; never beside once: true>,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
+               "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
     { "on": { "type": "issue", "action": ["closed"|"close", ...],   // per forge; azure refused at load
               "number": <optional int >= 1>,
@@ -4103,8 +4107,36 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
               "disarmed": { "at": "<time>", "jobId": "<optional>" } },  // written by the worker
       "run": { "kind": "github", "flow": "<flow name>",
                "command": "<see cron — exactly one of flow/command>",
-               "<the label entry's optional run fields apply unchanged; replicas never beside once: true>": "" } } ] }
+               "<the label entry's optional run fields apply unchanged; replicas never beside once: true>": "" } } ],
+  "secretBundles": {                                  // optional; AMENDED 2026-10-19 (#704)
+    "<id, [A-Za-z0-9._-]+>": { "profile": "<a declared BUNDLE profile name>",
+                               "ref": "<opaque reference, run.secrets' rules>",
+                               "project": "<a projects.json id; at most one bundle per project>",
+                               "forkReviews": <optional boolean; true = a fork's pull request gets it too>,
+                               "endpoints": <optional { "ENV_NAME": { "host": "<host name>",
+                                             "auth": "bearer"|"basic"|"header:<Name>" } }, max 64> } } }
   ```
+- **`secretBundles` (top level, optional), and `run.secretBundle`** (AMENDED 2026-10-19, #704,
+  `DES-PROJECT-SECRET-BUNDLES`): a project's whole environment, granted once. Validated by `parseTriggers` STRICTLY
+  (an unknown field refuses, unlike a trigger entry's drop-unknown posture: a misspelt `forkreviews` would be a
+  narrowing the operator reads and the worker never applies), and a malformed block refuses the WHOLE file in every
+  loader, the posture of every malformed trigger. Refused at load: a non-object, an id outside `[A-Za-z0-9._-]+`, a
+  `profile` outside the same charset, a `ref` that is empty, whitespace-padded or starts with `-` (run.secrets'
+  rules), a `project` that is not a projects.json id (`[a-z0-9][a-z0-9-]{0,31}`), a second bundle naming one
+  project, a non-boolean `forkReviews`, and an `endpoints` entry whose name is not an env-var name or is reserved,
+  whose `host` is not a bare host name, whose `auth` is not `bearer`, `basic` or `header:<Name>`, or that carries an
+  unknown field. `endpoints` is shape-checked on every venue and USED only on the openshell venues (a later part of
+  #704); elsewhere a named variable goes in plain like the rest. `run.secretBundle` is accepted on every trigger
+  type, strictly boolean. What the loader cannot answer is refused per job: whether the profile is declared (env
+  `PI_SECRET_BUNDLES` or the overlay's `secretBundles`), the variables themselves (names, caps, reserved names), and
+  whether the job's trigger is still the entry it came from. **The WORKER reads both from its own copy of this
+  file at pickup** (`PI_TRIGGERS_FILE`, else `./triggers.json`, the file its one-shot and skew checks read); no
+  receiver carries either, so a receiver of any version can neither drop nor forge a binding. An older receiver
+  ignores the key. While the file does not read or validate, the worker answers from its last good read; a missing
+  file is the same failure on a host that declares a bundle profile, and reads as no bundles on one that declares
+  none. A spelling of `secretBundle` other than the exact one under `run` (and any spelling under `on`), and a spelling
+  of the top-level `secretBundles` other than the exact one, refuses the file: the near-miss sweep `run.backend` keeps. **No model-callable tool writes the field**: an entry `dispatch_trigger_add` writes always
+  carries `"secretBundle": false` (the operator removes it by hand), and no trigger tool call may carry it.
 - **Other top-level keys are kept by every writer.** AMENDED 2026-10-19 (#704). The loaders read `triggers` and
   ignore every other top-level key, and the file's two writers (the console's `writeTriggers` and the worker's one-shot
   `disarmTrigger`, both in `worker/src/triggers-file.mjs`) now write every other top-level key back unchanged, in its
@@ -5446,7 +5478,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-unsupported|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -5522,7 +5554,10 @@ validator rather than a second copy of it.
     "recoverSkipped"?: "local" | "no-run-id" | "base-unprimed" | "workspace-extensions",
     "checkpoints"?: { "written": <int>, "failed": <int>, "skipped": <int> },
     "steered"?: { "delivered": <int>, "late": <int>, "withdrawn": <int> },            // issue #646: CONDITIONAL keys, present only
-    "steerSkipped"?: "venue-copies" | "no-exit-key" | "no-transcript" | "no-inbox" }  // when the job's data says steer: true
+    "steerSkipped"?: "venue-copies" | "no-exit-key" | "no-transcript" | "no-inbox",   // when the job's data says steer: true
+    "bundle"?: { "id": "<bundle id>", "variables": ["<ENV_NAME>", ...],               // issue #704: CONDITIONAL keys, present
+                 "shadowed": ["<ENV_NAME>", ...] },                                   // only when the job's project has a
+    "bundleSkipped"?: "manual" | "chained" | "opted-out" | "fork" | "head-unverified" }  // secret bundle; NAMES only, never values
   ```
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
@@ -5734,7 +5769,25 @@ validator rather than a second copy of it.
   image does not declare `exitAuth`, so no delivery ack could be verified), `no-transcript` (no transcript file could
   be staged, or this worker has no tail or relay wired, so nothing could read the acks; a worker with no Valkey client
   is the usual cause; on a copying venue also the stderr transcript not armed, issue #686), `no-inbox` (the inbox directory could not be made). The job still runs, as it would without
-  `run.steer`. Integers and enum members only: no message text, id, sender or author reaches the record. The runner's
+  `run.steer`. Integers and enum members only: no message text, id, sender or author reaches the record.
+  **`bundle` and `bundleSkipped` (issue #704, AMENDED 2026-10-19, `DES-PROJECT-SECRET-BUNDLES`)** are TAIL position after
+  the steering keys and CONDITIONAL like them: present only for a job whose project has a secret bundle, so every other
+  record is byte-identical to before. `bundle` is `{ id, variables, shadowed }`: the bundle's id and the variable
+  NAMES the job received from it, and those a trigger's own `run.secrets` shadowed, each sorted and REBUILT by the
+  worker (`recordedBundle`), every name held to the environment-name charset and at most 64, the whole key absent on
+  any violation. Names, never a value or a reference: the operator's own names from their own manager, and the
+  answer to "a grant now changes outside review", since a run says exactly what it held. A refused bundle job
+  carries no `bundle` (its `reason` says why). `bundleSkipped`: why the job ran WITHOUT its project's bundle, a
+  closed enum: `manual` (no trigger made it: `pi-dispatch run <folder>`, `/dispatch run`, `dispatch_run`), `chained`
+  (an `/outbox` child), `opted-out` (its trigger sets `run.secretBundle: false`), `fork` (a pull request whose head is
+  in another repository, on a bundle without `forkReviews`), `head-unverified` (the forge answered 401, 403 or 404
+  to the head read, so the job is treated as a fork). **Five reasons** come with them, all outcome `policy`,
+  pre-spend and before the mint, `budgetReserved: false`: `secret-bundle-profile-unknown`,
+  `secret-bundle-profile-ambiguous` (both deferred instead, with no record, on a multi-host worker's shared queue),
+  `secret-bundle-resume`, `secret-bundle-trigger-changed`, `openshell-bundle-unsupported`. A bundle read's refusals
+  reuse `secret-unresolved` and `secret-name-reserved` and its infrastructure failure `secret-resolver-unreachable`; a
+  fork check whose forge read failed for any reason but 401, 403 or 404, and a triggers file never read in this
+  process, retry as `container-never-started`. The runner's
   own `steer` block off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`) is NOT recorded; its `deliveredIds`, from a
   verified line, only move inbox states before the close counts them. Since review round 1 (F2) the failed listener's
   terminal branch settles the inbox too, so a stall-kill the processor never saw still closes it. **Three reasons** come with
@@ -7405,6 +7458,7 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
     "provider":    "<optional, provider id>",        // pi provider id; the trigger's run.provider shape (issue #673)
     "maxTurns":    <optional, int >= 1>,             // runner turn budget
     "secretProfiles": <optional { "<name>": "<absolute path to a resolver script>" }>,  // REQ-TRIGGER-SECRETS; deliberately NOT in KNOWN_KEYS, so no model-callable tool can set it
+    "secretBundles": <optional { "<name>": { "path": "<absolute path>", "format": "dotenv"|"json" } }>,  // AMENDED 2026-10-19 (#704): bundle resolvers; operator-only like secretProfiles; unknown fields and a missing format refused
     "dailyCap":    <optional, int >= 1>,             // jobs admitted per day (mandatory window; env default 25)
     "weeklyCap":   <optional, int >= 1>,             // jobs admitted per ISO week; unset -> weekly window disabled
     "monthlyCap":  <optional, int >= 1>,             // jobs admitted per calendar month; unset -> monthly window disabled
@@ -7968,6 +8022,15 @@ folders. A job whose scope is a member belongs to that project, and its run reco
   before the confirm (delete or change the row first), and an edit cannot change an id. A row that ALREADY names a
   missing project does not block an unrelated write; that write returns `pending` (the worker applies it once its
   live scoped limits no longer name that id).
+- **Secret bundles** (AMENDED 2026-10-19, #704, `DES-PROJECT-SECRET-BUNDLES`): a project id is the selector of the
+  triggers file's `secretBundles`, so which jobs hold a bundle is which jobs are in its project. The admin's project
+  tools, model-callable behind a confirm, therefore refuse a write that changes the MEMBERSHIP of a project a bundle
+  names, a creation under a bundled id and a delete included ("secretBundles "<id>" (project <p>) in <triggers file>
+  names this project ... change the bundle in triggers.json first. Nothing was written"), judged on the triggers file
+  before the confirm and again by `writeProjects` after it (the triggers file is one of the write's re-checked inputs).
+  A rename leaves membership as it is and is not refused. A triggers file that cannot be read or does not validate
+  refuses any membership change, since it cannot rule a bundle out. A hand edit of this file is the operator's and
+  is not judged.
 - **Fleet** (issue #499 part C): the file is per host while the project rows' counters are shared, so hosts of one
   fleet must carry the same file (a folder mounted at different paths is listed under every path in it). Each host
   publishes `fpProjects` (`INT-HOST-REGISTRY-CONTRACT`), a digest of its live projects' ids and member hashes, and
@@ -10633,3 +10696,6 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-19 | Issue #686, part 2, review round 2. **`INT-STEER-INBOX-CONTRACT` AMENDED**: the exit-line close is logged once, `steer_stdin_closed {container, reason}` (`exit-verified` or `exit-unverified`), added to the log list, and a message accepted after it is never written and settles `late`. Everything else UNCHANGED, checked. |
 | 2026-10-19 | Issue #686, part 3: bind mode, the `openshell-bind` venue. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the `openshell-bind` half: the create's mode label and `--driver-config-json` binds (one per spec mount at its `mounts`-layout path, read-only where the spec says), the policy listing each target and naming the job user's ids, no upload and no download, the exec of `/entrypoint.sh` in `/workspace` with the `mounts` layout's env and no pi-landlock, the file inbox and the tailed host session file, the before-spend probe create onto the reserved `/sandbox`, and the per-mode listing; the `openshell`, `local` and `podman` halves UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `openshell-bind-mounts-disabled`, and a test now holds every `OPENSHELL_REFUSALS` reason to the enum. **Review round 1 (#714)**: the bind half gains the `pi.dispatch.job-dir` label, `selinux_label: "private"`, the delete-and-poll before the run returns and before a salvage, and the engine's `info` read for the job user. **Review round 2 (#714)**: the delete-and-poll moves before the final transcript read, bounded per listing; the `<job dir>.openshell-bind` marker; a lingering sandbox marks the result, its exit code unchanged. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `openshell-bind-sandbox-lingering` (a test holds every `OPENSHELL_REFUSALS` reason to it). |
 | 2026-10-19 | Issue #704, the standalone fixes found while researching project secret bundles. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a bullet saying both writers (`writeTriggers`, `disarmTrigger`) keep every other top-level key, in its order, with `triggers` replaced in place (first when absent); before, both rewrote the file as `{ "triggers": [...] }` and deleted any other key on a console edit or a disarm; a file holding only `triggers` is written byte-identically to before. **`INT-HOST-REGISTRY-CONTRACT` AMENDED, and CORRECTED**: the field list now carries `caps`, which the 2026-08-31 row added in prose and the list never showed; its secret half is now what the host would resolve (env profiles, plus overlay profiles whose resolver realpath is an executable inside `PI_SECRET_RESOLVER_ROOTS`, none while a name is declared in both), read per beat. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: `secretProfiles` is read, never written, by the new code. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no reason or field moves; a routed job's record is identical to an unrouted one's. **Code evidence**: worker/src/triggers-file.mjs -> serialize; worker/src/start.mjs -> the `caps` thunk; worker/src/secret-profiles.mjs -> servableSecretProfiles; tests worker/test/triggers-file.test.mjs, admin/test/crud.test.mjs, worker/test/secrets.test.mjs, worker/test/start-wiring.test.mjs. |
+| 2026-10-19 | Issue #704, part 2: project secret bundles (`DES-PROJECT-SECRET-BUNDLES`). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the top-level `secretBundles` block in the contract (`profile`, `ref`, `project`, optional `forkReviews` and `endpoints`), validated strictly with every load-time refusal listed, a malformed block refusing the whole file in every loader; `run.secretBundle` (optional boolean) on every trigger type; both read by the WORKER from its own copy of the file at pickup, never carried by a receiver. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the conditional tail keys `bundle: { id, variables, shadowed }` (names only, rebuilt, charset-checked) and `bundleSkipped` (`manual` \| `chained` \| `opted-out` \| `fork` \| `head-unverified`), and five new `reason` tokens (`secret-bundle-profile-unknown`, `secret-bundle-profile-ambiguous`, `secret-bundle-resume`, `secret-bundle-trigger-changed`, `openshell-bundle-unsupported`), checked against the nested `session.reason` enum for the collision rule. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: the overlay accepts `secretBundles` (`{ name: { path, format } }`, unknown fields and a missing format refused), operator-only (`OPERATOR_ONLY_KEYS`), outside `KNOWN_KEYS` like `secretProfiles`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: the bundle resolver speaks its three codes through the same `runResolver`. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: a chained child gets no bundle, recorded as `bundleSkipped: "chained"`. **`INT-PROJECTS-FILE-CONTRACT` AMENDED** (review round 1): the project tools refuse any change to the membership of a project a bundle names, a creation under a bundled id included, judged on the triggers file before the confirm and again by `writeProjects`; an unreadable or invalid triggers file refuses a membership change it cannot rule out. **Code evidence**: worker/src/triggers.mjs -> validateSecretBundles, validateSecretBundleFlag, parseTriggersDocument; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/run-history.mjs -> recordedBundle, BUNDLE_SKIPPED_REASONS; worker/src/runtime-settings.mjs -> the `secretBundles` case. |
+| 2026-10-19 | Issue #704, part 2, review round 1. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `bundleSkipped` gains `head-unverified`; `secret-bundles-unreadable` is dropped (never released) and `openshell-bundle-unsupported` joins the reason enum; the two profile reasons are deferred, with no record, on a multi-host worker's shared queue. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the worker answers from its last good read while the file does not validate, a missing file reads as no bundles, and an entry `dispatch_trigger_add` writes carries `"secretBundle": false`. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the "Secret bundles" bullet, the project tools' refusal of a membership change of a bundled project. **Code evidence**: admin/src/read-model.mjs -> planProjectsWrite, writeProjects; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/run-history.mjs -> BUNDLE_SKIPPED_REASONS. |
+| 2026-10-19 | Issue #704, part 2, review round 2. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the near-miss refusal of `run.secretBundle` and the top-level `secretBundles` spellings; a missing file on a host that declares a bundle profile is a failure, not "no bundles". **Code evidence**: worker/src/triggers.mjs -> isSecretBundleNearMiss, validateSecretBundleFlag, parseTriggersDocument; worker/src/triggers-file.mjs -> makeFindSecretBundle. |

@@ -308,6 +308,8 @@ function mcpFieldNearMiss(key) {
 
 /** The refusal for a call that carries a tool-proof field or a near miss of one (see `TOOL_PROOF_FIELDS`), or null. */
 export function wideningFieldRefusal(params, tool) {
+  const bundle = secretBundleFieldRefusal(params, tool);
+  if (bundle !== null) return bundle;
   const objects = [["", params], ["run.", params?.run], ["on.", params?.on]];
   for (const [label, source] of objects) {
     if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
@@ -317,6 +319,25 @@ export function wideningFieldRefusal(params, tool) {
       const what =
         meant === "run.models" ? "allowed-model list" : meant === "run.mcp" ? "list of MCP servers" : "per-job dollar cap";
       return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${what} is set by hand in the triggers file, never by a tool`;
+    }
+  }
+  return null;
+}
+
+/**
+ * `run.secretBundle` (issue #704) is tool-proof in BOTH directions. Its `false` is the only thing that keeps a trigger's
+ * jobs out of their project's secret bundle, so a model that could remove it, or set `true` beside a `false` someone
+ * wrote, would hand a model-written task every variable of the project. So no tool call may carry it at all, under any
+ * spelling the sweep below folds (case, `_`, `-`, a trailing `s`), at the top level or under `run`/`on`; the add tool
+ * writes `false` itself (`planTriggerAdd`), and the edit tool spreads the entry's own `run`, so an existing value
+ * survives every edit untouched.
+ */
+function secretBundleFieldRefusal(params, tool) {
+  for (const [label, source] of [["", params], ["run.", params?.run], ["on.", params?.on]]) {
+    if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const key of Object.keys(source)) {
+      if (!/^secretbundles?$/.test(key.toLowerCase().replace(/[_\-. ]/g, ""))) continue;
+      return `${tool} cannot set run.secretBundle (sent as ${label}${key}): whether a trigger's jobs hold their project's secret bundle is set by hand in the triggers file, never by a tool. A trigger a tool adds always carries "secretBundle": false`;
     }
   }
   return null;
@@ -339,7 +360,7 @@ export function triggerList(paths, fs = nodeFs) {
  * loader's own `validateModelRef`), then the entry from `buildTriggerEntry`. `env` is where PI_BACKENDS is read.
  * `{ plan: { entry, mutate, target, expect, title, message, summary } }` or `{ refusal }`.
  */
-export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_add", fs = nodeFs }) {
+export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_add", surface = "tool", fs = nodeFs }) {
   const widening = wideningFieldRefusal(params, tool);
   if (widening !== null) return { refusal: widening };
   if (params.backend !== undefined) {
@@ -355,8 +376,14 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
   // writes no `command`, so none is passed.
   const progress = progressRefusal(params, params.kind, "the new trigger", paths.triggersPath);
   if (progress !== null) return { refusal: progress };
-  const entry = buildTriggerEntry(params.kind, params);
-  if (!entry) return { refusal: `unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)` };
+  const built = buildTriggerEntry(params.kind, params);
+  if (!built) return { refusal: `unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)` };
+  // Issue #704: a trigger a MODEL-CALLABLE tool writes is kept out of its project's secret bundle. Its task text (cron)
+  // or its flow is the model's choice, and a bundle is the project's whole environment, granted to the triggers the
+  // operator reviewed; an operator confirm on one entry does not review what that entry's jobs would hold. The
+  // operator removes the flag by hand in triggers.json when they mean it (docs/secrets.md). `surface: "console"` is
+  // the operator-typed console form, a person writing the entry, which keeps the entry as built, as the dialogs do.
+  const entry = surface === "tool" ? { ...built, run: { ...built.run, secretBundle: false } } : built;
   return {
     plan: {
       entry,
@@ -1003,7 +1030,7 @@ function projectPlan({ paths, env, mutate, planned, title, message, extra, fs })
       mutate,
       target: paths.projectsFile,
       expect: planned.inputs,
-      writeArgs: { projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: planned.inputs, envelope: envelopeGuard(paths, env, fs) },
+      writeArgs: { projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, triggersPath: paths.triggersPath ?? null, mutate, expect: planned.inputs, envelope: envelopeGuard(paths, env, fs) },
       ...confirmOf(title, message),
     },
   };
@@ -1011,7 +1038,7 @@ function projectPlan({ paths, env, mutate, planned, title, message, extra, fs })
 
 /** `planProjectsWrite` for a projects change, judged before the confirm: the plan, or the refusal. */
 function projectsPlanned(paths, env, mutate, fs) {
-  const planned = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, envelope: envelopeGuard(paths, env, fs), fs });
+  const planned = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, triggersPath: paths.triggersPath ?? null, mutate, envelope: envelopeGuard(paths, env, fs), fs });
   return planned.invalid ? { refusal: `rejected: ${escapeInterpreted(planned.invalid)}` } : { planned };
 }
 

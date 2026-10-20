@@ -42,7 +42,8 @@ import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
-import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
+import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
+import { makeBundleResolver } from "./secret-bundles.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, SCOPED_LIMITS_VERSION, scopeClaimRows } from "./scoped-limits.mjs";
@@ -2772,6 +2773,29 @@ export async function startWorker(
 			// injected env they were not, which is the divergence this file already calls out by name for
 			// sessionsDir. One deployment value, one place, same rule as the profiles below it.
 			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, hostEnv: env, log }),
+			// Issue #704, project secret bundles. The binding is read from the SAME triggers file the one-shot, skew and
+			// portfolio checks read (`onceTriggersFile`), by the worker, never carried by the receiver, and answered from
+			// the last good read while the file is broken (triggers-file.mjs says why). The resolver is the run.secrets
+			// seam's sibling, with the same roots, timeout, forwarded names and host env.
+			// `bundlesDeclared`: whether this host declares any bundle profile, env or panel. On such a host a MISSING
+			// triggers file is a failure (last good read, else retry), never "no bundles" (triggers-file.mjs says why).
+			findSecretBundle: makeFindSecretBundle({
+				triggersPath: onceTriggersFile,
+				log,
+				bundlesDeclared: () => {
+					if (Object.keys(config.secretBundleProfiles ?? {}).length > 0) return true;
+					const settings = getSettings();
+					return !settings.invalid && Object.keys(settings.secretBundles ?? {}).length > 0;
+				},
+			}),
+			secretBundles: makeBundleResolver({ envBundles: config.secretBundleProfiles ?? {}, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, hostEnv: env, log }),
+			// The fork check's seam: the job's own forge host, the one prepare hands run.resume's fork gate. A forge with
+			// no host (none configured for that kind) answers nothing, which the processor reads as a fork: no bundle.
+			resolvePullRequestHead: async (job, token) => {
+				const host = forgeFor(job)?.host;
+				if (typeof host?.resolvePullRequestHead !== "function") return null;
+				return await host.resolvePullRequestHead(job, token);
+			},
 			// REQ-MCP-OPERATOR-SERVERS: the overlay's mcp.json read once per job that names a server, never at boot (an
 			// operator who re-runs import-pi must not have to restart the worker). The allowlist is the one the proxy
 			// mounts, this folder's egress-allowlist.conf on both venues (up.mjs, podman-stack.mjs), and the endpoints

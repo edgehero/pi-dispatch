@@ -801,7 +801,8 @@ test("the writer's own output can never trip the check", () => {
 // A document with keys BEFORE and AFTER the array, so "kept in order, `triggers` replaced in place" is
 // pinned against a real position rather than the trivial one.
 const sharedDoc = (triggers) => ({
-	secretBundles: { acme: { from: "op", items: { GH_TOKEN: "op://vault/item/field" } } },
+	// A VALID bundle since the strict validator landed (issue #704 PR 2): the writers re-validate the whole file.
+	secretBundles: { acme: { profile: "op", ref: "op://vault/item", project: "acme", endpoints: { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } } } },
 	triggers,
 	x: [1],
 });

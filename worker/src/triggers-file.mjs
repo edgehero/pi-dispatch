@@ -45,7 +45,7 @@
  */
 
 import nodeFs from "node:fs";
-import { parseTriggers } from "./triggers.mjs";
+import { parseTriggers, parseTriggersDocument } from "./triggers.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { expectRefusal } from "./file-expect.mjs";
 
@@ -615,6 +615,137 @@ export function makeCheckPortfolioFlag({ triggersPath, fs = nodeFs }) {
 		} catch {
 			return false;
 		}
+	};
+}
+
+/**
+ * The worker's read of the project secret bundles (issue #704, INT-TRIGGERS-FILE-CONTRACT `secretBundles`):
+ * `(job, { project }) => answer`, from the SAME file the one-shot, skew and portfolio checks read
+ * (`PI_TRIGGERS_FILE`, else `./triggers.json` in the worker's working directory).
+ *
+ * THE WORKER READS THE BINDING ITSELF, never the receiver, and that is the design rather than a shortcut. A
+ * bundle is not a field of a trigger: it applies to every job of a project, cron and forge alike, so there is no
+ * job field a receiver could carry it in. And a field the receiver carried would be droppable by a receiver
+ * older than it (the `AUTHORED_NARROWING_FIELDS` class), while a binding the worker reads cannot be dropped or
+ * forged by any receiver. `run.secretBundle: false` is read here for the same reason, from the entry the job came
+ * from, so the opt-out needs no receiver floor either.
+ *
+ * Answers, and why each is its own:
+ *   - `{ none: true }`: no bundle names this project, or the job has no project. Every other job of the deployment.
+ *   - `{ id, bundle, optedOut, entry }`: the project's bundle, and whether the job's trigger opted out.
+ *     `entry` is `"cron"`, `"forge"` or null (a job with no trigger: the processor skips it as `manual` anyway).
+ *   - `{ id, bundle, triggerChanged: true }`: the job came from a trigger, and no entry in the file is that
+ *     trigger any more, so whether it opted out is UNKNOWN. The processor refuses rather than guessing: granting
+ *     would widen a job whose trigger may have said `false`, and running without would be a job missing the
+ *     environment its project grants. The refusal says to re-run it, the skew check's posture.
+ *   - `{ unreadable }`: the file has never been read and validated in this process, and cannot be now, and the job
+ *     HAS a project. The processor retries such a job (never refuses it, never runs it without its bundle).
+ *
+ * THE LAST GOOD READ (issue #704 review round 1), the receiver's posture toward its own triggers. A file that cannot be
+ * read or does not validate NOW is answered from the last version that did, logged once per failure reason
+ * (`secret_bundles_last_good`), so an operator's broken save neither drops a bundle silently (a host that declares no
+ * bundle profile used to run a bundled job without it and say nothing) nor refuses jobs that can never be repaired by
+ * a retry (a host that declares one used to refuse every trigger job, project-less ones included, and a refused
+ * webhook delivery is gone). Only a process that has NEVER had a good read retries, and only a job with a project:
+ * which bundle it would hold is then unknowable, while a job in no project can hold none.
+ *
+ * A MISSING file (ENOENT) depends on the host (review round 2). On a host that declares a bundle profile
+ * (`bundlesDeclared()`), it is a failure like any other: such a host means to serve bundles, and a missing file there
+ * is a misconfiguration (a wrong `PI_TRIGGERS_FILE`, a file not copied to this host) that must not run a bundled
+ * project's jobs without their environment, so it falls back to the last good read, else retries. On a host that
+ * declares NONE it is a good read of no bundles, the overlay's rule for a missing settings file: such a host could
+ * serve no bundle anyway, and every host without a triggers file would otherwise retry every project job forever.
+ * The residual is named (DES-PROJECT-SECRET-BUNDLES): a host with neither a bundle profile nor the file runs a
+ * bundled project's job without the bundle, and doctor warns on a multi-host worker with projects and no file.
+ *
+ * Parsed with the shared validator (`parseTriggersDocument`), so a file the receiver would refuse is one this
+ * refuses too, and cached by mtime and size, `makeCheckWaitSkew`'s hot-path rule: this runs for every job.
+ *
+ * The identity of the job's entry is checked on the RAW entries, never the normalized ones, because the loader
+ * collapses a DISARMED one-shot to a sentinel and a retry of the very job that spent it would otherwise read as a
+ * changed trigger. A cron job is found by its id and must agree on folder, flow, command and task
+ * (`makeCheckPortfolioFlag`'s rule); a forge job by its matched index, agreeing on kind, `on.type`, command, and
+ * flow except on a comment trigger, whose phrase may name another flow (`<phrase> <flow>`) without changing
+ * which entry authorized it.
+ */
+export function makeFindSecretBundle({ triggersPath, fs = nodeFs, log = () => {}, bundlesDeclared = () => false }) {
+	let cache = null; // { mtimeMs, size } of the text `lastGood` came from
+	let lastGood = null; // { entries, bundles }
+	let failing = null; // the failure reason last logged, so a broken file logs once, not once per job
+	const fail = (why) => {
+		cache = null;
+		if (failing !== why) {
+			failing = why;
+			log("secret_bundles_last_good", { why, kept: lastGood !== null });
+		}
+		return lastGood ?? { unreadable: why };
+	};
+	const good = (doc, st) => {
+		lastGood = doc;
+		failing = null;
+		cache = st ? { mtimeMs: st.mtimeMs, size: st.size } : null;
+		return doc;
+	};
+	// No file: no bundles on a host that declares none, a failure on one that declares any (see above).
+	const missing = () => {
+		let declared = false;
+		try {
+			declared = bundlesDeclared() === true;
+		} catch {
+			declared = false;
+		}
+		return declared ? fail("absent") : good({ entries: [], bundles: {} }, null);
+	};
+	const read = () => {
+		if (typeof triggersPath !== "string" || triggersPath === "") return missing();
+		let st = null;
+		try {
+			st = fs.statSync?.(triggersPath) ?? null;
+		} catch (err) {
+			if (err?.code === "ENOENT") return missing();
+			return fail(typeof err?.code === "string" ? err.code : "read-error");
+		}
+		if (cache && lastGood && st && cache.mtimeMs === st.mtimeMs && cache.size === st.size) return lastGood;
+		let text;
+		try {
+			text = fs.readFileSync(triggersPath, "utf8");
+		} catch (err) {
+			if (err?.code === "ENOENT") return missing();
+			return fail(typeof err?.code === "string" ? err.code : "read-error");
+		}
+		try {
+			const { secretBundles } = parseTriggersDocument(text, triggersPath);
+			return good({ entries: JSON.parse(text).triggers, bundles: secretBundles }, st);
+		} catch {
+			return fail("invalid");
+		}
+	};
+
+	return function findSecretBundle(job, { project = null } = {}) {
+		if (typeof project !== "string" || project === "") return { none: true };
+		const doc = read();
+		if (doc.unreadable !== undefined) return doc;
+		const id = Object.keys(doc.bundles).find((key) => doc.bundles[key].project === project);
+		if (id === undefined) return { none: true };
+		const bundle = doc.bundles[id];
+		const trigger = job?.trigger;
+		if (trigger === undefined || trigger === null) return { id, bundle, optedOut: false, entry: null };
+		const entries = Array.isArray(doc.entries) ? doc.entries : [];
+		const matched = trigger.matched;
+		let raw;
+		let entry;
+		if (Number.isInteger(matched?.index)) {
+			entry = "forge";
+			const candidate = entries[matched.index];
+			const sameType = typeof matched.type !== "string" || candidate?.on?.type === matched.type;
+			const sameFlow = matched.type === "comment" || candidate?.run?.flow === job.flow;
+			if (candidate?.run?.kind === job.kind && sameType && sameFlow && candidate?.run?.command === job.command) raw = candidate;
+		} else if (typeof trigger.id === "string") {
+			entry = "cron";
+			raw = entries.find((t) => t?.on?.type === "cron" && t.on.id === trigger.id && ["folder", "flow", "command", "task"].every((k) => t.run?.[k] === job[k]));
+		}
+		if (raw === undefined) return { id, bundle, triggerChanged: true };
+		return { id, bundle, optedOut: raw.run?.secretBundle === false, entry };
 	};
 }
 

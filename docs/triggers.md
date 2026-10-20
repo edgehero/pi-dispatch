@@ -195,6 +195,11 @@ changes what code runs or what it costs.
   host before the container starts. The job gets values. It never gets your manager's credential
   ([`docs/secrets.md`](secrets.md))
 
+- `"secretBundle": false` keeps this trigger's jobs out of their project's secret bundle, the one environment
+  `secretBundles` at the top of this file grants a whole project
+  ([`docs/secrets.md`](secrets.md#recipe-d-one-environment-for-a-whole-project)). The worker reads it from its own
+  copy of this file, so no receiver has to carry it
+
 - `"waitFor": [{ "after": "2026-09-01T09:00:00Z" }, { "profile": "jira" }]` holds this trigger's job in
   the queue, unstarted and unbilled, until every condition clears. An instant costs nothing. A profile
   names one of your own check scripts. The worker runs it on the host and reads the exit code

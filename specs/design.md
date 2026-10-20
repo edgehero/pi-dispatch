@@ -1569,6 +1569,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - ***A vault name as the unit of grant*** — a trigger enumerating fields stays true as the vault grows;
     a trigger naming a vault silently widens every time someone adds an item to it. Naming a vault is how a
     capability review decays without anyone editing the file it lives in.
+    **REVERSED 2026-10-19 (#704), for project secret bundles only** (`DES-PROJECT-SECRET-BUNDLES`). A bundle IS a
+    named environment as the unit of grant, and the widening this bullet warns of is exactly what the operator
+    asked for: a variable added in the manager reaches the next job of the project with no edit to the file. The
+    trade, stated where the rejection was: the reviewed file no longer lists the fields a project's jobs hold, so
+    a capability review of `triggers.json` stops being true as the environment grows, and the review of WHAT a
+    project holds moves to whoever can write the manager (or the file the resolver reads). What keeps that
+    honest is after the fact, not before: every run record names the variables it received. For `run.secrets`
+    the rejection STANDS unchanged: a trigger that must hold a deploy key no other job holds still names it by
+    field, and its value shadows a bundle variable of the same name.
   - ***A model-callable `secretsProfile` picker*** — considered, and it cannot exist coherently: a profile
     that resolves nothing is refused at load and no tool can write `run.secrets`, so the picker could never
     produce a valid trigger. A control that looks like a grant and is only ever an error.
@@ -1581,6 +1590,151 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-TRIGGER-SECRETS`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-RUNNER-EXIT-CODE-PROTOCOL`, `DES-SERVICE-ENV-SETUP-SEAM`, `DES-PER-TRIGGER-JOB-IMAGE`,
   `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `CONST-TOKEN-SCOPED-PER-JOB`
+
+## DES-PROJECT-SECRET-BUNDLES
+
+- **Decision** (issue #704, 2026-10-19): a project's whole environment can be granted ONCE, in the triggers file's
+  top-level `secretBundles` (`{ "<id>": { profile, ref, project, forkReviews?, endpoints? } }`,
+  `INT-TRIGGERS-FILE-CONTRACT`). A bundle profile is a resolver the operator declares with its output format
+  (`PI_SECRET_BUNDLES=name:/abs/path:dotenv|json`, or the overlay's operator-only `secretBundles` inside
+  `PI_SECRET_RESOLVER_ROOTS`). The worker runs it ONCE per job start, host-side, with the bundle's `ref` as its one
+  argument, parses its stdout strictly by the declared format, and injects every variable as `run.secrets` values
+  are injected. The binding applies to every TRIGGER-MADE job whose pickup project (`projectOf`) is the bundle's
+  `project`, cron and forge alike.
+
+- **Why**: per-field, per-trigger grants (`DES-PER-TRIGGER-SECRET-PROFILE`) turn every new variable into an edit of
+  every trigger that needs it, and the resolver runs once per reference, so a managed vault's reads scale with the
+  reference count rather than the job count (1Password's service-account limits are counted in requests per hour).
+  A project environment is a different unit of grant from a deploy key, and this entry is the place the first is
+  accepted while the second keeps its own rule. Each choice, and the reason:
+  - **The binding lives in `triggers.json`**, the reviewed, operator-only file: no `dispatch_*` tool writes it,
+    exactly as for `run.secrets`.
+  - **The WORKER reads it, at pickup, from its own copy of the file** (`makeFindSecretBundle`, cached by mtime and
+    size, parsed by the loaders' validator). A bundle is not a field of any trigger, so there is no job field a
+    receiver could carry it in, and a carried field is one an older receiver drops. Read where it is used, it cannot
+    be dropped or forged by any receiver, so it needs no receiver floor. The per-trigger opt-out
+    (`run.secretBundle: false`) is read from the same file, from the entry the job came from (by matched index or
+    cron id, with `makeCheckPortfolioFlag`'s and `makeCheckWaitSkew`'s identity guards on the RAW entries, so a
+    disarmed one-shot's retry still finds its entry), for the same reason: it is a narrowing whose absence widens.
+  - **An invalid `secretBundles` refuses the whole file**, in `parseTriggers`, so every reader treats it as every
+    malformed trigger is treated: the receiver keeps its running set on a reload (and refuses to boot on one), the
+    writers refuse to write it and doctor fails. The worker keeps its LAST GOOD read, as the receiver keeps its running
+    triggers, and answers from it while the file is broken (`secret_bundles_last_good`, logged once per failure); only
+    a process that has never had a good read RETRIES a job with a project (never refuses it: a refused webhook
+    delivery is gone, and never runs it without: the silent no-op), and a job in no project holds none either way. A
+    missing file is a good read of no bundles, the settings overlay's rule. An older receiver ignores the key, which is
+    safe because it never acts on it.
+  - **Who gets one**: trigger-made jobs only, the portfolio gate's predicate (`job.trigger` present, no
+    `parentJobId`/`chainDepth`). A chained `/outbox` child and every manual run get none (`bundleSkipped:
+    "chained"`, `"manual"`); so does an opted-out trigger (`"opted-out"`). A job on a pull request whose head is in
+    another repository gets none unless the bundle sets `forkReviews: true` (`"fork"`), because
+    `CONST-TRIGGER-AUTHOR-GATE` admits a collaborator's review of a fork and such a job reads a stranger's text.
+    `run.resume` beside an applying bundle is refused (`secret-bundle-resume`), `run.secrets`' load-time rule moved
+    to job time because the file cannot know a job's project.
+  - **No model-callable tool widens a grant** (review round 1). A trigger `dispatch_trigger_add` writes always carries
+    `run.secretBundle: false` (its task or flow is the model's choice, and an operator confirm on one entry does not
+    review what that entry's jobs would hold); the operator removes it by a hand edit. No tool call may carry the field
+    at all, under any spelling the sweep folds, so `dispatch_trigger_edit` can neither remove nor set it. The
+    operator-typed console form and the dialogs, a person writing the entry, keep it as built. And the project tools
+    refuse any change to the MEMBERSHIP of a project a bundle names, a creation under a bundled id included
+    (`planProjectsWrite`, judged on the triggers file before the confirm and again by `writeProjects` after it, the
+    scoped-limits "names this project" rule's shape): which jobs hold a bundle is which jobs are in its project.
+  - **The order of the gates** (`CONST-BUDGET-BEFORE-TOKENS`): every FREE answer comes before the mint: the binding,
+    the skip reasons, `secret-bundle-trigger-changed`, `secret-bundle-resume`, the profile lookup
+    (`secret-bundle-profile-unknown` / `-ambiguous`) and `openshell-bundle-unsupported`, ahead of the `run.secrets`
+    resolver, the one earlier gate that spawns. The READ comes after that resolver and BEFORE the mint for every job
+    that needs no fork check, so its determinate refusals cost not even a token. Only a pull request without
+    `forkReviews` needs the job's own token for the fork check, so its check and read come right AFTER the mint, both
+    BEFORE branch protection, the clone, the token-cap read and every reserve. A refusal there leaves the minted token
+    to expire, the unprotected-branch refusal's existing path: it is scoped and short-lived
+    (`CONST-TOKEN-SCOPED-PER-JOB`) and nothing in this project revokes one.
+  - **A profile this host lacks, on a multi-host worker's SHARED queue, is DEFERRED**, not refused
+    (`SecretBundleProfileHold`, handed back for the never-fits gate's `NEVER_FITS_RECHECK_MS` without spending an
+    attempt), because another host may declare it and routing does not steer the job there. A single host, and a
+    host's own queue, refuse as before. Like the never-fits deferral it waits for as long as no host serves it, and
+    doctor fails on every host that takes the project's jobs without the profile. The lookup stays in the processor's
+    free gate, not beside the never-fits gate in `index.mjs`: it needs the per-job settings read (the overlay's bundle
+    profiles) and must follow the skip rules, so each recheck re-runs the free gates above it.
+  - **A missing triggers file** (review round 2) is a failure (last good read, else retry) on a host that declares a
+    bundle profile, and "no bundles" on a host that declares none, which could serve none anyway and would otherwise
+    retry every project job forever.
+  - **The fork check asks the forge** (`resolvePullRequestHead`, the seam run.resume's fork gate uses) and compares
+    the head repository to the job's for EQUALITY, case-insensitively on GitHub and Forgejo, whose names are (GitLab
+    and Azure compare ids and report the job's own name back). A determinate answer (401, 403, 404) runs the job
+    WITHOUT the bundle (`bundleSkipped: "head-unverified"`), since retrying cannot turn it into a yes; a network
+    fault, a 5xx or a timeout RETRIES, so a blip neither grants a bundle nor drops one.
+  - **Exit codes are `INT-RUNNER-EXIT-CODE-PROTOCOL`'s**, through `secrets.mjs`'s `runResolver`, imported rather than
+    copied (one spawn, one timeout, one abort, one kill escalation). 0 is the environment; 2, an empty, oversized
+    (over 256 KiB in all) or malformed output, a bad name or value, refuse as `secret-unresolved`; anything else
+    retries as `secret-resolver-unreachable`.
+  - **Strict parsing by a DECLARED format**: `dotenv` is `NAME=value` lines with blanks and `#` comments and nothing
+    else (no quotes, no `export`, no expansion, no continuation); `json` is one object of non-empty strings. At most
+    64 variables, each value at most `MAX_SECRET_BYTES`, no duplicate, no NUL, no empty value.
+  - **Reserved names refuse, naming the variable, never drop**: the static set (`RESERVED_ENV_NAMES`), the job's
+    provider credential variables and `PI_FORWARD_ENV`, asked of the whole bundle (`secret-name-reserved`), and, for
+    bundles only because their contents are unreviewed, the loader and steering names (`PATH`, `LD_*`, `DYLD_*`,
+    `NODE_OPTIONS`, `NODE_PATH`, Node's TLS trust variables, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, git's command and
+    `GIT_CONFIG*` hooks, `SSH_ASKPASS`, and the Python, Perl and Ruby start-up variables): each changes what code runs
+    in the job or how it trusts the network, and `NODE_OPTIONS` also carries the runner's child-meter preload. A
+    variable an operator added in their manager that silently never arrives is this project's worst outcome. The
+    name is in the log; the public comment names none, because a bundle's names are the manager's contents.
+  - **The merge**: a trigger's own `run.secrets` win a clash, and the shadowed names are recorded. The values join
+    the same `secrets` map, so redaction, the checkpoint's refusal to store a value and the container env all
+    treat them as they treat `run.secrets` values.
+  - **The record names, never values**: `bundle: { id, variables, shadowed }` or `bundleSkipped`
+    (`INT-RUN-HISTORY-FILE-CONTRACT`). Since a grant now changes outside review, each run says what it held.
+  - **Per venue**: on `local` and `podman` the values are `-e NAME=VALUE` in the host argv like every other
+    (`OQ-028`, widened by the count). On the openshell venues a job that would carry a bundle is REFUSED before spend
+    (`openshell-bundle-unsupported`, review round 1): the `run.secrets` provider path binds every key to every
+    endpoint, and to nothing without a network rule, while the record would say the job received it. The per-endpoint
+    provider keys `endpoints` declares are #704 part 3; the field is shape-validated now.
+  - **Residuals, stated**:
+    - an MCP server cannot reference a bundle variable (the MCP check runs before the read and knows only
+      `run.secrets` and `PI_FORWARD_ENV` names, so it refuses `mcp-secret-unmapped`; bind that one value in
+      `run.secrets` instead);
+    - redaction skips values shorter than `MIN_SECRET_LENGTH` (8), as for every secret;
+    - a host with NEITHER a bundle profile NOR a triggers file applies no bundle, so a bundled project's job that lands
+      there (a fleet's shared queue) runs without its environment and records no `bundleSkipped`. Keep the same
+      `triggers.json` on every host; doctor warns on a fleet worker (`PI_WORKER_NAME`) with projects and no file;
+    - the openshell refusal precedes the fork check, so a fork's pull request that would have run WITHOUT the bundle
+      is refused on an OpenShell venue until #704 part 3;
+    - a shared-queue job naming no backend is judged against THIS host's default venue, so a host whose default is an
+      OpenShell venue refuses a bundled job another host would have run;
+    - `dispatch_trigger_edit` can still change the flow, backend, provider and model of an operator-written trigger in
+      a bundled project, exactly as it can for a trigger with `run.secrets` today; freezing bundled triggers against
+      the tools would be a new rule, not this one;
+    - a save that replaces the file by rename can leave a moment with no file, which on a host that declares no
+      bundle profile reads as "no bundles" for a job picked up in that instant (on a declaring host it keeps the last
+      good read).
+  - **Doctor** lists each bundle by id, profile, format and project, fails on an undeclared or ambiguous profile, an
+    unknown project and bundle profiles with no triggers file, warns per bundle whose project holds a folder and on a
+    fleet worker with projects and no triggers file, states
+    the one-call-per-job-start rate figure, and `doctor --secrets` resolves each bundle and prints names and a count.
+
+- **Rejected**:
+  - ***`projects.json` as the home of the binding*** — its membership is edited by confirm-gated model tools
+    (`dispatch_project_edit`), so a secret grant there would be one a model could widen by adding a member, and it
+    is not the reviewed file. The project id is only the selector.
+  - ***Per-reference reads of a bundle*** (a list of references expanded per job) — it is today's shape with a new
+    name: the read count scales with the variables, and a manager's rate limit is what the issue measured.
+  - ***Dropping a reserved name*** and running with the rest — a variable that never arrives while the manager shows
+    it is the silent no-op this project refuses; a refusal naming it is fixed in seconds.
+  - ***Sniffing the output format*** — `A=1` and `{"A":"1"}` are each the other's malformed input, and a sniffer's
+    answer would change the day a value looks like the other format.
+  - ***The receiver carrying the binding on the job*** — a receiver older than the field drops it (the
+    `AUTHORED_NARROWING_FIELDS` class), and a bundle applies to cron jobs the receiver never sees.
+  - ***Routing a job to a host that declares the bundle profile*** (a `b:` capability) — the need depends on the
+    job's PROJECT, which only the worker resolves (`projectOf` over its `projects.json`); the receiver reads no
+    `projects.json`, and teaching it to would add a file, a watcher and a receiver floor for a placement the
+    worker's pre-spend `secret-bundle-profile-unknown` refusal already makes safe. Declare every bundle profile on
+    every host that takes the project's jobs, which doctor checks.
+  - ***Several bundles per project*** — two would need a merge rule, and every merge rule is a variable silently won
+    by one grant over another; one resolver can print both sources.
+
+- **Traces to**: `REQ-TRIGGER-SECRETS`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `DES-PER-TRIGGER-SECRET-PROFILE`, `DES-SERVICE-ENV-SETUP-SEAM`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `OQ-028`
 
 ## DES-SERVICE-ENV-SETUP-SEAM
 
@@ -10730,6 +10884,11 @@ a tunnel.
     refusals before spend (`outcome: "policy"`, before the token mint), because a doctor line read once is not a gate
     (`CONST-VENUE-EGRESS-LAYER`'s third and fourth conditions). Bind mode additionally needs the gateway's engine on
     the worker's own host (#686).
+  AMENDED 2026-10-19 (#704 part 2): a job that would carry its project's secret bundle (`DES-PROJECT-SECRET-BUNDLES`)
+  is refused on both OpenShell venues before spend, `openshell-bundle-unsupported` (`OPENSHELL_BUNDLE_UNSUPPORTED`, one
+  sentence shared with `OPENSHELL_REFUSALS`), because the per-job provider would bind every bundle variable to every
+  endpoint, or to nothing without a network rule, while the record said the job received it. #704 part 3 lifts it
+  with per-endpoint bundle keys. `run.secrets` keep today's path unchanged.
 - **Why**: the custody. On `local` and `podman` the provider key and the forge token sit in the job's environment,
   where the agent reads them, and in the host's argv (`OQ-028`); on this venue they never enter the agent's
   container, the provider is to be created with no value on any command line (#684, so `OQ-028` is not reproduced on
@@ -13003,3 +13162,6 @@ a tunnel.
 | 2026-10-19 | Issue #707, review round 1 of #715. **`DES-OPENSHELL-VENUE` CORRECTED**, its "Setup (#707)" bullet: the worker unit gets `Wants=openshell-gateway.service` and NO `After=` (the 0.1.4 deb's unit is `After=default.target`, so the `After=` this bullet first named is an ordering cycle in which systemd deletes the worker's start job, measured; recorded among the Rejected); doctor's unit ⚠ now asks for the `Wants=` and flags an `After=`; the start offer is made only where `systemctl --user cat` finds the unit or `brew services info openshell` answers, with NVIDIA's release formula named (homebrew-core's defines no service); the registration offer only where `openshell gateway list -o json` reads empty, the command a fix otherwise; every CLI read bounded; the plist PATH byte-identical without the venue and never carrying an XML-unsafe directory; the CLI named in doctor's HOME/XDG_CONFIG_HOME line only where the venue is blessed; the worker's, the clients' and doctor's Valkey owner rules refuse a root-held Valkey for an openshell venue on Podman, as `up` does. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` CORRECTED** to match (the gateway pulled in, not ordered after); the two openshell keys are compared between this shell and `.env` only where an openshell venue is blessed. |
 | 2026-10-19 | Issue #707, review round 2 of #715. **`DES-OPENSHELL-VENUE` AMENDED**, its "Setup (#707)" bullet: the worker's boot hands the Valkey judgement `openshellUsed` (it handed `localUsed` and `podmanUsed` alone, so the root refusal round 1 added for an openshell venue on Podman never reached the boot), and `VALKEY_CONTEXT_KEYS` and doctor's resolution carry `PI_OPENSHELL_ENGINE`, so the admin panel's and doctor's clients judge it as the worker does. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` CORRECTED**: `readStackKeys` reads the two openshell keys in a second pass and refuses an odd line of theirs only where an openshell venue is blessed, naming them, so a `local`-only deployment is not stopped by a key nothing there reads. Also, unchanged in decision: the gateway list read accepts an array or `{gateways: [...]}` and the openshell lane prints the real one to measure it; the post-start poll ends at a 30 s wall-clock deadline; the engine probe is bounded; a `systemctl --user cat` that reaches no user bus is said as that. |
 | 2026-10-19 | Issue #704, the standalone fixes found while researching project secret bundles. **`DES-PER-TRIGGER-SECRET-PROFILE` AMENDED**, a dated paragraph: the job's need (`jobNeeds` adds `s:default` for a job with `run.secrets` and no profile, by `secretsArmed`'s rule, routed only to a host that advertises every need; on a mixed fleet a job with a second need can lose its route to an older host serving `default` from its overlay, so the workers upgrade before the receiver and the console), the host's advertisement (`servableSecretProfiles`: env profiles as declared plus overlay profiles whose resolver realpath is an executable inside `PI_SECRET_RESOLVER_ROOTS`, probed with the resolver's own `realExecutable`, read by the per-beat `caps` thunk, none while a name is declared in both sources) and doctor (merges the overlay by the same rules, fails on every ambiguous name and on a named overlay profile the worker would not use, loads the probe through a dynamic import because `secrets.mjs` loads pi, and still checks ambiguity without it); every profile lookup is by own name (`Object.hasOwn`); the `caps` thunk gates the overlay on `resolveSettings`, the job path's rule; three rejected alternatives. **`DES-TRIGGERS-UNIFIED-FILE` UNCHANGED, checked**: still one file read by both services; its writers now keep every other top-level key (`INT-TRIGGERS-FILE-CONTRACT`). **`DES-ONE-SHOT-DISARM-IN-THE-FILE` UNCHANGED, checked**: the disarm still adds exactly one key inside one entry, and it no longer deletes keys beside the array. **`DES-HOST-REGISTRY` UNCHANGED, checked**: no new field, and the content rule (names, never paths) holds. **Code evidence**: worker/src/triggers-file.mjs -> serialize, writeTriggers, disarmTrigger; worker/src/capabilities.mjs -> jobNeeds; worker/src/secret-profiles.mjs -> servableSecretProfiles; worker/src/secrets.mjs -> realExecutable; worker/src/start.mjs -> the `caps` thunk; worker/src/doctor.mjs -> the secrets section. |
+| 2026-10-19 | Issue #704, part 2: project secret bundles on the worker, `local` and `podman`. **NEW `DES-PROJECT-SECRET-BUNDLES`**: a project's environment granted once in `triggers.json`'s `secretBundles`, read by one resolver call per job start (`PI_SECRET_BUNDLES`, `name:/abs/path:dotenv\|json`, the overlay's operator-only `secretBundles`), the worker reading the binding and the `run.secretBundle: false` opt-out from its own file, trigger-made jobs only (`bundleSkipped` `manual`, `chained`, `opted-out`, `fork`), the free refusals before the mint and the fork check and read after it, strict declared formats, reserved names refused by name, `run.secrets` winning a clash, names-only record; seven rejected alternatives (projects.json as home, per-reference reads, dropping reserved names, sniffing formats, receiver-carried binding, `b:` routing, several bundles per project). **`DES-PER-TRIGGER-SECRET-PROFILE` REVERSED in part**: its rejected bullet "A vault name as the unit of grant" is reversed for bundles only, with the trade stated (the reviewed file no longer lists the fields; the record does, after the fact); it stands for `run.secrets`. **`DES-SERVICE-ENV-SETUP-SEAM` UNCHANGED, checked**: it stays boot time only; a bundle profile is a name selecting among execs the operator declared, the same argument `DES-PER-TRIGGER-SECRET-PROFILE` makes, and a trigger file names no path. **`DES-TRIGGERS-UNIFIED-FILE` UNCHANGED, checked**: still one file read by both services, refused whole when any part is malformed. **Code evidence**: worker/src/secret-bundles.mjs -> parseBundleOutput, makeBundleResolver, mergeBundleSecrets; worker/src/secret-profiles.mjs -> parseSecretBundleProfiles; worker/src/triggers.mjs -> parseTriggersDocument, validateSecretBundles; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/processor.mjs -> the two bundle gates; worker/src/doctor-bundles.mjs -> secretBundleChecks. |
+| 2026-10-19 | Issue #704, part 2, review round 1. **`DES-PROJECT-SECRET-BUNDLES` AMENDED**: no model-callable tool widens a grant (an entry `dispatch_trigger_add` writes carries `secretBundle: false`, no trigger tool call may carry the field, and the project tools refuse a membership change of a bundled project); the worker keeps its last good triggers read and retries a project job only while it has never had one (replacing the `secret-bundles-unreadable` refusal, which lost deliveries and was silent on hosts with no profile); a profile this host lacks is deferred on a multi-host shared queue (`SecretBundleProfileHold`); the read moves before the mint for every job that needs no fork check; the fork comparison is case-insensitive on GitHub and Forgejo and a 401/403/404 head read is `head-unverified`, not a retry; bundle-only loader and steering names refuse; bundle ids are capped at 128; two residuals stated (MCP servers cannot reference a bundle variable; values under 8 characters are not redacted). **`DES-OPENSHELL-VENUE` AMENDED**: a bundled job is refused on both OpenShell venues before spend (`openshell-bundle-unsupported`) until #704 part 3. **Code evidence**: admin/src/write-plans.mjs -> secretBundleFieldRefusal, planTriggerAdd; admin/src/read-model.mjs -> planProjectsWrite; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/processor.mjs -> the bundle gates, SecretBundleProfileHold, headReadStatus; worker/src/index.mjs -> the hold's hand-back; worker/src/secret-bundles.mjs -> bundleLoaderName; worker/src/backends.mjs -> OPENSHELL_BUNDLE_UNSUPPORTED. |
+| 2026-10-19 | Issue #704, part 2, review round 2. **`DES-PROJECT-SECRET-BUNDLES` AMENDED**: a missing triggers file is a failure (last good read, else retry) on a host that declares a bundle profile and "no bundles" only on one that declares none; the free profile lookup stays in the processor, with the reason; `run.secretBundle`, the top-level `secretBundles` and their spellings get the loader's near-miss sweep; a rate-limited head read retries; the bundle-only reserved names gain the remaining TLS-trust, template, interpreter and `npm_config_*` names, held to `docs/secrets.md` by a test; five residuals named (no profile and no file on a fleet host, the openshell refusal before the fork check, a shared-queue job judged against this host's default venue, `dispatch_trigger_edit` on a bundled project's operator trigger, the save-by-rename instant). **Code evidence**: worker/src/triggers.mjs -> isSecretBundleNearMiss; worker/src/triggers-file.mjs -> makeFindSecretBundle; worker/src/processor.mjs -> headReadRateLimited; worker/src/secret-bundles.mjs -> BUNDLE_LOADER_NAMES; worker/src/doctor.mjs -> the fleet warning. |

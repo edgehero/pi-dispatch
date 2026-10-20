@@ -260,6 +260,8 @@ it after one run. How spending works, and how to re-arm a rule:
 A trigger can have its own image, vault secrets, MCP servers, removed tools, standing instructions, replicas, a
 resumed session or a wait condition. Each one is a file edit only, never a panel key or an AI tool, because each
 changes what code runs or what it costs: [`docs/triggers.md`](docs/triggers.md#optional-run-fields).
+A whole project can also get one environment from your secrets manager, granted once in `triggers.json` and read
+fresh at each job start ([`docs/secrets.md`](docs/secrets.md#recipe-d-one-environment-for-a-whole-project)).
 
 ### Quiet hours
 

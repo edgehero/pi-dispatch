@@ -84,8 +84,12 @@ export function secretsArmed(job) {
  *
  * An unrecognised exit code is INFRA on `decideRetry`'s own reasoning: a runner that exits with something
  * we do not recognise is one we cannot reason about, and retrying-then-alerting beats accepting it as done.
+ *
+ * EXPORTED for the bundle resolver (issue #704, `secret-bundles.mjs`), which is this same seam with a larger
+ * `maxBytes` (a whole environment, not one value): one spawn, one exit mapping, one timeout and one abort, so a
+ * fix to any of them reaches both rather than one of two copies.
  */
-function runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, signal }) {
+export function runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, signal, maxBytes = MAX_SECRET_BYTES }) {
 	return new Promise((resolve) => {
 		let child;
 		try {
@@ -149,7 +153,7 @@ function runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, signal }) {
 
 		child.stdout?.on("data", (d) => {
 			bytes += d.length;
-			if (bytes > MAX_SECRET_BYTES) {
+			if (bytes > maxBytes) {
 				overflowed = true;
 				stop("overflow");
 				return;

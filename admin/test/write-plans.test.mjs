@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { KNOWN_KEYS, writeScopedLimits, writeTriggers } from "../src/read-model.mjs";
+import { KNOWN_KEYS, writeProjects, writeScopedLimits, writeTriggers } from "../src/read-model.mjs";
 import * as plans from "../src/write-plans.mjs";
 
 // The pre-confirm half of every panel and tool write, moved out of index.ts so the operator console (a process that
@@ -182,7 +182,7 @@ test("run.progress and run.statusComment (issue #644): carried only as booleans,
     assert.equal(after[1].run.progress, true);
     const flowOnly = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {} }).plan;
     assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: flowOnly.mutate }).ok);
-    assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run, { kind: "github", flow: "review", progress: true, statusComment: true }, "an edit that sends neither keeps both");
+    assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run, { kind: "github", flow: "review", progress: true, statusComment: true, secretBundle: false }, "an edit that sends neither keeps both (and the add tool's bundle opt-out, #704)");
     writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv", flow: "f", task: "t" } }] }));
     assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "f", statusComment: true }, paths, env: {} }).refusal, /run\.statusComment is only available on a forge trigger/);
     assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", progress: true }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f -> f, progress: - -> true");
@@ -494,3 +494,51 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
   }
 });
 
+
+// Issue #704: a model-callable tool can never widen a project secret bundle's grant.
+test("a trigger the add tool writes opts out of its project's bundle, and no tool call can carry secretBundle (#704)", () => {
+  const { paths, restore } = deployment();
+  try {
+    const add = plans.planTriggerAdd({ params: { kind: "cron", id: "n", pattern: "0 3 * * *", folder: "/srv", flow: "f", task: "t" }, paths, env: {} }).plan;
+    assert.equal(add.entry.run.secretBundle, false, "the tool path writes the opt-out");
+    assert.match(add.message, /"secretBundle":false/, "and the confirm shows it");
+    const console = plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"] }, paths, env: {}, surface: "console" }).plan;
+    assert.equal("secretBundle" in console.entry.run, false, "the operator-typed console form keeps the entry as built");
+    for (const params of [{ kind: "label", flow: "fix", labels: ["go"], secretBundle: true }, { kind: "label", flow: "fix", labels: ["go"], run: { secret_bundle: true } }, { kind: "label", flow: "fix", labels: ["go"], SecretBundles: false }]) {
+      assert.match(plans.planTriggerAdd({ params, paths, env: {} }).refusal, /cannot set run\.secretBundle/, JSON.stringify(params));
+    }
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: add.mutate }).ok);
+    assert.match(plans.planTriggerEdit({ params: { index: 1, flow: "f", secretBundle: true }, paths, env: {} }).refusal, /cannot set run\.secretBundle/);
+    const edit = plans.planTriggerEdit({ params: { index: 1, flow: "g" }, paths, env: {} }).plan;
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate }).ok);
+    assert.equal(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run.secretBundle, false, "an edit keeps the opt-out");
+  } finally {
+    restore();
+  }
+});
+
+test("the project tools refuse to change a bundled project's members, before the confirm and again at the write (#704)", () => {
+  const { paths, restore } = deployment();
+  try {
+    writeFileSync(paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/shop"] }, { id: "tools", members: ["github:acme/tools"] }] }));
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [], secretBundles: { env: { profile: "p", ref: "r", project: "shop" } } }));
+    const why = /secretBundles "env" \(project shop\) .* names this project.*change the bundle in triggers\.json first\. Nothing was written/;
+    assert.match(plans.planProjectEdit({ params: { id: "shop", members: ["github:acme/shop", "github:acme/web"] }, paths, env: {} }).refusal, why);
+    assert.match(plans.planProjectDelete({ id: "shop", paths, env: {} }).refusal, why);
+    assert.ok(plans.planProjectEdit({ params: { id: "shop", name: "Shop" }, paths, env: {} }).plan, "a rename leaves membership, and the grant, as it is");
+    assert.ok(plans.planProjectEdit({ params: { id: "tools", members: ["github:acme/tools", "github:acme/web"] }, paths, env: {} }).plan, "an unbundled project is edited as before");
+    // A project created under a bundled id would start the bundle applying to its members.
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [], secretBundles: { env: { profile: "p", ref: "r", project: "ghost" } } }));
+    assert.match(plans.planProjectAdd({ params: { id: "ghost", members: ["github:acme/web"] }, paths, env: {} }).refusal, /project ghost/);
+    // After the confirm: the bundle appears between the plan and the write, and the write judges the file as it is then.
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [] }));
+    const plan = plans.planProjectEdit({ params: { id: "shop", members: ["github:acme/web"] }, paths, env: {} }).plan;
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [], secretBundles: { env: { profile: "p", ref: "r", project: "shop" } } }));
+    assert.ok(writeProjects({ ...plan.writeArgs, expect: null }).invalid, "writeProjects refuses after the confirm too");
+    // An unreadable/invalid triggers file cannot rule a bundle out.
+    writeFileSync(paths.triggersPath, "{ nope");
+    assert.match(plans.planProjectEdit({ params: { id: "tools", members: ["github:acme/x"] }, paths, env: {} }).refusal, /cannot be ruled out/);
+  } finally {
+    restore();
+  }
+});

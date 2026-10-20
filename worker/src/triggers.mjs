@@ -36,6 +36,8 @@ import { findDuplicateKey } from "./json-duplicates.mjs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
 import { validateModelRef } from "./model-ref.mjs";
 import { parseUsdMicros } from "./money.mjs";
+// The project id rule, from its import-free module, so a bundle's `project` is held to the one rule projects.json is.
+import { PROJECT_ID_RE } from "./project-id.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
@@ -246,7 +248,7 @@ const SECRETS_MAX = 16;
  * a name is `-e NAME=VALUE` in the docker argv, so `=` would split in the wrong place, and the leading
  * digit is excluded because a shell cannot expand `$1FOO` as that variable.
  */
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * The env variable names a trigger may NOT bind, and why each set is here.
@@ -273,6 +275,17 @@ function isNonEmptyString(value) {
  * `configError` (fail-loud) on any malformed entry. The `path` is for error messages only.
  */
 export function parseTriggers(text, path) {
+	return parseTriggersDocument(text, path).triggers;
+}
+
+/**
+ * `parseTriggers`, plus the file's other validated top-level key: `{ triggers, secretBundles }` (issue #704).
+ * `secretBundles` is `{}` when the file has none. One function rather than a second parser, so the worker's
+ * bundle read and every loader judge the file by ONE rule: a file whose `secretBundles` is malformed is
+ * refused WHOLE, by the receiver, the worker's cron loader, doctor and every writer alike, exactly as a
+ * malformed trigger is (see `validateSecretBundles` for why that is the right blast radius).
+ */
+export function parseTriggersDocument(text, path) {
 	let parsed;
 	try {
 		parsed = JSON.parse(text);
@@ -303,7 +316,18 @@ export function parseTriggers(text, path) {
 	}
 
 	const state = { seenCronIds: new Set(), commentCounts: {} };
-	return entries.map((entry, index) => normalizeTrigger(entry, index, path, state));
+	const triggers = entries.map((entry, index) => normalizeTrigger(entry, index, path, state));
+	// AFTER the triggers, so a file broken in both places names the trigger first, the message every operator
+	// of an older file already knows.
+	// A misspelt top-level block (`secret_bundles`, `SecretBundles`, `secretBundle`) would be ignored as an unknown key,
+	// granting nothing while the file reads as granting a project its environment: refused, the sweep's rule.
+	for (const key of Object.keys(parsed)) {
+		if (key !== "secretBundles" && isSecretBundleNearMiss(key)) {
+			throw configError(`triggers file: top-level ${JSON.stringify(key)} is not a key -- did you mean "secretBundles"? A bundle block the loader ignores grants nothing while the file reads as granting it, so a near miss is refused rather than dropped: ${path}`);
+		}
+	}
+	const secretBundles = validateSecretBundles(parsed.secretBundles, path);
+	return { triggers, secretBundles };
 }
 
 function normalizeTrigger(entry, index, path, state) {
@@ -443,6 +467,7 @@ function normalizeCron(on, run, index, path, state) {
 	validateDisarmed(on, `cron trigger "${id}"`, path, { onType: "cron" });
 	const secrets = validateSecrets(run, `cron trigger "${id}"`, path);
 	const secretsProfile = validateSecretsProfile(run, `cron trigger "${id}"`, path);
+	const secretBundle = validateSecretBundleFlag(on, run, `cron trigger "${id}"`, path);
 	const backend = validateBackend(on, run, `cron trigger "${id}"`, path, { localWorkspace: true });
 	// Called for its refusal only: the returned `run` below deliberately grows no `waitFor` key, exactly as
 	// it grows no `replicas` one, because a cron entry can never carry either (issue #230).
@@ -465,7 +490,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -1242,6 +1267,202 @@ function validateSecretsProfile(run, at, path) {
 }
 
 /**
+ * The most variables one bundle may carry (issue #704), and so the most `endpoints` it may name. Sixty-four, four
+ * times `SECRETS_MAX`, and the justification is the one that cap gives, re-measured for one call: a bundle is ONE
+ * resolver call with ONE timeout, so the count multiplies no slot time; what it multiplies is the host argv
+ * (`-e NAME=VALUE` per variable on local and podman, OQ-028) and the redaction set, and 64 x 64 KiB is bounded
+ * anyway by the 256 KiB total the resolver's output may have (`secret-bundles.mjs`). A project with more than 64
+ * variables in one environment is one whose blast radius this feature should not make one grant.
+ */
+export const SECRET_BUNDLE_VARS_MAX = 64;
+
+/** An endpoint's auth scheme: a bearer token, HTTP Basic, or a named header (`header:X-Api-Key`). */
+const BUNDLE_ENDPOINT_AUTH = /^(?:bearer|basic|header:[A-Za-z0-9-]{1,64})$/;
+
+/** A DNS host name, no scheme, no port, no path: the shape a policy endpoint names. */
+const BUNDLE_ENDPOINT_HOST = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+
+/** The fields a bundle may carry. Closed: an unknown field refuses the file (see below). */
+const BUNDLE_FIELDS = new Set(["profile", "ref", "project", "forkReviews", "endpoints"]);
+
+/**
+ * The file's top-level `secretBundles` (issue #704, INT-TRIGGERS-FILE-CONTRACT): a project's whole environment,
+ * granted ONCE. `{ "<id>": { profile, ref, project, forkReviews?, endpoints? } }`. Returns a frozen normalized
+ * copy, `{}` when absent. Throws `configError` on anything malformed.
+ *
+ * STRICT, unlike the trigger entries' drop-unknown posture, and on the condition rule's reasoning (an unknown key
+ * inside a condition is refused because it would be a term of a gate that does nothing while the job runs): a
+ * misspelt `forkreviews` or `project_id` here is a narrowing or a binding the operator reads as written and the
+ * worker never applies. This block grants credentials, so a field the code does not read is refused by name.
+ *
+ * REFUSING THE WHOLE FILE is the blast radius, deliberately, rather than dropping the one bad bundle. A dropped
+ * bundle is the silent no-op this project refuses: the project's jobs would run without their environment and
+ * the file would read as granting it. Refusing it is the posture every malformed trigger already has, and each
+ * reader's existing reaction to an invalid file is the right one here too: the receiver keeps its running set
+ * and logs `triggers_reload_invalid` on a reload (and refuses to boot on one), every writer refuses to write it,
+ * doctor fails, and the worker keeps answering from its last good read (and retries a project's jobs while it has
+ * never had one, triggers-file.mjs `makeFindSecretBundle`). An
+ * OLDER receiver ignores the key entirely, which is safe for the same reason it is safe for the worker to be the
+ * only reader that acts on it: the binding is read by the worker from its own file at pickup, never carried on
+ * the job, so a receiver of any version can neither drop nor forge it.
+ *
+ * What this cannot check, because it is pure and fs-free: whether `profile` is declared (PI_SECRET_BUNDLES and
+ * the overlay are host state, refused per job as `secret-bundle-profile-unknown`), whether `project` exists in
+ * projects.json (doctor fails on it), and whether an `endpoints` name is a variable the bundle actually holds
+ * (only knowable once it is read; the openshell venue refuses that at use).
+ */
+function validateSecretBundles(value, path) {
+	if (value === undefined) return Object.freeze({});
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		throw configError(`secretBundles must be an object mapping bundle ids to { profile, ref, project } (got ${JSON.stringify(value)}): ${path}`);
+	}
+	const out = {};
+	const projects = new Map();
+	for (const id of Object.keys(value)) {
+		const at = `secretBundles ${JSON.stringify(id)}`;
+		// The cron-id charset, for its reasons: the id is named in log lines and the run record, and `__proto__` and
+		// friends pass it, so every write below defines an own property rather than assigning one.
+		// 1 to 128 characters: the run record's `bundle.id` holds at most that (run-history.mjs `recordedBundle`), so a
+		// longer id would load here and then void the record's key on every run of the project.
+		if (!ID_CHARSET.test(id) || id.length > 128 || id === "__proto__") {
+			throw configError(`${at}: a bundle id is 1 to 128 letters, digits, dots, dashes and underscores: ${path}`);
+		}
+		const bundle = value[id];
+		if (bundle === null || typeof bundle !== "object" || Array.isArray(bundle)) {
+			throw configError(`${at}: must be an object { profile, ref, project }: ${path}`);
+		}
+		const unknown = Object.keys(bundle).find((k) => !BUNDLE_FIELDS.has(k));
+		if (unknown !== undefined) {
+			throw configError(`${at}: unknown field ${JSON.stringify(unknown)} (a bundle reads only ${[...BUNDLE_FIELDS].join(", ")}): a field the worker does not read is a grant or a narrowing that is not applied: ${path}`);
+		}
+		const { profile, ref, project } = bundle;
+		if (!isNonEmptyString(profile) || !ID_CHARSET.test(profile)) {
+			throw configError(`${at}: profile must name one of the bundle resolvers this deployment declares (PI_SECRET_BUNDLES or the panel), letters, digits, dot, dash and underscore: ${path}`);
+		}
+		// `ref` takes run.secrets' reference rules verbatim, for their reasons: it is the resolver's first argument.
+		if (!isNonEmptyString(ref)) {
+			throw configError(`${at}: ref must be a non-empty string reference for the bundle's resolver to read (got ${JSON.stringify(ref)}): ${path}`);
+		}
+		if (ref !== ref.trim()) {
+			throw configError(`${at}: ref must not have leading or trailing whitespace -- the file is the reviewed artifact and silently trimming it would make the file disagree with what the resolver is asked for: ${path}`);
+		}
+		if (ref.startsWith("-")) {
+			throw configError(`${at}: ref must not start with "-" -- it is passed as the resolver's first argument, where a leading dash parses as a flag: ${path}`);
+		}
+		if (typeof project !== "string" || !PROJECT_ID_RE.test(project)) {
+			throw configError(`${at}: project must be a projects.json id (lowercase letters, digits and "-", 1 to 32 characters): ${path}`);
+		}
+		// ONE bundle per project. Two would need a merge rule, and every merge rule is a variable silently won by one
+		// grant over another; the operator who wants two sources writes one resolver that prints both.
+		if (projects.has(project)) {
+			throw configError(`${at}: project ${JSON.stringify(project)} is already bound by bundle ${JSON.stringify(projects.get(project))} -- a project has at most one bundle: ${path}`);
+		}
+		projects.set(project, id);
+		if (bundle.forkReviews !== undefined && typeof bundle.forkReviews !== "boolean") {
+			throw configError(`${at}: forkReviews must be true or false when present -- a truthy string must not quietly hand a stranger's pull request every project secret: ${path}`);
+		}
+		const endpoints = validateBundleEndpoints(bundle.endpoints, at, path);
+		Object.defineProperty(out, id, {
+			value: Object.freeze({ profile, ref, project, ...(bundle.forkReviews !== undefined && { forkReviews: bundle.forkReviews }), ...(endpoints !== undefined && { endpoints }) }),
+			enumerable: true,
+		});
+	}
+	return Object.freeze(out);
+}
+
+/**
+ * A bundle's `endpoints` (issue #704): `{ NAME: { host, auth } }`, the variables the openshell venue may hold as a
+ * per-job provider key bound to that one host. Shape-checked here on every venue so the file is one file; USED
+ * only on openshell, and on every other venue a named variable goes in plain like the rest, which is what it
+ * would be without the field (OQ-028 says so).
+ */
+function validateBundleEndpoints(endpoints, at, path) {
+	if (endpoints === undefined) return undefined;
+	if (endpoints === null || typeof endpoints !== "object" || Array.isArray(endpoints)) {
+		throw configError(`${at}: endpoints must be an object mapping variable names to { host, auth }: ${path}`);
+	}
+	const names = Object.keys(endpoints);
+	if (names.length > SECRET_BUNDLE_VARS_MAX) {
+		throw configError(`${at}: endpoints names ${names.length} variables, over the ${SECRET_BUNDLE_VARS_MAX} a bundle may carry: ${path}`);
+	}
+	const out = {};
+	for (const name of names) {
+		if (!ENV_NAME.test(name) || name === "__proto__") {
+			throw configError(`${at}: endpoints key ${JSON.stringify(name)} is not an environment variable name (letters, digits and underscore, not starting with a digit): ${path}`);
+		}
+		if (RESERVED_ENV_NAMES.has(name)) {
+			throw configError(`${at}: endpoints key ${JSON.stringify(name)} is reserved: this deployment's own runtime reads or writes it, so a bundle can never carry it: ${path}`);
+		}
+		const entry = endpoints[name];
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+			throw configError(`${at}: endpoints.${name} must be an object { host, auth }: ${path}`);
+		}
+		const extra = Object.keys(entry).find((k) => k !== "host" && k !== "auth");
+		if (extra !== undefined) {
+			throw configError(`${at}: endpoints.${name} has an unknown field ${JSON.stringify(extra)} (only host and auth are read): ${path}`);
+		}
+		if (typeof entry.host !== "string" || !BUNDLE_ENDPOINT_HOST.test(entry.host)) {
+			throw configError(`${at}: endpoints.${name}.host must be a host name with no scheme, port or path (e.g. "api.example.com"): ${path}`);
+		}
+		if (typeof entry.auth !== "string" || !BUNDLE_ENDPOINT_AUTH.test(entry.auth)) {
+			throw configError(`${at}: endpoints.${name}.auth must be "bearer", "basic" or "header:<Name>": ${path}`);
+		}
+		Object.defineProperty(out, name, { value: Object.freeze({ host: entry.host.toLowerCase(), auth: entry.auth }), enumerable: true });
+	}
+	return Object.freeze(out);
+}
+
+/**
+ * Whether `key` is a spelling of `secretBundle` / `secretBundles` (issue #704 review round 2): every case and
+ * separator variant of either, singular or plural, and a non-ASCII key whose surviving letters are an in-order subset
+ * of either (a homoglyph), `validateBackend`'s rule. The caller skips the exact spelling where it is legal.
+ */
+export function isSecretBundleNearMiss(key) {
+	const normalized = String(key).replace(/[^a-z0-9]/gi, "").toLowerCase();
+	const targets = ["secretbundle", "secretbundles"];
+	if (/^[\x20-\x7E]*$/.test(String(key))) return targets.includes(normalized);
+	const isSubsequence = (needle, hay) => {
+		let i = 0;
+		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
+		return i === needle.length;
+	};
+	return normalized.length >= 6 && targets.some((t) => isSubsequence(normalized, t));
+}
+
+/**
+ * `run.secretBundle` (issue #704): `false` keeps this trigger's jobs out of their project's bundle. Strictly
+ * boolean, `run.github`'s rule: a truthy `"false"` must not quietly leave a job holding a project's every secret.
+ * `true` is the default and changes nothing. Returned when present, so an unflagged entry normalizes
+ * byte-identically.
+ *
+ * The WORKER reads this from its own triggers file at pickup (triggers-file.mjs `makeFindSecretBundle`), never
+ * from the job data, so no receiver carries it and a receiver older than this field cannot drop it: the
+ * opt-out is a narrowing whose absence would WIDEN the job, the `AUTHORED_NARROWING_FIELDS` class, and reading
+ * it where the binding is read closes that skew without a version floor.
+ */
+function validateSecretBundleFlag(on, run, at, path) {
+	// The near-miss sweep `run.backend` and `run.excludeTools` keep, for the sharpest version of their reason: the
+	// opt-out is a NARROWING, so a misspelt `secret_bundle: false` dropped as an unknown key would hand the trigger's
+	// jobs their project's whole environment while the file reads as keeping them out. On `run` the exact spelling is
+	// the field; on `on` every spelling is wrong, the exact one included.
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal && key === "secretBundle") continue;
+			if (!isSecretBundleNearMiss(key)) continue;
+			throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.secretBundle? An opt-out the loader drops gives the trigger's jobs their project's secret bundle while the file reads as keeping them out, so a near miss is refused rather than dropped: ${path}`);
+		}
+	}
+	if (run.secretBundle === undefined) return undefined;
+	if (typeof run.secretBundle !== "boolean") {
+		throw configError(`${at}: run.secretBundle must be true or false when present (false keeps this trigger's jobs out of their project's secret bundle): ${path}`);
+	}
+	return run.secretBundle;
+}
+
+/**
  * Would running a folder-bound job in this venue be impossible? Exported ONLY so it can be driven.
  *
  * The refusal it answers cannot be reached through `parseTriggers` today: the table holds one entry and it
@@ -1775,6 +1996,7 @@ function normalizeLabel(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const secretBundle = validateSecretBundleFlag(on, run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
@@ -1782,7 +2004,7 @@ function normalizeLabel(on, run, index, path) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1822,6 +2044,7 @@ function normalizeComment(on, run, index, path, state) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const secretBundle = validateSecretBundleFlag(on, run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
@@ -1829,7 +2052,7 @@ function normalizeComment(on, run, index, path, state) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1896,6 +2119,7 @@ function normalizeIssue(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const secretBundle = validateSecretBundleFlag(on, run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
@@ -1910,7 +2134,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -1988,6 +2212,7 @@ function normalizePullRequest(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const secretBundle = validateSecretBundleFlag(on, run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
@@ -2007,7 +2232,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
