@@ -2660,7 +2660,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   superseded `127.0.0.1` panel. Since issue #640 that property is the EXTENSION's, and it still holds for the
   extension: the operator console of `DES-OPERATOR-CONSOLE` is a second surface, a separate process
   (`pi-dispatch-console`) over the same read model and the same write funnels, and it is that process, never this
-  extension, that listens. Since issue #641 the overlay's snapshot is the read model's `createFleetReader`: the
+  extension, that listens. Since issue #708 `/dispatch console` asks that process whether it runs, with one client
+  request to this host's loopback or the console's socket ("The console command" below); a client connection is not a
+  listener, so "binds no network port" is UNCHANGED, checked. Since issue #641 the overlay's snapshot is the read model's `createFleetReader`: the
   client, the queue pool and the whole `fetchSnapshot` pass moved out of `dashboard.ts` into `read-model.mjs`
   unchanged (the panel's existing tests pass as they were, which is the proof), so the panel and the console read the
   deployment one way and there is no second read model. The snapshot it reads gained fields the panel does not have
@@ -3379,6 +3381,36 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     resolver), and `add` refuses an env-declared name and a resolver outside a visible `PI_SECRET_RESOLVER_ROOTS`
     before the confirm. The operator-typed doors for declaring a resolver are this command and the console's audited
     forms; no tool declares one (the "and nowhere else" this entry's code comments said was corrected).
+- **The console command (ADDED 2026-10-21, #708)**: `/dispatch console [runs|fleet|insights|config|parked|audit|<run
+  id>] [--link [name]] [--no-open]`, an operator-typed subcommand, never a tool, for the reason `secrets` and `chat`
+  are commands: a sign-in link is a login as an operator. Its output goes to `notify` alone, never through `send`, and
+  without `ctx.hasUI` it refuses before anything else. It prints the page's address by `consolePageLines`' rules (the
+  ones `insights` uses), says whether the console runs, and with `--link` mints a one-time code
+  (`DES-OPERATOR-CONSOLE`, "The panel as a second minter"). The model-callable tool list is UNCHANGED, checked.
+  - **Running or not**: ONE probe, the worker's `@edgehero/pi-dispatch/console-probe` (`worker/src/console-probe.mjs`),
+    which doctor's console lines use too, so the command and doctor cannot disagree about whether a console runs (the
+    admin's own copy this PR first carried was replaced by the import once #728 merged). It sends one `GET /healthz`
+    with `Host: 127.0.0.1` (which every console's Host check accepts) and a one-second ceiling to the configured
+    loopback address, to `127.0.0.1` or `::1` for an any-address bind of that family, or to the unix socket; port 0, a
+    non-loopback address and an unusable value contact nothing and answer "unknown". `200` is running; anything else
+    that was asked is not running, with its reason and the start advice, one constant `CONSOLE_START_ADVICE` that
+    names both `pi-dispatch-console serve` and `pi-dispatch service install --console`. This reverses `link.mjs`'s "no probe" line: the panel printed an address that did not
+    answer, which is the silent failure this project refuses.
+  - **The browser (AMENDED from "spawns no browser")**: the extension spawns one only for `/dispatch console`, and
+    only on a local session: no `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`; macOS, Windows, or a display
+    (`DISPLAY`, `WAYLAND_DISPLAY`); a TCP listener at a concrete address (never a socket, never `<this host>`); a
+    console the probe found running; and no `--no-open`. A link with a code is opened through a private redirect page,
+    never as the opener's argument (`DES-OPERATOR-CONSOLE`, "The panel as a second minter"). The URL is printed always, the contract `OQ-024` names. The
+    shared opener (`worker/src/open-browser.mjs`) runs `rundll32 url.dll,FileProtocolHandler <url>` on Windows rather
+    than `cmd /c start`, which cut a URL at its first `&`. It never binds a port and never starts `serve`: a console
+    started from inside pi would be an unmanaged child holding the single-instance lock. **Code evidence**:
+    admin/src/console-command.mjs -> consoleCommand, parseConsoleArgs, consolePagePath, probeLine;
+    worker/src/console-probe.mjs -> consoleProbeTarget, probeConsole; worker/src/open-browser.mjs -> openerArgv,
+    isLocalBrowserSession; admin/src/index.ts (the `console` case); admin/test/console-command.test.mjs,
+    worker/test/console-probe.test.mjs, worker/test/open-browser.test.mjs, admin/test/wiring.test.mjs.
+  - **The guard**: the login-codes directory joins `guardedFiles()` as a directory, as the tokens file is
+    (`DES-OPERATOR-CONSOLE` threat 4); `write-guard.mjs` judges a `dir: true` entry by containment. The residuals named
+    above (`bash`, a later extension) are unchanged.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-ISSUE-TEXT-IS-DATA`, `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `DES-AI-TRIGGER-FLOW-GATE`,
   `DES-JOB-OUTBOX-CHAINING`, `REQ-DURABLE-RUN-HISTORY`, `DES-OPERATOR-CONSOLE`, `REQ-OPERATOR-CONSOLE-SCREENS`,
@@ -11779,7 +11811,8 @@ a tunnel.
   2. **Every request needs a named token's session.** Apart from `GET /healthz` (no data, `ok`) and the login routes,
      a request needs a session, and a session comes only from a token in the tokens file
      (`INT-CONSOLE-TOKENS-FILE-CONTRACT`) or from a one-time login code that `pi-dispatch-console link --name <n>`
-     mints as the deployment's own account. Two roles: `operator` (reads and writes) and `viewer` (reads). Sessions
+     mints as the deployment's own account (since issue #708 the panel's `/dispatch console --link` mints one too, as
+     the same account: "The panel as a second minter" below). Two roles: `operator` (reads and writes) and `viewer` (reads). Sessions
      live in the process (a restart signs everyone out), the id is 32 random bytes, a new one at every login (no
      fixation), in the cookie `pdc_session` with `HttpOnly; SameSite=Strict; Path=/`. An idle limit
      (`PI_CONSOLE_IDLE_MINUTES`, default 60, 5 to 1440) and an absolute one (`PI_CONSOLE_MAX_HOURS`, default 12, 1
@@ -11889,7 +11922,22 @@ a tunnel.
      tool could add an entry to the tokens file. The tokens file joins the pi extension's `guardedFiles()` (labelled
      "console tokens file"), the guard that already holds the envelope, the money files and the deployment's `.env`.
      The session's `bash` can still write it; that residual is the one `DES-ADMIN-VIA-PI-EXTENSION` already names
-     for every guarded file, and the audit records each token the CLI adds.
+     for every guarded file, and the audit records each token the CLI adds. **The login codes are the same reach
+     (AMENDED 2026-10-21, #708).** A file `<sha256(code)>.json` holding `{name, expiresAt}` in `console-login-codes/`
+     beside the tokens file is a sign-in as the token it names, for whoever holds the code, and the session that wrote
+     the file chose the code. So the login-codes directory joins the guarded files, as the tokens file is, as a
+     DIRECTORY guard: a `write` or `edit` of the directory or of any path under it is refused, always judged by
+     identity: where the directory exists, an existing ancestor of the target is its `(dev, ino)` (a symlink into it, a
+     case variant, a `..` on the way); before the first code makes it, as `targetIdentity` judges a missing file, its
+     nearest existing ancestor's `(dev, ino)` plus the folded segments below (review round 1 found a folded-path
+     comparison bypassed through the macOS firmlink `/System/Volumes/Data/...`, a name that is no symlink; a bind mount
+     or `/.vol` is the same shape). `envNamedFiles` adds it beside each reading of `PI_CONSOLE_TOKENS_FILE`. No key
+     names the directory itself, so `GUARDED_ENV_KEYS` is unchanged. The residual is `bash` again, as for the tokens
+     file. In depth, the consumer no longer trusts a file because it sits in the drop: a code file with any group or
+     other permission bit, or another account's, is removed and refused (`mintLoginCode` writes 0600 as this
+     account), and so is one whose `expiresAt` lies further ahead than a code lives (60 seconds, plus 5 of clock
+     step). A drop another account can reach is refused with "remove the directory and make a new link", not
+     "chmod 700": tightening the mode would make good any code planted while it was open.
   5. **A job could read the tokens file.** A local trigger whose `run.folder` contains the deployment folder mounts
      it into the job. The file holds sha256 hashes only, and a 256-bit random token cannot be recovered from its
      hash, so a read grants no login; it does name people and their roles. Doctor fails a tokens file inside
@@ -12506,7 +12554,42 @@ a tunnel.
   modelRunRecord; admin/src/write-plans.mjs -> resolverRootsJudgement; admin/src/console/panels.mjs -> profileUse,
   openshellRows; admin/src/dashboard.ts -> profilesSection, renderRunDetail; admin/src/secrets-command.ts;
   admin/test/secret-profiles-view.test.mjs.
+- **The panel as a second minter, and the return path (ADDED 2026-10-21, #708).** `/dispatch console --link` (the
+  operator-typed subcommand of `DES-ADMIN-VIA-PI-EXTENSION`) mints a one-time login code in the panel's own process,
+  for an operator token of the tokens file, through the same `mintLoginCode` and drop as `pi-dispatch-console link`.
+  The trust is the same: the panel runs as the deployment account, which can read the tokens file and write the drop
+  anyway. Three rules differ from the CLI's, each the stricter one:
+  - **audit, then mint**: a `login-code` row with actor role `panel` and the token's name as target is appended
+    before the code exists, and no code is made when it cannot be appended (the panel's rule, `audited-write.mjs`); a
+    mint that is then refused gets a `failed` row under the same `ticket`. The CLI appends after its change, as every
+    CLI change does;
+  - **only where it counts**: only for a console the probe found running (a code lives 60 seconds; "unknown" is
+    refused too), only in pi's terminal UI (`ctx.mode` exactly `"tui"`, so a pi too old to say refuses: in RPC mode
+    `hasUI` is true but a notice goes to the RPC client, another program), and only into the drop beside the tokens file `guardedFiles()` guards (one helper,
+    `consoleTokensPathFor`, gives both), so a session whose deployment the panel cannot see never mints where its own
+    `write` could have planted a code;
+  - **opened without its code on a command line**: the browser is handed a 0600 redirect page in a fresh 0700
+    temporary directory (`open-link.mjs`, `location.replace` with the fragment kept, removed after 60 seconds or by
+    the next run), because an opener's argv is readable by every local account while it runs;
+  - **operators only**: a viewer token is refused with the CLI command to use instead, and with several operator
+    tokens the operator picks one in a select; none is refused with the `token add` hint;
+  - **notify only**: the link is shown in the operator's notice, never sent into model context, and the token is never
+    printed, read from or written to `.env`. With no pi UI the command refuses before it probes or mints.
+  The link may name the page to land on, after the code in the fragment: `login/code#<code>&next=/runs`. Since the
+  link's text is anyone's to write, `next` is held to this console's own pages twice: the server's `POST /login/code`
+  answers `next` judged by `returnPathOf` (at most 1024 characters, a single leading `/`, no `//`, no backslash, no
+  control byte, no fragment, this origin, a `PAGES` path, and a query that page's own `parsePageQuery` accepts; else
+  `/`), and the script navigates there only when that answer is also one of `PAGES`' paths, else `/`. `/login` and
+  `/login/code` are not pages, so a link cannot loop back into sign-in. The code stays in the fragment, so neither it
+  nor `next` reaches a request line, a log or a `Referer`; `next` travels in the JSON body of the sign-in POST, beside
+  the code. **Code evidence**: admin/src/console-command.mjs -> consoleCommand; admin/src/console/pages.mjs ->
+  returnPathOf; admin/src/console/server.mjs -> postLoginCode, startSession; admin/src/console/script.mjs (the
+  login-code branch, `ownPage`); admin/test/console-command.test.mjs, admin/test/console-login-next.test.mjs.
 - **Rejected**:
+  - **`next` in a query string, or a redirect from the server** (2026-10-21, #708). A query string reaches the request
+    log and the history (the reason the code is in the fragment), and a server-side redirect to a path the request
+    named is the open-redirect shape itself. The page path rides in the fragment and comes back as a JSON answer the
+    script checks again.
   - **Keeping a second, offline insights renderer beside the console** (2026-10-18). From #641 the console served
     the insights sections while the extension still wrote the static insights export, with its own page chrome, its
     own inline script, its own reload loop and its own window default (30d against the console's 7d); the two
@@ -12578,7 +12661,18 @@ a tunnel.
   and slow the operator's own login, and can hold the 64 connections open (each cut ten seconds after it stops short
   of a full request, so the holder must keep reconnecting) to keep the operator out while it lasts; on Docker Desktop
   a job on a TCP listen is such a user, and unix-socket mode removes both paths; and the operator session's `bash`
-  can write the tokens file (threat 4). Since #641: a token holder, a viewer included, who signs in eight times can
+  can write the tokens file and, since #708 says so, the login-code directory (threat 4). Since #708, named follow-ups
+  rather than defects: doctor's job-folder check judges the tokens file's path and not the login-code directory
+  beside it (a job folder that contains the file contains the directory too; one that IS the directory, or lies
+  inside it, is not caught); the Windows opener (`rundll32 url.dll,FileProtocolHandler`) is verified by reading, not
+  run; a pi attached through tmux from an SSH session can carry a local environment and open the browser on the
+  host's unattended desktop; a minted link stays visible in the operator's notice and, until it is spent, in the
+  browser's history (the console's script removes the fragment from history before it posts the code); `open` and
+  `xdg-open` hand the redirect page to the desktop's `.html` handler, which may not be the browser, and on Linux a snap
+  or Flatpak browser has a private `/tmp` and cannot read it (the notice says "handed to your browser", never
+  "opened", and names that case with a pointer to the printed link); and one-time links are not supported on a
+  Windows host, since Node reports group and other bits on every Windows file and directory and the drop is refused
+  there (a token is pasted instead). Since #641: a token holder, a viewer included, who signs in eight times can
   hold all 32 stream slots, so other people's pages still load and still sign in but are not live until those
   streams close or that token's sessions end (`token revoke` or `rotate`); and a page that is only watched signs
   out at the idle limit, by design (an open stream never extends a session). Since #642: an operator's answer is
@@ -13745,3 +13839,4 @@ a tunnel.
 | 2026-10-21 | Issue #712, part B: the Venues view. **`DES-OPERATOR-CONSOLE` AMENDED**, a dated bullet "The Venues view": the Fleet page's Venues panel, the hosts tables' Venues column and the panel's VENUES view (`v` from HOSTS) from one model, `venuesView`, over the snapshot's host rows (`hostRowOf` keeps `backends` and `caps`); every property as the table's question and word with `DECLARATION_TEXT`, `PROPERTY_LABEL`, `GATEWAY_TEXT`, each bolted by `admin/test/venues-view.test.mjs`; nothing resolved live (two rejected options: a live check from the console, a column on the HOSTS lines); the run lists' venue (a console column, a panel cell off `local` only, a `/dispatch runs` column only when a run is off `local`) and the `backend` runs filter (by `HOST_VENUE_NAME_RE`, a newer worker's venue included); a race fixed: a 7-day read that lands while VENUES is open is kept for HOSTS; the README images regenerated and the fixture's records naming `local`. **`DES-HOST-REGISTRY` UNCHANGED, checked**: the new field is display only, so deleting `host:*` still changes nothing (its contract is `INT-HOST-REGISTRY-CONTRACT`'s). **Code evidence**: worker/src/backends.mjs -> HOST_GATEWAY_WORDS, hostBackendsField, parseHostBackends; worker/src/backend-openshell.mjs -> openshellBootVersions (`gatewayLocal`); worker/src/start.mjs (the `backends` field); admin/src/read-model.mjs -> hostRowOf, venuesView, DECLARATION_TEXT, PROPERTY_LABEL, GATEWAY_TEXT; admin/src/console/panels.mjs -> fleetVenues, blessedText, runVenue; admin/src/dashboard.ts -> venuesPanelView, recordVenue; admin/src/render.mjs (VENUE); admin/src/run-filter.mjs (`backend`); launch/fixture-deployment.mjs. |
 | 2026-10-21 (#712) | Issue #712, part D: OpenShell run facts and the secret profiles view. **`DES-OPENSHELL-VENUE` AMENDED**, a dated "Recorded run facts" bullet: the stage sets `openshell` (`mode`, the written policy's endpoint hosts, the providers made, the keys they bind) once every provider exists, `collectRun` carries it on every result, the settle carries it to the record; the hosts are operator config (allowlist, model endpoints, the forge's fixed host; the repository is a push-rule path and is not read), held to the host-name charset and capped at 32 with the total counted; counts for credentials, never names; MCP connection state is named as not recorded (#684 records none). **`DES-OPERATOR-CONSOLE` AMENDED**, a dated bullet: the run page's "Sandbox policy", "Rule hosts" and "Secrets profile" rows and the panel's RUN_DETAIL lines; the configuration's "Secret profiles in use" table, the panel's secret profiles section and `/dispatch secrets list`'s profile lines (`secretProfilesView`: source, the roots by `resolverRootsStatus`, which the add's judgement now reads too, the triggers and projects, the last resolve as refused, resolved or not reached, and the hosts advertising `s:<name>` through `hostRowOf`'s new `caps`); no resolver path on the console or the panel; `dispatch_runs` returns the facts and the profile name rebuilt, never a resolver path. Review round 1: the add's `resolverRootsJudgement` stays strict on its fs seam (no realpath throws) and only the view tolerates a row it cannot judge (`unresolved`); `hostRowOf` carries `capsSeen` so a host that publishes no list is counted; a `BUNDLE_SHARED_REASONS` refusal on a bundled run is said as either read's; `dispatch_runs`' list carries only the host count; no facts for a stage thrown or stopped before the exec or a detached run, said so; the bundles view's lexical roots check named as a residual. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: no `serves` word or custody changes; the facts are recorded, not declared. **`DES-PROJECT-SECRET-BUNDLES` UNCHANGED, checked**: the bundle's own record keys and surfaces are as #704 left them; the openshell `placeholders` count includes the bundle hosts' keys beside `bundle.placeholders`, which it does not replace. **Code evidence**: worker/src/backend-openshell.mjs -> stageRun, collectRun; worker/src/index.mjs; worker/src/run-history.mjs -> recordedOpenshell, recordedSecretsProfile; worker/src/capabilities.mjs -> secretProfileNeeded (exported); admin/src/read-model.mjs -> secretProfilesView, resolverRootsStatus; admin/src/console/panels.mjs; admin/src/dashboard.ts; admin/src/secrets-command.ts. |
 | 2026-10-21 (#708) | Issue #708, PR 3: the console as a service. **`DES-OPERATOR-CONSOLE` AMENDED**: an "As a service" bullet: `pi-dispatch service install --console`, the third component (mutually exclusive with `--receiver`), one `execArgvFor` for every manager, `deploy/console.service` (mirrored, `TEMPLATE_PINS`, `RestartPreventExitStatus=2`) with the plist (`com.pi-dispatch.console`) and nssm sequence derived as the receiver's, the receiver's scope, no Quadlet and no cross-scope refusal; the entry from `import.meta.resolve` of the admin package's `dist/console.mjs` when it exists, else the real path of `pi-dispatch-console` on PATH, refused with the npm line otherwise; install refused without an operator token in the tokens file the service reads; doctor's `consoleServiceChecks` (the unit by `readUnitSeam`, the answer by `worker/src/console-probe.mjs`: one `GET /healthz` with `Host: 127.0.0.1` and 1 s to loopback or the socket only, ✗ installed and silent, ⚠ no unit and nothing running, no line on a listen `serve` refuses); the worker exports the probe (`./console-probe`) and the admin's `/dispatch console` (#708 part 1) imports it, so there is one rule; `up`'s Next line. Five rejected options recorded. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the cross-scope refusal stays the worker's; a second console is refused by `serve`'s lock. **`DES-SERVICE-ENV-SETUP-SEAM` AMENDED** (round 1 review): an argv word the old sh -c form cannot carry as itself goes after the script as a systemd word (`exec "$$@"`), the old form kept byte for byte otherwise, and `%` joins the Linux setup-path refusals. Round 1 review also: no `EnvironmentFile=` in the console unit and `PI_WRAPPER_NO_DOTENV=1` in its plist and nssm entry (both wrappers then source no `.env`), every ExecStart word quoted the systemd way and `%` doubled in WorkingDirectory, `&`, `<` and `>` escaped in every plist string (`readUnitSeam` undoes both, for the folder and the setup path), a control character or (Linux) surrounding whitespace in the folder refused and `--` on macOS accepted, Windows refusing `"%&\|<>^` in any command word (the worker's too), units with such paths rendering new bytes after a re-render, a PATH hit taken only when it is the admin package's own `dist/console.mjs`, `--drain` refused for the receiver and the console, the stale-lock case documented, `up` and install judging one tokens file and `up` silent where a console unit exists. **Code evidence**: worker/src/service.mjs -> COMPONENTS, COMPONENT_TEMPLATES, execArgvFor, systemdWord, composeEnvSetupExec, xmlText, renderRefusal, consoleTokensPathFor, installedConsoleUnitPath, resolveConsoleEntry, readConsoleOperators, refuseMissingConsole, refuseConsoleWithoutOperator, installedUnitPaths, renderPlist; worker/src/console-probe.mjs -> consoleProbeTarget, probeConsole; worker/src/doctor.mjs -> consoleServiceChecks, installedConsoleUnit; worker/src/up.mjs -> defaultConsoleOperators; deploy/console.service; deploy/worker-env-wrapper.sh and .cmd; .github/workflows/deploy-lint.yml. |
+| 2026-10-21 (#708) | Issue #708, the console command. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: a dated bullet "The console command" (the subcommand, never a tool; the probe, the worker's `console-probe.mjs` since #728, one `GET /healthz` with `Host: 127.0.0.1` and a one-second ceiling to the loopback address, the any-address bind's loopback, or the socket, and nothing else; "spawns no browser" becomes "spawns one only for `/dispatch console` on a local session"; the shared opener runs `rundll32 url.dll,FileProtocolHandler` on Windows, since `cmd /c start` cut a URL at `&`; the login-codes directory guard), and the Decision's "binds no network port" paragraph says why it is UNCHANGED, checked (a client connection is not a listener). The model-callable tool list is UNCHANGED, checked. `link.mjs`'s "no probe" comment is reversed with its reason: the panel printed an address that did not answer. **`DES-OPERATOR-CONSOLE` AMENDED**: clause 2 names the panel as a second minter; threat 4 is extended to the login codes (the login-codes directory joins the guarded files, as the tokens file is, as a directory guard; no key names it, so `GUARDED_ENV_KEYS` is unchanged; the residual is `bash`, as for the tokens file) and the Residuals say so; a dated bullet "The panel as a second minter, and the return path" (audit then mint, operators only, notify only; `next` judged by `returnPathOf` on the server and by `PAGES`' paths in the script); and a Rejected entry for `next` in a query string or a server-side redirect. Review round 1: the directory guard judges a missing directory by its nearest ancestor's identity (a firmlink alias passed the folded-path comparison); the consumer refuses and removes a code file with loose bits, another owner or a too-long life, and the loose-directory refusal says to remove the directory, not chmod it; `--link` mints only for a console found running, only in TUI mode, only into a guarded drop, with one `ticket` on both rows, and opens through a private redirect page; the residuals name the follow-ups (doctor's job-folder check, rundll32 by reading, tmux over SSH, the notice and the history). Final review: the notice says "handed to your browser" and names the snap/Flatpak private /tmp; the sweep removes only pages older than their 60 seconds; `--link` requires `ctx.mode` to be `"tui"` exactly; the residuals add the `.html` handler and Windows, where one-time links are not supported. After #728 merged: the command imports the worker's probe (`@edgehero/pi-dispatch/console-probe`), the one doctor uses, and the admin's own copy is gone, so there is one rule; `CONSOLE_START_ADVICE` names `pi-dispatch service install --console` beside `serve`. |

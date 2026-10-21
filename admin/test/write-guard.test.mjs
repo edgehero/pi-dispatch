@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import { existsSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { JUDGED_COMMAND_TOOLS, PATH_WRITE_TOOLS, PI_UNICODE_SPACES, UNJUDGED_TOOLS, envNamedFiles, makeWriteGuard, piResolveToCwd, readSmallRegularFile, targetIdentity } from "../src/write-guard.mjs";
+import { JUDGED_COMMAND_TOOLS, LOGIN_CODES_GUARD, PATH_WRITE_TOOLS, PI_UNICODE_SPACES, UNJUDGED_TOOLS, envNamedFiles, insideDirectory, makeWriteGuard, piResolveToCwd, readSmallRegularFile, targetIdentity } from "../src/write-guard.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 
 // The operator session's write guard (issue #504 part C, admin/src/write-guard.mjs). The guarded files are real files
@@ -241,7 +242,8 @@ test("envNamedFiles reads every way a loader might take a value: comment, quotes
   assert.deepEqual(at("\uFEFFexport PI_ENVELOPE_FILE=/dep/envelope.json\r\n"), ["/dep/envelope.json"], "a BOM, export and CRLF");
   assert.deepEqual(at("# PI_PROJECTS_FILE=/dep/projects.json\nPI_OTHER_FILE=/x"), [], "a comment and an unguarded key name nothing");
   // Issue #640: a console tokens file moved by the deployment's .env is guarded where it really is, not only at its default.
-  assert.deepEqual(at("PI_CONSOLE_TOKENS_FILE=/dep/secret/console-tokens.json"), ["/dep/secret/console-tokens.json"], "the console tokens file");
+  // Issue #708: and the login-codes directory beside it, wherever the key puts the file.
+  assert.deepEqual(at("PI_CONSOLE_TOKENS_FILE=/dep/secret/console-tokens.json"), ["/dep/secret/console-tokens.json", "/dep/secret/console-login-codes"], "the console tokens file and its login codes");
 });
 
 test("powershell: trailing dots and spaces (stripped by Windows) still name the file; .env.example still does not", () => {
@@ -249,4 +251,85 @@ test("powershell: trailing dots and spaces (stripped by Windows) still name the 
   const ps = (command) => guard({ type: "tool_call", toolName: "powershell", toolCallId: "p", input: { command } }, { cwd: "/" });
   for (const c of ["Set-Content projects.json. x", "Set-Content 'projects.json.' x", "Set-Content projects.json... x", "Set-Content 'projects.json . ' x"]) assert.equal(ps(c)?.block, true, c);
   for (const c of ["Copy-Item .env.example x", "Get-Content projects.json.bak"]) assert.equal(ps(c), undefined, c);
+});
+
+test("a directory guard (issue #708): every write or edit under console-login-codes is refused, links and case variants too", () => {
+  const dep = tempDir("pd-guard-codes-");
+  const codes = join(dep, "console-login-codes");
+  const guard = makeWriteGuard({ guardedFiles: () => [{ path: codes, ...LOGIN_CODES_GUARD }] });
+  const call = (path, toolName = "write") => guard({ type: "tool_call", toolName, toolCallId: "c", input: toolName === "edit" ? { path, edits: [{ oldText: "a", newText: "b" }] } : { path, content: "{}" } }, { cwd: dep });
+  const planted = `${"a".repeat(64)}.json`;
+  // Before any code was made the directory does not exist, and planting it (with the code file) is the attack.
+  assert.equal(call(join(codes, planted))?.block, true, "a code file in a directory that does not exist yet");
+  assert.match(call(join(codes, planted)).reason, /the console's one-time login codes/);
+  assert.equal(call("console-login-codes/x.json")?.block, true, "relative to the session folder");
+  assert.equal(call(codes)?.block, true, "the directory itself");
+  mkdirSync(codes, { mode: 0o700 });
+  writeFileSync(join(codes, planted), "{}\n");
+  assert.equal(call(join(codes, planted), "edit")?.block, true, "an edit of an existing code");
+  assert.equal(call(join(codes, `${"b".repeat(64)}.json`))?.block, true, "a new code beside it");
+  assert.equal(call(join(codes, "sub", "deeper.json"))?.block, true, "anything deeper");
+  assert.equal(call(join(dep, "x", "..", "console-login-codes", "y.json"))?.block, true, "a .. on the way");
+  symlinkSync(codes, join(dep, "via"));
+  assert.equal(call(join(dep, "via", "z.json"))?.block, true, "through a symlink to the directory");
+  if (existsSync(join(dep, "CONSOLE-LOGIN-CODES"))) assert.equal(call(join(dep, "CONSOLE-LOGIN-CODES", "z.json"))?.block, true, "a case variant on a case-insensitive volume");
+  assert.equal(call(join(dep, "console-login-codes-old", "z.json")), undefined, "a sibling whose name only starts the same passes");
+  assert.equal(call(join(dep, "notes.md")), undefined, "an unrelated file beside it passes");
+  const ps = guard({ type: "tool_call", toolName: "powershell", toolCallId: "p", input: { command: `Set-Content console-login-codes\\${planted} x` } }, { cwd: dep });
+  assert.equal(ps?.block, true, "a powershell command naming the directory");
+});
+
+test("insideDirectory: by identity where the directory exists, by folded path where it does not", () => {
+  const dep = tempDir("pd-guard-inside-");
+  const d = join(dep, "codes");
+  assert.equal(insideDirectory(join(d, "a.json"), d), true);
+  assert.equal(insideDirectory(join(dep, "codesX", "a.json"), d), false);
+  mkdirSync(d);
+  assert.equal(insideDirectory(join(d, "a.json"), d), true);
+  assert.equal(insideDirectory(d, d), true);
+  assert.equal(insideDirectory(join(dep, "a.json"), d), false);
+});
+
+/**
+ * A filesystem where `/alias` is `/real` without being a symlink (a firmlink, a bind mount): the same directories under
+ * two names. The guard must judge by identity, so a target under the alias is inside a directory named under the real
+ * path, also before that directory exists (review round 1 of issue #708).
+ */
+function aliasFs(existing) {
+  const ino = new Map(existing.map((p, i) => [p, BigInt(i + 2)]));
+  ino.set("/", 1n);
+  const canon = (p) => (p === "/alias" || p.startsWith("/alias/") ? `/real${p.slice("/alias".length)}` : p);
+  const node = (p) => {
+    const n = ino.get(canon(p));
+    if (n === undefined) {
+      const e = new Error(`ENOENT: ${p}`);
+      e.code = "ENOENT";
+      throw e;
+    }
+    return { dev: 7n, ino: n, isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false };
+  };
+  return { lstatSync: node, statSync: (p) => node(p), readlinkSync: () => { throw new Error("no links here"); } };
+}
+
+test("insideDirectory judges a missing directory by its ancestor's identity: an alias that is no symlink cannot pass", () => {
+  const fake = aliasFs(["/real", "/real/dep"]);
+  const codes = "/real/dep/console-login-codes";
+  assert.equal(insideDirectory("/alias/dep/console-login-codes/x.json", codes, { fs: fake }), true, "a code under the alias, the directory not made yet");
+  assert.equal(insideDirectory("/alias/dep/Console-Login-Codes/x.json", codes, { fs: fake }), true, "folded below the ancestor");
+  assert.equal(insideDirectory("/alias/dep/console-login-codes", codes, { fs: fake }), true, "the directory itself");
+  assert.equal(insideDirectory("/alias/dep/other/x.json", codes, { fs: fake }), false);
+  assert.equal(insideDirectory("/alias/dep/console-login-codes-old/x.json", codes, { fs: fake }), false);
+  assert.equal(insideDirectory("/alias/x.json", codes, { fs: fake }), false);
+  const made = aliasFs(["/real", "/real/dep", "/real/dep/console-login-codes"]);
+  assert.equal(insideDirectory("/alias/dep/console-login-codes/x.json", codes, { fs: made }), true, "and once it exists");
+});
+
+test("darwin: a write through the /System/Volumes/Data firmlink into a missing console-login-codes is blocked", { skip: process.platform !== "darwin" ? "macOS firmlinks only" : false }, () => {
+  const dep = tempDir("pd-guard-firm-");
+  const codes = join(dep, "console-login-codes");
+  const alias = `/System/Volumes/Data${fs.realpathSync(dep)}`;
+  if (!existsSync(alias)) return; // a volume layout without the Data firmlink
+  const guard = makeWriteGuard({ guardedFiles: () => [{ path: codes, ...LOGIN_CODES_GUARD }] });
+  const r = guard({ type: "tool_call", toolName: "write", toolCallId: "c", input: { path: join(alias, "console-login-codes", `${"a".repeat(64)}.json`), content: "{}" } }, { cwd: dep });
+  assert.equal(r?.block, true);
 });

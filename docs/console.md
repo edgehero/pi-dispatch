@@ -151,7 +151,46 @@ It prints a link like `http://127.0.0.1:4790/login/code#<code>`. Open it within 
 the path and the part after `#`, and use your tunnel's host and port). The code is not your token: it signs in `rob`
 once and is then gone, and it sits after the `#`, which your browser never sends to a server, so it does not land in
 a request log or a `Referer`. A small script on the page posts it. The codes are files in `console-login-codes/`
-beside the tokens file, a folder only the deployment's account can open.
+beside the tokens file, a folder only the deployment's account can open. If that folder is ever open to other
+accounts, the console refuses it: remove the folder (what it holds cannot be trusted) and make a new link, which
+creates it again.
+
+### From pi: `/dispatch console`
+
+In pi, `/dispatch console` does the same in one step, without a second terminal:
+
+```text
+/dispatch console [runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-open]
+```
+
+- **The address.** It prints the page's URL by the same rules as `/dispatch insights`: the loopback URL, the `ssh -L`
+  line for a unix socket, `<this host>` for a bind on every address, and a sentence for port 0 or a value that does
+  not parse. A run id opens `/run?id=<id>`; no page opens the overview.
+- **Running or not.** It asks the console once, `GET /healthz` with a one second limit, at this host's loopback
+  address or the socket and nowhere else (the same check doctor makes), and says `running`, `not running` (with why,
+  and how to start it or keep it running as a service), or that it cannot tell and why (port 0, a non loopback
+  address).
+- **`--link`** makes a one-time sign-in link, like `pi-dispatch-console link`, for an operator token: the one there
+  is, the one you name (`--link rob`; the page goes before `--link`), or the one you pick when there are several. It
+  is shown only to you, in pi's notice: never in the conversation, never a tool. Its row is written to the audit log
+  (actor role `panel`) before the code is made, so no code exists that the log does not hold. None is made unless the
+  console answers as running, and none in pi's RPC mode (where the notice goes to another program) or where the panel
+  cannot see the deployment's tokens file (start pi in the deployment folder, or run `/dispatch setup`). The link
+  names the page too, after the code: `.../login/code#<code>&next=/runs`, and after signing in you land there. The
+  console only ever lands you on one of its own pages; anything else lands on the overview.
+- **The browser** opens by itself on a local session: not over SSH (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`),
+  and on Linux only with a display (`DISPLAY` or `WAYLAND_DISPLAY`), for a TCP address (a socket needs your tunnel
+  first). `--no-open` keeps it closed. The URL is printed every time. A sign-in link is handed to the browser through
+  a small private page in a temporary folder, so the code never sits on the opener's command line, where other
+  accounts on the host could read it. It still shows in pi's notice and, until it is used, in the browser's history.
+  The page is opened by your desktop's handler for `.html` files, usually the browser. A snap or Flatpak browser on
+  Linux has a private `/tmp` and shows the page as not found; the notice says so, so open the printed link instead.
+
+One-time links do not work on a Windows host: Windows reports every folder as open to other accounts, so the console
+refuses the `console-login-codes/` folder there. Paste the token instead.
+
+It never starts the console: run `pi-dispatch-console serve` for that, or keep it running with `pi-dispatch service
+install --console` ([above](#keep-it-running-as-a-service)).
 
 ## Sessions
 
@@ -176,8 +215,9 @@ Signing in sets one cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`). A ses
 
 Each of these except `token list` appends a row to the audit log, with the actor `shell`.
 
-Your pi session's `write` and `edit` tools cannot touch the tokens file: the `/dispatch` extension guards it, so a
-prompt injection in the operator's session cannot mint itself a login that way. Its `bash` tool can, which is the
+Your pi session's `write` and `edit` tools cannot touch the tokens file or anything in `console-login-codes/`: the
+`/dispatch` extension guards both (a code file planted there would be a sign-in), so a prompt injection in the
+operator's session cannot mint itself a login that way. Its `bash` tool can, which is the
 same residual every guarded file has ([`SECURITY.md`](../SECURITY.md)).
 
 ## Writes

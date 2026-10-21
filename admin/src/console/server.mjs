@@ -115,7 +115,7 @@ function actorOf(ctx) {
  * Create a session for `entry` (a tokens-file entry), with a NEW id whatever cookie came in (no fixation: a cookie
  * planted before sign-in is destroyed, never promoted), and audit it. An audit failure refuses the sign-in.
  */
-function startSession(ctx, entry, file, action) {
+function startSession(ctx, entry, file, action, extra = {}) {
   const { deps, res } = ctx;
   const presented = deps.cookies.readSessionCookie(ctx.req.headers.cookie);
   if (presented) deps.sessions.destroy(presented);
@@ -128,7 +128,7 @@ function startSession(ctx, entry, file, action) {
     return sendError(res, 500, "the audit log could not be written, so the sign-in was refused; check the console's log directory");
   }
   const cookie = deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000) });
-  return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role }, { "set-cookie": cookie });
+  return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, ...extra }, { "set-cookie": cookie });
 }
 
 /** The tokens file, or null after answering 503 (a file that went bad while the console ran: nobody signs in). */
@@ -174,7 +174,10 @@ async function postLoginCode(ctx) {
   if (!file) return;
   const entry = file.tokens.find((t) => t.name === consumed.name);
   if (!entry) return refuse("the link named a token that no longer exists");
-  return startSession(ctx, entry, file, "login-code");
+  // Issue #708: the page the link returns to, judged HERE by the page parser (`returnPathOf`), so the browser is only
+  // ever sent to one of this console's own pages; anything else, or nothing, lands on the overview. The script checks
+  // the answer's shape again before it navigates.
+  return startSession(ctx, entry, file, "login-code", { next: realPages.returnPathOf(ctx.body.next) ?? "/" });
 }
 
 async function postLogout(ctx) {

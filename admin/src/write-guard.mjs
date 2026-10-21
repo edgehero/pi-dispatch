@@ -10,7 +10,10 @@
  *     settings overlay, at the paths this deployment resolves (the pointer and the deployment `.env` included), and
  *     the two files that NAME those paths, the deployment's `.env` and the pointer itself (index.ts `guardedFiles`,
  *     whose set only grows within a session);
- *   - not the overlay's `models.json`: the admin never writes it, so no tool's confirm is bypassed there.
+ *   - not the overlay's `models.json`: the admin never writes it, so no tool's confirm is bypassed there;
+ *   - and, as a DIRECTORY (`dir: true`: every path under it, and the directory itself), the console's one-time login
+ *     codes beside the tokens file (issue #708). The login-codes directory joins the guarded files, as the tokens file
+ *     is: a code file planted there signs a browser in as the token it names.
  *
  * WHICH TOOLS is pinned against pi 0.99.1's `dist/core/tools/` (`allToolNames`) by a test: `write` and `edit` name
  * their target in `input.path`; `powershell` runs a command, judged by its text (a command that names a guarded file's
@@ -44,6 +47,8 @@ import * as nodeFs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, parse as parsePath, resolve as nodeResolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { loginCodesDir } from "./console/login-codes.mjs";
 
 /** pi's Unicode-space class (`dist/utils/paths.js` `UNICODE_SPACES`), copied; a test pins the literal. */
 export const PI_UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -172,9 +177,13 @@ export const GUARDED_ENV_KEYS = Object.freeze({
   PI_SCOPED_LIMITS_FILE: { label: "scoped-limits.json (PI_SCOPED_LIMITS_FILE)", tool: "dispatch_limit_add, _edit or _delete" },
   PI_TRIGGERS_FILE: { label: "triggers.json (PI_TRIGGERS_FILE)", tool: "dispatch_trigger_add, _edit or _delete" },
   PI_SETTINGS_FILE: { label: "the settings overlay (PI_SETTINGS_FILE)", tool: "dispatch_set" },
-  // Issue #640: a token here is a login to the operator console, which no tool of this session may mint.
+  // Issue #640: a token here is a login to the operator console, which no tool of this session may mint. Issue #708:
+  // the key also places the login-codes directory beside the file (`LOGIN_CODES_GUARD`), which no key names itself.
   PI_CONSOLE_TOKENS_FILE: { label: "the console tokens file (PI_CONSOLE_TOKENS_FILE)", tool: "`pi-dispatch-console token add`, `revoke` or `rotate`, in the operator's own shell" },
 });
+
+/** The login-codes directory's guard entry (issue #708), minus its path: guarded as a directory. */
+export const LOGIN_CODES_GUARD = Object.freeze({ label: "the console's one-time login codes (console-login-codes, beside the tokens file)", tool: "`/dispatch console --link` or `pi-dispatch-console link`, typed by the operator", dir: true });
 
 /** The most of a `.env` the guard reads: far above any real one, far below what a device or a huge file could cost. */
 export const ENV_READ_MAX = 1024 * 1024;
@@ -246,10 +255,88 @@ export function envNamedFiles(dir, { fs = nodeFs, home = homedir() } = {}) {
         readings.add(w.replace(/^(?:~(?=\/|$)|\$HOME(?![A-Za-z0-9_])|\$\{HOME\})/, home));
       }
     }
-    for (const r of readings) if (r.trim() !== "") out.push({ path: nodeResolve(dir, r), ...GUARDED_ENV_KEYS[key] });
+    for (const r of readings) {
+      if (r.trim() === "") continue;
+      out.push({ path: nodeResolve(dir, r), ...GUARDED_ENV_KEYS[key] });
+      if (key === "PI_CONSOLE_TOKENS_FILE") out.push({ path: loginCodesDir(nodeResolve(dir, r)), ...LOGIN_CODES_GUARD });
+    }
   }
   if (out.length > 0) out.push({ path: join(dir, ".env"), label: "the deployment's .env, which names these files (PI_*_FILE)", tool: "the operator's own editor" });
   return out;
+}
+
+/**
+ * Where an absolute path really is, as the kernel would resolve it on create: `{ real, rest }`, `real` the nearest
+ * existing ancestor reached with every symlink on the way followed (so it holds no link), `rest` the folded segments
+ * below it that do not exist yet. THROWS on anything but "not there", like `targetIdentity`, whose walk this is.
+ */
+export function realLocation(absPath, { fs = nodeFs } = {}) {
+  let path = nodeResolve(absPath);
+  for (let hops = 0; hops <= MAX_LINKS; hops++) {
+    const { root } = parsePath(path);
+    const segments = path.slice(root.length).split(sep).filter(Boolean);
+    let cur = root;
+    let restarted = false;
+    for (let i = 0; i < segments.length; i++) {
+      const next = join(cur, segments[i]);
+      let st;
+      try {
+        st = fs.lstatSync(next);
+      } catch (err) {
+        if (!GONE.has(err?.code)) throw err;
+        return { real: cur, rest: segments.slice(i).map(fold) };
+      }
+      if (st.isSymbolicLink()) {
+        path = nodeResolve(dirname(next), fs.readlinkSync(next), ...segments.slice(i + 1));
+        restarted = true;
+        break;
+      }
+      cur = next;
+    }
+    if (!restarted) return { real: cur, rest: [] };
+  }
+  const loop = new Error("too many symbolic links on the way");
+  loop.code = "ELOOP";
+  throw loop;
+}
+
+/**
+ * Is `absPath` the directory `dirPath` or anything under it (issue #708, a `dir: true` guard)? Decided by identity,
+ * never by a path string, since a volume can be reached by more than one path that is not a symlink (a macOS firmlink
+ * such as `/System/Volumes/Data/...`, a bind mount, `/.vol/<dev>/<ino>`):
+ *   - where the directory exists: some existing ancestor of the target's real location (`realLocation`, links
+ *     followed) is the directory's `(dev, ino)`, so a symlink into it, a case variant of its name and `..` all land
+ *     on it;
+ *   - where it does not exist yet (no code was ever made), as `targetIdentity` judges a file that does not exist: the
+ *     directory is its nearest existing ancestor's `(dev, ino)` plus the folded segments below it, and the target is
+ *     inside when one of its existing ancestors IS that ancestor (by identity) and the folded path from there down to
+ *     the target begins with those segments. A string comparison here was bypassed through a firmlink alias (review
+ *     round 1): pi's `write` then made the directory and the code file under the alias.
+ * THROWS like `targetIdentity`.
+ */
+export function insideDirectory(absPath, dirPath, { fs = nodeFs } = {}) {
+  const target = realLocation(absPath, { fs });
+  let dirId = null;
+  try {
+    const st = fs.statSync(dirPath, { bigint: true });
+    if (st.isDirectory()) dirId = idOf(st);
+  } catch (err) {
+    if (!GONE.has(err?.code)) throw err;
+  }
+  let wantId = dirId;
+  let wantRest = [];
+  if (dirId === null) {
+    const where = realLocation(dirPath, { fs });
+    wantId = idOf(fs.statSync(where.real, { bigint: true }));
+    wantRest = where.rest;
+  }
+  for (let p = target.real; ; p = dirname(p)) {
+    if (idOf(fs.statSync(p, { bigint: true })) === wantId) {
+      const below = [...target.real.slice(p.length).split(sep).filter(Boolean).map(fold), ...target.rest];
+      if (wantRest.every((seg, i) => below[i] === seg)) return true;
+    }
+    if (dirname(p) === p) return false;
+  }
 }
 
 /** Two identities name one file: the same existing file, or the same not-yet-existing name under the same directory. */
@@ -290,6 +377,20 @@ export function makeWriteGuard({ guardedFiles, fs = nodeFs, home = homedir(), pl
       const abs = piResolveToCwd(raw, typeof ctx?.cwd === "string" && ctx.cwd !== "" ? ctx.cwd : processCwd(), { home, platform });
       const target = targetIdentity(abs, { fs });
       for (const g of guarded) {
+        if (g.dir === true) {
+          const dirAbs = nodeResolve(processCwd(), g.path);
+          let inside;
+          try {
+            inside = insideDirectory(abs, dirAbs, { fs });
+          } catch {
+            // As for a file below: judged by name, folded, when the identity cannot be read.
+            const f = fold(abs);
+            const d = fold(dirAbs);
+            inside = f === d || f.startsWith(`${d}${sep}`);
+          }
+          if (inside) return blocked(tool, g);
+          continue;
+        }
         let id;
         try {
           id = targetIdentity(nodeResolve(processCwd(), g.path), { fs });

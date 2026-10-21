@@ -4310,7 +4310,7 @@ export async function readRunsPage(redis, { logsDir, before = null, limit = 50, 
 }
 
 /** A job id this reader will look up: the shapes the worker mints (`gh-…`, `repeat:<id>:<ms>`, a uuid), bounded. */
-const RUN_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+export const RUN_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 
 /**
  * One run by its job id (issue #641): `{ record, source }` with `source` "local" or "mirror", `{ missing: true }`, or

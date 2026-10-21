@@ -983,3 +983,28 @@ test("leak canary: no log line, audit row or response body carries a token, a se
     }
   }
 });
+
+test("a one-time code's return path (issue #708): one of this console's own pages, judged by the page parser, else /", async () => {
+  const cases = [
+    [undefined, "/"],
+    ["/runs", "/runs"],
+    ["/run?id=gh-acme-1", "/run?id=gh-acme-1"],
+    ["/insights?range=7d", "/insights?range=7d"],
+    ["//evil.example/x", "/"],
+    ["https://evil.example/", "/"],
+    ["/\\evil.example", "/"],
+    ["/login", "/"],
+    ["/login/code", "/"],
+    ["/nope", "/"],
+    ["/runs?evil=1", "/"],
+    ["/run", "/"],
+    [7, "/"],
+  ];
+  for (const [i, [next, want]] of cases.entries()) {
+    const code = String.fromCharCode(97 + i).repeat(43);
+    const c = await start({ codes: [[code, "alice"]] });
+    const res = await c.post("/login/code", next === undefined ? { code } : { code, next });
+    assert.equal(res.status, 200, String(next));
+    assert.equal(JSON.parse(res.text).next, want, String(next));
+  }
+});

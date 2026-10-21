@@ -109,6 +109,8 @@ import {
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
 import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
 import { consolePageLines } from "./console/link.mjs";
+import { CONSOLE_PAGE_WORDS, consoleCommand } from "./console-command.mjs";
+import { loginCodesDir } from "./console/login-codes.mjs";
 import { WHATIF_MODEL_RE } from "./console/whatif.mjs";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 // The insights payload's assembly, pi-free so the operator console shares it (issue #641). The allocation seams live
@@ -288,7 +290,7 @@ const CHANNEL = "pi-dispatch-admin";
 
 
 const USAGE =
-  "usage: /dispatch <status|pause|resume|run|runs|logs|chat|budget|insights|triggers|settings|set|unset|priorities|setup|secrets>";
+  "usage: /dispatch <status|pause|resume|run|runs|logs|chat|budget|insights|console|triggers|settings|set|unset|priorities|setup|secrets>";
 
 const KNOWN_SUBCOMMANDS = [
   "status",
@@ -300,6 +302,7 @@ const KNOWN_SUBCOMMANDS = [
   "chat",
   "budget",
   "insights",
+  "console",
   "triggers",
   "settings",
   "set",
@@ -352,7 +355,7 @@ export default function admin(pi: ExtensionAPI): void {
     // which is exactly the drift the USAGE/KNOWN_SUBCOMMANDS pin exists to catch -- keep all three
     // in step.
     description:
-      "pi-dispatch admin: status|pause|resume|run|runs|logs|chat|budget|insights|triggers|settings|set|unset|priorities|setup",
+      "pi-dispatch admin: status|pause|resume|run|runs|logs|chat|budget|insights|console|triggers|settings|set|unset|priorities|setup",
     getArgumentCompletions: (prefix) => completeArguments(prefix),
     handler: async (args, ctx) => dispatch(pi, args, ctx),
   });
@@ -376,7 +379,7 @@ export default function admin(pi: ExtensionAPI): void {
  * same reason and for the worker's: a service restart reads them.
  */
 function registerWriteGuard(pi: ExtensionAPI): void {
-  const seen = new Map<string, { path: string; label: string; tool: string }>();
+  const seen = new Map<string, Guarded>();
   const remember = () => {
     for (const g of guardedFiles()) if (!seen.has(g.path)) seen.set(g.path, g);
     return [...seen.values()];
@@ -400,7 +403,38 @@ function registerWriteGuard(pi: ExtensionAPI): void {
  */
 const CONSOLE_TOKENS_GUARD = { label: "the console tokens file (PI_CONSOLE_TOKENS_FILE)", tool: "`pi-dispatch-console token add`, `revoke` or `rotate`, in the operator's own shell" };
 
-export function guardedFiles(): { path: string; label: string; tool: string }[] {
+type Guarded = { path: string; label: string; tool: string; dir?: boolean };
+
+/**
+ * The console tokens file and, beside it, its one-time login codes (`console-login-codes/`, `loginCodesDir`), guarded
+ * as a DIRECTORY: every path under it. The login-codes directory joins the guarded files, as the tokens file is,
+ * because a code file there is a sign-in as the token it names: a model that could `write` `<sha256(code)>.json` into
+ * it could mint itself a console session as an operator, the same reach as adding a token. Only the operator makes
+ * codes (`/dispatch console --link`, `pi-dispatch-console link`); the residual is `bash`, as for the tokens file.
+ */
+function consoleTokenGuards(tokensPath: string | null): Guarded[] {
+  if (tokensPath === null) return [];
+  return [
+    { path: tokensPath, ...CONSOLE_TOKENS_GUARD },
+    { path: loginCodesDir(tokensPath), label: "the console's one-time login codes (console-login-codes, beside the tokens file)", tool: "`/dispatch console --link` or `pi-dispatch-console link`, typed by the operator", dir: true },
+  ];
+}
+
+/**
+ * The console tokens file the panel sees, or null where it sees none: the pointer's deployment folder's (its key, else
+ * the default name there); with no pointer, the session folder's when `PI_CONSOLE_TOKENS_FILE` is set or the folder is
+ * an init scaffold. ONE helper for the guard and for `/dispatch console --link` (issue #708, review round 1), so the
+ * command mints only into the drop beside a tokens file this guard holds, never one it computed some other way.
+ */
+function consoleTokensPathFor(env: any, dir: unknown): string | null {
+  if (typeof dir === "string" && dir !== "") return tokensFilePath(env, dir);
+  const cwd = process.cwd();
+  if (typeof env?.PI_CONSOLE_TOKENS_FILE === "string" && env.PI_CONSOLE_TOKENS_FILE !== "") return tokensFilePath(env, cwd);
+  if (DEPLOYMENT_SCAFFOLD_FILES.every((f) => nodeFs.existsSync(join(cwd, f)))) return tokensFilePath(env, cwd);
+  return null;
+}
+
+export function guardedFiles(): Guarded[] {
   const env = deploymentEnv();
   const paths = resolvePaths(deploymentEnv());
   const set = (key: string) => typeof env?.[key] === "string" && env[key] !== "";
@@ -415,8 +449,8 @@ export function guardedFiles(): { path: string; label: string; tool: string }[] 
     { path: pointerPath(process.env), label: "the deployment pointer (PI_DISPATCH_DEPLOYMENT_FILE)", tool: "/dispatch setup" },
     // Issue #640: the console's tokens file. A model that could write it could add a token of its own and sign in to
     // the console as an operator. Its default lives in the deployment folder, so it is guarded wherever the folder is
-    // known (the pointer's here, an init scaffold folder below) and, with the key set, wherever that key resolves.
-    { path: typeof dir === "string" && dir !== "" ? tokensFilePath(env, dir) : set("PI_CONSOLE_TOKENS_FILE") ? tokensFilePath(env, process.cwd()) : null, ...CONSOLE_TOKENS_GUARD },
+    // known (the pointer's, an init scaffold folder) and, with the key set, wherever that key resolves (`consoleTokensPathFor`).
+    ...consoleTokenGuards(consoleTokensPathFor(env, dir)),
   ];
   if (!(typeof dir === "string" && dir !== "")) {
     // No pointer: the session folder may BE the deployment (`init` then `up`, pi started there, nothing exported). Its
@@ -432,11 +466,10 @@ export function guardedFiles(): { path: string; label: string; tool: string }[] 
         { path: paths.triggersPath, label: "triggers.json (PI_TRIGGERS_FILE)", tool: "dispatch_trigger_add, _edit or _delete" },
         { path: paths.scopedLimitsPath, label: "scoped-limits.json (PI_SCOPED_LIMITS_FILE)", tool: "dispatch_limit_add, _edit or _delete" },
         { path: paths.projectsPath, label: "projects.json (PI_PROJECTS_FILE)", tool: "dispatch_project_add, _edit or _delete" },
-        { path: tokensFilePath(env, cwd), ...CONSOLE_TOKENS_GUARD },
       );
     }
   }
-  return out.filter((g): g is { path: string; label: string; tool: string } => typeof g.path === "string" && g.path !== "");
+  return out.filter((g): g is Guarded => typeof g.path === "string" && g.path !== "");
 }
 
 /**
@@ -1766,6 +1799,25 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       insightsLink(tokens, notify);
       return;
     }
+    case "console": {
+      // Issue #708: the console's address, whether it runs, a sign-in link and the browser, in one step. An
+      // operator-typed COMMAND and never a tool, for the reason `secrets` is one: a sign-in link is a login as an
+      // operator, so it goes to `notify` (the operator's alone) and never through `send` (console-command.mjs).
+      const env = deploymentEnv();
+      const dir = pointerState().deploymentDir;
+      await consoleCommand(tokens.slice(1), {
+        hasUI: Boolean(ctx?.hasUI),
+        mode: ctx?.mode,
+        notify,
+        select: typeof ctx?.ui?.select === "function" ? ctx.ui.select.bind(ctx.ui) : undefined,
+        env,
+        sessionEnv: process.env,
+        logsDir: paths.logsDir,
+        tokensPath: consoleTokensPathFor(env, dir),
+        guarded: (codesDir: string) => guardedFiles().some((g) => g.dir === true && g.path === codesDir),
+      });
+      return;
+    }
     case "run": {
       const folder = tokens[1];
       const flow = tokens[2];
@@ -2929,6 +2981,15 @@ function completeArguments(prefix: string) {
     const items = ids
       .filter((id) => id.startsWith(partial))
       .map((id) => ({ value: `chat ${id}`, label: id }));
+    return items.length > 0 ? items : null;
+  }
+  if (parts[0] === "console" && parts.length >= 2) {
+    // The page words and the flags; a run id is typed whole (or completed under `logs`).
+    const partial = parts[parts.length - 1];
+    const head = parts.slice(0, -1).join(" ");
+    const items = [...CONSOLE_PAGE_WORDS, "--link", "--no-open"]
+      .filter((w) => w.startsWith(partial) && !parts.slice(1, -1).includes(w))
+      .map((w) => ({ value: `${head} ${w}`, label: w }));
     return items.length > 0 ? items : null;
   }
   if (parts[0] === "insights" && parts.length === 2) {
