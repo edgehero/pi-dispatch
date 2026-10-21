@@ -989,6 +989,20 @@ test("underOsTempDir expands BOTH sides through realpath, which is the /private/
 	assert.equal(underOsTempDir("/var/x/logs", { TMPDIR: "/var/x" }, never), true);
 });
 
+test("PI_DOCTOR_INTERVAL_HOURS: 24 by default, 0 is off, a week is the ceiling, and doctor's reading agrees (#712)", async () => {
+	const { doctorIntervalHours } = await import("../src/doctor-results.mjs");
+	assert.equal(loadConfig({}).doctorIntervalHours, 24);
+	assert.equal(loadConfig({ PI_DOCTOR_INTERVAL_HOURS: "" }).doctorIntervalHours, 24);
+	for (const ok of ["0", "1", "168"]) {
+		assert.equal(loadConfig({ PI_DOCTOR_INTERVAL_HOURS: ok }).doctorIntervalHours, Number(ok));
+		assert.equal(doctorIntervalHours({ PI_DOCTOR_INTERVAL_HOURS: ok }), Number(ok), "the record's `every` is the worker's own reading");
+	}
+	for (const bad of ["169", "-1", "1.5", "x"]) {
+		assert.throws(() => loadConfig({ PI_DOCTOR_INTERVAL_HOURS: bad }), /PI_DOCTOR_INTERVAL_HOURS/, `refused: ${bad}`);
+		assert.equal(doctorIntervalHours({ PI_DOCTOR_INTERVAL_HOURS: bad }), null, `and unknown to the record: ${bad}`);
+	}
+});
+
 test("PI_SWEEP_INTERVAL_HOURS: 24 by default, 0 is the boot-only sentinel, and a week is the ceiling", () => {
 	assert.equal(loadConfig({}).sweepIntervalHours, 24);
 	assert.equal(loadConfig({ PI_SWEEP_INTERVAL_HOURS: "0" }).sweepIntervalHours, 0, "0 = boot-only, the pre-#292 behaviour");

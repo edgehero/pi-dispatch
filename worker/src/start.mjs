@@ -39,6 +39,8 @@ import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
 import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch } from "./sandbox.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
+import { makeDoctorSpawner } from "./doctor-spawner.mjs";
+import { fileURLToPath } from "node:url";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
@@ -685,6 +687,8 @@ export async function startWorker(
 		// sandbox reaper against a real retention root without spawning docker or podman.
 		listRunningSandboxes: listRunningSandboxesFn = listRunningSandboxes,
 		makeRetentionSweep: makeRetentionSweepFn = makeRetentionSweep,
+		// Issue #712: the worker's own doctor runs, a seam so a wiring test sees the interval and never spawns a doctor.
+		makeDoctorSpawner: makeDoctorSpawnerFn = makeDoctorSpawner,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		// Issue #643: the preparer factory, a seam so a test can see what the wiring hands it (`stageLive`).
 		makePrepareWorkspace: makePrepareWorkspaceFn = makePrepareWorkspace,
@@ -3212,6 +3216,20 @@ export async function startWorker(
 			extraClosers.push(sweep);
 		}
 
+		// Issue #712 (`DES-DOCTOR-RESULTS-PUBLISHED`): `pi-dispatch doctor --publish` as a child, shortly after boot and every
+		// PI_DOCTOR_INTERVAL_HOURS, so every host publishes its checks whether or not anyone runs doctor there. After the
+		// registry has started (above), so the first run's fleet lines see this host's own row. At 0 nothing is constructed,
+		// the sweep's posture: no timer, no closer, no child is reachable.
+		if (config.doctorIntervalHours > 0) {
+			const doctorRuns = makeDoctorSpawnerFn({
+				cliPath: fileURLToPath(new URL("./cli.mjs", import.meta.url)),
+				intervalMs: config.doctorIntervalHours * 3600000,
+				log,
+			});
+			doctorRuns.start();
+			extraClosers.push(doctorRuns);
+		}
+
 		log("worker_started", {
 			queue: "pi-jobs",
 			// Issue #278: the service's OWN answer to which daemon its jobs go to. `doctor` reads its caller's
@@ -3235,6 +3253,7 @@ export async function startWorker(
 			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
 			sweepIntervalHours: config.sweepIntervalHours, // 0 = boot-only sweeps, this version's pre-#292 behaviour
+			doctorIntervalHours: config.doctorIntervalHours, // issue #712: 0 = the worker runs no doctor of its own
 			dailyCap: config.dailyCap,
 			weeklyCap: config.weeklyCap, // null when the weekly window is disabled
 			monthlyCap: config.monthlyCap, // null when the monthly window is disabled

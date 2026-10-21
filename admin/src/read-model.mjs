@@ -20,7 +20,7 @@ import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
-import { logsDirPath, defaultSandboxDir, delimitedList, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
@@ -54,6 +54,7 @@ import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch
 import { parseConnection, makeRedisClient, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
 import { CAPACITY_WINDOWS, computeCapacity } from "@edgehero/pi-dispatch/capacity";
 import { readCapacityRecords } from "@edgehero/pi-dispatch/capacity-records";
 import { capacityText, deploymentFacts, onlyHost } from "@edgehero/pi-dispatch/capacity-cli";
@@ -3574,6 +3575,15 @@ function hostRowOf(h) {
   };
 }
 
+/** The host a reader runs on, as the worker names itself (`workerName`), or null for a name the worker refuses. */
+function doctorSelfName(env) {
+  try {
+    return workerName({ PI_WORKER_NAME: typeof env?.PI_WORKER_NAME === "string" ? env.PI_WORKER_NAME : undefined });
+  } catch {
+    return null;
+  }
+}
+
 /** How long the reader waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
 
@@ -3631,6 +3641,8 @@ export function createFleetReader(
     // before; a surface that knows its deployment passes the real plan (the TUI: `killSwitchPlan`, over the pointer),
     // so the two-Valkey refusal holds there exactly as it does for the tools.
     killSwitchPlanFn = null,
+    // Issue #712: the published doctor results' read (`readDoctorResults`), a seam so a test hands rows without a Valkey.
+    readDoctorResultsFn = readDoctorResults,
   } = {},
 ) {
   const prune = readOnly !== true;
@@ -3743,6 +3755,18 @@ export function createFleetReader(
     const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
     wide = { at, runs, mirror: degraded, partial };
     return wide;
+  };
+
+  // The published doctor results (issue #712, `INT-DOCTOR-RESULTS-KEY`), `{ at, got }`, read at most once per
+  // DOLLAR_RECORDS_TTL_MS: a host publishes once a day, so a per-second MGET would be load for nothing. Read for the
+  // index's hosts and the live ones, pruning only where this reader may write.
+  let doctorRead = null;
+  const doctorResults = async () => {
+    const at = nowFn();
+    if (doctorRead && at >= doctorRead.at && at - doctorRead.at < DOLLAR_RECORDS_TTL_MS) return doctorRead.got;
+    const got = await readDoctorResultsFn(redis, { names: lastHosts.map((h) => h?.name).filter((n) => typeof n === "string"), prune, now: nowFn, timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err) => ({ unreachable: err?.message ?? String(err) }));
+    doctorRead = { at, got };
+    return got;
   };
 
   return {
@@ -3948,6 +3972,13 @@ export function createFleetReader(
         // or "" while unknown). Read by the PROJECTS view; nothing here judges them. Issue #599, phase 3: with what the
         // HOSTS view's live lines read off the same rows (`hostRowOf`), so that view adds no read to this tick.
         hostBudgets: lastHosts.map(hostRowOf),
+        // Issue #712: each host's last published doctor run, `{ hosts, more }` or `{ unreachable }`, through the worker's
+        // own allowlist (`readDoctorResults`). Labels are another host's redacted text: every surface escapes them.
+        doctor: await doctorResults(),
+        // This console's or panel's own host, by the worker's name rule over the deployment's env, so a "does not load"
+        // sentence quotes this host's doctor before another's (each host has its own copy of the files). Null when the
+        // declared name is one the worker refuses.
+        doctorSelf: doctorSelfName(dollarEnvFn() ?? {}),
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
         schedulers: mapSchedulers(schedulerList, Date.now()),
         // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so neither reader

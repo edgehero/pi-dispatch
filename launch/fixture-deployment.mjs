@@ -488,6 +488,21 @@ export function hostRows({ liveJobsOf, liveJobsFields, version }) {
 	});
 }
 
+/**
+ * The doctor runs two hosts published (issue #712), as doctor's checks: mini1 an hour ago with one warning, build3 three
+ * days ago (past two of its daily intervals, so stale) with a failure whose label names a path the record must cut.
+ */
+export function doctorRuns(version) {
+	const ok = (n) => Array.from({ length: n }, (_, i) => ({ ok: true, label: `fine ${i}` }));
+	const mini1 = [...ok(41), { ok: false, warn: true, label: "this host's worker admits NO job on the podman venue: it could not list the job containers left from before it started there", fix: "make the runtime answer for the worker's account (`podman ps -a`)" }];
+	const build3 = [...ok(38), { ok: false, label: "Docker daemon unreachable at /var/run/docker.sock", fix: "start Docker, then re-run doctor" }, { ok: false, warn: true, label: "PI_CONCURRENCY=6 is above this host's slot budget", fix: "lower PI_CONCURRENCY or raise the budget" }];
+	const ids = (checks, section) => checks.map((c, i) => (c.ok ? `node.${i + 1}` : `${section}.${i + 1}`));
+	return [
+		{ name: "mini1", record: { checks: mini1, ids: ids(mini1, "fleet"), at: NOW - 60 * MIN, version, every: 24, by: { uid: 1001, worker: true } } },
+		{ name: "build3", record: { checks: build3, ids: ids(build3, "docker"), at: NOW - 3 * DAY, version, every: 24, by: { uid: 1001, worker: true } } },
+	];
+}
+
 // ---- Valkey -------------------------------------------------------------------------------------------------------
 const PLAN_REASONS = { web: "checkout launch is done; keep a floor for bug reports", billing: "the invoice rework starts this week", ops: "the weekly plan and report" };
 
@@ -608,6 +623,12 @@ export async function seedDeployment({ url, paths, mods, venue = "docker" }) {
 		// The job held on run.waitFor, as the wait gate writes it.
 		const wait = W.waitState.makeWaitState({ redis, now: () => NOW - (2 * 3600 + 14 * 60) * 1000 });
 		await wait.hold("gh-77c1", { dedupId: "github:acme/web#415", target: "acme/web#415", label: "after 2026-10-09T07:00Z + ci-green", untilMs: Date.UTC(2026, 9, 9, 7) });
+
+		// Issue #712: the hosts' published doctor runs, through doctor's own record builder and writer, where the caller
+		// handed that module (an older caller did not, and seeds none). mini2 has published nothing.
+		if (W.doctorResults) {
+			for (const run of doctorRuns(mods.version)) await W.doctorResults.publishDoctorRecord(redis, run.name, W.doctorResults.buildDoctorRecord(run.record));
+		}
 
 		// The cron schedulers, through BullMQ itself (their next fires are the queue's delayed jobs).
 		const q = W.queue.makeQueue(W.connection.parseConnection(url));

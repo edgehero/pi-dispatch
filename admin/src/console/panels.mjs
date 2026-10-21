@@ -61,6 +61,7 @@ import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { html, trustedRenderer } from "./html.mjs";
+import { DOCTOR_CHECKS_SHOWN, DOCTOR_FILE_CHECKS, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorQuote, doctorStale } from "../doctor-view.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -1170,6 +1171,42 @@ export const fleetHosts = fromSnapshot("Hosts", (s, view) => {
   );
 });
 
+/**
+ * The Doctor panel (issue #712, `DES-DOCTOR-RESULTS-PUBLISHED`): each host's last published `pi-dispatch doctor` run, its
+ * age and counts, then its failing and warning checks with their fix, failing first. A result older than two of its
+ * host's doctor intervals is flagged stale; a live host that has published nothing is named, so "no problems listed"
+ * never reads as "healthy" for a host that was never checked. The labels are doctor's redacted sentences (no path, no
+ * URL beyond its host, secret-named values and token shapes redacted, file content quoted by a parse error cut), shown
+ * to both roles and escaped like every value here.
+ */
+export const fleetDoctor = fromSnapshot("Doctor", (s, view) => {
+  const d = s.doctor;
+  if (!d || d.unreachable) return html`<p class="warn">The published doctor results could not be read.</p>`;
+  const rows = doctorHostsOf(s);
+  const published = new Set(rows.map((r) => r.name));
+  const silent = (Array.isArray(s.hostBudgets) ? s.hostBudgets : []).map((h) => h?.name).filter((n) => typeof n === "string" && !published.has(n));
+  const block = (r) => {
+    if (r.unreadable) return html`<h3>${r.name}</h3><p class="warn">Its published result cannot be read (a worker of another version may have written it).</p>`;
+    const problems = doctorProblems(r);
+    const shown = problems.slice(0, DOCTOR_CHECKS_SHOWN);
+    const hidden = problems.length - shown.length + (Number.isSafeInteger(r.more) ? r.more : 0);
+    const stale = doctorStale(r);
+    const head = html`<p${r.counts?.fail > 0 ? html` class="bad"` : r.counts?.warn > 0 ? html` class="warn"` : null}>Doctor ran ${ageText(r.ageMs)} ago${r.version ? ` (version ${r.version})` : ""}, ${doctorByText(r)}: ${doctorCountsText(r)}.${r.openshell ? " The openshell venue was judged." : ""}</p>`;
+    // A run by another account over the worker's (sudo, a second login) is published like any run, and said: it shows
+    // that account's view of the host, not the worker's.
+    const replaced = r.workerRun && r.by?.worker !== true ? html`<p class="warn">It replaced the worker's own run of ${ageText(view.now - r.workerRun.at)} ago${Number.isSafeInteger(r.workerRun.uid) ? ` (uid ${r.workerRun.uid})` : ""}, so it shows another account's view of the host.</p>` : null;
+    const staleNote = stale ? html`<p class="warn">Stale: older than two of this host's doctor runs (every ${r.every}h), so it may no longer describe the host.</p>` : null;
+    const list = table(
+      `Doctor checks on ${r.name}`,
+      ["Level", "Check", "What doctor said", "Fix"],
+      shown.map((c) => html`<tr><td class="${c.level === "fail" ? "bad" : "warn"}">${c.level === "fail" ? "failing" : "warning"}</td><td class="mono">${c.id}</td><td>${cell(c.label)}</td><td>${cell(c.fix)}</td></tr>`),
+      "Every check passed.",
+    );
+    return html`<h3>${r.name}</h3>${head}${replaced}${staleNote}${list}${hidden > 0 ? html`<p class="note">${count(hidden)} more not shown here; pi-dispatch doctor on that host prints them all.</p>` : null}`;
+  };
+  return html`${rows.length === 0 ? html`<p class="note">No host has published doctor results yet. Each worker runs doctor a minute after it starts and then every PI_DOCTOR_INTERVAL_HOURS (24 by default), and pi-dispatch doctor publishes too.</p>` : rows.map(block)}${silent.length > 0 ? html`<p class="note">No doctor result published by: ${silent.join(", ")}.</p>` : null}${d.more > 0 ? html`<p class="note">${count(d.more)} more hosts published results; not every one is read.</p>` : null}`;
+});
+
 export const fleetSchedulers = fromSnapshot("Schedules", (s, view) => {
   const list = Array.isArray(s.schedulers) ? s.schedulers : [];
   const stalls = s.schedulerStalls ?? {};
@@ -1214,12 +1251,25 @@ export const fleetFailed = fromSnapshot("Failed jobs", (s, view) => {
 
 // ---- configuration ---------------------------------------------------------------------------------------------------
 
+/**
+ * Why a file does not load, as one sentence: the newest published doctor check about that file where one was published
+ * (issue #712, `doctorQuote`), naming the host and its age, else the pointer to run doctor. Never the parser's own
+ * message, which names this host's path; a published label had its paths cut before it left the host that wrote it.
+ */
+function doctorReason(s, what) {
+  const id = DOCTOR_FILE_CHECKS[what];
+  const q = id ? doctorQuote(s, id) : null;
+  if (!q) return `The ${what} does not load; run pi-dispatch doctor for the reason.`;
+  const where = q.own ? `on this host (${q.host}, ${ageText(q.ageMs)} ago)` : `on ${q.host} (its own copy of the file, ${ageText(q.ageMs)} ago)`;
+  return `The ${what} does not load. pi-dispatch doctor ${where} says: ${q.label}${q.fix ? `. Fix: ${q.fix}` : ""}`;
+}
+
 /** A file view's trouble as one sentence (no parser message: it names the host's path), or null when it loaded. */
-function fileTrouble(v, what) {
+function fileTrouble(v, what, s = null) {
   if (!v) return `The ${what} could not be read.`;
   if (v.unset) return `No ${what} is configured.`;
   if (v.missing) return `The ${what} does not exist.`;
-  if (v.invalid) return `The ${what} does not load; run pi-dispatch doctor for the reason.`;
+  if (v.invalid) return doctorReason(s, what);
   if (v.unreadable) return `The ${what} cannot be read (${String(v.unreadable)}).`;
   return null;
 }
@@ -1276,7 +1326,7 @@ function triggersEditor(view) {
 
 export const configTriggers = fromSnapshot("Triggers", (s, view) => {
   const v = s.triggers;
-  const trouble = fileTrouble(v, "triggers file");
+  const trouble = fileTrouble(v, "triggers file", s);
   if (trouble) return html`<p class="warn">${trouble}</p>${triggersEditor(view)}`;
   const list = Array.isArray(v.triggers) ? v.triggers : [];
   return html`${table(
@@ -1303,7 +1353,7 @@ function settingsEditor(view) {
 
 export const configSettings = fromSnapshot("Settings overlay", (s, view) => {
   const v = s.settings;
-  if (!v || v.invalid) return html`<p class="warn">The settings overlay does not load; run pi-dispatch doctor for the reason.</p>${settingsEditor(view)}`;
+  if (!v || v.invalid) return html`<p class="warn">${doctorReason(s, "settings overlay")}</p>${settingsEditor(view)}`;
   const overlay = v.overlay ?? {};
   const shown = SETTINGS_SHOWN.filter((k) => ["string", "number", "boolean"].includes(typeof overlay[k]));
   const others = Object.keys(overlay).filter((k) => !SETTINGS_SHOWN.includes(k)).sort();
@@ -1322,7 +1372,7 @@ function pauseEditor(view) {
 
 export const configPauseWindows = fromSnapshot("Pause windows", (s, view) => {
   const v = s.pauseWindows;
-  const trouble = fileTrouble(v, "pause-windows file");
+  const trouble = fileTrouble(v, "pause-windows file", s);
   if (trouble) return html`<p class="note">${trouble}</p>${pauseEditor(view)}`;
   const list = Array.isArray(v.windows) ? v.windows : [];
   return html`${table(
@@ -1345,7 +1395,7 @@ function limitsEditor(view) {
 
 export const configScopedLimits = fromSnapshot("Scoped limits", (s, view) => {
   const v = s.scopedLimits;
-  const trouble = fileTrouble(v, "scoped-limits file");
+  const trouble = fileTrouble(v, "scoped-limits file", s);
   if (trouble) return html`<p class="note">${trouble}</p>${limitsEditor(view)}`;
   const list = Array.isArray(v.limits) ? v.limits : [];
   return html`${table(
@@ -1365,7 +1415,7 @@ function projectsEditor(view) {
 
 export const configProjects = fromSnapshot("Projects", (s, view) => {
   const v = s.projects;
-  const trouble = fileTrouble(v, "projects file");
+  const trouble = fileTrouble(v, "projects file", s);
   if (trouble) return html`<p class="note">${trouble}</p>${projectsEditor(view)}`;
   const list = Array.isArray(v.projects) ? v.projects : [];
   return html`${table(

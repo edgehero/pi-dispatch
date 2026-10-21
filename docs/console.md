@@ -218,7 +218,7 @@ console.
 | `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
 | `/insights?range=30d` | Spend and insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
-| `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
+| `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, each host's last doctor run ([Doctor results](#doctor-results)), every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |
 
@@ -246,6 +246,28 @@ An operator can answer an issue's parked run from this page ([Answering a parked
 is the worker's own message, trimmed and cleaned, but it can still carry a fragment of something a job touched, so
 only the operator role sees it, on the fleet page, in a "Why each failed" element below the failed jobs that you
 open per job, never in a list row.
+
+### Doctor results
+
+Every `pi-dispatch doctor` run publishes what it found to the deployment's Valkey, one result per host, and each
+worker runs doctor itself a minute after it starts and then every `PI_DOCTOR_INTERVAL_HOURS` (24 by default; `0`
+turns the worker's own runs off). The fleet page's **Doctor** panel shows each host's last result: how long ago it
+ran, how many checks failed, warned and passed, and every failing and warning check with its fix, failing first. A
+result older than two of that host's doctor intervals is marked stale. A live host that has published nothing is
+named, so a host nobody checked never looks healthy.
+
+What a result holds is doctor's own sentences with the private parts cut out before they leave the host: a path
+becomes `<path>`, a URL keeps only its scheme and host, the value of every variable named like a secret (a token, a
+key, a password) and every known token shape becomes `[redacted]`, and the file text a JSON parse error quotes becomes
+`<content>`. A secret held under a name that does not look like one, with no known shape, is not recognised, so do not
+rely on this to hide one. A passing check is published as its name only. A result is kept for 7 days after its last run. Both roles see
+it.
+
+When a file on the configuration page does not load (the triggers, the pause windows, the scoped limits, the projects
+or the settings overlay), the sentence quotes the newest published doctor check about that file and names the host
+and how long ago it ran. Without one it still says to run `pi-dispatch doctor` for the reason. Run
+`pi-dispatch doctor --no-publish` to check a host without publishing. The `/dispatch` panel shows the same lines in
+its hosts view (`u`).
 
 ### Run progress
 

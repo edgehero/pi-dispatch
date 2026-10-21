@@ -9451,6 +9451,10 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		scopedLimitsFilePath: (e) => cfg.scopedLimitsFilePath(e),
 		modelEndpointsFilePath: (e) => cfg.modelEndpointsFilePath(e),
 		// Issue #503: whether endpoints are declared, read as the service reads PI_MODEL_ENDPOINTS_FILE.
+		// Issue #712: the published record's interval, and the secret values it must not carry (it walks the whole env by
+		// entry, reading by name only the PAT pointer).
+		doctorIntervalHours: async (e) => (await import("../src/doctor-results.mjs")).doctorIntervalHours(e),
+		secretValuesIn: async (e) => (await import("../src/doctor-results.mjs")).secretValuesIn(e),
 		endpointsDeclaredIn: async (e) => (await import("../src/egress-cli.mjs")).endpointsDeclaredIn({ env: e, cwd: "/nonexistent-503", fs: { readFileSync: enoent, existsSync: () => false }, platform: "linux" }),
 	};
 	assert.deepEqual([...handedEnv].filter((n) => !Object.hasOwn(probes, n)).sort(), [], "every imported helper doctor hands env to is probed here");
@@ -12683,4 +12687,87 @@ test("doctor: a fleet worker with projects and no triggers file warns that it ap
 	assert.ok(hit && hit.warn === true, JSON.stringify(checks.filter((c) => !c.ok || c.warn).map((c) => c.label)));
 	const single = await collectChecks({ ...env, PI_WORKER_NAME: "" }, secretsSeams());
 	assert.ok(!single.some((c) => /applies no project secret bundle/.test(c.label)), "a single host is not warned");
+});
+
+// Issue #712 (`INT-DOCTOR-RESULTS-KEY`): a doctor run publishes what it judged, through the real collection, to the
+// `publishDoctor` seam (a fake Valkey here), and publishing never changes what doctor prints or its exit code.
+const SEEDED_KEY = "sk-ant-seeded-provider-key-0123456789abcdef";
+const SEEDED_PASSWORD = "hunter2-seeded-valkey-password";
+const publishEnv = (triggers) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: SEEDED_KEY, VALKEY_URL: `redis://:${SEEDED_PASSWORD}@127.0.0.1:6399`, PI_WORKER_NAME: "mini1", PI_TRIGGERS_FILE: triggers });
+const publishDeps = (out, extra = {}) => ({ out, spawn: fakeSpawn(green), probeValkey: async () => true, readHosts: async () => ({ hosts: [] }), dollarKeysExist: async () => false, fileExists: () => true, nodeVersion: "22.19.0", writeErr: () => {}, publishNow: () => Date.UTC(2026, 9, 21, 9, 0, 0), ...extra });
+
+test("doctor publishes one record per run: unique ids, named where the console quotes them, no secret and no path in it (#712)", { skip: skipNoPi }, async () => {
+	const dir = tempDir("pi-doctor-publish-");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, "{ not json");
+	const published = [];
+	const quiet = capture();
+	const plainCode = await runDoctor(publishEnv(triggers), publishDeps(quiet.out));
+	const { out, text } = capture();
+	const code = await runDoctor(publishEnv(triggers), publishDeps(out, { publish: true, publishDoctor: async (url, name, record) => published.push({ url, name, record }) }));
+	assert.equal(code, plainCode, "publishing never changes the verdict");
+	assert.equal(text(), quiet.text(), "nor a byte of what doctor prints");
+	assert.equal(published.length, 1);
+	const [{ url, name, record }] = published;
+	assert.equal(name, "mini1", "named for this host as the worker names it");
+	assert.equal(url, `redis://:${SEEDED_PASSWORD}@127.0.0.1:6399`, "to the Valkey doctor talked to (the client sends the password; the record never holds it)");
+	assert.equal(record.v, 1);
+	assert.equal(record.at, Date.UTC(2026, 9, 21, 9, 0, 0));
+	assert.equal(record.every, 24);
+	const ids = record.checks.map((c) => c.id);
+	assert.equal(new Set(ids).size, ids.length, `ids repeat: ${ids.join(", ")}`);
+	for (const id of ids) assert.match(id, /^[a-z][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,39}$/);
+	assert.equal(record.counts.ok + record.counts.warn + record.counts.fail, record.checks.length + record.more);
+	const broken = record.checks.find((c) => c.id === "triggers.file");
+	assert.ok(broken, `the broken triggers file carries its named id: ${ids.join(", ")}`);
+	assert.equal(broken.level, "fail");
+	assert.match(broken.label, /^triggers file is refused at load/);
+	assert.match(broken.fix, /<path>/, "its path is cut");
+	for (const c of record.checks.filter((c) => c.level === "ok")) assert.deepEqual(Object.keys(c), ["id", "level"], "an ok check is its id and level only");
+	const json = JSON.stringify(record);
+	for (const secret of [SEEDED_KEY, SEEDED_PASSWORD, dir, "hunter2"]) assert.ok(!json.includes(secret), `${secret} reached the published record`);
+	assert.doesNotMatch(json, /"(?:\/|[A-Za-z]:\\\\)[^"]*"|[\s(]\/(?:Users|home|srv|tmp|var|private)\//, "no absolute path anywhere in it");
+});
+
+test("publishing is best effort: a refused write or no usable Valkey is one stderr line and the same exit code (#712)", { skip: skipNoPi }, async () => {
+	const dir = tempDir("pi-doctor-publish-");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, '{"version":1,"triggers":[]}');
+	const baseline = await runDoctor(publishEnv(triggers), publishDeps(capture().out));
+	const errs = [];
+	const code = await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, writeErr: (s) => errs.push(s), publishDoctor: async () => {
+		throw new Error(`ECONNREFUSED redis://:${SEEDED_PASSWORD}@127.0.0.1:6399`);
+	} }));
+	assert.equal(code, baseline);
+	assert.equal(errs.length, 1);
+	assert.match(errs[0], /^doctor: results not published \(Valkey did not take them\)/);
+	assert.doesNotMatch(errs[0], /redis|hunter2|127\.0\.0\.1/, "the note names no URL and no value");
+	// A VALKEY_URL doctor refuses to talk to (no database by that path) publishes nowhere, and says so the same way.
+	const refused = [];
+	const calls = [];
+	const badCode = await runDoctor({ ...publishEnv(triggers), VALKEY_URL: "redis://127.0.0.1:6399/abc" }, publishDeps(capture().out, { publish: true, writeErr: (s) => refused.push(s), publishDoctor: async () => calls.push(1) }));
+	assert.equal(calls.length, 0, "nothing is written to a Valkey doctor did not talk to");
+	assert.match(refused.join(""), /^doctor: results not published \(doctor talked to no Valkey on this run\)/);
+	assert.equal(badCode, await runDoctor({ ...publishEnv(triggers), VALKEY_URL: "redis://127.0.0.1:6399/abc" }, publishDeps(capture().out)));
+	// And without `publish: true` (any caller but the CLI and `up`), nothing is attempted at all.
+	const none = [];
+	await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: "yes", publishDoctor: async () => none.push(1), writeErr: (s) => none.push(s) }));
+	assert.deepEqual(none, [], "strictly === true, as --live is");
+});
+
+test("a worker's own run records who ran it and the interval it runs at; a name the worker refuses is never published (#712)", { skip: skipNoPi }, async () => {
+	const dir = tempDir("pi-doctor-publish-");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, '{"version":1,"triggers":[]}');
+	const got = [];
+	await runDoctor({ ...publishEnv(triggers), PI_DOCTOR_INTERVAL_HOURS: "6" }, publishDeps(capture().out, { publish: true, publishBy: { worker: true, every: 12 }, publishDoctor: async (url, name, record) => got.push(record) }));
+	assert.deepEqual(got[0].by, { uid: process.geteuid?.() ?? null, worker: true });
+	assert.equal(got[0].every, 12, "the interval the spawner passed, not this resolution's reading of it");
+	await runDoctor({ ...publishEnv(triggers), PI_DOCTOR_INTERVAL_HOURS: "6" }, publishDeps(capture().out, { publish: true, publishDoctor: async (url, name, record) => got.push(record) }));
+	assert.deepEqual([got[1].by.worker, got[1].every], [false, 6], "an operator's run reads the service's interval");
+	const errs = [];
+	const calls = [];
+	await runDoctor({ ...publishEnv(triggers), PI_WORKER_NAME: "prod.json" }, publishDeps(capture().out, { publish: true, writeErr: (s) => errs.push(s), publishDoctor: async () => calls.push(1) }));
+	assert.equal(calls.length, 0);
+	assert.match(errs.join(""), /^doctor: results not published \(PI_WORKER_NAME is a name the worker refuses at boot\)/);
 });

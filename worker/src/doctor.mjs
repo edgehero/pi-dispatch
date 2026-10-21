@@ -59,7 +59,7 @@ import { basename, dirname, isAbsolute, join, posix, resolve, win32 } from "node
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectsFingerprint } from "./projects.mjs";
@@ -86,7 +86,7 @@ import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
 import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 import { imageRefProblem, jobImageFix, pullOffered } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
-import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF, PACKAGE_VERSION, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, backendRefusals, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, openshellSetupOf, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, podmanPausable, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
@@ -132,6 +132,8 @@ import { operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.
 import { verifyConsoleAudit } from "./console-audit.mjs";
 import { OTHER } from "./priorities.mjs";
 import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
+import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, secretValuesIn } from "./doctor-results.mjs";
+import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
@@ -251,6 +253,18 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// the operator's manager. `bundleSpawn` is its spawn seam, for the tests.
 		secrets = false,
 		bundleSpawn,
+		// Issue #712: publish this run's results to Valkey for the console and the panel (`doctor-results.mjs`). Strictly
+		// `=== true`, as `live`: the CLI passes it unless `--no-publish`, and a caller that hands runDoctor an option bag
+		// (every test) publishes nothing unless it says so. `publishDoctor(url, name, record)` is the write, a seam so a
+		// test drives it against a fake Valkey; `writeErr` takes the one line said when it could not publish; `publishNow`
+		// stamps the record.
+		publish = false,
+		// `{ worker: true, every }` when the worker's own spawn ran this (`--by-worker=<hours>`): the record then carries the
+		// interval the worker actually runs at, not this resolution's reading of it.
+		publishBy = null,
+		publishDoctor = defaultPublishDoctor,
+		writeErr = (s) => process.stderr.write(s),
+		publishNow = Date.now,
 		openshellRun,
 		liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync },
 		// Issue #341: who a job on this host would run as, decided from the same facts the worker reads. Seams because
@@ -446,6 +460,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		}
 	}
 
+	// The --live read-backs, kept for the published record (issue #712).
+	const liveRendered = [];
 	// ONCE, and after --fix: the probes read the host as the fix pass left it, so a fix that pulled the job image is
 	// read back rather than reported absent. Rendered like every other check and judged by the same rule.
 	if (live === true) {
@@ -454,8 +470,24 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Each venue's results are rendered BEFORE the next venue announces its containers, so what podman is about to
 		// start never lands between local's announcement and local's verdicts.
 		const liveSeams = { ...seams, liveFs, isAlive, pid, nonce, ...(now ? { now } : {}), ...(delay ? { delay } : {}) };
-		if (facts.localUsed !== false && render(await liveChecks(env, liveSeams, facts), out)) failed = true;
-		if (facts.podman && render(await podmanLiveChecks(env, liveSeams, facts), out)) failed = true;
+		if (facts.localUsed !== false) {
+			const read = await liveChecks(env, liveSeams, facts);
+			liveRendered.push(...read);
+			if (render(read, out)) failed = true;
+		}
+		if (facts.podman) {
+			const read = await podmanLiveChecks(env, liveSeams, facts);
+			liveRendered.push(...read);
+			if (render(read, out)) failed = true;
+		}
+	}
+
+	// Issue #712: what was judged, published for the console and the panel, after every check is in (the `--fix`
+	// re-collect and the `--live` read-backs included) and before the closing line. Best effort BY CONTRACT: whatever
+	// happens here leaves `failed`, and so the exit code, as it was, and a fault is one line on stderr, never on stdout,
+	// where a script reads doctor's verdict.
+	if (publish === true) {
+		await publishResults({ checks: [...checks, ...liveRendered], liveRendered, seams, env, publishDoctor, writeErr, at: publishNow(), by: publishBy });
 	}
 
 	// Issue #477: whether anything doctor judged came from the deployment's `.env`, which a hand-started worker never reads.
@@ -468,6 +500,47 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 	const fromSetup = expected.length > 0 && seams.envSetupSeen ? { script: seams.envSetupSeen.script, names: [...new Set(expected)] } : null;
 	out(failed ? "\ndoctor: some checks failed: fix the above, then re-run.\n" : `\ndoctor: ready. ${startAdvice({ tookFromFile, envPath, platform, fromSetup, unit: tookFromFile || fromSetup ? installedWorkerUnit(seams, cwd) : null })}\n`);
 	return failed ? 1 : 0;
+}
+
+/**
+ * Issue #712: publish one run's results (`INT-DOCTOR-RESULTS-KEY`). Never throws and never decides anything: a Valkey
+ * this run may not talk to, or one that does not answer, is ONE line on stderr whose wording starts with
+ * `DOCTOR_PUBLISH_SKIPPED_PREFIX` (the worker's spawner reads that prefix and nothing else), and no URL, path or value
+ * is in it. The secrets the record must not carry are every secret-named value of the resolution (`env`, which holds
+ * this shell's whole environment with the service's `.env` values over it), plus the `.env` values the resolution did
+ * not take (a provider key resolved later, a value this shell disagrees with), so a value the file holds is as absent
+ * as one this shell exports.
+ */
+async function publishResults({ checks, liveRendered, seams, env, publishDoctor, writeErr, at, by = null }) {
+	const say = (why) => {
+		try {
+			writeErr(`${DOCTOR_PUBLISH_SKIPPED_PREFIX} (${why}); the console and the panel keep the last published results\n`);
+		} catch {
+			// a closed stderr cannot change the verdict either
+		}
+	};
+	const target = seams.publishTo;
+	if (!target) return say("doctor talked to no Valkey on this run");
+	if (target.refused) return say(target.refused);
+	try {
+		const live = new Set(liveRendered);
+		const ids = assignCheckIds(checks, (c) => (live.has(c) ? "live" : (seams.checkSection?.(c) ?? "env")));
+		const service = seams.serviceEnv ?? {};
+		const fileSide = Object.fromEntries((service.disagreements ?? []).map((d) => [d.key, d.file]));
+		const secrets = secretValuesIn(env, service.fromFile, service.extraFromFile, fileSide);
+		const worker = by?.worker === true;
+		const every = worker && Number.isSafeInteger(by.every) ? by.every : target.every;
+		const record = buildDoctorRecord({ checks, ids, at, version: PACKAGE_VERSION, openshell: seams.openshellJudged === true, every, secrets, by: { uid: process.geteuid?.() ?? null, worker } });
+		await publishDoctor(target.url, target.name, record);
+	} catch {
+		say("Valkey did not take them");
+	}
+}
+
+/** The real write: doctor's own fail-fast client, bounded, always dropped (`withDoctorClient`). */
+async function defaultPublishDoctor(url, name, record) {
+	const { publishDoctorRecord } = await import("./doctor-results.mjs");
+	await withDoctorClient(url, (client) => publishDoctorRecord(client, name, record));
 }
 
 /**
@@ -623,7 +696,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -1088,7 +1161,7 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
  * loaders throw a `configError` on a path that does not exist and on content that does not parse, which is
  * exactly the boot this check is predicting.
  */
-const BOOT_FILES = Object.freeze([
+export const BOOT_FILES = Object.freeze([
 	Object.freeze({
 		key: "PI_PAUSE_WINDOWS_FILE",
 		noun: "scoped pauses",
@@ -1186,6 +1259,15 @@ const BOOT_FILES = Object.freeze([
 		load: (path, io, env) => loadEnvelopeAsTheWorker(path, io, env),
 	}),
 ]);
+
+/**
+ * A boot file's published check id (issue #712, `NAMED_CHECK_IDS`): `<scaffold name>.file` for the SERVICE's verdict on
+ * the file it reads, `<scaffold name>.file-shell` for this shell's. Derived from the scaffold name so a sixth boot file
+ * names itself, and the test holding `NAMED_CHECK_IDS` to the source fails until it is listed.
+ */
+export function bootFileId(spec, subject = "service") {
+	return `${spec.scaffold.replace(/\.json$/, "")}.file${subject === "shell" ? "-shell" : ""}`;
+}
 
 /** A key's value when it is a non-empty string, else null: the boot reads an unset key as off. */
 function nonEmpty(value) {
@@ -1513,8 +1595,25 @@ export async function collectChecks(shellVars, seams) {
 	let patFromFile = null;
 
 	const checks = [];
+	// Issue #712: the section each check was added in, for its published id (`assignCheckIds`, doctor-results.mjs). Each
+	// `section(name)` call hands every check added since the last one to the section that was current, then opens `name`.
+	// A WeakMap rather than a field on the check: a check may be a shared or frozen object, and a write to a frozen one
+	// throws in this strict module. Read back through `seams.checkSection`, set again on every collection (`--fix`
+	// re-collects).
+	const sectionOf = new WeakMap();
+	let currentSection = "node";
+	const tagSection = (list, name) => {
+		for (const c of list) if (c !== null && typeof c === "object" && !sectionOf.has(c)) sectionOf.set(c, name);
+	};
+	const section = (name) => {
+		tagSection(checks, currentSection);
+		currentSection = name;
+	};
+	seams.checkSection = (c) => sectionOf.get(c) ?? null;
+	section("node");
 	checks.push(nodeCheck(nodeVersion));
 
+	section("env");
 	checks.push({
 		ok: fileExists(join(cwd, ".env")),
 		warn: true, // advisory: env may be supplied by a service manager instead of a file
@@ -1617,6 +1716,7 @@ export async function collectChecks(shellVars, seams) {
 	const saidAtTop = { disagreements: service.disagreements.length, unread: service.unread.length };
 	// A CLI variable is not listed as read: no program doctor starts used it, and its own ⚠ says so.
 	checks.push(...serviceEnvLines(service, envPathShown, { said: ["VALKEY_URL", "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", ...CLI_KEY_NAMES] }));
+	section("image");
 	if (jobImageRefused) {
 		checks.push({
 			ok: false,
@@ -1633,6 +1733,7 @@ export async function collectChecks(shellVars, seams) {
 	// they name docker's where `local` is blessed and the Quadlet unit's where `podman` is.
 	const openshellSetup = openshellSetupOf(venuesOf(env), env);
 	const valkeyVenues = { localUsed: localUsed || openshellSetup.valkeyEngine === "docker", podmanUsed: podmanUsed || openshellSetup.valkeyEngine === "podman" };
+	section("docker");
 	// THE FIRST DOCKER CALL OF THE RUN, which is why it was the one that hung (issue #397): a daemon that
 	// accepts the connection and never answers held doctor here, before it had printed anything. Bounded
 	// now, and the three outcomes are three different sentences, because telling someone whose daemon is
@@ -1677,6 +1778,7 @@ export async function collectChecks(shellVars, seams) {
 	const { secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(env, fileExists);
+	section("triggers");
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -1689,6 +1791,7 @@ export async function collectChecks(shellVars, seams) {
 	if (triggersSet !== undefined && !fileExists(triggersPath(env, cwd))) {
 		const note = fromFileNote(fileSays("PI_TRIGGERS_FILE"));
 		checks.push({
+			id: "triggers.file-missing",
 			ok: false,
 			label: triggersSet === ""
 				? `PI_TRIGGERS_FILE is set to an empty value, which neither process reads as unset: the worker and the receiver refuse to start on it (exit 2)${note}`
@@ -1698,6 +1801,8 @@ export async function collectChecks(shellVars, seams) {
 	}
 	if (parseError) {
 		checks.push({
+			// Named (issue #712): the console quotes it beside "the triggers file does not load".
+			id: "triggers.file",
 			ok: false,
 			// "is refused at load" rather than "does not parse", because since issue #313 it is no longer
 			// only a syntax error: a duplicate key parses perfectly and is refused anyway. The loader's own
@@ -1707,8 +1812,10 @@ export async function collectChecks(shellVars, seams) {
 			fix: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it loads`,
 		});
 	}
+	section("dollars");
 	checks.push(...dollarChecks(env, costCaps, triggersSet !== undefined));
 
+	section("image");
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon. Issue #433:
 	// and never without `local`, where the podman section's line (the image in THIS ACCOUNT'S store) is the image check.
 	const imageRun = dockerRun === null ? null : dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage], runTimeouts.cmd) : { code: null, ended: "error" };
@@ -1754,6 +1861,7 @@ export async function collectChecks(shellVars, seams) {
 			: {}),
 	});
 
+	section("triggers");
 	// REQ-PER-TRIGGER-SKILLS (issue #60). Every distinct `run.skillsDir`, checked BEFORE anything fires,
 	// because the worker's own gate for these refuses at job time -- correct, but at 03:00 in a log nobody
 	// is reading. A deployment naming none adds no lines at all, so its output is byte-identical.
@@ -1888,6 +1996,7 @@ export async function collectChecks(shellVars, seams) {
 		checks.push({ ok: true, label: `${commands} command trigger(s): a command is only verifiable in-container -- the runner refuses an unregistered one before the prompt is sent (command-unregistered)` });
 	}
 
+	section("venues");
 	// Issue #41: every DISTINCT image a trigger names in run.image, minus the deployment default already
 	// checked above. Two silent-failure modes, and both used to be impossible because there was one image.
 	//   1. the image was never built -- a job that refuses pre-spend at 03:00 in a log nobody is reading, and
@@ -1950,6 +2059,7 @@ export async function collectChecks(shellVars, seams) {
 	// of the default image is what gates their podman half; its lines are still printed after the backend section, where
 	// they always were, so moving the read changed the order of spawns and not a byte of output.
 	const podman = podmanUsed ? await podmanChecks(env, seams, { jobImage, jobImageNote }) : null;
+	section("images");
 	for (const img of images.filter((i) => i !== jobImage)) {
 		if (dockerRun !== null && dockerCode === 0 && dockerRouted.has(img)) {
 			const run = await runCmd(spawn, "docker", ["image", "inspect", img], runTimeouts.cmd);
@@ -1987,6 +2097,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	section("egress");
 	// REQ-EGRESS-ALLOWLIST (issue #202). [] when PI_EGRESS=0, so a deployment that declined it gets
 	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
 	// the rest are noise on top of a down daemon.
@@ -2069,7 +2180,9 @@ export async function collectChecks(shellVars, seams) {
 				: dockerCode === null
 					? { answered: false, reason: "docker-not-found", transient: true }
 					: null);
+	section("backends");
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, unit: jobUser.unit, ...(podman ? { podman: podman.observed } : {}) }));
+	section("sizing");
 	// Issue #596: the default job size, and what this host's runtime says about the bounds a size becomes.
 	// Each venue this deployment runs, from that venue's own read: `undefined` leaves a venue out, null is "not read".
 	// Issue #596, phase 2: the host budget a worker started now would compute, from the same two reads, and what it means
@@ -2117,13 +2230,18 @@ export async function collectChecks(shellVars, seams) {
 		});
 		checks.push(...cpuReserveChecks(reserveReads, budgetView.cpuCenti));
 	}
+	section("job-user");
 	checks.push(...jobUser.checks);
+	section("podman");
 	if (podman) checks.push(...podman.checks);
+	section("openshell");
 	// Issue #683: the openshell venue's lines, asked by `--openshell` (before a deployment blesses it), or on every run
 	// once PI_BACKENDS does (blessable since #684).
 	// Issue #686 part 3: either OpenShell venue runs the section; copy mode's image line where `openshell` is blessed (or
 	// asked for with neither blessed), bind mode's lines where `openshell-bind` is.
 	const openshellVenues = venuesOf(env);
+	// Issue #712: whether this run judged the openshell venue, for the published record.
+	seams.openshellJudged = seams.openshell === true || Boolean(openshellVenues.openshellUsed);
 	if (seams.openshell === true || openshellVenues.openshellUsed) {
 		const { openshellChecks } = await import("./doctor-openshell.mjs");
 		const modes = { copy: openshellVenues.openshellCopyUsed || !openshellVenues.openshellUsed, bind: openshellVenues.openshellBindUsed };
@@ -2142,6 +2260,7 @@ export async function collectChecks(shellVars, seams) {
 	if (facts) facts.daemon = jobUser.daemon;
 	// Issue #354: which read-backs `--live` runs, and the podman venue's facts for its own.
 	if (facts) Object.assign(facts, { localUsed, podman: podman?.forLive ?? null });
+	section("selinux");
 	// Issue #355: on a Podman host that confines containers with SELinux, the directories a job mounts that the worker
 	// did NOT make, which it therefore never relabels. Read from the same facts and endpoint as the line above. Issue #354:
 	// the podman venue relabels on the same rule (its own directories only), so the same lines, ONCE when both venues do.
@@ -2149,6 +2268,7 @@ export async function collectChecks(shellVars, seams) {
 		checks.push(...(await selinuxLabelChecks({ folders, overlay: env.PI_GLOBAL_PI_DIR || null, spawn: seams.spawn })));
 	}
 
+	section("forges");
 	// The receiver itself, when the triggers file names ANY forge (issue #80). Only forge deliveries need
 	// the receiver at all, so a cron/local-only deployment gets no receiver noise here. WARNS rather than
 	// fails, same doctrine as the gitlab block below: a deployment can legitimately be mid-setup (or run
@@ -2326,6 +2446,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	section("github");
 	// The default source `gh` mints job tokens from the operator's gh login, so the FULL-scope login token
 	// reaches every token-carrying job container — the opposite of the App path's per-repo short-lived
 	// tokens (CONST-TOKEN-SCOPED-PER-JOB). Both checks below warn, never fail: a local-only deployment with
@@ -2623,6 +2744,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	section("valkey");
 	// Issue #464 (gate rounds 1 and 2): WHOSE Valkey that is, on the podman venue, by the one rule the worker applies at
 	// boot and `service install` and `up` apply (`judgeValkeyListeners`). Reachable is not enough: on a shared host a
 	// VALKEY_URL that reaches another account's Valkey (its port, its ::1 for a `localhost` URL, or 0.0.0.0) passed here,
@@ -2715,6 +2837,7 @@ export async function collectChecks(shellVars, seams) {
 		checks.push({ ok: false, warn: true, label: `another account also listens on an address VALKEY_URL's host resolves to: ${other}. The worker connects only to the address judged this account's, so it never reaches that one`, fix: "nothing to change for this deployment; a client that resolves the name itself (`pi-dispatch run` from a shell) may still reach it, so prefer VALKEY_URL=redis://127.0.0.1:<port>" });
 	}
 
+	section("fleet");
 	// --- the fleet (issue #57) -------------------------------------------------------------------------
 	//
 	// Every line here is gated on a peer actually existing, so a single-host deployment's output is
@@ -2730,7 +2853,12 @@ export async function collectChecks(shellVars, seams) {
 	// Valkey doctor reads, a host row is another party's text, and a control byte in a name or zone must not reach the
 	// terminal. The registry's own charset already refuses them at the source; this is the reader not relying on it.
 	const peers = (fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name), tz: h.tz ? printable(h.tz) : h.tz })).filter((h) => h.name !== workerNameOf(declaredWorkerName));
-	if (!env.PI_WORKER_NAME && peers.length > 0) checks.splice(budgetChecksAt, budgetChecksHere.length, ...hostBudgetChecks(budgetView, { ...budgetChecksArgs, peers: true }));
+	if (!env.PI_WORKER_NAME && peers.length > 0) {
+		// The budget lines are re-said for a fleet IN PLACE, so they keep the section they were first said in (issue #712).
+		const again = hostBudgetChecks(budgetView, { ...budgetChecksArgs, peers: true });
+		tagSection(again, "sizing");
+		checks.splice(budgetChecksAt, budgetChecksHere.length, ...again);
+	}
 	// Issue #596, phase 2: this host's own row, when its worker runs and publishes one. Its host budget ledger is held
 	// against the size labels of the job containers each venue's runtime lists, read only when the row carries the ledger.
 	const selfRow = (fleet.hosts ?? []).find((h) => printable(h.name) === workerNameOf(declaredWorkerName)) ?? null;
@@ -2761,6 +2889,17 @@ export async function collectChecks(shellVars, seams) {
 	// no envelope that refuses every job is told why. `{ digest }`, `{ undecodable: true }` for a key that exists and does
 	// not decode (the worker's EXISTS still counts it as governed), or null (no split, or no answer: nothing is said).
 	const valkeyUsable = !(unreadValkey || valkeyRefused || valkeyDbProblem || valkeyAuthVerdict?.state === "dbrange");
+	// Issue #712: where this run's results are published, by the rule every read above obeys: the Valkey doctor may talk
+	// to, at the address the worker pins, or none. Named for this host as the worker names it, so a record and its
+	// registry row share a name.
+	// A declared name the worker refuses at boot (review round 1) is never a key: the worker's own rule, not a copy.
+	let publishName = null;
+	try {
+		publishName = workerNameFrom({ PI_WORKER_NAME: declaredWorkerName });
+	} catch {
+		publishName = null;
+	}
+	seams.publishTo = !valkeyUsable ? null : publishName === null ? { refused: "PI_WORKER_NAME is a name the worker refuses at boot" } : { url: valkeyTalkUrl, name: publishName, every: doctorIntervalHours(env) };
 	const appliedSplit = valkeyUsable ? await (seams.readAppliedSplit ?? defaultReadAppliedSplit)(valkeyTalkUrl) : null;
 	// Read only when there is a peer to compare against. Every line below is gated on a peer existing, and
 	// the SUBPROCESS has to be too: otherwise every `doctor` run on every single-host deployment spawns an
@@ -2879,6 +3018,7 @@ export async function collectChecks(shellVars, seams) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
 	}
+	section("capacity");
 	// Issue #599, phase 2: how busy each host was over the last 7 days, one fact line per host, never a warning (nothing
 	// decides on it). On every deployment, a single host too: its own files are read when the run mirror is not. Read from
 	// the same Valkey the fleet was, with the registry rows just read (their running jobs count up to now), every Valkey
@@ -2892,6 +3032,7 @@ export async function collectChecks(shellVars, seams) {
 		if (envelopeHere.parseError === null) checks.push(...appliedSplitChecks(appliedSplit, envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, workerNameOf(declaredWorkerName), peers));
 	}
 
+	section("provider");
 	// Which variable holds a provider's key is PI'S fact, asked of pi rather than copied (issue #286).
 	// The copy this replaced had anthropic's two variables in the WRONG precedence order, invented
 	// GOOGLE_API_KEY, and invented a `gemini` provider pi has never had -- three ways for doctor to bless
@@ -2960,6 +3101,7 @@ export async function collectChecks(shellVars, seams) {
 	if (envShapeProblem.PI_PROVIDER === null) checks.push({ ...keyLine, label: `${keyLine.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
 
 
+	section("overlay");
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
 	// the exact posture the worker will boot with and refuses the exact values it refuses. Checked with or
 	// without an overlay configured, because a malformed knob stops boot either way -- and a `false` an
@@ -3375,6 +3517,7 @@ export async function collectChecks(shellVars, seams) {
 		});
 	}
 
+	section("waits");
 	// Issue #230, `run.waitFor`. The PARSE is asked unconditionally, and the rest only when something waits.
 	// That split is not the usual "only report what this deployment uses": `loadConfig` calls
 	// `parseWaitProfiles` on every boot whether or not a trigger holds anything, so a garbled variable is a
@@ -3446,6 +3589,7 @@ export async function collectChecks(shellVars, seams) {
 		});
 	}
 
+	section("models");
 	// Issue #673: PI_MODEL and PI_PROVIDER are held to the one model-id and provider-id shape a trigger's run.model and
 	// run.provider are (`modelFrom`, `providerFrom`), and a value outside it is a worker that will not boot. Judged by the
 	// worker's own functions (`envShapeProblem`, above), the PI_ALLOWED_MODELS row's rule below, on the SERVICE's value.
@@ -3531,6 +3675,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	section("secrets");
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
 	// reason to set.
@@ -3705,6 +3850,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	section("sessions");
 	// REQ-RESUMABLE-SESSION. Only reported when a trigger actually asked for it: a deployment that does
 	// not use resume should not be told about a directory it has no reason to create.
 	if (resuming > 0) {
@@ -3805,6 +3951,7 @@ export async function collectChecks(shellVars, seams) {
 		);
 	}
 
+	section("triggers");
 	// REQ-PER-TRIGGER-INSTRUCTION. A plain fact line, not a warning: standing text is an ordinary operator
 	// choice. It is reported at all because it changes what EVERY job of that trigger is told, and unlike a
 	// flow (which lives in the repo, reviewed by a merge) it lives only in triggers.json, so nothing else
@@ -3859,6 +4006,7 @@ export async function collectChecks(shellVars, seams) {
 		});
 	}
 
+	section("files");
 	// REQ-SCOPED-PAUSE-WINDOWS, the panel-writes-what-the-worker-ignores trap (issue #99). Three defaults
 	// that are individually defensible and together silent:
 	//
@@ -4055,8 +4203,9 @@ export async function collectChecks(shellVars, seams) {
 			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad, platform);
 			checks.push(
 				verdict.ok
-					? { ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)})${alsoExported === undefined ? "" : ", for this platform's loader,"} and loads: the service reads that file, this shell does not` }
+					? { id: bootFileId(spec), ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)})${alsoExported === undefined ? "" : ", for this platform's loader,"} and loads: the service reads that file, this shell does not` }
 					: {
+							id: bootFileId(spec),
 							ok: false,
 							warn: envSetup !== null,
 							label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)}) to a file the worker cannot load, so a service started from it ${spec.fails}: ${verdict.reason}`,
@@ -4076,6 +4225,7 @@ export async function collectChecks(shellVars, seams) {
 			const verdict = loadVerdict(spec, shellRaw, cwd, seamsForLoad, platform);
 			if (!verdict.ok) {
 				checks.push({
+					id: bootFileId(spec, "shell"),
 					ok: false,
 					label: `${spec.key} is set in this shell to a file the worker cannot load, so it ${spec.fails}: ${verdict.reason}`,
 					fix: `fix ${envValueShown(shellRaw)}, or point ${spec.key} at a file that loads`,
@@ -4092,6 +4242,7 @@ export async function collectChecks(shellVars, seams) {
 				const verdict = loadVerdict(spec, scaffolded, cwd, seamsForLoad, platform);
 				if (!verdict.ok) {
 					checks.push({
+						id: bootFileId(spec),
 						ok: false,
 						label: `${spec.key} is unset, so ${spec.unsetMeans}, and it does not load: the worker ${spec.fails}: ${verdict.reason}`,
 						fix: `fix ${envValueShown(scaffolded)}, or empty its "endpoints" list`,
@@ -4127,6 +4278,7 @@ export async function collectChecks(shellVars, seams) {
 	// dead folder by one line and a bare repo by the other.
 	const folderOnly = (s) => scopeFormOf(s) !== "qualified" && (s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s));
 
+	section("limits");
 	// The dead-scope advisory (issue #242), honest about what doctor can actually judge. A forge repo
 	// always contains "/" and never begins "/", "./" or "../" or carries a backslash, so a scope in any
 	// of THOSE shapes can only ever be a folder -- and a folder row that matches no trigger's canonical
@@ -4161,11 +4313,13 @@ export async function collectChecks(shellVars, seams) {
 		if (projectFacts.parseError === null) checks.push(...projectRowChecks(scopedLimitFacts.limits, projectFacts.projects, scopedLimitFacts.path));
 	}
 
+	section("envelope");
 	// Issue #504 part B: the envelope's advisories, on the file the service names, when it loads (a file that does not is
 	// the BOOT_FILES line's). Warnings only: the worker boots on both.
 	const envelopeFactsHere = readEnvelopeFacts(env);
 	if (envelopeFactsHere.envelope) checks.push(...envelopeChecks(envelopeFactsHere.envelope, envelopeFactsHere.projects, envelopeFactsHere.maxCostMicros));
 
+	section("console");
 	// Issue #640: the operator console, judged with its keys resolved by the console's own rule (this shell's value, else
 	// the deployment `.env`'s; DOCTOR_SHELL_KEYS). This shell's values are the ones `env` already carries (the resolution
 	// starts from a copy of this shell), so nothing here reads the shell a second way; and the resolution is apart from the
@@ -4173,6 +4327,7 @@ export async function collectChecks(shellVars, seams) {
 	const consoleShell = Object.fromEntries(CONSOLE_ENV_KEYS.filter((k) => Object.hasOwn(env, k)).map((k) => [k, env[k]]));
 	checks.push(...consoleChecks({ ...env, ...resolveServiceEnv({ env: consoleShell, file: serviceEnvFile, keys: CONSOLE_ENV_KEYS }).env }, { cwd, home, platform, folders, skillsDirs }));
 
+	section("limits");
 	// Issue #498: a BARE repo scope (`acme/web`) matches that repo on every forge, so with triggers on more than one forge
 	// kind a bare row is one cap (one lease, one count) shared by GitHub's acme/web and Forgejo's, and a bare pause window
 	// pauses both. That may be meant, so this is a WARNING naming the qualified spellings, never a failure: refusing bare
@@ -4192,6 +4347,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	section("dirs");
 	// Issue #464: the jobs dir is this account's to write. PI_JOBS_DIR, PI_SANDBOX_DIR and TMPDIR as the service reads them
 	// (TMPDIR in .env is a documented way out of a squatted default root, so doctor judges the root the service will use).
 	let dirRefused = false;
@@ -4228,6 +4384,7 @@ export async function collectChecks(shellVars, seams) {
 		checks.push(...sandboxTombstoneChecks(sandboxDir, kept));
 	}
 
+	section("state");
 	// issue #290. The two DURABLE stores -- the run history everything folds over, and the overlay holding
 	// every cap the operator tuned from the panel -- used to default under the OS temp dir, which macOS
 	// sweeps on its own schedule and which is tmpfs (RAM) on several Linux distros. They now default under
@@ -4318,6 +4475,8 @@ export async function collectChecks(shellVars, seams) {
 			const overlay = readOverlay(settingsFile);
 			if (overlay.invalid) {
 				checks.push({
+					// Named (issue #712): the console quotes it beside "the settings overlay does not load".
+					id: "settings.overlay",
 					ok: false,
 					label: `settings overlay ${settingsFile} is invalid (${overlay.invalid}) -- the worker refuses every job as settings-overlay-invalid until it is fixed, and the panel refuses to write over it`,
 					// The fix follows the reason: only a duplicate key gets the upgrade note, since only it loaded before #501.
@@ -4330,7 +4489,7 @@ export async function collectChecks(shellVars, seams) {
 				// (a window in one, no maxCostUsd in either), which the worker checks per job and answers by refusing every
 				// job. The env-only half is `dollarChecks`; this is the merged half, said only when env alone is fine.
 				const merged = overlayDollarProblem(overlay.overlay, env);
-				if (merged) checks.push({ ok: false, label: `settings overlay ${settingsFile}: ${merged} -- the worker refuses every job as settings-overlay-invalid`, fix: "set maxCostUsd in the overlay (or PI_MAX_COST_USD in .env), or remove the dollar window" });
+				if (merged) checks.push({ id: "settings.overlay-dollars", ok: false, label: `settings overlay ${settingsFile}: ${merged} -- the worker refuses every job as settings-overlay-invalid`, fix: "set maxCostUsd in the overlay (or PI_MAX_COST_USD in .env), or remove the dollar window" });
 			}
 		}
 		// PR #549's review: the scoped-limits dollar rows against the deployment's per-job cap, env and overlay merged
@@ -4394,6 +4553,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	section("env");
 	// Issue #471: what a key resolved above this point (the provider's variables, the PAT) added to the record.
 	checks.push(...serviceEnvLines({ fromFile: {}, disagreements: service.disagreements.slice(saidAtTop.disagreements), unread: service.unread.slice(saidAtTop.unread) }, envPathShown));
 	// Issue #471 (gate round 1): a key only this shell sets was taken in silence. Where a service for this folder is
@@ -4418,6 +4578,7 @@ export async function collectChecks(shellVars, seams) {
 		const { hazard } = serviceEnvFile;
 		checks.push({ ok: false, label: `${serviceEnvFile.path} line ${hazard.line} ${hazard.what}, so doctor read none of ${service.hazardSkipped.join(", ")} from it and judged this shell's values (or the defaults) instead: the service's own are unknown`, fix: hazard.fix });
 	}
+	tagSection(checks, currentSection);
 	return checks;
 }
 

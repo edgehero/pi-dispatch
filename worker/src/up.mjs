@@ -1106,7 +1106,9 @@ export async function runUp(argv = [], deps = {}) {
 	for (const [key, value] of Object.entries(venue.fromFile)) {
 		if (typeof env[key] !== "string") layered[key] = value;
 	}
-	const doctorCode = await runDoctorFn(layered, { out });
+	// Published like any doctor run (issue #712): `up` is how most hosts are set up, and its doctor is the first result
+	// the console can show.
+	const doctorCode = await runDoctorFn(layered, { out, publish: true });
 
 	// (g) the summary: what ran, what was skipped, what was already there — then the two commands
 	// that actually start work, so "up is green" flows straight into the first job.
