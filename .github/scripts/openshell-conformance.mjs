@@ -128,8 +128,13 @@ case "$c" in
 		# none asserted. The policy probes above fetch with the image's plain node and a GET; a job's provider call is a
 		# streamed POST from the runner's own binary, after pi has replaced the fetch dispatcher (docs/egress.md, issue
 		# #427), through the OpenAI SDK. Each step below changes one of those, so the first one to fail names the cause.
-		node /netpath.mjs node
-		/opt/pi-dispatch/runner-node /netpath.mjs runner
+		# Under /opt: the sandbox policy reads only its listed paths (sandboxPolicy's read_only), so a file at / is unreadable
+		# and the first run printed nothing. Each binary's exit and the head of its stderr are printed, so a load failure
+		# is a line too.
+		node /opt/pi-dispatch-probe/netpath.mjs node 2>/tmp/netpath.err; echo "probe netpath node exit=$?"
+		head -c 2000 /tmp/netpath.err | head -n 8 | sed 's/^/probe netpath node stderr=/'
+		/opt/pi-dispatch/runner-node /opt/pi-dispatch-probe/netpath.mjs runner 2>/tmp/netpath.err; echo "probe netpath runner exit=$?"
+		head -c 2000 /tmp/netpath.err | head -n 8 | sed 's/^/probe netpath runner stderr=/'
 		exit 0 ;;
 	*) exit "$c" ;;
 esac
@@ -169,7 +174,7 @@ if (who === "runner") {
 }
 `,
 );
-nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nCOPY netpath.mjs /netpath.mjs\nRUN chmod 0755 /entrypoint.sh && chmod 0644 /netpath.mjs\nUSER pi\n`);
+nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nCOPY netpath.mjs /opt/pi-dispatch-probe/netpath.mjs\nRUN chmod 0755 /entrypoint.sh && chmod 0755 /opt/pi-dispatch-probe && chmod 0644 /opt/pi-dispatch-probe/netpath.mjs\nUSER pi\n`);
 const probeImage = `pi-dispatch-openshell-probe:${nonce}`;
 const built = await run(engine, ["build", "--pull=false", "-q", "-t", probeImage, context]);
 if (built.code !== 0) refuse(`the probe image did not build: ${built.stderr.trim().split("\n").slice(-1)[0]}`);
