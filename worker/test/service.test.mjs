@@ -5,7 +5,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findOnPath, installedUnitPaths, readUnitSeam, readUnitUser, runService, TEMPLATE_PINS } from "../src/service.mjs";
+import { CONSOLE_PACKAGE, findOnPath, installedConsoleUnitPath, installedUnitPaths, readConsoleOperators, readUnitSeam, readUnitUser, resolveConsoleEntry, runService, TEMPLATE_PINS } from "../src/service.mjs";
+import { addToken } from "../src/console-tokens.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -446,7 +447,8 @@ test("regression: a deployment folder holding `$&` renders literally rather than
 	for (const platform of ["linux", "darwin"]) {
 		const h = harness({ platform, argv: ["render"], cwd });
 		assert.equal(await h.run(), 0);
-		assert.ok(h.text().includes(cwd), `${platform}: the deployment folder appears verbatim`);
+		// Verbatim on Linux; XML-escaped in the plist (`&` is `&amp;` there, round 1 review of #708), which readUnitSeam undoes.
+		assert.ok(h.text().includes(platform === "darwin" ? "/srv/pi$&amp;deploy" : cwd), `${platform}: the deployment folder appears verbatim`);
 		assert.doesNotMatch(h.text(), /\/opt\/pi-dispatch/, `${platform}: and nothing of the placeholder survives`);
 		assert.equal(readUnitSeam(h.text(), platform).deployDir, cwd);
 	}
@@ -1546,4 +1548,364 @@ test("the plist: byte-identical without an openshell venue, node in /usr/bin inc
 	const named = harness({ platform: "darwin", argv: ["install"], files: { [`${DEPLOY_AT}/.env`]: "PI_BACKENDS=openshell\n" }, plan: { launchctl: 0 }, extra: { findBin: () => "/opt/homebrew/bin/openshell" } });
 	await named.run();
 	assert.match(named.text(), /brew install https:\/\/github\.com\/NVIDIA\/OpenShell\/releases\/download\/v0\.1\.4\/openshell\.rb/);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// --console (issue #708): the operator console as a third component. One template (console.service),
+// the plist and the nssm sequence derived as the receiver's are, and two refusals before install: the
+// console package not found, and a tokens file with no operator token (serve would exit 2 on every start).
+// ---------------------------------------------------------------------------------------------------
+
+const CONSOLE_ENTRY = "/opt/npm-global/lib/node_modules/@edgehero/pi-dispatch-admin/dist/console.mjs";
+const CONSOLE_USER_UNIT = "/home/tester/.config/systemd/user/pi-dispatch-console.service";
+const CONSOLE_AGENT = "/home/tester/Library/LaunchAgents/com.pi-dispatch.console.plist";
+const consoleHarness = (opts = {}) =>
+	harness({ ...opts, extra: { resolveConsole: () => CONSOLE_ENTRY, consoleOperators: () => ({ path: `${DEPLOY_AT}/console-tokens.json`, operators: 1 }), ...opts.extra } });
+
+test("render linux --console: ExecStart runs the console package's entry with serve --deployment, the exit-2 stop survives, and readUnitSeam reads the deployment back", async () => {
+	const h = consoleHarness({ platform: "linux", argv: ["render", "--console"] });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.ok(text.startsWith(`# → ${CONSOLE_USER_UNIT}\n`), "the console unit has its own name");
+	assert.match(text, new RegExp(`^ExecStart=/fake/node/bin/node ${CONSOLE_ENTRY} serve --deployment ${DEPLOY_AT}$`, "m"));
+	assert.equal(text.match(/^ExecStart=/gm).length, 1, "the template's line is replaced, not joined by a second one");
+	assert.ok(text.includes(`WorkingDirectory=${DEPLOY_AT}`));
+	assert.doesNotMatch(text, /^EnvironmentFile=/m, "serve reads its own keys from .env; loading the whole file would hand it every worker secret");
+	for (const kept of ["RestartPreventExitStatus=2", "StartLimitIntervalSec=60", "StartLimitBurst=5", "KillSignal=SIGTERM", "TimeoutStopSec=30"]) assert.ok(text.includes(kept), kept);
+	assert.doesNotMatch(text, /^User=/m);
+	assert.match(text, /^WantedBy=default\.target$/m);
+	assert.doesNotMatch(text, /^(After|Wants|Requires)=.*docker/m, "the console starts no container, so nothing orders it after docker");
+	assert.deepEqual(readUnitSeam(text, "linux"), { setup: null, deployDir: DEPLOY_AT });
+	assert.equal(h.calls.length, 0, "render spawns nothing");
+	const system = consoleHarness({ platform: "linux", argv: ["render", "--console", "--system"] });
+	assert.equal(await system.run(), 0);
+	assert.match(system.text(), /^User=tester$/m, "system scope follows the receiver: User= is the invoking account");
+	assert.match(system.text(), /^WantedBy=multi-user\.target$/m);
+});
+
+test("render darwin --console: the plist is derived with label com.pi-dispatch.console, its own logs and the console argv after the wrapper", async () => {
+	const h = consoleHarness({ platform: "darwin", argv: ["render", "--console"] });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.ok(text.startsWith(`# → ${CONSOLE_AGENT}\n`));
+	assert.ok(text.includes("<string>com.pi-dispatch.console</string>"));
+	assert.ok(!text.includes("<string>com.pi-dispatch.worker</string>"));
+	assert.deepEqual(programArguments(text), ["/bin/sh", WRAPPER_SH, "/fake/node/bin/node", CONSOLE_ENTRY, "serve", "--deployment", DEPLOY_AT]);
+	assert.ok(text.includes(`<string>${DEPLOY_AT}/logs/console.out.log</string>`) && text.includes(`<string>${DEPLOY_AT}/logs/console.err.log</string>`));
+	assert.ok(!text.includes("worker.out.log") && !text.includes("worker.err.log"));
+	assert.ok(text.includes("<key>SuccessfulExit</key>"), "the KeepAlive shape that leaves the wrapper's converted exit 2 stopped");
+	assert.match(text, /<key>PI_WRAPPER_NO_DOTENV<\/key>\s*<string>1<\/string>/, "the wrapper sources no .env for the console");
+	assert.deepEqual(readUnitSeam(text, "darwin"), { setup: null, deployDir: DEPLOY_AT });
+	const worker = harness({ platform: "darwin", argv: ["render"] });
+	assert.equal(await worker.run(), 0);
+	assert.ok(!worker.text().includes("PI_WRAPPER_NO_DOTENV"), "the worker's wrapper still sources .env");
+});
+
+test("render win32 --console: the nssm sequence names pi-dispatch-console, passes the console argv and keeps AppExit 2 Exit", async () => {
+	const h = consoleHarness({ platform: "win32", argv: ["render", "--console"], cwd: "C:\\pi-deploy" });
+	assert.equal(await h.run(), 0);
+	const lines = h.text().split("\n").map((l) => l.trim()).filter((l) => l.startsWith("nssm "));
+	assert.deepEqual(lines, [
+		`nssm install pi-dispatch-console ${WRAPPER_CMD} /fake/node/bin/node ${CONSOLE_ENTRY} serve --deployment "C:\\pi-deploy"`,
+		'nssm set pi-dispatch-console AppDirectory "C:\\pi-deploy"',
+		"nssm set pi-dispatch-console AppEnvironmentExtra PI_WRAPPER_NO_DOTENV=1",
+		'nssm set pi-dispatch-console AppStdout "C:\\pi-deploy\\logs\\console.out.log"',
+		'nssm set pi-dispatch-console AppStderr "C:\\pi-deploy\\logs\\console.err.log"',
+		"nssm set pi-dispatch-console AppStopMethodConsole 15000",
+		"nssm set pi-dispatch-console AppThrottle 5000",
+		"nssm set pi-dispatch-console AppExit Default Restart",
+		"nssm set pi-dispatch-console AppExit 2 Exit",
+		"nssm start pi-dispatch-console",
+	]);
+});
+
+test("--console with --receiver is refused before anything is read or run", async () => {
+	for (const cmd of ["render", "install", "status"]) {
+		let resolved = 0;
+		const h = harness({ platform: "linux", argv: [cmd, "--console", "--receiver"], extra: { resolveConsole: () => (resolved++, CONSOLE_ENTRY) } });
+		assert.equal(await h.run(), 1, cmd);
+		assert.match(h.errText(), /--receiver and --console are mutually exclusive/);
+		assert.equal(resolved, 0, "refused before the console is looked for");
+		assert.equal(h.calls.length + h.store.size, 0);
+	}
+});
+
+test("--console with no console package found: render and install refuse with the npm install hint, writing nothing", async () => {
+	for (const [platform, cmd] of [["linux", "render"], ["linux", "install"], ["darwin", "install"], ["win32", "install"]]) {
+		const h = harness({ platform, argv: [cmd, "--console"], plan: { launchctl: 0, systemctl: 0, nssm: 0 }, extra: { resolveConsole: () => null } });
+		assert.equal(await h.run(), 1, `${platform} ${cmd}`);
+		assert.match(h.errText(), /operator console is not installed where this command can find it/);
+		assert.match(h.errText(), /npm install -g @edgehero\/pi-dispatch-admin when the worker is installed globally/);
+		assert.match(h.errText(), platform === "win32" ? /the PATH lookup does not run there/ : /nor is a `pi-dispatch-console` on this shell's PATH/);
+		assert.equal(h.store.size, 0);
+		assert.equal(h.calls.length, 0);
+	}
+});
+
+test("install --console with no operator token, or a tokens file the console cannot use, refuses with the fix and writes nothing", async () => {
+	for (const platform of ["linux", "darwin", "win32"]) {
+		const none = consoleHarness({ platform, argv: ["install", "--console"], plan: { launchctl: 0, systemctl: 0, nssm: 1 }, extra: { consoleOperators: () => ({ path: "/srv/pi-deploy/console-tokens.json", operators: 0 }) } });
+		assert.equal(await none.run(), 1, platform);
+		assert.match(none.errText(), /console-tokens\.json holds no operator token, so `pi-dispatch-console serve` would refuse to start \(exit 2\)/);
+		assert.match(none.errText(), /pi-dispatch-console token add --name <you> --role operator --deployment \/srv\/pi-deploy/);
+		assert.equal(none.store.size + none.calls.length, 0, `${platform}: nothing written, nothing run`);
+	}
+	const unusable = consoleHarness({ platform: "linux", argv: ["install", "--console"], plan: { systemctl: 0 }, extra: { consoleOperators: () => ({ path: "/x", refusal: "the console tokens file /x does not exist; create the first operator with `pi-dispatch-console token add --name <name> --role operator`" }) } });
+	assert.equal(await unusable.run(), 1);
+	assert.match(unusable.errText(), /does not exist; create the first operator .*The console refuses to start without it, so nothing was installed/);
+	assert.equal(unusable.store.size + unusable.calls.length, 0);
+	// render shows the unit anyway: it writes nothing, and the unit is right once a token exists.
+	let asked = 0;
+	const render = consoleHarness({ platform: "linux", argv: ["render", "--console"], extra: { consoleOperators: () => (asked++, { path: "/x", operators: 0 }) } });
+	assert.equal(await render.run(), 0);
+	assert.equal(asked, 0);
+});
+
+test("install linux --console: the user unit is written, enabled and started; uninstall, status, start and stop address pi-dispatch-console", async () => {
+	const h = consoleHarness({ platform: "linux", argv: ["install", "--console"], plan: { systemctl: 0 } });
+	assert.equal(await h.run(), 0, h.errText());
+	const unit = h.store.get(CONSOLE_USER_UNIT);
+	assert.ok(unit, "unit written into ~/.config/systemd/user");
+	assert.match(unit, /serve --deployment \/srv\/pi-deploy$/m);
+	assert.deepEqual(h.calls.map((c) => c.args), [["--user", "daemon-reload"], ["--user", "enable", "--now", "pi-dispatch-console.service"]]);
+	assert.ok(!h.store.has(USER_UNIT), "no worker unit");
+	for (const [cmd, args] of [["start", ["--user", "start", "pi-dispatch-console.service"]], ["stop", ["--user", "stop", "pi-dispatch-console.service"]]]) {
+		const s = consoleHarness({ platform: "linux", argv: [cmd, "--console"], plan: { systemctl: 0 } });
+		assert.equal(await s.run(), 0);
+		assert.deepEqual(s.calls.map((c) => c.args), [args]);
+	}
+	const status = consoleHarness({ platform: "linux", argv: ["status", "--console"], files: { [CONSOLE_USER_UNIT]: unit }, plan: { systemctl: { code: 0, output: "active\n" } } });
+	assert.equal(await status.run(), 0);
+	assert.match(status.text(), new RegExp(`user scope: ${CONSOLE_USER_UNIT} — active`));
+	const un = consoleHarness({ platform: "linux", argv: ["uninstall", "--console"], files: { [CONSOLE_USER_UNIT]: unit }, plan: { systemctl: 0 } });
+	assert.equal(await un.run(), 0, un.errText());
+	assert.ok(!un.store.has(CONSOLE_USER_UNIT));
+	assert.deepEqual(un.calls.map((c) => c.args), [["--user", "disable", "--now", "pi-dispatch-console.service"], ["--user", "daemon-reload"]]);
+});
+
+test("install linux --console --system stages the render and prints the sudo commands; darwin bootstraps com.pi-dispatch.console without the Docker Desktop note", async () => {
+	const sys = consoleHarness({ platform: "linux", argv: ["install", "--console", "--system"] });
+	assert.equal(await sys.run(), 0);
+	assert.equal(sys.calls.length, 0);
+	assert.match(sys.store.get("/faketmp/pi-dispatch-console.service"), /^User=tester$/m);
+	assert.ok(sys.text().includes("sudo systemctl enable --now pi-dispatch-console.service"));
+	const mac = consoleHarness({ platform: "darwin", argv: ["install", "--console"], plan: { launchctl: 0 } });
+	assert.equal(await mac.run(), 0, mac.errText());
+	assert.ok(mac.store.get(CONSOLE_AGENT)?.includes("<string>com.pi-dispatch.console</string>"));
+	assert.deepEqual(mac.calls.map((c) => [c.cmd, ...c.args].join(" ")), [`launchctl bootstrap gui/501 ${CONSOLE_AGENT}`, "launchctl enable gui/501/com.pi-dispatch.console"]);
+	assert.match(mac.text(), /LOGIN-scoped/);
+	assert.doesNotMatch(mac.text(), /Docker Desktop/);
+});
+
+test("installedUnitPaths names the console's units in both scopes", () => {
+	const linux = installedUnitPaths("linux", "/home/tester").filter((u) => u.which === "console");
+	assert.deepEqual(linux, [
+		{ which: "console", scope: "user", path: CONSOLE_USER_UNIT },
+		{ which: "console", scope: "system", path: "/etc/systemd/system/pi-dispatch-console.service" },
+	]);
+	const darwin = installedUnitPaths("darwin", "/home/tester").filter((u) => u.which === "console");
+	assert.deepEqual(darwin.map((u) => u.path), [CONSOLE_AGENT, "/Library/LaunchDaemons/com.pi-dispatch.console.plist"]);
+});
+
+test("resolveConsoleEntry: the package's dist/console.mjs when it exists, else the real path of pi-dispatch-console on PATH, else null", () => {
+	const pkg = "/srv/node_modules/@edgehero/pi-dispatch-admin/dist/console.mjs";
+	const asked = [];
+	const resolveModule = (spec) => (asked.push(spec), `file://${pkg}`);
+	assert.equal(resolveConsoleEntry({ resolveModule, exists: (p) => p === pkg, findBin: () => assert.fail("PATH is the fallback"), realpath: (p) => p }), pkg);
+	assert.deepEqual(asked, ["@edgehero/pi-dispatch-admin/dist/console.mjs"], "the package name and its bin's file, as admin/package.json publishes them");
+	// A resolution that names a dist/ nobody built (a checkout without `node admin/build.mjs`) falls through.
+	const bin = "/opt/npm-global/bin/pi-dispatch-console";
+	const pkgAt = (name) => (p) => (p === join(dirname(dirname(CONSOLE_ENTRY)), "package.json") ? JSON.stringify({ name }) : assert.fail(`read ${p}`));
+	const viaPath = (realpath, readFile = pkgAt(CONSOLE_PACKAGE)) => resolveConsoleEntry({ resolveModule, exists: () => false, findBin: (n) => (n === "pi-dispatch-console" ? bin : null), realpath, readFile });
+	assert.equal(viaPath((p) => (p === bin ? CONSOLE_ENTRY : p)), CONSOLE_ENTRY, "the symlink's target, which a service manager's PATH need not find");
+	// A shim (pnpm, Volta) is not the package's file, and `node <shim>` would crash at every start.
+	assert.equal(viaPath((p) => p), null, "a PATH entry that is not dist/console.mjs is refused");
+	assert.equal(viaPath(() => "/home/u/.volta/bin/volta-shim"), null);
+	assert.equal(viaPath(() => CONSOLE_ENTRY, pkgAt("some-other-package")), null, "a dist/console.mjs of another package is refused");
+	assert.equal(viaPath(() => CONSOLE_ENTRY, () => "not json"), null);
+	const throwing = () => {
+		throw Object.assign(new Error("not found"), { code: "ERR_MODULE_NOT_FOUND" });
+	};
+	assert.equal(resolveConsoleEntry({ resolveModule: throwing, findBin: () => null, realpath: (p) => p }), null);
+	assert.equal(resolveConsoleEntry({ resolveModule: throwing, findBin: () => bin, realpath: throwing }), null, "a dangling bin is not a console");
+	const pkgJson = JSON.parse(readFileSync(join(REPO_ROOT, "admin", "package.json"), "utf8"));
+	assert.equal(pkgJson.name, CONSOLE_PACKAGE);
+	assert.equal(pkgJson.bin["pi-dispatch-console"], "./dist/console.mjs");
+	assert.ok(pkgJson.files.includes("dist"), "dist/ is in the published files, so an installed package has the file");
+});
+
+test("readConsoleOperators: the tokens file serve would read in the deployment folder, judged as serve judges it", { skip: process.platform === "win32" }, () => {
+	const dir = tempDir("pd-service-console-");
+	const path = join(dir, "console-tokens.json");
+	const missing = readConsoleOperators(dir, process.platform);
+	assert.equal(missing.path, path);
+	assert.match(missing.refusal, /does not exist/);
+	addToken({ path, name: "viewer", role: "viewer" });
+	assert.deepEqual(readConsoleOperators(dir, process.platform), { path, operators: 0 });
+	addToken({ path, name: "rob", role: "operator" });
+	assert.deepEqual(readConsoleOperators(dir, process.platform), { path, operators: 1 });
+	chmodSync(path, 0o644);
+	assert.match(readConsoleOperators(dir, process.platform).refusal, /can be read or written by other accounts/);
+});
+
+/**
+ * A systemd Exec line read back the way systemd.service(5) "Command lines" says systemd reads it, for the tests: words
+ * split on blanks, a double-quoted word C-unescaped (`\\\\`, `\\"`, the usual letters), a single-quoted word taken
+ * as written, then `%%` -> `%` (specifiers) and `$$` -> `$` (variables) in every word. Written apart from the renderer's
+ * `systemdWord`, so a test holds the decoded argv against the intended one instead of restating the encoder.
+ */
+function systemdArgv(line) {
+	const words = [];
+	let i = 0;
+	const C = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "'": "'", a: "\x07", b: "\b", f: "\f", v: "\v", s: " " };
+	while (i < line.length) {
+		while (line[i] === " " || line[i] === "\t") i++;
+		if (i >= line.length) break;
+		let word = "";
+		if (line[i] === '"' || line[i] === "'") {
+			const q = line[i++];
+			while (i < line.length && line[i] !== q) {
+				if (q === '"' && line[i] === "\\") {
+					const next = line[i + 1];
+					assert.ok(next in C, `unknown escape \\${next} in ${line}`);
+					word += C[next];
+					i += 2;
+				} else word += line[i++];
+			}
+			assert.equal(line[i], q, `unterminated ${q} in ${line}`);
+			i++;
+			assert.ok(i >= line.length || line[i] === " ", `a quoted word must end at a blank: ${line}`);
+		} else {
+			while (i < line.length && line[i] !== " " && line[i] !== "\t") word += line[i++];
+		}
+		words.push(word.replace(/%%/g, "\0P").replace(/%/g, () => assert.fail(`an unescaped specifier in ${line}`)).replace(/\0P/g, "%").replace(/\$\$/g, "\0D").replace(/\$/g, () => assert.fail(`an unescaped $ in ${line}`)).replace(/\0D/g, "$"));
+	}
+	return words;
+}
+
+test("--console paths that need quoting: the ExecStart systemd reads back is exactly the intended argv, readUnitSeam reads the folder back, and --env-setup passes it outside the sh script", async () => {
+	for (const folder of ["/srv/My Deploy", "/srv/a%hb", "/srv/a$HOME", "/srv/it's", '/srv/say"hi"', "/srv/back\\slash", "/srv/semi;colon"]) {
+		const argv = ["/fake/node/bin/node", CONSOLE_ENTRY, "serve", "--deployment", folder];
+		const h = consoleHarness({ platform: "linux", argv: ["render", "--console"], cwd: folder });
+		assert.equal(await h.run(), 0, `${folder}: ${h.errText()}`);
+		assert.deepEqual(systemdArgv(h.text().match(/^ExecStart=(.*)$/m)[1]), argv, folder);
+		assert.equal(readUnitSeam(h.text(), "linux").deployDir, folder, `${folder}: the unit reads back as this folder`);
+		const es = consoleHarness({ platform: "linux", argv: ["render", "--console", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES, cwd: folder });
+		assert.equal(await es.run(), 0, folder);
+		const decoded = systemdArgv(es.text().match(/^ExecStart=(.*)$/m)[1]);
+		assert.deepEqual(decoded.slice(0, 2), ["/bin/sh", "-c"], folder);
+		if (/['"$`\\%]/.test(folder)) {
+			// Outside the script: sh receives the argv as its own words and execs them untouched.
+			assert.equal(decoded[2], `set -a; . "${ENV_SETUP}" || exit 1; set +a; exec "$@"`, folder);
+			assert.deepEqual(decoded.slice(3), ["sh", ...argv], folder);
+		} else {
+			// A space or a `;` alone: the old form, every word inside sh's double quotes.
+			assert.equal(decoded[2], `set -a; . "${ENV_SETUP}" || exit 1; set +a; exec ${argv.map((a) => `"${a}"`).join(" ")}`, folder);
+			assert.equal(decoded.length, 3, folder);
+		}
+		assert.deepEqual(readUnitSeam(es.text(), "linux"), { setup: ENV_SETUP, deployDir: folder });
+	}
+	// A folder needing nothing keeps the old shapes byte for byte, with and without the seam.
+	const plain = consoleHarness({ platform: "linux", argv: ["render", "--console", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
+	assert.equal(await plain.run(), 0);
+	assert.ok(plain.text().includes(`ExecStart=/bin/sh -c 'set -a; . "${ENV_SETUP}" || exit 1; set +a; exec "/fake/node/bin/node" "${CONSOLE_ENTRY}" "serve" "--deployment" "${DEPLOY_AT}"'`));
+	// A % in an --env-setup path is refused (it lands in the single-quoted word, where systemd expands specifiers).
+	const pct = harness({ platform: "linux", argv: ["render", "--env-setup", "/etc/pd/a%hb.sh"], files: { "/etc/pd/a%hb.sh": "" } });
+	assert.equal(await pct.run(), 1);
+	assert.match(pct.errText(), /%-specifiers/);
+});
+
+test("macOS: a folder holding -- or ' renders (the worker and the console) and reads back, ' and \" left literal, the setup path too", async () => {
+	for (const folder of ["/Users/rob/my--deploy", "/Users/rob/O'Brien deploy"]) {
+		const setup = `${folder}/setup.sh`;
+		for (const comp of [[], ["--console"]]) {
+			const h = consoleHarness({ platform: "darwin", argv: ["render", ...comp, "--env-setup", setup], files: { [setup]: "" }, cwd: folder });
+			assert.equal(await h.run(), 0, `${folder} ${comp}: ${h.errText()}`);
+			const text = h.text();
+			assert.ok(!text.includes("&apos;") && !text.includes("&quot;"), "no entity for a quote: nothing lands in an attribute");
+			assert.ok(text.includes(`<string>${folder}</string>`), "the folder as written");
+			assert.deepEqual(readUnitSeam(text, "darwin"), { setup, deployDir: folder });
+		}
+	}
+	// A plist written with the entities (by hand, or by another tool) still reads back.
+	assert.deepEqual(readUnitSeam("<key>PI_ENV_SETUP</key>\n<string>/a/O&apos;B&amp;C.sh</string>\n<key>WorkingDirectory</key>\n<string>/a/O&apos;B</string>", "darwin"), { setup: "/a/O'B&C.sh", deployDir: "/a/O'B" });
+});
+
+test("--console on macOS: a folder holding & or < is escaped in every plist string and reads back as itself", async () => {
+	const folder = "/Users/rob/R&D <one>";
+	const h = consoleHarness({ platform: "darwin", argv: ["render", "--console"], cwd: folder });
+	assert.equal(await h.run(), 0, h.errText());
+	const text = h.text();
+	assert.ok(!/&(?!amp;|lt;|gt;|quot;|apos;)/.test(text.replace(/<!--[\s\S]*?-->/g, "")), "no bare & outside comments");
+	assert.ok(programArguments(text).includes("/Users/rob/R&amp;D &lt;one&gt;"));
+	assert.equal(readUnitSeam(text, "darwin").deployDir, folder);
+});
+
+test("paths no unit can carry are refused before anything is rendered or written", async () => {
+	const cases = [
+		["linux", "/srv/a\nb", /control character/],
+		["darwin", "/Users/a\tb", /control character/],
+		["linux", "/srv/deploy ", /starts or ends with whitespace/],
+		["win32", "C:\\R&D", /cmd reads it/],
+		["win32", "C:\\100%", /cmd reads it/],
+	];
+	for (const [platform, cwd, why] of cases) {
+		for (const cmd of ["render", "install"]) {
+			const h = consoleHarness({ platform, argv: [cmd, "--console"], cwd, plan: { systemctl: 0, launchctl: 0, nssm: 1 } });
+			assert.equal(await h.run(), 1, `${platform} ${JSON.stringify(cwd)} ${cmd}`);
+			assert.match(h.errText(), why);
+			assert.equal(h.store.size + h.calls.length, 0);
+		}
+	}
+	// The worker's Windows argv holds no folder, so the same folder is fine there.
+	assert.equal(await harness({ platform: "win32", argv: ["render"], cwd: "C:\\R&D" }).run(), 0);
+});
+
+test("--drain is the worker's alone; macOS --system for the console names no Docker Desktop", async () => {
+	for (const flag of ["--console", "--receiver"]) {
+		const h = consoleHarness({ platform: "linux", argv: ["restart", "--drain", flag], plan: { systemctl: 0 } });
+		assert.equal(await h.run(), 1);
+		assert.match(h.errText(), /--drain applies to the worker alone/);
+		assert.equal(h.calls.length, 0);
+	}
+	const mac = consoleHarness({ platform: "darwin", argv: ["install", "--console", "--system"] });
+	assert.equal(await mac.run(), 1);
+	assert.match(mac.errText(), /user-scope only/);
+	assert.doesNotMatch(mac.errText(), /Docker/);
+	const worker = harness({ platform: "darwin", argv: ["install", "--system"] });
+	assert.equal(await worker.run(), 1);
+	assert.match(worker.errText(), /Docker Desktop/);
+});
+
+test("installedConsoleUnitPath: the console unit whose WorkingDirectory is this folder, and nothing else", async () => {
+	const h = consoleHarness({ platform: "linux", argv: ["render", "--console"] });
+	await h.run();
+	const unit = h.text();
+	const at = (files) => installedConsoleUnitPath({ platform: "linux", home: "/home/tester", cwd: DEPLOY_AT, fileExists: (p) => p in files, readUnit: (p) => files[p] });
+	assert.equal(at({ [CONSOLE_USER_UNIT]: unit }), CONSOLE_USER_UNIT);
+	assert.equal(at({ "/etc/systemd/system/pi-dispatch-console.service": unit }), "/etc/systemd/system/pi-dispatch-console.service");
+	assert.equal(at({ [CONSOLE_USER_UNIT]: unit.replace(`WorkingDirectory=${DEPLOY_AT}`, "WorkingDirectory=/srv/other") }), null);
+	assert.equal(at({ [USER_UNIT]: unit }), null, "a worker unit is not a console unit");
+	assert.equal(installedConsoleUnitPath({ platform: "win32", home: "C:\\u", cwd: "C:\\d" }), null);
+});
+
+test("wrapper: PI_WRAPPER_NO_DOTENV=1 sources no .env and needs none, keeps PI_ENV_SETUP, and a .env line cannot set it", { skip: !POSIX }, async () => {
+	// exit 9: the .env was sourced; exit 7: the flag reached the command.
+	const stub = '#!/bin/sh\n[ -z "$PI_WRAPPER_TEST" ] || exit 9\n[ -z "$PI_WRAPPER_NO_DOTENV" ] || exit 7\nexit 0\n';
+	const dir = wrapperDir(stub);
+	assert.equal((await runWrapper(dir, { env: { PI_WRAPPER_NO_DOTENV: "1" } })).code, 0);
+	const bare = wrapperDir(stub, { env: false });
+	assert.equal((await runWrapper(bare, { env: { PI_WRAPPER_NO_DOTENV: "1" } })).code, 0, "no .env is not a refusal in this mode");
+	const setup = join(dir, "setup.sh");
+	writeFileSync(setup, "FROM_SETUP=1\n");
+	const withSetup = wrapperDir('#!/bin/sh\n[ "$FROM_SETUP" = "1" ] || exit 6\n[ -z "$PI_WRAPPER_TEST" ] || exit 9\nexit 0\n');
+	assert.equal((await runWrapper(withSetup, { env: { PI_WRAPPER_NO_DOTENV: "1", PI_ENV_SETUP: setup } })).code, 0, "the configured setup script still runs");
+	const planted = wrapperDir(stub);
+	writeFileSync(join(planted, ".env"), "PI_WRAPPER_TEST=1\nPI_WRAPPER_NO_DOTENV=1\n");
+	assert.equal((await runWrapper(planted)).code, 9, "without the unit's flag the file is sourced, whatever it says");
+});
+
+test("pin: the console template carries no EnvironmentFile=, and both wrappers name PI_WRAPPER_NO_DOTENV", () => {
+	assert.doesNotMatch(readFileSync(join(DEPLOY_DIR, "console.service"), "utf8"), /^EnvironmentFile=/m);
+	for (const name of ["worker-env-wrapper.sh", "worker-env-wrapper.cmd"]) assert.ok(TEMPLATE_PINS[name].includes("PI_WRAPPER_NO_DOTENV"), name);
 });

@@ -46,7 +46,7 @@ with at least one commit, and `run` refuses any other folder before it queues an
 | `run <folder> --task "..."` | queue one job against a local folder |
 | `run --trigger <id>` | fire one cron trigger from the triggers file now, once, as its schedule would |
 | `status`, `pause`, `resume`, `cancel <jobId>` | steer the running worker from any terminal |
-| `service render\|install\|status\|restart` | run the worker (or `--receiver`) as a service (user level on macOS and Linux, nssm on Windows) |
+| `service render\|install\|status\|restart` | run the worker (or `--receiver`, or `--console` for the operator console) as a service (user level on macOS and Linux, nssm on Windows) |
 | `setup github` | create a GitHub App in one browser click |
 | `import-pi` | stage your own pi setup (models, skills, persona) for every job, without credentials |
 | `chat <jobId \| url \| key>` | follow and steer a running job, answer a parked one, or fork a finished one into your own pi, through the operator console |

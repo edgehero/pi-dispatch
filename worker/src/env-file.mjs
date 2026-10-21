@@ -2065,14 +2065,16 @@ export function decodeEnvFile(content, { loader = "systemd" } = {}) {
  * effect, and the reader and writer name it rather than let an operator believe it does anything. PI_ENV_SETUP is on
  * both lists: it is unit configuration and never honoured from the file. The cmd list is compared ignoring case, as
  * `set` does. Kept beside the wrappers' text by a test, which fails when either wrapper's own variables change.
+ * PI_WRAPPER_NO_DOTENV (issue #708) joins both: the console's unit sets it, the wrappers test it BEFORE the load and
+ * unset it after, so a `.env` line naming it can neither start nor stop the load.
  */
 export const WRAPPER_INTERNAL_KEYS = Object.freeze({
-	shell: Object.freeze(["PI_ENV_SETUP", "env_setup", "signaled", "child", "rc"]),
-	cmd: Object.freeze(["PI_ENV_SETUP", "ENV_SETUP", "RC", "ERRORLEVEL"]),
+	shell: Object.freeze(["PI_ENV_SETUP", "PI_WRAPPER_NO_DOTENV", "env_setup", "signaled", "child", "rc"]),
+	cmd: Object.freeze(["PI_ENV_SETUP", "PI_WRAPPER_NO_DOTENV", "ENV_SETUP", "RC", "ERRORLEVEL"]),
 });
 
 /** What a line assigning one of the wrapper's own variables is, and what to do, in the words doctor and the writer use. */
-const WRAPPER_INTERNAL_WHAT = (name) => `assigns ${name}, a variable the service wrapper keeps for itself (deploy/worker-env-wrapper.sh on macOS, .cmd on Windows) and assigns again after loading this file, so the line has no effect${/^pi_env_setup$/i.test(name) ? "; PI_ENV_SETUP is never honoured from this file" : ""}`;
+const WRAPPER_INTERNAL_WHAT = (name) => `assigns ${name}, a variable the service wrapper keeps for itself (deploy/worker-env-wrapper.sh on macOS, .cmd on Windows) and assigns again after loading this file, so the line has no effect${/^pi_env_setup$/i.test(name) ? "; PI_ENV_SETUP is never honoured from this file" : /^pi_wrapper_no_dotenv$/i.test(name) ? "; PI_WRAPPER_NO_DOTENV is unit configuration (the console's service sets it) and never honoured from this file" : ""}`;
 const WRAPPER_INTERNAL_FIX = "remove the line (a setup script is named with pi-dispatch service install --env-setup <path>, never in .env)";
 
 /** A `envFileWrapperInternal` finding as one sentence: the line, what it is, and the fix. */

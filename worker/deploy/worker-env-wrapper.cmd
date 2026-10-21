@@ -54,6 +54,10 @@ REM number. So after the load the wrapper re-asserts its own: ENV_SETUP and PI_E
 REM %PI_ENV_SETUP%, which cmd expands when it READS this parenthesized block, before its first line runs
 REM (`set /?`, the reason delayed expansion exists), so the value is the unit's and no .env line reaches it;
 REM and ERRORLEVEL cleared just before the command runs. RC is assigned after the command, before it is read.
+REM PI_WRAPPER_NO_DOTENV=1 (issue #708): the command reads the deployment's .env ITSELF and takes only the keys it
+REM owns (the operator console, `serve --deployment`), so .env is neither loaded nor required here; see
+REM worker-env-wrapper.sh for why. Read before the load, from the service's own environment, and cleared after it.
+if "%PI_WRAPPER_NO_DOTENV%"=="1" goto wrapper_env_loaded
 if exist ".env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
   set "ENV_SETUP=%PI_ENV_SETUP%"
@@ -65,6 +69,8 @@ if exist ".env" (
   )
   echo worker-env-wrapper: no .env in "%CD%" -- the environment comes from "%ENV_SETUP%" ^(PI_ENV_SETUP^) 1>&2
 )
+:wrapper_env_loaded
+set "PI_WRAPPER_NO_DOTENV="
 
 REM AFTER .env, deliberately: the manager is the newer source of truth, so a stale key left in the file
 REM loses instead of silently shadowing the managed one (mirrors the .sh twin). A missing or failing

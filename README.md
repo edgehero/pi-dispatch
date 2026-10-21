@@ -458,7 +458,8 @@ pi-dispatch service restart --drain   # pause, wait for running jobs, restart, r
 commands instead). A unit uses the folder you run `install` from as its working directory and reads that
 folder's `.env`. `--receiver` installs the receiver's unit instead of the worker's (the receiver package
 must be installed
-beside the worker), and `--env-setup <path>` wraps the worker in
+beside the worker), `--console` installs the operator console's (`pi-dispatch-console serve`, once the admin
+package is installed and a console token with the operator role exists: [`docs/console.md`](docs/console.md)), and `--env-setup <path>` wraps the worker in
 your secrets manager's setup script ([`docs/secrets.md`](docs/secrets.md)). On rootless Podman
 (`PI_BACKENDS=podman`) it also installs Valkey, the egress proxy and the proxy's network keeper as systemd
 units (Podman's Quadlet format), and `up` offers the same ([`docs/podman.md`](docs/podman.md)). Run one

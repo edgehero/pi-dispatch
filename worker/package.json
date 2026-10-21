@@ -48,6 +48,7 @@
     "./git-hardening": "./src/git-hardening.mjs",
     "./http-body": "./src/http-body.mjs",
     "./console-tokens": "./src/console-tokens.mjs",
+    "./console-probe": "./src/console-probe.mjs",
     "./console-audit": "./src/console-audit.mjs",
     "./console-answer": "./src/console-answer.mjs",
     "./steer-inbox": "./src/steer-inbox.mjs",

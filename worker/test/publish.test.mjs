@@ -28,6 +28,8 @@ const RECEIVER_DIR = join(REPO_ROOT, "receiver");
 // worker/deploy must mirror and ship.
 const MIRRORED_DEPLOY = [
 	"com.pi-dispatch.worker.plist",
+	// The operator console's systemd unit (issue #708), rendered by `service install --console`.
+	"console.service",
 	"docker-compose.yml",
 	// The egress policy's RULES (REQ-EGRESS-ALLOWLIST). A deployment artifact, not operator config, and
 	// the distinction this file's own comment asks to be decided: it ships unedited, the compose service

@@ -5,7 +5,7 @@
 # plist ships silently and only fails on the operator's box. This workflow is the cheap gate: it checks
 # STRUCTURE, not runtime behaviour.
 #
-#   - worker.service / receiver.service : `systemd-analyze verify` parses the units. The PLACEHOLDER
+#   - worker.service / receiver.service / console.service : `systemd-analyze verify` parses the units. The PLACEHOLDER
 #     paths (/opt/pi-dispatch, /usr/bin/node) do not exist on the runner, so path-existence warnings are
 #     EXPECTED and ignored; only genuine syntax errors (unknown directives, parse failures) fail.
 #   - com.pi-dispatch.worker.plist : `xmllint --noout` proves the plist is well-formed XML. plutil is
@@ -61,7 +61,7 @@ jobs:
           # verify exits non-zero for the missing PLACEHOLDER exec paths, which is expected -- so gate on
           # the CONTENT of the diagnostics, not the exit code. A real defect is an unknown directive or a
           # parse failure; a missing /opt/pi-dispatch or /usr/bin/node is not.
-          systemd-analyze verify --no-pager deploy/worker.service deploy/receiver.service > verify.log 2>&1 || true
+          systemd-analyze verify --no-pager deploy/worker.service deploy/receiver.service deploy/console.service > verify.log 2>&1 || true
           cat verify.log
           if grep -Eiq 'Unknown (key name|lvalue|section)|Failed to parse|Invalid setting|not a valid|expected ' verify.log; then
             echo "::error::systemd-analyze found a syntax error in a unit file. See the log above."
@@ -95,6 +95,34 @@ jobs:
             exit 1
           fi
           echo "OK: the rendered openshell unit is syntactically valid"
+
+      # Issue #708: the console's unit as `service install --console` renders it: the whole ExecStart replaced by the
+      # console package's entry with `serve --deployment`, which the template alone cannot show. The admin package is
+      # built first, since its dist/console.mjs is the entry the render resolves (and refuses without).
+      - name: a rendered console unit parses (issue #708)
+        run: |
+          node admin/build.mjs
+          d="$RUNNER_TEMP/render-708"
+          mkdir -p "$d"
+          : > "$d/.env"
+          (cd "$d" && node "$GITHUB_WORKSPACE/worker/src/cli.mjs" service render --console) > "$d/pi-dispatch-console.service"
+          cat "$d/pi-dispatch-console.service"
+          grep -Eq "^ExecStart=/[^ ]*node $GITHUB_WORKSPACE/admin/dist/console\.mjs serve --deployment $d\$" "$d/pi-dispatch-console.service" || { echo "::error::the rendered console unit does not run the console package's entry with serve --deployment"; exit 1; }
+          grep -qx 'RestartPreventExitStatus=2' "$d/pi-dispatch-console.service" || { echo "::error::the rendered console unit lost RestartPreventExitStatus=2"; exit 1; }
+          # And one folder holding characters a unit must quote or escape (a space, a quote, % and $), so the quoting
+          # (`systemdWord`, `%%` in WorkingDirectory=) is parsed by systemd itself, not only by the unit tests' reader.
+          q="$RUNNER_TEMP/it's 100% \$HOME"
+          mkdir -p "$q" "$d/quoted"
+          (cd "$q" && node "$GITHUB_WORKSPACE/worker/src/cli.mjs" service render --console) > "$d/quoted/pi-dispatch-console.service"
+          grep -q '^WorkingDirectory=.*100%% \$HOME$' "$d/quoted/pi-dispatch-console.service" || { echo "::error::the quoted folder's % is not doubled in WorkingDirectory="; exit 1; }
+          cat "$d/quoted/pi-dispatch-console.service"
+          systemd-analyze verify --no-pager "$d/pi-dispatch-console.service" "$d/quoted/pi-dispatch-console.service" > verify-708.log 2>&1 || true
+          cat verify-708.log
+          if grep -Eiq 'Unknown (key name|lvalue|section)|Failed to parse|Invalid setting|not a valid|expected ' verify-708.log; then
+            echo "::error::systemd-analyze found a syntax error in the rendered console unit. See the log above."
+            exit 1
+          fi
+          echo "OK: the rendered console unit is syntactically valid"
 
       - name: plist is well-formed XML
         run: |

@@ -77,7 +77,15 @@ trap wrapper_stopped_early TERM INT
 # until the `shift` below.
 set -- "${PI_ENV_SETUP:-}" "$@"
 
-if [ -f ./.env ]; then
+# PI_WRAPPER_NO_DOTENV=1 (issue #708) is set by the unit for a command that reads the deployment's .env ITSELF and
+# takes only the keys it owns: the operator console (`serve --deployment`), which also refuses a .env another account
+# can change. Sourcing the whole file here would hand that process every worker secret and make each key read as its
+# own shell's, which wins over the file and skips that check. So ./.env is not sourced and not required. Tested
+# before the load, from the unit's environment, so no .env line can set it; PI_ENV_SETUP is honoured exactly as
+# without it (an operator who configured a script asked for it). Unset after, so the command never sees it.
+if [ "${PI_WRAPPER_NO_DOTENV:-}" = "1" ]; then
+	:
+elif [ -f ./.env ]; then
 	set -a; . ./.env; set +a
 elif [ -z "$1" ]; then
 	echo "worker-env-wrapper: .env not found in $PWD -- this wrapper must be started in the deployment folder (the unit's WorkingDirectory / nssm AppDirectory); it no longer guesses a location from its own path" >&2
@@ -90,6 +98,7 @@ fi
 # AFTER THE LOAD, every variable this wrapper reads is assigned, so no assignment line of ./.env
 # reaches one. The worker sees the unit's PI_ENV_SETUP too, never one the file set (the setup script,
 # which is unit configuration, may still set its own).
+unset PI_WRAPPER_NO_DOTENV
 env_setup=$1
 shift
 if [ -n "$env_setup" ]; then
