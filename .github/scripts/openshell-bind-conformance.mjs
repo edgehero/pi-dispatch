@@ -375,6 +375,39 @@ if (!readings.readOnlyJobInputs?.ok) failed = true;
 	}
 }
 
+// Issue #730 E5: E1-E4 in bind mode, on the copy pass's investigation images (built there, named in a file), under a
+// policy that admits the stand-in and GitHub, as the copy pass's does. All diag, none asserted.
+{
+	const file = process.env.INV730_FILE ?? join(process.env.RUNNER_TEMP ?? scratch, "inv730.json");
+	let imgs = null;
+	try {
+		imgs = JSON.parse(nodeFs.readFileSync(file, "utf8"));
+	} catch (e) {
+		console.log(`diag    #730 bind: no investigation images from the copy pass (${e.code ?? e.message})`);
+	}
+	if (imgs !== null) {
+		const policy = { readAllowlist: () => ["api.anthropic.com", ".github.com"], readEndpoints: () => [{ id: "lab-a", host: "host.openshell.internal", port: 18080, slots: 1 }] };
+		const invRun = async (label, img, prompt, prefix) => {
+			output.set("last", "");
+			let code = "no-run";
+			try {
+				code = (await bundleFor("bind", img, policy).runContainer({ job: JOB, prepared: jobDirFor(prompt), name: `pi-job-bind-conformance-${nonce}-${label}`, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 200 } })).code;
+			} catch (e) {
+				code = `threw ${e?.reason ?? e?.message ?? e}`;
+			}
+			const lines = String(output.get("last") ?? "").split("\n").filter((l) => l.startsWith(`probe ${prefix}`)).map((l) => l.slice("probe ".length));
+			console.log(`diag    #730 bind ${label} (exit ${code}):\n${lines.map((l) => `          ${l}`).join("\n") || "          none printed"}`);
+		};
+		await invRun("e1", imgs.probe, "inv-e1", "e1");
+		await invRun("netpath", imgs.probe, "netpath", "netpath");
+		await invRun("e2-runner0755", imgs.runner0755, "netpath", "netpath");
+		await invRun("e2-newpath", imgs.newPath, "netpath", "netpath");
+		await invRun("e34-parent-node", imgs.probe, "inv-child-node", "e");
+		await invRun("e34-parent-runner", imgs.probe, "inv-child-runner", "e");
+		await invRun("e34-parent-runner-dumpable", imgs.runner0755, "inv-child-runner", "e");
+	}
+}
+
 await run("docker", ["image", "rm", "-f", probeImage]);
 // Some of it is uid 2000's now.
 await run("sudo", ["-n", "rm", "-rf", scratch]);

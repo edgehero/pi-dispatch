@@ -70,7 +70,7 @@ nodeFs.mkdirSync(context);
 nodeFs.writeFileSync(
 	join(context, "entrypoint.sh"),
 	`#!/bin/sh
-c=$(cat /sandbox/job/prompt.md)
+c=$(cat /sandbox/job/prompt.md 2>/dev/null || cat /job/prompt.md)
 case "$c" in
 	sleep) exec sleep 600 ;;
 	readback)
@@ -724,6 +724,18 @@ const STEER_FAKE_MODELS = { providers: { "steer-fake": { baseUrl: "http://host.o
 	}
 }
 
+// Issue #730 E5: the bind pass (openshell-bind-conformance.mjs, after the gateway restart) reruns E1-E4 on these same
+// images, so they are kept and named in a file (the default probe under a tag of its own, since its own is removed).
+{
+	const keep = `pi-dispatch-openshell-probe-inv:${nonce}`;
+	await run(engine, ["tag", probeImage, keep]);
+	const file = process.env.INV730_FILE ?? join(process.env.RUNNER_TEMP ?? scratch, "inv730.json");
+	try {
+		nodeFs.writeFileSync(file, `${JSON.stringify({ probe: keep, runner0755: probeImage0755, newPath: probeImageNewPath })}\n`);
+	} catch (e) {
+		console.log(`diag    #730 could not hand the images to the bind pass: ${e.code ?? e.message}`);
+	}
+}
 await run(engine, ["image", "rm", "-f", probeImage]);
 nodeFs.rmSync(scratch, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);
