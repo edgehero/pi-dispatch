@@ -218,9 +218,20 @@ console.
 | `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
 | `/insights?range=30d` | Spend and insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
-| `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, each host's last doctor run ([Doctor results](#doctor-results)), every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
+| `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget, running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |
+
+**The Venues panel** on `/fleet` lists every venue this release knows, and any venue a newer worker blesses that it does
+not. For each one: the hosts that bless it and the ones whose default it is, each host's
+`PI_BACKEND_FLOOR`, every property the venue declares (the question it answers, its word, and what the word means:
+`enforced`, `asserted` or `absent`, with the switch or the check it depends on), what it serves, who holds the job's
+credentials, and for the OpenShell venues each host's engine, mode and whether its gateway was on that host when
+its worker started. The hosts' parts are what each worker published about itself when it started; the rest is the
+release's own table.
+Nothing is checked live from the console, so a word is the venue's declared one: `pi-dispatch doctor` on a host says
+whether it holds there. A host running a worker older than this console shows "not published". The runs table has a
+Venue column, and in pi, `/dispatch` shows the same view: `u` for the hosts, then `v`.
 
 **Links to the forge** come from your deployment's own settings, never from a guess. A GitHub run links to
 `github.com`; a GitLab, Forgejo or Azure DevOps run links to the instance URL in your `.env` (`GITLAB_URL`,
@@ -351,6 +362,7 @@ The runs page takes these filters in its query string. Each one is matched exact
 | `trigger` | trigger: its position in the triggers file, or a schedule's id |
 | `project` | project id |
 | `host` | worker name |
+| `backend` | venue, as the Venues panel on `/fleet` names it (a run recorded before venues were recorded counts as `local`) |
 | `outcome` | outcome: `completed`, `policy` or `failed` |
 | `reason` | reason, such as `awaiting-input` or `over-budget` |
 | `model` | model id |

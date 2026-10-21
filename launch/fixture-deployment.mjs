@@ -412,7 +412,7 @@ function placedFirst() {
  * carrying the first in `earlier` the way the processor carries it), the cancelled job and the parked run. The portfolio manager's
  * runs are `pmRecord`'s.
  */
-export function buildRecords({ buildRecord, earlierFrom, dollarBudget: D, venue = "docker" }) {
+export function buildRecords({ buildRecord, earlierFrom, dollarBudget: D, venue = "local" }) {
 	const g = generator(599);
 	const taken = new Set(["gh-5d10", "gh-77c1", RETRY.id, CANCELLED.id, PARKED.id, ...Object.values(RUNNING).flat().map((e) => e.id)]);
 	const runs = scheduled(plannedJobs(g, taken), placedFirst());
@@ -439,7 +439,7 @@ export function pmJob(run) {
 }
 
 /** A pm run's record with the plan it wrote. */
-export function pmRecord({ buildRecord, dollarBudget: D, venue = "docker" }, run, plan) {
+export function pmRecord({ buildRecord, dollarBudget: D, venue = "local" }, run, plan) {
 	const g = generator(run.at % 100_000);
 	const j = pmJob(run);
 	return buildRecord({ job: bullJob(j), result: { ...outcomeOf(g, j, D), plan }, startedAt: iso(j.startMs), endedAt: iso(j.endMs), host: j.host, defaultBackend: venue, project: j.project, size: j.size, capacity: HOSTS[j.host] });
@@ -457,8 +457,18 @@ export const RUNNING = {
 };
 const ORPHANS = { build3: [{ id: CANCELLED.id, project: CANCELLED.project, memMiB: CANCELLED.size.memMiB, cpuCenti: CANCELLED.size.cpuCenti, at: CANCELLED.startMs, orphan: true }] };
 
+/**
+ * What each host blesses (issue #712), as `start.mjs` publishes it through `hostBackendsField`: mini1 runs `local` alone,
+ * mini2 `local` and OpenShell's copy venue on its own gateway, build3 rootless `podman` under a floor.
+ */
+const VENUES = {
+	mini1: { backends: ["local"] },
+	mini2: { backends: ["local", "openshell"], openshellEngine: "docker", gatewayWord: "local" },
+	build3: { backends: ["podman"], backendFloor: { egress: "enforced" } },
+};
+
 /** Each host's registry fields, as `start.mjs` publishes them; build3's last beat is 150 s old (a stale row). */
-export function hostRows({ liveJobsOf, liveJobsFields, version }) {
+export function hostRows({ liveJobsOf, liveJobsFields, version, hostBackendsField = null }) {
 	return Object.entries(HOSTS).map(([name, c]) => {
 		const running = RUNNING[name] ?? [];
 		const orphans = ORPHANS[name] ?? [];
@@ -483,6 +493,8 @@ export function hostRows({ liveJobsOf, liveJobsFields, version }) {
 				waiters: budget ? "0" : "",
 				jobs: live.jobs,
 				jobsMore: live.jobsMore,
+				// A caller without the writer (one from before #712) publishes no `backends`, as an older worker would.
+				...(hostBackendsField ? { backends: hostBackendsField(VENUES[name]) } : {}),
 			},
 		};
 	});
@@ -511,12 +523,12 @@ const PLAN_REASONS = { web: "checkout launch is done; keep a floor for bug repor
  * by the caller after it froze the clock and emptied the environment.
  */
 /**
- * `venue` (issue #712): the venue the records name. `"docker"` by default, which is no venue the backend table holds:
- * it is what the README's panel images were rendered with, and keeping it keeps them byte-stable until they are next
- * regenerated on purpose. The console's golden pages pass `"local"`, so they show a normal local run (the sandbox
- * command, the plain absent sentences) rather than an unknown venue's.
+ * `venue` (issue #712): the venue the records name, `local` by default, so the README's panel images and the console's
+ * golden pages show a normal local run (the sandbox command, the plain absent sentences). It was `"docker"`, which is no
+ * venue the backend table holds, while that kept the images byte-stable; the Venues view regenerated them on purpose,
+ * and a run list naming an unknown venue on every row would have drawn a venue column the README has no use for.
  */
-export async function seedDeployment({ url, paths, mods, venue = "docker" }) {
+export async function seedDeployment({ url, paths, mods, venue = "local" }) {
 	const { RM, DW } = mods;
 	// The settlement rules are the worker's own (a caller that predates the key gets them imported here).
 	const W = { ...mods.W, dollarBudget: mods.W.dollarBudget ?? (await import("../worker/src/dollar-budget.mjs")) };
@@ -574,7 +586,7 @@ export async function seedDeployment({ url, paths, mods, venue = "docker" }) {
 		writing = NOW;
 
 		// The registry: one beat per host through the worker's writer, at that host's own last-beat instant.
-		for (const row of hostRows({ liveJobsOf: W.liveJobs.liveJobsOf, liveJobsFields: W.liveJobs.liveJobsFields, version: mods.version })) {
+		for (const row of hostRows({ liveJobsOf: W.liveJobs.liveJobsOf, liveJobsFields: W.liveJobs.liveJobsFields, version: mods.version, hostBackendsField: W.backends?.hostBackendsField ?? null })) {
 			const reg = W.hostRegistry.makeHostRegistry({ redis, name: row.name, now: () => row.beatAt });
 			// One beat, and an interval that never fires during a render (it is unref'd, so it holds nothing open).
 			await reg.start(row.fields, { intervalMs: 2 ** 31 - 1 });

@@ -762,7 +762,9 @@ export async function openshellBootVersions({ gateway = null, exec = reaperExec(
 	}
 	if (!status.connected) return { gatewayDown: true };
 	if (status.version !== OPENSHELL_TESTED_VERSION) return { refusal: `PI_BACKENDS blesses openshell, and its gateway runs ${status.version ?? "an unknown release"}, not ${OPENSHELL_TESTED_VERSION}, the release this venue was measured on: run the gateway of ${OPENSHELL_TESTED_VERSION}`, transient: false };
-	return {};
+	// Issue #712: whether that gateway is on this host, for the registry row's `backends` field (a word, never the
+	// address). Not a refusal here: every job's preflight refuses a gateway that is not local, by name.
+	return { gatewayLocal: status.local };
 }
 
 /**

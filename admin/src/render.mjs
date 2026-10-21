@@ -50,8 +50,17 @@ const RUN_COLUMNS = [
   // set size is shown alongside the index because `r2` alone does not say whether the sibling exists --
   // `r2/2` is what makes the pair legible in a list where the two rows need not be adjacent.
   { key: "replica", header: "REPLICA", derive: (r) => (r?.replica > 0 ? `r${r.replica}/${r?.replicas ?? "?"}` : "-") },
+  // The venue the run used (issue #712): its record's `backend`, `local` for a record that names none (written before
+  // venues were recorded, the worker's own reading), so this column never says "-" for a run that has a venue. Drawn
+  // only when a listed run ran off `local` (`renderRuns`), so a list of local runs keeps the table it always had.
+  { key: "backend", header: "VENUE", derive: venueOf, optional: true },
   { key: "endedAt", header: "ENDED" },
 ];
+
+/** A run record's venue as the runs table words it: its `backend`, else `local` (a record from before venues). */
+function venueOf(r) {
+  return r && typeof r.backend === "string" && r.backend !== "" ? r.backend : "local";
+}
 
 /**
  * One cell of a record in a PLAIN-TEXT pane: a nullish field renders as "-" so a stable record shape reads
@@ -124,13 +133,16 @@ export function renderRuns(runs) {
   const list = Array.isArray(runs) ? runs : [];
   if (list.length === 0) return "No runs recorded.";
 
-  const headers = RUN_COLUMNS.map((c) => c.header);
+  // The optional VENUE column only when it says something a local-only list would not: this table is also the
+  // `/dispatch runs` message, whose width is the operator's terminal, so a column of `local` is a column of noise.
+  const columns = RUN_COLUMNS.filter((c) => !c.optional || list.some((r) => venueOf(r) !== "local"));
+  const headers = columns.map((c) => c.header);
   // `cell` on the DERIVED value too, which is the whole rule rather than one more site: a `derive` builds
   // its cell out of record fields (`chainDepth`, `replica`, `replicas`) and returned them raw, so the
   // belt covered the columns that did not need it and missed the three that did. Wrapping the output
   // instead of each derive means a column added later cannot reintroduce this, and it costs nothing on
   // the `-` and `r1/2` shapes a derive normally produces.
-  const rows = list.map((r) => RUN_COLUMNS.map((c) => cell(c.derive ? c.derive(r) : r?.[c.key])));
+  const rows = list.map((r) => columns.map((c) => cell(c.derive ? c.derive(r) : r?.[c.key])));
   // COLUMNS, not code units (issue #401), and this table is the MODEL-visible channel rather than a pane.
   // `target` is `local:<basename>` for a local run, so an operator's own folder name reaches it, and one
   // CJK character there shifted every later column of that row against the rows around it.

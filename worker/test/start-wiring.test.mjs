@@ -3959,6 +3959,33 @@ test("openshell's boot releases (#684): another release refuses (exit 2), a sile
 	assert.ok(logs.some((l) => l.event === "openshell_gateway_down_at_boot"));
 });
 
+test("the registry row's backends field (#712): the blessed venues in order, the floor, and the openshell engine with the boot's gateway word", { skip }, async () => {
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	const { parseHostBackends } = await import("../src/backends.mjs");
+	const rowOf = async (env, versions) => {
+		let published = null;
+		await runStart({
+			env,
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+			makeHost: () => fakeHost(),
+			...(versions ? { readOpenshellVersions: async () => versions } : {}),
+			makeHostRegistry: (args) => {
+				const real = makeHostRegistry(args);
+				return { ...real, start: (fields, opts) => ((published = fields), real.start(fields, opts)) };
+			},
+		});
+		return published.backends;
+	};
+	const remote = await rowOf({ PI_BACKENDS: "local,openshell-bind", PI_BACKEND_FLOOR: "nonRoot=asserted", PI_OPENSHELL_GATEWAY: "lab" }, { gatewayLocal: false });
+	assert.equal(typeof remote, "string", "a value: every part is boot configuration");
+	assert.equal(remote, "blessed=local,openshell-bind;floor=nonRoot:asserted;os=docker:remote");
+	assert.doesNotMatch(remote, /lab/, "the gateway's name is not the row's to carry, only whether it is on this host");
+	assert.deepEqual(parseHostBackends(remote), { blessed: ["local", "openshell-bind"], default: "local", floor: { nonRoot: "asserted" }, openshell: { engine: "docker", gateway: "remote", modes: ["bind"] } });
+	assert.equal(await rowOf({ PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" }, { gatewayLocal: true }), "blessed=openshell;os=podman:local");
+	assert.equal(await rowOf({ PI_BACKENDS: "local,openshell" }, { gatewayDown: true }), "blessed=local,openshell;os=docker:unknown", "a gateway down at boot is not read");
+	assert.equal(await rowOf({}), "blessed=local", "the unset default, with no openshell part");
+});
+
 test("openshell with PI_EGRESS=0 refuses the boot by name (#684, the operator's decision)", { skip }, async () => {
 	await assert.rejects(runStart({ env: { PI_BACKENDS: "local,openshell", PI_EGRESS: "0" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() }), (e) => e.piDispatchConfig === true && /^PI_EGRESS=0 cannot run openshell/.test(e.message));
 });

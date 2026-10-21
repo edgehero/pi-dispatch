@@ -14,17 +14,18 @@
  * admin/test/run-model-bolt.test.mjs. The refusal names the field and its rule, never the value: echoing hostile input
  * back is the mistake a refusal exists to avoid.
  *
- * Matching is EXACT per field, except `q`, a case-insensitive substring of the record's `target`: the target is the one
+ * Matching is EXACT per field (a record with no `backend` reads as `local`, see `runMatches`), except `q`, a case-insensitive substring of the record's `target`: the target is the one
  * field an operator half-remembers (`web#12`), and every other field is a closed vocabulary or an id they can copy.
  */
 import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
+import { HOST_VENUE_NAME_RE, UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
 import { repoOfTarget } from "./costs.mjs";
 
 /** The query parameters this filter reads, in the order a page states them. Anything else in the query is not its. */
-export const RUN_FILTER_FIELDS = Object.freeze(["repo", "kind", "flow", "trigger", "project", "host", "outcome", "reason", "model", "q"]);
+export const RUN_FILTER_FIELDS = Object.freeze(["repo", "kind", "flow", "trigger", "project", "host", "backend", "outcome", "reason", "model", "q"]);
 
 // A trigger is either the raw triggers-array position a forge run records (`triggerIndex`) or a cron scheduler id,
 // which a scheduled run carries in its job id (`repeat:<id>:<millis>`, `manual:<id>:<millis>`); the id charset is the
@@ -59,6 +60,10 @@ const RULES = Object.freeze({
   trigger: { ok: (v) => TRIGGER_INDEX_RE.test(v) || TRIGGER_ID_RE.test(v), says: "a trigger's index or a scheduler id (letters, digits, '.', '_', '-', at most 128 characters)" },
   project: { ok: (v) => PROJECT_ID_RE.test(v), says: "a project id (lowercase letters, digits and '-', at most 32 characters)" },
   host: { ok: (v) => WORKER_NAME_RE.test(v), says: "a worker name (letters, digits, '.', '_', '-', at most 64 characters)" },
+  // A venue name (issue #712), by the shape a host row carries one (HOST_VENUE_NAME_RE), not this build's table: a
+  // newer worker can bless and record a venue this console does not know, the Venues view lists it by name, and a
+  // filter refusing it would hide runs that exist.
+  backend: { ok: (v) => HOST_VENUE_NAME_RE.test(v), says: "a venue name (lowercase letters, digits and '-', starting with a letter, at most 32 characters)" },
   outcome: { ok: (v) => /^[a-z][a-z-]{0,31}$/.test(v), says: "an outcome (lowercase letters and '-', at most 32 characters)" },
   reason: { ok: (v) => /^[a-z0-9][a-z0-9-]{0,63}$/.test(v), says: "a reason (lowercase letters, digits and '-', at most 64 characters)" },
   // The record's `model` is the bare host-effective model id; the usage ledger's allowlist admits a leading `@` or `~`,
@@ -103,7 +108,9 @@ function schedulerIdOf(jobId) {
 
 /**
  * Whether `record` passes `filter` (a `parseRunFilter` result's `filter`): every set field must hold. A null or empty
- * filter passes everything. A record field that is absent never matches a set filter field.
+ * filter passes everything. A record field that is absent never matches a set filter field, with one exception:
+ * `backend`, where a record with no venue is a `local` run from before venues were recorded (UNATTRIBUTED_BACKEND), so
+ * `backend=local` matches it and every other venue does not.
  */
 export function runMatches(record, filter) {
   if (!filter) return true;
@@ -118,6 +125,9 @@ export function runMatches(record, filter) {
   }
   if (f.project !== undefined && record.project !== f.project) return false;
   if (f.host !== undefined && record.host !== f.host) return false;
+  // A record that names no venue is a `local` run from before venues were recorded (UNATTRIBUTED_BACKEND), so
+  // `backend=local` finds it: the one field whose absence has a meaning, which is the worker's own reading.
+  if (f.backend !== undefined && (typeof record.backend === "string" && record.backend !== "" ? record.backend : UNATTRIBUTED_BACKEND) !== f.backend) return false;
   if (f.outcome !== undefined && record.outcome !== f.outcome) return false;
   if (f.reason !== undefined && record.reason !== f.reason) return false;
   if (f.model !== undefined && record.model !== f.model) return false;

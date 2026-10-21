@@ -434,3 +434,44 @@ test("a reader that writes nothing (prune: false) skips a dead member and leaves
 	await readLiveHosts(redis, { now: () => NOW });
 	assert.ok(!redis.sets.get(HOST_SET).has("ghost"), "the default still prunes");
 });
+
+// ---- issue #712: the `backends` field ----------------------------------------------------------------------------------
+
+test("the backends field (#712): names and fixed words that pass the content rule, read back through an allowlist", async () => {
+	const { BACKEND_NAMES, HOST_GATEWAY_WORDS, OPENSHELL_ENGINES, hostBackendsField, parseHostBackends } = await import("../src/backends.mjs");
+	const field = hostBackendsField({ backends: ["podman", "local", "openshell", "openshell-bind"], backendFloor: { egress: "enforced", nonRoot: "asserted" }, openshellEngine: "docker", gatewayWord: "local" });
+	assert.equal(field, "blessed=podman,local,openshell,openshell-bind;floor=egress:enforced,nonRoot:asserted;os=docker:local");
+	assert.deepEqual(parseHostBackends(field), { blessed: ["podman", "local", "openshell", "openshell-bind"], default: "podman", floor: { egress: "enforced", nonRoot: "asserted" }, openshell: { engine: "docker", gateway: "local", modes: ["copy", "bind"] } });
+	// Through the registry's own write: not path-shaped, so it is published as it is.
+	const redis = fakeRedis();
+	const logs = [];
+	const reg = makeHostRegistry({ redis, name: "mini1", log: (event, f) => logs.push({ event, ...f }) });
+	await reg.start({ backends: field });
+	await reg.close();
+	assert.equal(logs.some((l) => l.event === "host_registry_field_refused"), false);
+	// Every venue the table holds has the row's venue shape (the runs filter takes that shape), and round-trips.
+	const { HOST_VENUE_NAME_RE } = await import("../src/backends.mjs");
+	for (const name of BACKEND_NAMES) assert.match(name, HOST_VENUE_NAME_RE, name);
+	for (const name of BACKEND_NAMES) assert.deepEqual(parseHostBackends(hostBackendsField({ backends: [name] })).blessed, [name], name);
+	for (const engine of OPENSHELL_ENGINES) {
+		for (const word of HOST_GATEWAY_WORDS) assert.deepEqual(parseHostBackends(hostBackendsField({ backends: ["openshell"], openshellEngine: engine, gatewayWord: word })).openshell, { engine, gateway: word, modes: ["copy"] });
+	}
+	// A word outside its list is never written: an engine is docker (the default the config reads), a gateway unknown.
+	assert.equal(hostBackendsField({ backends: ["openshell"], openshellEngine: "/usr/bin/podman", gatewayWord: "https://gw:1" }), "blessed=openshell;os=docker:unknown");
+	assert.equal(hostBackendsField({ backends: ["local"], openshellEngine: "podman" }), "blessed=local", "no os part without an openshell venue");
+});
+
+test("parseHostBackends (#712) re-checks a peer's row: shapes kept, anything else dropped, an older row is null", async () => {
+	const { parseHostBackends } = await import("../src/backends.mjs");
+	assert.equal(parseHostBackends(undefined), null, "a worker from before the field");
+	assert.equal(parseHostBackends(""), null);
+	assert.equal(parseHostBackends("floor=egress:enforced"), null, "no blessed list is not a row this reader can show");
+	assert.equal(parseHostBackends("x".repeat(2000)), null, "bounded");
+	// A venue this build does not know is kept by name (a newer worker's); a name of another shape is not.
+	const got = parseHostBackends("blessed=far-venue,local,Bad Name,/tmp,local;floor=egress:enforced,egress:absent,nonRoot:maybe,a:b:c,x;os=lxc:somewhere;later=1");
+	assert.deepEqual(got.blessed, ["far-venue", "local"]);
+	assert.equal(got.default, "far-venue");
+	assert.deepEqual(got.floor, { egress: "enforced" }, "the first of a twice-named property, words from the three only");
+	assert.deepEqual(got.openshell, { engine: "unknown", gateway: "unknown", modes: [] });
+	assert.deepEqual(parseHostBackends("blessed="), { blessed: [], default: null, floor: {}, openshell: null });
+});
