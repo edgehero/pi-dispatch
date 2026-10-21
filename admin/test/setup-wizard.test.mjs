@@ -1825,3 +1825,90 @@ test("wizard: compose's steps are never handed the environment's VALKEY_PASSWORD
     assert.equal(a.env.PI_VALKEY_PORT, "6379");
   }
 });
+
+// ---- issue #712: an openshell-only deployment ------------------------------------------------------------------------
+
+const OPENSHELL_ENV = (extra = {}) => ({ PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "openshell", ...extra });
+
+test("wizard (#712): an openshell-only deployment gates on its gateway's engine and the openshell CLI, and offers the venue by name", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const asked = [];
+  const { ui, notes, seen } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [true, false, false] });
+  const { deps, attached } = wizardDeps({
+    env: OPENSHELL_ENV(),
+    probeDockerFn: () => (asked.push("docker"), { ok: true }),
+    probePodmanFn: () => (asked.push("podman"), { ok: true }),
+    probeOpenshellFn: (gateway) => (asked.push(`openshell:${gateway}`), { version: "0.1.4", connected: true, local: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.deepEqual(asked, ["docker", "openshell:null"], "docker is the default engine, then the CLI and the gateway; never the podman venue");
+  assert.ok(seen.select.every((s) => !s.options?.includes?.("Use rootless Podman instead")), "no podman switch is offered");
+  assert.ok(notes.some((n) => /openshell venue: the openshell CLI 0\.1\.4, and its gateway answers on this host/.test(n.m)), JSON.stringify(notes));
+  assert.equal(attached[0].env.PI_BACKENDS, "openshell", "up runs the deployment's own venue, never podman's");
+  assert.match(seen.confirm[0].message, /openshell gateway's registration/);
+});
+
+test("wizard (#712): PI_OPENSHELL_ENGINE=podman gates on podman (rootful or not), never docker, and names the gateway it asks", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const asked = [];
+  const { ui } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [true, false, false] });
+  const { deps, attached } = wizardDeps({
+    platform: "darwin",
+    env: OPENSHELL_ENV({ PI_OPENSHELL_ENGINE: "podman", PI_OPENSHELL_GATEWAY: "gw" }),
+    probeDockerFn: () => (asked.push("docker"), { missing: true }),
+    probePodmanFn: () => (asked.push("podman"), { rootful: true }),
+    probeOpenshellFn: (gateway) => (asked.push(`openshell:${gateway}`), { version: "0.1.4", connected: true, local: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.deepEqual(asked, ["podman", "openshell:gw"], "the gateway's podman, on any platform, is the gate");
+  assert.equal(attached.length, 1, "and up ran");
+  assert.equal(attached[0].env.PI_BACKENDS, "openshell", "the podman venue's PI_BACKENDS is not put in its place");
+});
+
+test("wizard (#712): an openshell CLI that is missing is refused by name, and Stop installs nothing", async () => {
+  const dir = emptyDir();
+  const { ui, notes } = wizardUi({ select: ["Guided setup", "Stop"], input: [dir] });
+  const { deps, attached } = wizardDeps({ env: OPENSHELL_ENV(), probeOpenshellFn: () => ({ missing: true }) });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0, "nothing installed");
+  assert.ok(notes.some((n) => /openshell check: no `openshell` CLI on PATH\. The openshell venue needs OpenShell 0\.1\.4 .* then pi-dispatch up registers its gateway/.test(n.m)), JSON.stringify(notes));
+});
+
+test("wizard (#712): a gateway that is not answering is said, with up as the fix, and setup goes on to up", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const { ui, notes } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [true, false, false] });
+  const { deps, attached } = wizardDeps({ env: OPENSHELL_ENV(), probeOpenshellFn: () => ({ version: "0.1.4", connected: false, local: false }) });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.ok(notes.some((n) => n.t === "warning" && /its gateway is not answering on this host\. The up step below starts and registers it \(pi-dispatch up\)/.test(n.m)), JSON.stringify(notes));
+  assert.equal(attached.length, 1, "up ran");
+});
+
+test("wizard (#712): an engine the venue does not admit is refused by name before any probe; a list with local keeps the docker gate", async () => {
+  const dir = emptyDir();
+  const asked = [];
+  const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir] });
+  const { deps, attached } = wizardDeps({ env: OPENSHELL_ENV({ PI_OPENSHELL_ENGINE: "vm" }), probeDockerFn: () => (asked.push("docker"), { ok: true }), probeOpenshellFn: () => (asked.push("openshell"), { missing: true }) });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.deepEqual(asked, []);
+  assert.equal(attached.length, 0);
+  assert.ok(notes.some((n) => n.t === "error" && /openshell venue: PI_OPENSHELL_ENGINE must be docker or podman/.test(n.m)), JSON.stringify(notes));
+  assert.equal(mod.openshellPreferred({ PI_BACKENDS: "local,openshell" }, emptyDir(), realFs), null, "local's docker gate is the question there");
+  assert.deepEqual(mod.openshellPreferred({ PI_BACKENDS: "openshell-bind" }, emptyDir(), realFs), { engine: "docker", gateway: null, engineError: null });
+});
+
+test("probeOpenshell (#712): the CLI's version and the gateway judged by the worker's own reader; never throws", () => {
+  const exec = (answers) => (bin, args) => {
+    assert.equal(bin, "openshell");
+    const a = answers[args.filter((x) => x !== "--gateway" && x !== "gw").join(" ")];
+    if (a instanceof Error) throw a;
+    return a;
+  };
+  assert.deepEqual(mod.probeOpenshell(null, exec({ "--version": "openshell 0.1.4\n", "status -o json": JSON.stringify({ status: "connected", server: "https://127.0.0.1:17670", version: "0.1.4" }) })), { version: "0.1.4", connected: true, local: true });
+  assert.deepEqual(mod.probeOpenshell("gw", exec({ "--version": "openshell 0.1.4\n", "status -o json": JSON.stringify({ status: "connected", server: "https://gw.example.com" }) })), { version: "0.1.4", connected: true, local: false });
+  assert.deepEqual(mod.probeOpenshell(null, exec({ "--version": "openshell 0.1.4\n", "status -o json": "not json" })), { version: "0.1.4", connected: false, local: false });
+  assert.deepEqual(mod.probeOpenshell(null, exec({ "--version": Object.assign(new Error("spawn openshell ENOENT"), { code: "ENOENT" }) })), { missing: true });
+  assert.deepEqual(mod.probeOpenshell(null, exec({ "--version": Object.assign(new Error("x"), { status: 2 }) })), { broken: "`openshell --version` exited 2" });
+});

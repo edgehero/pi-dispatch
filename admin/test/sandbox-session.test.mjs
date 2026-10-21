@@ -301,6 +301,17 @@ test("the panel offers a podman run only where ITS OWN PI_BACKENDS blesses podma
   assert.match(mod.readSandboxInfo({ sandboxDir: retainedRoot({ backend: "far" }), sandboxRetentionHours: 24 }, "gh-1", { now: () => NOW, env: { PI_BACKENDS: "podman" } }).reason, /ran on far/);
 });
 
+test("an openshell run is not reopenable, in the words the console's run page uses for it (#712)", async () => {
+  const { sandboxShellRefusal } = await import("../src/read-model.mjs");
+  for (const venue of ["openshell", "openshell-bind"]) {
+    const info = mod.readSandboxInfo({ sandboxDir: retainedRoot({ backend: venue }), sandboxRetentionHours: 24 }, "gh-1", { now: () => NOW, env: { PI_BACKENDS: `local,${venue}` } });
+    assert.equal(info.retained, false, venue);
+    assert.equal(info.reason, sandboxShellRefusal(venue), venue);
+    assert.equal(info.reason, `not reopenable (${venue} has no sandbox shell)`);
+    assert.ok(info.reason.length <= 53, "under the pane's 53 columns");
+  }
+});
+
 test("a podman run pressed from a panel WITHOUT podman blessed is refused, and nothing is spawned under docker (#429)", async () => {
   const paths = { sandboxDir: retainedRoot({ backend: "podman" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
   const bins = [];

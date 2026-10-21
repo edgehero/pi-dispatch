@@ -302,8 +302,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// `steered` and the attempt's `steerSkipped`, which the record rebuilds; never throws, and a non-steer job costs
 		// nothing. `steerRan` is what this attempt's runContainer said about steering (null before any container).
 		let steerRan = null;
+		// Issue #712: this attempt's named live-transcript skip (runContainer's `liveSkipped`), null before any container.
+		// Carried onto the result here, at the one call every record site makes (the bolt above holds them to it), rather
+		// than at each of the processor's return statements, so no record site can be given it and another not.
+		let liveRan = null;
+		const carryLiveSkip = (target) => {
+			if (liveRan === null || target === null || typeof target !== "object") return;
+			try {
+				if (target.liveSkipped === undefined) target.liveSkipped = liveRan;
+			} catch {}
+		};
 		const settleSteer = async ({ result = null, error = null } = {}) => {
 			const held = await settleHeldReplies({ result, error });
+			carryLiveSkip(result ?? error);
 			if (job.data?.steer !== true) return;
 			// Issue #638: a run both steer-armed and awaitInput can end parked with a held reply AND a late steer message.
 			// Only one of them becomes the resumed job: the held reply, settled first, and the late messages are then
@@ -1424,6 +1435,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					}).then(async (r) => {
 						// Issue #646: what this attempt said about steering, for the record's `steerSkipped` (settleSteer above).
 						steerRan = r && typeof r === "object" ? { steerSkipped: r.steerSkipped ?? null } : null;
+						liveRan = r && typeof r === "object" && typeof r.liveSkipped === "string" ? r.liveSkipped : null;
 						await stopCancelPoll();
 						const raced = r && r.aborted !== true && signal.aborted === true && signal.reason === "operator-cancel";
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });

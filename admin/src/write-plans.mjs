@@ -24,7 +24,9 @@
  */
 import * as nodeFs from "node:fs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
-import { ISSUE_ACTIONS, isMcpNearMiss, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
+import { delimitedList } from "@edgehero/pi-dispatch/config";
+import { withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
+import { ISSUE_ACTIONS, isMcpNearMiss, recoverVenueProblem, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
@@ -46,6 +48,7 @@ import {
   readTriggers,
   renderBundleProfiles,
   settingShown,
+  triggerVenue,
   writeInputs,
   writeScopedLimits,
 } from "./read-model.mjs";
@@ -141,6 +144,18 @@ export function backendRefusal(backend, env) {
   if (blessed.length === 0) return "this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)";
   if (!blessed.includes(backend)) return `backend '${backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`;
   return null;
+}
+
+/**
+ * Why `run.recover` cannot be armed on a trigger whose jobs run in `backend` (its explicit `run.backend`), or, naming
+ * none, in the deployment default `PI_BACKENDS[0]` read from `env`; or null (issue #712). The worker's own sentence
+ * (`recoverVenueProblem`). The loader refuses the explicit pairing at the write too; the default one only the processor
+ * can (the file does not know PI_BACKENDS), before spend on every delivery, so it is refused here, before the confirm.
+ */
+export function recoverVenueRefusal({ recover, backend, env }) {
+  if (recover !== true) return null;
+  const venue = triggerVenue(backend, env);
+  return venue === null ? null : recoverVenueProblem(venue);
 }
 
 /** The #644 flags, #645's `recover` and #646's `steer` a tool call carries, each only when it is a boolean (see buildTriggerEntry). */
@@ -378,6 +393,8 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
   // writes no `command`, so none is passed.
   const progress = progressRefusal(params, params.kind, "the new trigger", paths.triggersPath);
   if (progress !== null) return { refusal: progress };
+  const recoverVenue = recoverVenueRefusal({ recover: params.recover, backend: optStr(params.backend), env });
+  if (recoverVenue !== null) return { refusal: recoverVenue };
   const built = buildTriggerEntry(params.kind, params);
   if (!built) return { refusal: `unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)` };
   // Issue #704: a trigger a MODEL-CALLABLE tool writes is kept out of its project's secret bundle. Its task text (cron)
@@ -447,6 +464,13 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   // #644. Merged only when sent, like backend; judged against the entry's own on.type (no status comment on cron).
   const progressFault = progressRefusal(params, cur.type, `trigger #${params.index + 1}`, paths.triggersPath, rawRun.command);
   if (progressFault !== null) return { refusal: progressFault };
+  // Issue #712: judged only when this edit sends `recover` or a venue, against the entry as it would be after it, so an
+  // edit of the flow alone is not refused over a pairing the operator did not touch (the processor refuses that one per
+  // delivery, by name, as before).
+  if (typeof params.recover === "boolean" || backend !== undefined) {
+    const recoverVenue = recoverVenueRefusal({ recover: typeof params.recover === "boolean" ? params.recover : rawRun.recover, backend: backend ?? rawRun.backend, env });
+    if (recoverVenue !== null) return { refusal: recoverVenue };
+  }
   const flags = progressRun(params);
   const flagLine = Object.keys(flags).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${flags[k]}`).join("");
   const index = params.index;
@@ -1188,11 +1212,71 @@ export function planPriorities({ projects, validDays, now }) {
 /** A profile name's shape: PI_SECRET_PROFILES is a comma-separated list of name:path pairs, so neither may appear. */
 export const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
 
-/** The declared table, rendered for a human on their own host: names and paths, never a reference. */
-export function renderProfiles(profiles) {
+/**
+ * The declared tables, rendered for a human on their own host: names and paths, never a reference. `env` is
+ * `envSecretProfiles(PI_SECRET_PROFILES)` (issue #712), or null when the caller has none: the worker merges both sources,
+ * so a list of the overlay's alone said "none declared" on a deployment whose profiles all live in `.env`.
+ */
+export function renderProfiles(profiles, env = null) {
   const names = Object.keys(profiles).sort();
-  if (names.length === 0) return "No resolver profiles are declared in the settings overlay.";
-  return ["Resolver profiles (settings overlay):", ...names.map((n) => `  ${n} -> ${profiles[n]}`)].join("\n");
+  const overlay = names.length === 0 ? "No resolver profiles are declared in the settings overlay." : ["Resolver profiles (settings overlay):", ...names.map((n) => `  ${n} -> ${profiles[n]}`)].join("\n");
+  if (env === null || typeof env !== "object") return overlay;
+  if (env.malformed) return `${overlay}\nPI_SECRET_PROFILES does not parse, so the worker refuses to boot until it is fixed.`;
+  const fromEnv = Object.keys(env.profiles ?? {}).sort();
+  // None in the env (or the env not visible here): the overlay's sentence alone, which names its source, as before.
+  if (fromEnv.length === 0) return overlay;
+  // A name in both is the worker's ambiguity: it then refuses every secrets job (secret-profiles.mjs `mergeSecretProfiles`).
+  const both = fromEnv.filter((n) => Object.hasOwn(profiles, n));
+  return [overlay, "Resolver profiles (PI_SECRET_PROFILES):", ...fromEnv.map((n) => `  ${n} -> ${env.profiles[n]}${both.includes(n) ? " (AMBIGUOUS: also in the settings overlay, so the worker refuses every secrets job)" : ""}`)].join("\n");
+}
+
+/**
+ * What PI_SECRET_RESOLVER_ROOTS says about an overlay resolver at `path`, judged BEFORE the confirm (issue #712), so an
+ * operator does not approve a write the worker then refuses on every job: `{ refusal }`, `{ warning }` (a line the
+ * confirm adds), or `{}`. The worker compares the resolver's REALPATH with the roots AS WRITTEN (secrets.mjs and
+ * secret-bundles.mjs: `realExecutablePath`, then `withinRoots`; the roots are never resolved), so this does exactly
+ * that, on THIS host: a lexical comparison would be wrong both ways (a path inside the roots that is a symlink to one
+ * outside is refused by the worker, one outside that resolves inside is admitted), and resolving the roots too would
+ * admit what the worker refuses (macOS writes `/tmp` as `/private/tmp`, so a root spelled `/tmp/pi` holds no real
+ * path). When a resolved root WOULD have held it, the refusal says to write the root as its real path.
+ *
+ * A path this host cannot resolve (an error with a `code`: not there yet, or on another machine) is NOT refused, even
+ * when it is outside the roots as written, deliberately: its real path is unknown here and may land inside them, so the
+ * confirm says the worker checks it where it runs (`doctor --secrets` is the check that it does). Any other error is a
+ * fault, not an answer, and is rethrown. Judged on the PANEL's host, which may not be the worker's.
+ * Judged only when the panel can see the variable (`env` holds the key): unset in what the panel reads is not proof
+ * the worker's host has no roots. Set and empty IS proof: the worker fails closed and refuses every overlay resolver.
+ */
+export function resolverRootsJudgement(path, env, fs = nodeFs) {
+  if (typeof env?.PI_SECRET_RESOLVER_ROOTS !== "string") return {};
+  const roots = delimitedList(env.PI_SECRET_RESOLVER_ROOTS);
+  if (roots.length === 0) return { refusal: "PI_SECRET_RESOLVER_ROOTS is set and empty on this deployment, so the worker refuses every resolver the settings overlay declares; set it to the directory your resolvers live in first" };
+  const resolve = (p) => {
+    try {
+      return fs.realpathSync(p);
+    } catch (error) {
+      if (typeof error?.code === "string") return null;
+      throw error;
+    }
+  };
+  const real = resolve(path);
+  if (real === null) return { warning: `${path} cannot be resolved on this host, so whether its real path sits inside PI_SECRET_RESOLVER_ROOTS (${roots.join(", ")}) is checked only by the worker, where it runs (pi-dispatch doctor --secrets shows it)` };
+  if (withinRoots(real, roots)) return {};
+  // A root the worker would hold this path under if it were written as its own real path.
+  const realRoot = roots.map((root) => ({ root, real: resolve(root) })).find((r) => r.real !== null && r.real !== r.root && withinRoots(real, [r.real]));
+  return { refusal: resolverRootsRefusal(path, env, real, realRoot?.real ?? null) };
+}
+
+/**
+ * The refusal sentence for a resolver whose real path `real` is outside the roots as written (`resolverRootsJudgement`
+ * decides it); `realRoot` is a root's real path that would hold it. Kept a function of its own so the refusal table's
+ * scan finds the sentence.
+ */
+export function resolverRootsRefusal(path, env, real = path, realRoot = null) {
+  const roots = delimitedList(env?.PI_SECRET_RESOLVER_ROOTS);
+  const via = real !== path ? ` (it resolves to ${real})` : "";
+  const sentence = `${path}${via} is outside PI_SECRET_RESOLVER_ROOTS (${roots.join(", ")}), so the worker would refuse it on every job; put the resolver inside one of them, or add its directory to PI_SECRET_RESOLVER_ROOTS`;
+  return realRoot !== null ? `${sentence}, or write the root as its real path (${realRoot})` : sentence;
 }
 
 /** Why `name` cannot name a profile, or null. */
@@ -1215,11 +1299,17 @@ export function secretResolverPathRefusal(path) {
  * so the operator approves the thing itself). Never a reference or a value: a profile is a name and a path.
  * `{ plan: { name, path, profiles, mutate, ... } }` or `{ refusal }`.
  */
-export function planSecretProfileAdd({ name, path, profiles, settingsFile }) {
+export function planSecretProfileAdd({ name, path, profiles, envProfiles = {}, env = null, settingsFile, fs = nodeFs }) {
   const badName = secretProfileNameRefusal(name);
   if (badName !== null) return { refusal: badName };
   const badPath = secretResolverPathRefusal(path);
   if (badPath !== null) return { refusal: badPath };
+  // Issue #712, planSecretBundleAdd's rule for its reason: a name PI_SECRET_PROFILES already declares would make the
+  // worker read it as AMBIGUOUS, which refuses every secrets job of every trigger, not just this profile's.
+  if (Object.hasOwn(envProfiles ?? {}, name)) return { refusal: `PI_SECRET_PROFILES already declares ${name} on this deployment; the worker reads a name declared in both places as ambiguous and refuses every secrets job, so pick another name or change the .env` };
+  const roots = resolverRootsJudgement(path, env, fs);
+  if (roots.refusal) return { refusal: roots.refusal };
+  const rootsNote = roots.warning ? `\n\nNote: ${roots.warning}.` : "";
   const next = { ...profiles, [name]: path };
   const replacing = profiles[name] ? `\n\nThis REPLACES the current ${name} -> ${profiles[name]}` : "";
   return {
@@ -1231,7 +1321,7 @@ export function planSecretProfileAdd({ name, path, profiles, settingsFile }) {
       target: settingsFile,
       ...confirmOf(
         "Declare a secret resolver",
-        `${settingsFile} gets:\n${JSON.stringify({ secretProfiles: next }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per reference. It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.`,
+        `${settingsFile} gets:\n${JSON.stringify({ secretProfiles: next }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per reference. It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.${rootsNote}`,
       ),
     },
   };
@@ -1239,7 +1329,7 @@ export function planSecretProfileAdd({ name, path, profiles, settingsFile }) {
 
 /** Plan removing profile `name` (`/dispatch secrets remove`). `{ plan: { name, profiles, mutate, ... } }` or `{ refusal }`. */
 export function planSecretProfileRemove({ name, profiles, settingsFile }) {
-  if (!name || !(name in profiles)) return { refusal: `no such profile. ${renderProfiles(profiles)}` };
+  if (!name || !Object.hasOwn(profiles, name)) return { refusal: `no such profile. ${renderProfiles(profiles)}` };
   const next = { ...profiles };
   delete next[name];
   return {
@@ -1275,7 +1365,7 @@ export function secretBundleFormatRefusal(format) {
  * is a name, a path and a format, and binding it to a project stays an edit to triggers.json's `secretBundles`.
  * `{ plan: { name, path, format, bundles, mutate, ... } }` or `{ refusal }`.
  */
-export function planSecretBundleAdd({ name, path, format, bundles, envBundles = {}, settingsFile }) {
+export function planSecretBundleAdd({ name, path, format, bundles, envBundles = {}, env = null, settingsFile, fs = nodeFs }) {
   const badName = secretBundleNameRefusal(name);
   if (badName !== null) return { refusal: badName };
   const badPath = secretResolverPathRefusal(path);
@@ -1283,6 +1373,10 @@ export function planSecretBundleAdd({ name, path, format, bundles, envBundles = 
   const badFormat = secretBundleFormatRefusal(format);
   if (badFormat !== null) return { refusal: badFormat };
   if (Object.hasOwn(envBundles, name)) return { refusal: `PI_SECRET_BUNDLES already declares ${name} on this deployment; the worker reads a name declared in both places as ambiguous and refuses every bundled job, so pick another name or change the .env` };
+  // Issue #712: the profiles' roots rule, for the same resolver check the worker makes on both kinds.
+  const roots = resolverRootsJudgement(path, env, fs);
+  if (roots.refusal) return { refusal: roots.refusal };
+  const rootsNote = roots.warning ? `\n\nNote: ${roots.warning}.` : "";
   const next = { ...bundles, [name]: { path, format } };
   const replacing = bundles[name] ? `\n\nThis REPLACES the current ${name} -> ${bundles[name].path} (${bundles[name].format ?? "no format"})` : "";
   return {
@@ -1295,7 +1389,7 @@ export function planSecretBundleAdd({ name, path, format, bundles, envBundles = 
       target: settingsFile,
       ...confirmOf(
         "Declare a secret bundle resolver",
-        `${settingsFile} gets:\n${JSON.stringify({ secretBundles: next }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per job start of every project a bundle in triggers.json binds to it, and hands that job EVERY variable it prints (${format}). It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.`,
+        `${settingsFile} gets:\n${JSON.stringify({ secretBundles: next }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per job start of every project a bundle in triggers.json binds to it, and hands that job EVERY variable it prints (${format}). It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.${rootsNote}`,
       ),
     },
   };

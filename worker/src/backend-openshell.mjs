@@ -51,7 +51,9 @@ import { makeRunContainer } from "./run-container.mjs";
  * declaring `steerStdin` takes its messages as MAC'd frames on the exec's stdin, the key frame first
  * (INT-STEER-INBOX-CONTRACT's second transport): makeRunContainer, handed the relay opener and told this venue copies
  * (`binds: false`), writes them, and the acks come back over the stderr transcript above. An image without `steerStdin`
- * runs unsteered, `steerSkipped: "venue-copies"`. Recovery is not served here: `run.recover` is refused before spend.
+ * runs unsteered, `steerSkipped: "venue-copies"`. Recovery is not served here (`serves.recovery: "no"`): `run.recover` is
+ * refused in the triggers file when the trigger names this venue (issue #712), and before spend when it lands here as
+ * the deployment default.
  *
  * BIND MODE (issue #686 part 3, the `openshell-bind` venue): the same factory with `mode: "bind"`, rather than a second
  * adapter, because everything that makes the venue trustworthy is shared and must stay one copy: the image read by ID,
@@ -1320,8 +1322,13 @@ export function makeOpenshellBackend(opts = {}) {
 	// The per-job, pre-spend venue checks (`CONST-VENUE-EGRESS-LAYER`'s third and fourth conditions): free reads, each
 	// refusing by name. A gateway that does not answer is infrastructure (retried); one that answers wrong is policy.
 	const observationPreflight = async (job) => {
-		// Issue #684: `run.recover` needs a checkpoint of the running session, which this venue cannot take until its
-		// transcript comes back over stdio (#686): refused by name, before anything is read, never run unarmed.
+		// Issue #684: `run.recover` needs a checkpoint of the running session and its workspace, and copy mode keeps both
+		// inside the sandbox until the exit's download. #686 brought the transcript back over stdio, but not the workspace,
+		// and there is no pause verb for a live checkpoint, so a lost attempt leaves nothing on the host to salvage or
+		// restore (bind mode, whose workspace IS on the host, serves it). So it is refused by name, before
+		// anything is read, never run unarmed (`serves.recovery: "no"`); since issue #712 a trigger that names this venue
+		// with `run.recover` is refused in the triggers file too (`recoverVenueProblem`), and this check stays for one that
+		// names no venue and lands here as the deployment default.
 		// A `kind: local` job runs unarmed on every venue (`recoverSkipped: "local"`), so it is not refused here either.
 		// Issue #686 part 3: bind mode serves it (the host workspace is salvaged and snapshotted at exit, as on `local`).
 		if (!binding && job?.recover === true && job?.kind !== "local") return { venueRefused: { reason: "openshell-recover-unsupported", comment: OPENSHELL_REFUSALS["openshell-recover-unsupported"] } };

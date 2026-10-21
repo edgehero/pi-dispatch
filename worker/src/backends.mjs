@@ -599,6 +599,10 @@ const BACKENDS_TABLE = {
 		// in the job's own container, as `-e NAME=VALUE` the agent can read. Not a word on the three-word scale: who holds
 		// the credentials is a closed choice (`CREDENTIAL_CUSTODY`), and `PI_BACKEND_FLOOR` does not compare it.
 		credentialCustody: "container",
+		// Issue #712: what the run-time features this venue serves, in words (`SERVES`). The bundle binds the job's
+		// directories (`binds: true`) and its transcript is a file on the host, so live transcript, progress and `/inbox`
+		// steering work as built; `run.recover` snapshots the host workspace; `pi-dispatch sandbox` has a docker launcher.
+		serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "yes" },
 		declares: {
 			// Built by this worker's own argv, in `ISOLATION_FLAGS`, and asserted back member-by-member
 			// against the imported array by two tests. `dockerArgsFromSpec` additionally refuses a
@@ -716,6 +720,8 @@ const BACKENDS_TABLE = {
 		remote: false,
 		// `local`'s: the credentials are `-e` values in the job's own container.
 		credentialCustody: "container",
+		// `local`'s, for `local`'s reasons: the bundle binds, the transcript is a host file, and SANDBOX_LAUNCHERS has a podman row.
+		serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "yes" },
 		declares: {
 			// The same `ISOLATION_FLAGS` through the same builder (`buildPodmanRunArgs` shares `argsFromSpec`), read back on
 			// a live rootless container: CapEff 0, NoNewPrivs 1, seccomp 2, pids.max 512, memory.max 4 GiB. AND ONLY WHILE
@@ -800,6 +806,11 @@ const BACKENDS_TABLE = {
 		// `CONST-VENUE-EGRESS-LAYER`: the venue's own layer holds the credentials, placeholders in the agent (issue #684):
 		// a per-job provider holds the values and the supervisor swaps them in for a request to a host the policy admits.
 		credentialCustody: "layer",
+		// Issue #712: copy mode COPIES the job's files (`binds: false`), so the live transcript comes over the exec's stderr
+		// and steering over its stdin, each only when the job image declares the capability (`transcriptStderr`; for
+		// steering `steerStdin` AND `transcriptStderr`, whose stream carries the acks) and an exit key: `image`. `run.recover` is refused before spend (`openshell-recover-unsupported`)
+		// and refused in the triggers file for a trigger naming this venue (`recoverVenueProblem`). No sandbox launcher.
+		serves: { liveTranscript: "image", steering: "image", recovery: "no", sandboxShell: "no" },
 		declares: {
 			// The agent container and its bounds are the compute driver's (`cap_drop ALL`, `no-new-privileges`, networking
 			// off, a pids limit of 2048, `--cpu` and `--memory`), not an argv this worker builds.
@@ -873,6 +884,9 @@ const BACKENDS_TABLE = {
 		remote: false,
 		// `CONST-VENUE-EGRESS-LAYER`, UNCHANGED: the provider, the policy and the placeholders are copy mode's exactly.
 		credentialCustody: "layer",
+		// Issue #712: the binds make it `local`'s for the transcript (a host file), `/inbox` steering and recovery (the host
+		// workspace is salvaged and snapshotted at exit); no sandbox launcher, as in copy mode.
+		serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "no" },
 		declares: {
 			isolation: ASSERTED,
 			ephemeral: ASSERTED,
@@ -953,6 +967,33 @@ export const OPENSHELL_BACKENDS = Object.freeze([OPENSHELL_BACKEND, OPENSHELL_BI
 export const CREDENTIAL_CUSTODY = Object.freeze(["container", "layer"]);
 
 /**
+ * The run-time features a venue serves (issue #712, `DES-CONTAINER-BACKEND-REGISTRY`), each entry's `serves` in words:
+ * `liveTranscript` (the live transcript and the progress it drives), `steering` (`run.steer` messages), `recovery`
+ * (`run.recover`) and `sandboxShell` (`pi-dispatch sandbox <id>`). NOT properties on the three-word scale: they say what a
+ * venue CAN DO for an operator, not what it guarantees, so `PI_BACKEND_FLOOR` never compares them. Derived facts held to
+ * their sources by `worker/test/backends-serves.test.mjs` (the bundle's `binds` and `transcript`, `SANDBOX_LAUNCHERS`, the
+ * copy-mode recovery refusal), so a surface that words them (the console, the panel) reads this table instead of
+ * restating which venue does what.
+ */
+export const SERVES = Object.freeze(["liveTranscript", "steering", "recovery", "sandboxShell"]);
+
+/**
+ * The words a `serves` entry takes. `yes`: the venue carries the feature itself. `no`: it never does (and `run.recover`
+ * naming such a venue is refused). `image`: the venue SKIPS the feature by name (a `liveSkipped` or `steerSkipped`
+ * reason on the record) unless the job image declares the capability that carries it, and an exit key: a copying
+ * venue's stderr transcript (`transcriptStderr`) and its stdin steering (`steerStdin`, which also needs
+ * `transcriptStderr` for the acks). `yes` is about the VENUE only: a feature it serves can still be refused before
+ * spend by what the image lacks on any venue (`job-image-steer-unsupported`, `job-image-recover-unsupported`, a
+ * missing `exitAuth`), as it always was.
+ */
+export const SERVES_WORDS = Object.freeze(["yes", "no", "image"]);
+
+/** A venue's `serves` block, or null for a name this table does not hold. `Object.hasOwn`, so `"toString"` is not a venue. */
+export function servesOf(name) {
+	return typeof name === "string" && Object.hasOwn(BACKENDS, name) ? BACKENDS[name].serves : null;
+}
+
+/**
  * Venues in the table that `PI_BACKENDS` refuses by name (issue #683): built and tested, and not yet admitted, each with
  * the sentence that says why. Removing a name here is the whole of blessing it. EMPTY since issue #684 blessed
  * `openshell`; kept, so the next venue that lands before its gate has the same one-line switch.
@@ -972,7 +1013,7 @@ export const BACKENDS = Object.freeze(
 		// exists to prevent (#278 found `asserts` had been left mutable).
 		Object.entries(BACKENDS_TABLE).map(([name, entry]) => [
 			name,
-			Object.freeze({ ...entry, declares: Object.freeze({ ...entry.declares }), asserts: Object.freeze({ ...(entry.asserts ?? {}) }), observedBy: Object.freeze({ ...(entry.observedBy ?? {}) }) }),
+			Object.freeze({ ...entry, declares: Object.freeze({ ...entry.declares }), serves: Object.freeze({ ...entry.serves }), asserts: Object.freeze({ ...(entry.asserts ?? {}) }), observedBy: Object.freeze({ ...(entry.observedBy ?? {}) }) }),
 		]),
 	),
 );

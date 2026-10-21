@@ -679,7 +679,8 @@ const configActions = [
   fileAction({
     name: "secret-profile-add",
     kind: "secret-profile-add",
-    build: (body, ctx) => ctx.a.plans.planSecretProfileAdd({ name: str(body, "name", { required: true, max: 64 }), path: str(body, "path", { required: true, max: 4096 }), profiles: profilesOf(ctx), settingsFile: ctx.a.paths.settingsFile }),
+    // Issue #712: the env-declared names and the resolver roots judged before the confirm, as `/dispatch secrets add` does.
+    build: (body, ctx) => ctx.a.plans.planSecretProfileAdd({ name: str(body, "name", { required: true, max: 64 }), path: str(body, "path", { required: true, max: 4096 }), profiles: profilesOf(ctx), envProfiles: ctx.a.rm.envSecretProfiles?.(ctx.a.env?.PI_SECRET_PROFILES)?.profiles ?? {}, env: ctx.a.env ?? null, settingsFile: ctx.a.paths.settingsFile, ...(ctx.fs ? { fs: ctx.fs } : {}) }),
     target: (ctx) => ctx.a.paths.settingsFile,
     write: writeSettingsOf,
   }),
@@ -695,7 +696,7 @@ const configActions = [
   fileAction({
     name: "secret-bundle-add",
     kind: "secret-bundle-add",
-    build: (body, ctx) => ctx.a.plans.planSecretBundleAdd({ name: str(body, "name", { required: true, max: 64 }), path: str(body, "path", { required: true, max: 4096 }), format: str(body, "format", { required: true, max: 16 }), bundles: bundleProfilesOf(ctx), envBundles: ctx.a.rm.envBundleProfiles(ctx.a.env?.PI_SECRET_BUNDLES).profiles, settingsFile: ctx.a.paths.settingsFile }),
+    build: (body, ctx) => ctx.a.plans.planSecretBundleAdd({ name: str(body, "name", { required: true, max: 64 }), path: str(body, "path", { required: true, max: 4096 }), format: str(body, "format", { required: true, max: 16 }), bundles: bundleProfilesOf(ctx), envBundles: ctx.a.rm.envBundleProfiles(ctx.a.env?.PI_SECRET_BUNDLES).profiles, env: ctx.a.env ?? null, settingsFile: ctx.a.paths.settingsFile, ...(ctx.fs ? { fs: ctx.fs } : {}) }),
     target: (ctx) => ctx.a.paths.settingsFile,
     write: writeSettingsOf,
   }),

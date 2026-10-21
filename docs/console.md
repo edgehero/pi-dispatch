@@ -219,7 +219,7 @@ console.
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
 | `/insights?range=30d` | Spend and insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
-| `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
+| `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |
 
 **Links to the forge** come from your deployment's own settings, never from a guess. A GitHub run links to
@@ -306,7 +306,13 @@ or not started yet."
   and marked.
 - **No transcript** means one of: the worker has `PI_LIVE_TRANSCRIPTS=0`, the run has not started writing yet, or
   its transcript expired (24 hours after the end, or 7 days after the start if its worker died). The page cannot
-  tell these apart and says so.
+  tell these apart and says so. Two more causes are said when they apply. A run whose record names why it had none
+  (`liveSkipped`) gets that reason instead: its venue copies the job's files and does not stream the transcript back,
+  its job image lacks `transcriptStderr`, or the image declares no `exitAuth`. And a run on a venue that does not
+  always stream (the `openshell` copy mode, which needs an image with that capability), or a running job whose venue
+  the page cannot name yet, adds "or its venue or job image does not stream it". The Progress panel follows the same
+  rule, since progress is read from the live transcript. The run's own page also shows a "Steering" row when a
+  steer-armed run took no message, and a "Live transcript" row when it had none, each with the reason.
 - The transcript holds one of your token's live-page slots while it is open, like any live page.
 
 The `/dispatch` panel's live tail (`l`) reads the same transcript.
@@ -447,7 +453,8 @@ before sending, what `pi-dispatch steer` refuses (the job is not running, the ru
 or above 8 KiB), and a confirm after the run finished is refused with nothing sent. A withdraw is guaranteed for a
 queued message and best effort for a written one, and its preview says which. The audit log records the job, the
 message id and a hash of the message, never the text. In the `/dispatch` panel the same is `t` (steer) and `T` (follow-up) on the
-ACTIVE row. All of it is in [`steering.md`](steering.md#from-the-console-and-the-panel).
+ACTIVE row, offered only while the run's inbox takes a message (a steer-armed run whose loop has not started, has
+ended, or whose venue or image cannot deliver says so instead). All of it is in [`steering.md`](steering.md#from-the-console-and-the-panel).
 
 ### The Chat panel
 
@@ -479,7 +486,9 @@ read the panel says so rather than guess.
 ### Opening a sandbox
 
 A run's page shows the command that reopens its sandbox, `pi-dispatch sandbox <job id>`, to copy and run in a shell on
-the host that ran the job. The console never opens a shell or starts a container itself: a terminal in the browser
+the host that ran the job. Only for a run whose venue has a sandbox shell (`local` and `podman`): an `openshell` run says "Its workspace is not
+reopenable (openshell has no sandbox shell)" instead, and an `openshell-bind` run "Its workspace is not reopenable
+(openshell-bind has no sandbox shell)", the words the panel's sandbox pane uses. The console never opens a shell or starts a container itself: a terminal in the browser
 would put an interactive shell one stolen session away from anyone.
 
 ## Live updates

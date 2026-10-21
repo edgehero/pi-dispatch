@@ -477,6 +477,16 @@ export const RECOVER_SKIPPED_REASONS = Object.freeze(["local", "no-run-id", "bas
 export const STEER_SKIPPED_REASONS = Object.freeze(["venue-copies", "no-exit-key", "no-transcript", "no-inbox"]);
 
 /**
+ * Why a run had no live transcript (and so no live progress) although this worker would read one (issue #712), the
+ * record's `liveSkipped`. A fixed enum, `run-container.mjs`'s own named skip (`live_transcript_skipped`): `venue-copies`
+ * (the venue copies the job's files and does not mirror the transcript over the exec's stderr), `no-capability` (it
+ * would, and the job image does not declare `transcriptStderr`), `no-exit-key` (the image declares no `exitAuth`, so the
+ * mirrored records could not be verified). Recorded so the console and the panel can say WHY a run's transcript is
+ * absent instead of listing the switch, the expiry and the start as the only causes. The job still runs.
+ */
+export const LIVE_SKIPPED_REASONS = Object.freeze(["venue-copies", "no-capability", "no-exit-key"]);
+
+/**
  * Why a job whose project has a secret bundle ran without it (issue #704), the record's `bundleSkipped`. A fixed enum:
  * `manual` (a run nobody's trigger made: `pi-dispatch run`, `/dispatch run`, `dispatch_run`), `chained` (an `/outbox`
  * child), `opted-out` (its trigger sets `run.secretBundle: false`), `fork` (a pull request whose head is in another
@@ -835,6 +845,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	// Issue #646: only for a job that armed `run.steer`, so no other record can carry either key.
 	const steered = data.steer === true ? recordedSteered(source.steered) : null;
 	const steerSkipped = data.steer === true && STEER_SKIPPED_REASONS.includes(source.steerSkipped) ? source.steerSkipped : null;
+	// Issue #712: on every job, since any job's transcript can be skipped; absent on every venue that streams it.
+	const liveSkipped = LIVE_SKIPPED_REASONS.includes(source.liveSkipped) ? source.liveSkipped : null;
 	// Issue #704: only for a job whose project has a secret bundle, so no other record can carry either key.
 	const bundle = recordedBundle(source.bundle);
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
@@ -1059,6 +1071,10 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		//   - `bundleSkipped`: why the job ran without its project's bundle (BUNDLE_SKIPPED_REASONS), a fixed enum.
 		...(bundle !== null ? { bundle } : {}),
 		...(bundleSkipped !== null ? { bundleSkipped } : {}),
+		// The live transcript (issue #712, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after the bundle keys, CONDITIONAL
+		// like them, so a record of a run whose transcript streamed (or that no reader asked for) is byte-identical:
+		//   - `liveSkipped`: why the run had no live transcript (LIVE_SKIPPED_REASONS), a fixed enum.
+		...(liveSkipped !== null ? { liveSkipped } : {}),
 	};
 }
 

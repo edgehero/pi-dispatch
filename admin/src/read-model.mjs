@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, delimitedList, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { BUNDLE_SKIPPED_REASONS, RECOVER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -34,7 +34,8 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 // The projects parser, for the same anti-drift reason: a `project:<id>` row is written only when the id is a project the
 // worker would load (issue #499 part B).
 import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
-import { BUNDLE_FORMATS, parseSecretBundleProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
+import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
+import { BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, UNATTRIBUTED_BACKEND, parseBackendList, servesOf } from "@edgehero/pi-dispatch/backends";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
@@ -184,7 +185,7 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The console's address (the insights move to the console): `/dispatch insights` and the `i` key print the spend
 // screen's URL from the PI_CONSOLE_LISTEN the console itself reads from this `.env` (`console/link.mjs`).
 // The session store (issue #647, part 2): `/dispatch chat` forks a finished run from the PI_SESSIONS_DIR the worker
@@ -193,6 +194,10 @@ export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "P
 // bundles view says whether this deployment declares the profile a bundle names and whether an overlay one sits inside
 // the roots, and in a pointer deployment those are the `.env`'s lines. DISPLAY ONLY, which is why it may come from the
 // file where the capability keys (OQ-038) may not: the panel never runs a resolver, it only says one is declared.
+// PI_SECRET_PROFILES (issue #712) for the same reason and under the same limit: the profiles lists name the env-declared
+// profiles beside the overlay's, and a profile add refuses a name the env already declares (the worker reads a name in
+// both sources as ambiguous). DISPLAY ONLY too, and still not a capability key in OQ-038's sense: the panel never runs
+// the resolver it names.
 // The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
 // in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
@@ -3817,6 +3822,12 @@ export function createFleetReader(
       const inboxRead = Promise.all(
         steerRows.slice(0, STEER_INBOX_ROWS_MAX).map(({ runId }) => withTimeout(listInboxPublic({ redis, runId }).catch(() => ({ error: "valkey" })), FLEET_READ_TIMEOUT_MS, { error: "timeout" })),
       );
+      // Issue #712: whether each of those runs takes a message NOW (`run:steer:open:<runId>`, the inbox's one authority,
+      // the run page's `readJobInbox` reads the same key), so the TUI offers its steer keys only where the console offers
+      // its forms. An armed run whose venue could not deliver never opens it. One EXISTS each, beside the list read.
+      const openRead = Promise.all(
+        steerRows.slice(0, STEER_INBOX_ROWS_MAX).map(({ runId }) => withTimeout(steerIsOpen({ redis, runId }).catch(() => null), FLEET_READ_TIMEOUT_MS, null)),
+      );
       // Issue #644: each active job's progress, INTEGERS AND A CHARSET-CHECKED TOOL NAME ONLY (`activeProgressOf`): the
       // snapshot is what lists, hub panels and `/api/state` are drawn from, so the model's phase names and note never
       // enter it. ONE MGET for the first PROGRESS_BATCH_MAX ids, started now and awaited at the end, so it rides beside
@@ -3915,8 +3926,11 @@ export function createFleetReader(
         row.progress = runIds[i] === null ? null : activeProgressOf(progressGot.byId?.[runIds[i]]);
       });
       const inboxGot = await inboxRead;
+      const openGot = await openRead;
       steerRows.forEach(({ row }, i) => {
         row.steer = true;
+        // true, false, or null when unread (past the bound, or a read that failed): never guessed open.
+        row.steerOpen = openGot[i] === true ? true : openGot[i] === false ? false : null;
         // null: past the per-tick bound, or unreadable this tick. Never `[]`, which would say "no message".
         row.inbox = Array.isArray(inboxGot[i]?.entries) ? inboxGot[i].entries.map(publicInboxEntry) : null;
       });
@@ -3955,6 +3969,15 @@ export function createFleetReader(
         // The project secret bundles (issue #704): null when the triggers file binds none. Names, profiles and the
         // newest run's received variable names; never a reference or a value, and never resolved here.
         secretBundles: secretBundlesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs }),
+        // Issue #712: the PI_SECRET_PROFILES names this deployment declares (`envSecretProfiles`; never a path here, the
+        // names-only rule of the overlay list beside it), so no surface says "none declared" over env-declared profiles.
+        secretProfilesEnv: (() => {
+          const got = envSecretProfiles((dollarEnvFn() ?? {}).PI_SECRET_PROFILES);
+          return { names: Object.keys(got.profiles).sort(), malformed: got.malformed, seen: got.seen };
+        })(),
+        // Issue #712: the venue a trigger naming none runs in (`PI_BACKENDS[0]`, read as the trigger tools read it), for the
+        // secrets disclosure's custody; null when the list does not parse.
+        defaultBackend: triggerVenue(undefined, dollarEnvFn() ?? {}),
         // Issue #504 part C: whether the deployment names an allocation envelope, for the `b split` hint alone.
         envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
         // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers' trust model.
@@ -4763,6 +4786,22 @@ export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs 
   return out;
 }
 
+/**
+ * `PI_SECRET_PROFILES` as this deployment's `.env` (or pi's environment) sets it, read for display (issue #712):
+ * `{ profiles: { name: path }, malformed, seen }`. The worker's own parser (`parseSecretProfiles`, imported), which
+ * refuses to BOOT on a malformed value, so `malformed` is said rather than any half of it being shown as declared;
+ * `seen` is whether the variable is visible here at all, since unset in what the panel reads (no pointer, or a `.env`
+ * without the line) is not proof the worker's host declares none.
+ */
+export function envSecretProfiles(raw) {
+  const seen = typeof raw === "string";
+  try {
+    return { profiles: { ...parseSecretProfiles(raw) }, malformed: false, seen };
+  } catch {
+    return { profiles: {}, malformed: true, seen };
+  }
+}
+
 /** The secret profiles' NAMES in a settings view (`readSettingsView`), sorted; never a resolver path. */
 export function secretProfileNames(settingsView) {
   const profiles = settingsView?.overlay?.secretProfiles;
@@ -4973,6 +5012,137 @@ export const BUNDLE_SKIPPED_TEXT = Object.freeze({
   fork: "a pull request from another repository, and the bundle does not set forkReviews",
   "head-unverified": "the forge would not say whose pull request this is (401, 403 or 404), so it ran as a fork's, without the bundle",
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What a venue serves, and why a run went without a feature (issue #712): the sentences the console and the panel say,
+// from the worker's own tables (`BACKENDS[*].serves`, `CREDENTIAL_CUSTODY`, `STEER_SKIPPED_REASONS`,
+// `LIVE_SKIPPED_REASONS`), each held to its table by admin/test/venue-words.test.mjs so a new venue word, custody or
+// reason cannot render as nothing. No surface restates which venue does what: it asks `servesOf`.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Why a steer-armed run went without steering (the record's `steerSkipped`), keyed like STEER_SKIPPED_REASONS. */
+export const STEER_SKIPPED_TEXT = Object.freeze({
+  "venue-copies": "its venue copies the job's files (no /inbox mount) and its job image does not declare steerStdin, so no message could reach the run",
+  "no-exit-key": "its job image does not declare exitAuth, so no delivery could be verified",
+  "no-transcript": "nothing could read the delivery acks: on a venue that copies the job's files its job image does not declare transcriptStderr (the acks come back over that stream), or no transcript could be staged, or this worker has no tail or relay wired",
+  "no-inbox": "the run's inbox directory could not be made",
+});
+
+/** Why a run had no live transcript, and so no live progress (the record's `liveSkipped`), keyed like LIVE_SKIPPED_REASONS. */
+export const LIVE_SKIPPED_TEXT = Object.freeze({
+  "venue-copies": "its venue copies the job's files and does not stream the transcript back",
+  "no-capability": "its venue streams the transcript only from a job image that declares transcriptStderr, and this one does not",
+  "no-exit-key": "its job image does not declare exitAuth, so a streamed transcript could not be verified",
+});
+
+/** Each `serves` entry's value in words (BACKENDS[*].serves), for every word SERVES_WORDS admits. */
+export const SERVES_TEXT = Object.freeze({
+  liveTranscript: Object.freeze({
+    yes: "streams the live transcript and progress",
+    no: "streams no live transcript or progress",
+    image: "streams the live transcript and progress only from a job image that declares transcriptStderr and exitAuth",
+  }),
+  steering: Object.freeze({
+    yes: "takes steering messages (run.steer)",
+    no: "takes no steering messages",
+    image: "takes steering messages only from a job image that declares steerStdin, transcriptStderr and exitAuth",
+  }),
+  recovery: Object.freeze({
+    yes: "recovers a lost run (run.recover)",
+    no: "recovers no lost run: run.recover is refused there",
+    image: "recovers a lost run only from a job image that supports it",
+  }),
+  sandboxShell: Object.freeze({
+    yes: "reopens a retained workspace (pi-dispatch sandbox)",
+    no: "has no sandbox shell: pi-dispatch sandbox cannot reopen its runs",
+    image: "reopens a retained workspace only from a job image that supports it",
+  }),
+});
+
+/**
+ * Where a trigger's `run.secrets` values end up, by its venue's `credentialCustody` (CREDENTIAL_CUSTODY): the panel's
+ * secrets disclosure. `container` is the line it always said; `layer` is the OpenShell venues', whose per-job provider
+ * holds the values and puts placeholders in the agent (CONST-VENUE-EGRESS-LAYER).
+ */
+export const CUSTODY_TEXT = Object.freeze({
+  container: "the agent can read them, and the forge is on the egress allowlist",
+  layer: "values with an endpoint are placeholders in the agent; run.secrets go to the job's provider",
+});
+
+/** A venue's credential custody (`container` when the table entry omits it, the worker's own reading), or null for an unknown name. */
+export function venueCustody(venue) {
+  if (typeof venue !== "string" || !BACKEND_NAMES.includes(venue)) return null;
+  const custody = BACKENDS[venue].credentialCustody ?? "container";
+  return CREDENTIAL_CUSTODY.includes(custody) ? custody : "container";
+}
+
+/**
+ * The venue a trigger's jobs run in: its explicit `run.backend`, else the deployment default `PI_BACKENDS[0]` read from
+ * `env` through the worker's own parser, else null (a list that does not parse, which the worker refuses to boot on).
+ */
+export function triggerVenue(backend, env) {
+  if (typeof backend === "string" && backend !== "") return backend;
+  try {
+    return parseBackendList(env?.PI_BACKENDS)[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The record's `liveSkipped` and `steerSkipped`, each null when absent or outside its closed enum. */
+export function recordSkips(record) {
+  const r = record !== null && typeof record === "object" && !Array.isArray(record) ? record : {};
+  return {
+    liveSkipped: Object.hasOwn(r, "liveSkipped") && LIVE_SKIPPED_REASONS.includes(r.liveSkipped) ? r.liveSkipped : null,
+    steerSkipped: Object.hasOwn(r, "steerSkipped") && STEER_SKIPPED_REASONS.includes(r.steerSkipped) ? r.steerSkipped : null,
+  };
+}
+
+/** The clause the absent sentences add when the run's venue may be the cause: one spelling for every surface. */
+export const VENUE_MAY_NOT_STREAM = "or its venue or job image does not stream it";
+
+/**
+ * Why a run may have no live transcript (and so no live progress), beyond the switch, the expiry and the start, which
+ * the stream cannot tell apart: `{ skipped }`, the record's named skip in words (the cause, known); `{ venue }`, the run
+ * is on a venue that does not always stream (`serves.liveTranscript` not `yes`) or on one this view cannot name (a
+ * running job has no record yet), so `VENUE_MAY_NOT_STREAM` is one of the causes; or null, a venue that streams it.
+ */
+export function liveAbsentCause(record) {
+  const { liveSkipped } = recordSkips(record);
+  if (liveSkipped !== null) return { skipped: LIVE_SKIPPED_TEXT[liveSkipped] };
+  // A record that names no venue was written before venues were recorded, when `local` was the only one
+  // (`UNATTRIBUTED_BACKEND`, the worker's own reading of the same absence); no record at all is a running job, whose
+  // venue this view cannot name.
+  const isRecord = record !== null && typeof record === "object" && !Array.isArray(record);
+  const venue = !isRecord ? null : typeof record.backend === "string" && record.backend !== "" ? record.backend : UNATTRIBUTED_BACKEND;
+  return servesOf(venue)?.liveTranscript === "yes" ? null : { venue: true };
+}
+
+/** The live transcript's absent sentence for `record` (null for a running job), the three causes plus the venue's. */
+export function transcriptAbsentText(record) {
+  const cause = liveAbsentCause(record);
+  if (cause?.skipped) return `No live transcript: ${cause.skipped}.`;
+  return cause?.venue ? `No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired, not started yet, ${VENUE_MAY_NOT_STREAM}.` : "No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired, or not started yet.";
+}
+
+/** The live progress' absent sentence, `transcriptAbsentText`'s rule: progress is read off the live transcript. */
+export function progressAbsentText(record) {
+  const cause = liveAbsentCause(record);
+  if (cause?.skipped) return `No live progress: it is read from the live transcript, and ${cause.skipped}.`;
+  return cause?.venue ? `No live progress: not published (PI_RUN_PROGRESS=0), expired, no step recorded yet, ${VENUE_MAY_NOT_STREAM}.` : "No live progress: not published (PI_RUN_PROGRESS=0), expired, or no step has been recorded yet.";
+}
+
+/**
+ * Why `pi-dispatch sandbox <id>` cannot reopen a run on `venue`, or null when the venue has a sandbox shell
+ * (`serves.sandboxShell`, held to SANDBOX_LAUNCHERS by the worker's test). The panel's sandbox pane and the console's run
+ * page say it in these words; kept under the pane's 53 columns for every venue name the table holds. A record with no
+ * venue is a `local` run from before attribution (`UNATTRIBUTED_BACKEND`), which the caller passes as such.
+ */
+export function sandboxShellRefusal(venue) {
+  const serves = servesOf(venue);
+  if (serves?.sandboxShell === "yes") return null;
+  return serves !== null ? `not reopenable (${venue} has no sandbox shell)` : `not reopenable here (ran on ${venue})`;
+}
 
 /**
  * A record's bundle facts (issue #704, INT-RUN-HISTORY-FILE-CONTRACT): `{ bundle, bundleSkipped }`, each null when

@@ -41,7 +41,8 @@ import {
 import { DEPLOYMENT_SCAFFOLD_FILES, panelValkeyContext, readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
 // The worker's own answers to "which venues does this list bless" and "set this .env key unless the operator already
 // did" (issue #430): one parse and one never-clobber writer, never a second copy of either in the admin.
-import { venuesOf } from "@edgehero/pi-dispatch/backends";
+import { openshellSetupOf, venuesOf } from "@edgehero/pi-dispatch/backends";
+import { OPENSHELL_NO_WINDOWS, OPENSHELL_RELEASE_URL, OPENSHELL_TESTED_VERSION, judgeGatewayStatus } from "@edgehero/pi-dispatch/openshell-cli";
 import { envFileEditCheck, envFileEditRefusal, updateEnvFile } from "@edgehero/pi-dispatch/env-file";
 // The venue keys read exactly as `service install` and `up` read them (issue #430 review round 2, E4): the general
 // reader takes a line inside a quoted value that systemd continues for an assignment, and this one refuses that file.
@@ -416,6 +417,88 @@ function podmanPreferred(env: any, dir: string, fs: any): boolean {
 }
 
 /**
+ * Does this deployment mean ONLY the openshell venues (issue #712)? `{ engine, gateway, engineError }` from the worker's
+ * own rule (`openshellSetupOf`, the one `up`, `service install` and doctor read), or null. From the wizard's own env or,
+ * where that sets no PI_BACKENDS, the deployment's `.env` through issue #471's one reader. Only a list WITHOUT `local`
+ * and `podman` counts: with either in it, that venue's own gate (docker, or rootless Podman) is the right question, and
+ * its step already puts the job image where the gateway's engine reads it when the engines agree (`imageEngine`).
+ */
+export function openshellPreferred(env: any, dir: string, fs: any): { engine: string; gateway: string | null; engineError: string | null } | null {
+  let file: any = {};
+  try {
+    file = (deploymentServiceEnv({ env: {}, dir, keys: ["PI_BACKENDS", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY"], fs, platform: "linux" }) as any).fromFile ?? {};
+  } catch {
+    file = {};
+  }
+  const pick = (key: string) => (typeof env?.[key] === "string" ? env[key] : file[key]);
+  const venues = venuesOf({ PI_BACKENDS: pick("PI_BACKENDS") });
+  if (!venues.openshellUsed || venues.localUsed || venues.podmanUsed) return null;
+  const setup = openshellSetupOf(venues, { PI_OPENSHELL_ENGINE: pick("PI_OPENSHELL_ENGINE"), PI_OPENSHELL_GATEWAY: pick("PI_OPENSHELL_GATEWAY") });
+  return { engine: setup.engine, gateway: setup.gateway, engineError: setup.engineError };
+}
+
+/**
+ * The openshell counterpart of probeDocker (issue #712): the CLI's version and the gateway's own answer, judged by the
+ * worker's `judgeGatewayStatus` (connected, and on this host), the reads doctor --openshell starts with. Bounded, and
+ * never throws: `{ missing: true }` (no `openshell` on PATH), `{ broken: why }` (it ran and did not answer usefully), or
+ * `{ version, connected, local }`. Asked only for an openshell-only deployment; `up` and doctor run the full check.
+ */
+export function probeOpenshell(gateway: string | null, execFn: any = execFileSync): { missing: true } | { broken: string } | { version: string | null; connected: boolean; local: boolean } {
+  const os = (args: string[]) => String(execFn("openshell", [...(gateway ? ["--gateway", gateway] : []), ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: DOCKER_PROBE_TIMEOUT_MS }) ?? "");
+  let version: string | null;
+  try {
+    version = /openshell (\S+)/.exec(os(["--version"]))?.[1] ?? null;
+  } catch (err: any) {
+    if (err?.code === "ENOENT" || err?.errno === "ENOENT") return { missing: true };
+    return { broken: typeof err?.status === "number" ? `\`openshell --version\` exited ${err.status}` : (err?.message ?? String(err)) };
+  }
+  let status: any;
+  try {
+    status = judgeGatewayStatus(JSON.parse(os(["status", "-o", "json"])));
+  } catch {
+    status = { connected: false, local: false };
+  }
+  return { version, connected: status.connected === true, local: status.local === true };
+}
+
+/**
+ * Step 3 on an openshell-only deployment (issue #712): the gateway's engine first (docker, or podman, by
+ * PI_OPENSHELL_ENGINE), then the openshell CLI and its gateway, offering the venue BY NAME or refusing it by name with
+ * the fix. A missing CLI gets the bounded Re-check loop the other gates have, since every job of this deployment needs
+ * it; a gateway that is not answering on this host is said and setup goes on, because the `up` step below is what
+ * starts and registers it (`pi-dispatch up`, issue #707). Returns whether to continue.
+ */
+async function ensureOpenshell(ui: any, notify: Notify, { platform, gateway, probeOpenshellFn }: any): Promise<boolean> {
+  if (platform === "win32") {
+    notify?.(`openshell venue: ${OPENSHELL_NO_WINDOWS}. Setup stops before anything is installed.`, "error");
+    return false;
+  }
+  for (let round = 1; ; round++) {
+    const probe = probeOpenshellFn(gateway);
+    if ("version" in probe) {
+      const tested = probe.version === OPENSHELL_TESTED_VERSION ? "" : ` (the tested release is ${OPENSHELL_TESTED_VERSION}; doctor --openshell says what differs)`;
+      if (probe.connected && probe.local) notify?.(`openshell venue: the openshell CLI ${probe.version ?? "of unknown version"}${tested}, and its gateway answers on this host`, "info");
+      else notify?.(`openshell venue: the openshell CLI ${probe.version ?? "of unknown version"}${tested} is installed, and its gateway is not answering on this host${probe.connected ? " (it is not on loopback)" : ""}. The up step below starts and registers it (pi-dispatch up); doctor --openshell checks it after.`, "warning");
+      return true;
+    }
+    const why = "missing" in probe ? "no `openshell` CLI on PATH" : `the openshell CLI did not answer (${probe.broken})`;
+    notify?.(`openshell check: ${why}. The openshell venue needs OpenShell ${OPENSHELL_TESTED_VERSION} on this host: ${OPENSHELL_RELEASE_URL}, then pi-dispatch up registers its gateway.`, "warning");
+    if (round >= DOCKER_PROBE_ROUNDS) {
+      notify?.(`openshell still not ready after ${DOCKER_PROBE_ROUNDS} checks: stopping setup before anything was installed. Re-run /dispatch setup once \`openshell --version\` answers.`, "error");
+      return false;
+    }
+    const choice = await ui.select("OpenShell is not ready", ["Re-check", "Continue anyway", "Stop"]);
+    if (choice === "Re-check") continue;
+    if (choice === "Continue anyway") {
+      notify?.("continuing without an openshell answer: `up` and doctor --openshell run the venue's own checks", "info");
+      return true;
+    }
+    notify?.("setup stopped before anything was installed: re-run /dispatch setup when the openshell CLI is installed", "info");
+    return false;
+  }
+}
+
+/**
  * What the deployment's `.env` says about PI_BACKENDS, read as `service install` reads it: `{ absent: true }` when the
  * file or the key is not there, `{ value }`, or `{ unreadable }` with the reader's reason. `writing`: the wizard is
  * about to write PI_BACKENDS into this file, so a line systemd reads differently counts even where no venue key is
@@ -453,10 +536,12 @@ function deploymentBackends(dir: string, fs: any, { writing = false, platform = 
  * Step 3 on the podman venue: the same bounded Re-check loop as ensureDocker, with podman's own verdicts. A rootful
  * Podman gets its own sentence: it is installed and answering, and still the wrong thing for this venue.
  */
-async function ensurePodman(ui: any, notify: Notify, { platform, probePodmanFn }: any): Promise<boolean> {
+async function ensurePodman(ui: any, notify: Notify, { platform, probePodmanFn, forOpenshell = false }: any): Promise<boolean> {
   for (let round = 1; ; round++) {
-    const probe = platform === "linux" ? probePodmanFn() : { daemonDown: "not Linux" };
-    if (probe.ok) return true;
+    // Issue #712: as the openshell gateway's ENGINE, Podman is the gateway's to drive, not the podman venue's, so neither
+    // the venue's Linux-only rule nor its rootless one applies here; doctor --openshell judges the engine.
+    const probe = platform === "linux" || forOpenshell ? probePodmanFn() : { daemonDown: "not Linux" };
+    if (probe.ok || (forOpenshell && probe.rootful)) return true;
     const why = probe.missing
       ? "no `podman` on PATH"
       : probe.rootful
@@ -492,7 +577,7 @@ async function ensurePodman(ui: any, notify: Notify, { platform, probePodmanFn }
  * run, so a wizard driven by a stuck answer source cannot spin), "Continue anyway" continues, "Stop"
  * (and a cancelled dialog, and the exhausted bound) returns false having spawned nothing at all.
  */
-async function ensureDocker(ui: any, notify: Notify, { platform, probeDockerFn }: any): Promise<"docker" | "podman" | false> {
+async function ensureDocker(ui: any, notify: Notify, { platform, probeDockerFn, offerPodman = true }: any): Promise<"docker" | "podman" | false> {
   for (let round = 1; ; round++) {
     const probe = probeDockerFn();
     if (probe.ok) return "docker";
@@ -513,7 +598,8 @@ async function ensureDocker(ui: any, notify: Notify, { platform, probeDockerFn }
     // has just failed, rather than as a question every run asks, so a docker host's wizard is exactly what it was.
     const choice = await ui.select(
       "Docker is not ready",
-      platform === "linux" ? ["Re-check", USE_PODMAN, "Continue anyway", "Stop"] : ["Re-check", "Continue anyway", "Stop"],
+      // Not for an openshell gateway's docker engine (issue #712): switching runtimes there is PI_OPENSHELL_ENGINE's.
+      platform === "linux" && offerPodman ? ["Re-check", USE_PODMAN, "Continue anyway", "Stop"] : ["Re-check", "Continue anyway", "Stop"],
     );
     if (choice === "Re-check") continue;
     if (choice === USE_PODMAN) return "podman";
@@ -630,6 +716,8 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
     existsSyncFn = (p: string) => fs.existsSync(p),
     probeDockerFn = probeDocker,
     probePodmanFn = probePodman,
+    // The openshell CLI and gateway read (issue #712), asked only for an openshell-only deployment; a seam for its test.
+    probeOpenshellFn = probeOpenshell,
     // Whether `up`'s pi-dispatch-valkey container exists (the compose answer's hand-over; a seam for its test).
     dockerQueryFn = dockerQuery,
     // The volume gap (PR #475's review): the started Valkey's pi-dispatch:owner marker, recorded and read back through
@@ -689,7 +777,24 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // Which runtime (issue #430): the podman venue when the deployment already says so (PI_BACKENDS without `local`), or
   // when the operator picks it at a failed docker gate on Linux. Everything after this reads `runtime`.
   let runtime: "docker" | "podman";
-  if (podmanPreferred(env, dir, fs)) {
+  // Issue #712: an openshell-only deployment's runtime is its gateway's engine (`openshellSetupOf`), and its gate adds
+  // the openshell CLI and gateway. `podmanVenue` below is then false whatever the engine: the podman venue's own steps
+  // (its PI_BACKENDS line, its Quadlet units) are not this deployment's.
+  const openshell = openshellPreferred(env, dir, fs);
+  if (openshell !== null) {
+    if (openshell.engineError !== null) {
+      notify?.(`openshell venue: ${openshell.engineError}. Setup stops before anything is installed: fix PI_OPENSHELL_ENGINE, then re-run /dispatch setup`, "error");
+      return;
+    }
+    if (openshell.engine === "podman") {
+      if (!(await ensurePodman(ui, notify, { platform, probePodmanFn, forOpenshell: true }))) return;
+      runtime = "podman";
+    } else {
+      if (!(await ensureDocker(ui, notify, { platform, probeDockerFn, offerPodman: false }))) return;
+      runtime = "docker";
+    }
+    if (!(await ensureOpenshell(ui, notify, { platform, gateway: openshell.gateway, probeOpenshellFn }))) return;
+  } else if (podmanPreferred(env, dir, fs)) {
     if (!(await ensurePodman(ui, notify, { platform, probePodmanFn }))) return;
     runtime = "podman";
   } else {
@@ -702,8 +807,9 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // deployment, where the operator picked rootless Podman at the docker gate. Setup never overwrites a key the operator
   // set, so going on would run `up` for podman while the service it installs next reads `local` from the file. It stops
   // here, before anything is downloaded, with the one edit that resolves it.
-  const fileBackends = deploymentBackends(dir, fs, { writing: runtime === "podman", platform, readBackFn });
-  if (runtime === "podman") {
+  const podmanVenue = runtime === "podman" && openshell === null;
+  const fileBackends = deploymentBackends(dir, fs, { writing: podmanVenue, platform, readBackFn });
+  if (podmanVenue) {
     if ("unreadable" in fileBackends) {
       notify?.(`${fileBackends.unreadable}. Setup stops before anything is installed: make that change, with PI_BACKENDS on a plain PI_BACKENDS=podman line, then re-run /dispatch setup`, "error");
       return;
@@ -768,18 +874,19 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // or setup stopped above), `up` gets NO PI_BACKENDS of its own and reads the file, as the service will; when it does
   // not (a fresh folder, where init inside this very `up` scaffolds `.env`), `up` runs with PI_BACKENDS=podman, and the
   // line is written into `.env` afterwards for the SERVICE, which reads only the file.
-  const fileAssigns = runtime === "podman" && "value" in fileBackends;
+  const fileAssigns = podmanVenue && "value" in fileBackends;
   const withoutBackends = (e: any) => {
     const { PI_BACKENDS: _dropped, ...rest } = e ?? {};
     return rest;
   };
-  const upAddsBackends = runtime === "podman" && !fileAssigns && !venuesOf({ PI_BACKENDS: env?.PI_BACKENDS }).podmanUsed;
+  const upAddsBackends = podmanVenue && !fileAssigns && !venuesOf({ PI_BACKENDS: env?.PI_BACKENDS }).podmanUsed;
   const upEnv =
-    runtime !== "podman" ? env : fileAssigns ? (typeof env?.PI_BACKENDS === "string" ? withoutBackends(env) : env) : upAddsBackends ? { ...env, PI_BACKENDS: "podman" } : env;
+    !podmanVenue ? env : fileAssigns ? (typeof env?.PI_BACKENDS === "string" ? withoutBackends(env) : env) : upAddsBackends ? { ...env, PI_BACKENDS: "podman" } : env;
   const podmanUpText = `Run in ${dir}:\n  ${upAddsBackends ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey, the egress proxy and its rootless network keeper as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
   const okUp = await ui.confirm(
     "Bring the deployment up",
-    runtime === "podman" ? podmanUpText :
+    podmanVenue ? podmanUpText :
+    openshell !== null ? `Run in ${dir}:\n  ${execPath} ${cliPath} up\n\nup shows each ${runtime} action (the job image into the gateway's ${runtime} store, Valkey) and the openshell gateway's registration, and asks y/N before each: nothing is auto-accepted.` :
     `Run in ${dir}:\n  ${execPath} ${cliPath} up\n\nup shows each docker action and asks y/N before it — nothing is auto-accepted.`,
   );
   if (!okUp) {
@@ -802,7 +909,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   }
 
   // ── (5b) the podman venue, recorded where the service reads it ────────────────────────────────
-  if (runtime === "podman") recordPodmanVenue(dir, fs, notify, platform, readBackFn);
+  if (podmanVenue) recordPodmanVenue(dir, fs, notify, platform, readBackFn);
 
   // ── (6) the deployment pointer ─────────────────────────────────────────────────────────────────
   // The four cwd-default files need pointing because resolvePaths defaults them to "./", which is right
