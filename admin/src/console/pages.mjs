@@ -37,6 +37,7 @@ import {
   fleetFailed,
   fleetHeld,
   fleetHosts,
+  fleetDoctor,
   fleetQueues,
   fleetSchedulers,
   INSIGHTS_DEFAULT_RANGE,
@@ -98,7 +99,7 @@ const PAGE_PANELS = Object.freeze({
   run: [["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
-  fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
+  fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
   config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles], ["p-secret-bundles", configSecretBundles]],
   audit: [["p-audit", auditLog]],
 });

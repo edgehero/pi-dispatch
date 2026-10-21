@@ -195,7 +195,7 @@ One command puts a live terminal view over the whole deployment:
   It counts jobs only: a machine busy with other work reads as idle.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-14" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-21" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects, then each host's last doctor run with its failing and warning checks" width="820">
 </p>
 
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`

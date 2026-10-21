@@ -103,6 +103,7 @@
     "./wait-state": "./src/wait-state.mjs",
     "./cancel-state": "./src/cancel-state.mjs",
     "./host-registry": "./src/host-registry.mjs",
+    "./doctor-results": "./src/doctor-results.mjs",
     "./identity": "./src/identity.mjs",
     "./gitlab-identity": "./src/gitlab-identity.mjs",
     "./forgejo-identity": "./src/forgejo-identity.mjs",

@@ -16,11 +16,13 @@ const FLEET_READ_TIMEOUT_MS = 2_000;
 const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
 
   pi-dispatch init         scaffold .env + triggers.json + pause-windows.json + pi-packages.json + subscriptions.json here
-  pi-dispatch doctor [--fix] [--live] [--openshell] [--secrets]
+  pi-dispatch doctor [--fix] [--live] [--openshell] [--secrets] [--no-publish]
                            preflight Docker, Valkey, the job image, and your provider key; --fix offers to run each fix (y/N per action);
                            --live reads the backend declarations back off short-lived real containers (shown in docker ps while they run);
                            --openshell says whether this host is ready for the openshell venue (run anyway once PI_BACKENDS names it);
-                           --secrets resolves each project secret bundle here and prints its variable names, never values
+                           --secrets resolves each project secret bundle here and prints its variable names, never values;
+                           every run publishes its checks to Valkey for the console and the panel (labels with paths
+                           and secret values redacted, kept 7 days), and --no-publish skips that
   pi-dispatch up [--yes]   one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
@@ -99,7 +101,31 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		// `fix` and `live` ride in the deps position (runDoctor(env, depsOrOpts)) — one options bag, no third arg.
 		// `--openshell` (issue #683): the openshell venue's lines, before PI_BACKENDS blesses it (issue #684 made it blessable).
 		// `--secrets` (issue #704): resolve each project secret bundle on this host, printing variable names and a count only.
-		return runDoctor(env, { fix: argv.slice(1).includes("--fix"), live: argv.slice(1).includes("--live"), openshell: argv.slice(1).includes("--openshell"), secrets: argv.slice(1).includes("--secrets") });
+		// Publishing (issue #712) is ON unless `--no-publish`; `--publish` says it explicitly (the worker's own runs pass it),
+		// and the two together are refused rather than one silently winning.
+		const flags = argv.slice(1);
+		if (flags.includes("--publish") && flags.includes("--no-publish")) {
+			writeErr("pi-dispatch doctor: --publish and --no-publish contradict each other; pass one\n");
+			return 2;
+		}
+		// `--by-worker=<hours>` is the worker's own spawn saying so (doctor-spawner.mjs), with the interval it runs at, so
+		// the record names who ran it and carries the real interval. Not in the usage: an operator has no reason to type it,
+		// and one who does only mislabels their own run.
+		// Held to the worker's own range (1 to DOCTOR_INTERVAL_MAX_HOURS: a worker at 0 spawns no doctor at all), refused
+		// otherwise, as a mistyped flag is.
+		const byWorkerFlag = flags.find((f) => f.startsWith("--by-worker"));
+		let publishBy = null;
+		if (byWorkerFlag !== undefined) {
+			const { DOCTOR_INTERVAL_MAX_HOURS } = await import("./doctor-spawner.mjs");
+			const m = /^--by-worker=(\d{1,3})$/.exec(byWorkerFlag);
+			const hours = m ? Number(m[1]) : NaN;
+			if (!(hours >= 1 && hours <= DOCTOR_INTERVAL_MAX_HOURS)) {
+				writeErr(`pi-dispatch doctor: --by-worker takes the worker's doctor interval in hours, 1 to ${DOCTOR_INTERVAL_MAX_HOURS}\n`);
+				return 2;
+			}
+			publishBy = { worker: true, every: hours };
+		}
+		return runDoctor(env, { fix: flags.includes("--fix"), live: flags.includes("--live"), openshell: flags.includes("--openshell"), secrets: flags.includes("--secrets"), publish: !flags.includes("--no-publish"), publishBy });
 	}
 
 	if (cmd === "up") {

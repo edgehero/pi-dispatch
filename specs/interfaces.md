@@ -9167,6 +9167,13 @@ report until the next beat, and no decision. A Redis-side toggle fails that test
 deleting it loses the operator's edit -- which is precisely why `OQ-008` refuses one, and why this
 keyspace is not that.
 
+**Doctor's published results are a separate keyspace** (AMENDED 2026-10-21, #712): `doctor:hosts` and
+`doctor:h:<name>` (`INT-DOCTOR-RESULTS-KEY`), named by the same worker name as `host:h:<name>` but written by doctor,
+not by the beat, and kept 7 days rather than 90 seconds, so a host that stopped beating still says what its last
+doctor run found. They obey the same falsification test: deleting every `doctor:*` key while the fleet runs changes
+no host's behaviour, because nothing reads them to decide anything. A registry row gains no field for them, and the
+admin reads them for the live hosts' names beside the index's, so a lost index entry costs nothing.
+
 ## INT-CANCEL-CHANNEL-CONTRACT
 
 **Producer of a request**: the CLI's `cancel` verb or the panel's `x` confirm. **Consumer**: the ONE
@@ -10445,6 +10452,86 @@ pull request when its container starts, edited as the run goes and a last time w
   no target, `phrase-collision` above).
 - **Acceptance**: `REQ-RUN-PROGRESS` (e).
 
+## INT-DOCTOR-RESULTS-KEY
+
+**`pi-dispatch doctor` → Valkey → the read model (the console's Fleet page and its configuration sentences, the
+`/dispatch` panel's HOSTS view).** One Valkey string per host holding that host's last doctor run, as one JSON record
+(issue #712, `DES-DOCTOR-RESULTS-PUBLISHED`). Doctor is its only writer (`publishResults` in `worker/src/doctor.mjs`,
+through `publishDoctorRecord`); the worker runs doctor for it (`doctor-spawner.mjs`). The constants and the reader are
+the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reader and the writer cannot drift.
+
+```
+  doctor:hosts      SET of host names that published: an index the READER prunes, never a source of truth
+  doctor:h:<name>   STRING, one JSON record, written whole by SET <key> <json> PX 604800000 (7 days)
+```
+
+- **The name**: the host's worker name (`PI_WORKER_NAME`, else the sanitized hostname, as the registry names the row),
+  held to `WORKER_NAME_RE`, so it is a key segment unescaped; any other name is refused before a write.
+- **Value** (`v: 1`):
+  ```
+  { "v": 1,
+    "at": <epoch ms>,                       // when the run published
+    "version": "<worker package version>",  // [0-9A-Za-z.+-]{1,32}, else ""
+    "openshell": <bool>,                    // whether the openshell venue was judged on this run
+    "every": <int> | null,                  // the worker's own interval when its spawn ran this (--by-worker=<h>), else
+                                            // PI_DOCTOR_INTERVAL_HOURS as this run resolves it; null when it does not parse
+    "by": { "uid": <int> | null, "worker": <bool> },   // the effective uid, and whether the worker's spawn ran it
+    "workerRun"?: { "uid": <int> | null, "at": <ms> },  // a run by hand under ANOTHER uid over the worker's: that run's uid and time
+    "counts": { "ok": <int>, "warn": <int>, "fail": <int> },   // over EVERY check, listed or not
+    "checks": [ { "id": "<id>", "level": "ok" | "warn" | "fail",
+                  "label"?: "<redacted>", "fix"?: "<redacted>" } ],  // label and fix on warn and fail only
+    "more": <int> }                         // checks past DOCTOR_CHECKS_MAX, counted and not listed
+  ```
+- **Ids** (`CHECK_ID_RE`, `<section>.<name>`): a NAMED id where the check carries one (`NAMED_CHECK_IDS`:
+  `triggers.file`, `triggers.file-missing`, `settings.overlay`, `settings.overlay-dollars`, and for each boot file
+  `<scaffold name>.file`, the service's verdict on the file it reads, and `<scaffold name>.file-shell`, this shell's);
+  else `<section>.<n>`, the check's place in its section on that run (`DOCTOR_SECTIONS`, `--live` read-backs in
+  `live`). A repeat gets `-2`, `-3`. A reader matches on named ids only: a derived id is stable for one host's
+  configuration, not across hosts. Both lists are pinned against `doctor.mjs` by a test.
+- **Content rule** (`redactText`, applied by the writer), in this order: invisible characters (zero-width, joiners,
+  marks, the soft hyphen, the byte-order mark) are deleted, and control, bidi, line and paragraph separator characters
+  are spaces; every value of a secret-named variable in doctor's resolution (and the `.env` values
+  it did not take) and every known token shape (`redact-secrets.mjs`'s, plus a JWT, a Google API key, `hf_` and `npm_`
+  tokens) is `[redacted]`, as is a credential-named query or fragment parameter's value, a `password=`, `password:`,
+  `--password` or `--token` value, a `Basic` credential, a `*-api-key:` header value and the userinfo of a scheme-less
+  `user:password@host` (a numeric or switch value of a secret-sounding knob is not taken as a secret); the input JSON.parse QUOTES in its message (`Unexpected token 'x', "..." is not valid JSON`) is
+  `<content>` (its position forms quote nothing and stay); a URL keeps `scheme://host[:port]` only; an absolute POSIX,
+  home (`~/`), drive or UNC path is `<path>`, wherever the character before it is not part of a word, a ratio or a URL
+  (so after `:`, `|`, `*` or a dash too), to its closing quote when it opens after one, and over a space into a next
+  word that holds a separator; whitespace is folded; each is cut to `DOCTOR_LABEL_MAX` (300) characters LAST, so a cut
+  never leaves the prefix of something a rule would take. **What is guaranteed is these rules, not "no value"**: a
+  secret under a name that does not look like one, with no known shape, written outside a URL, is not recognised, and
+  the last word of an unquoted path with a space and no separator after it (`/a/My Projects`) is kept. An ok check carries no label. At most `DOCTOR_CHECKS_MAX` (400)
+  entries, of which at most `DOCTOR_DETAILED_MAX` (80) carry words.
+- **When it is written**: at the end of every `pi-dispatch doctor` run unless `--no-publish` (after `--fix`'s re-check
+  and `--live`'s read-backs, before the closing line), every `pi-dispatch up`, and every run the worker starts (a minute
+  after boot, then every `PI_DOCTOR_INTERVAL_HOURS`). Only to the Valkey doctor talked to on that run, at the address
+  the worker pins (`judgeValkeyListeners`); a run that talked to none writes nothing.
+- **TTL**: 7 days (`DOCTOR_RESULTS_TTL_MS`), set afresh by every publish: a record's expiry IS "no result in a week".
+  The index has none; a reader that may write removes a member whose record is gone.
+- **Who ran it**: `by.worker` is set by the worker's own spawn (`doctor --publish --by-worker=<hours>`, 1 to 168 or exit 2, an internal
+  flag); every other run is "by hand". A run by hand under a uid other than the one that last ran as the worker
+  publishes as any run does, and carries `workerRun` (that run's uid and time, read with one `GET` before the write and
+  kept while hand runs follow), so a reader says whose view of the host it shows. A declared `PI_WORKER_NAME` the
+  worker refuses at boot (`workerName`, config.mjs) is never a key: the run says so on stderr and writes nothing.
+- **Failure**: every command is bounded (2 s) and the write is best effort: a fault is one stderr line starting
+  `doctor: results not published (`, naming no URL, path or value, and the exit code and stdout are unchanged.
+- **Pruning by the writer**: after its write, a publish looks at up to 256 other index members in one `MGET` and
+  removes those whose record has expired, so an index read only by the console (which never prunes) cannot grow.
+- **Reading** (`readDoctorResults(redis, { names, prune, now, timeoutMs })`): the live hosts a caller names FIRST, then
+  the index's other members, worker names only, each list sorted, at most `DOCTOR_HOSTS_MAX` (64), in ONE `MGET`, so
+  expired index members can never push a live host out of the read; each value through
+  `parseDoctorRecord`, an allowlist (another `v`, or JSON that does not parse, is `{ name, unreadable: true }`); each row
+  gains `ageMs` from the reader's clock (0 when the record is ahead). `{ unreachable }` is not `{ hosts: [] }`. The fleet
+  reader reads it at most every 15 s and the console's reader never prunes. Not on `/api/state`
+  (`INT-CONSOLE-STATE-API` UNCHANGED, checked: its body is built field by field and names no doctor field).
+- **Deleting it changes nothing**: no decision reads `doctor:*`; a reader that finds nothing says no result was
+  published, never that a host is healthy.
+- **Acceptance**: worker/test/doctor-results.test.mjs (ids, sections and named ids pinned, redaction, the record, the
+  write's one `SET ... PX` and the refreshed TTL, the read's allowlist, prune and bounds), worker/test/doctor.test.mjs
+  ("doctor publishes one record per run", "publishing is best effort"), worker/test/doctor-spawner.test.mjs,
+  admin/test/doctor-view.test.mjs, admin/test/console-pages.test.mjs (the Fleet fixtures).
+
 ## Revision History
 
 | Date | Change |
@@ -10759,3 +10846,4 @@ pull request when its container starts, edited as the run goes and a last time w
 | 2026-10-20 | Issue #704, part 3: project secret bundles on both OpenShell venues. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `bundle` gains `placeholders` and `plain` on the OpenShell venues, a pair of bounded integers or neither (rebuilt by `recordedBundle`, so every other record is byte-identical); the reason enum loses `openshell-bundle-unsupported` (retired, in no release) and gains `openshell-bundle-endpoint-not-allowed`, `openshell-bundle-endpoint-shared`, `openshell-bundle-endpoint-unknown`, `openshell-bundle-name-taken`, `openshell-bundle-unpassable` and (review round 1) `openshell-bundle-image-too-old`, all outcome `policy`, pre-spend, held to `OPENSHELL_REFUSALS` by the existing test. **`INT-CONTAINER-JOB-INPUTS` AMENDED** (review round 1, H1): on the OpenShell venues a bundle's plain variables are `<job dir>/bundle-env.json` (0600, removed at teardown) beside the reserved, non-secret `PI_BUNDLE_ENV=1`, read by a runner declaring the new image capability `bundleEnvFile`, which refuses a bad file as a config error; never the exec's `--env`, which the gateway logs. RELEASE OBLIGATION: a job image release carrying `bundleEnvFile` is owed before plain bundle variables run on an OpenShell venue (beside #695's). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `endpoints` keeps its shape and its load-time rules; the "a later part of #704" sentence now says what it does on the OpenShell venues (a placeholder bound to its host only, a shadowing run.secrets value kept on that binding, the host an exact policy endpoint and not one the job's own credentials use, an undelivered name refused there, `auth` recorded and narrowing nothing at 0.1.4). **Code evidence**: worker/src/run-history.mjs -> recordedBundle; worker/src/backend-openshell.mjs -> OPENSHELL_REFUSALS. |
 | 2026-10-20 | Issue #704, part 4: project secret bundles on the operator's surfaces. **`INT-CONSOLE-AUDIT-LOG` AMENDED**, the descriptive kinds list gains `secret-bundle-add` and `secret-bundle-remove`, written by `/dispatch secrets add\|remove --bundle` and the console's two forms (the charset rule, not the list, is enforced, as before). **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**, its `secretBundles` line names its two writers; the shape, its validator and its operator-only rule UNCHANGED, checked. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: the admin's display reader reads `secretBundles` and `run.secretBundle` leniently and copies no `ref`; the loaders' strict rule is untouched. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the admin reads `bundle` through the worker's own `recordedBundle` and `bundleSkipped` against `BUNDLE_SKIPPED_REASONS`, so a record file read back cannot put free text on a surface. Review round 1: a model-callable tool returns a record's `bundle` as counts (`{ id, received, shadowed, placeholders?, plain? }`), never the names; the record itself is unchanged. **`INT-PROJECTS-FILE-CONTRACT` UNCHANGED, checked**: the bundle refusal is the same sentence, now shown by the console form and the tool answer. **Code evidence**: admin/src/write-plans.mjs -> planSecretBundleAdd, planSecretBundleRemove; admin/src/read-model.mjs -> normalizeSecretBundlesForDisplay, recordBundle; admin/src/console/actions.mjs. |
 | 2026-10-21 | Issue #712, part A. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a conditional TAIL key `liveSkipped` after the bundle keys, `venue-copies`, `no-capability` or `no-exit-key` (`LIVE_SKIPPED_REASONS`, run-container.mjs's named `live_transcript_skipped`), on any job, present only when the attempt named the skip, so every other record is byte-identical; carried to the record by the one settle every record site calls; read by the console's run page and the panel's RUN_DETAIL; an enum member only, PII-free. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, `run.recover`: refused at load and write beside an explicit `run.backend` whose `serves.recovery` is `no` (`openshell`), in `recoverVenueProblem`'s words, which name the venues that serve it from the table; a trigger naming no venue stays the processor's pre-spend refusal and the admin's pre-confirm one against `PI_BACKENDS[0]`; a file already pairing the two no longer loads, deliberately, since the trigger could never run. **`INT-STEER-INBOX-CONTRACT` UNCHANGED, checked**: the panel reads the existing `run:steer:open:<runId>` key with the existing `isOpen`, one EXISTS per armed active row beside the list read. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: the read model's snapshot gains three keys (an active row's `steerOpen`, a boolean; `secretProfilesEnv`, profile names only; `defaultBackend`, a venue name), and the document is built field by field (`stateOf`), so none of them reaches it. **Code evidence**: worker/src/run-history.mjs -> LIVE_SKIPPED_REASONS, buildRecord; worker/src/run-container.mjs; worker/src/index.mjs -> settleSteer; worker/src/triggers.mjs -> recoverVenueProblem, validateBackend; admin/src/read-model.mjs -> recordSkips. |
+| 2026-10-21 (#712) | Issue #712, PR C: doctor results per host. **NEW `INT-DOCTOR-RESULTS-KEY`**: `doctor:hosts` (a SET the reader prunes) and `doctor:h:<name>` (a STRING written whole by `SET ... PX` 7 days, refreshed by every publish); the `v: 1` record (`at`, `version`, `openshell`, `every`, `counts` over every check, `checks` of `{ id, level, label?, fix? }`, `more`); the id rule and its two pinned lists; the content rule the writer applies; when it is written and to which Valkey; failure as one stderr line; the reader's allowlist, its one MGET over at most 64 worker names, `unreachable` apart from empty; deleting it changes nothing. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**, a dated paragraph: doctor's keys are a separate keyspace under the same worker name, 7 days rather than 90 s, and they obey the same falsification test; no registry field is added. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: its body is built field by field and names no doctor field. **Code evidence**: worker/src/doctor-results.mjs -> doctorKey, DOCTOR_HOSTS, publishDoctorRecord, parseDoctorRecord, readDoctorResults, NAMED_CHECK_IDS, DOCTOR_SECTIONS; worker/src/doctor.mjs -> publishResults; admin/src/read-model.mjs -> createFleetReader. Review round 1, folded in before merge: **`INT-DOCTOR-RESULTS-KEY` AMENDED**: `by` and `workerRun` in the record, `every` from the worker's spawn, the content rule's order and its new rules (JSON.parse's quoted input, credential query values, scheme-less userinfo, four token shapes, the path scanner) with what it does not catch, the refused worker name, the writer's prune, the live hosts read before the index. Review round 2, folded in before merge: **`INT-DOCTOR-RESULTS-KEY` AMENDED**, the content rule: invisible characters deleted first, the further credential forms, numeric knob values not secrets; `--by-worker` is bounded to 1 to 168. |

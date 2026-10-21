@@ -13,6 +13,7 @@ import { DEFAULT_BACKEND, OPENSHELL_BACKENDS, OPENSHELL_BIND_BACKEND, backendRef
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
+import { DOCTOR_INTERVAL_HOURS, DOCTOR_INTERVAL_MAX_HOURS } from "./doctor-spawner.mjs";
 import { parseSecretBundleProfiles, parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
@@ -574,6 +575,9 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// The ceiling is enforced because setInterval clamps a delay past 2^31-1 ms to 1ms (see
 		// SWEEP_INTERVAL_MAX_HOURS); a hot loop over the filesystem is a worse failure than a slow sweep.
 		sweepIntervalHours: nonNegativeInt(env, "PI_SWEEP_INTERVAL_HOURS", SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS),
+		// Issue #712: how often the worker runs `pi-dispatch doctor --publish` as a child (the first run shortly after boot).
+		// 0 = never, and start.mjs then constructs nothing; capped for the sweep's reason (setInterval's clamp).
+		doctorIntervalHours: nonNegativeInt(env, "PI_DOCTOR_INTERVAL_HOURS", DOCTOR_INTERVAL_HOURS, DOCTOR_INTERVAL_MAX_HOURS),
 		// REQ-RESUMABLE-SESSION. NO DEFAULT AT ALL, deliberately unlike every sibling above: unset means the
 		// feature is unavailable, and a trigger that armed run.resume then refuses PRE-SPEND rather than
 		// running silently without persistence. A transcript is the most PII-bearing artifact this system
@@ -1352,7 +1356,7 @@ export function defaultWorkerName() {
  * typed is refused loudly and never quietly altered. Defaulting is a convenience, so it must not be able
  * to fail; declaring is a statement, so a typo in it must not become a different machine's name.
  */
-function workerName(env) {
+export function workerName(env) {
 	const declared = env.PI_WORKER_NAME;
 	if (declared === undefined || declared === "") return defaultWorkerName();
 	if (!WORKER_NAME_RE.test(declared)) {

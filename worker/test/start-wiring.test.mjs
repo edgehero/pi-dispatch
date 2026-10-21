@@ -118,7 +118,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey, durable = {} } = {}) {
+async function runStart({ env = {}, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey, durable = {} } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -313,6 +313,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
+			// Issue #712: never a real doctor child under test. A spawner that starts nothing unless a test hands its own.
+			makeDoctorSpawner: makeDoctorSpawner ?? (() => ({ start() {}, runOnce: async () => {}, close: async () => {} })),
 			...(makeHostRegistry ? { makeHostRegistry } : {}),
 			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
 			...(makeClaimSweeper ? { makeClaimSweeper } : {}),
@@ -2111,8 +2113,8 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// wrong. It became 6 with issue #292's periodic sweep, registered on #295's own finding that
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
-		// 7 since issue #499's projects watch, registered by the same rule.
-		assert.equal(captured.extraClosers.length, 7, "runtimeQueue + registry + one closer per armed watch + the retention sweep");
+		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs.
+		assert.equal(captured.extraClosers.length, 8, "runtimeQueue + registry + one closer per armed watch + the retention sweep + the doctor runs");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -2540,7 +2542,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 	assert.equal(constructions.length, 0, "the factory is never called at all");
 	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
 	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
-	assert.equal(captured.extraClosers.length, 2, "runtimeQueue + registry, and nothing from the sweep");
+	assert.equal(captured.extraClosers.length, 3, "runtimeQueue + registry + the doctor runs (issue #712), and nothing from the sweep");
 	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
@@ -2564,8 +2566,35 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
 	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "sandbox", "session", "recovery_host_lost"], "boot's own order");
-	assert.equal(captured.extraClosers.length, 3, "runtimeQueue + registry + the sweep (no watch files in this env)");
+	assert.equal(captured.extraClosers.length, 4, "runtimeQueue + registry + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
+});
+
+// ── issue #712: the worker's own doctor runs ─────────────────────────────────────────────────────────
+
+test("the default arms the doctor runs daily on the worker's own CLI and registers them as a closer; 0 constructs nothing", { skip }, async () => {
+	const constructions = [];
+	const starts = [];
+	const handles = [];
+	const spawner = (args) => {
+		constructions.push(args);
+		const handle = { start: () => starts.push(args), runOnce: async () => {}, close: async () => {} };
+		handles.push(handle);
+		return handle;
+	};
+	const { captured, logs } = await runStart({ makeDoctorSpawner: spawner });
+	assert.equal(constructions.length, 1);
+	assert.equal(starts.length, 1, "constructed AND started");
+	assert.equal(constructions[0].intervalMs, 24 * 3600000);
+	assert.match(constructions[0].cliPath, /[\\/]worker[\\/]src[\\/]cli\.mjs$/, "the same entry an operator types");
+	assert.equal(typeof constructions[0].log, "function");
+	assert.ok(captured.extraClosers.includes(handles[0]), "the spawner itself is the closer, so a shutdown kills a run in flight");
+	assert.equal(logs.find((l) => l.event === "worker_started").doctorIntervalHours, 24);
+	const off = [];
+	const second = await runStart({ env: { PI_DOCTOR_INTERVAL_HOURS: "0" }, makeDoctorSpawner: (args) => (off.push(args), { start() {}, close: async () => {} }) });
+	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
+	assert.equal(second.captured.extraClosers.length, 3, "runtimeQueue + registry + the sweep");
+	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 
 test("the sweep re-runs the SAME closures boot already built, so one config read serves both", { skip }, async () => {

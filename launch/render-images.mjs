@@ -620,6 +620,8 @@ async function main() {
 		allocation: await import("../worker/src/allocation.mjs"),
 		waitState: await import("../worker/src/wait-state.mjs"),
 		dollarBudget: await import("../worker/src/dollar-budget.mjs"),
+		// Issue #712: the hosts' published doctor runs, which the hosts view draws under each host.
+		doctorResults: await import("../worker/src/doctor-results.mjs"),
 	};
 	const RM = await import("../admin/src/read-model.mjs");
 	const DW = await import("../admin/src/dollar-windows.mjs");

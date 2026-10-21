@@ -147,6 +147,7 @@ async function renderInChild() {
     allocation: await import("../../worker/src/allocation.mjs"),
     waitState: await import("../../worker/src/wait-state.mjs"),
     dollarBudget: await import("../../worker/src/dollar-budget.mjs"),
+    doctorResults: await import("../../worker/src/doctor-results.mjs"),
   };
   const RM = await import("../src/read-model.mjs");
   const DW = await import("../src/dollar-windows.mjs");

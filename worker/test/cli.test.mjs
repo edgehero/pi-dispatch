@@ -25,8 +25,26 @@ test("`doctor --live` reaches runDoctor as live: true, and the usage names the f
 	// deps bag, where runDoctor reads it strictly as `=== true`.
 	const { readFileSync } = await import("node:fs");
 	const src = readFileSync(new URL("../src/cli.mjs", import.meta.url), "utf8");
-	assert.match(src, /runDoctor\(env, \{ fix: argv\.slice\(1\)\.includes\("--fix"\), live: argv\.slice\(1\)\.includes\("--live"\), openshell: argv\.slice\(1\)\.includes\("--openshell"\), secrets: argv\.slice\(1\)\.includes\("--secrets"\) \}\)/);
+	assert.match(src, /runDoctor\(env, \{ fix: flags\.includes\("--fix"\), live: flags\.includes\("--live"\), openshell: flags\.includes\("--openshell"\), secrets: flags\.includes\("--secrets"\), publish: !flags\.includes\("--no-publish"\), publishBy \}\)/);
 	assert.match(src, /pi-dispatch doctor \[--fix\] \[--live\] \[--openshell\] \[--secrets\]/, "issue #683 adds --openshell, issue #704 --secrets");
+});
+
+test("doctor publishes unless --no-publish, and --publish beside --no-publish is refused before doctor runs (#712)", async () => {
+	const errs = [];
+	assert.equal(await main(["doctor", "--publish", "--no-publish"], env, { writeErr: (s) => errs.push(s) }), 2);
+	assert.match(errs.join(""), /--publish and --no-publish contradict each other/);
+	const { readFileSync } = await import("node:fs");
+	const src = readFileSync(new URL("../src/cli.mjs", import.meta.url), "utf8");
+	assert.match(src, /const flags = argv\.slice\(1\);/);
+	assert.match(src, /pi-dispatch doctor \[--fix\] \[--live\] \[--openshell\] \[--secrets\] \[--no-publish\]/);
+});
+
+test("--by-worker takes the worker's interval, 1 to 168 hours, and anything else is refused before doctor runs (#712)", async () => {
+	for (const bad of ["--by-worker=0", "--by-worker=169", "--by-worker=999", "--by-worker=x", "--by-worker"]) {
+		const errs = [];
+		assert.equal(await main(["doctor", "--publish", bad], env, { writeErr: (s) => errs.push(s) }), 2, bad);
+		assert.match(errs.join(""), /--by-worker takes the worker's doctor interval in hours, 1 to 168/);
+	}
 });
 
 test("no args prints usage and exits 0", async () => {

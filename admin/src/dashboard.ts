@@ -40,6 +40,7 @@ import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { LIVE_MAX_ENTRIES } from "@edgehero/pi-dispatch/live-transcript";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
+import { doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
@@ -3211,14 +3212,26 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
     return out;
   };
 
+  // Issue #712: each host's last published doctor run under its other lines, and a host that published one but has no
+  // live row and no history drawn after them, so a host that went quiet still says what was wrong with it.
+  const doctorRead = snapshot?.doctor && !snapshot.doctor.unreachable;
+  const doctorByName = new Map<string, any>(doctorHostsOf(snapshot).map((d: any) => [d.name, d]));
+  const doctorOf = (name: any): string[] => (doctorRead ? doctorLines(doctorByName.get(name), iw, styler) : []);
+  if (snapshot?.doctor?.unreachable) lines.push(...wrapped(`doctor results unreadable (${cellOf(snapshot.doctor.unreachable)})`, "warning"));
   for (const r of rows) {
     if (lines.length > 0) lines.push(styler.cell("", iw));
-    lines.push(...liveLines(r), ...historyLines(byName.get(r?.name), r?.name));
+    lines.push(...liveLines(r), ...historyLines(byName.get(r?.name), r?.name), ...doctorOf(r?.name));
   }
   for (const h of historyOnly) {
     if (lines.length > 0) lines.push(styler.cell("", iw));
     lines.push(fitLine(styler.bold(styler.fg("accent", clip(hostName(h?.name), Math.max(8, iw - 14)))) + "  " + styler.fg("dim", "no live row"), iw, styler));
-    lines.push(...historyLines(h, h?.name));
+    lines.push(...historyLines(h, h?.name), ...doctorOf(h?.name));
+  }
+  const drawn = new Set<any>([...rows.map((r: any) => r?.name), ...historyOnly.map((h: any) => h?.name)]);
+  for (const d of doctorRead ? [...doctorByName.values()].filter((d: any) => !drawn.has(d.name)) : []) {
+    if (lines.length > 0) lines.push(styler.cell("", iw));
+    lines.push(fitLine(styler.bold(styler.fg("accent", clip(hostName(d.name), Math.max(8, iw - 14)))) + "  " + styler.fg("dim", "no live row"), iw, styler));
+    lines.push(...doctorOf(d.name));
   }
   if (report) {
     lines.push(styler.cell("", iw));
@@ -3228,6 +3241,35 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
     lines.push(...wrapped(`${notes.join("; ")}.`, "dim"));
   }
   return { title, lines };
+}
+
+/** The warn and fail checks a host's doctor lines list before they count the rest. */
+const DOCTOR_TUI_SHOWN = 4;
+
+/**
+ * A host's doctor lines in the HOSTS view (issue #712, `INT-DOCTOR-RESULTS-KEY`): its last published run's age and counts
+ * (and `stale` once it is older than two of its own intervals), then up to `DOCTOR_TUI_SHOWN` failing and warning checks,
+ * failing first, each with its fix. A host that published nothing says so, so an empty list never reads as healthy.
+ * Labels are another host's redacted text, escaped and gated (`textCell`), and every line is fitted to `iw`.
+ */
+function doctorLines(row: any, iw: number, styler: any): string[] {
+  const wrapped = (t: string, color: string, indent: string) =>
+    wrapColumns(t, Math.max(1, iw - indent.length), styler).map((l) => styler.cell(indent + l, iw, { color }));
+  if (!row) return wrapped("doctor: nothing published by this host yet", "dim", "  ");
+  if (row.unreadable) return wrapped("doctor: its published result cannot be read", "warning", "  ");
+  const age = Number.isSafeInteger(row.ageMs) ? `${durationText(row.ageMs)} ago` : "at an unknown time";
+  const stale = doctorStale(row);
+  const failing = Number.isSafeInteger(row.counts?.fail) && row.counts.fail > 0;
+  const head = `doctor ${age}, ${doctorByText(row)}: ${doctorCountsText(row)}${stale ? ` · stale (runs every ${row.every}h)` : ""}${row.workerRun && row.by?.worker !== true ? " · replaced the worker's run" : ""}`;
+  const out = wrapped(head, failing ? "error" : stale || row.counts?.warn > 0 ? "warning" : "muted", "  ");
+  const problems = doctorProblems(row);
+  for (const c of problems.slice(0, DOCTOR_TUI_SHOWN)) {
+    out.push(...wrapped(`${c.level === "fail" ? "✗" : "⚠"} ${textCell(c.label ?? c.id)}`, c.level === "fail" ? "error" : "warning", "    "));
+    if (c.fix) out.push(...wrapped(`→ ${textCell(c.fix)}`, "dim", "      "));
+  }
+  const hidden = problems.length - Math.min(problems.length, DOCTOR_TUI_SHOWN) + (Number.isSafeInteger(row.more) ? row.more : 0);
+  if (hidden > 0) out.push(...wrapped(`+${hidden} more: the console's Fleet page lists them, and doctor on that host prints them`, "dim", "    "));
+  return out;
 }
 
 /**
