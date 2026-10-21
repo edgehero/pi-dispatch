@@ -11,6 +11,7 @@ import * as realPages from "../src/console/pages.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
 import { preText, runTranscriptSection, TRANSCRIPT_ABSENT, TRANSCRIPT_FORMATS, transcriptEntryHtml, transcriptEntryJson } from "../src/console/transcript.mjs";
+import { transcriptAbsentText } from "../src/read-model.mjs";
 import { compareTranscriptIds, readTranscriptMeta, readTranscriptSince } from "../src/read-model.mjs";
 
 // The console's live transcript (issue #643, DES-OPERATOR-CONSOLE "Live transcript"): the entry html, the run page's
@@ -117,7 +118,9 @@ test("the run page's section: an operator with a stream gets [data-transcript]; 
   assert.match(TRANSCRIPT_ABSENT, /not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet/);
   assert.doesNotMatch(gone, /data-transcript/, "an ended run whose stream is gone holds no stream open");
   const early = String(runTranscriptSection(view("operator", { transcript: { exists: false }, run: { missing: true } })));
-  assert.ok(early.includes(TRANSCRIPT_ABSENT) && early.includes("Reload to check again."), "no record and no stream: say why");
+  // Issue #712: no record yet, so the venue cannot be named here, and its cause is listed with the other three.
+  assert.ok(early.includes(transcriptAbsentText(null)) && early.includes("Reload to check again."), "no record and no stream: say why");
+  assert.match(transcriptAbsentText(null), /not started yet, or its venue or job image does not stream it\.$/);
   assert.doesNotMatch(early, /data-transcript/, "and hold no stream open for a run that may never publish (or does not exist: the page's 404)");
   const down = String(runTranscriptSection(view("operator", { transcript: { unreachable: true, exists: false }, run: { missing: true } })));
   assert.match(down, /could not be read/);

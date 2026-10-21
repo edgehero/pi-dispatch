@@ -184,7 +184,8 @@ async function renderInChild() {
       PI_GLOBAL_PI_DIR: paths.overlay,
     };
     Object.assign(process.env, env);
-    await seedDeployment({ url, paths, mods: { W, RM, DW, version } });
+    // Issue #712: records naming a real venue, so the goldens are a normal local run's pages.
+    await seedDeployment({ url, paths, mods: { W, RM, DW, version }, venue: "local" });
 
     // The parked run's session chain counter, as the session store keeps it, so the inbox shows a known count.
     const sessionsDir = join(deployment, "sessions");
@@ -376,6 +377,8 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   // Issue #643: the live transcript section, outside every panel. The fixture's run has ended and Valkey holds no
   // stream for it, so the operator reads why and nothing is opened; a viewer reads that transcripts are operators'.
   assert.match(first["run.operator"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">No live transcript: not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet\. Reload to check again\.<\/p><\/section><\/main>/);
+  // Issue #712: a local run's page shows the command that reopens its sandbox.
+  assert.match(first["run.operator"].html, /<code class="mono">pi-dispatch sandbox gh-2f6a<\/code>/);
   assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/main>/);
   for (const key of ["run.operator", "run.viewer"]) assert.doesNotMatch(first[key].html, /data-transcript/, `${key}: no stream for an ended run without one`);
   // Issue #644: the active tables carry each job's progress as integers and a tool name, the remote host's job too; the

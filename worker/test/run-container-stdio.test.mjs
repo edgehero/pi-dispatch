@@ -114,7 +114,9 @@ test("the arming matrix: each missing part is a named skip, writes no PI_TRANSCR
 	];
 	for (const c of cases) {
 		const { seen, go } = harness(c.h);
-		await go(c.bag);
+		const result = await go(c.bag);
+		// Issue #712: the same named skip on the result, for the record's `liveSkipped`.
+		assert.equal(result.liveSkipped, c.reason, c.name);
 		assert.equal("PI_TRANSCRIPT" in seen.env, false, c.name);
 		assert.equal(seen.opened.length, 0, c.name);
 		assert.deepEqual(seen.logs.filter(([e]) => e === "live_transcript_skipped"), [["live_transcript_skipped", { container: NAME, reason: c.reason }]], c.name);
@@ -135,7 +137,8 @@ test("nothing would read it (no opener): nothing is armed and nothing is said; s
 
 test("a binding venue is untouched: the file tail, no PI_TRANSCRIPT, no skip, whatever the image declares (#686)", { skip }, async () => {
 	const { seen, go } = harness({ transcript: "file", layout: "mounts" });
-	await go();
+	const result = await go();
+	assert.equal("liveSkipped" in result, false, "issue #712: nothing skipped, so the result (and the record) carries no key");
 	assert.equal("PI_TRANSCRIPT" in seen.env, false);
 	assert.equal(seen.opened.length, 1);
 	assert.equal("source" in seen.opened[0], false, "the opener is called exactly as before");

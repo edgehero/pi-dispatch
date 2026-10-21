@@ -498,7 +498,7 @@ test("the ACTIVE row ignores an ended snapshot (an earlier attempt's) and marks 
 
 test("initialTail opens the overlay on that job's LIVE_TAIL, and Esc lands on its ACTIVE row, where t steers (#647 part 2)", { timeout: 20_000 }, async () => {
   const s = scripted({ start: { entries: [e("1-1", "assistant", "working on it")], next: "1-1", ended: false } });
-  const snap = () => ({ ...SNAP(), triggers: { triggers: [{ index: 0, on: { type: "cron" } }] }, active: [{ jobId: "jA", queue: "pi-jobs@mini2", startedAt: AT - 60_000, host: "mini2", steer: true }] });
+  const snap = () => ({ ...SNAP(), triggers: { triggers: [{ index: 0, on: { type: "cron" } }] }, active: [{ jobId: "jA", queue: "pi-jobs@mini2", startedAt: AT - 60_000, host: "mini2", steer: true, steerOpen: true }] });
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, initialTail: "jA", deps: deps({ ...s, fetchSnapshot: async () => snap(), planSteer: async () => ({ refusal: "x" }), steer: async () => ({}) }) });
   await until(() => s.calls.length >= 1, "the first transcript read, with no key pressed");
   const tailOut = stripAnsi(comp.render(80).join("\n"));
@@ -529,7 +529,7 @@ test("Esc from a tail whose job is no longer the ACTIVE row: the cursor rests on
   const s = scripted({ start: { entries: [e("1-1", "assistant", "done now")], next: "1-1", ended: false } });
   // jA ended between `/dispatch chat`'s lookup and the overlay: another steer-armed job is the ACTIVE row now, and the
   // snapshot lists several active jobs (only the ACTIVE row's is a list row).
-  const snap = () => ({ ...SNAP(), triggers: { triggers: [] }, activeJobId: "jOther", active: [{ jobId: "jOther", queue: "pi-jobs@mini2", startedAt: AT - 60_000, host: "mini2", steer: true }, { jobId: "jThird", queue: "pi-jobs@mini3", startedAt: AT - 30_000, host: "mini3", steer: true }], runs: [{ jobId: "jR", kind: "github", target: "o/r#1", outcome: "completed", endedAt: new Date(AT - 1000).toISOString() }] });
+  const snap = () => ({ ...SNAP(), triggers: { triggers: [] }, activeJobId: "jOther", active: [{ jobId: "jOther", queue: "pi-jobs@mini2", startedAt: AT - 60_000, host: "mini2", steer: true, steerOpen: true }, { jobId: "jThird", queue: "pi-jobs@mini3", startedAt: AT - 30_000, host: "mini3", steer: true, steerOpen: true }], runs: [{ jobId: "jR", kind: "github", target: "o/r#1", outcome: "completed", endedAt: new Date(AT - 1000).toISOString() }] });
   const planned = [];
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, initialTail: "jA", deps: deps({ ...s, fetchSnapshot: async () => snap(), planSteer: async (a) => (planned.push(a), { refusal: "x" }), steer: async () => ({}) }) });
   await until(() => s.calls.length >= 1, "the first transcript read");

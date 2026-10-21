@@ -893,7 +893,9 @@ export function makeRunContainer({
 				// `steer` is the runner's own count (advisory, like `recovery`), without the ids; `steerSkipped` the verdict.
 				const steerShown = steerCounts !== null && typeof steerCounts === "object" ? { delivered: steerCounts.delivered ?? null, pending: steerCounts.pending ?? null } : null;
 				const steered = steerAsked ? { ...(steerArmed && steerShown !== null ? { steer: steerShown } : {}), ...(steerSkipped !== null ? { steerSkipped } : {}) } : {};
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
+				// Issue #712: the named live-transcript skip, for the record's `liveSkipped`, only when there was one.
+				const liveShown = liveSkipped !== null ? { liveSkipped } : {};
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
 			});
 		});
 

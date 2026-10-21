@@ -15,7 +15,7 @@
  * Nothing here reaches `/api/state`, a hub panel or a list.
  */
 import { LIVE_OUTCOMES, LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
-import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
+import { TRANSCRIPT_ID_RE, transcriptAbsentText } from "../read-model.mjs";
 import { html } from "./html.mjs";
 
 /** The kinds that carry text worth folding: a tool call's arguments and a tool's result go in a `<details>`. */
@@ -101,8 +101,13 @@ export function transcriptEntryJson(entry) {
   };
 }
 
-/** Why a run has no stream: the stream cannot tell these apart, so the page names all three. */
-export const TRANSCRIPT_ABSENT = "No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired, or not started yet.";
+/**
+ * Why a run on a venue that streams it has no stream: the stream cannot tell these apart, so the page names all three.
+ * Issue #712: the page says `transcriptAbsentText(record)`, which is this sentence for such a venue, the record's named
+ * skip when it has one (`liveSkipped`), and these three plus the venue's cause for a run on a venue that does not always
+ * stream or whose venue the page cannot name yet (a running job has no record).
+ */
+export const TRANSCRIPT_ABSENT = transcriptAbsentText({ backend: "local" });
 
 /**
  * The run page's "Live transcript" section (operator only), from the page data's `transcript` (the fleet reader's
@@ -118,7 +123,7 @@ export function runTranscriptSection(view) {
   if (typeof id !== "string" || id === "") return title;
   const meta = view?.data?.transcript ?? null;
   if (meta?.unreachable) return html`${title}<p class="warn">The live transcript could not be read (is Valkey reachable?). Reload to try again.</p>`;
-  if (meta?.exists !== true) return html`${title}<p class="note">${TRANSCRIPT_ABSENT} Reload to check again.</p>`;
+  if (meta?.exists !== true) return html`${title}<p class="note">${transcriptAbsentText(view?.data?.run?.record ?? null)} Reload to check again.</p>`;
   const note = html`<p class="note">${meta.ended ? `The run has ended (${meta.outcome ?? "unknown"}); its stream is kept 24 hours.` : "The run is publishing its transcript."}</p>`;
   return html`${title}${note}<p class="t-status" data-transcript-status role="status" aria-live="polite">not live</p><div class="transcript" data-transcript data-job="${id}" tabindex="0"></div>`;
 }

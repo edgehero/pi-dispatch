@@ -412,11 +412,11 @@ function placedFirst() {
  * carrying the first in `earlier` the way the processor carries it), the cancelled job and the parked run. The portfolio manager's
  * runs are `pmRecord`'s.
  */
-export function buildRecords({ buildRecord, earlierFrom, dollarBudget: D }) {
+export function buildRecords({ buildRecord, earlierFrom, dollarBudget: D, venue = "docker" }) {
 	const g = generator(599);
 	const taken = new Set(["gh-5d10", "gh-77c1", RETRY.id, CANCELLED.id, PARKED.id, ...Object.values(RUNNING).flat().map((e) => e.id)]);
 	const runs = scheduled(plannedJobs(g, taken), placedFirst());
-	const record = (j, result, { earlier = null } = {}) => buildRecord({ job: bullJob(j), result, startedAt: iso(j.startMs), endedAt: iso(j.endMs), host: j.host, defaultBackend: "docker", project: j.project, size: j.size, capacity: HOSTS[j.host], earlier });
+	const record = (j, result, { earlier = null } = {}) => buildRecord({ job: bullJob(j), result, startedAt: iso(j.startMs), endedAt: iso(j.endMs), host: j.host, defaultBackend: venue, project: j.project, size: j.size, capacity: HOSTS[j.host], earlier });
 	const records = runs.map((j) => record(j, outcomeOf(g, j, D)));
 	// An infrastructure exit promotes nothing, so its session is the cold read alone.
 	const failed = record(RETRY, { ...outcomeOf(g, RETRY, D), outcome: "failed", reason: "container-lost", exitCode: null, session: { resumed: false, reason: "absent", bytes: null } });
@@ -439,10 +439,10 @@ export function pmJob(run) {
 }
 
 /** A pm run's record with the plan it wrote. */
-export function pmRecord({ buildRecord, dollarBudget: D }, run, plan) {
+export function pmRecord({ buildRecord, dollarBudget: D, venue = "docker" }, run, plan) {
 	const g = generator(run.at % 100_000);
 	const j = pmJob(run);
-	return buildRecord({ job: bullJob(j), result: { ...outcomeOf(g, j, D), plan }, startedAt: iso(j.startMs), endedAt: iso(j.endMs), host: j.host, defaultBackend: "docker", project: j.project, size: j.size, capacity: HOSTS[j.host] });
+	return buildRecord({ job: bullJob(j), result: { ...outcomeOf(g, j, D), plan }, startedAt: iso(j.startMs), endedAt: iso(j.endMs), host: j.host, defaultBackend: venue, project: j.project, size: j.size, capacity: HOSTS[j.host] });
 }
 
 // ---- the live fleet --------------------------------------------------------------------------------------------
@@ -495,7 +495,13 @@ const PLAN_REASONS = { web: "checkout launch is done; keep a floor for bug repor
  * Seed the Valkey at `url` and write the run records under `paths.logs`. `mods` are the project's modules, imported
  * by the caller after it froze the clock and emptied the environment.
  */
-export async function seedDeployment({ url, paths, mods }) {
+/**
+ * `venue` (issue #712): the venue the records name. `"docker"` by default, which is no venue the backend table holds:
+ * it is what the README's panel images were rendered with, and keeping it keeps them byte-stable until they are next
+ * regenerated on purpose. The console's golden pages pass `"local"`, so they show a normal local run (the sandbox
+ * command, the plain absent sentences) rather than an unknown venue's.
+ */
+export async function seedDeployment({ url, paths, mods, venue = "docker" }) {
 	const { RM, DW } = mods;
 	// The settlement rules are the worker's own (a caller that predates the key gets them imported here).
 	const W = { ...mods.W, dollarBudget: mods.W.dollarBudget ?? (await import("../worker/src/dollar-budget.mjs")) };
@@ -530,8 +536,8 @@ export async function seedDeployment({ url, paths, mods }) {
 		plans.push(await apply(PM_RUNS[3].at + 2 * MIN + 30_000, { web: 4, api: 1, billing: 7, ops: 1, _other: 0 }, PM_RUNS[3], "mini1"));
 		const planOf = (res) => ({ outcome: res.outcome, reason: res.reason ?? null, planId: res.planId ?? null, clamped: res.clamped === true });
 
-		const records = buildRecords({ buildRecord: W.runHistory.buildRecord, earlierFrom: W.runHistory.earlierFrom, dollarBudget: W.dollarBudget });
-		PM_RUNS.forEach((run, i) => records.push(pmRecord({ buildRecord: W.runHistory.buildRecord, dollarBudget: W.dollarBudget }, run, planOf(plans[i]))));
+		const records = buildRecords({ buildRecord: W.runHistory.buildRecord, earlierFrom: W.runHistory.earlierFrom, dollarBudget: W.dollarBudget, venue });
+		PM_RUNS.forEach((run, i) => records.push(pmRecord({ buildRecord: W.runHistory.buildRecord, dollarBudget: W.dollarBudget, venue }, run, planOf(plans[i]))));
 		records.sort((a, b) => Date.parse(a.endedAt) - Date.parse(b.endedAt) || (a.jobId < b.jobId ? -1 : 1));
 		// mini1 and mini2 share one PI_LOGS_DIR (this one) and keep 30 days; build3 keeps its own logs directory for 7
 		// days (BUILD3_RETENTION_DAYS), so its runs reach the others only through the run mirror every named worker

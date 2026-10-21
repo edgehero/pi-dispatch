@@ -122,6 +122,7 @@
     "./console-client": "./src/console-client.mjs",
     "./workspace-checkpoint": "./src/workspace-checkpoint.mjs",
     "./sandbox": "./src/sandbox.mjs",
+    "./openshell-cli": "./src/openshell-cli.mjs",
     "./sandbox-store": "./src/sandbox-store.mjs",
     "./subscriptions": "./src/subscriptions.mjs",
     "./budget": "./src/budget.mjs",

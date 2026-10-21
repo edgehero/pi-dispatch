@@ -91,6 +91,23 @@ test("the role rule: a failure reason is the operator's, in a details element, a
   assert.ok(!String(audit.html).includes("login"), "no audit row reaches a viewer");
 });
 
+test("the secret profiles list PI_SECRET_PROFILES' names beside the overlay's, and never says none while the env holds some (#712)", async () => {
+  const profilesOf = async (extra) => {
+    const html = (await pagePanels("config", ctxOf("operator", { snapshot: { ...snapshot(), ...extra } }))).map((p) => p.html).join("");
+    return html.slice(html.indexOf("<h2>Secret profiles</h2>"), html.indexOf("<h2>Secret bundles</h2>"));
+  };
+  const noOverlay = { settings: { overlay: {} } };
+  const envOnly = await profilesOf({ ...noOverlay, secretProfilesEnv: { names: ["prod"], malformed: false, seen: true } });
+  assert.match(envOnly, /<li class="mono">prod \(PI_SECRET_PROFILES\)<\/li>/);
+  assert.ok(!envOnly.includes("No secret profile is declared"), envOnly);
+  assert.match(await profilesOf({ ...noOverlay, secretProfilesEnv: { names: [], malformed: false, seen: true } }), /No secret profile is declared\./, "both sources seen and empty");
+  assert.match(await profilesOf({ ...noOverlay, secretProfilesEnv: { names: [], malformed: false, seen: false } }), /No secret profile is declared in the settings overlay\./, "the env not visible: says which source it read");
+  assert.match(await profilesOf({ ...noOverlay, secretProfilesEnv: { names: [], malformed: true, seen: true } }), /PI_SECRET_PROFILES does not parse/);
+  const both = await profilesOf({ settings: { overlay: { secretProfiles: { prod: "/opt/secret/p" } } }, secretProfilesEnv: { names: ["prod"], malformed: false, seen: true } });
+  assert.match(both, /prod \(AMBIGUOUS: also in PI_SECRET_PROFILES, so the worker refuses every secrets job\)/);
+  assert.ok(!both.includes("/opt/secret"), "names only");
+});
+
 test("the configuration shows names and basenames, never a parser message or a resolver path", async () => {
   const html = (await pagePanels("config", ctxOf("operator", { snapshot: snapshot() }))).map((p) => p.html).join("");
   assert.ok(!html.includes("/srv/"), html);

@@ -896,7 +896,11 @@ test("the fleet reader's inbox read and snapshot: a steer-armed active job's ent
     const snap = await reader.snapshot();
     const byId = Object.fromEntries(snap.active.map((a) => [a.jobId, a]));
     assert.deepEqual([byId["gh-a1"].steer, byId["gh-a1"].inbox], [true, one.entries]);
-    assert.equal("steer" in byId["gh-a2"] || "inbox" in byId["gh-a2"], false);
+    // Issue #712: and whether its inbox takes a message now, the open key the run page reads, for the TUI's t/T keys.
+    assert.equal(byId["gh-a1"].steerOpen, true);
+    assert.equal("steer" in byId["gh-a2"] || "inbox" in byId["gh-a2"] || "steerOpen" in byId["gh-a2"], false);
+    await v.redis.del("run:steer:open:gh-a1");
+    assert.equal((await reader.snapshot()).active.find((a) => a.jobId === "gh-a1").steerOpen, false, "armed is not open");
     assert.ok(!JSON.stringify(snap).includes("READER-TEXT-CANARY"), "the snapshot never holds the text");
   } finally {
     await reader.dispose();

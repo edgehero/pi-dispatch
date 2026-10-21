@@ -491,6 +491,14 @@ is honoured. The worker re-checks that bound itself, on the real path, every tim
 belt-and-braces: `PI_SETTINGS_FILE` can put the file the panel writes anywhere, so a check that lived only
 in the panel would prove nothing on a shared host.
 
+Before it asks you to confirm, `add` (and the console's form) refuses two things the worker would refuse later: a
+name `PI_SECRET_PROFILES` already declares on this deployment (the worker reads a name declared in both places as
+ambiguous and then refuses every secrets job), and, when the panel can see `PI_SECRET_RESOLVER_ROOTS` (it reads it
+from the deployment's `.env`), a resolver whose real path (symlinks followed) is outside it as written. The roots are compared as you wrote them, as the worker compares them, so on macOS a root written `/tmp/pi` holds nothing under `/private/tmp/pi`; the refusal then says to write the root as its real path. The panel judges this on its own host, which may not be the worker's: a path it cannot resolve there is not refused, and the confirm says the worker checks it where it runs. Set and empty, the
+variable refuses every overlay resolver, so `add` says that too. `/dispatch secrets list` and the console's
+configuration screen list the profiles `PI_SECRET_PROFILES` declares beside the overlay's, and mark a name in both
+as ambiguous.
+
 **Binding a secret to a trigger stays a file edit.** The panel declares managers; `triggers.json` says which
 job reaches one. No `dispatch_*` tool has a `secrets` parameter.
 
@@ -498,7 +506,8 @@ job reaches one. No `dispatch_*` tool has a `secrets` parameter.
 `--bundle`. `/dispatch secrets add --bundle` asks three questions (a name, the path to the script, and the format it
 prints, `dotenv` or `json`) and shows you the exact bytes it writes to the overlay's `secretBundles`
 (`{ "<name>": { "path": "...", "format": "..." } }`). It refuses a name `PI_SECRET_BUNDLES` already declares on this
-deployment: the worker reads a name declared in both places as ambiguous and then refuses every bundled job.
+deployment: the worker reads a name declared in both places as ambiguous and then refuses every bundled job. It
+refuses a resolver outside a visible `PI_SECRET_RESOLVER_ROOTS` too, as `add` does for a profile.
 `/dispatch secrets remove --bundle <name>` says what the removal does: nothing when no bundle in `triggers.json` names
 it; it resolves the ambiguity when `PI_SECRET_BUNDLES` declares the same name (unless another name is in both places, which keeps every bundled job refused, and it says so); otherwise it names the bundles whose
 jobs are refused before they spend once it is gone (or, on a multi-host worker's shared queue, held for a host that
@@ -519,6 +528,9 @@ that, on the host that runs the jobs), and no reference or value is ever shown:
   Then whether fork reviews get it, its `endpoints` (names and hosts) and the triggers that opt out (a cron trigger
   counts only when its folder is in the bundle's project). `/dispatch triggers` adds the same lines under the
   triggers.
+- A trigger's detail in the `/dispatch` panel says where its `run.secrets` values end up, by its venue (its
+  `run.backend`, else the first venue in `PI_BACKENDS`): on `local` and `podman` the agent can read them; on the
+  OpenShell venues the values with an endpoint are placeholders in the agent and `run.secrets` go to the job's provider.
 - The `/dispatch` panel has a **secret bundles** section under the triggers with the same facts and the variable
   names the newest run in view received. A cron trigger whose folder is in a bundled project carries `[bundle <id>]`
   beside `[secrets]`, and a trigger that opts out carries `[no bundle]`; its detail says which bundle its jobs hold.

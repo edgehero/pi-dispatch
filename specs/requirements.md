@@ -1130,7 +1130,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   read all of it through the read model's one fleet reader (`createFleetReader`), the same reader the `/dispatch`
   panel uses; shall keep every open live page current within about two seconds of a change in Valkey by sending only
   the panels that changed; and shall bound every query a page accepts. The `/dispatch` panel shall show the parked
-  runs too.
+  runs too. **AMENDED 2026-10-21 (#712)**: neither surface shall say anything that is wrong for the venue a run ran on:
+  the sandbox command only where the venue has a sandbox shell, the secrets disclosure by the venue's credential
+  custody, steer keys only while the inbox is open, and an absent live transcript or progress blamed on the record's
+  named skip or the venue where those are the cause, each sentence keyed by the worker's own tables
+  (`DES-OPERATOR-CONSOLE`).
 - **Scope**: reads only. Every write and action, answering a parked run included, is #642's
   (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; the live transcript on
   the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's (`REQ-RUN-PROGRESS`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
@@ -3454,7 +3458,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   exactly as before. Not in scope: continuing on a host other than
   the one holding the checkpoint and a local folder's recovery (`OQ-045`); a forge mirror of the workspace is declined there.
   **Venues (AMENDED 2026-10-19, #686 part 3)**: on the `openshell` venue (copy mode) a `run.recover` forge job is refused
-  before spend (`openshell-recover-unsupported`, since #684); on `openshell-bind` it is served as on `local`: the host
+  before spend (`openshell-recover-unsupported`, since #684); **AMENDED 2026-10-21 (#712)**: and a trigger whose
+  `run.backend` names that venue beside `run.recover` is refused when the triggers file loads or is written (the venue's
+  `serves.recovery` is `no`), while one naming no venue is refused before the confirm by the admin's trigger tools when
+  `PI_BACKENDS[0]` is that venue and before spend by the worker as before; on `openshell-bind` it is served as on `local`: the host
   workspace is the job's bind, so a lost worker's tree is salvaged and an infrastructure exit snapshotted, and as on
   every venue that cannot freeze, live checkpoints are off (`pausable: absent`). Before a salvage reads the lost
   attempt's tree there, the sandbox that bound it is deleted and confirmed gone, or the salvage reads nothing and the
@@ -5061,7 +5068,10 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   forge-side configuration (webhooks, branch protection, App installation). The admin extension's
   `/dispatch setup` wizard (issue #92, `DES-FIRST-RUN-SETUP-WIZARD`) is **in scope as a driver, not
   as a power**: it reaches these same CLI actions through their own consent gates and adds only the
-  deployment pointer (`INT-DEPLOYMENT-POINTER-CONTRACT`).
+  deployment pointer (`INT-DEPLOYMENT-POINTER-CONTRACT`). **AMENDED 2026-10-21 (#712)**: on a deployment whose only
+  venues are the OpenShell ones, its host pre-check is the gateway's engine (`openshellSetupOf`, the rule `up` reads)
+  and the openshell CLI and gateway, and it offers the venue by name or refuses it by name with the fix; it gains no
+  power (the probes are reads, and `up` remains what registers the gateway).
 - **Why**: The quickstart was five hand-typed infra chores whose commands were already fixed strings —
   automation removes typing, not decisions. The decisions stay human: every mutating action is printed
   verbatim and runs only on an explicit accept (y/N, default No, No on non-TTY), because "pulled onto
@@ -5205,6 +5215,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-21 | Issue #712, part A: the console and the panel say nothing wrong for an OpenShell run. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, its statement: neither surface says anything wrong for the venue a run ran on (the sandbox command only where the venue has a sandbox shell, the secrets disclosure by the venue's credential custody, steer keys only while the inbox is open, an absent live transcript or progress blamed on the record's named skip or the venue), each sentence keyed by the worker's own tables. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: on an openshell-only deployment the wizard's host pre-check is the gateway's engine (`openshellSetupOf`) and the openshell CLI and gateway, offering or refusing the venue by name; it gains no power. **`REQ-RUN-RECOVERY` AMENDED**, its Venues paragraph: `run.recover` beside a `run.backend` naming the `openshell` copy mode is refused at load and write, and with no venue named, before the confirm by the admin when `PI_BACKENDS[0]` is that venue. **`REQ-TRIGGER-SECRETS`, `REQ-STEER-RUNNING-JOB`, `REQ-CONSOLE-SECURITY` and `REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the profile add's new refusals (a name `PI_SECRET_PROFILES` declares, a resolver outside `PI_SECRET_RESOLVER_ROOTS` on this host's realpath) say before the confirm what the worker already refused at resolution; the steer keys follow the inbox's existing open key; nothing shows a value, a reference or a resolver's output; no tool is added and no tool declares a resolver. |
 | 2026-10-20 | Issue #704, part 4: project secret bundles on the operator's surfaces. **`REQ-TRIGGER-SECRETS` AMENDED**, a dated acceptance paragraph: a bundle profile is declared and removed only by `/dispatch secrets add --bundle` / `remove --bundle` and the console's two forms, audited, a name `PI_SECRET_BUNDLES` holds refused, no tool able to write it (a test); the bundles view on `/dispatch secrets list`, `/dispatch triggers` (without variable names), the panel and the console; a run's received names, shadowed names, counts and skip sentence; never a `ref` or a value, never a resolve; the project tools' bundle refusal shown in the console form and the tool answer. Review round 1: no tool result carries a variable name (counts only, `dispatch_status` without the operator-only keys), an overlay resolver outside `PI_SECRET_RESOLVER_ROOTS` shown as one the worker will not run, a near-miss flag refused. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g): the configuration page shows the bundle resolvers and the bundles, never a `ref`, a path or a value, and the run page (c) a run's bundle facts. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (i): the bundle resolver actions, and the project edit refused for a bundle at the preview. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: `/dispatch secrets` was already an audited, operator-typed write and its subcommand list is unchanged (`--bundle` is a flag); the two new writes join the same chain (clause (k)). The statement and every earlier acceptance line UNCHANGED, checked. |
 | 2026-10-20 | Issue #704, part 3: project secret bundles on both OpenShell venues. **`REQ-TRIGGER-SECRETS` AMENDED**, its bundle acceptance: `openshell-bundle-unsupported` retired; six venue refusals inside the read (`openshell-bundle-endpoint-not-allowed`, `-endpoint-shared`, `-endpoint-unknown`, `-name-taken`, `-unpassable`, `-image-too-old`, the last and the model and MCP hosts of `-endpoint-shared` from review round 1), plain values by a job-directory file and never the exec, behind the fork check and before every reserve, an unreadable source retried; an `endpoints` variable a placeholder used only at its host, the rest values, and the record's two counts. The statement, the per-trigger `run.secrets` rules and every other acceptance line UNCHANGED, checked. |
 | 2026-10-19 | Issue #704, part 2, review round 1. **`REQ-TRIGGER-SECRETS` AMENDED**, its bundle scope and acceptance: no model-callable tool may widen a grant (an added trigger carries `secretBundle: false`, no trigger tool call may carry the field, the project tools refuse a bundled project's membership change); `openshell-bundle-unsupported`; a profile this host lacks defers a multi-host shared-queue job; the last good triggers read, and a retry only before the first; the read before the mint unless a fork check is needed; a 401, 403 or 404 head read is `head-unverified`; bundle-only loader and steering names refuse. |

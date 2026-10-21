@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { UnrecoverableError } from "bullmq";
 import { isFinalOutcome, makeLateForge, settleInbox, STEER_LATE_REPLY } from "../src/inbox-settle.mjs";
 import { InfraRetry, RECOVERY_ENQUEUED, RECOVERY_SUPERSEDED } from "../src/processor.mjs";
-import { buildRecord, parseExitSteer, recordedSteered, STEER_SKIPPED_REASONS } from "../src/run-history.mjs";
+import { buildRecord, LIVE_SKIPPED_REASONS, parseExitSteer, recordedSteered, STEER_SKIPPED_REASONS } from "../src/run-history.mjs";
 import { forgeMessageId, steerTargetKey } from "../src/steer-inbox.mjs";
 import { enqueueLateForgeJob, releaseSemanticWindow } from "../src/queue.mjs";
 
@@ -117,7 +117,8 @@ test("BY SHAPE: every record write in index.mjs is immediately preceded by the s
 	// The helper is defined before the first site, decides finality itself (inbox-settle.mjs), and only for steer jobs.
 	const def = src.indexOf("const settleSteer = async");
 	assert.ok(def !== -1 && def < src.indexOf("await settleSteer("));
-	assert.match(src.slice(def, def + 400), /if \(job\.data\?\.steer !== true\) return;/);
+	// 800, not 400, since issue #712 put the live-skip decoration (every job's) ahead of that return.
+	assert.match(src.slice(def, def + 800), /if \(job\.data\?\.steer !== true\) return;/);
 	// No bare closeInbox in the processor: the close goes through settleInbox, which knows what is final.
 	assert.doesNotMatch(src, /closeInbox/);
 });
@@ -172,6 +173,37 @@ test("MAKE IT LIE: a hostile steered or steerSkipped never reaches the record as
 		assert.equal("steerSkipped" in buildRecord({ job: job(), result: { steerSkipped: reason }, ...AT }), false, String(reason));
 	}
 	assert.equal(recordedSteered({ delivered: 0, late: 0, withdrawn: 0 }).delivered, 0, "zeros are counts");
+});
+
+test("the record's liveSkipped: the enum only, on any job, tail position, absent when nothing was skipped (#712)", () => {
+	for (const reason of LIVE_SKIPPED_REASONS) {
+		const r = buildRecord({ job: job({ data: { kind: "github" } }), result: { outcome: "completed", exitCode: 0, liveSkipped: reason }, ...AT });
+		assert.equal(r.liveSkipped, reason);
+		assert.equal(Object.keys(r).at(-1), "liveSkipped", "TAIL position");
+	}
+	// After the steering keys, before nothing else a steer job carries.
+	const steerJob = buildRecord({ job: job(), result: { steerSkipped: "venue-copies", liveSkipped: "venue-copies" }, ...AT });
+	assert.deepEqual(Object.keys(steerJob).slice(-2), ["steerSkipped", "liveSkipped"]);
+	const bundled = buildRecord({ job: job(), result: { steerSkipped: "venue-copies", bundleSkipped: "manual", liveSkipped: "venue-copies" }, ...AT });
+	assert.deepEqual(Object.keys(bundled).slice(-3), ["steerSkipped", "bundleSkipped", "liveSkipped"], "the newest key last, after the bundle keys");
+	assert.equal("liveSkipped" in buildRecord({ job: job(), result: { outcome: "completed" }, ...AT }), false, "byte-identical when nothing was skipped");
+	for (const reason of ["venue-copies; rm -rf /", "NO-CAPABILITY", "", 1, null, { toString: () => "no-exit-key" }]) {
+		assert.equal("liveSkipped" in buildRecord({ job: job(), result: { liveSkipped: reason }, ...AT }), false, String(reason));
+	}
+	// A thrown final error carries it the same way (the settle decorates it).
+	assert.equal(buildRecord({ job: job(), error: Object.assign(infra(), { liveSkipped: "no-capability" }), ...AT }).liveSkipped, "no-capability");
+});
+
+test("BY SHAPE: the attempt's liveSkipped is captured off runContainer and put on the result at the one settle every record site calls (#712)", () => {
+	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	assert.match(src, /liveRan = r && typeof r === "object" && typeof r\.liveSkipped === "string" \? r\.liveSkipped : null;/);
+	const from = src.indexOf("const settleSteer = async ({ result = null, error = null } = {}) => {");
+	assert.ok(from !== -1);
+	const body = src.slice(from, src.indexOf("\n\t\t};", from));
+	const decorate = body.indexOf("carryLiveSkip(result ?? error);");
+	assert.ok(decorate !== -1, "decorated inside the settle");
+	assert.match(src, /const carryLiveSkip = \(target\) => \{[\s\S]{0,200}target\.liveSkipped = liveRan;/);
+	assert.ok(decorate < body.indexOf("if (job.data?.steer !== true) return;"), "before the steer-only return, so every job gets it");
 });
 
 test("parseExitSteer: the decisive exit line's steer block, counts only", () => {

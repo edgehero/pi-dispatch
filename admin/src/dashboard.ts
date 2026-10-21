@@ -28,7 +28,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { BUNDLE_SKIPPED_TEXT, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, CUSTODY_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, liveAbsentCause, recordSkips, venueCustody, VENUE_MAY_NOT_STREAM, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -1407,6 +1407,13 @@ export function makeDashboard({
           tui?.requestRender?.();
           return;
         }
+        // Issue #712: armed is not open. The inbox opens once the run's loop starts on a venue and image that can deliver,
+        // so an input here would only lead to the planner's refusal; the run page's Inbox panel says which cause it is.
+        if (row.steerOpen !== true) {
+          actionNote = "inbox closed: not started, ended, or venue can't deliver";
+          tui?.requestRender?.();
+          return;
+        }
         steerInput = { jobId: row.jobId, mode: data === "T" ? "followUp" : "steer", input: makeLineInput("") };
         tui?.requestRender?.();
         return;
@@ -1543,7 +1550,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const detailTitle = `trigger · ${scrubControl(String(t?.type ?? "?"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const sched = cronSchedInfo(t, snapshot);
-    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt, detailTrigger?.instructions, snapshot?.overlayMcp, snapshot?.secretBundles ?? null);
+    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt, detailTrigger?.instructions, snapshot?.overlayMcp, snapshot?.secretBundles ?? null, snapshot?.defaultBackend ?? null);
     if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", pendingDelete ? "delete this trigger? y/n" : "e edit · x delete · esc back"];
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: triggerDetailHints(dw - 4, styler, pendingDelete) });
     return centerBlock(boxed, Math.trunc(width), dw);
@@ -3289,7 +3296,7 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     // The cancel hint rides the SELECTED row, not the footer -- the footer's width arithmetic has no
     // headroom for another hint (its own comment), and the key only means anything on this row anyway.
     // Issue #646: a steer-armed run's selected row adds its two message keys after the cancel key.
-    const hint = sel ? ` ${styler.fg("dim", row.steer === true ? "· x cancel · t steer · T follow-up" : "· x cancel")}` : "";
+    const hint = sel ? ` ${styler.fg("dim", row.steerOpen === true ? "· x cancel · t steer · T follow-up" : "· x cancel")}` : "";
     const progress = activeProgressText(row.progress, row.phaseName, row.now);
     return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", scrubControl(String(row.jobId ?? "-")))} ${styler.fg("dim", "running")}${progress ? ` ${styler.fg("muted", `· ${progress}`)}` : ""}${hint}`, inner, styler);
   }
@@ -3360,7 +3367,7 @@ function settingsLines(settings: any, inner: number, styler: any): string[] {
  * no crammed "produces" line. Read-only; `e`/`x` drive edit/delete through the command loop. Every line is
  * `inner` cols.
  */
-function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number, instructionsText: any = null, overlayMcp: any = null, bundles: any = null): string[] {
+function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number, instructionsText: any = null, overlayMcp: any = null, bundles: any = null, defaultVenue: string | null = null): string[] {
   if (!raw) return [styler.cell("(no trigger)", inner, { color: "dim" })];
   const t = scrubTrigger(raw); // the rule at the door: see `scrubTrigger`
   const out: string[] = [];
@@ -3550,7 +3557,11 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
     const holds = (text: string) => bullet(text, "warning");
     holds(`${t.secrets} vault secret(s) injected${t.secretsProfile ? ` via profile ${t.secretsProfile}` : ""}`);
     holds("resolved on the host before the container; the job holds no vault credential");
-    holds("the agent can read them, and the forge is on the egress allowlist");
+    // Issue #712: WHO HOLDS THEM is the venue's (`credentialCustody`), so the line follows the trigger's own run.backend,
+    // else the deployment default (`PI_BACKENDS[0]`). On a `layer` venue (OpenShell) the agent holds placeholders, and
+    // saying "the agent can read them" there would overstate the exposure the operator is weighing. A venue this panel
+    // cannot name keeps the container line, the wider claim.
+    holds(CUSTODY_TEXT[venueCustody(t.backend ?? defaultVenue) === "layer" ? "layer" : "container"]);
   }
   if (bundleAt?.id && !bundleAt.optedOut) {
     bullet(`bundle ${cellOf(bundleAt.id)}: every variable its resolver prints, read once per job start; each run records the names`, "warning");
@@ -3816,7 +3827,10 @@ function buildRows(snapshot: any, runSort = "time", runProject: any = ALL_RUNS):
   const activeRow = (Array.isArray(snapshot?.active) ? snapshot.active : []).find((a: any) => a?.jobId === snapshot?.activeJobId);
   const phaseName = snapshot?.activePhase?.jobId === snapshot?.activeJobId ? snapshot?.activePhase?.name ?? null : null;
   // Issue #646: `steer` only when the snapshot says the job is steer-armed, so the `t`/`T` hint rides that row alone.
-  const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId, progress: activeRow?.progress ?? null, phaseName, now: snapshot?.fetchedAt, ...(activeRow?.steer === true ? { steer: true } : {}) }] : [];
+  // Issue #712: and `steerOpen` only while its inbox takes a message now (the snapshot's `steerOpen`, the open key the
+  // console's Inbox panel reads), so the hint is never offered for a run the planner would refuse: an armed run whose
+  // venue or image could not deliver never opens its inbox.
+  const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId, progress: activeRow?.progress ?? null, phaseName, now: snapshot?.fetchedAt, ...(activeRow?.steer === true ? { steer: true } : {}), ...(activeRow?.steer === true && activeRow?.steerOpen === true ? { steerOpen: true } : {}) }] : [];
   // The project filter (issue #499 part C) reads the id the record carries, never the projects file as it is now.
   const runs = (Array.isArray(snapshot?.runs) ? snapshot.runs : [])
     .filter((record: any) => runProject === ALL_RUNS || recordProject(record) === runProject)
@@ -3859,7 +3873,7 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
       // The plain twin of runRow's selected-row cancel hint: the monochrome panel must not hide a key
       // the colored one advertises.
       const progress = activeProgressText(row.progress, row.phaseName, row.now);
-      out.push(clipData(`${cursor} * ACTIVE ${cellOf(row.jobId)} running${progress ? ` · ${progress}` : ""}${i === selected ? (row.steer === true ? " · x cancel · t steer · T follow-up" : " · x cancel") : ""}`, w));
+      out.push(clipData(`${cursor} * ACTIVE ${cellOf(row.jobId)} running${progress ? ` · ${progress}` : ""}${i === selected ? (row.steerOpen === true ? " · x cancel · t steer · T follow-up" : " · x cancel") : ""}`, w));
       continue;
     }
     const run = row.record;
@@ -3995,15 +4009,22 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
     // host's PI_CAPTURE_JOB_LOGS for a log that was never going to be here. `elsewhere` arrives only from the read model's log tail
     // with the run's host and this host's name both known, and it is a registry name in the worker-name charset.
     const id = scrubControl(String(tailJobId ?? "-"));
+    // Issue #712: the run's own record, when the snapshot holds it, may NAME the cause (`liveSkipped`), or put the run on
+    // a venue that does not always stream (`serves.liveTranscript`), which is then said as one of the causes. A running
+    // job has no record yet, so its venue cannot be named here and that cause is listed too.
+    const record = (Array.isArray(snapshot?.runs) ? snapshot.runs : []).find((r: any) => r?.jobId === tailJobId) ?? null;
+    const cause = liveAbsentCause(record);
     const said = typeof tail.elsewhere === "string" && tail.elsewhere !== ""
       ? [
           `live ${id} -- this run is on host ${scrubControl(tail.elsewhere)}.`,
-          "Its live transcript is not in Valkey: that host publishes none (PI_LIVE_TRANSCRIPTS=0), the run has not written one yet, or it has expired.",
+          cause?.skipped
+            ? `Its live transcript is not in Valkey: ${cause.skipped}.`
+            : `Its live transcript is not in Valkey: that host publishes none (PI_LIVE_TRANSCRIPTS=0), the run has not written one yet, ${cause?.venue ? `it has expired, ${VENUE_MAY_NOT_STREAM}` : "or it has expired"}.`,
           "Its raw log stays on that host.",
         ]
       : [
           `live ${id} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found)`,
-          ...(tail.noStream ? ["and no live transcript in Valkey (PI_LIVE_TRANSCRIPTS=0, not written yet, or expired)"] : []),
+          ...(tail.noStream ? [cause?.skipped ? `and no live transcript in Valkey (${cause.skipped})` : `and no live transcript in Valkey (PI_LIVE_TRANSCRIPTS=0, not written yet, ${cause?.venue ? `expired, ${VENUE_MAY_NOT_STREAM}` : "or expired"})`] : []),
         ];
     if (!framed) return [boxTitle, "", ...said, "", "Esc back"];
     const lines = said.flatMap((l) => wrapColumns(l, Math.trunc(width) - 4, styler));
@@ -4198,6 +4219,14 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
     if (counts !== "") out.push(kv("", counts, "dim"));
     if (rec.checkpoints) out.push(kv("checkpoints", checkpointsText(rec.checkpoints)));
   }
+  // WHAT THE RUN WENT WITHOUT (issue #712): the record's `steerSkipped` (a steer-armed run that took no message) and
+  // `liveSkipped` (a run with no live transcript, so no live progress), each the closed enum in words
+  // (STEER_SKIPPED_TEXT, LIVE_SKIPPED_TEXT), WRAPPED under the label as the bundle lines are, since the cause is the
+  // point of the line. A record with neither key renders byte-identical.
+  const skips = recordSkips(r);
+  const said = (k: string, v: string) => wrapColumns(v, Math.max(1, inner - 13), styler).forEach((part: string, i: number) => out.push(kv(i === 0 ? k : "", part, "warning")));
+  if (skips.steerSkipped !== null) said("steering", `skipped (${skips.steerSkipped}): ${STEER_SKIPPED_TEXT[skips.steerSkipped]}`);
+  if (skips.liveSkipped !== null) said("live", `no transcript (${skips.liveSkipped}): ${LIVE_SKIPPED_TEXT[skips.liveSkipped]}`);
   // Issue #662: an attempt whose run went on as a #645 recovery. The record above is this attempt's own (its progress
   // counts included); the line names the job that continues the run, whose own row shows the run's live progress. Only
   // for a `recovery-enqueued` record, so every other record renders byte-identical.

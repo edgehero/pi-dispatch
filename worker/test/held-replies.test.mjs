@@ -315,7 +315,7 @@ test("BY SHAPE: settleSteer settles held replies FIRST, so every record site the
 	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
 	const def = src.indexOf("const settleSteer = async");
 	assert.ok(def !== -1);
-	assert.match(src.slice(def, def + 200), /^const settleSteer = async \(\{ result = null, error = null \} = \{\}\) => \{\n\t+const held = await settleHeldReplies\(\{ result, error \}\);\n\t+if \(job\.data\?\.steer !== true\) return;/);
+	assert.match(src.slice(def, def + 260), /^const settleSteer = async \(\{ result = null, error = null \} = \{\}\) => \{\n\t+const held = await settleHeldReplies\(\{ result, error \}\);\n(\t+carryLiveSkip\(result \?\? error\);\n)?\t+if \(job\.data\?\.steer !== true\) return;/, "issue #712: only the live-skip carry, which settles nothing, may sit between them");
 	// And what it says reaches the steer settle, so a held resume and a late steer never both start a job.
 	assert.match(src.slice(def, def + 1200), /lateContext: \{ heldResumed: Number\(held\?\.resumed\) > 0 \|\| Number\(heldTaken\?\.resumed\) > 0 \|\| heldTaken\?\.taken === "other" \}/);
 	// Review round 2: once the take ran, the backstop is told so, and then only drops.

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -490,6 +490,12 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["bundle format", plans.planSecretBundleAdd({ name: "op-shop", path: "/x", format: "yaml", bundles: {}, settingsFile: "/s" }).refusal, "the format is dotenv or json: what the resolver prints, declared, because the worker never guesses it from the output"],
       ["bundle name in PI_SECRET_BUNDLES", plans.planSecretBundleAdd({ name: "op-shop", path: "/x", format: "json", bundles: {}, envBundles: { "op-shop": { path: "/y", format: "json" } }, settingsFile: "/s" }).refusal, "PI_SECRET_BUNDLES already declares op-shop on this deployment; the worker reads a name declared in both places as ambiguous and refuses every bundled job, so pick another name or change the .env"],
       ["no such bundle resolver", plans.planSecretBundleRemove({ name: "gone", bundles: {}, settingsFile: "/s" }).refusal, "no such bundle resolver. No bundle resolvers are declared in the settings overlay."],
+      // Issue #712: an env-declared profile name, and a resolver outside the roots, refused before the confirm.
+      ["profile name in PI_SECRET_PROFILES", plans.planSecretProfileAdd({ name: "prod", path: "/opt/pi/r", profiles: {}, envProfiles: { prod: "/opt/pi/x" }, settingsFile: "/s" }).refusal, "PI_SECRET_PROFILES already declares prod on this deployment; the worker reads a name declared in both places as ambiguous and refuses every secrets job, so pick another name or change the .env"],
+      ["resolver outside the roots", plans.planSecretProfileAdd({ name: "prod", path: "/tmp/r", profiles: {}, env: { PI_SECRET_RESOLVER_ROOTS: "/opt/pi" }, settingsFile: "/s", fs: { realpathSync: (p) => p } }).refusal, "/tmp/r is outside PI_SECRET_RESOLVER_ROOTS (/opt/pi), so the worker would refuse it on every job; put the resolver inside one of them, or add its directory to PI_SECRET_RESOLVER_ROOTS"],
+      ["resolver under a root written through a link", plans.resolverRootsRefusal("/tmp/pi/r", { PI_SECRET_RESOLVER_ROOTS: "/tmp/pi" }, "/private/tmp/pi/r", "/private/tmp/pi"), "/tmp/pi/r (it resolves to /private/tmp/pi/r) is outside PI_SECRET_RESOLVER_ROOTS (/tmp/pi), so the worker would refuse it on every job; put the resolver inside one of them, or add its directory to PI_SECRET_RESOLVER_ROOTS, or write the root as its real path (/private/tmp/pi)"],
+      ["roots set and empty", plans.resolverRootsJudgement("/opt/pi/r", { PI_SECRET_RESOLVER_ROOTS: "" }).refusal, "PI_SECRET_RESOLVER_ROOTS is set and empty on this deployment, so the worker refuses every resolver the settings overlay declares; set it to the directory your resolvers live in first"],
+      ["run.recover on a venue that does not recover", plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"], recover: true }, paths, env: { PI_BACKENDS: "openshell" } }).refusal, { prefix: "run.recover cannot be armed on a trigger whose jobs run in the openshell venue" }],
       ["no backends", plans.backendRefusal("local", { PI_BACKENDS: "vapour" }), "this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)"],
       ["backend not blessed", plans.backendRefusal("podman", { PI_BACKENDS: "local" }), "backend 'podman' is not blessed by this deployment (PI_BACKENDS: local)"],
       ["tool-proof dollar cap", plans.wideningFieldRefusal({ maxCostUsd: "1" }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.maxCostUsd (sent as maxCostUsd): a trigger's per-job dollar cap is set by hand in the triggers file, never by a tool"],
@@ -563,4 +569,78 @@ test("the project tools refuse to change a bundled project's members, before the
   } finally {
     restore();
   }
+});
+
+// ---- issue #712 --------------------------------------------------------------------------------------------------------
+
+test("run.recover is refused before the confirm on a venue that does not serve recovery: named, or PI_BACKENDS[0] when none is (#712)", async () => {
+  const { recoverVenueProblem } = await import("../../worker/src/triggers.mjs");
+  const { paths, restore } = deployment();
+  try {
+    const add = (params, env) => plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"], ...params }, paths, env });
+    assert.equal(add({ recover: true, backend: "openshell" }, { PI_BACKENDS: "local,openshell" }).refusal, recoverVenueProblem("openshell"), "an explicit venue: the loader's own sentence");
+    assert.equal(add({ recover: true }, { PI_BACKENDS: "openshell,local" }).refusal, recoverVenueProblem("openshell"), "no venue named: the deployment default, which the loader cannot see");
+    assert.ok(add({ recover: true }, { PI_BACKENDS: "local,openshell" }).plan, "the default serves it");
+    assert.ok(add({ recover: true, backend: "openshell-bind" }, { PI_BACKENDS: "openshell-bind" }).plan, "bind mode serves it");
+    assert.ok(add({ recover: false, backend: "openshell" }, { PI_BACKENDS: "openshell" }).plan, "false arms nothing");
+    // The edit judges the entry as it would be after it, and only when it sends `recover` or a venue.
+    const edit = (params, env) => plans.planTriggerEdit({ params: { index: 0, flow: "fix", ...params }, paths, env });
+    assert.equal(edit({ recover: true }, { PI_BACKENDS: "openshell" }).refusal, recoverVenueProblem("openshell"));
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", recover: true } }] }));
+    assert.equal(edit({ backend: "openshell" }, { PI_BACKENDS: "local,openshell" }).refusal, recoverVenueProblem("openshell"), "moving a recovering trigger onto the venue");
+    assert.ok(edit({}, { PI_BACKENDS: "openshell" }).plan, "an edit of the flow alone is not refused over a pairing it did not touch");
+    assert.ok(edit({ recover: false }, { PI_BACKENDS: "openshell" }).plan, "and turning recovery off is the fix, so it passes");
+  } finally {
+    restore();
+  }
+});
+
+test("the profile list names PI_SECRET_PROFILES' profiles beside the overlay's, and a name in both is marked ambiguous (#712)", async () => {
+  const { envSecretProfiles } = await import("../src/read-model.mjs");
+  assert.deepEqual(envSecretProfiles(undefined), { profiles: {}, malformed: false, seen: false });
+  assert.deepEqual(envSecretProfiles("prod:/opt/pi/p.sh"), { profiles: { prod: "/opt/pi/p.sh" }, malformed: false, seen: true });
+  assert.deepEqual(envSecretProfiles("prod:relative"), { profiles: {}, malformed: true, seen: true }, "the worker's parser refuses it, so nothing half-parsed is shown");
+  assert.equal(plans.renderProfiles({ dev: "/d" }, envSecretProfiles(undefined)), "Resolver profiles (settings overlay):\n  dev -> /d", "not visible: the overlay's own list, as before");
+  assert.equal(plans.renderProfiles({}, envSecretProfiles("prod:/opt/pi/p.sh")), "No resolver profiles are declared in the settings overlay.\nResolver profiles (PI_SECRET_PROFILES):\n  prod -> /opt/pi/p.sh");
+  assert.match(plans.renderProfiles({ prod: "/o" }, envSecretProfiles("prod:/opt/pi/p.sh")), /prod -> \/opt\/pi\/p\.sh \(AMBIGUOUS: also in the settings overlay, so the worker refuses every secrets job\)/);
+  assert.match(plans.renderProfiles({}, envSecretProfiles("x:rel")), /PI_SECRET_PROFILES does not parse/);
+  // The roots: judged only where visible, on this host's realpath, fail-closed on an empty value (the realpath cases
+  // are the next test).
+  const asWritten = { realpathSync: (p) => p };
+  const add = (path, env) => plans.planSecretProfileAdd({ name: "prod", path, profiles: {}, env, settingsFile: "/s", fs: asWritten });
+  assert.ok(add("/tmp/r", null).plan, "roots not visible: not judged, and the confirm says the worker checks");
+  assert.ok(add("/opt/pi/r", { PI_SECRET_RESOLVER_ROOTS: `/srv${delimiter}/opt/pi` }).plan);
+  assert.match(add("/opt/pi-evil/r", { PI_SECRET_RESOLVER_ROOTS: "/opt/pi" }).refusal, /outside PI_SECRET_RESOLVER_ROOTS/, "a separator boundary, the worker's withinRoots");
+  assert.match(plans.planSecretBundleAdd({ name: "b", path: "/tmp/b", format: "json", bundles: {}, env: { PI_SECRET_RESOLVER_ROOTS: "/opt/pi" }, settingsFile: "/s", fs: asWritten }).refusal, /outside PI_SECRET_RESOLVER_ROOTS/, "the bundle resolvers by the same rule");
+});
+
+test("the resolver roots are judged on this host's realpath, as the worker judges them: a symlink either way, and a path this host cannot resolve (#712)", () => {
+  const dir = realpathSync(tempDir("pd-712-roots-"));
+  const roots = join(dir, "roots");
+  const outside = join(dir, "outside");
+  mkdirSync(roots);
+  mkdirSync(outside);
+  writeFileSync(join(roots, "real.sh"), "#!/bin/sh\n");
+  writeFileSync(join(outside, "real.sh"), "#!/bin/sh\n");
+  symlinkSync(join(outside, "real.sh"), join(roots, "to-outside.sh"));
+  symlinkSync(join(roots, "real.sh"), join(outside, "to-inside.sh"));
+  // A root spelled through a symlink (macOS writes /tmp as /private/tmp): the worker never resolves a root, so it holds
+  // nothing whose real path is under the target, and the refusal says to write the root as its real path.
+  symlinkSync(roots, join(dir, "roots-link"));
+  const env = { PI_SECRET_RESOLVER_ROOTS: roots };
+  const add = (path, e = env) => plans.planSecretProfileAdd({ name: "prod", path, profiles: {}, env: e, settingsFile: "/s" });
+  assert.ok(add(join(roots, "real.sh")).plan);
+  assert.equal(add(join(roots, "to-outside.sh")).refusal, `${join(roots, "to-outside.sh")} (it resolves to ${join(outside, "real.sh")}) is outside PI_SECRET_RESOLVER_ROOTS (${roots}), so the worker would refuse it on every job; put the resolver inside one of them, or add its directory to PI_SECRET_RESOLVER_ROOTS`, "inside as written, outside on the real path: refused, as the worker would");
+  assert.ok(add(join(outside, "to-inside.sh")).plan, "outside as written, inside on the real path: admitted, as the worker would");
+  const viaLink = add(join(roots, "real.sh"), { PI_SECRET_RESOLVER_ROOTS: join(dir, "roots-link") });
+  assert.equal(viaLink.refusal, `${join(roots, "real.sh")} is outside PI_SECRET_RESOLVER_ROOTS (${join(dir, "roots-link")}), so the worker would refuse it on every job; put the resolver inside one of them, or add its directory to PI_SECRET_RESOLVER_ROOTS, or write the root as its real path (${roots})`, "the roots are compared as written, as the worker compares them");
+  assert.match(add(join(dir, "roots-link", "real.sh"), { PI_SECRET_RESOLVER_ROOTS: join(dir, "roots-link") }).refusal, /it resolves to .*write the root as its real path/, "the resolver's own path through the link is resolved too");
+  // Only an error with a code means "cannot be resolved here"; anything else is a fault, never a pass.
+  const broken = { realpathSync: () => { throw new TypeError("not a path"); } };
+  assert.throws(() => plans.resolverRootsJudgement("/x", env, broken), TypeError);
+  assert.ok(plans.resolverRootsJudgement("/x", env, { realpathSync: () => { throw Object.assign(new Error("gone"), { code: "ENOENT" }); } }).warning, "a coded error is a note");
+  const missing = add(join(dir, "nowhere", "r.sh"));
+  assert.ok(missing.plan, "a path this host cannot resolve is not refused");
+  assert.match(missing.plan.message, /Note: .*nowhere\/r\.sh cannot be resolved on this host, so whether its real path sits inside PI_SECRET_RESOLVER_ROOTS .* is checked only by the worker, where it runs/);
+  assert.ok(!add(join(roots, "real.sh")).plan.message.includes("Note:"), "a resolved path adds no note");
 });

@@ -103,6 +103,7 @@ import {
   createFleetReader,
   planParkedAnswer,
   enqueueParkedAnswer,
+  sandboxShellRefusal,
 } from "./read-model.mjs";
 // The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
@@ -1853,7 +1854,10 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
     }
     case "secrets": {
       // REQ-TRIGGER-SECRETS. Declaring a resolver profile means naming an absolute host path the WORKER
-      // EXECUTES, so it lives here, on the operator-typed command surface, and nowhere else.
+      // EXECUTES, so it lives on OPERATOR-TYPED surfaces only: this command, and the operator console's audited
+      // `secret-profile-add` and `secret-bundle-add` forms (issue #642, a person submitting a form and approving its
+      // preview). Never a tool: nothing a model can call declares one (issue #712 corrected an "and nowhere else" here,
+      // which the console's forms had made untrue).
       //
       // THE SEPARATION IS STRUCTURAL, not a convention this file invented. `registerCommand` has no
       // parameter schema and no LLM-facing surface; pi reaches a command handler only from its own
@@ -2149,7 +2153,8 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
           : unblessed
             ? `not reopenable here (PI_BACKENDS lacks ${venue})`
             : named
-              ? `not reopenable here (ran on ${venue})`
+              ? // Issue #712: the console's run page says the same words for the same venue (`sandboxShellRefusal`).
+                (sandboxShellRefusal(venue) ?? `not reopenable here (ran on ${venue})`)
               : "not reopenable (no venue recorded)";
     return { retained: false, reason };
   }
@@ -2165,7 +2170,7 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
   // Issue #683: a venue with no launcher row (`openshell`) is refused by `sandboxSyncRefusal` above; if one ever reached
   // here, it is not reopenable, never reopened under docker.
   const launcher = sandboxLauncher(sandboxVenueOf(manifest));
-  if (!launcher) return { retained: false, reason: "not reopenable (its venue has no sandbox shell)" };
+  if (!launcher) return { retained: false, reason: sandboxShellRefusal(sandboxVenueOf(manifest)) ?? "not reopenable (its venue has no sandbox shell)" };
   const runtime = launcher.bin;
   // The sweep's own deadline rule (issue #446): the pin, else the earlier of the `retainUntil` the worker wrote and
   // `createdAt` plus this shell's window.

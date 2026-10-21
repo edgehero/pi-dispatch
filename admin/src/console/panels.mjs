@@ -55,7 +55,8 @@ import {
 import { fmtCost } from "../panel.mjs";
 import { renderWhatIf } from "../render.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
-import { BUNDLE_SKIPPED_TEXT, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf } from "../read-model.mjs";
+import { UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
+import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
@@ -518,8 +519,12 @@ function liveProgressBody(g, view) {
   ])}<h3>Running now</h3>${running}<h3>Phase</h3>${phaseBody(g, operator)}<h3>Recent steps</h3>${table("Recent steps", ["Tool", "Status", { num: "Took" }, "At"], recent.map((r) => html`<tr${r.status === "ok" ? null : html` class="warn"`}><td class="mono">${r.tool}</td><td>${r.status}</td><td class="num">${stepDuration(r.durationMs)}</td><td>${utcText(r.at)}</td></tr>`), "No step has finished yet.")}`;
 }
 
-/** Why a run has no progress snapshot: the key cannot tell these apart, so the panel names all three. */
-export const PROGRESS_ABSENT = "No live progress: not published (PI_RUN_PROGRESS=0), expired, or no step has been recorded yet.";
+/**
+ * Why a run on a venue that streams has no progress snapshot: the key cannot tell these apart, so the panel names all
+ * three. Issue #712: the panel says `progressAbsentText(record)`, `TRANSCRIPT_ABSENT`'s rule (progress is read off the
+ * live transcript), so a run on a venue that does not stream it is not blamed on the switch alone.
+ */
+export const PROGRESS_ABSENT = progressAbsentText({ backend: "local" });
 
 /**
  * The run page's "Progress" panel (issue #644). A run with a record shows the record's `progress` (and, while the key
@@ -566,13 +571,18 @@ export function runProgress(view) {
     const recordStart = typeof record.startedAt === "string" ? Date.parse(record.startedAt) : Number.NaN;
     const same = live && live.ended && Number.isFinite(recordEnd) && Number.isFinite(recordStart) && live.startedAt >= recordStart && live.startedAt <= recordEnd;
     const names = same && view.role === "operator" && live.phases.length > 0 ? html`<h3>Phases</h3>${phaseBody(live, true)}` : null;
-    if (body === null && names === null) return titled(title, html`<p class="note">This run's record holds no progress (an older worker, or PI_RUN_PROGRESS=0).</p>`);
+    // Issue #712: a record that names its live skip says it; one on a venue that does not always stream adds that cause.
+    if (body === null && names === null) {
+      const cause = liveAbsentCause(record);
+      const why = cause?.skipped ? `it had no live transcript to read it from: ${cause.skipped}` : cause?.venue ? `an older worker, PI_RUN_PROGRESS=0, ${VENUE_MAY_NOT_STREAM}` : "an older worker, or PI_RUN_PROGRESS=0";
+      return titled(title, html`<p class="note">This run's record holds no progress (${why}).</p>`);
+    }
     return titled(title, html`${body ?? html`<p class="note">This run's record holds no progress.</p>`}${names}`);
   }
   if (live) return titled(title, liveProgressBody(live, view));
   if (g?.unreachable) return titled(title, html`<p class="warn">The run's progress could not be read (is Valkey reachable?).</p>`);
   if (g?.invalid) return titled(title, html`<p class="warn">The run's progress key is not one this console reads (a newer or older worker?).</p>`);
-  return titled(title, html`<p class="note">${PROGRESS_ABSENT}</p>`);
+  return titled(title, html`<p class="note">${progressAbsentText(record)}</p>`);
 }
 
 // ---- run inbox (issue #646) ------------------------------------------------------------------------------------------
@@ -749,7 +759,26 @@ function chatDrawsSteer(view) {
  */
 function runActions(r, view) {
   if (view.role !== "operator" || typeof r.jobId !== "string" || !RUN_ID_RE.test(r.jobId)) return null;
-  return html`<h3>Actions</h3><p>Open its retained workspace on the host: <code class="mono">${`pi-dispatch sandbox ${r.jobId}`}</code></p>${canAct(view) ? actForm("rerun", { hidden: [["jobId", r.jobId]], label: "Preview a re-run" }) : null}`;
+  // Issue #712: the command only for a venue with a sandbox shell (`serves.sandboxShell`, held to the worker's
+  // SANDBOX_LAUNCHERS), and otherwise the reason the panel's sandbox pane gives, in its words (`sandboxShellRefusal`). A
+  // record with no `backend` is a `local` run from before attribution (`UNATTRIBUTED_BACKEND`), as the sandbox reads it.
+  const venue = typeof r.backend === "string" && r.backend !== "" ? r.backend : UNATTRIBUTED_BACKEND;
+  const refused = sandboxShellRefusal(venue);
+  const reopen = refused === null ? html`<p>Open its retained workspace on the host: <code class="mono">${`pi-dispatch sandbox ${r.jobId}`}</code></p>` : html`<p class="note">Its workspace is ${refused}.</p>`;
+  return html`<h3>Actions</h3>${reopen}${canAct(view) ? actForm("rerun", { hidden: [["jobId", r.jobId]], label: "Preview a re-run" }) : null}`;
+}
+
+/**
+ * The run summary's skip rows (issue #712): "Steering" (why a steer-armed run took no message, the record's
+ * `steerSkipped`) and "Live transcript" (why it had none, `liveSkipped`), each the closed enum and its sentence; no row
+ * for a record that carries neither, so every other run renders byte-identical.
+ */
+function skipRows(r) {
+  const { liveSkipped, steerSkipped } = recordSkips(r);
+  return [
+    ["Steering", steerSkipped !== null ? `skipped (${steerSkipped}): ${STEER_SKIPPED_TEXT[steerSkipped]}` : null],
+    ["Live transcript", liveSkipped !== null ? `none (${liveSkipped}): ${LIVE_SKIPPED_TEXT[liveSkipped]}` : null],
+  ];
 }
 
 /**
@@ -803,6 +832,7 @@ export const runSummary = withRun("Run", (r, view, source) => {
     ...recoveryRows(r),
     ["Host", cell(r.host)],
     ["Venue", cell(r.backend)],
+    ...skipRows(r),
     ["Project", cell(r.project)],
     ...bundleRows(r),
     ["Provider and model", [r.provider, r.model].filter(Boolean).join(" / ") || "-"],
@@ -1373,8 +1403,15 @@ function profilesEditor(view) {
 
 export const configSecretProfiles = fromSnapshot("Secret profiles", (s, view) => {
   const names = secretProfileNames(s.settings);
-  if (names.length === 0) return html`<p class="note">No secret profile is declared.</p>${profilesEditor(view)}`;
-  return html`<p class="note">Names only: a profile's resolver and its references stay in the settings file.</p><ul class="plain">${names.map((n) => html`<li class="mono">${n}</li>`)}</ul>${profilesEditor(view)}`;
+  // Issue #712: the PI_SECRET_PROFILES names too (the snapshot's `secretProfilesEnv`), since the worker merges both; a
+  // name in both is the worker's ambiguity, which refuses every secrets job, and is marked so.
+  const env = s.secretProfilesEnv ?? null;
+  const fromEnv = Array.isArray(env?.names) ? env.names : [];
+  const envNote = env?.malformed ? html`<p class="warn">PI_SECRET_PROFILES does not parse, so the worker refuses to boot until it is fixed.</p>` : null;
+  // "None" only where the console can see both sources; otherwise it names the one it read.
+  if (names.length === 0 && fromEnv.length === 0) return html`<p class="note">No secret profile is declared${env?.seen === true ? "" : " in the settings overlay"}.</p>${envNote}${profilesEditor(view)}`;
+  const overlayItem = (n) => (fromEnv.includes(n) ? html`<li class="mono warn">${n} (AMBIGUOUS: also in PI_SECRET_PROFILES, so the worker refuses every secrets job)</li>` : html`<li class="mono">${n}</li>`);
+  return html`<p class="note">Names only: a profile's resolver and its references stay in the settings file${fromEnv.length > 0 ? " or the .env" : ""}.</p><ul class="plain">${fromEnv.map((n) => html`<li class="mono">${n} (PI_SECRET_PROFILES)</li>`)}${names.map(overlayItem)}</ul>${envNote}${profilesEditor(view)}`;
 });
 
 /** The bundle resolvers editor (issue #704): a name, its resolver's absolute path and the format it prints. */

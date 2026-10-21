@@ -5,7 +5,9 @@
  * WORKER EXECUTES, which is the plainest case of "a capability the model would GAIN" that index.ts's own
  * rule describes. It reaches the operator through `registerCommand`, which pi exposes with no parameter
  * schema and dispatches only from its own user-input path, so there is no tool to withhold: there is
- * nothing for the model to call.
+ * nothing for the model to call. This command is not the only door, and does not claim to be (issue #712): the
+ * operator console's audited `secret-profile-add` and `secret-bundle-add` forms declare the same things through the
+ * same plans (write-plans.mjs), a person approving a preview. What no surface offers is a TOOL that does.
  *
  * WHAT THIS WRITES, and what it deliberately does not. It writes the `secretProfiles` key of the settings
  * overlay, which is the shared, durable truth between this console and the worker. It never writes
@@ -24,7 +26,7 @@
  * would be cosmetic.
  */
 
-import { blankSettingsFile, envBundleProfiles, overlayBundleProfiles, readProjects, readSettingsView, readTriggers, renderBundleProfiles, renderSecretBundles, secretBundlesView, writeSettings } from "./read-model.mjs";
+import { blankSettingsFile, envBundleProfiles, envSecretProfiles, overlayBundleProfiles, readProjects, readSettingsView, readTriggers, renderBundleProfiles, renderSecretBundles, secretBundlesView, writeSettings } from "./read-model.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 // The name and path rules and the confirm's exact bytes (issue #642): pi-free, so the operator console declares a
 // profile under the same rules and shows the same words.
@@ -75,7 +77,8 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
     // A deployment with no bundle resolver and no bundle reads exactly as it did before the feature.
     const projects = typeof paths.projectsFile === "string" ? readProjects({ projectsPath: paths.projectsFile, ...fsSeam }) : null;
     const bound = renderSecretBundles(secretBundlesView({ triggers: triggersView, settings: view, env, projects }), { names: false });
-    const parts = [renderProfiles(profiles), ...(Object.keys(bundles).length > 0 ? [renderBundleProfiles(bundles)] : []), ...(bound !== "" ? [bound] : [])];
+    // Issue #712: the env-declared profiles beside the overlay's, as the worker merges them.
+    const parts = [renderProfiles(profiles, envSecretProfiles(env.PI_SECRET_PROFILES)), ...(Object.keys(bundles).length > 0 ? [renderBundleProfiles(bundles)] : []), ...(bound !== "" ? [bound] : [])];
     notify?.(parts.join("\n\n"), "info");
     return;
   }
@@ -113,7 +116,7 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
       return;
     }
     // The exact bytes again, and a name PI_SECRET_BUNDLES already holds refused (`planSecretBundleAdd` says why).
-    const planned: any = planSecretBundleAdd({ name, path, format, bundles, envBundles: envBundleProfiles(env.PI_SECRET_BUNDLES).profiles, settingsFile: paths.settingsFile });
+    const planned: any = planSecretBundleAdd({ name, path, format, bundles, envBundles: envBundleProfiles(env.PI_SECRET_BUNDLES).profiles, env, settingsFile: paths.settingsFile, ...fsSeam });
     if (planned.refusal) {
       notify?.(planned.refusal, "error");
       return;
@@ -177,7 +180,9 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
     }
     // The pointer wizard's discipline: show the EXACT bytes to be written, not a summary of them. This
     // file redirects what the worker executes, so the operator approves the thing itself.
-    const planned: any = planSecretProfileAdd({ name, path, profiles, settingsFile: paths.settingsFile });
+    // Issue #712: a name PI_SECRET_PROFILES already holds, and a resolver outside PI_SECRET_RESOLVER_ROOTS, are refused
+    // here, before the confirm (`planSecretProfileAdd` says why).
+    const planned: any = planSecretProfileAdd({ name, path, profiles, envProfiles: envSecretProfiles(env.PI_SECRET_PROFILES).profiles, env, settingsFile: paths.settingsFile, ...fsSeam });
     if (planned.refusal) {
       notify?.(planned.refusal, "error");
       return;

@@ -23,7 +23,7 @@
  * Custom: triggers validated inline per config.mjs/schedules.mjs precedent; zod not in deps
  */
 
-import { BACKEND_NAMES, backendFor } from "./backends.mjs";
+import { BACKEND_NAMES, backendFor, servesOf } from "./backends.mjs";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 // SKILL_NAME_RE is the single-sourced skill charset (flow-gate exports it for exactly this reason:
@@ -1572,7 +1572,28 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
 		throw configError(`${at}: run.backend ${JSON.stringify(backend)} ${why}, and this trigger runs against a folder on THIS machine that has to be bind-mounted and edited in place -- there is no volume to hide behind (DES-WORKER-ON-HOST): ${path}`);
 	}
 
+	// Issue #712: `run.recover` on a venue that does not serve recovery (`serves.recovery: "no"`, the `openshell` copy
+	// mode) is refused before spend on EVERY delivery (`openshell-recover-unsupported`), so the file already knows the
+	// answer and is refused at load and write, refusesLocalWorkspace's reasoning. Only for an EXPLICIT venue: a trigger
+	// that names none runs on PI_BACKENDS[0], which is the deployment's and not the file's, so that pairing stays the
+	// processor's pre-spend refusal (the admin's trigger tools also judge it against PI_BACKENDS[0] before the confirm).
+	const recoverRefused = run.recover === true ? recoverVenueProblem(backend) : null;
+	if (recoverRefused !== null) throw configError(`${at}: ${recoverRefused}: ${path}`);
+
 	return backend;
+}
+
+/**
+ * Why `run.recover` cannot be armed on a trigger whose jobs run in `venue`, or null (issue #712): the venue's
+ * `serves.recovery` is `no`. One sentence, so the loader (`validateBackend`, explicit venues) and the admin's trigger tools
+ * (which also judge a trigger naming no venue against PI_BACKENDS[0]) refuse in the same words. A name the table does not
+ * hold is null here: the loader's own unknown-venue refusal says that.
+ */
+export function recoverVenueProblem(venue) {
+	if (servesOf(venue)?.recovery !== "no") return null;
+	// The venues that do serve it come from the same table, so a new venue changes this sentence without an edit here.
+	const serving = BACKEND_NAMES.filter((name) => servesOf(name)?.recovery === "yes");
+	return `run.recover cannot be armed on a trigger whose jobs run in the ${venue} venue: that venue does not serve recovery, so every delivery would be refused before it spends. Remove run.recover, or name a venue that serves it (${serving.join(", ")})`;
 }
 
 /**

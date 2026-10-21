@@ -3840,7 +3840,7 @@ function steerDeps(snap, { refusal = null, push = null } = {}) {
 }
 
 test("t on a steer-armed ACTIVE row opens the message input: keys type, Enter plans then pushes for the job captured at t, and the note names the message, never its text", async () => {
-  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true, inbox: [] }] };
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true, steerOpen: true, inbox: [] }] };
   const { deps, calls } = steerDeps(snap);
   const doneCalls = [];
   const comp = makeDashboard({ paths: {}, done: (v) => doneCalls.push(v), tui: fakeTui(), intervalMs: 100000, deps });
@@ -3866,7 +3866,7 @@ test("t on a steer-armed ACTIVE row opens the message input: keys type, Enter pl
 });
 
 test("T sends a follow-up; Esc closes the input with nothing sent; an empty message and a planner refusal are said and push nothing", async () => {
-  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true, steerOpen: true }] };
   const { deps, calls } = steerDeps(snap);
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
   await flush();
@@ -3918,7 +3918,7 @@ test("t is inert off the ACTIVE row and on a panel not wired to send; an unarmed
   assert.doesNotMatch(stripAnsi(comp.render(120).join("\n")), /steer gh-A:|steer-armed/, "inert on a run row");
   assert.deepEqual(calls.plan, []);
   await comp.dispose();
-  const armed = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const armed = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true, steerOpen: true }] };
   const bare = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => armed }) });
   await flush();
   bare.handleInput("t");
@@ -3927,7 +3927,7 @@ test("t is inert off the ACTIVE row and on a panel not wired to send; an unarmed
 });
 
 test("the message input and the armed row's hint fit every width, framed and plain: no line wider than the frame", async () => {
-  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true, steerOpen: true }] };
   const { deps } = steerDeps(snap);
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
   await flush();
@@ -3974,7 +3974,7 @@ test("the panel's steer seam is the panel's: source panel, by panel (createDashb
 
 test("the message input scrubs what it shows: a control byte in a refusal, a thrown error, the push's answer and the job id never reach the terminal; whitespace alone is empty; the left arrow edits", async () => {
   const ESC = "\x1b";
-  const snap = { ...SNAPSHOT, activeJobId: `gh-${ESC}[2J`, active: [{ jobId: `gh-${ESC}[2J`, steer: true }] };
+  const snap = { ...SNAPSHOT, activeJobId: `gh-${ESC}[2J`, active: [{ jobId: `gh-${ESC}[2J`, steer: true, steerOpen: true }] };
   const run = async (over, keys) => {
     const { deps, calls } = steerDeps(snap, over);
     const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: { ...deps, ...(over.deps ?? {}) } });
@@ -4009,7 +4009,7 @@ test("the message input scrubs what it shows: a control byte in a refusal, a thr
 });
 
 test("the degraded plain panel carries the open input, so a narrow terminal shows what is being typed and to whom", async () => {
-  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true }] };
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A", active: [{ jobId: "gh-A", steer: true, steerOpen: true }] };
   const { deps } = steerDeps(snap);
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
   await flush();

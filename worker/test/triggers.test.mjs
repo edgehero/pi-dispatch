@@ -1727,6 +1727,34 @@ test("run.recover is refused beside run.command on every forge type: a recovery 
 	assert.equal(off.run.recover, false, "false arms nothing, so it may sit beside a command");
 });
 
+test("run.recover is refused on an explicit venue that does not serve recovery, on every forge type (#712)", async () => {
+	const { BACKEND_NAMES, servesOf } = await import("../src/backends.mjs");
+	const { recoverVenueProblem } = await import("../src/triggers.mjs");
+	const refusing = BACKEND_NAMES.filter((n) => servesOf(n).recovery === "no");
+	assert.ok(refusing.includes("openshell"), "the copy mode is the venue this exists for");
+	for (const venue of BACKEND_NAMES) {
+		for (const entry of [
+			{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", backend: venue, recover: true } },
+			{ on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", flow: "fix", backend: venue, recover: true } },
+			{ on: { type: "issue", action: ["closed"] }, run: { kind: "forgejo", flow: "fix", backend: venue, recover: true } },
+			{ on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", flow: "review", backend: venue, recover: true } },
+		]) {
+			if (refusing.includes(venue)) {
+				assert.throws(() => parse([entry]), (e) => isConfigError(e) && e.message.includes(recoverVenueProblem(venue)) && e.message.includes(PATH), `${venue} ${entry.on.type}`);
+			} else {
+				assert.equal(parse([entry])[0].run.recover, true, `${venue} ${entry.on.type}`);
+			}
+		}
+		// false arms nothing, and a trigger naming no venue is the processor's to judge (PI_BACKENDS[0] is not the file's).
+		assert.equal(parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", backend: venue, recover: false } }])[0].run.recover, false, venue);
+	}
+	assert.equal(parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", recover: true } }])[0].run.recover, true);
+	// The sentence names the venues that DO serve it, from the table.
+	assert.match(recoverVenueProblem("openshell"), /local, podman, openshell-bind\)$/);
+	assert.equal(recoverVenueProblem("local"), null);
+	assert.equal(recoverVenueProblem("no-such-venue"), null, "the loader's unknown-venue refusal says that");
+});
+
 // --- run.steer (issue #646) ---
 
 test("run.steer is carried on every forge type, and absent when not written", () => {

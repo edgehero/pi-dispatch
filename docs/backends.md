@@ -20,6 +20,8 @@ mine: {
   describe: "the Acme container service",
   remote: true,                  // true unless the container runs on the worker's own host
   declares: { /* all fourteen properties, see below */ },
+  // what the venue does for an operator, each "yes", "no" or "image" (see "What a backend serves" below)
+  serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "no" },
   asserts: { nonRoot: "the Acme image spec's USER field" },   // required for every `asserted` word
   // observedBy: only for a word earned by observing THIS host (see `credentialTransit` below)
 },
@@ -255,6 +257,39 @@ ones adapters get wrong:
   `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir`, `network_cmd_path`, `default_sysctls`, `default_ulimits`, `seccomp_profile`, `init_path`, `dns_servers`, `dns_options`, `dns_searches`, `base_hosts_file`, `oom_score_adj`, `privileged`, `label`, `cgroup_conf`, `host_containers_internal_ip`, `runtimes`, `conmon_path`, `cgroups` or `umask`, or while
   its running rootless network still carries such an option, at the same two points (issues #428 and #450,
   docs/podman.md step 4).
+
+## What a backend serves
+
+Beside the fourteen properties, each entry says which run-time features it serves, in `serves`:
+
+| Entry | What it means |
+|---|---|
+| `liveTranscript` | the live transcript, and the run progress read from it |
+| `steering` | messages sent into a running job (`run.steer`) |
+| `recovery` | a lost run continued from its checkpoint (`run.recover`) |
+| `sandboxShell` | `pi-dispatch sandbox <id>` reopening a run's retained workspace |
+
+Each is `yes`, `no`, or `image`. `yes` means the venue carries the feature itself; `no` that it never does. `image`
+means the venue skips the feature, and says so by name on the run record, unless the job image declares the capability
+that carries it and an exit key (on `openshell`: `transcriptStderr` for the live transcript, and `steerStdin` plus
+`transcriptStderr` for steering, since the acks come back over the transcript). `yes` is about the venue only: on any
+venue a feature can still be refused before the job spends when the image lacks what it needs (the `steer` or
+`recover` capability, or `exitAuth`). These are not on the three-word scale, and `PI_BACKEND_FLOOR` never compares them: they say what the venue can
+do for you, not what it guarantees. The console and the `/dispatch` panel word them from this table (a run on a venue
+with no sandbox shell is shown no `pi-dispatch sandbox` command, for example), and a trigger that names a venue whose
+`recovery` is `no` together with `run.recover` is refused when the triggers file loads.
+
+They restate facts the code already has, so `worker/test/backends-serves.test.mjs` holds each to its source: your
+bundle's `binds` and the `transcript` mode its runContainer uses (a binding venue serves the live transcript and
+steering; a copying one needs the image's `transcriptStderr`, and for steering `steerStdin` too), the `SANDBOX_LAUNCHERS` table, and
+whether your `observationPreflight` refuses `run.recover`. A new venue must be built in that test too.
+
+| Venue | Live transcript | Steering | Recovery | Sandbox shell |
+|---|---|---|---|---|
+| `local` | yes | yes | yes | yes |
+| `podman` | yes | yes | yes | yes |
+| `openshell` | image | image | no | no |
+| `openshell-bind` | yes | yes | yes | no |
 
 ## A declaration is not a claim that the property holds
 
@@ -562,8 +597,11 @@ credential provider, and with them it is **blessable**.
 [release](https://github.com/NVIDIA/OpenShell/releases/tag/v0.1.4): the deb, rpm or snap on Linux; on macOS the
 release's own formula, `brew install https://github.com/NVIDIA/OpenShell/releases/download/v0.1.4/openshell.rb`, since
 only that formula defines the Homebrew service (homebrew-core's `openshell` has none); there is no Windows build, so the
-venue is refused there). Then, in the deployment folder, with `PI_BACKENDS` (and `PI_OPENSHELL_ENGINE` for Podman) in
-`.env`:
+venue is refused there). `/dispatch setup` (the panel's wizard) asks about the gateway's engine and checks the
+openshell CLI and gateway only when `PI_BACKENDS` names the OpenShell venues alone. A mixed list (`local,openshell`)
+keeps the docker (or podman) check and asks nothing about openshell, so there `up` and `pi-dispatch doctor --openshell`
+are where a missing CLI or gateway shows. Then, in the deployment folder, with `PI_BACKENDS` (and `PI_OPENSHELL_ENGINE`
+for Podman) in `.env`:
 
 1. `pi-dispatch up` checks the engine, the CLI and the gateway as the worker's boot does, and changes nothing unless
    you accept. A gateway that does not answer is offered a start (`systemctl --user start openshell-gateway`, the user
@@ -660,7 +698,9 @@ placeholder cannot stand in for.
   This channel is weaker than the read-only `/inbox` mount the binding venues keep: the agent cannot plant a message,
   but it can intercept one, which then settles `late`.
 - **Not served yet**: a trigger with `run.recover` is refused before it spends
-  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session (bind mode, below, serves it). No
+  (`openshell-recover-unsupported`), since the venue cannot checkpoint a running session (bind mode, below, serves it).
+  A trigger that names this venue in `run.backend` beside `run.recover` is refused when the triggers file loads, so a
+  file that already pairs them no longer loads until you remove one of the two (or name `openshell-bind`). No
   `pi-dispatch sandbox` shell either: the venue has no launcher. A job's MCP servers are served (issue #684): an
   `http` server's host is an allowlist entry like any other, and a stdio server's overlay paths are moved to the
   sandbox layout.
