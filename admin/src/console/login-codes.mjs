@@ -18,6 +18,8 @@ import { dirname, join } from "node:path";
 /** A code: 32 random bytes as base64url, always 43 characters. */
 const CODE_RE = /^[A-Za-z0-9_-]{43}$/;
 const CODE_FILE_RE = /^[0-9a-f]{64}\.json$/;
+/** How far a code's `expiresAt` may sit past `now + ttlMs` (a clock stepped between mint and consume). */
+const EXPIRY_SKEW_MS = 5000;
 
 /** The drop directory: `console-login-codes` beside the tokens file. */
 export function loginCodesDir(tokensPath) {
@@ -56,19 +58,35 @@ function dirProblem(dir, fs, { create }) {
   if (st.isSymbolicLink()) return `the login-code directory ${dir} is a symbolic link, and the console uses only a real directory; remove the link and run the command again`;
   if (!st.isDirectory()) return `${dir} is not a directory; remove it and run the command again`;
   if ((st.mode & 0o077) !== 0) {
-    return `the login-code directory ${dir} can be reached by other accounts (mode ${(st.mode & 0o777).toString(8).padStart(3, "0")}); run \`chmod 700 ${dir}\``;
+    // NOT "chmod 700": a directory another account could write may already hold a code it planted (issue #708, review
+    // round 1), and tightening the mode would make that code good. Its contents cannot be trusted, so it goes.
+    return `the login-code directory ${dir} can be reached by other accounts (mode ${(st.mode & 0o777).toString(8).padStart(3, "0")}), so what it holds cannot be trusted; remove the directory (\`rm -r ${dir}\`) and make a new link, which creates it again 0700`;
   }
   return null;
 }
 
 /**
- * Read one code file and remove it: `{name, expiresAt}` when THIS call removed it, else null (gone, already taken, or
- * not a regular file, which is removed too: nothing else belongs here).
+ * This process's effective uid, or undefined where there is none (Windows), where the owner check is skipped. Not
+ * because the directory check holds there instead: Node reports group and other bits on every Windows file and
+ * directory (a mode such as 0o666 or 0o777), so `dirProblem` refuses every drop and no code is ever minted or spent on
+ * a Windows host. One-time links (`pi-dispatch-console link`, `/dispatch console --link`) are not supported there; a
+ * token is pasted instead (docs/console.md).
  */
-function take(file, fs) {
+function processUid() {
+  return typeof process.geteuid === "function" ? process.geteuid() : undefined;
+}
+
+/**
+ * Read one code file and remove it: `{name, expiresAt}` when THIS call removed it, else null (gone, already taken, or
+ * not a regular file, which is removed too: nothing else belongs here). Defence in depth beside the directory check
+ * (issue #708): a file with any group or other permission bit, or one another account owns, was not written by
+ * `mintLoginCode` (0600, this account), so it is removed and refused rather than read.
+ */
+function take(file, fs, uid) {
   let text;
   try {
-    if (!fs.lstatSync(file).isFile()) {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || (uid !== undefined && ((st.mode & 0o077) !== 0 || st.uid !== uid))) {
       fs.unlinkSync(file);
       return null;
     }
@@ -150,18 +168,21 @@ export function mintLoginCode({ dir, name, fs = nodeFs, now = () => Date.now(), 
  * Spend a code: `{name}` for the one caller that removes its file before it expires, `{refusal}` for everyone else
  * (unknown, already used, expired, malformed). The refusal never quotes the code.
  */
-export function consumeLoginCode({ dir, code, fs = nodeFs, now = () => Date.now() }) {
+export function consumeLoginCode({ dir, code, fs = nodeFs, now = () => Date.now(), ttlMs = 60000, uid = processUid() }) {
   const used = "this login link is not valid: it was already used, has expired, or was never made. Run `pi-dispatch-console link --name <name>` for a new one";
   if (typeof code !== "string" || !CODE_RE.test(code)) return { refusal: used };
   const problem = dirProblem(dir, fs, { create: false });
   if (problem) return { refusal: problem };
   const t = now();
-  const taken = take(join(dir, `${codeHash(code)}.json`), fs);
+  const taken = take(join(dir, `${codeHash(code)}.json`), fs, uid);
   reap(dir, fs, t);
   if (!taken) return { refusal: used };
   if (!Number.isFinite(taken.expiresAt) || taken.expiresAt <= t) {
     return { refusal: "this login link has expired. Run `pi-dispatch-console link --name <name>` for a new one" };
   }
+  // A code the minter made expires at most `ttlMs` after it was made; one that claims longer (allowing a few seconds of
+  // clock step) was written by something else.
+  if (taken.expiresAt > t + ttlMs + EXPIRY_SKEW_MS) return { refusal: used };
   if (typeof taken.name !== "string" || taken.name === "") return { refusal: used };
   return { name: taken.name };
 }

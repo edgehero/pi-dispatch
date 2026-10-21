@@ -745,7 +745,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   form that prints the console's what-if URL per `REQ-COST-ANALYTICS`; it writes nothing and spawns no browser, and the
   panel's `i` key shows the same URL as a notice), a run's chat (`chat`, since issue #647 part 2:
   `/dispatch chat <run-id | issue-or-PR-url | session-key>` per `REQ-TERMINAL-CHAT`, an operator-typed command and
-  never a tool; it reads the deployment's `PI_SESSIONS_DIR`, which joins the panel's path keys), queue on/off
+  never a tool; it reads the deployment's `PI_SESSIONS_DIR`, which joins the panel's path keys), the console
+  (`console`, since issue #708: `/dispatch console [page] [--link [name]] [--no-open]` prints a console page's address,
+  says whether the console is running from one probe of this host's loopback or the console's socket, with `--link`
+  shows a one-time sign-in link for an operator token, audited before it is minted, and opens the browser on a local
+  session only; an operator-typed command and never a tool, its output a notice and never model context, and the one
+  subcommand that spawns a browser), queue on/off
   (`pause`/`resume`, backed by the same durable `queue.pause()`), and
   settings editing (`set`/`unset`, writing the `settings.json` overlay), plus **operator-typed trigger CRUD**
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
@@ -957,7 +962,26 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   given a refused run, then the rule's sentence; given a deployment `.env` that sets `PI_SESSIONS_DIR`, then the panel
   reads it, a relative one against the deployment folder (`admin/test/dispatch-chat.test.mjs`,
   `admin/test/dashboard-transcript.test.mjs`, `admin/test/read-model.test.mjs`). The tool enumeration above is
-  UNCHANGED, checked: `/dispatch chat` registers no tool.
+  UNCHANGED, checked: `/dispatch chat` registers no tool. Given `/dispatch console` (issue #708) with no pi UI, then it
+  refuses and probes, reads and mints nothing; given a page word (`runs`, `fleet`, `insights`, `config`, `parked`,
+  `audit`) or a run id, then it prints that page's address (`run?id=<id>` for a run) by the `insights` rules, and any
+  other word answers the usage line; given a console that answers `GET /healthz`, then it says running, one that
+  refuses the connect says not running and how to start it, and port 0, a non-loopback address or an unusable listen
+  contacts nothing and says unknown, and no probe ever contacts an address other than this host's loopback or the
+  socket; given `--link` with one operator token, then the audit row precedes the code and the notice shows
+  `<url>login/code#<code>[&next=/<page>]`, the code never in a query string and the token never shown; given several,
+  then a select chooses; given none, a viewer name or an unknown name, then it refuses with the hint; given an audit
+  log that cannot be appended, then no code is made; given a console not found running, pi in RPC or another non-TUI
+  mode, or a tokens file the write guard does not hold, then no code is made; given a local session (no SSH variable;
+  macOS, Windows or a display), a running console and a TCP listener, then the browser opens on the printed URL unless
+  `--no-open` (a link with a code through a private 0600 redirect page, never as the opener's argument), and over SSH,
+  without a display or for a socket it only prints; nothing the command does reaches
+  `pi.sendMessage` or a tool (`admin/test/console-command.test.mjs`, `worker/test/console-probe.test.mjs`,
+  `admin/test/wiring.test.mjs`, `worker/test/open-browser.test.mjs`); given pi's `write` or `edit` into the console's
+  `console-login-codes/` directory (a code that does not exist yet, an existing one, a symlink into it, a firmlink
+  alias before the directory exists), then it is blocked, and a code file with loose permission bits, another owner
+  or a life longer than a code's is refused by the consumer and removed (`admin/test/write-guard.test.mjs`, `admin/test/write-guard.wired.test.mjs`). The tool enumeration is
+  UNCHANGED, checked: `/dispatch console` registers no tool, and the extension still binds no port.
 
 ## REQ-CONSOLE-SECURITY
 
@@ -5262,6 +5286,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-21 (#708) | Issue #708, the console command. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Statement gains `console` (`/dispatch console [page] [--link [name]] [--no-open]`: a page's address by the `insights` rules, whether the console runs from one probe of this host's loopback or its socket, a one-time sign-in link for an operator token audited before it is minted, and the browser on a local session only; operator-typed, never a tool, a notice and never model context, the one subcommand that spawns a browser); the Acceptance gains its clauses and the login-codes directory guard's. The model-callable tool list is UNCHANGED, checked (the spec scan in `admin/test/wiring.test.mjs` still holds), and "binds no network port" is UNCHANGED, checked: a probe is a client connection. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the code still sits after `#`, sessions and guards are untouched, and the new `next` return path is validated against the console's own pages on the server (`returnPathOf`, the page parser) and again in the script, so it is not an open redirect; it rides in the fragment and the sign-in POST body, never a query string. **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: no page changes; a code sign-in may now land on a named page instead of `/`. Review round 1: the Acceptance adds the running-only, TUI-only and guarded-drop refusals of `--link`, the private redirect page, the firmlink alias and the consumer's own refusals. |
 | 2026-10-21 (#708) | Issue #708, PR 3: the console as a service. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, its Scope: `pi-dispatch service` addresses one service per invocation, the worker, `--receiver` or `--console` (the operator console, `pi-dispatch-console serve --deployment <folder>`), the two flags mutually exclusive; `install --console` refuses before writing anything when the console package cannot be found or the tokens file holds no operator token. User level by default, system scope printed, the `--env-setup` clauses (1) to (3) and doctor's unit read UNCHANGED, checked. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the unit runs the same `serve` with the same refusals, and doctor's probe sends one request to a loopback address or the socket, never across a network. |
 | 2026-10-21 (#712) | Issue #712, part D: OpenShell run facts and the secret profiles view. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g): each secret profile's use on the configuration page (source, roots, triggers, projects, last resolve, advertising hosts), still with no resolver path, and the run page's sandbox policy, rule hosts and secrets profile; the names-only rule UNCHANGED, checked. **`REQ-TRIGGER-SECRETS` AMENDED**, a dated acceptance paragraph: an armed run records `secretsProfile` (a name); the console, the panel and `/dispatch secrets list` show each profile's use; no model-callable tool returns a resolver path. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: every new value is escaped by the console's one helper and scrubbed in the panel, and nothing new reaches `/api/state` (`stateOf` builds it field by field). |
 | 2026-10-21 | Issue #712, part B: the Venues view. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (b) the runs filter gains `backend`, a venue name by the registry row's venue shape (so a venue a newer worker blesses, which the Venues view names, is a filter too), a record naming no venue read as `local`, and the run lists show each run's venue; (f) the hosts table shows each host's blessed venues and the Fleet page gains a Venues panel (every venue, the hosts that bless it and default to it, the floors, each property's question and word in sentences, `serves`, custody, the OpenShell engine, modes and gateway word per host), from the hosts' published facts and the static table, nothing resolved live; the panel's VENUES view (`v` from HOSTS) shows the same. **`REQ-CONSOLE-SECURITY` and `REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the new field is names and fixed words (never an address or a path), every value is escaped and scrubbed, no write and no tool is added. |

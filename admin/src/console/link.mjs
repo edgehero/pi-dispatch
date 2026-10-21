@@ -3,8 +3,10 @@
  * insights move to the console): `/dispatch insights`, `/dispatch insights whatif` and the dashboard's `i` key print
  * the spend screen's address. The address is the deployment's `PI_CONSOLE_LISTEN`, parsed by the console's own
  * `parseListen`, else the console's default (`DEFAULT_LISTEN`), so the URL printed is the one `pi-dispatch-console
- * serve` would bind. Nothing here checks that a console is running: a probe would be a network call from the panel for
- * a line of text, and the line says how to start one instead.
+ * serve` would bind. Nothing HERE checks that a console is running; the worker's `console-probe.mjs` does, for
+ * `/dispatch console` and doctor alike (issue #708). It once was "a network call from the panel for a line of text", and declined for that. The reversal's reason:
+ * the panel printed an address that did not answer, with nothing to say so, which is the silent failure this project
+ * refuses. The probe stays bounded to this host's loopback or the socket (`consoleProbeTarget`).
  */
 import { isIPv4 } from "node:net";
 
@@ -12,7 +14,7 @@ import { DEFAULT_LISTEN } from "./config.mjs";
 import { listenUrl, parseListen } from "./listen.mjs";
 
 /** True for the any-address binds, `0.0.0.0` and `::` in any spelling (`[::]`, `0:0:0:0:0:0:0:0`, `::0`). */
-function isUnspecified(host) {
+export function isUnspecified(host) {
   if (isIPv4(host)) return host === "0.0.0.0";
   try {
     return new URL(`http://[${host}]/`).hostname === "[::]";
@@ -51,8 +53,14 @@ export function consolePageUrl(env, path, { platform = process.platform } = {}) 
   return { url: `${listenUrl(listen)}${path}`, defaulted: declared === "" };
 }
 
+/**
+ * How to start a console that is not running: ONE constant, so a new way to run it (a service) is added in one place and
+ * every surface that says it (this hint and `/dispatch console`'s "not running" line) says the same.
+ */
+export const CONSOLE_START_ADVICE = "start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)";
+
 /** How to start the console, said wherever its address is printed. */
-export const CONSOLE_START_HINT = "if the console is not running, start it with pi-dispatch-console serve (docs/console.md)";
+export const CONSOLE_START_HINT = `if the console is not running, ${CONSOLE_START_ADVICE}`;
 
 /**
  * The lines a panel surface prints for console page `path`: the URL (or the tunnel to take, or why the address is

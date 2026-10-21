@@ -169,7 +169,10 @@ test("the drop directory is refused when it is a symlink, not a directory, or re
 
   fs.mkdirSync(dir, { mode: 0o755 });
   fs.chmodSync(dir, 0o755);
-  assert.match(mintLoginCode({ dir, name: "rob", now, random: counter() }).refusal, /reached by other accounts \(mode 755\); run `chmod 700 /);
+  // Not "chmod 700" (issue #708): a directory others could write may already hold a planted code, so it must go.
+  const loose = mintLoginCode({ dir, name: "rob", now, random: counter() }).refusal;
+  assert.match(loose, /reached by other accounts \(mode 755\), so what it holds cannot be trusted; remove the directory \(`rm -r /);
+  assert.doesNotMatch(loose, /chmod/);
   assert.match(consumeLoginCode({ dir, code, now }).refusal, /mode 755/);
   fs.chmodSync(dir, 0o701);
   assert.match(mintLoginCode({ dir, name: "rob", now, random: counter() }).refusal, /mode 701/);
@@ -193,4 +196,35 @@ test("mint creates its file exclusively: a link planted at the code's path after
   const res = mintLoginCode({ dir, name: "rob", now, random: counter(), fs: racing });
   assert.match(res.refusal, /could not be written .*EEXIST/);
   assert.equal(fs.readFileSync(target, "utf8"), "untouched\n", "the planted link's target was not written");
+});
+
+test("consume refuses and removes a code file this minter did not write: loose mode, another owner, a too-long life (issue #708)", { skip: !posix }, () => {
+  const now = clock();
+  const plant = (dir, code, { mode = 0o600, expiresAt = new Date(now() + 30000).toISOString() } = {}) => {
+    const file = join(dir, `${sha(code)}.json`);
+    fs.writeFileSync(file, JSON.stringify({ name: "rob", expiresAt }));
+    fs.chmodSync(file, mode);
+    return file;
+  };
+  const { dir } = setup();
+  assert.ok(mintLoginCode({ dir, name: "rob", now, random: counter() }).code, "the drop exists, 0700");
+  for (const [i, mode] of [0o644, 0o640, 0o604, 0o660].entries()) {
+    const code = String.fromCharCode(97 + i).repeat(43);
+    const file = plant(dir, code, { mode });
+    assert.match(consumeLoginCode({ dir, code, now }).refusal, /not valid/, mode.toString(8));
+    assert.equal(fs.existsSync(file), false, `a ${mode.toString(8)} file is removed`);
+  }
+  const owned = "o".repeat(43);
+  const ownedFile = plant(dir, owned);
+  assert.match(consumeLoginCode({ dir, code: owned, now, uid: process.geteuid() + 1 }).refusal, /not valid/, "another account's file");
+  assert.equal(fs.existsSync(ownedFile), false);
+  const forever = "f".repeat(43);
+  plant(dir, forever, { expiresAt: "9999-01-01T00:00:00.000Z" });
+  assert.match(consumeLoginCode({ dir, code: forever, now }).refusal, /not valid/, "an expiry past now + ttl");
+  const skewed = "s".repeat(43);
+  plant(dir, skewed, { expiresAt: new Date(now() + 63000).toISOString() });
+  assert.deepEqual(consumeLoginCode({ dir, code: skewed, now }), { name: "rob" }, "a few seconds past the ttl is a clock step");
+  const fine = "g".repeat(43);
+  plant(dir, fine);
+  assert.deepEqual(consumeLoginCode({ dir, code: fine, now }), { name: "rob" }, "a 0600 file of this account within the ttl");
 });

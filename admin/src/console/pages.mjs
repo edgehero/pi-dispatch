@@ -241,6 +241,37 @@ export function pageQueryString(name, query) {
   return p.toString();
 }
 
+// ---- where a sign-in lands ------------------------------------------------------------------------------------------
+
+/** The longest return path accepted: a page path and a query within `QUERY_LIMITS`, with room to spare. */
+export const RETURN_PATH_MAX = 1024;
+
+/**
+ * The page a one-time sign-in link returns to (issue #708: `login/code#<code>&next=/runs`), or null for anything that
+ * is not one of THIS console's own pages. The `next` value arrives from a link anyone could have written, so it is an
+ * open redirect unless it is held to the console's own pages: a string of at most `RETURN_PATH_MAX` characters,
+ * starting with exactly one `/` (`//evil` is a scheme-relative URL to another host), no backslash (a browser reads
+ * `/\evil` as `//evil`), no control byte, no fragment, that parses to this origin, whose path is a `PAGES` path, and
+ * whose query passes that page's own `parsePageQuery`. `/login` and `/login/code` are not pages, so a link cannot loop
+ * back into sign-in. Returns the path and query as given (`/run?id=a.b`), since the page parser accepted them.
+ */
+export function returnPathOf(raw) {
+  if (typeof raw !== "string" || raw === "" || raw.length > RETURN_PATH_MAX) return null;
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\") || raw.includes("#") || /[\u0000-\u001f\u007f]/.test(raw)) return null;
+  let url;
+  try {
+    url = new URL(raw, "http://console.invalid");
+  } catch {
+    return null;
+  }
+  if (url.origin !== "http://console.invalid") return null;
+  const name = Object.keys(PAGES).find((k) => PAGES[k].path === url.pathname);
+  if (name === undefined) return null;
+  const parsed = parsePageQuery(name, url.searchParams);
+  if (!parsed || parsed.refusal || !("query" in parsed)) return null;
+  return `${url.pathname}${url.search}`;
+}
+
 // ---- reading ---------------------------------------------------------------------------------------------------------
 
 /** What each screen reads beside the clock. */

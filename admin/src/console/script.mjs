@@ -9,7 +9,9 @@
  *   - `login-code`: reads the one-time code from `location.hash`, drops the fragment from history with
  *     `history.replaceState` BEFORE posting it (so the back button and a session restore cannot replay it), then posts
  *     it. The code travels in the fragment because a fragment never reaches the server's request line, a log or a
- *     Referer.
+ *     Referer. A fragment `#<code>&next=<path>` (issue #708) also names the page to land on: it is posted beside the
+ *     code, the server answers the page it accepts (`returnPathOf`, one of this console's own pages, else `/`), and
+ *     the script navigates there only if the answer is also one of `PAGES`' paths (`ownPage`), never anywhere else.
  *   - every signed-in page: the sign-out button (`#logout`).
  *   - a LIVE page (issue #641; `data-live` on the body): opens `/api/events?page=<data-live>&<data-query>` with
  *     `EventSource`. An `event: panel` carries `{id, html}`, and its html replaces the inner HTML of the element with
@@ -47,10 +49,12 @@
  * swap and the transcript append above, all of server-escaped fragments into elements the server marked for them.
  */
 import { FIT_JS } from "../graph-html.mjs";
+import { PAGES } from "./pages.mjs";
 
 export const CONSOLE_SCRIPT = `"use strict";
 (function () {
   var page = document.body ? document.body.getAttribute("data-page") : null;
+  var PAGE_PATHS = ${JSON.stringify(Object.values(PAGES).map((p) => p.path))};
   function say(text) {
     var el = document.getElementById("notice");
     if (el) el.textContent = text;
@@ -83,16 +87,30 @@ export const CONSOLE_SCRIPT = `"use strict";
       }, function () { say("The console could not be reached."); });
     });
   } else if (page === "login-code") {
-    var code = location.hash.length > 1 ? location.hash.slice(1) : "";
+    var frag = location.hash.length > 1 ? location.hash.slice(1) : "";
     history.replaceState(null, "", location.pathname);
+    var amp = frag.indexOf("&");
+    var code = amp < 0 ? frag : frag.slice(0, amp);
+    var next = null;
+    if (amp >= 0) {
+      try { next = new URLSearchParams(frag.slice(amp + 1)).get("next"); } catch (e) { next = null; }
+    }
     if (code === "") {
       say("This link carries no code. Ask for a new one with pi-dispatch-console link.");
     } else {
-      post("/login/code", { code: code }).then(function (r) {
-        if (r.ok) location.replace("/");
+      post("/login/code", next === null ? { code: code } : { code: code, next: next }).then(function (r) {
+        if (r.ok) location.replace(ownPage(r.body && r.body.next));
         else failed(r);
       }, function () { say("The console could not be reached."); });
     }
+  }
+  // Where a sign-in may land: one of this console's own page paths, else the overview. The server has already judged
+  // the return path with the page parser; this repeats the shape check, so a navigation off this origin needs both
+  // to be wrong.
+  function ownPage(path) {
+    if (typeof path !== "string" || path.charAt(0) !== "/" || path.charAt(1) === "/" || path.indexOf("\\\\") >= 0 || path.indexOf("#") >= 0) return "/";
+    var q = path.indexOf("?");
+    return PAGE_PATHS.indexOf(q < 0 ? path : path.slice(0, q)) >= 0 ? path : "/";
   }
   var out = document.getElementById("logout");
   if (out) out.addEventListener("click", function () {

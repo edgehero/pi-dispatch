@@ -547,7 +547,7 @@ test("bare insights prints the console's spend screen address for the window, sa
     assert.deepEqual(text.split("\n"), [
       "insights are on the operator console's spend screen:",
       "http://127.0.0.1:4790/insights?range=30d",
-      "PI_CONSOLE_LISTEN is not set, so that is the console's default address; if the console is not running, start it with pi-dispatch-console serve (docs/console.md)",
+      "PI_CONSOLE_LISTEN is not set, so that is the console's default address; if the console is not running, start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)",
     ], "the default window is 30d, the page's own");
     const seven = fakeCtx({ withCustom: true });
     await def.handler("insights 7d", seven.ctx);
@@ -557,7 +557,7 @@ test("bare insights prints the console's spend screen address for the window, sa
     const { def } = await loadRegistered();
     const view = fakeCtx({ withCustom: true });
     await def.handler("insights mtd", view.ctx);
-    assert.deepEqual(view.notes[0][0].split("\n").slice(1), ["http://[::1]:4811/insights?range=mtd", "if the console is not running, start it with pi-dispatch-console serve (docs/console.md)"], "the deployment's own address, bracketed");
+    assert.deepEqual(view.notes[0][0].split("\n").slice(1), ["http://[::1]:4811/insights?range=mtd", "if the console is not running, start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)"], "the deployment's own address, bracketed");
   });
 });
 
@@ -587,7 +587,7 @@ test("insights whatif prints the console's what-if address; a unix socket gets t
   assert.ok(!zero[0].includes(":0/"), "no :0 URL");
   for (const listen of ["0.0.0.0:4790", "[::]:4790", "[0:0:0:0:0:0:0:0]:4790"]) {
     const lines = notesOf(["insights"], { PI_CONSOLE_LISTEN: listen, PI_CONSOLE_BIND_PUBLIC: "1" })[0][0].split("\n");
-    assert.deepEqual(lines.slice(1), ["http://<this host>:4790/insights?range=30d", "the console binds every address of this host, so open it by this host's name or address; if the console is not running, start it with pi-dispatch-console serve (docs/console.md)"], listen);
+    assert.deepEqual(lines.slice(1), ["http://<this host>:4790/insights?range=30d", "the console binds every address of this host, so open it by this host's name or address; if the console is not running, start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)"], listen);
   }
   assert.match(notesOf(["insights"], { PI_CONSOLE_LISTEN: "192.168.1.5:4790", PI_CONSOLE_BIND_PUBLIC: "1" })[0][0], /\nhttp:\/\/192\.168\.1\.5:4790\/insights\?range=30d\n/, "a named public address is printed as it is");
   // A target or flow the console page would refuse 400 is never printed as a URL: the usage line instead.
@@ -608,6 +608,64 @@ test("the dashboard's i key shows the console's insights address between overlay
     assert.equal(notes[0][1], "info");
     assert.equal(notes[0][0].split("\n")[1], "http://127.0.0.1:4799/insights?range=30d");
   });
+});
+
+test("/dispatch console --link: the link reaches notify alone, never the model, and no tool carries it (issue #708)", async () => {
+  // A real console stand-in on a unix socket (answers /healthz as the console does), a real tokens file, the real
+  // audit log and code drop: the whole command as the operator types it. A socket listener never opens a browser.
+  const { createServer } = await import("node:http");
+  const { addToken } = await import("@edgehero/pi-dispatch/console-tokens");
+  const dir = tempDir("admin-wiring-console-");
+  const socketPath = join(dir, "c.sock");
+  const tokensPath = join(dir, "console-tokens.json");
+  const added = addToken({ path: tokensPath, name: "alice", role: "operator" });
+  assert.ok(added.token, JSON.stringify(added));
+  const server = createServer((req, res) => {
+    res.writeHead(req.url === "/healthz" ? 200 : 404);
+    res.end(req.url === "/healthz" ? "ok" : "");
+  });
+  await new Promise((r) => server.listen(socketPath, r));
+  try {
+    await withEnv({ PI_CONSOLE_LISTEN: `unix:${socketPath}`, PI_CONSOLE_TOKENS_FILE: tokensPath }, async () => {
+      const { calls, def } = await loadRegistered();
+      const view = fakeCtx({ withCustom: true });
+      view.ctx.hasUI = true;
+      view.ctx.mode = "tui";
+      await def.handler("console runs --link", view.ctx);
+      assert.equal(calls.sendMessage.length, 0, "nothing goes into model context");
+      assert.equal(view.notes.length, 1);
+      const [text, level] = view.notes[0];
+      assert.equal(level, "info");
+      assert.match(text, /the console: running/);
+      const m = /sign-in link for "alice" \(through that tunnel; it works once, within 60 seconds\): (http:\/\/localhost:4790\/login\/code#([A-Za-z0-9_-]{43})&next=\/runs)$/m.exec(text);
+      assert.ok(m, text);
+      assert.ok(!text.includes(added.token), "the token is never shown");
+      assert.equal(readdirSync(join(dir, "console-login-codes")).length, 1, "one code in the drop");
+      const auditDir = join(process.env.PI_LOGS_DIR, "console-audit");
+      const rows = readdirSync(auditDir).filter((f) => f.endsWith(".jsonl")).flatMap((f) => readFileSync(join(auditDir, f), "utf8").trim().split("\n").map((l) => JSON.parse(l)));
+      const row = rows.findLast((r) => r.action === "login-code");
+      assert.deepEqual([row.actor.role, row.target, row.outcome], ["panel", "alice", "ok"]);
+      assert.ok(!JSON.stringify(rows).includes(m[2]), "the audit row never holds the code");
+      assert.ok(!calls.registerTool.some((t) => /console|link|login/.test(t.name)), "no tool exposes the command");
+
+      // Without pi's UI (print mode) it refuses, and nothing more is minted.
+      const headless = fakeCtx({ withCustom: false });
+      await def.handler("console --link", headless.ctx);
+      assert.match(headless.notes[0][0], /needs pi's interactive UI/);
+      assert.equal(readdirSync(join(dir, "console-login-codes")).length, 1);
+      assert.equal(calls.sendMessage.length, 0);
+    });
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test("completions offer console, its page words and its flags", async () => {
+  const { def } = await loadRegistered();
+  assert.ok(def.getArgumentCompletions("con").some((i) => i.value === "console"));
+  assert.deepEqual(def.getArgumentCompletions("console r").map((i) => i.value), ["console runs"]);
+  assert.deepEqual(def.getArgumentCompletions("console runs --").map((i) => i.value), ["console runs --link", "console runs --no-open"]);
+  assert.deepEqual(def.getArgumentCompletions("console runs --link --").map((i) => i.value), ["console runs --link --no-open"]);
 });
 
 test("USAGE and KNOWN_SUBCOMMANDS agree, member for member, in order", () => {

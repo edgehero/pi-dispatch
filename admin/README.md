@@ -242,7 +242,10 @@ It can act as well as show: cancel, retry, remove and re-run jobs, answer a park
 and edit the configuration, each previewed, confirmed and recorded in one audit log that holds the panel's own writes
 too. Every running job's progress shows in its row and on its run page, and its transcript, redacted, streams live
 on its run page for operators, and the panel's live tail
-(`l`) reads the same transcript for a run on any host. Nothing listens unless you start it. See
+(`l`) reads the same transcript for a run on any host. Nothing listens unless you start it. In pi,
+`/dispatch console [page] [--link]` prints a page's address, says whether the console is running, makes a one time
+sign-in link for an operator token (shown only to you, and recorded in the audit log first), and opens your browser
+when the session is local (not over SSH; `--no-open` keeps it closed). See
 [`docs/console.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/console.md).
 
 ## More than one machine
