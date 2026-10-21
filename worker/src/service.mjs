@@ -23,6 +23,9 @@
  *                   package's own exported entry, wherever npm (or the workspace symlink) put it.
  *                   null when the package is not installed — receiver renders refuse loudly instead
  *                   of writing a unit that would crash-loop at boot.
+ *   - consoleEntry  the admin package's bin, dist/console.mjs (issue #708, resolveConsoleEntry): the
+ *                   same resolution, else the `pi-dispatch-console` a global install put on PATH. null
+ *                   refuses the console renders, for the receiver's reason.
  *
  * Scope doctrine:
  *   - User-level by default, everywhere. macOS REFUSES root outright (a LaunchAgent is per-user, and a
@@ -45,7 +48,7 @@ import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSy
 import { lookup as dnsLookup } from "node:dns/promises";
 import { connect as netConnect } from "node:net";
 import { homedir, networkInterfaces, tmpdir, userInfo } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { openshellSetupOf, parseBackendList, venuesOf } from "./backends.mjs";
@@ -53,6 +56,9 @@ import { OPENSHELL_BREW_INSTALL, OPENSHELL_GATEWAY_UNIT, OPENSHELL_NO_WINDOWS } 
 import { sharedShellIgnored } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
+import { operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
+import { deploymentServiceEnv } from "./service-env.mjs";
+import * as nodeFs from "node:fs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
 import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, MODEL_ENDPOINTS_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
@@ -79,6 +85,70 @@ function resolveReceiverStart() {
 	} catch {
 		return null;
 	}
+}
+
+/** The admin package, whose bin is the console (`pi-dispatch-console` -> ./dist/console.mjs, in its published `files`). */
+export const CONSOLE_PACKAGE = "@edgehero/pi-dispatch-admin";
+
+/**
+ * The console's entry point (issue #708): the admin package's dist/console.mjs as module resolution finds it from here,
+ * else the real path of the `pi-dispatch-console` on this shell's PATH. null when neither exists.
+ *
+ * Two lookups because the admin package is NOT a dependency of this one: it is a pi extension an operator installs
+ * with `pi install` or `npm i -g`. Resolution from here finds it when it sits in the same node_modules tree as this
+ * worker (both global, or both in the deployment folder); the PATH lookup covers the rest. The package has no
+ * `exports` map, so the subpath resolves as a plain file, and `import.meta.resolve` does not check that the file
+ * exists (measured on node 23.5: a checkout without `node admin/build.mjs` resolves to a dist/ that is not there),
+ * hence the existence check.
+ *
+ * The PATH hit is accepted only when its real path IS the package's file: it ends in dist/console.mjs and the
+ * package.json two levels up names this package (round 1 review of #708). npm's bin is a symlink to exactly that file,
+ * but pnpm and Volta put a SHIM on PATH (a shell script, or a binary that picks a version at run time), and a unit that
+ * ran `node <shim>` would crash at every start. The real path, not the PATH name, because a service manager's PATH is
+ * not this shell's and launchd's cannot see an nvm or Homebrew prefix at all. `findOnPath` reads only absolute POSIX
+ * directories, so on Windows this lookup does not run and resolution is the only way (`refuseMissingConsole` says so).
+ */
+export function resolveConsoleEntry({ findBin, realpath, exists = existsSync, readFile = (p) => readFileSync(p, "utf8"), resolveModule = (specifier) => import.meta.resolve(specifier) }) {
+	try {
+		const resolved = fileURLToPath(resolveModule(`${CONSOLE_PACKAGE}/dist/console.mjs`));
+		if (exists(resolved)) return resolved;
+	} catch {}
+	const found = findBin("pi-dispatch-console");
+	if (!found) return null;
+	try {
+		const real = realpath(found);
+		const dist = dirname(real);
+		if (basename(real) !== "console.mjs" || basename(dist) !== "dist") return null;
+		const pkg = JSON.parse(readFile(join(dirname(dist), "package.json")));
+		return pkg?.name === CONSOLE_PACKAGE ? real : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The console tokens file the SERVICE's console reads for the deployment in `deployDir` (issue #708): PI_CONSOLE_TOKENS_FILE
+ * from the deployment `.env` (through the reader the console itself uses), else console-tokens.json there. Never this
+ * shell's export: the unit inherits no shell, loads no EnvironmentFile and its wrapper sources no `.env`, so `serve`
+ * finds only the file's value. One helper for `service install --console` and `up`'s next step, so the two cannot
+ * name different files.
+ */
+export function consoleTokensPathFor(deployDir, platform) {
+	const { env } = deploymentServiceEnv({ env: {}, dir: deployDir, keys: ["PI_CONSOLE_TOKENS_FILE"], platform, fs: nodeFs });
+	return tokensFilePath(env, deployDir);
+}
+
+/**
+ * How many operator tokens the console this unit starts would find (issue #708): `{ path, operators }` or
+ * `{ path, refusal }`. The tokens file is where `serve --deployment <deployDir>` looks: PI_CONSOLE_TOKENS_FILE as the
+ * SERVICE sees it (the deployment `.env`, through the reader the console itself uses), never this shell's export,
+ * which the unit does not inherit. Read with the real filesystem on purpose: `readTokensFile` judges the file the way
+ * `serve` does (owner-only, regular, no symlink), and a fake that answered differently would prove nothing.
+ */
+export function readConsoleOperators(deployDir, platform) {
+	const path = consoleTokensPathFor(deployDir, platform);
+	const read = readTokensFile({ path });
+	return read.refusal ? { path, refusal: read.refusal } : { path, operators: operatorCount(read.file) };
 }
 
 /**
@@ -126,8 +196,21 @@ export const TEMPLATE_PINS = {
 		"KillSignal=SIGTERM",
 		"TimeoutStopSec=30",
 	],
+	// Issue #708: the console, the receiver's shape. Its ExecStart names the console package's entry and the deployment
+	// (`serve --deployment`), so the folder is in the line twice and the WHOLE line is replaced, as for the other two.
+	"console.service": [
+		"ExecStart=/usr/bin/node /usr/lib/node_modules/@edgehero/pi-dispatch-admin/dist/console.mjs serve --deployment /opt/pi-dispatch", // the WHOLE line → `<execPath> <consoleEntry> serve --deployment <deployDir>`
+		"WorkingDirectory=/opt/pi-dispatch",
+		"\nUser=pi\n",
+		"WantedBy=multi-user.target",
+		"RestartPreventExitStatus=2", // serve's refusals (no operator token, the lock held, an unusable listen) exit 2, and the next start would refuse the same way
+		"StartLimitIntervalSec=60",
+		"StartLimitBurst=5",
+		"KillSignal=SIGTERM",
+		"TimeoutStopSec=30",
+	],
 	"com.pi-dispatch.worker.plist": [
-		"<string>com.pi-dispatch.worker</string>", // → com.pi-dispatch.receiver for --receiver
+		"<string>com.pi-dispatch.worker</string>", // → com.pi-dispatch.receiver for --receiver, com.pi-dispatch.console for --console
 		"<string>/opt/pi-dispatch/deploy/worker-env-wrapper.sh</string>", // → the PACKAGE's wrapper copy, followed by the exec argv (<node> <script> …) the wrapper now runs verbatim
 		"<key>WorkingDirectory</key>\n\t<string>/opt/pi-dispatch</string>", // → the deployment folder (load-bearing: the wrapper sources ./.env there); also the anchor for the PATH injection below
 		"<string>/opt/pi-dispatch/logs/worker.out.log</string>", // → <deployDir>/logs/… (install creates the dir; launchd will not)
@@ -152,8 +235,10 @@ export const TEMPLATE_PINS = {
 	// they read back (`--env-setup`, issue #209 — the plist's EnvironmentVariables dict on macOS, nssm's
 	// AppEnvironmentExtra on Windows), and a rename on one side with silence on the other would produce
 	// a unit that starts fine and ignores the operator's secrets manager.
-	"worker-env-wrapper.sh": ["PI_ENV_SETUP"],
-	"worker-env-wrapper.cmd": ["PI_ENV_SETUP"],
+	// Since issue #708 also PI_WRAPPER_NO_DOTENV, which the console's plist and nssm entry set and the wrappers test
+	// before they load ./.env: the same rename hazard, and here a rename would hand the console every worker secret.
+	"worker-env-wrapper.sh": ["PI_ENV_SETUP", "PI_WRAPPER_NO_DOTENV"],
+	"worker-env-wrapper.cmd": ["PI_ENV_SETUP", "PI_WRAPPER_NO_DOTENV"],
 	// The podman venue's stack as Quadlet units (issue #430, podman-stack.mjs). Three are copied verbatim, so what is
 	// pinned is what the worker and the installer rely on by NAME: the container and network names the worker attaches
 	// by, the unit names the worker unit Wants=, the loopback-only port, and an explicit Network= in every .container
@@ -225,7 +310,7 @@ export const TEMPLATE_PINS = {
  * composed form quotes.
  */
 const ENV_SETUP_REFUSALS = {
-	linux: { re: /['"$\\\x00-\x1f\x7f]/, why: "the path lands inside a single-quoted systemd Exec word, and systemd expands $VAR there whatever the quoting" },
+	linux: { re: /['"$%\\\x00-\x1f\x7f]/, why: "the path lands inside a single-quoted systemd Exec word, and systemd expands $VAR and %-specifiers there whatever the quoting" },
 	darwin: { re: /[<>&"\x00-\x1f\x7f]/, why: "the launchd unit is a plist, and the path lands in an XML <string>" },
 	win32: { re: /[%"\x00-\x1f\x7f]/, why: "cmd expands %VAR% when the wrapper runs the script" },
 };
@@ -282,6 +367,23 @@ const ENV_SETUP_READERS = {
 };
 
 /**
+ * `text` as XML character data: `&`, `<` and `>` only, `&` first. No string this render writes lands in an attribute,
+ * so `'` and `"` need no entity, and leaving them literal keeps every plist that held one byte-identical to before
+ * (final review of #708). `>` is escaped although character data allows it, so a path can never write `-->`.
+ */
+function xmlText(text) {
+	return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * The reverse, for what readUnitSeam reads back out of a plist: the three entities `xmlText` writes plus the two it does
+ * not (a hand-edited plist may carry them). `&amp;` last, so `&amp;lt;` stays `&lt;`.
+ */
+function xmlUntext(text) {
+	return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
+
+/**
  * What an installed unit records: the configured `--env-setup` path and the deployment folder it
  * serves. Both null for a unit rendered without the flag, which is every unit that predates issue #209
  * and every default render since. Never throws: an unreadable, truncated or hand-rewritten unit simply
@@ -297,7 +399,12 @@ export function readUnitSeam(text, platform) {
 	// capture already ends exactly where the renderer's delimiter does, and a path is allowed to hold a
 	// space anywhere in it. An empty value means the same as no value at all.
 	const clip = (v) => (v === null ? null : v.replace(/\r$/, "") || null);
-	return { setup: clip(grab(readers.setup)), deployDir: clip(grab(readers.deployDir)) };
+	// The folder as the renderer escaped it (round 1 review of #708): `%` doubled in a systemd unit (WorkingDirectory=
+	// expands specifiers), XML entities in a plist. Undone here so a folder holding either still reads as itself.
+	const folder = clip(grab(readers.deployDir));
+	const deployDir = folder === null ? null : platform === "linux" ? folder.replace(/%%/g, "%") : platform === "darwin" ? xmlUntext(folder) : folder;
+	const setup = clip(grab(readers.setup));
+	return { setup: setup !== null && platform === "darwin" ? xmlUntext(setup) : setup, deployDir };
 }
 
 /**
@@ -315,7 +422,7 @@ export function readUnitUser(text, platform) {
 
 const SUBCOMMANDS = new Set(["render", "install", "uninstall", "status", "start", "stop", "restart"]);
 
-const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver) as an OS service, rendered for THIS host
+const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver, or --console) as an OS service, rendered for THIS host
 
   pi-dispatch service render                the unit(s) with this host's real node + repo paths
   pi-dispatch service install [--force]     write + enable the user-level unit
@@ -327,6 +434,8 @@ const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver) as
                                             to finish, restarts, resumes  [--drain-timeout <s>, default 600]
 
   flags: --receiver          the webhook receiver instead of the worker
+         --console           the operator console (pi-dispatch-console serve) instead of the worker;
+                             install needs an operator token (pi-dispatch-console token add)
          --user | --system   linux scope (default --user; --system never executes root commands)
          --force             replace an existing unit in the same scope
          --print             also print the rendered unit before installing
@@ -346,6 +455,10 @@ export async function runService(argv = [], deps = {}) {
 		// Injectable so tests can render as if from an npm install without installing anything.
 		moduleDir = MODULE_DIR,
 		resolveReceiver = resolveReceiverStart,
+		// Issue #708: the console package's entry (see resolveConsoleEntry); a test injects a path or null.
+		resolveConsole = null,
+		// Issue #708: the operator tokens the console unit would start with (see readConsoleOperators).
+		consoleOperators = readConsoleOperators,
 		home = homedir(),
 		// env-internal USER: whose account a rendered unit runs as, taken from the login already running
 		// this command. An operator changes it by running the command as someone else, not by declaring it.
@@ -383,6 +496,7 @@ export async function runService(argv = [], deps = {}) {
 			allowPositionals: true,
 			options: {
 				receiver: { type: "boolean", default: false },
+				console: { type: "boolean", default: false },
 				user: { type: "boolean", default: false },
 				system: { type: "boolean", default: false },
 				force: { type: "boolean", default: false },
@@ -402,9 +516,16 @@ export async function runService(argv = [], deps = {}) {
 		return cmd ? 1 : 0; // bare `service` is a usage view, an unknown subcommand is an error
 	}
 	if (values.user && values.system) return fail(err, "--user and --system are mutually exclusive");
+	// One component per invocation: every subcommand addresses exactly one unit, and guessing which of two was meant
+	// would install, stop or remove the other one.
+	if (values.receiver && values.console) return fail(err, "--receiver and --console are mutually exclusive: each names one service; run the command once for each");
 	if (platform === "darwin" && values.system) {
-		return fail(err, "macOS is user-scope only (a LaunchAgent): Docker Desktop lives in the login session, so a system daemon would wait on a docker socket that only exists once you log in. Drop --system.");
+		// The Docker Desktop reason is the worker's; the console and the receiver start no container (round 1 review of #708).
+		return fail(err, values.console || values.receiver ? "macOS is user-scope only here (a LaunchAgent, in your login session, where this command installs every unit). Drop --system." : "macOS is user-scope only (a LaunchAgent): Docker Desktop lives in the login session, so a system daemon would wait on a docker socket that only exists once you log in. Drop --system.");
 	}
+	// `--drain` pauses the QUEUE and waits for its jobs, which only the worker runs (round 1 review of #708): on the
+	// receiver or the console it would pause every job for a restart that drains nothing.
+	if (values.drain && (values.console || values.receiver)) return fail(err, "--drain applies to the worker alone (it pauses the queue and waits for its running jobs); restart the receiver or the console without it");
 	if (platform === "win32" && (values.user || values.system)) {
 		return fail(err, "Windows services via nssm are machine-scoped; --user/--system do not apply here");
 	}
@@ -426,6 +547,9 @@ export async function runService(argv = [], deps = {}) {
 		// Resolved only when asked for: worker-only invocations must not care whether the receiver
 		// package exists here at all.
 		receiverStart: values.receiver ? resolveReceiver() : null,
+		// Issue #708: the same rule for the console, resolved only for --console.
+		consoleEntry: values.console ? (resolveConsole ?? (() => resolveConsoleEntry({ findBin, realpath })))() : null,
+		consoleOperators,
 		home,
 		user,
 		tmp,
@@ -443,7 +567,7 @@ export async function runService(argv = [], deps = {}) {
 		realpath,
 		newPassword,
 		findBin,
-		which: values.receiver ? "receiver" : "worker",
+		which: values.receiver ? "receiver" : values.console ? "console" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
 		force: values.force,
 		// The operator's env-setup script, or null for the shipped default. Null is load-bearing: with no
@@ -484,6 +608,34 @@ export async function runService(argv = [], deps = {}) {
 }
 
 /**
+ * The services this command installs, by `ctx.which`. Each has ONE systemd template, and the launchd and nssm forms are
+ * derived from the worker's (the receiver's precedent): the same KeepAlive/ExitTimeOut shape and the same AppExit pair,
+ * which is what keeps every component's exit 2 a stop rather than a restart loop.
+ *
+ *   template      the deploy/ file renderLinuxUnit reads (a TEMPLATE_PINS key)
+ *   templateExec  that template's ExecStart line, replaced WHOLE by execArgvFor's argv
+ */
+const COMPONENTS = Object.freeze(["worker", "receiver", "console"]);
+const COMPONENT_TEMPLATES = Object.freeze({
+	worker: { template: "worker.service", templateExec: "ExecStart=/usr/bin/node worker/src/cli.mjs worker" },
+	receiver: { template: "receiver.service", templateExec: "ExecStart=/usr/bin/node receiver/src/start.mjs" },
+	console: { template: "console.service", templateExec: "ExecStart=/usr/bin/node /usr/lib/node_modules/@edgehero/pi-dispatch-admin/dist/console.mjs serve --deployment /opt/pi-dispatch" },
+});
+
+/**
+ * The command a unit runs, for every service manager: the systemd ExecStart, the argv the launchd wrapper execs and
+ * nssm's AppParameters. One function because there were three copies of it, one per manager, and a component added
+ * to two of them would install a unit on the third that runs the worker. Absolute node, absolute script: nothing here
+ * depends on a PATH or a working directory. The console names its deployment itself (`serve --deployment`), so it
+ * reads THIS deployment's `.env` and tokens even where the manager's working directory were not honoured.
+ */
+function execArgvFor(ctx) {
+	if (ctx.which === "receiver") return [ctx.execPath, ctx.receiverStart];
+	if (ctx.which === "console") return [ctx.execPath, ctx.consoleEntry, "serve", "--deployment", ctx.deployDir];
+	return [ctx.execPath, ctx.cliPath, "worker"];
+}
+
+/**
  * Where each unit lives (or is looked for) per platform. `otherScopeWorkerPaths` exists only to
  * enforce DES-CONCURRENCY-3 at install time — those locations are READ, never written. On Linux the
  * system-scope check covers both our canonical name and `worker.service`, the name the README's
@@ -520,7 +672,8 @@ function unitPaths(ctx) {
 }
 
 /**
- * Every unit FILE this tool could have installed on this host: both daemons, both scopes, plus the
+ * Every unit FILE this tool could have installed on this host: every component (the worker, the receiver and, since
+ * issue #708, the console), both scopes, plus the
  * `worker.service` name the README's manual `sudo cp` instructions produce (doStatus already counts
  * that one as a real worker unit, so a preflight reading units must too). Derived from unitPaths
  * rather than restated, so the two cannot disagree about where a unit lives.
@@ -530,13 +683,28 @@ function unitPaths(ctx) {
 export function installedUnitPaths(platform, home) {
 	if (platform !== "linux" && platform !== "darwin") return [];
 	const found = [];
-	for (const which of ["worker", "receiver"]) {
+	for (const which of COMPONENTS) {
 		const paths = unitPaths({ platform, home, which, scope: "user" });
 		found.push({ which, scope: "user", path: platform === "linux" ? paths.userPath : paths.installPath });
 		found.push({ which, scope: "system", path: paths.systemPath });
 		if (platform === "linux" && which === "worker") found.push({ which, scope: "system", path: "/etc/systemd/system/worker.service" });
 	}
 	return found;
+}
+
+/**
+ * The console unit FILE installed for the deployment in `cwd` (issue #708), or null: one of `installedUnitPaths`'
+ * console entries whose WorkingDirectory (`readUnitSeam`) is this folder. Shared by doctor and `up`, so the two agree
+ * on whether a console service exists. Always null on win32, where the service is nssm's and is asked by name.
+ */
+export function installedConsoleUnitPath({ platform, home, cwd, fileExists = existsSync, readUnit = (path) => readFileSync(path, "utf8") }) {
+	for (const { path, which } of installedUnitPaths(platform, home)) {
+		if (which !== "console" || !fileExists(path)) continue;
+		try {
+			if (readUnitSeam(readUnit(path), platform).deployDir === cwd) return path;
+		} catch {}
+	}
+	return null;
 }
 
 function readTemplate(ctx, name) {
@@ -559,7 +727,10 @@ function subDeployDir(ctx, text) {
 	// Function replacement, here and everywhere below a computed path is the REPLACEMENT: String.replace
 	// and replaceAll both read `$&` and its relatives out of a replacement STRING, so a deployment folder
 	// holding one would splice itself into the unit. A function replacement is taken literally.
-	return text.replaceAll("/opt/pi-dispatch", () => ctx.deployDir);
+	// `%` doubled (round 1 review of #708): WorkingDirectory= and EnvironmentFile= expand systemd specifiers, so a
+	// folder named `a%hb` would run in `a<home>b`. readUnitSeam undoes it. Linux units only: the plist has its own
+	// escaping (xmlText), and nssm takes the folder as an argv word.
+	return text.replaceAll("/opt/pi-dispatch", () => ctx.deployDir.replace(/%/g, "%%"));
 }
 
 /**
@@ -586,6 +757,68 @@ function refuseMissingReceiver(ctx) {
 }
 
 /**
+ * The console refusals (issue #708), shared by render and install as the receiver's is: the console package's entry
+ * not found, so a unit would name a file that is not there.
+ */
+function refuseMissingConsole(ctx) {
+	// Worded per platform (round 1 review of #708): `findOnPath` reads no Windows directory, so there it did not look.
+	const looked =
+		ctx.platform === "win32"
+			? `${CONSOLE_PACKAGE}/dist/console.mjs does not resolve from this worker's install (on Windows that is the only place looked: the PATH lookup does not run there)`
+			: `neither does ${CONSOLE_PACKAGE}/dist/console.mjs resolve from this worker's install, nor is a \`pi-dispatch-console\` on this shell's PATH that is that package's own file (a pnpm or Volta shim is not)`;
+	return fail(
+		ctx.err,
+		`the operator console is not installed where this command can find it: ${looked}. Install it in the same place as this worker, so it resolves from here: npm install -g ${CONSOLE_PACKAGE} when the worker is installed globally, or npm install ${CONSOLE_PACKAGE} in the folder whose node_modules holds this worker (an admin package installed anywhere else is not found), then re-run`,
+	);
+}
+
+/**
+ * Paths a unit cannot carry (round 1 review of #708), refused before anything is rendered, on every component: a control
+ * character in the deployment folder (it would end or corrupt the unit line, the XML or the nssm property), surrounding
+ * whitespace on Linux (systemd strips it from WorkingDirectory=, so the unit would run in another folder), and on
+ * Windows a command word holding a character cmd reads (the wrapper runs its argv as `%*`, where `"` cannot be
+ * quoted and `&`, `|`, `<`, `>`, `^` and `%` outside quotes change the command). Everything else is quoted or escaped
+ * per form: systemdWord, xmlText, nssm's argv. null when the render can go ahead.
+ */
+function renderRefusal(ctx) {
+	const shown = (c) => (c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f ? `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}` : c);
+	const control = /[\x00-\x1f\x7f]/.exec(ctx.deployDir);
+	if (control) return fail(ctx.err, `the deployment folder ${JSON.stringify(ctx.deployDir)} holds ${JSON.stringify(shown(control[0]))}, a control character no service unit can carry; run this from a folder without one`);
+	if (ctx.platform === "linux" && ctx.deployDir !== ctx.deployDir.trim()) return fail(ctx.err, `the deployment folder ${JSON.stringify(ctx.deployDir)} starts or ends with whitespace, which systemd strips from WorkingDirectory=, so the unit would run in another folder; rename it`);
+	// NOT refused (final review of #708): a `--` in the folder, which the plist template also names inside XML comments.
+	// plutil accepts it there, and `xmlText` escapes `>`, so a folder can never write the `-->` that would end one;
+	// refusing it broke worker installs that had always worked in a folder like ~/my--deploy.
+	if (ctx.platform === "win32") {
+		for (const word of execArgvFor(ctx)) {
+			const bad = /["%&|<>^\x00-\x1f\x7f]/.exec(word);
+			if (bad) return fail(ctx.err, `${JSON.stringify(word)} holds ${JSON.stringify(shown(bad[0]))}, which the service's wrapper cannot pass to the command it runs (cmd reads it); move it to a path without one`);
+		}
+	}
+	return null;
+}
+
+/**
+ * Install only: a console unit started with no operator token in its tokens file would exit 2 on every start (`serve`
+ * refuses, so nobody could change anything from it), and RestartPreventExitStatus=2 would then leave it stopped. An
+ * install that "succeeds" into a service that never runs is the silent no-op this project refuses, so it is refused
+ * here, with the fix. A tokens file that cannot be used at all (missing, too open, invalid) is refused the same way and
+ * with its own sentence. `render` does not refuse: it writes nothing, and the unit it shows is right once a token exists.
+ */
+function refuseConsoleWithoutOperator(ctx) {
+	let found;
+	try {
+		found = ctx.consoleOperators(ctx.deployDir, ctx.platform);
+	} catch (err) {
+		return fail(ctx.err, `the console's tokens file could not be read (${err?.message ?? err}), so the console would refuse to start; nothing was installed`);
+	}
+	if (found.refusal) return fail(ctx.err, `${found.refusal}. The console refuses to start without it, so nothing was installed`);
+	if (found.operators === 0) {
+		return fail(ctx.err, `${found.path} holds no operator token, so \`pi-dispatch-console serve\` would refuse to start (exit 2) and the unit would stay stopped. Add one first: pi-dispatch-console token add --name <you> --role operator --deployment ${ctx.deployDir}`);
+	}
+	return null;
+}
+
+/**
  * The systemd form of the env-setup seam. Three pieces, each load-bearing:
  *
  *   - `exec` keeps systemd watching the WORKER and not a shell in front of it, so an exit 2 arrives as
@@ -607,8 +840,29 @@ function refuseMissingReceiver(ctx) {
  * whole script as one word, and a worker exiting 2 under it reports ExecMainStatus=2 with NRestarts=0.
  */
 function composeEnvSetupExec(setup, argv) {
-	const command = argv.map((a) => `"${a}"`).join(" ");
-	return `/bin/sh -c 'set -a; . "${setup}" || exit 1; set +a; exec ${command}'`;
+	// The argv inside the script, in sh's double quotes, as it always was, while every word is one that form carries
+	// as itself. Otherwise (round 1 review of #708: a deployment folder in the console's argv may hold a space, a `'`,
+	// a `$` or a `%`) the argv goes AFTER the script as its own systemd words (`systemdWord`), and the script runs
+	// `exec "$@"` (written `$$@`: systemd turns `$$` into `$` whatever the quoting), so nothing typed into a path is
+	// ever shell text. The prefix readUnitSeam reads is the same in both forms.
+	if (argv.every((a) => !/['"$`\\%\x00-\x1f\x7f]/.test(a))) {
+		const command = argv.map((a) => `"${a}"`).join(" ");
+		return `/bin/sh -c 'set -a; . "${setup}" || exit 1; set +a; exec ${command}'`;
+	}
+	return `/bin/sh -c 'set -a; . "${setup}" || exit 1; set +a; exec "$$@"' sh ${argv.map(systemdWord).join(" ")}`;
+}
+
+/**
+ * One word of a systemd Exec line (systemd.service(5), "Command lines"; systemd.unit(5), "Specifiers"): as it is when it
+ * holds only characters systemd reads literally, else in double quotes with `\\` and `"` escaped, `%` written `%%` (a
+ * specifier) and `$` written `$$` (variable expansion, which happens inside quotes too). Round 1 review of #708: the
+ * console's argv carries the deployment folder, and an unquoted one split at a space and expanded `%h` and `$HOME`.
+ * Every path a render held before is a bare word, so those units are byte-identical. A control character cannot be
+ * written on one unit line at all; `renderRefusal` refuses it before anything is rendered.
+ */
+export function systemdWord(word) {
+	if (/^[A-Za-z0-9_@+=:,./-]+$/.test(word)) return word;
+	return `"${word.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
 }
 
 /**
@@ -617,15 +871,13 @@ function composeEnvSetupExec(setup, argv) {
  * crash-loop bound, KillSignal, TimeoutStopSec — passes through byte-for-byte.
  */
 function renderLinuxUnit(ctx, stackUnits = [], venues = null, openshell = null) {
-	const template = ctx.which === "receiver" ? "receiver.service" : "worker.service";
+	const { template, templateExec: templateLine } = COMPONENT_TEMPLATES[ctx.which];
 	// The ExecStart line is replaced WHOLE, not path-by-path: the template's script path is relative
 	// to a repo-root WorkingDirectory that only a checkout has. The rendered unit points at absolute
 	// entries that exist in both layouts — cliPath beside this module; the receiver package's ./start
-	// export — so ExecStart works no matter what WorkingDirectory is.
-	const argv = ctx.which === "receiver" ? [ctx.execPath, ctx.receiverStart] : [ctx.execPath, ctx.cliPath, "worker"];
-	const templateLine =
-		ctx.which === "receiver" ? "ExecStart=/usr/bin/node receiver/src/start.mjs" : "ExecStart=/usr/bin/node worker/src/cli.mjs worker";
-	const execStart = `ExecStart=${ctx.envSetup ? composeEnvSetupExec(ctx.envSetup, argv) : argv.join(" ")}`;
+	// export; the console package's dist/console.mjs — so ExecStart works no matter what WorkingDirectory is.
+	const argv = execArgvFor(ctx);
+	const execStart = `ExecStart=${ctx.envSetup ? composeEnvSetupExec(ctx.envSetup, argv) : argv.map(systemdWord).join(" ")}`;
 	// The banner outranks the template's own "TEMPLATE/UNTESTED EXAMPLE — set the PLACEHOLDERs" header,
 	// which renders through below (the no-markers design keeps templates byte-usable, so their prose
 	// survives): a reader of the rendered unit should know the placeholders are already substituted.
@@ -699,27 +951,32 @@ function renderPlist(ctx, { pathDirs = [] } = {}) {
 	// Substituted before anything composed goes in (subDeployDir): the two anchors below are therefore
 	// written in their post-substitution form, and PI_ENV_SETUP can no longer be rewritten into a path
 	// the operator never typed. Only subDeployDir here — the template's /usr/bin/node is example prose.
-	let plist = subDeployDir(ctx, readTemplate(ctx, "com.pi-dispatch.worker.plist"));
+	// Every string this render puts into the XML is escaped (`xmlText`, round 1 review of #708): a deployment folder
+	// or a package path holding `&` or `<` produced a plist launchd refuses to load. No-op for every other path, so
+	// those renders are byte-identical to before.
+	let plist = readTemplate(ctx, "com.pi-dispatch.worker.plist").replaceAll("/opt/pi-dispatch", () => xmlText(ctx.deployDir));
 	// One wrapper, two daemons: the exec argv IS the difference now. The wrapper sources ./.env in the
 	// unit's WorkingDirectory and runs exactly these arguments — no `receiver` selector flag, no paths
 	// guessed inside the wrapper (issue #96: the wrapper's self-relative guess broke under npm install).
-	const execArgv = ctx.which === "receiver" ? [ctx.execPath, ctx.receiverStart] : [ctx.execPath, ctx.cliPath, "worker"];
-	if (ctx.which === "receiver") {
+	const execArgv = execArgvFor(ctx);
+	if (ctx.which !== "worker") {
+		// The console (issue #708) is derived exactly as the receiver is: `serve`'s refusals exit 2, which the wrapper
+		// turns into the clean exit KeepAlive leaves stopped.
 		plist = plist
-			.replace("<string>com.pi-dispatch.worker</string>", "<string>com.pi-dispatch.receiver</string>")
-			.replaceAll("worker.out.log", "receiver.out.log")
-			.replaceAll("worker.err.log", "receiver.err.log");
+			.replace("<string>com.pi-dispatch.worker</string>", () => `<string>com.pi-dispatch.${ctx.which}</string>`)
+			.replaceAll("worker.out.log", () => `${ctx.which}.out.log`)
+			.replaceAll("worker.err.log", () => `${ctx.which}.err.log`);
 	}
 	// The template's two-element ProgramArguments (sh + wrapper) becomes sh + the PACKAGE's wrapper +
 	// the command: absolute node, absolute script. The wrapper path is module-relative (templatesDir),
 	// so it exists in a checkout AND under node_modules — unlike the old repo-root guess.
 	plist = plist.replace(
-		`<string>${ctx.deployDir}/deploy/worker-env-wrapper.sh</string>`,
+		`<string>${xmlText(ctx.deployDir)}/deploy/worker-env-wrapper.sh</string>`,
 		() =>
 			[
-				`<string>${ctx.wrapperSh}</string>`,
-				"<!-- the command the wrapper execs after sourcing ./.env in WorkingDirectory - absolute paths, nothing guessed -->",
-				...execArgv.map((a) => `<string>${a}</string>`),
+				`<string>${xmlText(ctx.wrapperSh)}</string>`,
+				ctx.which === "console" ? "<!-- the command the wrapper execs in WorkingDirectory (it sources no .env for the console: PI_WRAPPER_NO_DOTENV below) - absolute paths, nothing guessed -->" : "<!-- the command the wrapper execs after sourcing ./.env in WorkingDirectory - absolute paths, nothing guessed -->",
+				...execArgv.map((a) => `<string>${xmlText(a)}</string>`),
 			].join("\n\t\t"),
 	);
 	// launchd's default PATH is /usr/bin:/bin — an nvm or Homebrew node is invisible to it. The exec
@@ -734,7 +991,14 @@ function renderPlist(ctx, { pathDirs = [] } = {}) {
 	// With none, the line is byte-identical to the one before (review round 1 of #715), node in /usr/bin included.
 	const fixed = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 	const extra = [...new Set(pathDirs)].filter((d) => d !== dirname(ctx.execPath) && !fixed.includes(d));
-	const envEntries = ["\t\t<key>PATH</key>", `\t\t<string>${[dirname(ctx.execPath), ...extra, ...fixed].join(":")}</string>`];
+	const envEntries = ["\t\t<key>PATH</key>", `\t\t<string>${xmlText([dirname(ctx.execPath), ...extra, ...fixed].join(":"))}</string>`];
+	if (ctx.which === "console") {
+		// Issue #708 (round 1 review): the console reads the deployment's .env itself (`serve --deployment`), only its own
+		// keys and only from a file no other account can change, so the wrapper must not source the whole file into its
+		// environment (every worker secret, each read as this "shell's" and so winning over the file). The wrapper tests
+		// this before its load; PI_ENV_SETUP below still runs when configured.
+		envEntries.push("\t\t<key>PI_WRAPPER_NO_DOTENV</key>", "\t\t<string>1</string>");
+	}
 	if (ctx.envSetup) {
 		// launchd has no EnvironmentFile and no shell in front of ProgramArguments, so the seam is a
 		// VARIABLE the wrapper reads rather than a composed command line: nothing here has to be quoted
@@ -743,10 +1007,10 @@ function renderPlist(ctx, { pathDirs = [] } = {}) {
 		envEntries.push(
 			"\t\t<!-- `pi-dispatch service --env-setup`: worker-env-wrapper.sh sources this file after ./.env.\n\t\t     A path, not a credential. Re-render to change it. -->",
 			"\t\t<key>PI_ENV_SETUP</key>",
-			`\t\t<string>${ctx.envSetup}</string>`,
+			`\t\t<string>${xmlText(ctx.envSetup)}</string>`,
 		);
 	}
-	const workingDir = `<key>WorkingDirectory</key>\n\t<string>${ctx.deployDir}</string>`;
+	const workingDir = `<key>WorkingDirectory</key>\n\t<string>${xmlText(ctx.deployDir)}</string>`;
 	plist = plist.replace(
 		workingDir,
 		() =>
@@ -769,7 +1033,7 @@ function renderPlist(ctx, { pathDirs = [] } = {}) {
 function nssmSequence(ctx) {
 	const service = `pi-dispatch-${ctx.which}`;
 	const logDir = `${ctx.deployDir}\\logs`;
-	const execArgv = ctx.which === "receiver" ? [ctx.execPath, ctx.receiverStart] : [ctx.execPath, ctx.cliPath, "worker"];
+	const execArgv = execArgvFor(ctx);
 	return {
 		service,
 		commands: [
@@ -778,7 +1042,9 @@ function nssmSequence(ctx) {
 			// Same seam as the plist's EnvironmentVariables dict, for the same reason: nssm takes a
 			// NAME=VALUE with no shell between it and the wrapper, so the path needs no quoting and
 			// AppParameters stays byte-identical to the default render.
-			...(ctx.envSetup ? [["set", service, "AppEnvironmentExtra", `PI_ENV_SETUP=${ctx.envSetup}`]] : []),
+			// The console's PI_WRAPPER_NO_DOTENV (issue #708) travels the same way, in the same one property (nssm takes
+			// several NAME=VALUE words there).
+			...(ctx.envSetup || ctx.which === "console" ? [["set", service, "AppEnvironmentExtra", ...(ctx.envSetup ? [`PI_ENV_SETUP=${ctx.envSetup}`] : []), ...(ctx.which === "console" ? ["PI_WRAPPER_NO_DOTENV=1"] : [])]] : []),
 			["set", service, "AppStdout", `${logDir}\\${ctx.which}.out.log`],
 			["set", service, "AppStderr", `${logDir}\\${ctx.which}.err.log`],
 			["set", service, "AppStopMethodConsole", "15000"],
@@ -954,12 +1220,17 @@ async function podmanStackFor(ctx, venue, { readKeeper = false, egress = true } 
 
 async function doRender(ctx) {
 	if (ctx.which === "receiver" && !ctx.receiverStart) return refuseMissingReceiver(ctx);
+	if (ctx.which === "console" && !ctx.consoleEntry) return refuseMissingConsole(ctx);
+	const unrenderable = renderRefusal(ctx);
+	if (unrenderable !== null) return unrenderable;
 	const paths = unitPaths(ctx);
 	if (ctx.platform === "darwin") {
 		ctx.out(`# → ${paths.installPath}\n`);
 		ctx.out(renderPlist(ctx, { pathDirs: openshellPathDirs(ctx, deploymentVenue(ctx)) }));
 		ctx.out(
-			"\n# note: ProgramArguments runs the package's worker-env-wrapper.sh, which sources ./.env in the\n# WorkingDirectory above and then runs the argv that follows it — launchd has no EnvironmentFile.\n# The wrapper also converts a policy refusal (exit 2, EXIT_POLICY) into a clean exit, so KeepAlive\n# never relaunch-loops a refusal into a provider bill.\n",
+			ctx.which === "console"
+				? "\n# note: ProgramArguments runs the package's worker-env-wrapper.sh, which (PI_WRAPPER_NO_DOTENV=1) sources NO\n# .env for the console: `serve --deployment` reads the console's own keys from it. The wrapper converts serve's\n# refusal (exit 2) into a clean exit, so KeepAlive leaves it stopped instead of relaunching it.\n"
+				: "\n# note: ProgramArguments runs the package's worker-env-wrapper.sh, which sources ./.env in the\n# WorkingDirectory above and then runs the argv that follows it — launchd has no EnvironmentFile.\n# The wrapper also converts a policy refusal (exit 2, EXIT_POLICY) into a clean exit, so KeepAlive\n# never relaunch-loops a refusal into a provider bill.\n",
 		);
 		if (ctx.envSetup) {
 			ctx.out(
@@ -998,6 +1269,13 @@ async function doRender(ctx) {
 
 async function doInstall(ctx) {
 	if (ctx.which === "receiver" && !ctx.receiverStart) return refuseMissingReceiver(ctx);
+	if (ctx.which === "console" && !ctx.consoleEntry) return refuseMissingConsole(ctx);
+	const unrenderable = renderRefusal(ctx);
+	if (unrenderable !== null) return unrenderable;
+	if (ctx.which === "console") {
+		const refused = refuseConsoleWithoutOperator(ctx);
+		if (refused !== null) return refused;
+	}
 	const paths = unitPaths(ctx);
 
 	// THE refusal, worker only: one worker per docker daemon (DES-CONCURRENCY-3). The worker's boot
@@ -1103,8 +1381,12 @@ async function installDarwin(ctx, paths, venue = null) {
 	if (enable !== 0) return fail(ctx.err, `launchctl enable gui/${ctx.euid}/${paths.name} failed (exit ${enable})`);
 	ctx.out(`installed ${paths.name} → ${paths.installPath} (bootstrapped into gui/${ctx.euid}; RunAtLoad starts it now and on login)\n`);
 	// The honest note: no pretending a LaunchAgent is a boot daemon. It is the right fit anyway.
+	// The Docker Desktop reason is the worker's (issue #708): the console starts no container, and telling its operator
+	// about a docker socket would explain a choice by a fact that does not apply to it.
 	ctx.out(
-		"note: a LaunchAgent is LOGIN-scoped — it runs while you are logged in, not from boot. That is the honest fit here: Docker Desktop is itself login-scoped, so a boot-time daemon would only wait on a docker socket that appears at login anyway.\n",
+		ctx.which === "console"
+			? "note: a LaunchAgent is LOGIN-scoped — it runs while you are logged in, not from boot, which is when a browser on this Mac can reach it.\n"
+			: "note: a LaunchAgent is LOGIN-scoped — it runs while you are logged in, not from boot. That is the honest fit here: Docker Desktop is itself login-scoped, so a boot-time daemon would only wait on a docker socket that appears at login anyway.\n",
 	);
 	// Issue #707: the openshell venue's gateway, which a LaunchAgent cannot order itself after; Homebrew's service runs it
 	// in the same login session. And the CLI the worker spawns by name, whose directory is now on the plist's PATH.

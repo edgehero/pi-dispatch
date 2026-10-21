@@ -56,6 +56,8 @@ import { ENV_WRITER_FS, ENV_VALUE_UNWRITABLE, envKeyIsBlank, envValueShown, read
 import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
+import { operatorCount, readTokensFile } from "./console-tokens.mjs";
+import { consoleTokensPathFor, installedConsoleUnitPath } from "./service.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf, replaceProxyConfCopy } from "./egress-conf-copy.mjs";
 import { EGRESS_PROXY_IMAGE, MODEL_ENDPOINTS_TARGET, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { endpointsDeclaredIn, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
@@ -159,6 +161,17 @@ function underFolder(p, folder, platform) {
 	return a === b || a.startsWith(`${b}/`);
 }
 
+/**
+ * The operator tokens the console SERVICE of the deployment in `dir` would find (issue #708): the file
+ * `service install --console` judges (`consoleTokensPathFor`: the deployment `.env`'s PI_CONSOLE_TOKENS_FILE, else
+ * console-tokens.json in `dir`), read and judged as `serve` reads it. 0 for a file the console could not use, which is
+ * also no reason to offer the service. One helper with the install, so the line never offers an install that refuses.
+ */
+function defaultConsoleOperators(dir, platform) {
+	const read = readTokensFile({ path: consoleTokensPathFor(dir, platform) });
+	return read.refusal ? 0 : operatorCount(read.file);
+}
+
 export async function runUp(argv = [], deps = {}) {
 	const {
 		env = process.env,
@@ -228,6 +241,13 @@ export async function runUp(argv = [], deps = {}) {
 		gatewayWaitMs = 30_000,
 		// How long one read of the openshell CLI may take before it is killed (review round 1 of #715).
 		openshellReadTimeoutMs = 15_000,
+		// Issue #708: how many operator tokens the console's tokens file holds (0 when it cannot be used), for the closing
+		// "Next:" line that offers the console as a service. A seam so a test need not make an owner-only file.
+		consoleOperators = (dir) => defaultConsoleOperators(dir, platform),
+		// Issue #708 (round 1 review): whether a console unit is already installed for this folder (service.mjs' own
+		// lookup), so the line is not offered twice. On win32 the service is nssm's and is not asked here (no spawn for a
+		// hint), so the line follows the tokens alone there.
+		consoleUnitInstalled = (dir) => platform !== "win32" && installedConsoleUnitPath({ platform, home, cwd: dir }) !== null,
 	} = deps;
 	let { runInitFn, runDoctorFn } = deps;
 	const yes = argv.includes("--yes");
@@ -1130,6 +1150,13 @@ Next:
 	if (venues.podmanUsed) {
 		out("  (podman venue: a worker started by hand reads only its shell, so export the same PI_BACKENDS there first, or run it as a service with `pi-dispatch service install`, which reads .env)\n");
 	}
+	// Issue #708: the console as a service, offered only where it could start (an operator token exists): without one,
+	// `service install --console` refuses, and a "Next:" line that leads to a refusal is not a next step.
+	let consoleReady = false;
+	try {
+		consoleReady = consoleOperators(cwd) > 0 && !consoleUnitInstalled(cwd);
+	} catch {}
+	if (consoleReady) out("  pi-dispatch service install --console\n      keep the operator console running as a service (open it with /dispatch console)\n");
 	// Issue #707: the openshell venues' own next step, said only where one is blessed.
 	if (openshell.used) {
 		out(`  pi-dispatch service install\n      the worker as a ${platform === "darwin" ? "LaunchAgent (the gateway runs in this login session: `brew services start openshell`, the service of OpenShell's release formula, keeps it there)" : `user service that pulls in the gateway's own unit (${OPENSHELL_GATEWAY_UNIT})`}; then \`pi-dispatch doctor\` reads the gateway, its engine and the image back. A worker started by hand reads only its shell, so export the same PI_BACKENDS (and PI_OPENSHELL_ENGINE) there first\n`);

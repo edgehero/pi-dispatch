@@ -9,6 +9,7 @@ import { jobImageFix, registryQualified } from "../src/image-ref.mjs";
 import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
 import { runInit } from "../src/init.mjs";
 import { readPackagedProxyConf } from "../src/egress-conf-copy.mjs";
+import { addToken } from "../src/console-tokens.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_START_SCRIPT } from "../src/valkey-auth.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
@@ -161,6 +162,9 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 			doctorOpts.push(opts);
 			return doctorCode;
 		},
+		// Issue #708: no console tokens unless a test says so; the default reads the real deployment folder.
+		consoleOperators: () => 0,
+		consoleUnitInstalled: () => false,
 		...extra,
 	};
 	return { run: () => runUp(argv, deps), deps, calls, promptCalls, initCalls, initOpts, doctorCalls, doctorOpts, store, text: () => buf.join("") };
@@ -3060,4 +3064,43 @@ test("up on openshell: the gateway list's shapes, the poll's wall-clock deadline
 	assert.equal(await nobus.run(), 1);
 	assert.match(nobus.text(), /this shell reaches no user manager to ask for its unit/);
 	assert.doesNotMatch(nobus.text(), /has no openshell-gateway\.service/);
+});
+
+test("up's closing Next: offers the console as a service only where an operator token exists (#708)", async () => {
+	const line = "  pi-dispatch service install --console\n      keep the operator console running as a service (open it with /dispatch console)\n";
+	const without = harness({ plan: green, argv: ["--yes"] });
+	await without.run();
+	assert.ok(!without.text().includes("service install --console"), "no token, so the install would refuse: no line");
+	const asked = [];
+	const withToken = harness({ plan: green, argv: ["--yes"], extra: { consoleOperators: (dir) => (asked.push(dir), 1) } });
+	await withToken.run();
+	const text = withToken.text();
+	assert.ok(text.includes(line), text);
+	assert.ok(text.indexOf(line) > text.indexOf("Next:"), "among up's own next steps");
+	assert.deepEqual(asked, ["/deploy"], "asked about this deployment's folder");
+	const installed = harness({ plan: green, argv: ["--yes"], extra: { consoleOperators: () => 1, consoleUnitInstalled: (dir) => dir === "/deploy" } });
+	await installed.run();
+	assert.ok(!installed.text().includes("service install --console"), "a console unit is already installed for this folder: not offered again");
+	const broken = harness({ plan: green, argv: ["--yes"], extra: { consoleOperators: () => { throw new Error("EACCES"); } } });
+	await broken.run();
+	assert.ok(!broken.text().includes("service install --console"), "a tokens read that fails offers nothing and stops nothing");
+});
+
+test("up's default console read: the deployment folder's tokens file, judged as serve judges it (#708)", { skip: process.platform === "win32" }, async () => {
+	const dir = tempDir("pi-up-708-");
+	const run = async (env = { PI_PROVIDER: "anthropic" }) => {
+		// undefined puts runUp's own default back (a destructuring default applies to undefined).
+		const h = harness({ plan: green, argv: ["--yes"], cwd: dir, env, extra: { consoleOperators: undefined } });
+		await h.run();
+		return h.text().includes("service install --console");
+	};
+	assert.equal(await run(), false, "no tokens file");
+	addToken({ path: join(dir, "console-tokens.json"), name: "view", role: "viewer" });
+	assert.equal(await run(), false, "a viewer alone cannot start the console");
+	addToken({ path: join(dir, "console-tokens.json"), name: "rob", role: "operator" });
+	assert.equal(await run(), true);
+	// The file the SERVICE reads, as `service install --console` judges it: this shell's export is not the unit's.
+	assert.equal(await run({ PI_PROVIDER: "anthropic", PI_CONSOLE_TOKENS_FILE: join(dir, "elsewhere.json") }), true, "this shell's PI_CONSOLE_TOKENS_FILE is not what the service reads");
+	writeFileSync(join(dir, ".env"), "PI_CONSOLE_TOKENS_FILE=elsewhere.json\n", { mode: 0o600 });
+	assert.equal(await run(), false, "the deployment .env's PI_CONSOLE_TOKENS_FILE names the file the service reads");
 });

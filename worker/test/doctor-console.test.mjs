@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CONSOLE_ENV_KEYS, consoleChecks, consoleListenOf } from "../src/doctor.mjs";
+import { CONSOLE_ENV_KEYS, consoleChecks, consoleListenOf, consoleServiceChecks } from "../src/doctor.mjs";
+import { runService } from "../src/service.mjs";
 import { collectChecks } from "./helpers/doctor.mjs";
 import { addToken } from "../src/console-tokens.mjs";
 import { makeConsoleAudit } from "../src/console-audit.mjs";
@@ -245,4 +246,88 @@ test("collectChecks: the console lines judge the tokens file against the trigger
 
 test("CONSOLE_ENV_KEYS is the contract's PI_CONSOLE_* set", () => {
 	assert.deepEqual([...CONSOLE_ENV_KEYS].sort(), ["PI_CONSOLE_ALLOWED_HOSTS", "PI_CONSOLE_BIND_PUBLIC", "PI_CONSOLE_IDLE_MINUTES", "PI_CONSOLE_LISTEN", "PI_CONSOLE_MAX_HOURS", "PI_CONSOLE_MAX_STREAMS", "PI_CONSOLE_READ_ONLY", "PI_CONSOLE_TOKENS_FILE"]);
+});
+
+// Issue #708: whether a service unit keeps this deployment's console running, and whether the console answers.
+
+/** The console unit `service render --console` writes for `cwd`, on `platform`: the real render, so doctor reads what install writes. */
+async function renderedConsoleUnit(platform, cwd) {
+	const out = [];
+	const code = await runService(["render", "--console"], { platform, cwd, home: "/home/t", execPath: "/n/bin/node", resolveConsole: () => "/pkg/dist/console.mjs", out: (s) => out.push(s), err: () => {}, env: {}, findBin: () => null });
+	assert.equal(code, 0);
+	return out.join("");
+}
+
+const RUNNING = async () => ({ state: "running", target: "127.0.0.1:4790" });
+const DOWN = async () => ({ state: "not-running", target: "127.0.0.1:4790", reason: "nothing listens there" });
+
+test("consoleServiceChecks: a unit for this deployment and the console answering is ok; installed but not answering fails", async () => {
+	for (const [platform, path] of [["linux", "/home/t/.config/systemd/user/pi-dispatch-console.service"], ["darwin", "/home/t/Library/LaunchAgents/com.pi-dispatch.console.plist"]]) {
+		const cwd = "/srv/deploy";
+		const text = await renderedConsoleUnit(platform, cwd);
+		const seams = { platform, cwd, home: "/home/t", fileExists: (p) => p === path, readUnit: (p) => (p === path ? text : assert.fail(`read ${p}`)) };
+		assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), [`ok console: the service ${JSON.stringify(path)} keeps it running, and it answers on 127.0.0.1:4790`], platform);
+		const down = await consoleServiceChecks({}, { ...seams, consoleProbe: DOWN });
+		assert.deepEqual(labels(down), [`fail console: the service ${JSON.stringify(path)} is installed for this deployment, but nothing answers on 127.0.0.1:4790 (nothing listens there)`], platform);
+		assert.match(down[0].fix, /pi-dispatch service status --console/);
+		assert.match(down[0].fix, /console-audit\/\.console\.lock can name a pid another process has since taken.*remove the lock/, "the stale-lock case after a crash");
+		assert.match(down[0].fix, platform === "linux" ? /journalctl --user -u pi-dispatch-console/ : /\/srv\/deploy\/logs\/console\.err\.log/);
+		// A unit of ANOTHER deployment's folder is not this one's.
+		const elsewhere = await consoleServiceChecks({}, { ...seams, cwd: "/srv/other", consoleProbe: DOWN });
+		assert.equal(elsewhere[0].warn, true, `${platform}: no unit for this folder, so a warning`);
+	}
+});
+
+test("consoleServiceChecks: no unit warns while nothing runs, and is ok (started by hand) while the console answers", async () => {
+	const seams = { platform: "linux", cwd: "/srv/deploy", home: "/home/t", fileExists: () => false };
+	const none = await consoleServiceChecks({}, { ...seams, consoleProbe: DOWN });
+	assert.deepEqual(labels(none), ["warn console: not running on 127.0.0.1:4790 (nothing listens there), and no service unit keeps it running"]);
+	assert.match(none[0].fix, /pi-dispatch service install --console/);
+	assert.match(none[0].fix, /pi-dispatch-console serve/);
+	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), ["ok console: answers on 127.0.0.1:4790, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)"]);
+});
+
+test("consoleServiceChecks: the probe is asked with the resolved env, an unknown answer is said, and an unusable listen asks nothing", async () => {
+	const seams = { platform: "linux", cwd: "/srv/deploy", home: "/home/t", fileExists: () => false };
+	const asked = [];
+	const probe = async (env) => (asked.push(env.PI_CONSOLE_LISTEN), { state: "unknown", reason: "PI_CONSOLE_LISTEN asks for port 0" });
+	assert.deepEqual(labels(await consoleServiceChecks({ PI_CONSOLE_LISTEN: "127.0.0.1:0" }, { ...seams, consoleProbe: probe })), ["ok console: no service unit keeps it running; whether it answers is not checked (PI_CONSOLE_LISTEN asks for port 0)"]);
+	assert.deepEqual(asked, ["127.0.0.1:0"]);
+	for (const listen of ["localhost:4790", "0.0.0.0:4790"]) {
+		assert.deepEqual(await consoleServiceChecks({ PI_CONSOLE_LISTEN: listen }, { ...seams, consoleProbe: () => assert.fail("probed") }), [], `${listen}: consoleChecks already fails it`);
+	}
+	const threw = await consoleServiceChecks({}, { ...seams, consoleProbe: async () => { throw new Error("boom"); } });
+	assert.match(threw[0].label, /whether it answers is not checked \(the probe failed \(boom\)\)/);
+});
+
+test("consoleServiceChecks on win32: the nssm service by name", async () => {
+	const spawnFor = (code) => () => {
+		const handlers = {};
+		const stream = () => ({ on() { return this; } });
+		queueMicrotask(() => handlers.close?.(code));
+		return { stdout: stream(), stderr: stream(), stdin: { on() { return this; }, end() {} }, kill() {}, on(ev, cb) { handlers[ev] = cb; return this; } };
+	};
+	const seams = { platform: "win32", cwd: "C:\\deploy", home: "C:\\Users\\t" };
+	assert.match((await consoleServiceChecks({}, { ...seams, spawn: spawnFor(0), consoleProbe: DOWN }))[0].label, /^console: the service "pi-dispatch-console" is installed/);
+	assert.equal((await consoleServiceChecks({}, { ...seams, spawn: spawnFor(3), consoleProbe: DOWN }))[0].warn, true);
+});
+
+test("collectChecks: the console's service line follows its other lines, and a deployment without a console is never probed", { skip: !posix }, async () => {
+	const d = deployment();
+	const spawn = () => {
+		const handlers = {};
+		const stream = () => ({ on() { return this; } });
+		const child = { stdout: stream(), stderr: stream(), stdin: { on() { return this; }, end() {} }, kill() {}, on(ev, cb) { handlers[ev] = cb; return this; } };
+		queueMicrotask(() => handlers.close?.(1));
+		return child;
+	};
+	let probes = 0;
+	const seams = (consoleProbe) => ({ out: () => {}, cwd: d.cwd, home: d.cwd, spawn, probeValkey: async () => false, nodeVersion: "22.19.0", fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8"), consoleProbe: async (env) => (probes++, consoleProbe(env)) });
+	const none = await collectChecks({ ...d.env, PI_PROVIDER: "anthropic" }, seams(RUNNING));
+	assert.deepEqual(none.filter((c) => c.label.startsWith("console:")), []);
+	assert.equal(probes, 0);
+	withToken(d);
+	const lines = labels((await collectChecks({ ...d.env, PI_PROVIDER: "anthropic" }, seams(DOWN))).filter((c) => c.label.startsWith("console:")));
+	assert.equal(lines.at(-1), "warn console: not running on 127.0.0.1:4790 (nothing listens there), and no service unit keeps it running");
+	assert.equal(probes, 1);
 });

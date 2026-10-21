@@ -80,6 +80,43 @@ Host it likes, so against a job the token is what holds. A socket only you can o
 Docker Desktop, use it. It also stops another
 account from spending the login rate limit and slowing your own sign-in.
 
+## Keep it running as a service
+
+`serve` stops with its terminal. To keep the console running, install it as a service from the deployment folder:
+
+```bash
+pi-dispatch service install --console
+```
+
+That is a LaunchAgent on macOS, a `systemctl --user` unit on Linux (`--system` prints the sudo commands instead) and
+an nssm service on Windows, like the worker's ([`README.md`](../README.md#run-as-a-service)). The unit runs
+`pi-dispatch-console serve --deployment <this folder>`, so it reads this folder's `.env` and tokens file.
+`service status --console`, `start`, `stop`, `restart` and `uninstall` take the same flag.
+
+`install` refuses in two cases, before it writes anything:
+
+- the console is not installed where it can find it. Install the admin package where the worker is installed:
+  `npm install -g @edgehero/pi-dispatch-admin` beside a global worker, or `npm install @edgehero/pi-dispatch-admin` in
+  the folder whose `node_modules` holds the worker. A `pi-dispatch-console` on your PATH is used only when it is that
+  package's own file (a pnpm or Volta shim is not), and on Windows the PATH is not searched;
+- the tokens file holds no operator token: `serve` would refuse to start, so the service would never run. Add one
+  with `pi-dispatch-console token add --name <you> --role operator` first.
+
+When `serve` refuses (exit 2: no operator token, another console holding the lock, an unusable address), the service
+stays stopped instead of restarting. Fix the cause, then `pi-dispatch service start --console`.
+
+After a crash the lock (`console-audit/.console.lock` in your logs folder) still names the dead console's pid, and the
+next start takes it over. If another process has taken that pid since, every start refuses and names it: when that
+pid is not a console, remove the lock file and start the service again.
+
+The service does not load your `.env` into its environment: `serve --deployment` reads the file itself and takes only
+the console's own settings from it, so the worker's secrets never reach the console process.
+
+`pi-dispatch doctor` says whether a console service is installed for the deployment and whether the console answers
+on its address (one `GET /healthz` to the loopback address or the socket, never anywhere else). An installed service
+that does not answer is a failure; no service and nothing running is a warning. `pi-dispatch up` names the install
+command once an operator token exists.
+
 ## From another machine
 
 Forward a local port over SSH and open it in your browser. To a console on the default TCP port:
@@ -203,6 +240,9 @@ set). It then checks:
 - `PI_CONSOLE_LISTEN` is a value `serve` would accept;
 - `PI_CONSOLE_BIND_PUBLIC=1` (a warning, every time);
 - the audit chain verifies (a warning when it does not).
+- whether a console service is installed for this folder (`pi-dispatch service install --console`) and whether the
+  console answers on its address: a failure when the service is installed and nothing answers, a warning when there
+  is no service and nothing runs.
 
 ## The screens
 

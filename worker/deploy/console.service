@@ -1,0 +1,52 @@
+# UNTESTED EXAMPLE (DES-OPERATOR-CONSOLE) -- a starting point, not a shipped, verified unit. Adapt it.
+#
+# The operator console (`pi-dispatch-console serve`, issue #640) as a service, so it keeps running after the terminal
+# that started it closes (issue #708). `pi-dispatch service install --console` renders this file for THIS host: the
+# node, the console package's own entry (admin/dist/console.mjs of @edgehero/pi-dispatch-admin, wherever npm put it)
+# and the deployment folder are substituted, so prefer that to adapting it by hand.
+#
+# The console listens on PI_CONSOLE_LISTEN (default 127.0.0.1:4790, loopback only) and reads its tokens file
+# (PI_CONSOLE_TOKENS_FILE, default console-tokens.json in the deployment folder). It never needs Docker or Podman, so
+# this unit is ordered after nothing but the network and has no Quadlet companion. Reach it from another machine
+# with ssh -L, never by binding a public address: it speaks plain HTTP (docs/console.md).
+#
+# NO EnvironmentFile= on purpose: `serve --deployment` reads the deployment's `.env` itself, takes only its own
+# PI_CONSOLE_* keys and the Valkey keys it needs from it, and refuses a `.env` another account can change. Loading the
+# whole file into the process environment would hand it every worker secret (the provider key, the forge token) and
+# would make each of those keys read as this shell's, which wins over the file and skips that trust check.
+# WorkingDirectory / User / node path below are PLACEHOLDERS: set them to wherever your deployment folder is and
+# whoever owns it (the tokens file must be owned by that account, mode 0600, or serve refuses).
+
+[Unit]
+Description=pi-dispatch operator console (the web console over the queue, runs and spend; loopback by default)
+# For a system unit. In a --user unit these two are inert (the user manager has no network-online.target), which is
+# harmless: the console binds loopback or a socket, and its Valkey reads retry on their own.
+After=network-online.target
+Wants=network-online.target
+# Crash-loop bound, as the worker and receiver units carry it: at most StartLimitBurst restarts within
+# StartLimitIntervalSec, then systemd stops trying. Pairs with Restart=on-failure below.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/pi-dispatch
+ExecStart=/usr/bin/node /usr/lib/node_modules/@edgehero/pi-dispatch-admin/dist/console.mjs serve --deployment /opt/pi-dispatch
+Restart=on-failure
+RestartSec=5
+# Exit 2 is the console's refusal: no tokens file, no operator token in it, an unusable PI_CONSOLE_LISTEN, or the
+# single-instance lock held by another console of this deployment. The next start reads the same files and fails
+# the same way, so it is never restarted; add a token (`pi-dispatch-console token add`) or fix the setting, then
+# start the unit again.
+# A crash leaves the lock (<PI_LOGS_DIR>/console-audit/.console.lock) behind holding a dead pid, which the next start
+# takes over. But if that pid has since been reused by another process (or by another account's, which reads as
+# alive), every start refuses with exit 2 and the unit stays stopped: when the pid the refusal names is not a console,
+# remove the lock file and start the unit again.
+RestartPreventExitStatus=2
+# serve handles SIGTERM: it ends the open streams, closes the listener and releases the lock, then exits.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

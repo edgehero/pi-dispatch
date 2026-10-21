@@ -1644,10 +1644,12 @@ test("doctor: on win32 the seam comes back from `nssm get`, NULs and all", async
 		[
 			["get", "pi-dispatch-worker", "AppEnvironmentExtra"],
 			["get", "pi-dispatch-receiver", "AppEnvironmentExtra"],
+			// Issue #708: and the console's service, the third this command installs.
+			["get", "pi-dispatch-console", "AppEnvironmentExtra"],
 		],
-		"both daemons are asked, and nothing else is",
+		"every service is asked, and nothing else is",
 	);
-	assert.equal(text().match(/env-setup script present/g).length, 1, "one script serving both daemons is one finding");
+	assert.equal(text().match(/env-setup script present/g).length, 1, "one script serving every service is one finding");
 	assert.doesNotMatch(text(), /group\/world-writable/, "win32 stat modes are synthetic -- the mode findings cannot exist there");
 });
 

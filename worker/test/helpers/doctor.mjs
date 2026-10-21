@@ -15,12 +15,16 @@ const NO_RECORDS = () => [];
 // history passes its own `readCapacity`.
 // And the default itself is refused in any process that loads this helper, so a test that drops the seam fails loudly.
 forbidDefaultCapacityRead();
+// Issue #708: the console's liveness probe sends a GET to 127.0.0.1:4790 (or the deployment's PI_CONSOLE_LISTEN), which
+// on a developer's host may be a REAL console. Here the seam defaults to "nothing answers"; a test that wants another
+// answer passes its own `consoleProbe`.
+export const NO_CONSOLE = async () => ({ state: "not-running", target: "127.0.0.1:4790", reason: "nothing listens there" });
 export const NO_CAPACITY = async () => ({ records: [], coverage: { source: "local", reason: null, localHost: null, localHosts: [], local: null, mirror: null } });
 
 export function runDoctor(shellVars, deps = {}) {
-	return realRunDoctor(shellVars, { readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, ...deps });
+	return realRunDoctor(shellVars, { readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...deps });
 }
 
 export function collectChecks(shellVars, seams = {}) {
-	return realCollectChecks(shellVars, { readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, ...seams });
+	return realCollectChecks(shellVars, { readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...seams });
 }

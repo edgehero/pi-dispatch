@@ -47,8 +47,8 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
 
   pi-dispatch worker       drain the queue (run this in another terminal, or as a service)
   pi-dispatch-receiver     webhook receiver for forge triggers, its own bin (see docs/github.md)
-  pi-dispatch service <render|install|uninstall|status|start|stop|restart> [--receiver] [--user|--system] [--force]
-                           run the worker (or --receiver) as an OS service — the deploy/ templates
+  pi-dispatch service <render|install|uninstall|status|start|stop|restart> [--receiver|--console] [--user|--system] [--force]
+                           run the worker (or --receiver, or --console) as an OS service — the deploy/ templates
                            rendered with this host's real paths, installed user-level;
                            \`service restart --drain\` lets the in-flight job finish first
   pi-dispatch egress render

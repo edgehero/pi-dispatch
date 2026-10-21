@@ -98,7 +98,7 @@ import { runLiveProbes } from "./live-probes.mjs";
 import { VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
 import { urlShown, valkeyContextFromResolution, valkeyPasswordFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
-import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
+import { installedConsoleUnitPath, installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
 import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
 import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
@@ -241,6 +241,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Issue #599, phase 2: the capacity line's read of the run history (the run mirror and the logs directory).
 		// Undefined means the default, which reads the deployment's real Valkey and files.
 		readCapacity,
+		// Issue #708: whether the operator console answers (`probeConsole`, console-probe.mjs). Undefined means the default,
+		// which sends one GET /healthz to a loopback address or the socket, so a test passes its own.
+		consoleProbe,
 		// --live (issue #278, INT-LIVE-PROBE-CONTRACT): read the backend declarations back off short-lived real containers.
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
@@ -425,7 +428,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -4325,7 +4328,12 @@ export async function collectChecks(shellVars, seams) {
 	// starts from a copy of this shell), so nothing here reads the shell a second way; and the resolution is apart from the
 	// service record, so a console key is never reported as a service's.
 	const consoleShell = Object.fromEntries(CONSOLE_ENV_KEYS.filter((k) => Object.hasOwn(env, k)).map((k) => [k, env[k]]));
-	checks.push(...consoleChecks({ ...env, ...resolveServiceEnv({ env: consoleShell, file: serviceEnvFile, keys: CONSOLE_ENV_KEYS }).env }, { cwd, home, platform, folders, skillsDirs }));
+	const consoleEnv = { ...env, ...resolveServiceEnv({ env: consoleShell, file: serviceEnvFile, keys: CONSOLE_ENV_KEYS }).env };
+	const consoleLines = consoleChecks(consoleEnv, { cwd, home, platform, folders, skillsDirs });
+	checks.push(...consoleLines);
+	// Issue #708: whether a service keeps the console running, and whether it answers. Only for a deployment that has a
+	// console at all (the lines above), so a deployment that never set one up meets no probe.
+	if (consoleLines.length > 0) checks.push(...(await consoleServiceChecks(consoleEnv, { ...seams, cwd, home, platform })));
 
 	section("limits");
 	// Issue #498: a BARE repo scope (`acme/web`) matches that repo on every forge, so with triggers on more than one forge
@@ -5294,6 +5302,67 @@ export function consoleChecks(env, { cwd = process.cwd(), fs = nodeFs, uid = pro
 		checks.push({ ok: true, label: `console: audit log chain intact (${audit.rows} row${audit.rows === 1 ? "" : "s"}${start})` });
 	}
 	return checks;
+}
+
+/** The console's service name on Windows, where nssm keeps one machine-scoped service per name (service.mjs). */
+const CONSOLE_NSSM_SERVICE = "pi-dispatch-console";
+
+/**
+ * The console service unit installed for the deployment in `cwd` (issue #708): `{ path }` (the unit file, or the nssm
+ * service's name on win32), else null. Read as the worker's unit is (`installedWorkerUnit`): a unit FILE whose
+ * WorkingDirectory is this folder (`readUnitSeam`), in either scope; on win32 the nssm service by name, since nssm
+ * keeps the folder apart (AppDirectory) and there is one such service per machine.
+ */
+async function installedConsoleUnit({ platform, home, cwd, fileExists, readUnit = (path) => readFileSync(path, "utf8"), spawn }) {
+	if (platform === "win32") {
+		if (typeof spawn !== "function") return null;
+		const got = await runCmdCapture(spawn, "nssm", ["status", CONSOLE_NSSM_SERVICE]);
+		return got.code === 0 ? { path: CONSOLE_NSSM_SERVICE } : null;
+	}
+	const path = installedConsoleUnitPath({ platform, home, cwd, fileExists, readUnit });
+	return path === null ? null : { path };
+}
+
+/**
+ * The console's service lines (issue #708): whether a service unit keeps the console of this deployment running, and
+ * whether the console answers (`probeConsole`: one GET /healthz to the loopback address or the socket it binds, 1 s).
+ *   - a unit installed and the console answering: ✓;
+ *   - a unit installed and nothing answering: ✗, since the service exists to keep it answering (`serve` exits 2 on a
+ *     refusal and the unit then stays stopped, so the unit's log says which);
+ *   - no unit and nothing answering: ⚠, with the install command;
+ *   - no unit and the console answering: ✓, saying it was started by hand and stops with its terminal;
+ *   - an address the probe may not or cannot ask (port 0, a non-loopback bind): the unit line alone, and why the
+ *     answer is not known.
+ * NOTHING when the console could not start on its listen address at all: `consoleChecks` already fails that line, and a
+ * second line saying it does not answer would be the same fact twice. `env` carries the console keys resolved as
+ * `collectChecks` resolves them; no other key is read. Seams: `consoleProbe(env)`, `fileExists`, `readUnit`, `spawn`.
+ */
+export async function consoleServiceChecks(env, seams = {}) {
+	const { platform = process.platform, cwd = process.cwd() } = seams;
+	const listen = consoleListenOf(env.PI_CONSOLE_LISTEN, platform);
+	if (listen.refusal || (!listen.loopback && env.PI_CONSOLE_BIND_PUBLIC !== "1")) return [];
+	const unit = await installedConsoleUnit({ ...seams, platform, cwd, fileExists: seams.fileExists ?? existsSync });
+	const probe = seams.consoleProbe ?? (async (e) => (await import("./console-probe.mjs")).probeConsole(e));
+	let answer;
+	try {
+		answer = await probe(env);
+	} catch (err) {
+		answer = { state: "unknown", reason: `the probe failed (${escapeControls(err?.message ?? String(err))})` };
+	}
+	const at = answer.target ? ` on ${escapeControls(answer.target)}` : "";
+	const why = answer.reason ? ` (${escapeControls(answer.reason)})` : "";
+	const unitShown = unit ? quotedShown(unit.path) : null;
+	const logs = platform === "linux" ? "`journalctl --user -u pi-dispatch-console` (or without --user for a system unit)" : platform === "darwin" ? `${join(cwd, "logs", "console.err.log")}` : `${join(cwd, "logs", "console.err.log")} and \`nssm status ${CONSOLE_NSSM_SERVICE}\``;
+	if (answer.state === "unknown") {
+		return [{ ok: true, label: `console: ${unit ? `the service ${unitShown} serves this deployment; ` : "no service unit keeps it running; "}whether it answers is not checked${why}` }];
+	}
+	if (unit && answer.state === "running") return [{ ok: true, label: `console: the service ${unitShown} keeps it running, and it answers${at}` }];
+	if (unit) {
+		const lock = join(logsDirPath(env, seams.home), "console-audit", ".console.lock");
+		return [{ ok: false, label: `console: the service ${unitShown} is installed for this deployment, but nothing answers${at}${why}`, fix: `\`pi-dispatch service status --console\` says whether it runs, and ${logs} says why it stopped: \`pi-dispatch-console serve\` exits 2 on a refusal (no operator token, the lock held by another console, an address in use), and the unit then stays stopped until it is started again (\`pi-dispatch service start --console\`). After a crash the lock ${escapeControls(lock)} can name a pid another process has since taken, which keeps every start refusing: when that pid is not a console, remove the lock, then start the unit` }];
+	}
+	if (answer.state === "running") return [{ ok: true, label: `console: answers${at}, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)` }];
+	return [{ ok: false, warn: true, label: `console: not running${at}${why}, and no service unit keeps it running`, fix: "`pi-dispatch service install --console` keeps it running (it needs an operator token); or start it in a terminal with `pi-dispatch-console serve`" }];
 }
 
 /**
@@ -7830,7 +7899,8 @@ export function allowlistHostAliases(text) {
 }
 
 /**
- * The worker and receiver services installed for THIS folder, as `[{ which, source, setup }]` (`setup` null for a unit
+ * The services installed for THIS folder (the worker, the receiver and, since issue #708, the console), as
+ * `[{ which, source, setup }]` (`setup` null for a unit
  * rendered without `--env-setup`): an installed unit whose WorkingDirectory is this folder (systemd, launchd), or the
  * nssm service by name on win32, where nssm keeps the folder in a separate AppDirectory property and there is exactly
  * one machine-scoped service per name. Read ONCE (issue #481, PR #485's final review) and shared by the env-setup lines
@@ -7840,7 +7910,7 @@ async function installedServices(seams) {
 	const { cwd, spawn, fileExists, platform, home } = seams;
 	const found = [];
 	if (platform === "win32") {
-		for (const which of ["worker", "receiver"]) {
+		for (const which of ["worker", "receiver", "console"]) {
 			const service = `pi-dispatch-${which}`;
 			const got = await runCmdCapture(spawn, "nssm", ["get", service, "AppEnvironmentExtra"]);
 			// Not installed, or nssm not on PATH: silence. Same doctrine as check-ignore below -- a check
