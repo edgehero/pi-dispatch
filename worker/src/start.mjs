@@ -61,7 +61,7 @@ import { hostQueueName, makeQueue, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
-import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, hostBackendsField, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { makeOpenshellBackend, makeOpenshellReaper, openshellBootVersions } from "./backend-openshell.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
@@ -1017,10 +1017,14 @@ export async function startWorker(
 	// Issue #684: the openshell venue's releases, read once at boot (the half #683 left to the blessing). A CLI or a gateway
 	// at another release than the one this venue was measured on refuses the boot (exit 2); a CLI that does not answer is
 	// restarted into (exit 1); a gateway that does not answer refuses nothing, since every job's preflight reads it again.
+	// Issue #712: whether the gateway is on this host, as the boot read it, for the registry row's `backends` word.
+	// `unknown` while not read (a gateway down at boot): a word published per beat must not spawn the CLI per beat.
+	let openshellGatewayWord = "unknown";
 	if (openshellBlessed) {
 		const versions = await readOpenshellVersionsFn({ gateway: config.openshell.gateway });
 		if (versions?.refusal) throw versions.transient ? new Error(versions.refusal) : configError(versions.refusal);
 		if (versions?.gatewayDown) log("openshell_gateway_down_at_boot", { gateway: config.openshell.gateway });
+		if (typeof versions?.gatewayLocal === "boolean") openshellGatewayWord = versions.gatewayLocal ? "local" : "remote";
 	}
 	// Issue #448: where a local job runs on rootful Podman's Docker API service on this host, the containers.conf that
 	// service reads (the system chain, root's own, the unit's CONTAINERS_CONF) and whether the running service started
@@ -2148,6 +2152,10 @@ export async function startWorker(
 			if (typeof snap?.seeded !== "boolean") return "";
 			return snap.seeded ? "listed" : `unlisted:${(snap.unseeded ?? []).join(",")}`;
 		},
+		// Issue #712: the venues this host blesses (the first is its default), its floor and its OpenShell engine and
+		// gateway word, for the console's and the panel's Venues view (`hostBackendsField`: names and fixed words only).
+		// A value, not a thunk: every part is boot configuration or the boot's gateway read, none changes without a restart.
+		backends: hostBackendsField({ backends: config.backends, backendFloor: config.backendFloor, openshellEngine: config.openshell?.engine ?? null, gatewayWord: openshellGatewayWord }),
 	});
 
 

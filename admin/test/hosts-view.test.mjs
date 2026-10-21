@@ -201,7 +201,7 @@ test("u in the view reads the 7 days again, keeping the last reading on screen, 
   await flush();
   assert.match(textAt(comp, 80), /last 7d to 12:00 UTC: busy 6\.6%/, "the reading is labelled with the moment it was taken");
   const footer = comp.render(80).map(stripAnsi).find((l) => l.includes("esc back"));
-  assert.match(footer, /u refresh {2}· {2}esc back/);
+  assert.match(footer, /u refresh {2}· {2}v venues {2}· {2}esc back/);
   assert.ok(!footer.includes("…"), "the footer fits 80");
   comp.handleInput("u");
   await flush();
@@ -463,7 +463,7 @@ test("below the frame's minimum the view degrades to plain lines with no SGR, in
   }
   const nan = comp.render(NaN);
   assert.equal(nan[0], "hosts · 3 live · last 7d", "the title leads the plain lines");
-  assert.equal(nan[nan.length - 1], "u refresh · esc back");
+  assert.equal(nan[nan.length - 1], "u refresh · v venues · esc back");
   await comp.dispose();
 });
 
@@ -513,6 +513,9 @@ test("the tick's snapshot carries each row's live fields through the worker's al
       // a raw row as an unparsing reader hands it: one good entry, one hostile id the allowlist drops
       jobs: JSON.stringify([{ id: "gh-1", p: "web", m: 4096, c: 200, at: AT - 60_000 }, { id: "gh-\u001b[2J", p: "web", at: AT }]),
       jobsMore: "1",
+      // Issue #712: the advertised profiles and the venues, each through its allowlist.
+      caps: "s:deploy,w:ci,x:bad,s:Bad Name",
+      backends: "blessed=local,openshell;floor=egress:enforced;os=docker:local",
     },
     { name: "mini2", routes: "true", concurrency: "2", jobs: "not json", jobsMore: "0", staleMs: -5 },
   ];
@@ -534,7 +537,10 @@ test("the tick's snapshot carries each row's live fields through the worker's al
     jobsUnreadable: false,
     staleMs: 1500,
     routes: "true",
+    caps: ["s:deploy", "w:ci"],
+    backends: { blessed: ["local", "openshell"], default: "local", floor: { egress: "enforced" }, openshell: { engine: "docker", gateway: "local", modes: ["copy"] } },
   }, "these keys and no other; the dropped entry joins jobsMore");
+  assert.deepEqual([snap.hostBudgets[1].caps, snap.hostBudgets[1].backends], [[], null], "a row without either: none advertised, no venues published");
   assert.equal(snap.hostBudgets[1].jobs, null);
   assert.equal(snap.hostBudgets[1].jobsUnreadable, true, "a value that is not a list is unreadable, never an empty list");
   assert.equal(snap.hostBudgets[1].staleMs, null, "a negative age is not an age");

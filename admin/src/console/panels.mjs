@@ -56,7 +56,7 @@ import { fmtCost } from "../panel.mjs";
 import { renderWhatIf } from "../render.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
-import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf } from "../read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, venuesView, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
@@ -281,12 +281,23 @@ function beatCell(staleMs) {
   return staleMs > MIN ? html`<td class="warn">${ageText(staleMs)} ago</td>` : html`<td>${ageText(staleMs)} ago</td>`;
 }
 
+/**
+ * A host's blessed venues, compact (issue #712): `local (default), openshell`, the first the default as PI_BACKENDS reads
+ * it; "not published" for a worker from before the registry's `backends` field, never a guessed `local`.
+ */
+function blessedText(h) {
+  const blessed = Array.isArray(h?.backends?.blessed) ? h.backends.blessed : null;
+  if (blessed === null) return html`<span class="note">not published</span>`;
+  if (blessed.length === 0) return "none";
+  return blessed.map((n, i) => (i === 0 ? `${n} (default)` : n)).join(", ");
+}
+
 export const overviewHosts = fromSnapshot("Hosts online", (s) => {
   const hosts = Array.isArray(s.hostBudgets) ? s.hostBudgets : [];
   return table(
     "Hosts online",
-    ["Host", { num: "Slots" }, { num: "Running" }, "Last beat"],
-    hosts.map((h) => html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td class="num">${Array.isArray(h.jobs) ? h.jobs.filter((j) => !j.o).length : "unknown"}</td>${beatCell(h.staleMs)}</tr>`),
+    ["Host", { num: "Slots" }, { num: "Running" }, "Venues", "Last beat"],
+    hosts.map((h) => html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td class="num">${Array.isArray(h.jobs) ? h.jobs.filter((j) => !j.o).length : "unknown"}</td><td>${blessedText(h)}</td>${beatCell(h.staleMs)}</tr>`),
     "No host is registered. A worker registers when it starts.",
   );
 });
@@ -385,7 +396,7 @@ export const overviewActive = fromSnapshot("Active jobs", (s, view) => activeTab
 // ---- runs ------------------------------------------------------------------------------------------------------------
 
 /** What each filter field is called on the form. */
-const FILTER_LABELS = Object.freeze({ repo: "Repository", kind: "Forge", flow: "Flow", trigger: "Trigger", project: "Project", host: "Host", outcome: "Outcome", reason: "Reason", model: "Model", q: "Target contains" });
+const FILTER_LABELS = Object.freeze({ repo: "Repository", kind: "Forge", flow: "Flow", trigger: "Trigger", project: "Project", host: "Host", backend: "Venue", outcome: "Outcome", reason: "Reason", model: "Model", q: "Target contains" });
 
 /** The runs filter, a plain GET form: it works without the script, and its values are the query's, escaped. */
 export function runsFilter(view) {
@@ -406,12 +417,20 @@ function runsHref(filter, extra = {}) {
   return qs === "" ? "/runs" : `/runs?${qs}`;
 }
 
+/**
+ * The venue a run used (issue #712): its record's `backend`, or `local` for a record that names none, which was written
+ * before venues were recorded (`UNATTRIBUTED_BACKEND`, the worker's own reading, and the runs filter's).
+ */
+function runVenue(r) {
+  return typeof r?.backend === "string" && r.backend !== "" ? r.backend : UNATTRIBUTED_BACKEND;
+}
+
 /** One run as a table row. */
 function runRow(r, env, subscriptions) {
   const at = msOf(r.endedAt ?? r.startedAt);
   const outcome = [r.outcome, r.reason].filter((x) => typeof x === "string" && x !== "").join(" / ");
   const failed = r.outcome === "failed";
-  return html`<tr><td>${utcText(at)}</td><td>${runLink(r.jobId)}</td><td>${targetLink(r, env)}</td><td>${cell(r.flow)}</td><td>${cell(r.host)}</td><td${failed ? html` class="bad"` : null}>${cell(outcome)}</td><td>${cell(r.model)}</td><td class="num">${Number.isFinite(r.tokens?.total) ? count(r.tokens.total) : "-"}</td><td class="num">${costText(runCost(r, subscriptions))}</td><td class="num">${usdText(capMicrosOf(r))}</td></tr>`;
+  return html`<tr><td>${utcText(at)}</td><td>${runLink(r.jobId)}</td><td>${targetLink(r, env)}</td><td>${cell(r.flow)}</td><td>${cell(r.host)}</td><td>${runVenue(r)}</td><td${failed ? html` class="bad"` : null}>${cell(outcome)}</td><td>${cell(r.model)}</td><td class="num">${Number.isFinite(r.tokens?.total) ? count(r.tokens.total) : "-"}</td><td class="num">${costText(runCost(r, subscriptions))}</td><td class="num">${usdText(capMicrosOf(r))}</td></tr>`;
 }
 
 export function runsTable(view) {
@@ -429,7 +448,7 @@ export function runsTable(view) {
   const pager = html`<div class="pager">${view.query?.before !== undefined && view.query?.before !== null ? html`<a href="${runsHref(filter)}">Newest runs</a>` : null}${page.next !== null && page.next !== undefined ? html`<a href="${runsHref(filter, { before: page.next })}">Older runs</a>` : null}</div>`;
   return titled(
     "Runs",
-    html`${notes}${table("Runs", ["When", "Job", "Target", "Flow", "Host", "Outcome", "Model", { num: "Tokens" }, { num: "Cost" }, { num: "Job cap" }], runs.map((r) => runRow(r, view.env, subs)), "No run matches.")}${pager}`,
+    html`${notes}${table("Runs", ["When", "Job", "Target", "Flow", "Host", "Venue", "Outcome", "Model", { num: "Tokens" }, { num: "Cost" }, { num: "Job cap" }], runs.map((r) => runRow(r, view.env, subs)), "No run matches.")}${pager}`,
   );
 }
 
@@ -1161,11 +1180,11 @@ export const fleetHosts = fromSnapshot("Hosts", (s, view) => {
   const hosts = Array.isArray(s.hostBudgets) ? s.hostBudgets : [];
   return table(
     "Hosts",
-    ["Host", { num: "Slots" }, "Memory", "CPU (centi)", { num: "Waiting" }, "Running jobs", "Routes", "Last beat"],
+    ["Host", { num: "Slots" }, "Memory", "CPU (centi)", { num: "Waiting" }, "Running jobs", "Venues", "Routes", "Last beat"],
     hosts.map((h) => {
       const jobs = Array.isArray(h.jobs) ? h.jobs : null;
       const list = jobs === null ? (h.jobsUnreadable ? "unreadable" : "-") : jobs.length === 0 ? "none" : html`${jobs.map((j, i) => html`${i > 0 ? ", " : ""}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? html` <span class="note">${ageText(view.now - j.at)}</span>` : null}`)}${h.jobsMore > 0 ? ` and ${h.jobsMore} more` : ""}`;
-      return html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td>${budgetText(h.usedMemMiB, h.budgetMemMiB, "MiB")}</td><td>${budgetText(h.usedCpuCenti, h.budgetCpuCenti, null)}</td><td class="num">${cell(h.waiters)}</td><td>${list}</td><td>${h.routes === false || h.routes === "false" ? "no" : "yes"}</td>${beatCell(h.staleMs)}</tr>`;
+      return html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td>${budgetText(h.usedMemMiB, h.budgetMemMiB, "MiB")}</td><td>${budgetText(h.usedCpuCenti, h.budgetCpuCenti, null)}</td><td class="num">${cell(h.waiters)}</td><td>${list}</td><td>${blessedText(h)}</td><td>${h.routes === false || h.routes === "false" ? "no" : "yes"}</td>${beatCell(h.staleMs)}</tr>`;
     }),
     "No host is registered.",
   );
@@ -1205,6 +1224,42 @@ export const fleetDoctor = fromSnapshot("Doctor", (s, view) => {
     return html`<h3>${r.name}</h3>${head}${replaced}${staleNote}${list}${hidden > 0 ? html`<p class="note">${count(hidden)} more not shown here; pi-dispatch doctor on that host prints them all.</p>` : null}`;
   };
   return html`${rows.length === 0 ? html`<p class="note">No host has published doctor results yet. Each worker runs doctor a minute after it starts and then every PI_DOCTOR_INTERVAL_HOURS (24 by default), and pi-dispatch doctor publishes too.</p>` : rows.map(block)}${silent.length > 0 ? html`<p class="note">No doctor result published by: ${silent.join(", ")}.</p>` : null}${d.more > 0 ? html`<p class="note">${count(d.more)} more hosts published results; not every one is read.</p>` : null}`;
+});
+
+/**
+ * The Venues panel (issue #712, `DES-OPERATOR-CONSOLE`): every venue this build's table holds, with which live hosts
+ * bless it and default to it (their registry rows' `backends` field), each declared property in words (its question,
+ * the word and what the word means, the switch or the observation it holds under, and which hosts' floors ask for it),
+ * what it serves and who holds its credentials, and per host the OpenShell engine, modes and gateway word. The hosts'
+ * published facts plus the static table (`venuesView`); nothing is resolved live, so a word is the DECLARED one.
+ */
+export const fleetVenues = fromSnapshot("Venues", (s) => {
+  const v = venuesView(Array.isArray(s.hostBudgets) ? s.hostBudgets : []);
+  const names = (list) => (list.length === 0 ? "no live host" : list.join(", "));
+  const floorText = (floor) => Object.entries(floor ?? {}).map(([p, w]) => `${p}=${w}`).join(", ");
+  const means = (p) => html`${p.wordText}${p.armedBy ? html`<br><span class="note">Only while ${p.armedBy} is on.</span>` : null}${p.observedText ? html`<br><span class="note">Holds on a host where ${p.observedText}; elsewhere it counts as asserted.</span>` : null}`;
+  const floored = (p) => (p.flooredOn.length === 0 ? "-" : p.flooredOn.map((f) => `${f.want} on ${f.host}`).join(", "));
+  const venue = (x) => {
+    const summary = `${x.name}: ${x.blessedOn.length === 0 ? "blessed on no live host" : `blessed on ${x.blessedOn.join(", ")}`}${x.defaultOn.length > 0 ? `, the default on ${x.defaultOn.join(", ")}` : ""}`;
+    const openshell = x.openshell && x.openshell.length > 0
+      ? table(`${x.name} OpenShell setup`, ["Host", "Engine", "Modes", "Gateway"], x.openshell.map((o) => (o.unpublished ? html`<tr><td>${cell(o.host)}</td><td colspan="3">${OPENSHELL_UNPUBLISHED_TEXT}</td></tr>` : html`<tr><td>${cell(o.host)}</td><td>${cell(o.engine)}</td><td>${o.modes.length > 0 ? o.modes.join(", ") : "-"}</td><td>${GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown}</td></tr>`)), "")
+      : null;
+    return html`<details><summary>${summary}</summary><p>Runs in ${x.describe}.</p>${facts([
+      ["Blessed on", names(x.blessedOn)],
+      ["Default on", names(x.defaultOn)],
+      ["Credentials", x.custody === "layer" ? html`held by the venue's egress layer: ${x.custodyText}` : html`in the job's container: ${x.custodyText}`],
+    ])}<ul class="plain">${x.serves.map((sv) => html`<li>It ${sv.text ?? `${sv.key}: ${sv.word}`}.</li>`)}</ul>${openshell}${table(
+      `${x.name} properties`,
+      ["Property", "Word", "What the word means", "Asked for by a floor"],
+      x.properties.map((p) => html`<tr><td>${p.question}<br><span class="note mono">${p.property}</span></td><td>${p.word}</td><td>${means(p)}</td><td>${floored(p)}</td></tr>`),
+      "",
+    )}</details>`;
+  };
+  return html`<p class="note">What each venue declares is this build's table; which hosts bless it, their floors and their OpenShell setup are what each host's worker published when it started. Nothing here is read live from a host.</p>${
+    v.unpublished.length > 0 ? html`<p class="note">Not published by ${v.unpublished.join(", ")} (a worker older than this console).</p>` : null
+  }${v.floors.length > 0 ? table("Floors", ["Host", "PI_BACKEND_FLOOR"], v.floors.map((f) => html`<tr><td>${cell(f.host)}</td><td class="mono">${floorText(f.floor)}</td></tr>`), "") : html`<p class="note">No live host published a floor (PI_BACKEND_FLOOR).</p>`}${v.venues.map(venue)}${
+    v.others.length > 0 ? html`<p class="warn">Blessed by a host and not in this console's table: ${v.others.map((o) => `${o.name} (${o.blessedOn.join(", ")})`).join("; ")}.</p>` : null
+  }`;
 });
 
 export const fleetSchedulers = fromSnapshot("Schedules", (s, view) => {

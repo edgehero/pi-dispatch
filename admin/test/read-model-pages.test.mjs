@@ -56,7 +56,24 @@ test("parseRunFilter: every field parses from a query string; empty is unset; th
   assert.ok(Object.isFrozen(filter));
   assert.deepEqual(parseRunFilter(new URLSearchParams("repo=&q=")).filter, {});
   assert.deepEqual(parseRunFilter({ kind: "local", trigger: "nightly.build" }).filter, { kind: "local", trigger: "nightly.build" });
-  assert.deepEqual([...RUN_FILTER_FIELDS], ["repo", "kind", "flow", "trigger", "project", "host", "outcome", "reason", "model", "q"]);
+  assert.deepEqual([...RUN_FILTER_FIELDS], ["repo", "kind", "flow", "trigger", "project", "host", "backend", "outcome", "reason", "model", "q"]);
+});
+
+test("the backend filter (#712): any venue-shaped name, the table's and a newer worker's; other shapes refused; a record that names none is a local run", async () => {
+  const { BACKEND_NAMES } = await import("@edgehero/pi-dispatch/backends");
+  for (const name of BACKEND_NAMES) {
+    const { filter } = parseRunFilter({ backend: name });
+    assert.deepEqual(filter, { backend: name });
+    assert.equal(runMatches(rec("gh-1", AT, { backend: name }), filter), true, name);
+    assert.equal(runMatches(rec("gh-1", AT, { backend: BACKEND_NAMES.find((n) => n !== name) }), filter), false, `${name}: another venue's run`);
+    assert.equal(runMatches(rec("gh-1", AT), filter), name === "local", `${name}: a run from before venues were recorded`);
+  }
+  // A venue a newer worker blesses (named by the Venues view) is a filter too, matched exactly; other shapes are refused.
+  const { filter } = parseRunFilter({ backend: "far-venue" });
+  assert.deepEqual(filter, { backend: "far-venue" });
+  assert.equal(runMatches(rec("gh-1", AT, { backend: "far-venue" }), filter), true);
+  assert.equal(runMatches(rec("gh-1", AT), filter), false, "a record naming no venue is local, not far-venue");
+  for (const value of ["Local", "local,podman", "toString", "-x", "a".repeat(33), "far venue"]) assert.match(parseRunFilter({ backend: value }).refusal, /^backend must be a venue name/, value);
 });
 
 test("parseRunFilter refuses a hostile value in every field, and never echoes it back", () => {
@@ -90,6 +107,7 @@ test("runMatches: each field, positive and negative", () => {
     ["trigger", "nightly", r, gh],
     ["project", "shop", r, gh],
     ["host", "mini-1", r, gh],
+    ["backend", "podman", { ...r, backend: "podman" }, gh],
     ["outcome", "failed", r, gh],
     ["reason", "budget-exceeded", r, gh],
     ["model", "anthropic/claude-x", r, gh],

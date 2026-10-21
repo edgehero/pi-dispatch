@@ -35,7 +35,8 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 // worker would load (issue #499 part B).
 import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, UNATTRIBUTED_BACKEND, parseBackendList, servesOf } from "@edgehero/pi-dispatch/backends";
+import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
+import { parseCaps } from "@edgehero/pi-dispatch/capabilities";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
@@ -3572,6 +3573,12 @@ function hostRowOf(h) {
     jobsUnreadable: h?.jobsUnreadable === true || (live.jobs === null && h?.jobs !== undefined && h?.jobs !== null && h?.jobs !== ""),
     staleMs: Number.isSafeInteger(h?.staleMs) && h.staleMs >= 0 ? h.staleMs : null,
     routes: h?.routes,
+    // Issue #712: the profiles this host advertises (`s:<profile>`, `w:<profile>`), through the worker's own allowlist and
+    // sorted, so two ticks of one row compare equal; and its venues (`parseHostBackends`: the blessed list, the default,
+    // the floor and the OpenShell engine and gateway word, or null for a worker from before the field). Both are another
+    // host's text, re-checked here for `jobs`' reason.
+    caps: [...parseCaps(h?.caps)].sort(),
+    backends: parseHostBackends(typeof h?.backends === "string" ? h.backends : null),
   };
 }
 
@@ -5105,6 +5112,109 @@ export function venueCustody(venue) {
   if (typeof venue !== "string" || !BACKEND_NAMES.includes(venue)) return null;
   const custody = BACKENDS[venue].credentialCustody ?? "container";
   return CREDENTIAL_CUSTODY.includes(custody) ? custody : "container";
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The Venues view (issue #712): every venue this build's table holds, the live hosts' published facts about it (the
+// registry row's `backends` field), and the table's own declarations in words. NOTHING HERE RESOLVES ANYTHING LIVE: no
+// CLI is spawned, no endpoint read and no observation made, so a word is the table's DECLARED word, and what a host
+// observes (which can lower it to `asserted` there) is named as the condition, never judged from here.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Each declaration word in a sentence (`docs/backends.md`'s table), keyed like ENFORCED, ASSERTED and ABSENT. */
+export const DECLARATION_TEXT = Object.freeze({
+  enforced: "this worker builds it in its own code, and a test reads it back off what was produced",
+  asserted: "something outside the worker provides it (an image, a vendor's documentation): not verifiable from here",
+  absent: "not provided: a floor that asks for it refuses this venue",
+});
+
+/**
+ * A short name for each property (PROPERTY_NAMES), for the panel's narrow lines; the long form is the property's own
+ * `question`, read from the worker's table. Keyed exactly like PROPERTIES, so a new property without one fails a test.
+ */
+export const PROPERTY_LABEL = Object.freeze({
+  isolation: "isolation flags",
+  ephemeral: "one container per job",
+  mountSet: "declared mounts only",
+  egress: "egress allowlist",
+  jobToJobIsolation: "jobs cannot reach each other",
+  imagePinning: "image never pulled",
+  exitCodes: "exit code unmodified",
+  abortable: "stoppable on timeout",
+  readOnlyJobInputs: "read-only /job",
+  nonRoot: "agent not root",
+  secretsCustody: "no secret value logged",
+  credentialTransit: "credentials stay on owned networks",
+  localFolders: "local folders in place",
+  pausable: "freezable",
+});
+
+/**
+ * A host's OpenShell gateway word (HOST_GATEWAY_WORDS) in words. Every one says WHEN it was read: the worker reads its
+ * gateway once, when it starts, so a gateway moved or started since is not in it.
+ */
+export const GATEWAY_TEXT = Object.freeze({
+  local: "the gateway was on this host when the worker started",
+  remote: "the gateway was not on this host when the worker started, so every job there is refused (openshell-gateway-not-local)",
+  unknown: "the gateway's place was not read: it did not answer when the worker started",
+});
+
+/** The OpenShell setup of a host whose row blesses an OpenShell venue and carries no `os` part: not a failed boot read. */
+export const OPENSHELL_UNPUBLISHED_TEXT = "not published by this host's worker";
+
+/**
+ * The Venues view's model from the snapshot's host rows (`hostRowOf`): `{ venues, others, floors, unpublished }`.
+ *
+ *   - `venues`: one entry per venue in BACKENDS, in the table's order: its description, the hosts that bless it and the
+ *     ones whose default it is, its fourteen properties (`{ property, label, question, word, wordText, armedBy,
+ *     observedBy, observedText, flooredOn }`, `flooredOn` naming each host whose floor asks for that property), what it
+ *     serves in words (SERVES_TEXT), who holds its credentials (CUSTODY_TEXT), and per host that blesses it the
+ *     OpenShell engine, gateway word and modes when it is an OpenShell venue;
+ *   - `others`: venue names hosts bless that this build's table does not hold (a newer worker's), with those hosts;
+ *   - `floors`: each host's PI_BACKEND_FLOOR, as it published it;
+ *   - `unpublished`: the live hosts whose row carries no `backends` field (a worker from before it).
+ */
+export function venuesView(hostRows) {
+  const rows = (Array.isArray(hostRows) ? hostRows : []).filter((h) => h && typeof h === "object");
+  const nameOf = (h) => (typeof h.name === "string" && h.name !== "" ? h.name : "(no name)");
+  const published = rows.filter((h) => h.backends && Array.isArray(h.backends.blessed));
+  const unpublished = rows.filter((h) => !(h.backends && Array.isArray(h.backends.blessed))).map(nameOf);
+  const floors = published.filter((h) => Object.keys(h.backends.floor ?? {}).length > 0).map((h) => ({ host: nameOf(h), floor: h.backends.floor }));
+  const venues = BACKEND_NAMES.map((name) => {
+    const entry = BACKENDS[name];
+    const blessing = published.filter((h) => h.backends.blessed.includes(name));
+    const custody = venueCustody(name);
+    return {
+      name,
+      describe: entry.describe,
+      blessedOn: blessing.map(nameOf),
+      defaultOn: published.filter((h) => h.backends.default === name).map(nameOf),
+      properties: PROPERTY_NAMES.map((property) => {
+        const d = declarationOf(name, property);
+        const word = isDeclaration(d?.word) ? d.word : ABSENT;
+        return {
+          property,
+          label: PROPERTY_LABEL[property] ?? property,
+          question: d?.question ?? "",
+          word,
+          wordText: DECLARATION_TEXT[word],
+          armedBy: d?.armedBy ?? null,
+          observedBy: d?.observedBy ?? null,
+          observedText: d?.observedBy ? (OBSERVATIONS[d.observedBy] ?? null) : null,
+          flooredOn: blessing.filter((h) => Object.hasOwn(h.backends.floor ?? {}, property)).map((h) => ({ host: nameOf(h), want: h.backends.floor[property] })),
+        };
+      }),
+      serves: SERVES.map((key) => ({ key, word: entry.serves[key], text: SERVES_TEXT[key]?.[entry.serves[key]] ?? null })),
+      custody,
+      custodyText: CUSTODY_TEXT[custody] ?? null,
+      // A blessing row without an `os` part says nothing about its gateway (a hand-written row, a later encoding): it is
+      // `unpublished`, never the failed-boot `unknown`, which is a word the worker published.
+      openshell: OPENSHELL_BACKENDS.includes(name) ? blessing.map((h) => (h.backends.openshell ? { host: nameOf(h), ...h.backends.openshell } : { host: nameOf(h), engine: null, gateway: null, modes: [], unpublished: true })) : null,
+    };
+  });
+  const otherNames = [...new Set(published.flatMap((h) => h.backends.blessed))].filter((n) => !BACKEND_NAMES.includes(n)).sort();
+  const others = otherNames.map((name) => ({ name, blessedOn: published.filter((h) => h.backends.blessed.includes(name)).map(nameOf) }));
+  return { venues, others, floors, unpublished };
 }
 
 /**

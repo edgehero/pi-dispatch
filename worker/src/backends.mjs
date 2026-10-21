@@ -1236,6 +1236,87 @@ export function parseBackendFloor(raw) {
 }
 
 /**
+ * Whether this host's OpenShell gateway is on this host, as a word for the host registry (issue #712): `local`, `remote`,
+ * or `unknown` (not read: the gateway did not answer at boot). A WORD and never the gateway's address, which is operator
+ * topology the registry's content rule keeps out. Closed, so a reader can refuse anything else.
+ */
+export const HOST_GATEWAY_WORDS = Object.freeze(["local", "remote", "unknown"]);
+
+/**
+ * A venue name as a host row may carry one: lowercase-led, lowercase letters, digits and `-`, at most 32 characters.
+ * Exported for the runs filter (issue #712), so a venue a newer worker blesses, which the Venues view lists, is also one
+ * the filter takes. Every name in BACKENDS has this shape (a test holds it).
+ */
+export const HOST_VENUE_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
+/** A property name as a host row's floor may carry one: lowercase-led letters and digits, bounded. */
+const HOST_PROPERTY_NAME_RE = /^[a-z][A-Za-z0-9]{0,47}$/;
+
+/**
+ * The registry row's `backends` field (issue #712, `INT-HOST-REGISTRY-CONTRACT`): what venues this host blesses, its
+ * floor, and its OpenShell setup, for the console's and the panel's Venues view. One compact string of names and fixed
+ * words only, so the row keeps its content rule (names, integers, digests):
+ *
+ *   blessed=<venue>[,<venue>...];floor=<property>:<word>[,...];os=<engine>:<gateway word>
+ *
+ * `blessed` is `PI_BACKENDS` as the worker parsed it, in its order, so the FIRST is the default (the parse's own rule,
+ * not a second field that could disagree with it). `floor` is `PI_BACKEND_FLOOR` as `parseBackendFloor` read it, its
+ * property names and words, and is left out when there is none. `os` only while an OpenShell venue is blessed: the
+ * engine (`OPENSHELL_ENGINES`) and whether the gateway is on this host (`HOST_GATEWAY_WORDS`); the modes are the blessed
+ * OpenShell venues themselves (`openshell` copies, `openshell-bind` binds), so they are not written twice.
+ *
+ * NOT JSON, which `jobs` uses: `jobs` is a list of records, and this is three flat lists a reader splits on two
+ * characters, none of which a venue name, a property name or a word can hold. Nothing reads it to decide anything, so
+ * deleting `host:*` still changes nothing: it is what the host says about itself, displayed.
+ */
+export function hostBackendsField({ backends = [], backendFloor = {}, openshellEngine = null, gatewayWord = "unknown" } = {}) {
+	const blessed = (backends ?? []).filter((n) => typeof n === "string" && HOST_VENUE_NAME_RE.test(n));
+	const parts = [`blessed=${blessed.join(",")}`];
+	const floor = Object.entries(backendFloor ?? {}).filter(([p, w]) => HOST_PROPERTY_NAME_RE.test(p) && isDeclaration(w));
+	if (floor.length > 0) parts.push(`floor=${floor.map(([p, w]) => `${p}:${w}`).join(",")}`);
+	if (OPENSHELL_BACKENDS.some((n) => blessed.includes(n))) {
+		const engine = OPENSHELL_ENGINES.includes(openshellEngine) ? openshellEngine : "docker";
+		parts.push(`os=${engine}:${HOST_GATEWAY_WORDS.includes(gatewayWord) ? gatewayWord : "unknown"}`);
+	}
+	return parts.join(";");
+}
+
+/**
+ * A peer's `backends` field read back: `{ blessed, default, floor, openshell }`, or null for a row without the field (a
+ * worker from before it) or one that does not read. PEER-WRITTEN, so every element is re-checked as `parseCaps` does:
+ * a venue name of the right shape is kept even when this build's table does not hold it (a newer worker's venue, which
+ * a reader names rather than hides), a floor entry needs a property-shaped name and one of the three words, and
+ * `openshell` is `{ engine, gateway, modes }` with each value from its closed list (`unknown` otherwise). Unknown keys
+ * are skipped, so a later field does not make an older reader drop the row.
+ */
+export function parseHostBackends(raw) {
+	if (typeof raw !== "string" || raw === "" || raw.length > 1024) return null;
+	const out = { blessed: [], default: null, floor: {}, openshell: null };
+	let sawBlessed = false;
+	for (const part of raw.split(";")) {
+		const at = part.indexOf("=");
+		if (at <= 0) continue;
+		const key = part.slice(0, at);
+		const items = part.slice(at + 1).split(",").filter((s) => s !== "");
+		if (key === "blessed") {
+			sawBlessed = true;
+			out.blessed = [...new Set(items.filter((n) => HOST_VENUE_NAME_RE.test(n)))];
+		} else if (key === "floor") {
+			for (const item of items) {
+				const [property, word, extra] = item.split(":");
+				if (extra === undefined && HOST_PROPERTY_NAME_RE.test(property ?? "") && isDeclaration(word) && !Object.hasOwn(out.floor, property)) out.floor[property] = word;
+			}
+		} else if (key === "os") {
+			const [engine, gateway] = (items[0] ?? "").split(":");
+			out.openshell = { engine: OPENSHELL_ENGINES.includes(engine) ? engine : "unknown", gateway: HOST_GATEWAY_WORDS.includes(gateway) ? gateway : "unknown", modes: [] };
+		}
+	}
+	if (!sawBlessed) return null;
+	out.default = out.blessed[0] ?? null;
+	if (out.openshell) out.openshell.modes = [...(out.blessed.includes(OPENSHELL_BACKEND) ? ["copy"] : []), ...(out.blessed.includes(OPENSHELL_BIND_BACKEND) ? ["bind"] : [])];
+	return out;
+}
+
+/**
  * Which floored properties this deployment is NOT getting because their switch is off, as
  * `[{ property, want, armedBy }]`.
  *

@@ -82,6 +82,14 @@ test("renderRuns aligns columns with a header and a data row, including the chai
   assert.match(out, /o\/r#5/);
   assert.match(out, /completed/);
   assert.match(out, /\bd1\b/, "a chained child renders a d<n> depth marker");
+  // Issue #712: no VENUE column for a list of local runs (a record naming none is one); with a run elsewhere, every
+  // row names its venue, `local` included.
+  assert.doesNotMatch(out, /VENUE/);
+  assert.doesNotMatch(renderRuns([{ jobId: "j1", backend: "local" }]), /VENUE/);
+  const mixed = renderRuns([{ jobId: "j1" }, { jobId: "j2", backend: "openshell" }]).split("\n");
+  assert.match(mixed[0], /VENUE/);
+  assert.match(mixed[1], /^j1\b.*\blocal\b/);
+  assert.match(mixed[2], /^j2\b.*\bopenshell\b/);
 });
 
 test("renderRuns surfaces per-job tokens and cost, and dashes them when usage is absent", () => {

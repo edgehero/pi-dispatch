@@ -615,6 +615,7 @@ async function main() {
 		runMirror: await import("../worker/src/run-mirror.mjs"),
 		hostRegistry: await import("../worker/src/host-registry.mjs"),
 		liveJobs: await import("../worker/src/live-jobs.mjs"),
+		backends: await import("../worker/src/backends.mjs"),
 		budget: await import("../worker/src/budget.mjs"),
 		scopedLimits: await import("../worker/src/scoped-limits.mjs"),
 		allocation: await import("../worker/src/allocation.mjs"),

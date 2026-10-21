@@ -13,7 +13,8 @@
  * fields; LIVE_TAIL -- a running job's live transcript (issue #643, any host), else its `.log`; TRIGGER_DETAIL -- one trigger's trust model;
  * FAILED (`f`) and HELD_LIST (`h`) -- the failed and held jobs; ALLOCATION (`b`) -- the budget split;
  * PROJECTS (`j`) -- the projects with their spend and sizes; and HOSTS (`u`) -- each live host's slots,
- * budget and running jobs, with its last 7 days; PARKED (`k`) -- the runs waiting for an answer on their issue
+ * budget and running jobs, with its last 7 days, and from it VENUES (`v`, issue #712) -- each venue, the hosts that
+ * bless it and what it declares; PARKED (`k`) -- the runs waiting for an answer on their issue
  * (issue #641). Analytics live on the operator console's spend screen (the insights move to the console): the `i`
  * key shows its address.
  *
@@ -28,7 +29,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { BUNDLE_SKIPPED_TEXT, CUSTODY_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, liveAbsentCause, recordSkips, venueCustody, VENUE_MAY_NOT_STREAM, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, CUSTODY_TEXT, DECLARATION_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, venuesView, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, liveAbsentCause, recordSkips, venueCustody, VENUE_MAY_NOT_STREAM, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -498,6 +499,8 @@ export function makeDashboard({
   // filters the runs list: ALL_RUNS for every run, null for runs recorded under no project, or a project id.
   let projectsSelected = 0;
   let projectsInfo: any = null;
+  // The VENUES view's cursor (issue #712), over BACKENDS' venues: the selected one's properties are drawn below the list.
+  let venuesSelected = 0;
   let runProject: any = ALL_RUNS;
   // The ALLOCATION view (issue #504 part C, key `b`): the envelope and the applied split, read through the injected
   // `allocationInfo` seam when the view opens and again after a revert, never per tick (index.ts holds the Valkey and
@@ -551,7 +554,9 @@ export function makeDashboard({
       });
     }
     const res = await capRead;
-    if (seq !== capSeq || disposed || view !== "HOSTS") return;
+    // VENUES counts as HOSTS here (issue #712): it is opened from HOSTS and Esc returns there, so a read that lands while
+    // it is open is the one HOSTS shows next. Dropping it left HOSTS "reading" forever with no read running.
+    if (seq !== capSeq || disposed || (view !== "HOSTS" && view !== "VENUES")) return;
     capInfo = res;
     tui?.requestRender?.();
   };
@@ -699,6 +704,7 @@ export function makeDashboard({
         pendingRevert,
         allocNote,
         capInfo,
+        venuesSelected,
         copiedNote,
         copyAvailable: typeof deps?.copyText === "function",
         // Height through the injected seam, read per frame (a resize changes it): null (seam absent, or
@@ -978,6 +984,33 @@ export function makeDashboard({
         if (data === "u" || data === "U") {
           capInfo = capInfo?.report ? { ...capInfo, refreshing: true } : { loading: true };
           void loadCapacity();
+          tui?.requestRender?.();
+          return;
+        }
+        // `v` opens the VENUES view (issue #712) from here, where the hosts are; Esc there comes back. The report stays
+        // held, and a read still running when `v` is pressed lands while VENUES is open (`loadCapacity` accepts it there),
+        // so coming back costs no second read and never finds HOSTS waiting on a read that was dropped.
+        if (data === "v" || data === "V") {
+          view = "VENUES";
+          tui?.requestRender?.();
+        }
+        return;
+      }
+      if (view === "VENUES") {
+        // Read-only (issue #712): a cursor over the venues; Esc backs out to HOSTS. Every other key is inert.
+        const count = venuesView(snapshot?.hostBudgets).venues.length;
+        if (matchesKey(data, "escape")) {
+          view = "HOSTS";
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "up")) {
+          venuesSelected = Math.max(0, venuesSelected - 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "down")) {
+          venuesSelected = Math.min(Math.max(0, count - 1), venuesSelected + 1);
           tui?.requestRender?.();
         }
         return;
@@ -1648,9 +1681,20 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const dw = framed ? Math.min(Math.trunc(width), ALLOC_WIDTH) : Math.trunc(width);
     const iw = framed ? dw - 4 : 24;
     const { title: detailTitle, lines } = hostsView(snapshot, state.capInfo, iw, styler);
-    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "u refresh · esc back"];
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "u refresh · v venues · esc back"];
     const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
-    const footer = fitLine([k("u", "refresh"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
+    const footer = fitLine([k("u", "refresh"), k("v", "venues"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
+    const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
+    return centerBlock(boxed, Math.trunc(width), dw);
+  }
+
+  if (view === "VENUES") {
+    const dw = framed ? Math.min(Math.trunc(width), ALLOC_WIDTH) : Math.trunc(width);
+    const iw = framed ? dw - 4 : 24;
+    const { title: detailTitle, lines } = venuesPanelView(snapshot, state.venuesSelected ?? 0, iw, styler);
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "↑↓ select · esc back"];
+    const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+    const footer = fitLine([k("↑↓", "select"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
     return centerBlock(boxed, Math.trunc(width), dw);
   }
@@ -2675,6 +2719,16 @@ function recordProject(record: any): string | null {
 }
 
 /**
+ * The venue a run row names (issue #712): the record's `backend` when it is not `local`, else null. A record that names
+ * none is a `local` run from before venues were recorded (the worker's own reading), so a `local` run keeps the row it
+ * always had and only a run elsewhere gains the cell, `recordProject`'s posture.
+ */
+function recordVenue(record: any): string | null {
+  const venue = typeof record?.backend === "string" && record.backend !== "" ? record.backend : "local";
+  return venue === "local" ? null : venue;
+}
+
+/**
  * A `project:<id>` row's note for the limits view (issue #499 part C): how many members the project has, or that the
  * project is missing from the projects file the worker reads (the worker refuses such a row; doctor names it). Null
  * for any other row, and when the projects file does not load (its own line says so; a guess here would not).
@@ -3273,6 +3327,67 @@ function doctorLines(row: any, iw: number, styler: any): string[] {
 }
 
 /**
+ * The VENUES view (issue #712, `DES-OPERATOR-CONSOLE`, the console Fleet page's Venues panel in the panel's width): one
+ * line per venue in BACKENDS (the hosts that bless it, `*` where it is the default), then the selected venue: what it is,
+ * who holds its credentials, what it serves, each blessing host's OpenShell engine, modes and gateway word, and its
+ * fourteen properties as `label  word`, marked where a switch (`PI_EGRESS`) or an observation qualifies the word and
+ * where a host's floor asks for it, with the three words in sentences below. From `venuesView` over the rows the tick
+ * already read, so the view adds no read; every host name is another host's text and goes through `hostName`.
+ */
+function venuesPanelView(snapshot: any, selected: number, iw: number, styler: any): { title: string; lines: string[] } {
+  const v = venuesView(snapshot?.hostBudgets);
+  const sel = Math.min(Math.max(0, selected), v.venues.length - 1);
+  const rows: any[] = Array.isArray(snapshot?.hostBudgets) ? snapshot.hostBudgets : [];
+  const title = `venues · ${v.venues.length} known · ${rows.length} live host${rows.length === 1 ? "" : "s"}`;
+  const lines: string[] = [];
+  const wrapped = (t: string, color: string, indent = "") =>
+    wrapColumns(t, Math.max(1, iw - indent.length), styler).map((l) => styler.cell(indent + l, iw, { color }));
+  const hostList = (names: string[]) => names.map((n) => hostName(n)).join(", ");
+  const nameWidth = Math.max(...v.venues.map((x: any) => x.name.length));
+  v.venues.forEach((x: any, i: number) => {
+    const cursor = i === sel ? styler.fg("accent", "›") : " ";
+    const on = x.blessedOn.length === 0 ? styler.fg("dim", "blessed on no live host") : styler.fg("text", x.blessedOn.map((n: string) => `${hostName(n)}${x.defaultOn.includes(n) ? "*" : ""}`).join(", "));
+    lines.push(fitLine(`${cursor} ${styler.bold(styler.fg(i === sel ? "accent" : "text", x.name.padEnd(nameWidth)))}  ${on}`, iw, styler));
+  });
+  if (v.venues.some((x: any) => x.defaultOn.length > 0)) lines.push(styler.cell("  * the host's default venue", iw, { color: "dim" }));
+  if (v.unpublished.length > 0) lines.push(...wrapped(`not published by ${hostList(v.unpublished)} (a worker older than this panel)`, "warning"));
+  if (v.others.length > 0) lines.push(...wrapped(`blessed and not in this panel's table: ${v.others.map((o: any) => `${textCell(o.name)} (${hostList(o.blessedOn)})`).join("; ")}`, "warning"));
+  for (const f of v.floors) lines.push(...wrapped(`floor on ${hostName(f.host)}: ${Object.entries(f.floor).map(([p, w]) => `${p}=${w}`).join(", ")}`, "muted"));
+
+  const x = v.venues[sel];
+  if (x) {
+    lines.push(styler.cell("", iw));
+    lines.push(fitLine(styler.bold(styler.fg("accent", x.name)), iw, styler));
+    lines.push(...wrapped(x.describe, "dim", "  "));
+    lines.push(...wrapped(`credentials: ${x.custody === "layer" ? "held by the venue's egress layer" : "in the job's container"}: ${x.custodyText}`, "text", "  "));
+    for (const sv of x.serves) lines.push(...wrapped(`it ${sv.text ?? `${sv.key}: ${sv.word}`}`, sv.word === "yes" ? "text" : "muted", "  "));
+    for (const o of x.openshell ?? []) {
+      if (o.unpublished) {
+        lines.push(...wrapped(`${hostName(o.host)}: OpenShell setup ${OPENSHELL_UNPUBLISHED_TEXT}`, "dim", "  "));
+        continue;
+      }
+      lines.push(...wrapped(`${hostName(o.host)}: ${o.engine} engine, ${o.modes.length > 0 ? o.modes.join(" and ") : "no"} mode, ${GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown}`, o.gateway === "local" ? "text" : "warning", "  "));
+    }
+    const labelWidth = Math.min(34, Math.max(...x.properties.map((p: any) => p.label.length)));
+    for (const p of x.properties) {
+      const marks = [...(p.armedBy ? [`only with ${p.armedBy}`] : []), ...(p.observedBy ? ["where observed"] : []), ...p.flooredOn.map((f: any) => `floor ${f.want} on ${hostName(f.host)}`)];
+      const word = styler.fg(p.word === "enforced" ? "success" : p.word === "asserted" ? "warning" : "error", p.word.padEnd(8));
+      const base = `  ${styler.fg("text", clip(p.label, labelWidth).padEnd(labelWidth))}  ${word}`;
+      const tail = marks.join(", ");
+      // The marks beside the word when they fit, else wrapped below it, so a floor's host is never the part a clip takes.
+      if (marks.length === 0) lines.push(fitLine(base, iw, styler));
+      else if (styler.visibleLen(base) + 2 + styler.visibleLen(tail) <= iw) lines.push(fitLine(`${base}  ${styler.fg("dim", tail)}`, iw, styler));
+      else lines.push(fitLine(base, iw, styler), ...wrapped(tail, "dim", "    "));
+    }
+    lines.push(styler.cell("", iw));
+    for (const word of ["enforced", "asserted", "absent"]) lines.push(...wrapped(`${word}: ${DECLARATION_TEXT[word]}`, "dim", "  "));
+    if (x.properties.some((p: any) => p.observedBy)) lines.push(...wrapped("where observed: the word holds on a host that observes it (pi-dispatch doctor names the observation); elsewhere it counts as asserted", "dim", "  "));
+    lines.push(...wrapped("The hosts' parts are what each worker published when it started. The console's Fleet page has each property's full question.", "dim", "  "));
+  }
+  return { title, lines };
+}
+
+/**
  * `RUNS`, or `RUNS · 2 hosts`, or `RUNS · this host only`.
  *
  * The mirror's degradation channel is what distinguishes the last one from a single-host deployment, and
@@ -3372,6 +3487,8 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     outcomeColored(r.outcome, r.reason, styler),
     styler.fg("dim", `${cell(r.turns)}t`),
     styler.fg("dim", Number.isFinite(r.tokens?.total) ? fmtTokens(r.tokens.total) : "-"),
+    // Last, so a narrow frame clips the venue before the outcome; only a run off `local` carries it (`recordVenue`).
+    ...(recordVenue(r) === null ? [] : [styler.fg("muted", cell(recordVenue(r)))]),
   ];
   return fitLine(`${cursor} ${tree}${rep}${cells.join(sep)}`, inner, styler);
 }
@@ -3928,7 +4045,8 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     // added here without `cellOf` still cannot delete a column's worth of width.
     const rep = run?.replica > 0 ? cellOf(`r${run.replica}/${run.replicas ?? "?"} `) : "";
     const project = recordProject(run);
-    const cells = [run?.jobId, run?.target, ...(project === null ? [] : [project]), run?.flow, run?.outcome, run?.turns, run?.tokens?.total].map(cellOf).join(" · ");
+    const venue = recordVenue(run);
+    const cells = [run?.jobId, run?.target, ...(project === null ? [] : [project]), run?.flow, run?.outcome, run?.turns, run?.tokens?.total, ...(venue === null ? [] : [venue])].map(cellOf).join(" · ");
     out.push(clipData(`${cursor} ${rep}${cells}`, w));
   }
   const below = rows.length - top - count;

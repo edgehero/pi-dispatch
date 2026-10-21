@@ -555,7 +555,9 @@ test("the boot's release judgement: the tested CLI and gateway pass, another rel
 		throw new Error(`unexpected ${args.join(" ")}`);
 	};
 	const up = { status: "connected", server: "https://127.0.0.1:17670", version: mod.OPENSHELL_TESTED_VERSION };
-	assert.deepEqual(await mod.openshellBootVersions({ exec: answers(mod.OPENSHELL_TESTED_VERSION, up) }), {});
+	assert.deepEqual(await mod.openshellBootVersions({ exec: answers(mod.OPENSHELL_TESTED_VERSION, up) }), { gatewayLocal: true });
+	// Issue #712: a gateway elsewhere boots (each job refuses it by name) and says so, for the registry row's word.
+	assert.deepEqual(await mod.openshellBootVersions({ exec: answers(mod.OPENSHELL_TESTED_VERSION, { ...up, server: "https://gw.example:17670" }) }), { gatewayLocal: false });
 	const cli = await mod.openshellBootVersions({ exec: answers("0.1.5", up) });
 	assert.equal(cli.transient, false);
 	assert.match(cli.refusal, /CLI is 0\.1\.5, not 0\.1\.4/);

@@ -291,6 +291,13 @@ whether your `observationPreflight` refuses `run.recover`. A new venue must be b
 | `openshell` | image | image | no | no |
 | `openshell-bind` | yes | yes | yes | no |
 
+**Where to see them.** The console's Fleet page has a Venues panel, and the `/dispatch` panel a VENUES view (`u` for
+the hosts, then `v`): every venue with the hosts that bless it and use it as their default, each host's floor, every
+property in words with its word, what the venue serves, who holds its credentials, and for the OpenShell venues each
+host's engine, mode and whether its gateway was on that host when its worker started. Each worker publishes its own
+part when it starts (the `backends` field of its registry row, names and fixed words only); nothing is checked live
+from either surface.
+
 ## A declaration is not a claim that the property holds
 
 It is a claim about who is asserting it. The reason is in the constitution, and it is the sentence this
