@@ -660,6 +660,13 @@ before the sandbox exists and before spend (`openshell-bundle-endpoint-not-allow
 `-endpoint-unknown`, `-name-taken`, `-unpassable`, `-image-too-old`). The read-back expects exactly one `_provider_*`
 layer per provider the job attached.
 
+**What a run records** (issue #712). Each run on either OpenShell venue records `openshell`: the mode, the hosts of
+its network policy (your allowlist's, your model endpoints' and the forge's, all your own config, so the record still
+holds nothing a webhook or an issue chose; up to 32 listed and the total counted), how many credential providers the
+sandbox was given (the job's own, made only when it has a secret and the policy a rule, and one per bundle host) and
+how many keys they bound as placeholders. Counts only for credentials, never a name or a value. The console's run page
+and the panel's run detail show them ([`console.md`](console.md)). MCP connection state is not recorded.
+
 **git push.** The clone's remote carries no token, so a forge job's exec gets a git credential helper (through
 `GIT_CONFIG_COUNT`) that prints the forge token's placeholder as the password, the supervisor rewriting it in a request to
 any host the policy admits (every credential of the job's provider is bound to every admitted host, as squid gives every

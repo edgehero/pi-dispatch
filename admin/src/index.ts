@@ -510,7 +510,8 @@ function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params) {
       const paths = resolvePaths(deploymentEnv());
       // A record's `bundle` reaches the model as counts only (`modelRunRecord`, issue #704): its variable names are the
-      // operator's manager's contents and stay in the operator's own views.
+      // operator's manager's contents and stay in the operator's own views. Issue #712: an openshell run's rule hosts ride
+      // only here, by id; the list below carries their count.
       if (params.jobId) return toolText(JSON.stringify(modelRunRecord(readRun({ logsDir: paths.logsDir, jobId: params.jobId }))));
       // `{runs, hosts, mirror}` rather than a bare array (issue #57, Gap 3). The one deliberate tool-shape
       // change here, and this surface's own doctrine is the justification: typed dollars carry their
@@ -519,7 +520,7 @@ function registerTools(pi: ExtensionAPI): void {
       // says whether the list is the whole deployment ("ok"), this host alone ("off"), capped
       // ("truncated"), or unknown ("unreachable ...").
       const merged: any = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl });
-      return toolText(JSON.stringify(Array.isArray(merged?.runs) ? { ...merged, runs: merged.runs.map(modelRunRecord) } : merged));
+      return toolText(JSON.stringify(Array.isArray(merged?.runs) ? { ...merged, runs: merged.runs.map((r: any) => modelRunRecord(r, { list: true })) } : merged));
     },
   });
 

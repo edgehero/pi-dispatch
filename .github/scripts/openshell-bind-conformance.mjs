@@ -36,7 +36,8 @@ const load = (path) => import(pathToFileURL(join(root, path)).href);
 
 const { makeOpenshellBackend, OPENSHELL_OWNER, OPENSHELL_OWNER_LABEL, sandboxNameOf } = await load("worker/src/backend-openshell.mjs");
 const { READ_BACK_BY_A_LIVE_PROBE, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
-const { makeLogSink } = await load("worker/src/run-history.mjs");
+const { buildRecord, makeLogSink } = await load("worker/src/run-history.mjs");
+const { networkPolicyFor } = await load("worker/src/openshell-policy.mjs");
 const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs");
 
 // Every owned sandbox the gateway still lists, polled until the listing is empty or 30 s have passed: a delete is
@@ -341,6 +342,17 @@ if (!readings.readOnlyJobInputs?.ok) failed = true;
 	const ok = result.code === 0 && got.btoken === "placeholder" && (got["benviron-readable"] === "no" || got.benviron === "1") && got.bplain === "file" && got.bown === "200" && swapped && Array.isArray(left) && left.length === 0;
 	console.log(`${ok ? "ok     " : "FAIL   "} a secret bundle in bind mode: ${JSON.stringify({ exit: result.code, ...got, swapped, providersLeft: left })}`);
 	if (!ok) failed = true;
+	// Issue #712: the run's record-facing facts in bind mode (collectRun's early return carries them too): the mode, the
+	// policy's hosts with the bundle's own among them, the job's provider and the bundle host's. Never a value.
+	const record = buildRecord({ job: { id: "conformance", attemptsMade: 0, data: { ...JOB, backend: "openshell-bind" } }, result: { outcome: "completed", exitCode: result.code, openshell: result.openshell }, startedAt: null, endedAt: null });
+	const facts = record.openshell ?? null;
+	// Exact, from this run's sources (POLICY_SOURCES' allowlist, the endpoint this case reads) through the same generator,
+	// and the keys: the job's provider binds ANTHROPIC_API_KEY (no token is passed here), the bundle host's BUNDLE_TOKEN.
+	const policy = networkPolicyFor({ allowlist: POLICY_SOURCES.readAllowlist(), endpoints: [{ id: "lab-b", host: "host.docker.internal", port: 18080, slots: 1 }], kind: JOB.kind, repo: JOB.repo });
+	const wantHosts = [...new Set(Object.values(policy.network_policies ?? {}).flatMap((rule) => rule.endpoints.map((e) => e.host)))].sort();
+	const factsOk = facts !== null && facts.mode === "bind" && JSON.stringify(facts.ruleHosts) === JSON.stringify(wantHosts) && facts.ruleHostCount === wantHosts.length && facts.providers === 2 && facts.placeholders === 2 && !Object.values(values).some((v) => JSON.stringify(record).includes(v));
+	console.log(`${factsOk ? "ok     " : "FAIL   "} the bind run's record carries its openshell facts: ${JSON.stringify(facts)} (hosts wanted ${JSON.stringify(wantHosts)}, 2 providers, 2 placeholders)`);
+	if (!factsOk) failed = true;
 }
 
 // Review round 1 (#714): run_as_user other than the image's, exercised in CI. The job dir is handed to uid 2000 (sudo),

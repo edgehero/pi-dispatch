@@ -609,4 +609,7 @@ test("a bundle on the bind venue (#704 part 3): the same per-host provider as co
 	assert.ok(!execCall.join(" ").includes("sk_bind_0005") && !execCall.join(" ").includes("plain_bind_0006"));
 	assert.equal(existsSync(join(dirs.jobDir, "bundle-env.json")), false, "removed at teardown");
 	assert.equal(typeof b.bundleGate, "function", "the bind bundle judges bundles as the copy one does");
+	// Issue #712: the record's facts, from bind mode's early return out of collectRun too. The job's provider binds
+	// ANTHROPIC_API_KEY (no token: JOB has none), the host's STRIPE_KEY; DB_URL is plain.
+	assert.deepEqual(result.openshell, { mode: "bind", ruleHosts: ["api.anthropic.com", "api.stripe.com"], providers: 2, placeholders: 2 });
 });

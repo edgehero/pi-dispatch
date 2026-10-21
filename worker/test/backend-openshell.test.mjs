@@ -721,6 +721,36 @@ test("bundle (#704 part 3): an endpoint variable is its host's own provider key,
 	for (const p of [sb, hostProvider]) assert.equal(existsSync(`${dirs.jobDir}.openshell-profile-${p}.json`), false, p);
 });
 
+test("the run's openshell facts (#712): the policy's hosts, the providers made and the keys they bind, on every path out of collectRun; none for a stage that never got there", { skip }, async () => {
+	const fake = fakeOpenshell();
+	const { run } = runBundled(fake);
+	const result = await run;
+	assert.equal(result.code, 0);
+	// The job's own provider (ANTHROPIC_API_KEY, GH_TOKEN, GITHUB_TOKEN) and the bundle host's (STRIPE_KEY): two
+	// providers, four placeholders. The plain DB_URL is a value by file, not a placeholder, so it is not counted.
+	assert.deepEqual(result.openshell, { mode: "copy", ruleHosts: result.openshell.ruleHosts, providers: 2, placeholders: 4 });
+	assert.deepEqual([...result.openshell.ruleHosts].sort(), ["*.github.com", "api.anthropic.com", "api.stripe.com", "github.com"]);
+	const hosts = Object.values(fake.state.written.policy.network_policies).flatMap((r) => r.endpoints.map((e) => e.host));
+	assert.deepEqual([...result.openshell.ruleHosts].sort(), [...new Set(hosts)].sort(), "exactly the written policy's endpoint hosts");
+	assert.ok(!JSON.stringify(result.openshell).includes("acme/widget"), "the repository the push rule names is not taken");
+	for (const v of Object.values(BUNDLE_SECRETS)) assert.ok(!JSON.stringify(result.openshell).includes(v));
+	// Deny-all: no rule, no provider, nothing bound, and still said.
+	const none = fakeOpenshell();
+	const dirs = jobDirs();
+	const bare = await bundle(none).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.deepEqual(bare.openshell, { mode: "copy", ruleHosts: [], providers: 0, placeholders: 0 });
+	// A download that fails after the run keeps the facts on its (reclassified) result.
+	const broken = fakeOpenshell({ failDownload: true });
+	const dirs2 = jobDirs();
+	const failed = await bundle(broken, { readAllowlist: () => ["api.anthropic.com"] }).runContainer({ job: JOB, prepared: { jobDir: dirs2.jobDir, workspace: dirs2.workspace, live: dirs2.live }, name: "pi-job-j2", signal: new AbortController().signal });
+	assert.equal(failed.code, 1);
+	assert.deepEqual(failed.openshell, { mode: "copy", ruleHosts: ["api.anthropic.com"], providers: 1, placeholders: 1 });
+	// A create that fails never started: there is no result to carry anything.
+	const refused = fakeOpenshell({ failCreate: true });
+	const dirs3 = jobDirs();
+	await assert.rejects(bundle(refused).runContainer({ job: JOB, prepared: { jobDir: dirs3.jobDir, workspace: dirs3.workspace, live: dirs3.live }, name: "pi-job-j3", signal: new AbortController().signal }), (err) => err.reason === "container-never-started");
+});
+
 test("bundle read-back (#704 part 3): exactly the layers this job attached, a missing or an extra one never starts the job", { skip }, async () => {
 	const policy = { version: 1, network_policies: { a: { name: "a", endpoints: [{ host: "x" }] } }, filesystem_policy: { read_only: ["/var/log"], read_write: [] } };
 	const [only] = mod.expectedPolicies(policy, { providers: ["pi-job-s0123456789a", "pi-job-s0123456789a-b0"] });

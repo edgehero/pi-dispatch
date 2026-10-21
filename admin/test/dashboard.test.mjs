@@ -3067,7 +3067,7 @@ test("issue #596, phase 3: the snapshot carries each live host's budget and use,
   const snap = await deps.fetchSnapshot();
   // Issue #599 phase 3 added the HOSTS view's live fields (hosts-view.test.mjs pins them); `fpUsd` and every other field a
   // row carries still stay out.
-  assert.deepEqual(snap.hostBudgets, [{ name: "mini1", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200", concurrency: undefined, budgetRunning: undefined, waiters: undefined, jobs: null, jobsMore: null, jobsUnreadable: false, staleMs: null, routes: "true", caps: [], backends: null }], "the budget fields, the live fields and the name, nothing else");
+  assert.deepEqual(snap.hostBudgets, [{ name: "mini1", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200", concurrency: undefined, budgetRunning: undefined, waiters: undefined, jobs: null, jobsMore: null, jobsUnreadable: false, staleMs: null, routes: "true", caps: [], backends: null, capsSeen: false }], "the budget fields, the live fields and the name, nothing else");
   await deps.dispose();
 });
 

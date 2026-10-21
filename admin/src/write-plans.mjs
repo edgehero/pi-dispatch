@@ -46,7 +46,9 @@ import {
   readScopedLimits,
   readSettingsView,
   readTriggers,
+  realPathOrNull,
   renderBundleProfiles,
+  resolverRootsStatus,
   settingShown,
   triggerVenue,
   writeInputs,
@@ -1248,22 +1250,13 @@ export function renderProfiles(profiles, env = null) {
  * the worker's host has no roots. Set and empty IS proof: the worker fails closed and refuses every overlay resolver.
  */
 export function resolverRootsJudgement(path, env, fs = nodeFs) {
-  if (typeof env?.PI_SECRET_RESOLVER_ROOTS !== "string") return {};
-  const roots = delimitedList(env.PI_SECRET_RESOLVER_ROOTS);
-  if (roots.length === 0) return { refusal: "PI_SECRET_RESOLVER_ROOTS is set and empty on this deployment, so the worker refuses every resolver the settings overlay declares; set it to the directory your resolvers live in first" };
-  const resolve = (p) => {
-    try {
-      return fs.realpathSync(p);
-    } catch (error) {
-      if (typeof error?.code === "string") return null;
-      throw error;
-    }
-  };
-  const real = resolve(path);
-  if (real === null) return { warning: `${path} cannot be resolved on this host, so whether its real path sits inside PI_SECRET_RESOLVER_ROOTS (${roots.join(", ")}) is checked only by the worker, where it runs (pi-dispatch doctor --secrets shows it)` };
-  if (withinRoots(real, roots)) return {};
+  // Issue #712: the status is `resolverRootsStatus` (read-model.mjs), the one rule the profiles view reads too.
+  const { status, roots, real } = resolverRootsStatus(path, env, fs);
+  if (status === "unseen" || status === "inside") return {};
+  if (status === "empty") return { refusal: "PI_SECRET_RESOLVER_ROOTS is set and empty on this deployment, so the worker refuses every resolver the settings overlay declares; set it to the directory your resolvers live in first" };
+  if (status === "unresolved") return { warning: `${path} cannot be resolved on this host, so whether its real path sits inside PI_SECRET_RESOLVER_ROOTS (${roots.join(", ")}) is checked only by the worker, where it runs (pi-dispatch doctor --secrets shows it)` };
   // A root the worker would hold this path under if it were written as its own real path.
-  const realRoot = roots.map((root) => ({ root, real: resolve(root) })).find((r) => r.real !== null && r.real !== r.root && withinRoots(real, [r.real]));
+  const realRoot = roots.map((root) => ({ root, real: realPathOrNull(root, fs) })).find((r) => r.real !== null && r.real !== r.root && withinRoots(real, [r.real]));
   return { refusal: resolverRootsRefusal(path, env, real, realRoot?.real ?? null) };
 }
 
