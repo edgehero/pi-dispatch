@@ -136,6 +136,28 @@ case "$c" in
 		/opt/pi-dispatch/runner-node /opt/pi-dispatch-probe/netpath.mjs runner 2>/tmp/netpath.err; echo "probe netpath runner exit=$?"
 		head -c 2000 /tmp/netpath.err | head -n 8 | sed 's/^/probe netpath runner stderr=/'
 		exit 0 ;;
+	inv-e1)
+		# Issue #730 E1: the mechanism's inputs, from inside the sandbox. A nondumpable process's /proc is root-owned and
+		# ptrace-gated, which is what the broker's same-uid memory read hits.
+		echo "probe e1 node-dumpable=$(node -e 'console.log(require(\"fs\").readFileSync(\"/proc/self/status\",\"utf8\").match(/^Dumpable:\\s*(\\d)/m)?.[1]??\"?\")')"
+		echo "probe e1 runner-dumpable=$(/opt/pi-dispatch/runner-node -e 'console.log(require(\"fs\").readFileSync(\"/proc/self/status\",\"utf8\").match(/^Dumpable:\\s*(\\d)/m)?.[1]??\"?\")')"
+		echo "probe e1 runner-node-stat=$(stat -c '%a %U:%G' /opt/pi-dispatch/runner-node)"
+		echo "probe e1 node-stat=$(stat -c '%a %U:%G' /usr/local/bin/node)"
+		echo "probe e1 ptrace-scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>&1)"
+		echo "probe e1 whoami=$(id -u):$(id -g)"
+		exit 0 ;;
+	inv-child-node|inv-child-runner)
+		# Issue #730 E3/E4: a parent holding a canary in memory (a buffer), in its environment and on fd 0 spawns a tool
+		# child (always the dumpable node, as pi's bash tool would). The child tries to reach the network (E3) and to read
+		# the parent's secrets by each route (E4). The parent is the dumpable node or the nondumpable runner, so the pair
+		# of runs shows what an ancestor's dumpability changes.
+		MEMCANARY_FILE=/tmp/memcanary; printf 'CANARY-MEM-9z7y' > "$MEMCANARY_FILE"
+		export ENVCANARY=CANARY-ENV-9z7y
+		case "$c" in inv-child-node) RUNNER=/usr/local/bin/node ;; *) RUNNER=/opt/pi-dispatch/runner-node ;; esac
+		echo "probe e34 parent=$c runner=$RUNNER"
+		"$RUNNER" /opt/pi-dispatch-probe/parent.mjs "$MEMCANARY_FILE" < "$MEMCANARY_FILE" 2>&1 | sed 's/^/probe /'
+		echo "probe e34 parent-exit=$?"
+		exit 0 ;;
 	*) exit "$c" ;;
 esac
 `,
@@ -174,10 +196,104 @@ if (who === "runner") {
 }
 `,
 );
-nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nCOPY netpath.mjs /opt/pi-dispatch-probe/netpath.mjs\nRUN chmod 0755 /entrypoint.sh && chmod 0755 /opt/pi-dispatch-probe && chmod 0644 /opt/pi-dispatch-probe/netpath.mjs\nUSER pi\n`);
+
+// Issue #730 E3/E4 harness. The parent keeps a canary in a buffer, in its environ and on fd 0, prints one readable
+// address from its own maps, then spawns the tool child (the dumpable node). Never a real secret: a synthetic marker.
+nodeFs.writeFileSync(
+	join(context, "parent.mjs"),
+	`import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const canaryFile = process.argv[2];
+const mem = Buffer.from(readFileSync(canaryFile)); // the canary, held in this process's memory
+try { unlinkSync(canaryFile); } catch {}
+globalThis.__hold = mem; // keep it live for the child's read attempts
+let addr = "0";
+try {
+	for (const line of readFileSync("/proc/self/maps", "utf8").split("\\n")) {
+		const m = /^([0-9a-f]+)-[0-9a-f]+ r/.exec(line);
+		if (m) { addr = m[1]; break; }
+	}
+} catch {}
+writeFileSync("/tmp/paddr", addr);
+const child = spawnSync("/usr/local/bin/node", ["/opt/pi-dispatch-probe/child.mjs", String(process.pid), addr], { stdio: ["inherit", "inherit", "inherit"] });
+process.exit(child.status ?? 1);
+`,
+);
+nodeFs.writeFileSync(
+	join(context, "child.mjs"),
+	`import { readFileSync, openSync, readSync, closeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const [ppid, addr] = process.argv.slice(2);
+const base = "http://host.openshell.internal:18080";
+const line = (k, v) => console.log("e4 " + k + "=" + v);
+// E3: can a tool child reach the network at all (its ancestor includes the runner)?
+try { const r = await fetch(base + "/", { signal: AbortSignal.timeout(10000) }); line("e3-fetch", "status " + r.status); }
+catch (e) { line("e3-fetch", "error " + (e?.name ?? "") + " " + (e?.cause?.code ?? e?.message ?? "")); }
+const git = spawnSync("git", ["ls-remote", "https://github.com/octocat/Hello-World"], { timeout: 30000, encoding: "utf8" });
+line("e3-git", "code " + git.status + " " + String(git.stderr ?? "").split("\\n")[0].slice(0, 80));
+// E4: read the parent's secrets by each file route. errno (the .code) is the signal.
+try { const env = readFileSync("/proc/" + ppid + "/environ", "utf8"); line("e4-environ", env.includes("CANARY-ENV-9z7y") ? "READ canary" : "read no-canary " + env.length); }
+catch (e) { line("e4-environ", "error " + e.code); }
+try { const fd = openSync("/proc/" + ppid + "/mem", "r"); const b = Buffer.alloc(64); const n = readSync(fd, b, 0, 64, parseInt(addr, 16)); closeSync(fd); line("e4-mem", "READ " + n + " bytes " + (b.includes(Buffer.from("CANARY-MEM-9z7y")) ? "(canary)" : "")); }
+catch (e) { line("e4-mem", "error " + e.code); }
+try { const fd = openSync("/proc/" + ppid + "/fd/0", "r"); const b = Buffer.alloc(64); const n = readSync(fd, b, 0, 64, 0); closeSync(fd); line("e4-fd0", "READ " + n + " bytes " + (b.includes(Buffer.from("CANARY-MEM-9z7y")) ? "(canary)" : "")); }
+catch (e) { line("e4-fd0", "error " + e.code); }
+// process_vm_readv and ptrace: a compiled helper if the image build could add one, else noted (the sandbox's child
+// seccomp denies both syscalls per OpenShell source, child_seccomp.rs; this measures it).
+const helper = spawnSync("/opt/pi-dispatch-probe/memtry", [ppid, addr], { encoding: "utf8" });
+line("e4-syscalls", helper.error ? "helper-absent " + helper.error.code : String(helper.stdout ?? "").trim().replace(/\\n/g, " | "));
+`,
+);
+// A tiny C helper for the two syscall routes, compiled at image build (gcc added just for it). Best effort: if the
+// build cannot add gcc the helper is absent and the child says so.
+nodeFs.writeFileSync(
+	join(context, "memtry.c"),
+	`#define _GNU_SOURCE
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/uio.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+int main(int argc, char **argv) {
+	pid_t pid = atoi(argv[1]);
+	unsigned long addr = argc > 2 ? strtoul(argv[2], 0, 16) : 0;
+	char buf[32] = {0};
+	struct iovec local = { buf, sizeof buf };
+	struct iovec remote = { (void *)addr, sizeof buf };
+	ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
+	printf("process_vm_readv=%s", n < 0 ? strerror(errno) : "ok");
+	long r = ptrace(PTRACE_ATTACH, pid, 0, 0);
+	printf(" ptrace_attach=%s", r < 0 ? strerror(errno) : "ok");
+	if (r == 0) { waitpid(pid, 0, 0); ptrace(PTRACE_DETACH, pid, 0, 0); }
+	printf("\\n");
+	return 0;
+}
+`,
+);
+nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nCOPY netpath.mjs parent.mjs child.mjs /opt/pi-dispatch-probe/\nCOPY memtry.c /opt/pi-dispatch-probe/memtry.c\nRUN (apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && cc -O2 -o /opt/pi-dispatch-probe/memtry /opt/pi-dispatch-probe/memtry.c) || echo "memtry build skipped"\nRUN chmod 0755 /entrypoint.sh && chmod 0755 /opt/pi-dispatch-probe && chmod 0644 /opt/pi-dispatch-probe/netpath.mjs /opt/pi-dispatch-probe/parent.mjs /opt/pi-dispatch-probe/child.mjs\nUSER pi\n`);
 const probeImage = `pi-dispatch-openshell-probe:${nonce}`;
 const built = await run(engine, ["build", "--pull=false", "-q", "-t", probeImage, context]);
 if (built.code !== 0) refuse(`the probe image did not build: ${built.stderr.trim().split("\n").slice(-1)[0]}`);
+
+// Issue #730 investigation variants, built from the same context with an extra Dockerfile each. The default probe
+// image keeps runner-node at the shipped 0711 (nondumpable). These do not, so the lane can measure what dumpability
+// alone changes, with the same bytes at the same path (so OpenShell's TOFU binary hash is unchanged):
+//   - probeImage0755: runner-node chmod 0755 (readable, so exec leaves it dumpable).
+//   - probeImageNewPath: a 0755 copy of node at /opt/pi-dispatch/runner-observable, added to the net-binaries label
+//     so the generated policy lists it (a never-shipped path, to see whether a fresh listed path works at all).
+const probeImage0755 = `pi-dispatch-openshell-probe-0755:${nonce}`;
+nodeFs.writeFileSync(join(context, "Dockerfile.0755"), `FROM ${probeImage}\nUSER root\nRUN chmod 0755 /opt/pi-dispatch/runner-node\nUSER pi\n`);
+const built0755 = await run(engine, ["build", "--pull=false", "-q", "-t", probeImage0755, "-f", join(context, "Dockerfile.0755"), context]);
+if (built0755.code !== 0) console.log(`diag    the 0755-runner variant did not build: ${built0755.stderr.trim().split("\n").slice(-1)[0]}`);
+const probeImageNewPath = `pi-dispatch-openshell-probe-newpath:${nonce}`;
+const NET_LABEL = "dev.pi-dispatch.net-binaries";
+const baseBinaries = (await run(engine, ["image", "inspect", "--format", `{{index .Config.Labels "${NET_LABEL}"}}`, probeImage])).stdout.trim();
+nodeFs.writeFileSync(join(context, "Dockerfile.newpath"), `FROM ${probeImage}\nUSER root\nRUN install -o root -g root -m 0755 /usr/local/bin/node /opt/pi-dispatch/runner-observable\nLABEL ${NET_LABEL}="${baseBinaries},/opt/pi-dispatch/runner-observable"\nUSER pi\n`);
+const builtNewPath = await run(engine, ["build", "--pull=false", "-q", "-t", probeImageNewPath, "-f", join(context, "Dockerfile.newpath"), context]);
+if (builtNewPath.code !== 0) console.log(`diag    the new-path variant did not build: ${builtNewPath.stderr.trim().split("\n").slice(-1)[0]}`);
 
 const output = new Map();
 const bundleFor = (img, extra = {}) =>
@@ -449,6 +565,29 @@ for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) consol
 	const lines = String(output.get("last") ?? "").split("\n").filter((l) => l.startsWith("probe netpath "));
 	console.log(`diag    the model-call routes (exit ${result.code}):\n${lines.map((l) => `          ${l.slice("probe netpath ".length)}`).join("\n") || "          none printed"}`);
 }
+
+// Issue #730 investigation (E1-E4): all diag, none asserted. A helper runs one probe prompt on one image and prints
+// every `probe <...>` line the run wrote, so a build or run failure is a visible line too.
+const invRun = async (label, img, prompt, prefix) => {
+	output.set("last", "");
+	let code = "no-run";
+	try {
+		code = (await bundleFor(img).runContainer({ job: JOB, prepared: jobDirFor(prompt), name: `pi-job-conformance-${nonce}-${label}`, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 200 } })).code;
+	} catch (e) {
+		code = `threw ${e?.reason ?? e?.message ?? e}`;
+	}
+	const lines = String(output.get("last") ?? "").split("\n").filter((l) => l.startsWith(`probe ${prefix}`)).map((l) => l.slice("probe ".length));
+	console.log(`diag    #730 ${label} (exit ${code}):\n${lines.map((l) => `          ${l}`).join("\n") || "          none printed"}`);
+};
+// E1: the mechanism's inputs (dumpable bit, modes, Yama). E2: does a dumpable runner-node (0755) reach the model, and
+// does a fresh policy-listed 0755 path? E3/E4: a tool child's network reach and its reads of the parent, with the
+// parent dumpable (node) and nondumpable (runner), on the shipped 0711 image.
+await invRun("e1", probeImage, "inv-e1", "e1");
+await invRun("e2-runner0755", probeImage0755, "netpath", "netpath");
+await invRun("e2-newpath", probeImageNewPath, "netpath", "netpath");
+await invRun("e34-parent-node", probeImage, "inv-child-node", "e");
+await invRun("e34-parent-runner", probeImage, "inv-child-runner", "e");
+await invRun("e34-parent-runner-dumpable", probeImage0755, "inv-child-runner", "e");
 
 // Issue #686, part 2: the real runner STEERED over the exec's stdin. The real relay (inbox-relay.mjs) over an in-memory
 // inbox holding one queued steer, the real publisher with the steer ack consumer (the opener start.mjs builds), and the
