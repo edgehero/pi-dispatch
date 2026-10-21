@@ -339,6 +339,23 @@ test("the project, envelope, secret-profile and priorities plans", async () => {
     assert.deepEqual(add.mutate({ model: "m" }), { model: "m", secretProfiles: { dev: "/opt/d.sh", prod: "/opt/r.sh" } });
     assert.equal(plans.planSecretProfileRemove({ name: "gone", profiles: {}, settingsFile: "/s" }).refusal, "no such profile. No resolver profiles are declared in the settings overlay.");
     assert.deepEqual(plans.planSecretProfileRemove({ name: "dev", profiles: { dev: "/d", x: "/x" }, settingsFile: "/s" }).plan.mutate({}), { secretProfiles: { x: "/x" } });
+    // Bundle resolvers (issue #704): the validator's `{ path, format }` shape, a replace said, and the stranded bundles named.
+    const badd = plans.planSecretBundleAdd({ name: "op-shop", path: "/opt/b2.mjs", format: "dotenv", bundles: { "op-shop": { path: "/opt/b.mjs", format: "json" } }, settingsFile: "/s/settings.json" }).plan;
+    assert.equal(badd.title, "Declare a secret bundle resolver");
+    assert.deepEqual(badd.mutate({ secretProfiles: { a: "/a" } }), { secretProfiles: { a: "/a" }, secretBundles: { "op-shop": { path: "/opt/b2.mjs", format: "dotenv" } } });
+    assert.match(badd.message, /This REPLACES the current op-shop -> \/opt\/b\.mjs \(json\)/);
+    const brm = plans.planSecretBundleRemove({ name: "op-shop", bundles: { "op-shop": { path: "/opt/b.mjs", format: "json" } }, bound: ["shop", "web"], settingsFile: "/s" }).plan;
+    assert.deepEqual(brm.mutate({}), { secretBundles: {} });
+    assert.match(brm.message, /The jobs of bundles shop, web are refused PRE-SPEND .*, or on a multi-host worker's shared queue held for a host that declares it/);
+    const one = { "op-shop": { path: "/b", format: "json" } };
+    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: null, settingsFile: "/s" }).plan.message, /The triggers file could not be read, so the jobs of any bundle naming it are refused/);
+    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: [], settingsFile: "/s" }).plan.message, /No bundle in triggers\.json names it, so no project's jobs depend on it\.$/);
+    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: ["shop"], envBundles: { "op-shop": { path: "/e", format: "json" } }, settingsFile: "/s" }).plan.message, /PI_SECRET_BUNDLES also declares op-shop, so removing it here resolves the ambiguity/);
+    // Any colliding name makes EVERY bundle ambiguous (mergeSecretProfiles), so another collision left keeps it so.
+    const two = { "op-shop": { path: "/b", format: "json" }, "op-web": { path: "/w", format: "json" } };
+    const env2 = { "op-shop": { path: "/e", format: "json" }, "op-web": { path: "/f", format: "json" } };
+    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: two, bound: [], envBundles: env2, settingsFile: "/s" }).plan.message, /so this removes one collision\. Still ambiguous after this: op-web also collides with PI_SECRET_BUNDLES/);
+    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: two, bound: [], envBundles: { "op-web": { path: "/f", format: "json" } }, settingsFile: "/s" }).plan.message, /removing op-shop does not change that\. Still ambiguous after this: op-web also collides/);
     // Priorities: the plan applyPriorities takes, validUntil from the injected clock.
     const now = new Date(Date.UTC(2026, 9, 15, 0, 0, 0));
     assert.deepEqual(plans.planPriorities({ projects: [{ id: "web", weight: 3, reason: "r" }], validDays: 2, now }).plan.plan, { validUntil: "2026-10-17T00:00:00.000Z", projects: [{ id: "web", weight: 3, reason: "r" }] });
@@ -468,6 +485,11 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["no such profile, with some", plans.planSecretProfileRemove({ name: "gone", profiles: { dev: "/d" }, settingsFile: "/s" }).refusal, "no such profile. Resolver profiles (settings overlay):\n  dev -> /d"],
       ["profile name", plans.planSecretProfileAdd({ name: "pro d", path: "/x", profiles: {}, settingsFile: "/s" }).refusal, "a profile name may use letters, digits, dot, dash and underscore only \u2014 PI_SECRET_PROFILES is a comma-separated list of name:path pairs"],
       ["resolver path", plans.planSecretProfileAdd({ name: "prod", path: "rel/x", profiles: {}, settingsFile: "/s" }).refusal, "the resolver needs an ABSOLUTE path: a service manager's working directory is not your shell's"],
+      // Issue #704: the bundle resolvers' own sentences.
+      ["bundle profile name", plans.planSecretBundleAdd({ name: "op shop", path: "/x", format: "json", bundles: {}, settingsFile: "/s" }).refusal, "a bundle profile name may use letters, digits, dot, dash and underscore only \u2014 PI_SECRET_BUNDLES is a comma-separated list of name:path:format entries"],
+      ["bundle format", plans.planSecretBundleAdd({ name: "op-shop", path: "/x", format: "yaml", bundles: {}, settingsFile: "/s" }).refusal, "the format is dotenv or json: what the resolver prints, declared, because the worker never guesses it from the output"],
+      ["bundle name in PI_SECRET_BUNDLES", plans.planSecretBundleAdd({ name: "op-shop", path: "/x", format: "json", bundles: {}, envBundles: { "op-shop": { path: "/y", format: "json" } }, settingsFile: "/s" }).refusal, "PI_SECRET_BUNDLES already declares op-shop on this deployment; the worker reads a name declared in both places as ambiguous and refuses every bundled job, so pick another name or change the .env"],
+      ["no such bundle resolver", plans.planSecretBundleRemove({ name: "gone", bundles: {}, settingsFile: "/s" }).refusal, "no such bundle resolver. No bundle resolvers are declared in the settings overlay."],
       ["no backends", plans.backendRefusal("local", { PI_BACKENDS: "vapour" }), "this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)"],
       ["backend not blessed", plans.backendRefusal("podman", { PI_BACKENDS: "local" }), "backend 'podman' is not blessed by this deployment (PI_BACKENDS: local)"],
       ["tool-proof dollar cap", plans.wideningFieldRefusal({ maxCostUsd: "1" }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.maxCostUsd (sent as maxCostUsd): a trigger's per-job dollar cap is set by hand in the triggers file, never by a tool"],

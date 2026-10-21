@@ -1277,7 +1277,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     scoped limits, the projects, the envelope and allocation, the MCP servers and the staged packages, and the secret
     profiles by NAME only: no page and no `/api/state` body carries a resolver path, a secret's value or a secret's
     reference. Tests: `admin/test/read-model-pages.test.mjs` (`secretProfileNames`),
-    `admin/test/console-pages.test.mjs`.
+    `admin/test/console-pages.test.mjs`. AMENDED 2026-10-20 (#704): and the secret bundles (`REQ-TRIGGER-SECRETS`):
+    the bundle resolvers by name and format, and each bundle the triggers file binds with its facts and the variable
+    names the newest run received, never a bundle's `ref`, a resolver path or a value. The run page (c) shows a run's
+    bundle facts. Tests: `admin/test/secret-bundles-view.test.mjs`.
   - (h) **Audit** (`/audit`). For the operator role, the page shows the console audit rows newest first, pages with
     `before`, and shows a line that is not a row as broken, in its place, rather than skipping it; for a viewer, it is
     refused (`REQ-CONSOLE-SECURITY` (l)). Tests: `worker/test/console-audit.test.mjs` (`readConsoleAudit`),
@@ -1391,7 +1394,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     sentence the matching tool gives (one planner, `write-plans.mjs`), and the confirm writes through the panel's
     funnel; given the file changed by another session after the preview (the triggers file and the settings overlay
     included), the confirm refuses and the file is byte-identical. A secret profile action names a profile and its
-    resolver path, never a value. Tests: `admin/test/write-plans.test.mjs`, `admin/test/write-expect.test.mjs`,
+    resolver path, never a value; AMENDED 2026-10-20 (#704): so does a bundle resolver action (`secret-bundle-add`,
+    `secret-bundle-remove`), with its format, and a project edit the project tools refuse because a secret bundle
+    names the project is refused at the preview with the same sentence. Tests: `admin/test/write-plans.test.mjs`, `admin/test/write-expect.test.mjs`,
     `worker/test/file-expect.test.mjs`, `admin/test/console-actions.test.mjs`.
   - (j) **Bulk.** Given more than 100 matching jobs, the preview lists 100 and says how many more; the ticket binds
     the exact list and each job's state; the confirm acts per job and reports per job, a job that changed refused
@@ -4496,6 +4501,21 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   host (a trigger's run.secrets value for that name too), the host never one the job's own forge, model or MCP
   credentials go to; every other bundle variable is a value, handed by a file in the job directory and never on the
   exec's command line or in the gateway's log; and the record's `bundle` also counts the two (`placeholders`, `plain`).
+  AMENDED 2026-10-20 (#704 part 4), the operator's surfaces: a bundle profile is declared in the overlay's
+  `secretBundles` only by the operator-typed `/dispatch secrets add --bundle` (a name, an absolute path and a format,
+  the exact bytes confirmed) and the console's `secret-bundle-add` form, and removed by `remove --bundle <name>` and
+  `secret-bundle-remove`, each audited (`secret-bundle-add`, `secret-bundle-remove`); a name `PI_SECRET_BUNDLES` already
+  declares is refused before the confirm. No registered tool has a parameter for it, `dispatch_set` refuses the key, and
+  a test holds the planners to the two operator surfaces. `/dispatch secrets list`, `/dispatch triggers`, the panel
+  and the console show each bundle the triggers file binds (its project, its profile and whether this deployment
+  declares it, `forkReviews`, its `endpoints` names and hosts, the triggers that opt out), and the panel and the
+  console alone the variable names the newest run in view received (no model-callable tool
+  returns a variable name: a record's `bundle` reaches a tool result as counts, and `dispatch_status` returns no
+  operator-only overlay key, held by a test over every registered tool); a run's detail in the panel
+  and on the console shows the variables it received and from which bundle, the shadowed names, the openshell counts,
+  or its `bundleSkipped` as a sentence. None shows a `ref` or a value, and none resolves a bundle (`doctor --secrets`
+  does). A project edit the project tools refuse for a bundle shows that sentence in the console's form and the tool's
+  answer.
 
 ## REQ-DEPLOYMENT-BOOTSTRAP
 
@@ -5185,6 +5205,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-20 | Issue #704, part 4: project secret bundles on the operator's surfaces. **`REQ-TRIGGER-SECRETS` AMENDED**, a dated acceptance paragraph: a bundle profile is declared and removed only by `/dispatch secrets add --bundle` / `remove --bundle` and the console's two forms, audited, a name `PI_SECRET_BUNDLES` holds refused, no tool able to write it (a test); the bundles view on `/dispatch secrets list`, `/dispatch triggers` (without variable names), the panel and the console; a run's received names, shadowed names, counts and skip sentence; never a `ref` or a value, never a resolve; the project tools' bundle refusal shown in the console form and the tool answer. Review round 1: no tool result carries a variable name (counts only, `dispatch_status` without the operator-only keys), an overlay resolver outside `PI_SECRET_RESOLVER_ROOTS` shown as one the worker will not run, a near-miss flag refused. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g): the configuration page shows the bundle resolvers and the bundles, never a `ref`, a path or a value, and the run page (c) a run's bundle facts. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (i): the bundle resolver actions, and the project edit refused for a bundle at the preview. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: `/dispatch secrets` was already an audited, operator-typed write and its subcommand list is unchanged (`--bundle` is a flag); the two new writes join the same chain (clause (k)). The statement and every earlier acceptance line UNCHANGED, checked. |
 | 2026-10-20 | Issue #704, part 3: project secret bundles on both OpenShell venues. **`REQ-TRIGGER-SECRETS` AMENDED**, its bundle acceptance: `openshell-bundle-unsupported` retired; six venue refusals inside the read (`openshell-bundle-endpoint-not-allowed`, `-endpoint-shared`, `-endpoint-unknown`, `-name-taken`, `-unpassable`, `-image-too-old`, the last and the model and MCP hosts of `-endpoint-shared` from review round 1), plain values by a job-directory file and never the exec, behind the fork check and before every reserve, an unreadable source retried; an `endpoints` variable a placeholder used only at its host, the rest values, and the record's two counts. The statement, the per-trigger `run.secrets` rules and every other acceptance line UNCHANGED, checked. |
 | 2026-10-19 | Issue #704, part 2, review round 1. **`REQ-TRIGGER-SECRETS` AMENDED**, its bundle scope and acceptance: no model-callable tool may widen a grant (an added trigger carries `secretBundle: false`, no trigger tool call may carry the field, the project tools refuse a bundled project's membership change); `openshell-bundle-unsupported`; a profile this host lacks defers a multi-host shared-queue job; the last good triggers read, and a retry only before the first; the read before the mint unless a fork check is needed; a 401, 403 or 404 head read is `head-unverified`; bundle-only loader and steering names refuse. |
 | 2026-10-19 | Issue #704, part 2: project secret bundles. **`REQ-TRIGGER-SECRETS` AMENDED**, three dated paragraphs: the scope gains bundles (trigger-made jobs of the bound project, one resolver call per job start, the same exclusions: no `dispatch_run` or manual run, no chained child, no model-callable writer; the `run.secretBundle: false` opt-out; no fork pull request without `forkReviews`; `run.secrets` win a clash); "names FIELDS" stays true for `run.secrets` and is explicitly not true for bundles; the acceptance gains the load-time refusals, the pre-mint and post-mint refusals and retries, the names-only record and doctor's lines. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: a bundle is not routed (`DES-PROJECT-SECRET-BUNDLES` says why); the worker's pre-spend refusal is the backstop. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: `doctor --secrets` reads and never writes. **Code evidence**: worker/src/processor.mjs -> the bundle gates; worker/src/secret-bundles.mjs; worker/src/triggers.mjs -> validateSecretBundles; worker/src/run-history.mjs -> recordedBundle. |

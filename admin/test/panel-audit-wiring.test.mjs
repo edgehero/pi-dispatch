@@ -393,6 +393,9 @@ const CASES = [
   // ---- /dispatch secrets ----
   { site: "secrets-command.ts:secret-profile-add", name: "/dispatch secrets add", kind: "secret-profile-add", outcomes: ["ok"], state: (fx) => bytes(fx.files.settings), run: () => command("secrets add", { input: ["staging", "/opt/pi/staging.sh"] }) },
   { site: "secrets-command.ts:secret-profile-remove", name: "/dispatch secrets remove", kind: "secret-profile-remove", outcomes: ["ok"], state: (fx) => bytes(fx.files.settings), run: () => command("secrets remove prod") },
+  // Issue #704: the bundle resolvers, the same door with --bundle.
+  { site: "secrets-command.ts:secret-bundle-add", name: "/dispatch secrets add --bundle", kind: "secret-bundle-add", outcomes: ["ok"], state: (fx) => bytes(fx.files.settings), run: () => command("secrets add --bundle", { input: ["op-shop", "/opt/pi/bundle.sh", "json"] }) },
+  { site: "secrets-command.ts:secret-bundle-remove", name: "/dispatch secrets remove --bundle", kind: "secret-bundle-remove", outcomes: ["ok"], state: (fx) => bytes(fx.files.settings), prepare: (fx) => writeFileSync(fx.files.settings, JSON.stringify({ model: "m", secretBundles: { "op-shop": { path: "/opt/pi/bundle.sh", format: "json" } } })), run: () => command("secrets remove --bundle op-shop") },
   // ---- dashboard.ts's withAuditedWrites, with the writer index.ts hands it (panelWrite on PI_LOGS_DIR) ----
   ...["pause", "resume", "cancelActive", "cancelHeld"].map((method) => {
     const kind = { pause: "fleet-pause", resume: "fleet-resume", cancelActive: "cancel-active", cancelHeld: "cancel-held" }[method];

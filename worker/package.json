@@ -110,6 +110,7 @@
     "./get-token": "./src/get-token.mjs",
     "./octokit-log": "./src/octokit-log.mjs",
     "./runtime-settings": "./src/runtime-settings.mjs",
+    "./secret-profiles": "./src/secret-profiles.mjs",
     "./run-history": "./src/run-history.mjs",
     "./run-mirror": "./src/run-mirror.mjs",
     "./run-budget-ledger": "./src/run-budget-ledger.mjs",

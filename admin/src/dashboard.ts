@@ -28,7 +28,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -1543,7 +1543,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const detailTitle = `trigger · ${scrubControl(String(t?.type ?? "?"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const sched = cronSchedInfo(t, snapshot);
-    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt, detailTrigger?.instructions, snapshot?.overlayMcp);
+    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt, detailTrigger?.instructions, snapshot?.overlayMcp, snapshot?.secretBundles ?? null);
     if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", pendingDelete ? "delete this trigger? y/n" : "e edit · x delete · esc back"];
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: triggerDetailHints(dw - 4, styler, pendingDelete) });
     return centerBlock(boxed, Math.trunc(width), dw);
@@ -1725,7 +1725,8 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
         ...budgetMeters(snapshot.budget, snapshot.settings, 24),
       ],
     },
-    { title: "TRIGGERS", lines: toLines(renderTriggers({ schedulers: snapshot.schedulers, triggers: snapshot.triggers })) },
+    // The project secret bundles (issue #704) under the triggers; "" when the file binds none, so the section is as before.
+    { title: "TRIGGERS", lines: toLines([renderTriggers({ schedulers: snapshot.schedulers, triggers: snapshot.triggers }), renderSecretBundles(snapshot.secretBundles)].filter((x) => x !== "").join("\n\n")) },
     // The section TITLE carries the fleet fact, not a seventh cell in each row (issue #57, Gap 3). A cell
     // would compete with jobId and target inside one `fitLine(..., inner)` and clip silently at width 80;
     // the title answers the completeness question once rather than fifty times. Absent on a single host,
@@ -1866,6 +1867,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     { key: "spend", head: ["spend & limits", `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
     ...dollarSection(snapshot.dollars, inner, styler),
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
+    ...bundlesSection(snapshot.secretBundles, inner, styler),
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
     // Priority 0: the section an operator acts on least often from the panel folds FIRST under the
     // collapse budget. The key hint lives in this divider, not the footer -- the footer's width
@@ -1962,6 +1964,38 @@ function dollarRow(r: any, inner: number, styler: any): string {
     bits.push(styler.fg("dim", "records n/a"));
   }
   return fitLine(bits.join(styler.fg("dim", "  ")), inner, styler);
+}
+
+/**
+ * The project secret bundles (issue #704), two rows per bundle the triggers file binds: its id, then the facts every
+ * surface states (project, profile and whether this deployment declares it, fork reviews, the endpoint count, the
+ * triggers that opt out), and under it the variable NAMES the newest run in view received. CONDITIONAL,
+ * `heldSection`'s rule: no bundle, no section, so a deployment without one renders exactly the panel it always did.
+ * Collapsible beside the triggers it belongs to (priority 3, Tab opens the triggers). Nothing here is resolved:
+ * `pi-dispatch doctor --secrets` does that on the host that runs the jobs.
+ */
+function bundlesSection(view: any, inner: number, styler: any): any[] {
+  const rows: any[] = Array.isArray(view?.bundles) ? view.bundles : [];
+  if (rows.length === 0) return [];
+  const body: string[] = [];
+  // Compact words, the console's facts shortened to fit 80 columns: the declared state is the one an operator must not
+  // miss, so a profile this deployment does not serve is in capitals and red. The console spells each one out.
+  const DECLARED: Record<string, string> = { env: "env", overlay: "overlay", "overlay-outside-roots": "OUTSIDE ROOTS", ambiguous: "AMBIGUOUS", "env-malformed": "ENV MALFORMED", missing: "NOT DECLARED", unseen: "env not visible" };
+  for (const b of rows) {
+    const ok = b.declared === "env" || b.declared === "overlay";
+    const ends = Array.isArray(b.endpoints) ? b.endpoints.length : 0;
+    const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map((i: number) => `#${i}`).join(" ") : "none";
+    const facts = [
+      `project ${b.project ?? "-"}${b.projectKnown === false ? " (not in projects.json)" : ""}`,
+      `profile ${b.profile ?? "-"} (${DECLARED[b.declared] ?? "NOT DECLARED"}${b.format ? `, ${b.format}` : ""})`,
+      `forks ${b.forkReviews ? "yes" : "no"}`,
+      `${ends} endpoint${ends === 1 ? "" : "s"}`,
+      `opt-out ${opted}`,
+    ];
+    body.push(fitLine(styler.fg("warning", cellOf(b.id)) + styler.fg(ok ? "dim" : b.declared === "unseen" ? "warning" : "error", `  ${cellOf(facts.join(" · "))}`), inner, styler));
+    body.push(fitLine(styler.fg("dim", `  ${b.last ? cellOf(`last received: ${b.last.variables.length > 0 ? b.last.variables.join(", ") : "none"}`) : "no run in view recorded it yet"}`), inner, styler));
+  }
+  return [{ key: "bundles", priority: 3, viewKey: "tab", head: ["secret bundles", `${rows.length} · names only · doctor --secrets resolves`], body }];
 }
 
 /** How many held rows the section shows before it stops and counts the rest. */
@@ -2339,11 +2373,11 @@ function triggerLines(snapshot: any, selected: number, inner: number, styler: an
   if (triggers && triggers.invalid) { lines.push(styler.cell(`(triggers file invalid: ${triggers.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
   const list = (triggers && triggers.triggers) ?? [];
   if (list.length === 0) { lines.push(styler.cell("(no triggers · a to add)", inner, { color: "dim" })); return { count: 0, lines }; }
-  list.forEach((t: any, i: number) => lines.push(triggerRow(t, i === selected, inner, styler, cronSchedInfo(t, snapshot))));
+  list.forEach((t: any, i: number) => lines.push(triggerRow(t, i === selected, inner, styler, cronSchedInfo(t, snapshot), triggerBundleOf(t, snapshot?.secretBundles))));
   return { count: list.length, lines };
 }
 
-function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: any = null): string {
+function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: any = null, bundle: any = null): string {
   const t = scrubTrigger(raw);
   const cursor = sel ? styler.fg("accent", "›") : " ";
   const kind = t?.type ?? "?";
@@ -2411,7 +2445,12 @@ function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: a
   // apply, which is `accent`'s meaning on this row. Not a risk badge, so a narrow row may drop it; the drill-in keeps
   // the fact on its own line. Cron only, absent otherwise, appended after the cap so every other row is byte-identical.
   const pfo = t?.portfolio === true ? rowBadge("accent", false, "[portfolio]") : null;
-  const badges = [pkgs, img, skl, ins, res, rep, sec, mcp, shot, mdl, cap, pfo, health].filter((b): b is RowBadge => b !== null);
+  // The project secret bundle (issue #704), beside [secrets]: `[bundle <id>]` amber with it, for its reason (what a job
+  // can REACH, here a project's whole environment), on a cron row whose folder is in a bundled project; `[no bundle]`
+  // in `accent` on a trigger that opts out (`run.secretBundle: false`), a narrowing like [once]. Absent when the
+  // deployment binds no bundle, so every row is byte-identical then.
+  const bnd = bundle === null ? null : bundle.optedOut ? rowBadge("accent", false, "[no bundle]") : rowBadge("warning", true, "[bundle ", cellOf(bundle.id), "]");
+  const badges = [pkgs, img, skl, ins, res, rep, sec, bnd, mcp, shot, mdl, cap, pfo, health].filter((b): b is RowBadge => b !== null);
   const match = matchColored(t, styler);
   return fitTriggerRow(`${cursor} ${badge} `, match, targetColored(t, styler), badges, inner, styler, rowFloorMatch(t, match, styler));
 }
@@ -3321,7 +3360,7 @@ function settingsLines(settings: any, inner: number, styler: any): string[] {
  * no crammed "produces" line. Read-only; `e`/`x` drive edit/delete through the command loop. Every line is
  * `inner` cols.
  */
-function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number, instructionsText: any = null, overlayMcp: any = null): string[] {
+function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number, instructionsText: any = null, overlayMcp: any = null, bundles: any = null): string[] {
   if (!raw) return [styler.cell("(no trigger)", inner, { color: "dim" })];
   const t = scrubTrigger(raw); // the rule at the door: see `scrubTrigger`
   const out: string[] = [];
@@ -3451,6 +3490,17 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   // row; the trust-model lines below still say what binding them means. `warning` when bound, for the
   // row badge's reason: this is what the job can REACH. Count and profile name, never the references.
   kvWrap("secrets", t.secrets > 0 ? `${t.secrets} bound${t.secretsProfile ? ` via profile ${cellOf(t.secretsProfile)}` : ""}` : "none bound", t.secrets > 0 ? "warning" : "dim");
+  // The project secret bundle (issue #704), beside the secrets it adds to: only when the deployment binds one, so every
+  // other drill-in is byte-identical. A cron trigger belongs to its folder's project; a webhook trigger to none until
+  // a repository does, so its row says which bundles its jobs may hold. `warning` for the secrets row's reason.
+  const bundleAt = bundles ? triggerBundleOf(raw, bundles) : null;
+  const bundleIds = Array.isArray(bundles?.bundles) ? bundles.bundles.map((b: any) => cellOf(b.id)) : [];
+  if (bundles) {
+    if (bundleAt?.optedOut) kvWrap("bundle", `opted out${bundleAt.id !== null ? ` of ${cellOf(bundleAt.id)}` : " of every project's bundle"} (run.secretBundle: false)`, "accent");
+    else if (bundleAt?.id) kvWrap("bundle", `${cellOf(bundleAt.id)}: its project's whole environment`, "warning");
+    else if (t.type === "cron") kvWrap("bundle", "none: the folder is in no bundled project", "dim");
+    else kvWrap("bundle", `a job on a bundled project's repository holds it (${bundleIds.join(", ")})`, "warning");
+  }
   // The same "I checked" dim default, for the one field on this pane that changes what a delivery COSTS
   // (REQ-REPLICA-RUNS). `warning` when armed: this row is a multiplier, and a multiplier that renders like
   // a preference is the polarity mistake 0.1.4 shipped a fix for on [packages].
@@ -3501,6 +3551,10 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
     holds(`${t.secrets} vault secret(s) injected${t.secretsProfile ? ` via profile ${t.secretsProfile}` : ""}`);
     holds("resolved on the host before the container; the job holds no vault credential");
     holds("the agent can read them, and the forge is on the egress allowlist");
+  }
+  if (bundleAt?.id && !bundleAt.optedOut) {
+    bullet(`bundle ${cellOf(bundleAt.id)}: every variable its resolver prints, read once per job start; each run records the names`, "warning");
+    bullet("a variable added in the manager reaches the next job with no edit here", "warning");
   }
   // Stated beside the trust model rather than only in docs/replicas.md, because the multiplier is the whole
   // of what an operator needs to weigh: N replicas is N HONEST budget reservations, not a bypass, so the
@@ -4076,6 +4130,27 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // WHICH PROJECT (issue #499 part C): the id the worker resolved at pickup and wrote into the record. Absent for a run
   // outside every project and for one recorded before projects existed, which are never re-attributed.
   if (recordProject(r) !== null) out.push(kv("project", recordProject(r)));
+  // THE PROJECT SECRET BUNDLE (issue #704): the variable NAMES the run received and the bundle they came from, the names
+  // its trigger's own run.secrets shadowed, and on an openshell venue how many were placeholders; or why it ran without
+  // its project's bundle, as a sentence. `recordBundle` is the worker's rebuild (environment-name charset, a closed
+  // enum), and each part still goes through `show`. WRAPPED under the label, never clipped: a cut list of names would
+  // read as the whole grant. At most six lines, the rest counted. A record with neither key renders byte-identical.
+  const bundleGot = recordBundle(r);
+  if (bundleGot !== null) {
+    const wrapped = (k: string, v: string, color: string, maxLines = 6) => {
+      const parts = wrapColumns(v, Math.max(1, inner - 13), styler);
+      parts.slice(0, maxLines).forEach((part: string, i: number) => out.push(kv(i === 0 ? k : "", part, color)));
+      if (parts.length > maxLines) out.push(kv("", `${styler.glyphs?.ellipsis ?? "…"} ${parts.length - maxLines} more line(s) in the run record`, "dim"));
+    };
+    const b = bundleGot.bundle;
+    if (b) {
+      wrapped("bundle", show(bundleReceivedText(b)), "warning");
+      if (b.shadowed.length > 0) wrapped("", show(`shadowed by run.secrets: ${b.shadowed.join(", ")}`), "dim");
+      const counts = bundleCountsText(b);
+      if (counts !== "") wrapped("", show(counts), "dim");
+    }
+    if (bundleGot.bundleSkipped !== null) wrapped("bundle", show(`skipped (${bundleGot.bundleSkipped}): ${BUNDLE_SKIPPED_TEXT[bundleGot.bundleSkipped]}`), "dim");
+  }
   // WHAT A PORTFOLIO RUN ASKED FOR (issue #507): the record's `plan` (issue #505), its outcome, the reason as the enum
   // word the worker wrote (there is no reason-to-words table, and the plan's own reason TEXT is never in a record), and
   // the plan id the `b` view's history names. A line only when the record carries the object, so every older record,

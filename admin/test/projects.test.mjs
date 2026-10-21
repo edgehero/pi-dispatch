@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import * as realFs from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -222,6 +222,26 @@ test("dispatch_project_delete is refused BEFORE the confirm while a scoped-limit
   const out = textOf(await toolByName("dispatch_project_delete").execute("id", { id: "ops" }, undefined, undefined, ctx));
   assert.deepEqual(out, { applied: true, deleted: "ops" });
   assert.deepEqual(d.read().projects.map((p) => p.id), ["shop"]);
+});
+
+test("dispatch_project_edit and _delete on a project a secret bundle names are refused BEFORE the confirm, with the planner's sentence (#704)", async () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["github:acme/web"] }] });
+  const triggers = join(dirname(d.p), "triggers.json");
+  writeFileSync(triggers, JSON.stringify({ triggers: [], secretBundles: { env: { profile: "op-shop", ref: "r", project: "shop" } } }));
+  const saved = process.env.PI_TRIGGERS_FILE;
+  process.env.PI_TRIGGERS_FILE = triggers;
+  try {
+    const before = readFileSync(d.p, "utf8");
+    const { ctx, shown } = toolCtx({ answer: true });
+    const why = /rejected: secretBundles "env" \(project shop\) in .*triggers\.json names this project, and a change to its members would change which jobs hold that bundle's secrets; change the bundle in triggers\.json first\. Nothing was written$/;
+    await assert.rejects(() => toolByName("dispatch_project_edit").execute("id", { id: "shop", members: ["github:acme/web", "github:acme/api"] }, undefined, undefined, ctx), why);
+    await assert.rejects(() => toolByName("dispatch_project_delete").execute("id", { id: "shop" }, undefined, undefined, ctx), why);
+    assert.equal(shown.length, 0, "the operator is never asked to approve it");
+    assert.equal(readFileSync(d.p, "utf8"), before);
+  } finally {
+    if (saved === undefined) delete process.env.PI_TRIGGERS_FILE;
+    else process.env.PI_TRIGGERS_FILE = saved;
+  }
 });
 
 test("the project tools refuse while PI_PROJECTS_FILE is unset, saying why", async () => {

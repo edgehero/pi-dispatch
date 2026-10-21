@@ -215,11 +215,11 @@ console.
 |---|---|
 | `/` | The overview: whether the fleet is paused, the queue counts, the hosts online and how long ago each last checked in, today's spend against the caps, how many runs are waiting for an answer (and how many of those are being answered now), and the failures of the last 24 hours. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. |
-| `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
+| `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
 | `/insights?range=30d` | Spend and insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget and running jobs, every running job, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
-| `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages and the secret profiles (their names only, never where a secret comes from or its value). |
+| `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |
 
 **Links to the forge** come from your deployment's own settings, never from a guess. A GitHub run links to
@@ -360,7 +360,7 @@ is refused here with the same words, and every action lands in the [audit log](#
 | Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. |
 | Run | Steer, Follow-up, Withdraw | Sends a message to a running, steer-armed job, or takes one back ([below](#steering-a-running-job)). Spends from the run's own reservation. |
 | Run | Sandbox | Shows the command that opens the run's sandbox on the host ([below](#opening-a-sandbox)). |
-| Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, and secret profile names. |
+| Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, secret profile names, and bundle resolvers (a name, a path and a format). |
 
 **Paid actions show what they reserve.** A re-run, an answer and a retry start a paid job, so their preview shows what the
 worker will hold for it before it runs: one job from the job count, and in dollars the per-job cap (the trigger's
@@ -374,8 +374,9 @@ run's turn, dollar and token caps still bind, so its preview says so instead of 
 
 **Configuration edits** change the same files the panel writes (`triggers.json`, the settings overlay, the money
 files) and nothing else. Nothing is committed to git: if you keep the deployment folder in git, commit the change
-yourself. A secret profile is a name and the path of its resolver script; the console never asks for or shows a
-secret's value. If another session (the panel, a tool, a hand edit) wrote the file after your preview, the confirm is
+yourself. A secret profile is a name and the path of its resolver script, and a bundle resolver also says the format its script
+prints; the console never asks for or shows a secret's value, nor a bundle's reference. A project edit refused because
+a secret bundle names the project shows that refusal in the form, and nothing is written. If another session (the panel, a tool, a hand edit) wrote the file after your preview, the confirm is
 refused and the file is left as it is.
 
 ### Bulk actions

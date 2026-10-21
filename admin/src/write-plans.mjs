@@ -30,6 +30,7 @@ import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-r
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { formatCpus, formatMemory, parseCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import {
+  BUNDLE_FORMATS,
   KNOWN_KEYS,
   blankSettingsFile,
   envelopeJobCap,
@@ -43,6 +44,7 @@ import {
   readScopedLimits,
   readSettingsView,
   readTriggers,
+  renderBundleProfiles,
   settingShown,
   writeInputs,
   writeScopedLimits,
@@ -1247,6 +1249,95 @@ export function planSecretProfileRemove({ name, profiles, settingsFile }) {
       mutate: (o) => ({ ...o, secretProfiles: next }),
       target: settingsFile,
       ...confirmOf("Remove a secret resolver", `${name} -> ${profiles[name]}\n\nEvery trigger naming it refuses PRE-SPEND after this, rather than running without its secrets.`),
+    },
+  };
+}
+
+// ---- bundle resolver profiles (issue #704, DES-PROJECT-SECRET-BUNDLES) ----
+
+/** Why `name` cannot name a bundle profile, or null: the profile charset, for PI_SECRET_BUNDLES' list grammar. */
+export function secretBundleNameRefusal(name) {
+  return PROFILE_NAME.test(name) ? null : "a bundle profile name may use letters, digits, dot, dash and underscore only \u2014 PI_SECRET_BUNDLES is a comma-separated list of name:path:format entries";
+}
+
+/** Why `format` cannot be a bundle resolver's declared format, or null. Declared, never guessed: the worker never sniffs. */
+export function secretBundleFormatRefusal(format) {
+  return BUNDLE_FORMATS.includes(format) ? null : `the format is ${BUNDLE_FORMATS.join(" or ")}: what the resolver prints, declared, because the worker never guesses it from the output`;
+}
+
+/**
+ * Plan declaring bundle profile `name` -> resolver `path` printing `format` over the overlay's `bundles`
+ * (`/dispatch secrets add --bundle`, the console's `secret-bundle-add`). `secretProfiles`' rules (the name and the
+ * absolute path), the format required, and one of its own: a name `PI_SECRET_BUNDLES` already declares on this
+ * deployment (`envBundles`) is refused, because the worker reads a name in both sources as AMBIGUOUS and then refuses
+ * every bundled job of every project, not just this one's. The confirm shows the EXACT bytes to be written, the shape
+ * runtime-settings.mjs's validator takes (`{ name: { path, format } }`). Never a reference or a value: a bundle profile
+ * is a name, a path and a format, and binding it to a project stays an edit to triggers.json's `secretBundles`.
+ * `{ plan: { name, path, format, bundles, mutate, ... } }` or `{ refusal }`.
+ */
+export function planSecretBundleAdd({ name, path, format, bundles, envBundles = {}, settingsFile }) {
+  const badName = secretBundleNameRefusal(name);
+  if (badName !== null) return { refusal: badName };
+  const badPath = secretResolverPathRefusal(path);
+  if (badPath !== null) return { refusal: badPath };
+  const badFormat = secretBundleFormatRefusal(format);
+  if (badFormat !== null) return { refusal: badFormat };
+  if (Object.hasOwn(envBundles, name)) return { refusal: `PI_SECRET_BUNDLES already declares ${name} on this deployment; the worker reads a name declared in both places as ambiguous and refuses every bundled job, so pick another name or change the .env` };
+  const next = { ...bundles, [name]: { path, format } };
+  const replacing = bundles[name] ? `\n\nThis REPLACES the current ${name} -> ${bundles[name].path} (${bundles[name].format ?? "no format"})` : "";
+  return {
+    plan: {
+      name,
+      path,
+      format,
+      bundles: next,
+      mutate: (o) => ({ ...o, secretBundles: next }),
+      target: settingsFile,
+      ...confirmOf(
+        "Declare a secret bundle resolver",
+        `${settingsFile} gets:\n${JSON.stringify({ secretBundles: next }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per job start of every project a bundle in triggers.json binds to it, and hands that job EVERY variable it prints (${format}). It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.`,
+      ),
+    },
+  };
+}
+
+/**
+ * Plan removing bundle profile `name` (`/dispatch secrets remove --bundle`, the console's `secret-bundle-remove`).
+ * `bound` is the triggers-file bundle ids that name it (`[]` for a file that names none or does not exist), or null
+ * when the file could not be read, and `envBundles` the `PI_SECRET_BUNDLES` profiles this deployment declares. The
+ * confirm says what the removal does to them: nothing when no bundle names it; resolves the ambiguity when
+ * PI_SECRET_BUNDLES holds the same name (the worker refused every bundled job while both did); otherwise names the
+ * bundles whose jobs are refused before they spend (or, on a multi-host worker's shared queue, held for a host that
+ * declares it). `{ plan: { name, bundles, mutate, ... } }` or `{ refusal }`.
+ */
+export function planSecretBundleRemove({ name, bundles, bound = null, envBundles = {}, settingsFile }) {
+  if (!name || !Object.hasOwn(bundles, name)) return { refusal: `no such bundle resolver. ${renderBundleProfiles(bundles)}` };
+  const next = { ...bundles };
+  delete next[name];
+  // The worker's `mergeSecretProfiles` makes EVERY bundle ambiguous while ANY name is in both sources, so the other
+  // colliding names decide whether this removal resolves anything (final review).
+  const others = Object.keys(next).filter((n) => Object.hasOwn(envBundles, n)).sort();
+  const still = others.length > 0 ? ` Still ambiguous after this: ${others.join(", ")} also ${others.length === 1 ? "collides" : "collide"} with PI_SECRET_BUNDLES, and the worker refuses every bundled job until no name is in both.` : "";
+  let effect;
+  if (Object.hasOwn(envBundles, name)) {
+    effect = others.length > 0
+      ? `PI_SECRET_BUNDLES also declares ${name}, so this removes one collision.${still}`
+      : `PI_SECRET_BUNDLES also declares ${name}, so removing it here resolves the ambiguity: while both did, the worker refused every bundled job, and after this it runs PI_SECRET_BUNDLES' resolver.`;
+  } else if (others.length > 0) {
+    effect = `Every bundled job is refused already while a name is in both places, and removing ${name} does not change that.${still}`;
+  } else if (Array.isArray(bound) && bound.length === 0) {
+    effect = "No bundle in triggers.json names it, so no project's jobs depend on it.";
+  } else {
+    const who = Array.isArray(bound) ? `The jobs of bundle${bound.length === 1 ? "" : "s"} ${bound.join(", ")}` : "The triggers file could not be read, so the jobs of any bundle naming it";
+    effect = `${who} are refused PRE-SPEND after this (secret-bundle-profile-unknown), or on a multi-host worker's shared queue held for a host that declares it, rather than running without their environment.`;
+  }
+  return {
+    plan: {
+      name,
+      bundles: next,
+      mutate: (o) => ({ ...o, secretBundles: next }),
+      target: settingsFile,
+      ...confirmOf("Remove a secret bundle resolver", `${name} -> ${bundles[name].path} (${bundles[name].format ?? "no format"})\n\n${effect}`),
     },
   };
 }
