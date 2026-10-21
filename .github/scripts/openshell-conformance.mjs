@@ -123,12 +123,53 @@ case "$c" in
 		echo "probe bother=$(node -e 'fetch("http://host.openshell.internal:18080/bundle-elsewhere",{headers:{authorization:"Bearer "+process.env.BUNDLE_TOKEN},signal:AbortSignal.timeout(10000)}).then(r=>console.log(r.status),e=>console.log("refused",e.cause?.code??e.name))')"
 		echo "probe bkey=$(node -e 'fetch("http://host.docker.internal:18080/key-at-bundle-host",{headers:{"x-api-key":process.env.ANTHROPIC_API_KEY},signal:AbortSignal.timeout(10000)}).then(r=>console.log(r.status),e=>console.log("refused",e.cause?.code??e.name))')"
 		exit 0 ;;
+	netpath)
+		# Issue #725 diagnostics: the routes a model call can take from this sandbox to the stand-in, each printed and
+		# none asserted. The policy probes above fetch with the image's plain node and a GET; a job's provider call is a
+		# streamed POST from the runner's own binary, after pi has replaced the fetch dispatcher (docs/egress.md, issue
+		# #427), through the OpenAI SDK. Each step below changes one of those, so the first one to fail names the cause.
+		node /netpath.mjs node
+		/opt/pi-dispatch/runner-node /netpath.mjs runner
+		exit 0 ;;
 	*) exit "$c" ;;
 esac
 `,
 	{ mode: 0o755 },
 );
-nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nRUN chmod 0755 /entrypoint.sh\nUSER pi\n`);
+// Issue #725 diagnostics, run by the `netpath` mode: one line per route, `probe netpath <binary> <step>=<answer>`. The
+// POST carries a `tool` message, so the stand-in answers it at once ("done") rather than holding it for the steering
+// case's signal. Errors are printed by name and cause code (and a short cause message), never a body.
+nodeFs.writeFileSync(
+	join(context, "netpath.mjs"),
+	`const who = process.argv[2];
+const base = "http://host.openshell.internal:18080";
+const body = JSON.stringify({ model: "m1", stream: true, messages: [{ role: "user", content: "x" }, { role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "read", arguments: "{}" } }] }, { role: "tool", tool_call_id: "c", content: "x" }] });
+const why = (e) => { const c = e?.cause; return [e?.name, e?.constructor?.name, c?.code ?? c?.cause?.code ?? "", String(c?.message ?? e?.message ?? "").slice(0, 160)].join(" "); };
+const step = async (label, fn) => { try { console.log("probe netpath " + who + " " + label + "=" + (await fn())); } catch (e) { console.log("probe netpath " + who + " " + label + "=error " + why(e)); } };
+const get = async () => { const r = await fetch(base + "/", { signal: AbortSignal.timeout(10000) }); return "status " + r.status; };
+const post = (auth) => async () => { const r = await fetch(base + "/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json", ...(auth ? { authorization: "Bearer keyless" } : {}) }, body, signal: AbortSignal.timeout(15000) }); const t = await r.text(); return "status " + r.status + " " + (r.headers.get("content-type") ?? "") + " " + (t.includes("[DONE]") ? "complete" : "partial") + " " + t.length; };
+await step("get", get);
+await step("post-sse-noauth", post(false));
+await step("post-sse", post(true));
+if (who === "runner") {
+	await step("load-pi", async () => { const m = await import("/app/image/runner/src/env-proxy.mjs"); return "env proxy restored " + (await m.loadPiThenRestore()); });
+	await step("pi-get", get);
+	await step("pi-post-sse", post(true));
+	await step("pi-openai-sdk", async () => {
+		const { createRequire } = await import("node:module");
+		const { pathToFileURL } = await import("node:url");
+		const at = createRequire("/app/node_modules/@earendil-works/pi-ai/package.json").resolve("openai");
+		const OpenAI = (await import(pathToFileURL(at).href)).default;
+		const client = new OpenAI({ apiKey: "keyless", baseURL: base + "/v1", maxRetries: 0, timeout: 15000 });
+		const stream = await client.chat.completions.create({ ...JSON.parse(body) });
+		let n = 0;
+		for await (const _ of stream) n += 1;
+		return "chunks " + n;
+	});
+}
+`,
+);
+nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nCOPY netpath.mjs /netpath.mjs\nRUN chmod 0755 /entrypoint.sh && chmod 0644 /netpath.mjs\nUSER pi\n`);
 const probeImage = `pi-dispatch-openshell-probe:${nonce}`;
 const built = await run(engine, ["build", "--pull=false", "-q", "-t", probeImage, context]);
 if (built.code !== 0) refuse(`the probe image did not build: ${built.stderr.trim().split("\n").slice(-1)[0]}`);
@@ -395,6 +436,15 @@ for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) consol
 	if (!ok) failed = true;
 }
 
+// Issue #725 diagnostics: the model-call routes from a copy-mode sandbox under the probes' policy, printed and never
+// asserted (the steering case below is the assertion). Run before it so its answer is in the log whatever it does.
+{
+	output.set("last", "");
+	const result = await backend.runContainer({ job: JOB, prepared: jobDirFor("netpath"), name: `pi-job-conformance-${nonce}-netpath`, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 100 } });
+	const lines = String(output.get("last") ?? "").split("\n").filter((l) => l.startsWith("probe netpath "));
+	console.log(`diag    the model-call routes (exit ${result.code}):\n${lines.map((l) => `          ${l.slice("probe netpath ".length)}`).join("\n") || "          none printed"}`);
+}
+
 // Issue #686, part 2: the real runner STEERED over the exec's stdin. The real relay (inbox-relay.mjs) over an in-memory
 // inbox holding one queued steer, the real publisher with the steer ack consumer (the opener start.mjs builds), and the
 // bundle handed both, as start.mjs hands them. A fresh job's relay is released at the spawn (an empty upload has no
@@ -469,6 +519,15 @@ const STEER_FAKE_MODELS = { providers: { "steer-fake": { baseUrl: "http://host.o
 	const openInboxRelay = (args) => (relayRef = makeInboxRelay({ redis: {}, host: "conformance", log, pollMs: 500, inbox, ...args }));
 	// The stand-in's release (the workflow sets the path for both): removed first so a rerun starts held, touched once
 	// the relay has written the second frame. Without the variable the stand-in answers after its 30 s cap anyway.
+	// The stand-in's completion requests so far (the diagnostics above sent some), so a failure reports this run's own.
+	const standinCompletions = () => {
+		let seen = [];
+		try {
+			seen = nodeFs.readFileSync(process.env.STANDIN_LOG ?? "", "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+		} catch {}
+		return seen.filter((e) => e.path === "/v1/chat/completions").map((e) => `${e.method} ${e.path}`);
+	};
+	const completionsBefore = standinCompletions().length;
 	const signalFile = process.env.STEER_SIGNAL_FILE ?? "";
 	if (signalFile !== "") nodeFs.rmSync(signalFile, { force: true });
 	const signal = setInterval(() => {
@@ -513,6 +572,10 @@ const STEER_FAKE_MODELS = { providers: { "steer-fake": { baseUrl: "http://host.o
 	if (!ok) {
 		console.log(said.split("\n").slice(-20).join("\n"));
 		console.log(JSON.stringify(events.filter(([e]) => /steer|transcript/.test(e))));
+		// Whether the model calls reached the stand-in at all (issue #725): its log's completion requests, by method and
+		// path only (the log holds no body; the credential headers are left out here too).
+		const calls = standinCompletions().slice(completionsBefore);
+		console.log(`the stand-in saw ${calls.length} completion request(s) during this run${calls.length > 0 ? `: ${JSON.stringify(calls)}` : ""}`);
 		failed = true;
 	}
 }
