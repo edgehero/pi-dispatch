@@ -29,7 +29,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { BUNDLE_SKIPPED_TEXT, CUSTODY_TEXT, DECLARATION_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, venuesView, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, liveAbsentCause, recordSkips, venueCustody, VENUE_MAY_NOT_STREAM, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX } from "./read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, CUSTODY_TEXT, DECLARATION_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, venuesView, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, liveAbsentCause, recordSkips, venueCustody, VENUE_MAY_NOT_STREAM, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile, secretProfileFacts } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { projectKeyOf } from "./costs.mjs";
@@ -1920,6 +1920,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     ...dollarSection(snapshot.dollars, inner, styler),
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     ...bundlesSection(snapshot.secretBundles, inner, styler),
+    ...profilesSection(snapshot.secretProfiles, inner, styler),
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
     // Priority 0: the section an operator acts on least often from the panel folds FIRST under the
     // collapse budget. The key hint lives in this divider, not the footer -- the footer's width
@@ -2048,6 +2049,27 @@ function bundlesSection(view: any, inner: number, styler: any): any[] {
     body.push(fitLine(styler.fg("dim", `  ${b.last ? cellOf(`last received: ${b.last.variables.length > 0 ? b.last.variables.join(", ") : "none"}`) : "no run in view recorded it yet"}`), inner, styler));
   }
   return [{ key: "bundles", priority: 3, viewKey: "tab", head: ["secret bundles", `${rows.length} · names only · doctor --secrets resolves`], body }];
+}
+
+/**
+ * The secret profiles (issue #712): per profile its name, then its facts (`secretProfileFacts`: source, where its
+ * resolver stands against PI_SECRET_RESOLVER_ROOTS on this host, the triggers and projects that use it, the last
+ * resolve a run in view recorded, the live hosts that advertise it), WRAPPED under it at most three lines, the rest
+ * counted. Names and words only, never a resolver path (the bundles section's rule; `/dispatch secrets list` prints the
+ * paths). CONDITIONAL: no profile declared or named, no section, so such a deployment renders the panel it always did.
+ */
+function profilesSection(view: any, inner: number, styler: any): any[] {
+  const rows: any[] = Array.isArray(view?.profiles) ? view.profiles : [];
+  if (rows.length === 0) return [];
+  const body: string[] = [];
+  for (const p of rows) {
+    const bad = p.source === "ambiguous" || p.source === "undeclared" || p.roots === "outside" || p.roots === "empty" || p.last?.outcome === "refused";
+    body.push(fitLine(styler.fg(bad ? "error" : "warning", cellOf(p.name)), inner, styler));
+    const parts = wrapColumns(cellOf(secretProfileFacts(p, view).join(" · ")), Math.max(1, inner - 2), styler);
+    parts.slice(0, 3).forEach((part: string) => body.push(fitLine(styler.fg("dim", `  ${part}`), inner, styler)));
+    if (parts.length > 3) body.push(fitLine(styler.fg("dim", `  ${styler.glyphs?.ellipsis ?? "…"} ${parts.length - 3} more line(s): the console's configuration page shows them`), inner, styler));
+  }
+  return [{ key: "profiles", priority: 3, viewKey: "tab", head: ["secret profiles", `${rows.length} · names only · doctor --secrets resolves`], body }];
 }
 
 /** How many held rows the section shows before it stops and counts the rest. */
@@ -4308,6 +4330,20 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // and nothing is inferred for it -- the panel shows a record, it decides nothing from one. Unlike the host
   // line, every record this version writes carries the field, so the line is the normal case.
   if (typeof r.backend === "string" && r.backend !== "") out.push(kv("backend", show(r.backend)));
+  // THE SANDBOX POLICY an openshell run was given (issue #712): its mode, the credential providers and placeholders, then
+  // the hosts its policy admitted, WRAPPED under the label (a cut host list would read as the whole policy), at most four
+  // lines, the rest counted. `recordOpenshell` is the worker's rebuild (the host-name charset, counts bounded), and each
+  // part still goes through `show`. Then the secrets profile NAME run.secrets resolved through. A record without either
+  // key (every other venue, every run without secrets) renders byte-identical. MCP connection state is recorded nowhere.
+  const policy = recordOpenshell(r);
+  if (policy !== null) {
+    wrapColumns(show(openshellCountsText(policy)), Math.max(1, inner - 13), styler).forEach((part: string, i: number) => out.push(kv(i === 0 ? "policy" : "", part, "dim")));
+    const parts = wrapColumns(show(openshellHostsText(policy)), Math.max(1, inner - 13), styler);
+    parts.slice(0, 4).forEach((part: string, i: number) => out.push(kv(i === 0 ? "rule hosts" : "", part, "dim")));
+    if (parts.length > 4) out.push(kv("", `${styler.glyphs?.ellipsis ?? "…"} ${parts.length - 4} more line(s) in the run record`, "dim"));
+  }
+  const profileName = recordSecretsProfile(r);
+  if (profileName !== null) out.push(kv("secrets via", show(profileName), "warning"));
   // WHICH PROJECT (issue #499 part C): the id the worker resolved at pickup and wrote into the record. Absent for a run
   // outside every project and for one recorded before projects existed, which are never re-attributed.
   if (recordProject(r) !== null) out.push(kv("project", recordProject(r)));

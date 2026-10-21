@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -36,7 +36,6 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
 import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
-import { parseCaps } from "@edgehero/pi-dispatch/capabilities";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
@@ -67,6 +66,7 @@ import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleet
 import { RUNS_INDEX, RUNS_INDEX_MAX, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
+import { CAP_SECRET, parseCaps } from "@edgehero/pi-dispatch/capabilities";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 // The live transcript's key, kinds, outcomes and tool charset (issue #643), the worker's own, so the reader and the
 // publisher cannot drift on the stream's contract.
@@ -3579,6 +3579,9 @@ function hostRowOf(h) {
     // host's text, re-checked here for `jobs`' reason.
     caps: [...parseCaps(h?.caps)].sort(),
     backends: parseHostBackends(typeof h?.backends === "string" ? h.backends : null),
+    // Whether the row publishes a capability list at all (an older worker publishes none), so a reader can tell "this
+    // host advertises nothing" from "this host says nothing"; `caps` alone is always an array.
+    capsSeen: typeof h?.caps === "string",
   };
 }
 
@@ -4007,6 +4010,9 @@ export function createFleetReader(
         // The project secret bundles (issue #704): null when the triggers file binds none. Names, profiles and the
         // newest run's received variable names; never a reference or a value, and never resolved here.
         secretBundles: secretBundlesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs }),
+        // Issue #712: the secret profiles view (`secretProfilesView`): each profile's source, roots status, triggers,
+        // projects, last resolve and the live hosts that advertise it. Names and words only, never a resolver path.
+        secretProfiles: secretProfilesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, hosts: fleetDegraded ? null : lastHosts.map(hostRowOf), hostsUnreadable: Boolean(fleetDegraded), fs }),
         // Issue #712: the PI_SECRET_PROFILES names this deployment declares (`envSecretProfiles`; never a path here, the
         // names-only rule of the overlay list beside it), so no surface says "none declared" over env-declared profiles.
         secretProfilesEnv: (() => {
@@ -4848,6 +4854,185 @@ export function secretProfileNames(settingsView) {
   return Object.keys(profiles).filter((n) => /^[A-Za-z0-9._-]{1,64}$/.test(n)).sort();
 }
 
+/**
+ * Where an overlay resolver at `path` stands against PI_SECRET_RESOLVER_ROOTS, by the worker's own rule (secrets.mjs:
+ * the resolver's REALPATH against the roots AS WRITTEN, never resolved), judged on THIS host (issue #712):
+ * `{ status, roots, real? }`, `status` one of `unseen` (the variable is not visible here, which is not proof the
+ * worker's host has none), `empty` (set and empty: the worker refuses every overlay resolver), `unresolved` (this host
+ * cannot resolve the path: an error with a `code`, so only the worker can judge it), `inside` or `outside`. Any other
+ * error is a fault, not an answer, and is rethrown. The ONE rule `resolverRootsJudgement` (write-plans.mjs, the add's
+ * pre-confirm check) and the profiles view (`secretProfilesView`) both read, so the view never calls inside what the
+ * add refuses.
+ */
+export function resolverRootsStatus(path, env, fs = nodeFs) {
+  if (typeof env?.PI_SECRET_RESOLVER_ROOTS !== "string") return { status: "unseen", roots: [] };
+  const roots = delimitedList(env.PI_SECRET_RESOLVER_ROOTS);
+  if (roots.length === 0) return { status: "empty", roots };
+  const real = realPathOrNull(path, fs);
+  if (real === null) return { status: "unresolved", roots };
+  return { status: withinRoots(real, roots) ? "inside" : "outside", roots, real };
+}
+
+/** `fs.realpathSync(p)`, or null for an error with a `code` (not there, or not this host's); any other error is rethrown. */
+export function realPathOrNull(p, fs = nodeFs) {
+  // STRICT on the seam: an fs without realpath is a wiring fault, and it throws here (a TypeError has no `code`), so the
+  // add's pre-confirm judgement can never fail open on it. Only the profiles view tolerates it, per row.
+  try {
+    return fs.realpathSync(p);
+  } catch (error) {
+    if (typeof error?.code === "string") return null;
+    throw error;
+  }
+}
+
+/**
+ * The secret-resolve refusals a run record can carry (processor.mjs, the `run.secrets` resolve), so the profiles view
+ * can tell "the resolve refused" from "the run ended elsewhere". `secret-name-reserved`, `secret-unresolved` and
+ * `secret-resolver-unreachable` are also the project bundle read's (issue #704), which runs after the profile's, so on a
+ * bundled run those three may be the bundle's: the view says so then (`BUNDLE_SHARED_REASONS`, `last.bundled`), never
+ * pinning the refusal on the profile alone.
+ */
+export const SECRET_RESOLVE_REASONS = Object.freeze(["secret-profile-unknown", "secret-profile-ambiguous", "secret-name-reserved", "secret-unresolved", "secret-resolver-unreachable"]);
+
+/** The three of those the project bundle's read reuses (processor.mjs, issue #704), said as either's on a bundled run. */
+export const BUNDLE_SHARED_REASONS = Object.freeze(["secret-name-reserved", "secret-unresolved", "secret-resolver-unreachable"]);
+
+/** The most trigger indices and projects a profile row lists; the rest are counted. */
+const PROFILE_USES_MAX = 16;
+
+/**
+ * The secret profiles view (issue #712): one row per profile a source declares or a trigger names, sorted by name, or
+ * null when there is none (so every surface renders what it did before). Each row:
+ *   - `name`;
+ *   - `source`: `env` (PI_SECRET_PROFILES), `overlay` (the settings file's `secretProfiles`), `ambiguous` (both: the
+ *     worker refuses every secrets job, secret-profiles.mjs `mergeSecretProfiles`), or `undeclared` (a trigger names it
+ *     and neither visible source declares it; `envSeen` says whether that can be known);
+ *   - `roots`: an overlay row's `resolverRootsStatus(...).status`, else null (an env resolver is not bounded by roots);
+ *   - `triggers`: the raw indices of the triggers whose jobs resolve through it (`run.secretsProfile`, or the implicit
+ *     `default` when `run.secrets` is set: secrets.mjs' own rule), at most `PROFILE_USES_MAX`, `triggersMore` the rest;
+ *   - `projects`: the projects those triggers' jobs belong to (a cron trigger's folder through the worker's
+ *     `projectOf`), `anyRepo` whether a webhook trigger uses it (its jobs may land in any project);
+ *   - `last`: the newest run in `runs` that recorded this profile (`secretsProfile`, the worker's rebuild), `{ jobId,
+ *     at, outcome, reason }`: `outcome` is `refused` (a `SECRET_RESOLVE_REASONS` member), `resolved` (a container ran,
+ *     which only a passed resolve allows) or `not-reached` (the run ended before a container, and the record cannot say
+ *     whether the resolve ran); null when no run in view recorded it;
+ *   - `hosts`: the live hosts whose registry row advertises `s:<name>` (`hostRowOf`'s `caps`), `hostsUnknown` how many
+ *     rows publish no capability list at all (`capsSeen` false: an older worker).
+ * NEVER a path on a row: the console and the panel are names-only for resolvers (REQ-OPERATOR-CONSOLE-SCREENS (g)), and
+ * `/dispatch secrets list` prints the paths itself from the two sources. Never a reference or a value, and nothing is
+ * resolved: the realpath is the add's own check, on this host.
+ */
+export function secretProfilesView({ triggers = null, settings = null, env = {}, projects = null, runs = [], hosts = null, hostsUnreadable = false, fs = nodeFs } = {}) {
+  const fromEnv = envSecretProfiles(env?.PI_SECRET_PROFILES);
+  const raw = settings?.overlay?.secretProfiles;
+  const overlay = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const overlayNames = secretProfileNames(settings).filter((n) => typeof overlay[n] === "string");
+  const entries = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
+  const projectList = Array.isArray(projects?.projects) ? projects.projects : null;
+  const usedBy = new Map();
+  for (const t of entries) {
+    if (!Number.isInteger(t?.index) || !(t.secrets > 0)) continue;
+    const name = typeof t.secretsProfile === "string" && t.secretsProfile !== "" ? t.secretsProfile : "default";
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(name)) continue;
+    if (!usedBy.has(name)) usedBy.set(name, []);
+    usedBy.get(name).push(t);
+  }
+  const names = [...new Set([...Object.keys(fromEnv.profiles), ...overlayNames, ...usedBy.keys()])].sort();
+  if (names.length === 0) return null;
+  const recorded = (Array.isArray(runs) ? runs : [])
+    .filter((r) => r !== null && typeof r === "object" && !Array.isArray(r) && Object.hasOwn(r, "secretsProfile") && recordSecretsProfile(r) !== null)
+    .sort((a, b) => runAt(b) - runAt(a));
+  // `hosts` null: this surface reads no registry (`/dispatch secrets list`), which is not "no host advertises it".
+  const hostRows = Array.isArray(hosts) ? hosts : [];
+  // Per row and tolerant, unlike the add's judgement: one resolver this host cannot judge (a fault, a bad seam) shows as
+  // `unresolved` on its own row instead of failing the whole snapshot.
+  const rootsOf = (path) => {
+    try {
+      return resolverRootsStatus(path, env, fs).status;
+    } catch {
+      return "unresolved";
+    }
+  };
+  // The projects with a secret bundle: on such a run the bundle's read follows the profile's and reuses three of its
+  // refusal reasons, so a refusal there is said as either's.
+  const bundledProjects = new Set((Array.isArray(triggers?.secretBundles) ? triggers.secretBundles : []).map((b) => b?.project).filter((p) => typeof p === "string"));
+  const rows = names.map((name) => {
+    const inEnv = Object.hasOwn(fromEnv.profiles, name);
+    const inOverlay = overlayNames.includes(name);
+    const source = inEnv && inOverlay ? "ambiguous" : inEnv ? "env" : inOverlay ? "overlay" : "undeclared";
+    const users = usedBy.get(name) ?? [];
+    const projectIds = projectList === null ? [] : [...new Set(users.filter((t) => t.type === "cron" && typeof t.folder === "string").map((t) => projectOf({ kind: "local", folder: t.folder }, projectList)).filter((p) => p !== null))].sort();
+    const hit = recorded.find((r) => recordSecretsProfile(r) === name);
+    const ran = hit ? Number.isInteger(hit.exitCode) || (hit.tokens !== null && typeof hit.tokens === "object") || hit.outcome === "completed" : false;
+    const reason = hit && typeof hit.reason === "string" && /^[a-z0-9-]{1,64}$/.test(hit.reason) ? hit.reason : null;
+    const token = `${CAP_SECRET}:${name}`;
+    return {
+      name,
+      source,
+      roots: inOverlay ? rootsOf(overlay[name]) : null,
+      triggers: users.slice(0, PROFILE_USES_MAX).map((t) => t.index),
+      triggersMore: Math.max(0, users.length - PROFILE_USES_MAX),
+      projects: projectIds.slice(0, PROFILE_USES_MAX),
+      projectsMore: Math.max(0, projectIds.length - PROFILE_USES_MAX),
+      anyRepo: users.some((t) => t.type !== "cron"),
+      last: hit ? { jobId: typeof hit.jobId === "string" ? hit.jobId : null, at: Number.isFinite(runAt(hit)) ? new Date(runAt(hit)).toISOString() : null, outcome: reason !== null && SECRET_RESOLVE_REASONS.includes(reason) ? "refused" : ran ? "resolved" : "not-reached", reason, bundled: BUNDLE_SHARED_REASONS.includes(reason) && (Object.hasOwn(hit, "bundle") || (typeof hit.project === "string" && bundledProjects.has(hit.project))) } : null,
+      hosts: hostRows.filter((h) => Array.isArray(h?.caps) && h.caps.includes(token) && typeof h.name === "string").map((h) => h.name).sort(),
+      hostsUnknown: hostRows.filter((h) => h?.capsSeen === false || !Array.isArray(h?.caps)).length,
+    };
+  });
+  return { profiles: rows, envSeen: fromEnv.seen, envMalformed: fromEnv.malformed, rootsSeen: typeof env?.PI_SECRET_RESOLVER_ROOTS === "string", hostsSeen: Array.isArray(hosts) ? hostRows.length : null, hostsUnreadable: !Array.isArray(hosts) && hostsUnreadable === true };
+}
+
+/** A profile row's `source` in words, the same on every surface. */
+export const PROFILE_SOURCE_TEXT = Object.freeze({
+  env: "declared in PI_SECRET_PROFILES",
+  overlay: "declared in the settings overlay",
+  ambiguous: "AMBIGUOUS: declared in both PI_SECRET_PROFILES and the settings overlay, so the worker refuses every secrets job",
+  undeclared: "named by a trigger, declared in no source this view can see",
+});
+
+/** An overlay row's `roots` in words; no path, so the console and the panel can show it. */
+export const PROFILE_ROOTS_TEXT = Object.freeze({
+  inside: "its resolver's real path on this host is inside PI_SECRET_RESOLVER_ROOTS as written",
+  outside: "its resolver's real path on this host is OUTSIDE PI_SECRET_RESOLVER_ROOTS, so the worker refuses every job naming it",
+  unresolved: "its resolver cannot be resolved on this host, so only the worker can judge it against PI_SECRET_RESOLVER_ROOTS (doctor --secrets)",
+  unseen: "PI_SECRET_RESOLVER_ROOTS is not visible here, so the roots are the worker's to judge (doctor --secrets)",
+  empty: "PI_SECRET_RESOLVER_ROOTS is set and empty, so the worker refuses every overlay resolver",
+});
+
+/** A profile row's facts as short sentences, one per fact, for every surface (each scrubbed by the caller's renderer). */
+export function secretProfileFacts(row, view = null) {
+  if (row === null || typeof row !== "object") return [];
+  const out = [PROFILE_SOURCE_TEXT[row.source] ?? PROFILE_SOURCE_TEXT.undeclared];
+  if (row.source === "undeclared" && view?.envSeen === false) out[0] += " (PI_SECRET_PROFILES is not visible here)";
+  if (row.roots !== null && Object.hasOwn(PROFILE_ROOTS_TEXT, row.roots)) out.push(PROFILE_ROOTS_TEXT[row.roots]);
+  const trig = row.triggers.length > 0 ? `used by trigger${row.triggers.length + row.triggersMore === 1 ? "" : "s"} ${row.triggers.map((i) => `#${i}`).join(", ")}${row.triggersMore > 0 ? ` and ${row.triggersMore} more` : ""}` : "used by no trigger";
+  out.push(trig);
+  if (row.projects.length > 0 || row.anyRepo) out.push(`projects: ${[...row.projects, ...(row.projectsMore > 0 ? [`${row.projectsMore} more`] : []), ...(row.anyRepo ? ["any (a webhook trigger)"] : [])].join(", ")}`);
+  out.push(profileLastText(row.last));
+  out.push(profileHostsText(row, view));
+  return out;
+}
+
+/** "last resolve: refused (secret-unresolved) at <ISO>", or "no run in view recorded it". */
+export function profileLastText(last) {
+  if (last === null || typeof last !== "object") return "last resolve: no run in view recorded it";
+  const at = last.at ? ` at ${last.at}` : "";
+  if (last.outcome === "refused") return `last resolve: refused (${last.reason}${last.bundled ? ": the profile's or the project bundle's read" : ""})${at}`;
+  if (last.outcome === "resolved") return `last resolve: resolved${at}`;
+  return `last resolve: not reached, the run ended before a container${last.reason ? ` (${last.reason})` : ""}${at}`;
+}
+
+/** "served by: a, b", or why no host is named. */
+export function profileHostsText(row, view = null) {
+  // A registry read that failed this tick is not "no host": the rows last read may be stale, so none are named.
+  if (view?.hostsUnreadable === true) return "served by: the host registry could not be read";
+  if (view?.hostsSeen === null) return "served by: the registry is not read here (the console's and the panel's profiles show the live hosts)";
+  if (row.hosts.length > 0) return `served by: ${row.hosts.join(", ")}${row.hostsUnknown > 0 ? ` (${row.hostsUnknown} host(s) publish no capabilities)` : ""}`;
+  if (view?.hostsSeen === 0) return "served by: no live host in the registry";
+  return row.hostsUnknown > 0 ? `served by: no live host advertises it (${row.hostsUnknown} host(s) publish no capabilities)` : "served by: no live host advertises it";
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Project secret bundles (issue #704, DES-PROJECT-SECRET-BUNDLES): the bundles view and a run's bundle facts, for the
 // console, the `/dispatch` panel and `/dispatch secrets`. DISPLAY ONLY: nothing here resolves a bundle (doctor
@@ -5025,6 +5210,20 @@ export function renderSecretBundles(view, { names = true } = {}) {
     out.push(scrubControls(`  ${row.id}: ${bundleFacts(row).join("; ")}`));
     if (names) out.push(scrubControls(row.last ? `    last run ${row.last.jobId ?? "-"} received: ${row.last.variables.length > 0 ? row.last.variables.join(", ") : "none"}` : "    no run in view recorded it yet"));
   }
+  return out.join("\n");
+}
+
+/**
+ * The profiles view (issue #712) as `/dispatch secrets list` prints it, under the declared tables (which carry the
+ * paths): one line per profile, its facts after it. "" when there is none. Scrubbed: a profile name is charset-checked,
+ * a reason and an instant are the worker's, and the rest is this file's own words.
+ */
+export function renderSecretProfilesView(view) {
+  const rows = Array.isArray(view?.profiles) ? view.profiles : [];
+  if (rows.length === 0) return "";
+  const out = ["Secret profiles in use (names only; the resolver paths are listed above):"];
+  for (const row of rows) out.push(scrubControls(`  ${row.name}: ${secretProfileFacts(row, view).join("; ")}`));
+  if (view.envMalformed) out.push("  PI_SECRET_PROFILES does not parse, so the worker refuses to boot until it is fixed.");
   return out.join("\n");
 }
 
@@ -5286,6 +5485,36 @@ export function sandboxShellRefusal(venue) {
 }
 
 /**
+ * A record's OpenShell policy facts (issue #712, INT-RUN-HISTORY-FILE-CONTRACT): the worker's own rebuild
+ * (`recordedOpenshell`, held to the venue the record's `backend` names, hosts to the host-name charset, counts bounded),
+ * so a record read back from disk or a mirror cannot put free text on a surface through it; null when absent or invalid.
+ */
+export function recordOpenshell(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record) || !Object.hasOwn(record, "openshell")) return null;
+  return recordedOpenshell(record.openshell, record.backend);
+}
+
+/** A record's `secretsProfile` (issue #712), the worker's charset, or null. */
+export function recordSecretsProfile(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record) || typeof record.secretsProfile !== "string") return null;
+  return /^[A-Za-z0-9._-]{1,128}$/.test(record.secretsProfile) ? record.secretsProfile : null;
+}
+
+/** "copy mode, 1 provider, 2 placeholders" (the openshell policy's head, without the hosts). */
+export function openshellCountsText(o) {
+  if (o === null || typeof o !== "object") return "";
+  return `${o.mode} mode, ${plural(o.providers, "credential provider", "credential providers")}, ${plural(o.placeholders, "placeholder", "placeholders")}`;
+}
+
+/** "3 rule hosts: a, b, c" (the hosts the policy admitted, and how many the record does not list). */
+export function openshellHostsText(o) {
+  if (o === null || typeof o !== "object") return "";
+  if (o.ruleHostCount === 0) return "no rule host: the sandbox reaches nothing";
+  const more = o.ruleHostCount - o.ruleHosts.length;
+  return `${plural(o.ruleHostCount, "rule host", "rule hosts")}: ${o.ruleHosts.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+}
+
+/**
  * A record's bundle facts (issue #704, INT-RUN-HISTORY-FILE-CONTRACT): `{ bundle, bundleSkipped }`, each null when
  * absent or not valid, or null when the record carries neither (every record of a project with no bundle). `bundle` is
  * the worker's own rebuild (`recordedBundle`: names held to the environment-name charset, counts bounded), so a record
@@ -5302,15 +5531,40 @@ export function recordBundle(record) {
  * A run record as a MODEL-CALLABLE tool returns it (issue #704 review): its `bundle` as COUNTS, `{ id, received,
  * shadowed, placeholders?, plain? }`, never the variable names. The names are the operator's manager's contents: the
  * operator's own views (the panel, the console, `/dispatch secrets`) show them, and no model context needs them to
- * reason about a run. A `bundle` the worker's rebuild refuses is dropped whole. Every other key is the record's own, and
- * a record with no `bundle` is returned as it is (the same object), so every other run reads byte-identical.
+ * reason about a run. A `bundle` the worker's rebuild refuses is dropped whole. Issue #712: `openshell` and
+ * `secretsProfile` are rebuilt the same way (names that are operator config, and counts; never a resolver path). Every
+ * other key is the record's own, and a record with none of the three is returned as it is (the same object), so every
+ * other run reads byte-identical.
  */
-export function modelRunRecord(record) {
-  if (record === null || typeof record !== "object" || Array.isArray(record) || !Object.hasOwn(record, "bundle")) return record;
-  const { bundle: raw, ...rest } = record;
-  const b = recordedBundle(raw);
-  if (b === null) return rest;
-  return { ...rest, bundle: { id: b.id, received: b.variables.length, shadowed: b.shadowed.length, ...(Number.isSafeInteger(b.placeholders) ? { placeholders: b.placeholders, plain: b.plain } : {}) } };
+export function modelRunRecord(record, { list = false } = {}) {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return record;
+  const hasBundle = Object.hasOwn(record, "bundle");
+  const hasOpenshell = Object.hasOwn(record, "openshell");
+  const hasProfile = Object.hasOwn(record, "secretsProfile");
+  if (!hasBundle && !hasOpenshell && !hasProfile) return record;
+  const { bundle: raw, openshell: _openshell, secretsProfile: _profile, ...rest } = record;
+  const out = { ...rest };
+  if (hasBundle) {
+    const b = recordedBundle(raw);
+    if (b !== null) out.bundle = { id: b.id, received: b.variables.length, shadowed: b.shadowed.length, ...(Number.isSafeInteger(b.placeholders) ? { placeholders: b.placeholders, plain: b.plain } : {}) };
+  }
+  // Issue #712: the OpenShell facts REBUILT (`recordOpenshell`) or dropped whole. The rule hosts stay: they are the
+  // operator's allowlist and model endpoints, the class `backend` and `host` already are, and "which hosts could this
+  // run reach" is a question a model asked about a run can only answer with them. Counts for the credentials, as the
+  // record has them; never a key name.
+  // In a LIST of runs only the host count rides (a page of runs times 32 names is context no question about a list
+  // needs); a single run read by its id carries the names.
+  if (hasOpenshell) {
+    const o = recordOpenshell(record);
+    if (o !== null) out.openshell = list ? { mode: o.mode, ruleHostCount: o.ruleHostCount, providers: o.providers, placeholders: o.placeholders } : o;
+  }
+  // The profile's NAME, as `dispatch_triggers` already gives it (`secretsProfile` on a trigger); never its resolver path,
+  // which no model-callable read carries (`OPERATOR_ONLY_KEYS`).
+  if (hasProfile) {
+    const name = recordSecretsProfile(record);
+    if (name !== null) out.secretsProfile = name;
+  }
+  return out;
 }
 
 /** "Variables received: A, B, C (from bundle shop)", or "No variables received from bundle shop". */

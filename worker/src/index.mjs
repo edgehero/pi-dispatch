@@ -306,10 +306,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// Carried onto the result here, at the one call every record site makes (the bolt above holds them to it), rather
 		// than at each of the processor's return statements, so no record site can be given it and another not.
 		let liveRan = null;
+		// Issue #712: the OpenShell venues' policy facts (runContainer's `openshell`, backend-openshell.mjs), carried the same
+		// way and for the same reason; the record rebuilds them (run-history.mjs `recordedOpenshell`), so nothing is trusted here.
+		let openshellRan = null;
 		const carryLiveSkip = (target) => {
-			if (liveRan === null || target === null || typeof target !== "object") return;
+			if (target === null || typeof target !== "object") return;
 			try {
-				if (target.liveSkipped === undefined) target.liveSkipped = liveRan;
+				if (liveRan !== null && target.liveSkipped === undefined) target.liveSkipped = liveRan;
+				if (openshellRan !== null && target.openshell === undefined) target.openshell = openshellRan;
 			} catch {}
 		};
 		const settleSteer = async ({ result = null, error = null } = {}) => {
@@ -1436,6 +1440,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						// Issue #646: what this attempt said about steering, for the record's `steerSkipped` (settleSteer above).
 						steerRan = r && typeof r === "object" ? { steerSkipped: r.steerSkipped ?? null } : null;
 						liveRan = r && typeof r === "object" && typeof r.liveSkipped === "string" ? r.liveSkipped : null;
+						openshellRan = r && typeof r === "object" && r.openshell !== null && typeof r.openshell === "object" ? r.openshell : null;
 						await stopCancelPoll();
 						const raced = r && r.aborted !== true && signal.aborted === true && signal.reason === "operator-cancel";
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });

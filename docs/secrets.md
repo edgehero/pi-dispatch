@@ -541,9 +541,29 @@ that, on the host that runs the jobs), and no reference or value is ever shown:
   and how many values; or, for a run that went without its project's bundle, why, in a sentence.
 - A project edit the project tools refuse because a bundle names the project shows that sentence in the console's
   project form and in the tool's answer in the panel.
+- **Each profile's use** (issue #712). `/dispatch secrets list` (under the tables with the paths), the `/dispatch`
+  panel's **secret profiles** section and the console's "Secret profiles in use" table say, for every profile a
+  source declares or a trigger names:
+  - where it is declared: `PI_SECRET_PROFILES`, the overlay, both (ambiguous: the worker refuses every secrets job),
+    or neither the panel can see;
+  - for an overlay resolver, where its real path on the panel's host stands against `PI_SECRET_RESOLVER_ROOTS` as
+    written (the same check `add` makes before the confirm): inside, outside (the worker refuses every job naming it),
+    not resolvable here (only the worker can judge it, `doctor --secrets`), or the roots not visible;
+  - the triggers whose jobs resolve through it (a trigger with `run.secrets` and no `run.secretsProfile` uses
+    `default`) and the projects of the cron ones; a webhook trigger's jobs may land in any project and are said so;
+  - the last resolve, from the newest run in view that recorded the profile (a run that armed `run.secrets` records
+    its `secretsProfile`): refused with the reason as the record has it (`secret-unresolved`, `secret-profile-unknown`
+    and the rest; on a run whose project has a bundle, `secret-unresolved`, `secret-name-reserved` and
+    `secret-resolver-unreachable` are said as "the profile's or the project bundle's read", since both reads give them), resolved (a container ran, which
+    only a passed resolve allows), or not reached (the run ended before a container, so the record cannot say);
+  - which live hosts advertise it (their registry row's `s:<name>`). The list reads no registry and says so.
+  The console and the panel show no resolver path, not even its real one; the list keeps printing the paths it always
+  printed, in your own terminal.
 - **No model-callable tool sees a variable name.** `dispatch_runs` returns a record's `bundle` as counts
   (`{ id, received, shadowed, placeholders, plain }`), and `dispatch_status` leaves out `secretProfiles` and
-  `secretBundles`. The names stay in your own views above.
+  `secretBundles`. The names stay in your own views above. A record's `secretsProfile` (a profile name, which
+  `dispatch_triggers` already shows) and an OpenShell run's `openshell` (its counts, and its rule hosts when one run
+  is read by its id) do reach `dispatch_runs`; a resolver path reaches no tool.
 
 ## Recipe D: one environment for a whole project
 

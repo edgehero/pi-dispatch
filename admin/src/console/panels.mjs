@@ -56,7 +56,7 @@ import { fmtCost } from "../panel.mjs";
 import { renderWhatIf } from "../render.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
-import { BUNDLE_SKIPPED_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, venuesView, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf } from "../read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, venuesView, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf, PROFILE_ROOTS_TEXT, PROFILE_SOURCE_TEXT, profileHostsText, profileLastText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
@@ -802,6 +802,22 @@ function skipRows(r) {
 }
 
 /**
+ * The run summary's OpenShell rows (issue #712): "Sandbox policy" (the mode, the credential providers and placeholders
+ * the sandbox was given) and "Rule hosts" (the hosts its policy admitted, with the count of any the record does not
+ * list), the worker's rebuild (`recordOpenshell`: hosts held to the host-name charset), escaped by the renderer; and
+ * "Secrets profile", the profile NAME run.secrets resolved through. No row for a record without the keys, so every
+ * other run renders byte-identical. MCP connection state is not recorded on any venue, so no row claims it.
+ */
+function openshellRows(r) {
+  const o = recordOpenshell(r);
+  return [
+    ["Sandbox policy", o !== null ? openshellCountsText(o) : null],
+    ["Rule hosts", o !== null ? openshellHostsText(o) : null],
+    ["Secrets profile", recordSecretsProfile(r)],
+  ];
+}
+
+/**
  * The run summary's durable-run rows (issue #645): "Recovery of" (the base run, linked), "Recovery" (where it came from
  * and the runner's counts, or why an armed job ran without recovery) and "Checkpoints". Every value is `recordRecovery`'s
  * rebuild (integers, closed enums and a charset-checked id), so both roles see them; each row is null, and so not drawn,
@@ -853,6 +869,7 @@ export const runSummary = withRun("Run", (r, view, source) => {
     ["Host", cell(r.host)],
     ["Venue", cell(r.backend)],
     ...skipRows(r),
+    ...openshellRows(r),
     ["Project", cell(r.project)],
     ...bundleRows(r),
     ["Provider and model", [r.provider, r.model].filter(Boolean).join(" / ") || "-"],
@@ -1514,10 +1531,34 @@ export const configSecretProfiles = fromSnapshot("Secret profiles", (s, view) =>
   const fromEnv = Array.isArray(env?.names) ? env.names : [];
   const envNote = env?.malformed ? html`<p class="warn">PI_SECRET_PROFILES does not parse, so the worker refuses to boot until it is fixed.</p>` : null;
   // "None" only where the console can see both sources; otherwise it names the one it read.
-  if (names.length === 0 && fromEnv.length === 0) return html`<p class="note">No secret profile is declared${env?.seen === true ? "" : " in the settings overlay"}.</p>${envNote}${profilesEditor(view)}`;
+  if (names.length === 0 && fromEnv.length === 0) return html`<p class="note">No secret profile is declared${env?.seen === true ? "" : " in the settings overlay"}.</p>${envNote}${profileUse(s.secretProfiles)}${profilesEditor(view)}`;
   const overlayItem = (n) => (fromEnv.includes(n) ? html`<li class="mono warn">${n} (AMBIGUOUS: also in PI_SECRET_PROFILES, so the worker refuses every secrets job)</li>` : html`<li class="mono">${n}</li>`);
-  return html`<p class="note">Names only: a profile's resolver and its references stay in the settings file${fromEnv.length > 0 ? " or the .env" : ""}.</p><ul class="plain">${fromEnv.map((n) => html`<li class="mono">${n} (PI_SECRET_PROFILES)</li>`)}${names.map(overlayItem)}</ul>${envNote}${profilesEditor(view)}`;
+  return html`<p class="note">Names only: a profile's resolver and its references stay in the settings file${fromEnv.length > 0 ? " or the .env" : ""}.</p><ul class="plain">${fromEnv.map((n) => html`<li class="mono">${n} (PI_SECRET_PROFILES)</li>`)}${names.map(overlayItem)}</ul>${envNote}${profileUse(s.secretProfiles)}${profilesEditor(view)}`;
 });
+
+/**
+ * Each profile's use (issue #712, the snapshot's `secretProfiles`, `secretProfilesView`): its source, where its resolver
+ * stands against PI_SECRET_RESOLVER_ROOTS on this host, the triggers and projects that use it, the last resolve a run in
+ * view recorded, and the live hosts that advertise it. Words and names only: the view carries no resolver path, so the
+ * page cannot (REQ-OPERATOR-CONSOLE-SCREENS (g)). Nothing when no profile is declared or named.
+ */
+function profileUse(v) {
+  const rows = Array.isArray(v?.profiles) ? v.profiles : [];
+  if (rows.length === 0) return null;
+  return table(
+    "Secret profiles in use",
+    ["Profile", "Source", "Resolver roots", "Triggers", "Projects", "Last resolve", "Served by"],
+    rows.map((row) => {
+      const trig = row.triggers.length > 0 ? `${row.triggers.map((i) => `#${i}`).join(", ")}${row.triggersMore > 0 ? ` and ${row.triggersMore} more` : ""}` : "none";
+      const proj = [...row.projects, ...(row.projectsMore > 0 ? [`${row.projectsMore} more`] : []), ...(row.anyRepo ? ["any (a webhook trigger)"] : [])].join(", ") || "-";
+      const last = row.last ? html`${profileLastText(row.last).replace(/^last resolve: /, "")}${row.last.jobId ? html` (${runLink(row.last.jobId)})` : null}` : "no run in view";
+      const warnSource = row.source === "ambiguous" || row.source === "undeclared";
+      const warnRoots = row.roots === "outside" || row.roots === "empty";
+      return html`<tr><td class="mono">${row.name}</td><td${warnSource ? html` class="warn"` : null}>${PROFILE_SOURCE_TEXT[row.source] ?? "-"}</td><td${warnRoots ? html` class="warn"` : null}>${row.roots !== null ? (PROFILE_ROOTS_TEXT[row.roots] ?? "-") : "not bounded (an env resolver)"}</td><td>${trig}</td><td class="mono">${proj}</td><td${row.last?.outcome === "refused" ? html` class="warn"` : null}>${last}</td><td class="mono">${profileHostsText(row, v).replace(/^served by: /, "")}</td></tr>`;
+    }),
+    "",
+  );
+}
 
 /** The bundle resolvers editor (issue #704): a name, its resolver's absolute path and the format it prints. */
 function bundleProfilesEditor(view) {

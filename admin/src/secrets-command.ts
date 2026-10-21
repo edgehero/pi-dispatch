@@ -26,7 +26,7 @@
  * would be cosmetic.
  */
 
-import { blankSettingsFile, envBundleProfiles, envSecretProfiles, overlayBundleProfiles, readProjects, readSettingsView, readTriggers, renderBundleProfiles, renderSecretBundles, secretBundlesView, writeSettings } from "./read-model.mjs";
+import { blankSettingsFile, envBundleProfiles, envSecretProfiles, listRuns, overlayBundleProfiles, readProjects, readSettingsView, readTriggers, renderBundleProfiles, renderSecretBundles, renderSecretProfilesView, secretBundlesView, secretProfilesView, writeSettings } from "./read-model.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 // The name and path rules and the confirm's exact bytes (issue #642): pi-free, so the operator console declares a
 // profile under the same rules and shows the same words.
@@ -78,7 +78,13 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
     const projects = typeof paths.projectsFile === "string" ? readProjects({ projectsPath: paths.projectsFile, ...fsSeam }) : null;
     const bound = renderSecretBundles(secretBundlesView({ triggers: triggersView, settings: view, env, projects }), { names: false });
     // Issue #712: the env-declared profiles beside the overlay's, as the worker merges them.
-    const parts = [renderProfiles(profiles, envSecretProfiles(env.PI_SECRET_PROFILES)), ...(Object.keys(bundles).length > 0 ? [renderBundleProfiles(bundles)] : []), ...(bound !== "" ? [bound] : [])];
+    // Issue #712: each profile's use (source, roots, triggers, projects, the last resolve off this host's newest run
+    // records), under the tables that carry its path. The registry is not read here, and the view says so.
+    // The deployment's logs dir only (index.ts passes it): the PI_LOGS_DIR fallback the audit takes is not read for display.
+    const runsDir = deps.logsDir ?? paths.logsDir ?? null;
+    const runs = typeof runsDir === "string" && runsDir !== "" ? listRuns({ logsDir: runsDir, limit: 50, ...fsSeam }) : [];
+    const used = renderSecretProfilesView(secretProfilesView({ triggers: triggersView, settings: view, env, projects, runs: Array.isArray(runs) ? runs : [], hosts: null, ...fsSeam }));
+    const parts = [renderProfiles(profiles, envSecretProfiles(env.PI_SECRET_PROFILES)), ...(used !== "" ? [used] : []), ...(Object.keys(bundles).length > 0 ? [renderBundleProfiles(bundles)] : []), ...(bound !== "" ? [bound] : [])];
     notify?.(parts.join("\n\n"), "info");
     return;
   }

@@ -1144,6 +1144,12 @@ export function makeOpenshellBackend(opts = {}) {
 			}
 		}
 		if (plan.bundles.length > 0 || plan.plain.length > 0) log("openshell_bundle_bound", { container: name, providers: plan.bundles.length, placeholders: plan.bundles.reduce((n, b) => n + b.keys.length, 0), plain: plan.plain.length });
+		// Issue #712: what this attempt's policy admitted and bound, for the record's `openshell` (collectRun carries it on
+		// the result, run-history.mjs `recordedOpenshell` rebuilds it). The hosts are the policy's own endpoints, which come
+		// from the operator's allowlist, model endpoints and the fixed forge host, never from the job; the repository the
+		// push rule names is a PATH of that rule and is not taken. Counts only for the credentials: never a value, never
+		// a key name. Set here, after every provider exists, so a record never claims a provider the create did not get.
+		at.facts = { mode, ruleHosts: [...endpointHosts], providers: at.providers.length, placeholders: (jobProvider !== null ? secrets.length : 0) + plan.bundles.reduce((n, b) => n + b.keys.length, 0) };
 		if (stopped()) return;
 		fs.writeFileSync(at.policyFile, `${JSON.stringify(policy)}\n`, { mode: 0o600 });
 		// Issue #686 part 3: the mode label and the binds, bind mode only, so copy mode's create is unchanged.
@@ -1200,7 +1206,11 @@ export function makeOpenshellBackend(opts = {}) {
 		}
 	};
 
-	const collectRun = async (result, { opts: built }) => {
+	// Issue #712: every path out of collectRun carries the attempt's policy facts (`at.facts`, set by the stage once its
+	// providers exist), so an aborted or a failed-download run's record still says what its sandbox was given.
+	const withFacts = (result, at) => (at?.facts && result !== null && typeof result === "object" ? { ...result, openshell: at.facts } : result);
+	const collectRun = async (result, { opts: built }) => withFacts(await collectOutputs(result, { opts: built }), attempts.get(built));
+	const collectOutputs = async (result, { opts: built }) => {
 		const at = attempts.get(built);
 		// Bind mode: the writable outputs are the host's own directories, and the sandbox was already ended before the
 		// transcript's final read (`settleRun`, review rounds 1 and 2). A sandbox not confirmed gone rides the result as

@@ -538,9 +538,11 @@ test("the tick's snapshot carries each row's live fields through the worker's al
     staleMs: 1500,
     routes: "true",
     caps: ["s:deploy", "w:ci"],
+    capsSeen: true,
     backends: { blessed: ["local", "openshell"], default: "local", floor: { egress: "enforced" }, openshell: { engine: "docker", gateway: "local", modes: ["copy"] } },
   }, "these keys and no other; the dropped entry joins jobsMore");
   assert.deepEqual([snap.hostBudgets[1].caps, snap.hostBudgets[1].backends], [[], null], "a row without either: none advertised, no venues published");
+  assert.equal(snap.hostBudgets[1].capsSeen, false, "and is said to publish no list, not an empty one");
   assert.equal(snap.hostBudgets[1].jobs, null);
   assert.equal(snap.hostBudgets[1].jobsUnreadable, true, "a value that is not a list is unreadable, never an empty list");
   assert.equal(snap.hostBudgets[1].staleMs, null, "a negative age is not an age");

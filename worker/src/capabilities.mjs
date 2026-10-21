@@ -121,7 +121,9 @@ export const IMPLICIT_SECRET_PROFILE = "default";
  * and refuse. Once every worker runs this release, A advertises its overlay `default` and the job is routed
  * to A again. An older receiver computes no such need and routes as before.
  */
-function secretProfileNeeded(job) {
+// Exported (issue #712) for the run record's `secretsProfile` (run-history.mjs), which must name the profile this rule
+// routes by and `resolveSecrets` resolves through, and must not import secrets.mjs, which spawns.
+export function secretProfileNeeded(job) {
 	const named = job?.secretsProfile;
 	if (typeof named === "string" && named !== "") return named;
 	const secrets = job?.secrets;

@@ -8,6 +8,7 @@ import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { HOST_CPUS_MAX, HOST_MEMORY_MAX_MIB, HOST_SLOTS_MAX, recordedJobSize } from "./job-size.mjs";
 import { waitArmed } from "./wait-for.mjs";
+import { secretProfileNeeded } from "./capabilities.mjs";
 import { scheduledForMillis } from "./repeat-slot.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
 
@@ -526,6 +527,65 @@ export function recordedBundle(b) {
 	return { id: b.id, variables, shadowed, ...(counted ? { placeholders: b.placeholders, plain: b.plain } : {}) };
 }
 
+/** The two OpenShell venues and the mode each runs in (backends.mjs `OPENSHELL_BACKENDS`, pinned by a test). */
+const OPENSHELL_VENUE_MODES = Object.freeze({ openshell: "copy", "openshell-bind": "bind" });
+/** The most rule hosts the record's `openshell` lists; `ruleHostCount` says how many there were in all. */
+export const OPENSHELL_RULE_HOSTS_MAX = 32;
+/** A rule host as the generated policy names it (openshell-policy.mjs `HOST_RE`, plus a leading `*.` for a dot entry). */
+const RULE_HOST = /^(?:\*\.)?(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+/** The most providers and bound credentials an attempt can hold (backend-openshell.mjs `OPENSHELL_LIMITS`: 32 x 32). */
+const OPENSHELL_COUNT_MAX = 32 * 32;
+/** The most rule hosts `ruleHostCount` may claim: far above any allowlist, a bound on a number read back from a file. */
+const OPENSHELL_RULE_COUNT_MAX = 65_536;
+
+/**
+ * The record's `openshell` (issue #712): `{ mode, ruleHosts, ruleHostCount, providers, placeholders }`, what the
+ * attempt's sandbox policy admitted and bound, or null on any violation and on every other venue. REBUILT, never the
+ * source's object:
+ *   - `mode`: `copy` or `bind`, and it must be the mode of the venue the job resolved to, so a venue's record cannot
+ *     claim the other's;
+ *   - `ruleHosts`: the policy's endpoint hosts, deduplicated, sorted, held to the host-name charset (no port, no path,
+ *     no userinfo: a name that fails is dropped, never repaired), at most `OPENSHELL_RULE_HOSTS_MAX`;
+ *     `ruleHostCount` the number of valid hosts before that cap, so a view can say how many it does not list;
+ *   - `providers`: how many credential providers the sandbox was given (the job's own and one per bundle host);
+ *   - `placeholders`: how many credential keys those providers bound (the agent saw each as a placeholder).
+ * ADMISSIBLE because every host is OPERATOR CONFIG: the policy is generated from egress-allowlist.conf,
+ * model-endpoints.json and the fixed forge host (openshell-policy.mjs `networkPolicyFor`), and a bundle host must
+ * already be one of those endpoints. No payload, issue, branch or repository reaches a host (the repository is a path
+ * in the push rule, which is not read), so the record still holds no attacker-chosen string. Counts, never a key name
+ * or a value.
+ */
+export function recordedOpenshell(o, backend) {
+	if (o === null || typeof o !== "object" || Array.isArray(o)) return null;
+	if (!Object.hasOwn(OPENSHELL_VENUE_MODES, backend ?? "") || o.mode !== OPENSHELL_VENUE_MODES[backend]) return null;
+	if (!Array.isArray(o.ruleHosts)) return null;
+	const count = (n) => Number.isSafeInteger(n) && n >= 0 && n <= OPENSHELL_COUNT_MAX;
+	if (!count(o.providers) || !count(o.placeholders)) return null;
+	const hosts = [...new Set(o.ruleHosts.filter((h) => typeof h === "string" && RULE_HOST.test(h)))].sort();
+	// The adapter hands the whole list and no count; a record read back (the admin's rebuild) carries its own count, which
+	// is kept when it is an integer at least the hosts it lists, so a capped list does not shrink its total on a re-read.
+	const given = Number.isSafeInteger(o.ruleHostCount) && o.ruleHostCount >= 0 && o.ruleHostCount <= OPENSHELL_RULE_COUNT_MAX ? o.ruleHostCount : 0;
+	const listed = hosts.slice(0, OPENSHELL_RULE_HOSTS_MAX);
+	return { mode: o.mode, ruleHosts: listed, ruleHostCount: Math.max(hosts.length, given >= listed.length ? given : 0), providers: o.providers, placeholders: o.placeholders };
+}
+
+/** A secrets profile name as the triggers file admits it (triggers.mjs `validateSecretsProfile`), bounded here. */
+const SECRETS_PROFILE_NAME = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * The record's `secretsProfile` (issue #712): the NAME of the resolver profile a job's `run.secrets` resolved through,
+ * its own `run.secretsProfile` or the implicit `default`, only for a job that armed secrets, else null. The rule is
+ * capabilities.mjs `secretProfileNeeded`, the one the router routes by (`secretsArmed` and `resolveSecrets` spelled
+ * receiver-safe; a test holds the three together), imported rather than secrets.mjs, which spawns and would pull the
+ * worker's runtime into every reader of this module (the admin bundle's import walks refuse it). Operator config,
+ * charset-checked at load and again here; never a path, a reference or a value. Whether the resolve worked is the
+ * record's `outcome`/`reason`.
+ */
+export function recordedSecretsProfile(data) {
+	const name = secretProfileNeeded(data);
+	return typeof name === "string" && SECRETS_PROFILE_NAME.test(name) ? name : null;
+}
+
 /**
  * The record's `steered` (issue #646): `{ delivered, late, withdrawn }`, three non-negative safe integers counted off the
  * run's inbox at its final outcome (inbox-settle.mjs), or null on any violation. Rebuilt, never the source's object.
@@ -847,6 +907,10 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const steerSkipped = data.steer === true && STEER_SKIPPED_REASONS.includes(source.steerSkipped) ? source.steerSkipped : null;
 	// Issue #712: on every job, since any job's transcript can be skipped; absent on every venue that streams it.
 	const liveSkipped = LIVE_SKIPPED_REASONS.includes(source.liveSkipped) ? source.liveSkipped : null;
+	// Issue #712: the OpenShell venues' policy facts, held to the venue the job resolved to, and the secrets profile.
+	const backend = resolveBackendName(data, defaultBackend);
+	const openshell = recordedOpenshell(source.openshell, backend);
+	const secretsProfile = recordedSecretsProfile(data);
 	// Issue #704: only for a job whose project has a secret bundle, so no other record can carry either key.
 	const bundle = recordedBundle(source.bundle);
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
@@ -955,7 +1019,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// operator-authored config checked against a charset at load, never payload. `null` only where no
 		// default was passed (a dependency-injection seam; `recordRun` in start.mjs always passes one) or
 		// where the job data carries an explicit null, which no producer writes and the blessed gate refuses.
-		backend: resolveBackendName(data, defaultBackend),
+		backend,
 		// The dollar reservation's outcome (issue #501, INT-RUN-HISTORY-FILE-CONTRACT). Additive, nullable, an explicit
 		// literal REBUILT here (never the source's object), TAIL position after `backend` on the same contract: field order
 		// is the serialisation order. `{ reservedMicros, settledMicros, basis, modelBasis }`: two integers of micro-dollars,
@@ -1075,6 +1139,14 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// like them, so a record of a run whose transcript streamed (or that no reader asked for) is byte-identical:
 		//   - `liveSkipped`: why the run had no live transcript (LIVE_SKIPPED_REASONS), a fixed enum.
 		...(liveSkipped !== null ? { liveSkipped } : {}),
+		// OpenShell run facts and the secrets profile (issue #712, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after
+		// `liveSkipped`, CONDITIONAL like it, so a record of any other venue, or of a job that armed no secrets, is
+		// byte-identical to before:
+		//   - `openshell`: `{ mode, ruleHosts, ruleHostCount, providers, placeholders }`, REBUILT (`recordedOpenshell`),
+		//     host names that are operator config and counts, on the two OpenShell venues only;
+		//   - `secretsProfile`: the profile NAME `run.secrets` resolved through (`recordedSecretsProfile`).
+		...(openshell !== null ? { openshell } : {}),
+		...(secretsProfile !== null ? { secretsProfile } : {}),
 	};
 }
 

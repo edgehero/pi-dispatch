@@ -41,7 +41,8 @@ const load = (path) => import(pathToFileURL(join(root, path)).href);
 
 const { makeOpenshellBackend, OPENSHELL_OWNER, OPENSHELL_OWNER_LABEL, sandboxNameOf } = await load("worker/src/backend-openshell.mjs");
 const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
-const { makeLogSink } = await load("worker/src/run-history.mjs");
+const { buildRecord, makeLogSink } = await load("worker/src/run-history.mjs");
+const { networkPolicyFor } = await load("worker/src/openshell-policy.mjs");
 const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs");
 const { makeInboxRelay } = await load("worker/src/inbox-relay.mjs");
 
@@ -288,6 +289,19 @@ const providersListed = async () => {
 	const ok = !logged && said.bcmdline === "0" && gate?.ok === true && gate.placeholders === 1 && gate.plain === 1 && refusedWide?.venueRefused?.reason === "openshell-bundle-endpoint-not-allowed" && result.code === 0 && said.btoken === "placeholder" && (said["benviron-readable"] === "no" || said.benviron === "1") && said["benviron-values"] === "0" && said.bplain === "file" && said.bown === "200" && swapped && elsewhere && keyRefused && !leaked;
 	console.log(`${ok ? "ok     " : "FAIL   "} a secret bundle: ${JSON.stringify({ gate, wide: refusedWide?.venueRefused?.reason ?? null, exit: result.code, btoken: said.btoken, benvironReadable: said["benviron-readable"], benviron: said.benviron, benvironValues: said["benviron-values"], bplain: said.bplain, bcmdline: said.bcmdline, gatewayLogRead: gatewayLog.length > 0, logged, bown: said.bown, bother: said.bother, bkey: said.bkey, swapped, elsewhere, keyRefused, leaked })}`);
 	if (!ok) failed = true;
+	// Issue #712: the run's record-facing facts, from the real stage through runContainer's result to the record the
+	// processor would write: copy mode, the policy's hosts (the allowlist's and both model endpoints'), the job's provider
+	// and the bundle host's, and the keys they bound. Never a value.
+	const record = buildRecord({ job: { id: "conformance", attemptsMade: 0, data: { ...JOB, backend: "openshell" } }, result: { outcome: "completed", exitCode: result.code, openshell: result.openshell }, startedAt: null, endedAt: null });
+	const facts = record.openshell ?? null;
+	// Exact, from the sources this run's policy was generated from (the same generator, so a host added or dropped by
+	// the stage is a mismatch), and the keys: the job's provider binds ANTHROPIC_API_KEY, GH_TOKEN and GITHUB_TOKEN (the
+	// token passed), the bundle host's BUNDLE_TOKEN; BUNDLE_PLAIN is a value by file and is not one.
+	const policy = networkPolicyFor({ allowlist: POLICY_SOURCES.readAllowlist(), endpoints: POLICY_SOURCES.readEndpoints(), kind: JOB.kind, repo: JOB.repo });
+	const wantHosts = [...new Set(Object.values(policy.network_policies ?? {}).flatMap((rule) => rule.endpoints.map((e) => e.host)))].sort();
+	const factsOk = facts !== null && facts.mode === "copy" && JSON.stringify(facts.ruleHosts) === JSON.stringify(wantHosts) && facts.ruleHostCount === wantHosts.length && facts.providers === 2 && facts.placeholders === 4 && !Object.values(BUNDLE_VALUES).some((v) => JSON.stringify(record).includes(v));
+	console.log(`${factsOk ? "ok     " : "FAIL   "} the run's record carries its openshell facts: ${JSON.stringify(facts)} (hosts wanted ${JSON.stringify(wantHosts)}, 2 providers, 4 placeholders)`);
+	if (!factsOk) failed = true;
 	const left = await providersListed();
 	const tidy = left !== null && !left.some((p) => p.startsWith(sandboxNameOf(name)));
 	console.log(`${tidy ? "ok     " : "FAIL   "} the bundle run's teardown deleted its providers: ${JSON.stringify(left)}`);
