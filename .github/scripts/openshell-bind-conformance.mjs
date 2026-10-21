@@ -401,7 +401,7 @@ if (!readings.readOnlyJobInputs?.ok) failed = true;
 		await invRun("e1", imgs.probe, "inv-e1", "e1");
 		await invRun("netpath", imgs.probe, "netpath", "netpath");
 		await invRun("e2-runner0755", imgs.runner0755, "netpath", "netpath");
-		await invRun("e2-newpath", imgs.newPath, "netpath", "netpath");
+		await invRun("e2-newpath", imgs.newPath, "netpath-obs", "netpath");
 		await invRun("e34-parent-node", imgs.probe, "inv-child-node", "e");
 		await invRun("e34-parent-runner", imgs.probe, "inv-child-runner", "e");
 		await invRun("e34-parent-runner-dumpable", imgs.runner0755, "inv-child-runner", "e");

@@ -136,11 +136,21 @@ case "$c" in
 		/opt/pi-dispatch/runner-node /opt/pi-dispatch-probe/netpath.mjs runner 2>/tmp/netpath.err; echo "probe netpath runner exit=$?"
 		head -c 2000 /tmp/netpath.err | head -n 8 | sed 's/^/probe netpath runner stderr=/'
 		exit 0 ;;
+	netpath-obs)
+		# Issue #730 E2: the same steps under the fresh 0755 copy at a policy-listed path of its own.
+		/opt/pi-dispatch/runner-observable /opt/pi-dispatch-probe/netpath.mjs runner 2>/tmp/netpath.err; echo "probe netpath observable exit=$?"
+		head -c 2000 /tmp/netpath.err | head -n 8 | sed 's/^/probe netpath observable stderr=/'
+		exit 0 ;;
 	inv-e1)
 		# Issue #730 E1: the mechanism's inputs, from inside the sandbox. A nondumpable process's /proc is root-owned and
 		# ptrace-gated, which is what the broker's same-uid memory read hits.
-		echo "probe e1 node-dumpable=$(node -e 'console.log(require(\"fs\").readFileSync(\"/proc/self/status\",\"utf8\").match(/^Dumpable:\\s*(\\d)/m)?.[1]??\"?\")')"
-		echo "probe e1 runner-dumpable=$(/opt/pi-dispatch/runner-node -e 'console.log(require(\"fs\").readFileSync(\"/proc/self/status\",\"utf8\").match(/^Dumpable:\\s*(\\d)/m)?.[1]??\"?\")')"
+		# Dumpable is not a /proc/<pid>/status field. The kernel shows it another way: a nondumpable process's /proc
+		# entries are root-owned and a same-uid sibling cannot open its environ.
+		for b in /usr/local/bin/node /opt/pi-dispatch/runner-node; do
+			"$b" -e 'setTimeout(()=>{},5000)' & p=$!; sleep 1
+			echo "probe e1 dumpable $b=proc-owner $(stat -c %U /proc/$p) environ $(head -c1 /proc/$p/environ >/dev/null 2>&1 && echo readable || echo denied)"
+			kill $p 2>/dev/null; wait $p 2>/dev/null
+		done
 		echo "probe e1 runner-node-stat=$(stat -c '%a %U:%G' /opt/pi-dispatch/runner-node)"
 		echo "probe e1 node-stat=$(stat -c '%a %U:%G' /usr/local/bin/node)"
 		echo "probe e1 ptrace-scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>&1)"
@@ -572,7 +582,7 @@ const invRun = async (label, img, prompt, prefix) => {
 	output.set("last", "");
 	let code = "no-run";
 	try {
-		code = (await bundleFor(img).runContainer({ job: JOB, prepared: jobDirFor(prompt), name: `pi-job-conformance-${nonce}-${label}`, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 200 } })).code;
+		code = (await bundleFor(img, POLICY_SOURCES).runContainer({ job: JOB, prepared: jobDirFor(prompt), name: `pi-job-conformance-${nonce}-${label}`, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 200 } })).code;
 	} catch (e) {
 		code = `threw ${e?.reason ?? e?.message ?? e}`;
 	}
@@ -583,8 +593,30 @@ const invRun = async (label, img, prompt, prefix) => {
 // does a fresh policy-listed 0755 path? E3/E4: a tool child's network reach and its reads of the parent, with the
 // parent dumpable (node) and nondumpable (runner), on the shipped 0711 image.
 await invRun("e1", probeImage, "inv-e1", "e1");
+{
+	const name = `pi-job-conformance-${nonce}-e1log`;
+	const sandbox = sandboxNameOf(name);
+	output.set("last", "");
+	let done = false;
+	const running = bundleFor(probeImage, POLICY_SOURCES).runContainer({ job: JOB, prepared: jobDirFor("netpath"), name, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 200 } }).catch((e) => ({ code: `threw ${e?.message ?? e}` })).finally(() => (done = true));
+	const seen = new Set();
+	while (!done) {
+		const got = await run("openshell", ["logs", sandbox, "--source", "sandbox", "--level", "warn", "-n", "500"], 15_000);
+		for (const l of `${got.stdout}\n${got.stderr}`.split("\n")) if (/notification denied|task-memory|EAI_AGAIN|binary/i.test(l)) seen.add(l.trim().slice(0, 400));
+		await new Promise((r) => setTimeout(r, 1000));
+	}
+	await running;
+	console.log(`diag    #730 e1 broker log (sandbox ${sandbox}, warn and up, matching lines):\n${[...seen].slice(0, 12).map((l) => `          ${l}`).join("\n") || "          none matched"}`);
+}
 await invRun("e2-runner0755", probeImage0755, "netpath", "netpath");
-await invRun("e2-newpath", probeImageNewPath, "netpath", "netpath");
+await invRun("e2-newpath", probeImageNewPath, "netpath-obs", "netpath");
+// E2 (b): whether the fresh path is in the policy the stage generates from the variant's label (the same generator).
+{
+	const label = (await run(engine, ["image", "inspect", "--format", `{{index .Config.Labels "${NET_LABEL}"}}`, probeImageNewPath])).stdout.trim();
+	const pol = networkPolicyFor({ allowlist: POLICY_SOURCES.readAllowlist(), endpoints: POLICY_SOURCES.readEndpoints(), kind: JOB.kind, repo: JOB.repo, binaries: label.split(",") });
+	const listed = Object.values(pol.network_policies ?? {}).some((r) => (r.binaries ?? []).some((b) => b.path === "/opt/pi-dispatch/runner-observable"));
+	console.log(`diag    #730 e2-newpath policy lists /opt/pi-dispatch/runner-observable: ${listed} (label has it: ${label.includes("runner-observable")})`);
+}
 await invRun("e34-parent-node", probeImage, "inv-child-node", "e");
 await invRun("e34-parent-runner", probeImage, "inv-child-runner", "e");
 await invRun("e34-parent-runner-dumpable", probeImage0755, "inv-child-runner", "e");
