@@ -13,17 +13,22 @@
  * run.image and run.resume. So the panel makes a manager easy to ADD, and binding one to a job stays a
  * diff someone can read.
  *
+ * BUNDLE RESOLVERS (issue #704, `--bundle`) are the same capability one step wider: a script that prints a project's
+ * WHOLE environment, written to the overlay's `secretBundles` (`{ name: { path, format } }`, runtime-settings.mjs's
+ * shape) by the same operator-typed door, never by a tool. `list` shows both kinds and the bundles triggers.json binds,
+ * with whether this deployment declares each one's profile; it never resolves a bundle (`doctor --secrets` does).
+ *
  * The worker does not trust any of it. Every overlay-declared path is re-checked against
  * PI_SECRET_RESOLVER_ROOTS at resolution time, on the realpath, because PI_SETTINGS_FILE can put this
  * file anywhere (its default was the OS temp directory until issue #290). A check that lived only here
  * would be cosmetic.
  */
 
-import { blankSettingsFile, readSettingsView, writeSettings } from "./read-model.mjs";
+import { blankSettingsFile, envBundleProfiles, overlayBundleProfiles, readProjects, readSettingsView, readTriggers, renderBundleProfiles, renderSecretBundles, secretBundlesView, writeSettings } from "./read-model.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 // The name and path rules and the confirm's exact bytes (issue #642): pi-free, so the operator console declares a
 // profile under the same rules and shows the same words.
-import { planSecretProfileAdd, planSecretProfileRemove, renderProfiles, secretProfileNameRefusal, secretResolverPathRefusal } from "./write-plans.mjs";
+import { planSecretBundleAdd, planSecretBundleRemove, planSecretProfileAdd, planSecretProfileRemove, renderProfiles, secretBundleFormatRefusal, secretBundleNameRefusal, secretProfileNameRefusal, secretResolverPathRefusal } from "./write-plans.mjs";
 // The write lands in the console's audit chain as the panel (issue #642), appended before it.
 import { panelWrite } from "./audited-write.mjs";
 import { logsDirPath } from "@edgehero/pi-dispatch/config";
@@ -49,10 +54,29 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
     return;
   }
   const profiles: Record<string, string> = { ...(view.overlay?.secretProfiles ?? {}) };
-  const action = tokens[0] ?? "list";
+  const bundles: Record<string, any> = overlayBundleProfiles(view);
+  // `--bundle` anywhere selects the bundle resolvers; the rest of the words keep their places.
+  const bundle = tokens.includes("--bundle");
+  const words = tokens.filter((t) => t !== "--bundle");
+  const action = words[0] ?? "list";
+  const USAGE_LINE = "usage: /dispatch secrets <list|add [--bundle]|remove [--bundle] <name>>";
+  // Any other flag (`--bundles`, `-b`, `--Bundle`) is refused with the usage line rather than read as a word: a near
+  // miss of `--bundle` falling through to the profile `add` would declare the wrong kind of resolver (review L6).
+  if (words.some((w) => w.startsWith("-"))) {
+    notify?.(`unknown flag ${words.find((w) => w.startsWith("-"))}. ${USAGE_LINE}`, "warning");
+    return;
+  }
+  // The bundles triggers.json binds (issue #704), read the display way: never a reference, never resolved.
+  const triggersPath = typeof paths.triggersPath === "string" ? paths.triggersPath : null;
+  const triggersView: any = triggersPath !== null ? readTriggers({ triggersPath, ...fsSeam }) : { missing: true };
+  const env = deps.env ?? process.env;
 
   if (action === "list") {
-    notify?.(renderProfiles(profiles), "info");
+    // A deployment with no bundle resolver and no bundle reads exactly as it did before the feature.
+    const projects = typeof paths.projectsFile === "string" ? readProjects({ projectsPath: paths.projectsFile, ...fsSeam }) : null;
+    const bound = renderSecretBundles(secretBundlesView({ triggers: triggersView, settings: view, env, projects }), { names: false });
+    const parts = [renderProfiles(profiles), ...(Object.keys(bundles).length > 0 ? [renderBundleProfiles(bundles)] : []), ...(bound !== "" ? [bound] : [])];
+    notify?.(parts.join("\n\n"), "info");
     return;
   }
 
@@ -60,6 +84,75 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
   // without the primitives degrades to one notice instead of half-running.
   if (typeof ui?.input !== "function" || typeof ui?.confirm !== "function") {
     notify?.("declaring a profile needs dialogs (newer pi) — no input/confirm available", "warning");
+    return;
+  }
+
+  if (action === "add" && bundle) {
+    const nameAnswer = await ui.input("bundle profile name — what a triggers.json bundle's \"profile\" will say (e.g. op-shop)", "default");
+    const name = (nameAnswer ?? "").trim();
+    if (name === "") return;
+    const badName = secretBundleNameRefusal(name);
+    if (badName !== null) {
+      notify?.(badName, "error");
+      return;
+    }
+    const pathAnswer = await ui.input("resolver — ABSOLUTE path to the script that prints a whole environment for one reference", "/opt/pi/bundle.sh");
+    const path = (pathAnswer ?? "").trim();
+    if (path === "") return;
+    const badPath = secretResolverPathRefusal(path);
+    if (badPath !== null) {
+      notify?.(badPath, "error");
+      return;
+    }
+    const formatAnswer = await ui.input("format — what the script prints: dotenv (NAME=value lines) or json (one object of strings)", "dotenv");
+    const format = (formatAnswer ?? "").trim();
+    if (format === "") return;
+    const badFormat = secretBundleFormatRefusal(format);
+    if (badFormat !== null) {
+      notify?.(badFormat, "error");
+      return;
+    }
+    // The exact bytes again, and a name PI_SECRET_BUNDLES already holds refused (`planSecretBundleAdd` says why).
+    const planned: any = planSecretBundleAdd({ name, path, format, bundles, envBundles: envBundleProfiles(env.PI_SECRET_BUNDLES).profiles, settingsFile: paths.settingsFile });
+    if (planned.refusal) {
+      notify?.(planned.refusal, "error");
+      return;
+    }
+    const ok = await ui.confirm(planned.plan.title, planned.plan.message);
+    if (!ok) {
+      notify?.("not declared", "info");
+      return;
+    }
+    const res: any = panelWrite(auditDir, { ...auditSeam, kind: "secret-bundle-add", target: paths.settingsFile }, () => writeSettings({ settingsFile: paths.settingsFile, mutate: planned.plan.mutate, ...fsSeam }));
+    if (res.invalid) {
+      notify?.(`rejected: ${res.invalid}`, "error");
+      return;
+    }
+    notify?.(`declared bundle resolver ${name} -> ${path} (${format}). A project reaches it with a "secretBundles" entry naming "profile": "${name}" in triggers.json, which is an edit to that file.`, "info");
+    return;
+  }
+
+  if (action === "remove" && bundle) {
+    const name = (words[1] ?? "").trim();
+    // A file that names no bundle (or does not exist) strands nothing; one that cannot be read cannot say (null).
+    const readable = !triggersView?.invalid && triggersView !== null;
+    const boundIds = !readable ? null : Array.isArray(triggersView?.secretBundles) ? triggersView.secretBundles.filter((b: any) => b.profile === name).map((b: any) => b.id) : [];
+    const planned: any = planSecretBundleRemove({ name, bundles, bound: boundIds, envBundles: envBundleProfiles(env.PI_SECRET_BUNDLES).profiles, settingsFile: paths.settingsFile });
+    if (planned.refusal) {
+      notify?.(planned.refusal, "warning");
+      return;
+    }
+    const ok = await ui.confirm(planned.plan.title, planned.plan.message);
+    if (!ok) {
+      notify?.("not removed", "info");
+      return;
+    }
+    const res: any = panelWrite(auditDir, { ...auditSeam, kind: "secret-bundle-remove", target: paths.settingsFile }, () => writeSettings({ settingsFile: paths.settingsFile, mutate: planned.plan.mutate, ...fsSeam }));
+    if (res.invalid) {
+      notify?.(`rejected: ${res.invalid}`, "error");
+      return;
+    }
+    notify?.(`removed bundle resolver ${name}`, "info");
     return;
   }
 
@@ -104,7 +197,7 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
   }
 
   if (action === "remove") {
-    const name = (tokens[1] ?? "").trim();
+    const name = (words[1] ?? "").trim();
     const planned: any = planSecretProfileRemove({ name, profiles, settingsFile: paths.settingsFile });
     if (planned.refusal) {
       notify?.(planned.refusal, "warning");
@@ -124,5 +217,5 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
     return;
   }
 
-  notify?.("usage: /dispatch secrets <list|add|remove <name>>", "warning");
+  notify?.(USAGE_LINE, "warning");
 }

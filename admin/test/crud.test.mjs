@@ -752,6 +752,180 @@ test("/dispatch secrets reads a blank settings file (whitespace or a BOM only) a
   assert.equal(fs.files["/s/settings.json"], '{"secretProfiles":{"a":"/x"},"secretProfiles":{}}');
 });
 
+// --- /dispatch secrets --bundle: declaring a bundle resolver (issue #704, DES-PROJECT-SECRET-BUNDLES) ---
+
+/** An in-memory fs over `files` for the secrets command. */
+function bundleFs(files) {
+  return {
+    files,
+    readFileSync: (p) => {
+      if (!(p in files)) { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; }
+      return files[p];
+    },
+    writeFileSync: (p, d) => (files[p] = d),
+    renameSync: (a, b) => { files[b] = files[a]; delete files[a]; },
+    mkdirSync: () => {},
+  };
+}
+
+test("secrets add --bundle writes the overlay's secretBundles only after a confirm showing the exact bytes, in the validator's shape", async () => {
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  const { readOverlay } = await import("@edgehero/pi-dispatch/runtime-settings");
+  const fs = bundleFs({ "/s/settings.json": JSON.stringify({ model: "m" }) });
+  const shown = [];
+  const notes = [];
+  const answers = { "bundle profile name": "op-shop", resolver: "/opt/pi/op-shop.mjs", format: "json" };
+  const input = async (t) => answers[Object.keys(answers).find((k) => t.startsWith(k))];
+  const ctx = { ui: { input, confirm: async (_t, m) => (shown.push(m), true), notify: () => {} } };
+  await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, (m) => notes.push(m), ["add", "--bundle"], { fs, env: {}, audit: { append() {} } });
+  assert.equal(shown.length, 1);
+  assert.match(shown[0], /^\/s\/settings\.json gets:\n\{\n {2}"secretBundles": \{\n {4}"op-shop": \{\n {6}"path": "\/opt\/pi\/op-shop\.mjs",\n {6}"format": "json"\n/);
+  assert.match(shown[0], /EXECUTES this script.*once per job start.*EVERY variable it prints \(json\).*PI_SECRET_RESOLVER_ROOTS/s);
+  const written = JSON.parse(fs.files["/s/settings.json"]);
+  assert.deepEqual(written, { model: "m", secretBundles: { "op-shop": { path: "/opt/pi/op-shop.mjs", format: "json" } } });
+  assert.deepEqual(readOverlay("/s/settings.json", { fs }).overlay.secretBundles, written.secretBundles, "the worker's validator reads it back as written");
+  assert.ok(notes.some((n) => /"secretBundles" entry naming "profile": "op-shop" in triggers\.json/.test(n)), "binding it is still a file edit");
+  // A format the worker would not read, and a name PI_SECRET_BUNDLES holds, are refused before any confirm.
+  for (const [extra, env, why] of [[{ format: "yaml" }, {}, /^the format is dotenv or json/], [{}, { PI_SECRET_BUNDLES: "op-shop:/opt/x:json" }, /^PI_SECRET_BUNDLES already declares op-shop/]]) {
+    const again = bundleFs({});
+    const asked = [];
+    const said = [];
+    const a = { ...answers, ...extra };
+    await runSecretsCommand({ settingsFile: "/s/settings.json" }, { ui: { input: async (t) => a[Object.keys(a).find((k) => t.startsWith(k))], confirm: async () => (asked.push(1), true), notify: () => {} } }, (m) => said.push(m), ["add", "--bundle"], { fs: again, env, audit: { append() {} } });
+    assert.equal(asked.length, 0, JSON.stringify(extra));
+    assert.match(said[0], why);
+    assert.deepEqual(again.files, {});
+  }
+});
+
+test("a near miss of --bundle is refused with the usage line, never read as a profile add (review L6)", async () => {
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  for (const tokens of [["add", "--bundles"], ["add", "-b"], ["remove", "--Bundle", "x"], ["add", "--bundle=yes"]]) {
+    const fs = bundleFs({});
+    const notes = [];
+    let asked = 0;
+    await runSecretsCommand({ settingsFile: "/s/settings.json" }, { ui: { input: async () => (asked++, "x"), confirm: async () => true, notify: () => {} } }, (m) => notes.push(m), tokens, { fs, env: {}, audit: { append() {} } });
+    assert.equal(asked, 0, tokens.join(" "));
+    assert.match(notes[0], /^unknown flag .*usage: \/dispatch secrets <list\|add \[--bundle\]\|remove \[--bundle\] <name>>$/, tokens.join(" "));
+    assert.deepEqual(fs.files, {});
+  }
+});
+
+test("secrets remove --bundle names the bundles it strands, and list shows profiles, bundle resolvers and the bindings, never a ref", async () => {
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  const files = {
+    "/s/settings.json": JSON.stringify({ secretProfiles: { prod: "/opt/p.sh" }, secretBundles: { "op-shop": { path: "/opt/b.mjs", format: "json" } } }),
+    "/s/triggers.json": JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix", secretBundle: false } }], secretBundles: { shop: { profile: "op-shop", ref: "env-ref-canary", project: "shop" } } }),
+    "/s/projects.json": JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/shop"] }] }),
+  };
+  const fs = bundleFs(files);
+  const paths = { settingsFile: "/s/settings.json", triggersPath: "/s/triggers.json", projectsFile: "/s/projects.json" };
+  const notes = [];
+  await runSecretsCommand(paths, { ui: {} }, (m) => notes.push(m), ["list"], { fs, env: { PI_SECRET_RESOLVER_ROOTS: "/opt" } });
+  assert.equal(notes[0], [
+    "Resolver profiles (settings overlay):\n  prod -> /opt/p.sh",
+    "Bundle resolvers (settings overlay):\n  op-shop -> /opt/b.mjs (json)",
+    "Secret bundles (triggers.json; names only, never a reference or a value):\n  shop: project shop; profile op-shop (declared in the settings overlay, json, inside PI_SECRET_RESOLVER_ROOTS as written; doctor --secrets checks it runs); fork reviews do not; no endpoints; 1 trigger opts out: #0",
+  ].join("\n\n"));
+  assert.ok(!notes[0].includes("env-ref-canary"));
+  // Roots the panel can see that do not hold the path: the worker would not run it, and the list says so.
+  const closed = [];
+  await runSecretsCommand(paths, { ui: {} }, (m) => closed.push(m), ["list"], { fs, env: { PI_SECRET_RESOLVER_ROOTS: "" } });
+  assert.match(closed[0], /profile op-shop \(declared in the settings overlay but outside PI_SECRET_RESOLVER_ROOTS, so the worker will not run it/);
+  // Roots the panel cannot see at all prove nothing about the worker's host: said as not visible, never as outside.
+  const unseen = [];
+  await runSecretsCommand(paths, { ui: {} }, (m) => unseen.push(m), ["list"], { fs, env: {} });
+  assert.match(unseen[0], /profile op-shop \(declared in the settings overlay, json; PI_SECRET_RESOLVER_ROOTS is not visible to the panel; doctor --secrets checks it runs\)/);
+  const shown = [];
+  const said = [];
+  await runSecretsCommand(paths, { ui: { input: async () => "", confirm: async (_t, m) => (shown.push(m), true), notify: () => {} } }, (m) => said.push(m), ["remove", "--bundle", "op-shop"], { fs, env: {}, audit: { append() {} } });
+  assert.match(shown[0], /^op-shop -> \/opt\/b\.mjs \(json\)\n\nThe jobs of bundle shop are refused PRE-SPEND after this \(secret-bundle-profile-unknown\), or on a multi-host worker's shared queue held for a host that declares it/);
+  assert.deepEqual(JSON.parse(fs.files["/s/settings.json"]), { secretProfiles: { prod: "/opt/p.sh" }, secretBundles: {} });
+  assert.deepEqual(said, ["removed bundle resolver op-shop"]);
+  // The profile of the same name is a different namespace: `remove prod` without --bundle still removes the profile.
+  said.length = 0;
+  await runSecretsCommand(paths, { ui: { input: async () => "", confirm: async () => true, notify: () => {} } }, (m) => said.push(m), ["remove", "--bundle", "prod"], { fs, env: {}, audit: { append() {} } });
+  assert.match(said[0], /^no such bundle resolver\. No bundle resolvers are declared in the settings overlay\.$/);
+});
+
+// The OPERATOR-TYPED rule for bundle resolvers (issue #704): a bundle resolver is an exec path that hands a project's
+// whole environment to its jobs, so no model-callable tool may write the overlay's `secretBundles`, exactly as none may
+// write `secretProfiles`. Three doors, each shut here: no tool parameter, `dispatch_set`'s generic key (refused, the file
+// untouched, nothing shown), and the planners themselves, reached only from the operator-typed command and the console.
+test("no registered tool can write the overlay's secretBundles: no parameter, dispatch_set refuses the key, and only operator surfaces reach the planners (#704)", async () => {
+  const { OPERATOR_ONLY_KEYS } = await import("@edgehero/pi-dispatch/runtime-settings");
+  assert.ok(OPERATOR_ONLY_KEYS.includes("secretBundles"));
+  for (const tool of registeredTools()) {
+    const keys = Object.keys(tool.parameters?.properties ?? {});
+    for (const forbidden of ["secretBundles", "secretBundle", "bundle"]) assert.equal(keys.includes(forbidden), false, `${tool.name} exposes ${forbidden}`);
+    assert.equal(/secretBundles/.test(tool.description ?? ""), false, `${tool.name}'s description advertises secretBundles`);
+  }
+  for (const key of OPERATOR_ONLY_KEYS) {
+    const settingsFile = withSettings({ model: "m" });
+    const before = readFileSync(settingsFile, "utf8");
+    const { ctx, shown } = toolCtx({ answer: true });
+    await assert.rejects(() => toolByName("dispatch_set").execute("id", { key, value: JSON.stringify({ x: { path: "/opt/x", format: "json" } }) }, undefined, undefined, ctx), /unknown key/, key);
+    assert.equal(shown.length, 0, `${key}: no confirm is even asked`);
+    assert.equal(readFileSync(settingsFile, "utf8"), before, key);
+  }
+  // The planners that mutate the overlay's secretBundles are exactly the two, and only the operator surfaces name them.
+  const src = (rel) => readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), "utf8");
+  assert.equal([...src("write-plans.mjs").matchAll(/\.\.\.o, secretBundles\b/g)].length, 2, "planSecretBundleAdd and planSecretBundleRemove, nothing else");
+  // Every source file under admin/src, walked, so a new module that calls a planner cannot hide from a hand-kept list.
+  const root = fileURLToPath(new URL("../src/", import.meta.url));
+  const walk = (dir) => readdirSync(join(root, dir), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : /\.(mjs|ts)$/.test(e.name) ? [join(dir, e.name)] : []));
+  const files = walk("");
+  assert.ok(files.includes("index.ts") && files.includes(join("console", "actions.mjs")), "the walk found the sources");
+  const callers = files.filter((f) => f !== "write-plans.mjs" && /planSecretBundle(Add|Remove)/.test(src(f))).sort();
+  assert.deepEqual(callers, [join("console", "actions.mjs"), "secrets-command.ts"]);
+  assert.equal(/secretBundles\s*:/.test(src("index.ts")), false, "index.ts, where every tool lives, writes no secretBundles key");
+});
+
+// Issue #704 review M1/L3: a run's bundle variable NAMES are the operator's manager's contents, and the operator-only
+// overlay keys are resolver paths the worker executes; neither reaches model context. Every registered tool is run
+// (reads with their default or a job id, writes with no interactive operator, so each refuses), over a deployment
+// whose record and overlay carry distinctive canaries, and no result or refusal holds one.
+test("no registered tool's result carries a bundle variable name or an operator-only overlay path (#704)", async () => {
+  const saved = Object.fromEntries(["PI_SETTINGS_FILE", "VALKEY_URL", "PI_TRIGGERS_FILE"].map((k) => [k, process.env[k]]));
+  const dir = tempDir("pi-704-tools-");
+  const logsDir = process.env.PI_LOGS_DIR;
+  const NAME = "ZQX_CANARY_BUNDLE_VAR";
+  const SHADOW = "ZQX_CANARY_SHADOWED";
+  const PATH_CANARY = "/opt/zqx-canary-resolver.sh";
+  writeFileSync(join(logsDir, "gh-zqx-canary.json"), JSON.stringify({ jobId: "gh-zqx-canary", kind: "github", target: "acme/web#1", flow: "fix", outcome: "completed", startedAt: "2026-10-20T10:00:00Z", endedAt: "2026-10-20T10:05:00Z", bundle: { id: "shop", variables: [NAME, SHADOW], shadowed: [SHADOW], placeholders: 1, plain: 1 } }));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ model: "m", secretProfiles: { prod: PATH_CANARY }, secretBundles: { "op-shop": { path: PATH_CANARY, format: "json" } } }));
+  writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [], secretBundles: { shop: { profile: "op-shop", ref: "zqx-ref-canary", project: "shop" } } }));
+  Object.assign(process.env, { PI_SETTINGS_FILE: join(dir, "settings.json"), VALKEY_URL: "not-a-url", PI_TRIGGERS_FILE: join(dir, "triggers.json") }); // degrade synchronously, never a timeout burn
+  try {
+    const { ctx } = toolCtx({ hasUI: false });
+    const seen = [];
+    for (const tool of registeredTools()) {
+      for (const params of tool.name === "dispatch_runs" ? [{}, { jobId: "gh-zqx-canary" }] : [{}]) {
+        let out;
+        let timer;
+        try {
+          out = JSON.stringify(await Promise.race([tool.execute("id", params, undefined, undefined, ctx), new Promise((r) => (timer = setTimeout(() => r("timeout"), 15000)))]));
+        } catch (e) {
+          out = String(e?.message ?? e);
+        } finally {
+          clearTimeout(timer);
+        }
+        assert.notEqual(out, JSON.stringify("timeout"), `${tool.name} did not answer, so its result was never checked`);
+        seen.push(tool.name);
+        for (const canary of [NAME, SHADOW, PATH_CANARY, "zqx-ref-canary"]) assert.ok(!out.includes(canary), `${tool.name} ${JSON.stringify(params)} returned ${canary}`);
+      }
+    }
+    assert.ok(seen.includes("dispatch_runs") && seen.includes("dispatch_status") && seen.includes("dispatch_triggers"));
+    // What the model does get: the counts.
+    const one = textOf(await toolByName("dispatch_runs").execute("id", { jobId: "gh-zqx-canary" }, undefined, undefined, ctx));
+    assert.deepEqual(one.bundle, { id: "shop", received: 2, shadowed: 1, placeholders: 1, plain: 1 });
+    const status = textOf(await toolByName("dispatch_status").execute("id", {}, undefined, undefined, ctx));
+    assert.deepEqual(status.settings.overlay, { model: "m" }, "dispatch_status leaves the operator-only keys out");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
+
 test("declining the confirm writes nothing at all", async () => {
   const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
   let wrote = false;

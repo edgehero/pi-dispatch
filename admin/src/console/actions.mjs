@@ -537,6 +537,18 @@ function profilesOf(ctx) {
   return { ...(view?.overlay?.secretProfiles ?? {}) };
 }
 
+/** The settings overlay's bundle resolvers now (issue #704; names to `{ path, format }`, never a reference or a value). */
+function bundleProfilesOf(ctx) {
+  return ctx.a.rm.overlayBundleProfiles(ctx.a.rm.readSettingsView({ settingsFile: ctx.a.paths.settingsFile, fs: ctx.fs }));
+}
+
+/** The triggers-file bundle ids that name bundle profile `name`, for the removal's confirm; null when unreadable. */
+function bundlesNaming(ctx, name) {
+  const t = typeof ctx.a.paths.triggersPath === "string" ? ctx.a.rm.readTriggers({ triggersPath: ctx.a.paths.triggersPath, fs: ctx.fs }) : { missing: true };
+  if (t?.invalid) return null;
+  return Array.isArray(t?.secretBundles) ? t.secretBundles.filter((b) => b.profile === name).map((b) => b.id) : [];
+}
+
 /**
  * The whole pause-windows list, #640's reference write, kept as an action: `POST /api/pause-windows/preview|confirm`
  * stay its aliases (DES-OPERATOR-CONSOLE). It validates through the loader's own parser and serializes exactly as
@@ -675,6 +687,25 @@ const configActions = [
     name: "secret-profile-remove",
     kind: "secret-profile-remove",
     build: (body, ctx) => ctx.a.plans.planSecretProfileRemove({ name: str(body, "name", { required: true, max: 64 }), profiles: profilesOf(ctx), settingsFile: ctx.a.paths.settingsFile }),
+    target: (ctx) => ctx.a.paths.settingsFile,
+    write: writeSettingsOf,
+  }),
+  // Issue #704: the bundle resolvers, the profiles' twin one step wider (a script printing a project's whole
+  // environment), written to the overlay's `secretBundles` by an operator through this form, never by a tool.
+  fileAction({
+    name: "secret-bundle-add",
+    kind: "secret-bundle-add",
+    build: (body, ctx) => ctx.a.plans.planSecretBundleAdd({ name: str(body, "name", { required: true, max: 64 }), path: str(body, "path", { required: true, max: 4096 }), format: str(body, "format", { required: true, max: 16 }), bundles: bundleProfilesOf(ctx), envBundles: ctx.a.rm.envBundleProfiles(ctx.a.env?.PI_SECRET_BUNDLES).profiles, settingsFile: ctx.a.paths.settingsFile }),
+    target: (ctx) => ctx.a.paths.settingsFile,
+    write: writeSettingsOf,
+  }),
+  fileAction({
+    name: "secret-bundle-remove",
+    kind: "secret-bundle-remove",
+    build: (body, ctx) => {
+      const name = str(body, "name", { required: true, max: 64 });
+      return ctx.a.plans.planSecretBundleRemove({ name, bundles: bundleProfilesOf(ctx), bound: bundlesNaming(ctx, name), envBundles: ctx.a.rm.envBundleProfiles(ctx.a.env?.PI_SECRET_BUNDLES).profiles, settingsFile: ctx.a.paths.settingsFile });
+    },
     target: (ctx) => ctx.a.paths.settingsFile,
     write: writeSettingsOf,
   }),

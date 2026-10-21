@@ -247,6 +247,8 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "setting-unset": "setting-unset",
     "secret-profile-add": "secret-profile-add",
     "secret-profile-remove": "secret-profile-remove",
+    "secret-bundle-add": "secret-bundle-add",
+    "secret-bundle-remove": "secret-bundle-remove",
     "pause-window-add": "pause-window-add",
     "pause-window-edit": "pause-window-edit",
     "pause-window-delete": "pause-window-delete",
@@ -321,6 +323,7 @@ const FILE_CASES = [
   ["setting-set", { key: "maxTurns", value: "40" }, "settingsFile", (j) => j.maxTurns === 40],
   ["setting-unset", { key: "maxTurns" }, "settingsFile", (j) => !("maxTurns" in j)],
   ["secret-profile-add", { name: "prod", path: "/opt/resolve-prod" }, "settingsFile", (j) => j.secretProfiles.prod === "/opt/resolve-prod"],
+  ["secret-bundle-add", { name: "op-shop", path: "/opt/bundle-shop", format: "json" }, "settingsFile", (j) => j.secretBundles["op-shop"].path === "/opt/bundle-shop" && j.secretBundles["op-shop"].format === "json"],
   ["pause-window-add", { scope: "acme/web", from: "22:00", to: "23:00", days: ["sat"] }, "pauseWindowsPath", (j) => j.windows.length === 2 && j.windows[1].days[0] === "sat"],
   ["pause-window-edit", { index: 0, to: "03:00" }, "pauseWindowsPath", (j) => j.windows[0].to === "03:00" && j.windows[0].from === "01:00"],
   ["pause-window-delete", { index: 0 }, "pauseWindowsPath", (j) => j.windows.length === 0],
@@ -367,6 +370,39 @@ test("secret-profile-remove and the whole-list pause-windows write go through th
   const whole = await c.both("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }] });
   assert.equal(whole.confirm.status, 200);
   assert.equal(lastWrite(c).kind, "pause-windows-set");
+});
+
+// Issue #704: the bundle resolvers through the console's form, the profiles' twin, and a bundled project's members.
+test("secret-bundle-remove goes through the pipeline and names the bundles it strands; a name PI_SECRET_BUNDLES holds is refused at the preview (#704)", async () => {
+  const { paths } = deployment();
+  writeFileSync(paths.settingsFile, `${JSON.stringify({ secretBundles: { "op-shop": { path: "/opt/b", format: "dotenv" }, other: { path: "/opt/o", format: "json" } } }, null, 2)}\n`);
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [], secretBundles: { shop: { profile: "op-shop", ref: "env-ref-canary", project: "web" } } }, null, 2)}\n`);
+  const c = await start({ paths });
+  const p = await c.act("secret-bundle-remove", { name: "op-shop" });
+  assert.equal(p.status, 200, p.text);
+  assert.ok(p.json().summary.join("\n").includes("The jobs of bundle shop are refused PRE-SPEND after this (secret-bundle-profile-unknown), or on a multi-host worker's shared queue held"), p.text);
+  assert.ok(!p.text.includes("env-ref-canary"), "a bundle's reference never reaches the preview");
+  const res = await c.confirm("secret-bundle-remove", p.json().ticket);
+  assert.equal(res.status, 200, res.text);
+  assert.deepEqual(JSON.parse(read(paths.settingsFile)).secretBundles, { other: { path: "/opt/o", format: "json" } });
+  assert.equal(lastWrite(c).kind, "secret-bundle-remove");
+  const held = await start({ paths, a: { env: { PI_SECRET_BUNDLES: "op-shop:/opt/env-b:json" } } });
+  const refused = await held.act("secret-bundle-add", { name: "op-shop", path: "/opt/b", format: "json" });
+  assert.equal(refused.status, 400);
+  assert.match(refused.json().error, /^PI_SECRET_BUNDLES already declares op-shop on this deployment/);
+  assert.equal((await held.act("secret-bundle-add", { name: "x", path: "/opt/b", format: "yaml" })).json().error, "the format is dotenv or json: what the resolver prints, declared, because the worker never guesses it from the output");
+});
+
+test("project-edit on a project a secret bundle names is refused at the preview with the planner's sentence, nothing written (#704)", async () => {
+  const { paths } = deployment();
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [], secretBundles: { shop: { profile: "op-shop", ref: "r", project: "web" } } }, null, 2)}\n`);
+  const before = read(paths.projectsFile);
+  const c = await start({ paths });
+  const got = await c.act("project-edit", { id: "web", members: "github:acme/web\ngithub:acme/api" });
+  assert.equal(got.status, 400, got.text);
+  assert.equal(got.json().error, WP.planProjectEdit({ params: { id: "web", members: ["github:acme/web", "github:acme/api"] }, paths, env: {} }).refusal);
+  assert.match(got.json().error, /secretBundles "shop" \(project web\) in .* names this project.*change the bundle in triggers\.json first\. Nothing was written/);
+  assert.equal(read(paths.projectsFile), before);
 });
 
 test("a refusal is the tool's own sentence, before any ticket: a tool-proof trigger field, an unknown key, a bad index", async () => {

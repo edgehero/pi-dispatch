@@ -494,6 +494,45 @@ in the panel would prove nothing on a shared host.
 **Binding a secret to a trigger stays a file edit.** The panel declares managers; `triggers.json` says which
 job reaches one. No `dispatch_*` tool has a `secrets` parameter.
 
+**Bundle resolvers** ([Recipe D](#recipe-d-one-environment-for-a-whole-project)) take the same door with
+`--bundle`. `/dispatch secrets add --bundle` asks three questions (a name, the path to the script, and the format it
+prints, `dotenv` or `json`) and shows you the exact bytes it writes to the overlay's `secretBundles`
+(`{ "<name>": { "path": "...", "format": "..." } }`). It refuses a name `PI_SECRET_BUNDLES` already declares on this
+deployment: the worker reads a name declared in both places as ambiguous and then refuses every bundled job.
+`/dispatch secrets remove --bundle <name>` says what the removal does: nothing when no bundle in `triggers.json` names
+it; it resolves the ambiguity when `PI_SECRET_BUNDLES` declares the same name (unless another name is in both places, which keeps every bundled job refused, and it says so); otherwise it names the bundles whose
+jobs are refused before they spend once it is gone (or, on a multi-host worker's shared queue, held for a host that
+declares it). Any flag but `--bundle` (`--bundles`, `-b`) is refused with the usage line. The console's configuration screen has the same two forms. As
+for profiles, there is no model-callable tool for either, and `dispatch_set` refuses the key.
+
+**What the panel and the console show.** Nothing is resolved to draw any of it (`pi-dispatch doctor --secrets` does
+that, on the host that runs the jobs), and no reference or value is ever shown:
+
+- `/dispatch secrets list` prints the resolver profiles, the bundle resolvers, and each bundle `triggers.json` binds:
+  its project (and whether `projects.json` has it), its profile and whether this deployment declares it (in
+  `PI_SECRET_BUNDLES`, in the overlay, in both, which is ambiguous, or not at all). An overlay resolver whose path is
+  outside `PI_SECRET_RESOLVER_ROOTS` is shown as one the worker will not run; one inside is shown with
+  "doctor --secrets checks it runs", because only the worker's host can follow the real path. When the panel cannot
+  see `PI_SECRET_RESOLVER_ROOTS` (it reads it from the deployment's `.env`), it says the roots are not visible rather
+  than calling the resolver outside them. When the panel
+  cannot see `PI_SECRET_BUNDLES` at all (no deployment pointer, or no such line), it says so rather than "missing".
+  Then whether fork reviews get it, its `endpoints` (names and hosts) and the triggers that opt out (a cron trigger
+  counts only when its folder is in the bundle's project). `/dispatch triggers` adds the same lines under the
+  triggers.
+- The `/dispatch` panel has a **secret bundles** section under the triggers with the same facts and the variable
+  names the newest run in view received. A cron trigger whose folder is in a bundled project carries `[bundle <id>]`
+  beside `[secrets]`, and a trigger that opts out carries `[no bundle]`; its detail says which bundle its jobs hold.
+- The console's configuration screen has a **Secret bundles** panel with the same facts, and its trigger table
+  names the bundle (or the opt-out) in the notes.
+- A run's detail, in the panel and on the console's run page, says "Variables received: A, B, C (from bundle
+  shop)", the names the trigger's own `run.secrets` shadowed, and on an OpenShell venue how many were placeholders
+  and how many values; or, for a run that went without its project's bundle, why, in a sentence.
+- A project edit the project tools refuse because a bundle names the project shows that sentence in the console's
+  project form and in the tool's answer in the panel.
+- **No model-callable tool sees a variable name.** `dispatch_runs` returns a record's `bundle` as counts
+  (`{ id, received, shadowed, placeholders, plain }`), and `dispatch_status` leaves out `secretProfiles` and
+  `secretBundles`. The names stay in your own views above.
+
 ## Recipe D: one environment for a whole project
 
 Recipe C grants one field to one trigger, and that is the point of it. When a project simply has an
@@ -511,7 +550,7 @@ grants the project's environment **once**:
 
 `project` is an id from `projects.json` ([projects](projects.md)). Every job whose project is `shop` gets the
 bundle, whichever trigger made it: a new trigger or a new repository in the project needs no secrets edit. You
-declare the bundle resolver once, with the **format** it prints:
+declare the bundle resolver once, with the **format** it prints (or from the panel, [above](#from-the-panel)):
 
 ```sh
 # /etc/pi-dispatch/pi-dispatch.env

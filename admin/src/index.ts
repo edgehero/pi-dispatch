@@ -67,6 +67,10 @@ import {
   readLogTail,
   readSettingsView,
   readTriggers,
+  renderSecretBundles,
+  secretBundlesView,
+  modelRunRecord,
+  withoutOperatorOnly,
   readPauseWindows,
   readScopedLimits,
   readScopedBudget,
@@ -486,7 +490,9 @@ function registerTools(pi: ExtensionAPI): void {
         readBudget({ url: paths.valkeyUrl }),
         readSchedulers({ url: paths.valkeyUrl }),
       ]);
-      const settings = readSettingsView({ settingsFile: paths.settingsFile });
+      // The operator-only overlay keys (`secretProfiles`, `secretBundles`: resolver paths the worker executes) are left
+      // out of what the model reads (issue #704 review): no tool can set them, and none needs to see them.
+      const settings = withoutOperatorOnly(readSettingsView({ settingsFile: paths.settingsFile }));
       return toolText(JSON.stringify({ queue, budget, settings, schedulers }));
     },
   });
@@ -502,15 +508,17 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params) {
       const paths = resolvePaths(deploymentEnv());
-      if (params.jobId) return toolText(JSON.stringify(readRun({ logsDir: paths.logsDir, jobId: params.jobId })));
+      // A record's `bundle` reaches the model as counts only (`modelRunRecord`, issue #704): its variable names are the
+      // operator's manager's contents and stay in the operator's own views.
+      if (params.jobId) return toolText(JSON.stringify(modelRunRecord(readRun({ logsDir: paths.logsDir, jobId: params.jobId }))));
       // `{runs, hosts, mirror}` rather than a bare array (issue #57, Gap 3). The one deliberate tool-shape
       // change here, and this surface's own doctrine is the justification: typed dollars carry their
       // `class` so a model consuming them cannot launder an estimate into a fact by dropping the label, and
       // a bare array holding some unstated fraction of a fleet's runs is exactly that laundering. `mirror`
       // says whether the list is the whole deployment ("ok"), this host alone ("off"), capped
       // ("truncated"), or unknown ("unreachable ...").
-      const merged = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl });
-      return toolText(JSON.stringify(merged));
+      const merged: any = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl });
+      return toolText(JSON.stringify(Array.isArray(merged?.runs) ? { ...merged, runs: merged.runs.map(modelRunRecord) } : merged));
     },
   });
 
@@ -1739,7 +1747,11 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
     case "triggers": {
       const schedulers = await readSchedulers({ url: paths.valkeyUrl });
       const triggers = readTriggers({ triggersPath: paths.triggersPath });
-      send(pi, renderTriggers({ schedulers, triggers }));
+      // The project secret bundles (issue #704) under the triggers, on this MODEL-VISIBLE channel without the last
+      // run's variable names (`names: false`): ids, projects and profile names are the reviewed file's, the names a
+      // manager holds are not for model context. "" when the file binds none, so the output is as before.
+      const bundles = renderSecretBundles(secretBundlesView({ triggers, settings: readSettingsView({ settingsFile: paths.settingsFile }), env: deploymentEnv(), projects: readProjects({ projectsPath: paths.projectsFile }) }), { names: false });
+      send(pi, `${renderTriggers({ schedulers, triggers })}${bundles !== "" ? `\n\n${bundles}` : ""}`);
       return;
     }
     case "settings": {
@@ -1854,7 +1866,9 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       // anywhere (its default was the OS temp directory until issue #290). A panel-side check alone would
       // be cosmetic.
       const { runSecretsCommand } = await import("./secrets-command.ts");
-      await runSecretsCommand(paths, ctx, notify, tokens.slice(1), { logsDir: paths.logsDir });
+      // The deployment's env (issue #704): `list` says whether PI_SECRET_BUNDLES declares a bundle's profile, and `add
+      // --bundle` refuses a name it already holds (the worker reads a name in both places as ambiguous).
+      await runSecretsCommand(paths, ctx, notify, tokens.slice(1), { logsDir: paths.logsDir, env: deploymentEnv() });
       return;
     }
     case "setup": {

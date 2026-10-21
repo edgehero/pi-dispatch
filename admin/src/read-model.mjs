@@ -20,10 +20,10 @@ import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
-import { logsDirPath, defaultSandboxDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
-import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
+import { logsDirPath, defaultSandboxDir, delimitedList, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { RECOVER_SKIPPED_REASONS, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { BUNDLE_SKIPPED_REASONS, RECOVER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedRecovered, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -33,7 +33,8 @@ import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, parseScopedLimits, scopeDollarKeyPrefix, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 // The projects parser, for the same anti-drift reason: a `project:<id>` row is written only when the id is a project the
 // worker would load (issue #499 part B).
-import { parseProjects } from "@edgehero/pi-dispatch/projects";
+import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
+import { BUNDLE_FORMATS, parseSecretBundleProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
@@ -183,11 +184,15 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The console's address (the insights move to the console): `/dispatch insights` and the `i` key print the spend
 // screen's URL from the PI_CONSOLE_LISTEN the console itself reads from this `.env` (`console/link.mjs`).
 // The session store (issue #647, part 2): `/dispatch chat` forks a finished run from the PI_SESSIONS_DIR the worker
 // writes, which in a pointer deployment is set in this `.env`, so it is a path key below too.
+// The bundle resolvers (issue #704, PI_SECRET_BUNDLES, and PI_SECRET_RESOLVER_ROOTS, which bounds the overlay's): the
+// bundles view says whether this deployment declares the profile a bundle names and whether an overlay one sits inside
+// the roots, and in a pointer deployment those are the `.env`'s lines. DISPLAY ONLY, which is why it may come from the
+// file where the capability keys (OQ-038) may not: the panel never runs a resolver, it only says one is declared.
 // The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
 // in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
@@ -2502,6 +2507,17 @@ export function readLogTail({ logsDir, jobId, lines = 200, fs = nodeFs, host = n
   return { lines: all.slice(Math.max(0, all.length - cap)) };
 }
 
+/**
+ * A settings view (`readSettingsView`) without the operator-only overlay keys (`OPERATOR_ONLY_KEYS`: `secretProfiles`,
+ * `secretBundles`), for what a MODEL-CALLABLE tool returns (issue #704 review). They map names to resolver paths the
+ * worker executes; no tool can set them, and a model needs none of them to reason about a setting.
+ */
+export function withoutOperatorOnly(view) {
+  if (!view?.overlay || typeof view.overlay !== "object") return view;
+  const overlay = Object.fromEntries(Object.entries(view.overlay).filter(([k]) => !OPERATOR_ONLY_KEYS.includes(k)));
+  return { ...view, overlay };
+}
+
 /** Read the settings overlay via the worker's own validator. Returns `{ path, overlay }` or `{ path, invalid }`. */
 export function readSettingsView({ settingsFile, fs = nodeFs }) {
   const result = readOverlay(settingsFile, { fs });
@@ -2549,7 +2565,42 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
   // `count` is the RAW entries length, for the same reason `index` is raw: the attribution range
   // guard must accept an index that points at an unusable-but-present row (triggers.length would
   // reject it and miscount the run as stale).
-  return { triggers, count: entries.length };
+  // The project secret bundles (issue #704), read as leniently as the entries: a key only when the file has the block,
+  // so every other read is key-identical to before. Never a bundle's `ref` (`normalizeSecretBundlesForDisplay`).
+  const bundles = normalizeSecretBundlesForDisplay(parsed?.secretBundles);
+  return { triggers, count: entries.length, ...(bundles !== null && { secretBundles: bundles }) };
+}
+
+/** The most bundles, and the most endpoint names per bundle, the display keeps: the worker's own caps are smaller. */
+const BUNDLES_SHOWN_MAX = 256;
+const BUNDLE_ENDPOINTS_SHOWN_MAX = 64;
+
+/**
+ * The triggers file's top-level `secretBundles` for DISPLAY (issue #704): `[{ id, project, profile, forkReviews,
+ * endpoints: [{ name, host }] }]` sorted by id, or null when the file has no such object. LENIENT like
+ * `normalizeTriggerForDisplay`, never the worker's strict `validateSecretBundles`: a viewer shows what it can, and a
+ * malformed block is the loaders' to refuse (doctor names why). A field of the wrong type reads as null, an entry that
+ * is not an object is skipped. NEVER the `ref`: a bundle's reference is the address of the operator's environment in
+ * their manager, the class `run.secrets`' references are kept out of every display for, and a field this function does
+ * not copy cannot reach the model-callable `dispatch_triggers` read or a panel. The endpoint names and hosts are
+ * operator text from the reviewed file, shown so the operator sees which variables a venue holds as placeholders.
+ * Every string here is the file's own, unescaped: each surface escapes it where it renders, as for every trigger field.
+ */
+export function normalizeSecretBundlesForDisplay(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const str = (v) => (typeof v === "string" && v !== "" ? v : null);
+  const out = [];
+  for (const id of Object.keys(value).slice(0, BUNDLES_SHOWN_MAX)) {
+    const b = value[id];
+    if (b === null || typeof b !== "object" || Array.isArray(b)) continue;
+    const ends = b.endpoints !== null && typeof b.endpoints === "object" && !Array.isArray(b.endpoints) ? b.endpoints : {};
+    const endpoints = Object.keys(ends)
+      .slice(0, BUNDLE_ENDPOINTS_SHOWN_MAX)
+      .map((name) => ({ name, host: str(ends[name]?.host) }))
+      .sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+    out.push({ id, project: str(b.project), profile: str(b.profile), forkReviews: b.forkReviews === true, endpoints });
+  }
+  return out.sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
 }
 
 /**
@@ -2682,6 +2733,10 @@ export function normalizeTriggerForDisplay(entry) {
     // The overlay MCP servers the jobs connect (REQ-MCP-OPERATOR-SERVERS), by name: the operator's own words, never a
     // server's definition or a credential. Shown for `secrets`' reason: what a job can reach is set only in this file.
     ...(Array.isArray(run.mcp) && run.mcp.length > 0 && run.mcp.every((name) => typeof name === "string") && { mcp: [...run.mcp] }),
+    // The project secret bundle opt-out (issue #704, `run.secretBundle: false`): this trigger's jobs run WITHOUT their
+    // project's bundle, so the row and the drill-in say so beside the secrets they do bind. Spread only when false, so
+    // every other trigger keeps exactly its keys; `true` is the default and says nothing.
+    ...(run.secretBundle === false && { secretBundle: false }),
   };
   switch (on.type) {
     case "cron":
@@ -3816,6 +3871,7 @@ export function createFleetReader(
       // The dollar windows (issue #501, part 7): null when no dollar window is set, so a deployment without one renders
       // exactly the panel it always did. Caught as a unit, like `held`.
       const settings = readSettingsView({ settingsFile: paths.settingsFile });
+      const projectsView = readProjects({ projectsPath: paths.projectsFile });
       const dollars = await dollarWindows(settings?.overlay, limitRows).catch((err) => ({ rows: [], unreachable: err?.message ?? String(err) }));
 
       // Issue #641: the parked runs and the day's failures, off the wide window (cached, so at most one read of it per
@@ -3895,7 +3951,10 @@ export function createFleetReader(
         triggerInstructions,
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
         // The projects as the WORKER reads them (issue #499 part C): `{ unset }` when PI_PROJECTS_FILE is unset.
-        projects: readProjects({ projectsPath: paths.projectsFile }),
+        projects: projectsView,
+        // The project secret bundles (issue #704): null when the triggers file binds none. Names, profiles and the
+        // newest run's received variable names; never a reference or a value, and never resolved here.
+        secretBundles: secretBundlesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs }),
         // Issue #504 part C: whether the deployment names an allocation envelope, for the `b split` hint alone.
         envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
         // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers' trust model.
@@ -4710,6 +4769,249 @@ export function secretProfileNames(settingsView) {
   if (profiles === null || typeof profiles !== "object" || Array.isArray(profiles)) return [];
   // The worker's profile-name charset (secret-profiles.mjs): a key outside it is not a profile the worker loads.
   return Object.keys(profiles).filter((n) => /^[A-Za-z0-9._-]{1,64}$/.test(n)).sort();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Project secret bundles (issue #704, DES-PROJECT-SECRET-BUNDLES): the bundles view and a run's bundle facts, for the
+// console, the `/dispatch` panel and `/dispatch secrets`. DISPLAY ONLY: nothing here resolves a bundle (doctor
+// --secrets does, on the host that runs the jobs), and nothing here carries a value or a reference.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The output formats a bundle resolver declares: the worker's own list, imported, never a copy. */
+export { BUNDLE_FORMATS };
+
+/** A bundle profile name's shape, the worker's (secret-profiles.mjs `PROFILE_NAME`). */
+const BUNDLE_PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * `PI_SECRET_BUNDLES` as this deployment's `.env` (or pi's environment) sets it, read for display:
+ * `{ profiles: { name: { path, format } }, malformed }`. The worker's own parser (`parseSecretBundleProfiles`, imported),
+ * which refuses to BOOT on a malformed value (a relative path, a missing format, a name twice), so `malformed` is said
+ * rather than any half of it being shown as declared.
+ */
+export function envBundleProfiles(raw) {
+  try {
+    return { profiles: { ...parseSecretBundleProfiles(raw) }, malformed: false };
+  } catch {
+    return { profiles: {}, malformed: true };
+  }
+}
+
+/** The settings overlay's bundle profiles (`readSettingsView`), `{ name: { path, format } }`; `{}` when none or unreadable. */
+export function overlayBundleProfiles(settingsView) {
+  const v = settingsView?.overlay?.secretBundles;
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return {};
+  const out = {};
+  for (const name of Object.keys(v)) {
+    const e = v[name];
+    if (!BUNDLE_PROFILE_NAME.test(name) || e === null || typeof e !== "object" || typeof e.path !== "string") continue;
+    Object.defineProperty(out, name, { value: { path: e.path, format: BUNDLE_FORMATS.includes(e.format) ? e.format : null }, enumerable: true, writable: true, configurable: true });
+  }
+  return out;
+}
+
+/** The overlay's bundle profiles as a human reads them on their own host: names, formats and paths. */
+export function renderBundleProfiles(bundles) {
+  const names = Object.keys(bundles ?? {}).sort();
+  if (names.length === 0) return "No bundle resolvers are declared in the settings overlay.";
+  // The path through `scrubControls`: the overlay's validator holds it to a non-empty string, not to a charset.
+  return ["Bundle resolvers (settings overlay):", ...names.map((n) => scrubControls(`  ${n} -> ${bundles[n].path} (${bundles[n].format ?? "no format"})`))].join("\n");
+}
+
+/**
+ * The bundles view (issue #704): one row per bundle the triggers file binds, or null when it binds none (so every
+ * surface renders exactly what it did before the feature). Each row:
+ *   - `id`, `project`, `profile`, `forkReviews`, `endpoints` (`normalizeSecretBundlesForDisplay`, never the `ref`);
+ *   - `declared`: whether THIS deployment declares the profile, as the worker's lookup reads the two sources
+ *     (`mergeSecretProfiles`): `env` (PI_SECRET_BUNDLES), `overlay` (the settings file's `secretBundles`), `ambiguous`
+ *     (a name in both, which the worker refuses for EVERY bundle), `overlay-outside-roots` (an overlay path outside
+ *     PI_SECRET_RESOLVER_ROOTS, lexically, said only when the panel can see the roots: `rootsSeen`), `env-malformed` (PI_SECRET_BUNDLES does not parse: the worker does not boot),
+ *     `missing` (PI_SECRET_BUNDLES is visible and does not name it) or `unseen` (the panel cannot see PI_SECRET_BUNDLES); and `format`, the declared one or null. Another host may declare it
+ *     differently: doctor judges each host, this reads the deployment this panel points at;
+ *   - `projectKnown`: whether projects.json has the project (null when it cannot be read);
+ *   - `optedOut`: the raw indices of the triggers whose jobs in this project run without it (`run.secretBundle:
+ *     false`): a cron trigger whose folder is in the project, and every webhook trigger, which may fire on any repo;
+ *   - `last`: the newest run in `runs` that recorded this bundle, `{ jobId, variables }` (names, rebuilt by the
+ *     worker's `recordedBundle`), or null. Never resolved here: the names are what a run already held.
+ * `byIndex` maps a trigger's raw index to `{ id, optedOut }`: the bundle a cron trigger's jobs hold (id null for a
+ * trigger outside every bundled project or a webhook trigger, which belongs to no project until a repo does).
+ */
+export function secretBundlesView({ triggers, settings = null, env = {}, projects = null, runs = [] } = {}) {
+  const list = Array.isArray(triggers?.secretBundles) ? triggers.secretBundles : [];
+  if (list.length === 0) return null;
+  const fromEnv = envBundleProfiles(env?.PI_SECRET_BUNDLES);
+  const fromOverlay = overlayBundleProfiles(settings);
+  const ambiguous = Object.keys(fromOverlay).some((n) => Object.hasOwn(fromEnv.profiles, n));
+  const roots = delimitedList(env?.PI_SECRET_RESOLVER_ROOTS);
+  // Whether the panel sees PI_SECRET_RESOLVER_ROOTS at all (final review): unset in what it reads is not proof the
+  // worker's host has no roots, so "outside the roots" is claimed only against roots the panel can see.
+  const rootsSeen = typeof env?.PI_SECRET_RESOLVER_ROOTS === "string";
+  // Whether the panel sees the worker's PI_SECRET_BUNDLES at all: unset in what it reads (no pointer, or a `.env`
+  // without the line) is not proof the worker's host declares none, so "missing" is said only when it is visible.
+  const envSeen = typeof env?.PI_SECRET_BUNDLES === "string";
+  const projectList = Array.isArray(projects?.projects) ? projects.projects : null;
+  const entries = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
+  const byProject = new Map(list.filter((b) => b.project !== null).map((b) => [b.project, b.id]));
+  const byIndex = {};
+  for (const t of entries) {
+    if (!Number.isInteger(t?.index)) continue;
+    const project = t.type === "cron" && typeof t.folder === "string" && projectList !== null ? projectOf({ kind: "local", folder: t.folder }, projectList) : null;
+    const id = project !== null ? (byProject.get(project) ?? null) : null;
+    // An opt-out is said only where it decides something (review L5): a cron trigger in a bundled project, or a webhook
+    // trigger, whose jobs may land in any bundled project; a cron trigger outside every bundled project opts out of nothing.
+    byIndex[t.index] = { id, optedOut: t.secretBundle === false && (t.type !== "cron" || id !== null), cron: t.type === "cron" };
+  }
+  const recorded = (Array.isArray(runs) ? runs : [])
+    .map((r) => ({ r, b: r && typeof r === "object" ? recordedBundle(r.bundle) : null }))
+    .filter((x) => x.b !== null)
+    .sort((x, y) => runAt(y.r) - runAt(x.r));
+  const bundles = list.map((b) => {
+    const inEnv = b.profile !== null && Object.hasOwn(fromEnv.profiles, b.profile);
+    const inOverlay = b.profile !== null && Object.hasOwn(fromOverlay, b.profile);
+    // An overlay resolver the worker would not use: its path outside PI_SECRET_RESOLVER_ROOTS (unset is empty, fail
+    // closed). LEXICAL, the worker's own `withinRoots` on the declared path: the worker checks the REALPATH, which only
+    // the host that runs the jobs can resolve, so a lexical yes is not a yes (doctor --secrets is the check that it
+    // runs) and a lexical no is a no.
+    const outside = inOverlay && rootsSeen && !withinRoots(fromOverlay[b.profile].path, roots);
+    const declared = fromEnv.malformed ? "env-malformed" : ambiguous ? "ambiguous" : inEnv ? "env" : outside ? "overlay-outside-roots" : inOverlay ? "overlay" : envSeen ? "missing" : "unseen";
+    const format = declared === "env" ? fromEnv.profiles[b.profile].format : inOverlay && (declared === "overlay" || declared === "overlay-outside-roots") ? fromOverlay[b.profile].format : null;
+    const optedOut = entries.filter((t) => t?.secretBundle === false && Number.isInteger(t.index) && (t.type !== "cron" || byIndex[t.index]?.id === b.id)).map((t) => t.index);
+    const hit = recorded.find((x) => x.b.id === b.id);
+    return {
+      ...b,
+      declared,
+      format,
+      rootsSeen,
+      projectKnown: projectList === null || b.project === null ? null : projectList.some((p) => p.id === b.project),
+      optedOut,
+      last: hit ? { jobId: typeof hit.r.jobId === "string" ? hit.r.jobId : null, variables: hit.b.variables } : null,
+    };
+  });
+  return { bundles, byIndex };
+}
+
+/** A bundle row's `declared` in words, the same on every surface. */
+export function bundleDeclaredText(row) {
+  switch (row?.declared) {
+    case "env":
+      return `declared in PI_SECRET_BUNDLES${row.format ? `, ${row.format}` : ""}; doctor --secrets checks it runs`;
+    case "overlay":
+      return row.rootsSeen === false
+        ? `declared in the settings overlay${row.format ? `, ${row.format}` : ""}; PI_SECRET_RESOLVER_ROOTS is not visible to the panel; doctor --secrets checks it runs`
+        : `declared in the settings overlay${row.format ? `, ${row.format}` : ""}, inside PI_SECRET_RESOLVER_ROOTS as written; doctor --secrets checks it runs`;
+    case "overlay-outside-roots":
+      return "declared in the settings overlay but outside PI_SECRET_RESOLVER_ROOTS, so the worker will not run it and this project's jobs are refused before they spend";
+    case "ambiguous":
+      return "declared in BOTH PI_SECRET_BUNDLES and the overlay: the worker refuses every bundled job until one goes";
+    case "env-malformed":
+      return "PI_SECRET_BUNDLES does not parse: the worker does not start";
+    case "unseen":
+      return "not in the overlay, and PI_SECRET_BUNDLES is not visible to the panel; doctor --secrets on the worker's host says whether it is declared";
+    default:
+      return "not declared in the overlay or PI_SECRET_BUNDLES: this project's jobs are refused before they spend";
+  }
+}
+
+/** A bundle row's endpoints in words: "STRIPE_KEY at api.stripe.com, ...", or "" when it declares none. */
+export function bundleEndpointsText(row) {
+  const list = Array.isArray(row?.endpoints) ? row.endpoints : [];
+  return list.map((e) => `${e.name}${e.host ? ` at ${e.host}` : ""}`).join(", ");
+}
+
+/**
+ * One bundle row's facts as short phrases, the same words on every surface: the project (and whether projects.json has
+ * it), the profile and where it is declared, fork reviews, the endpoints and the opted-out triggers.
+ */
+export function bundleFacts(row) {
+  const ends = Array.isArray(row?.endpoints) ? row.endpoints : [];
+  return [
+    `project ${row?.project ?? "-"}${row?.projectKnown === false ? " (not in projects.json)" : ""}`,
+    `profile ${row?.profile ?? "-"} (${bundleDeclaredText(row)})`,
+    row?.forkReviews ? "fork reviews get it" : "fork reviews do not",
+    ends.length === 0 ? "no endpoints" : `${plural(ends.length, "endpoint", "endpoints")}: ${bundleEndpointsText(row)}`,
+    Array.isArray(row?.optedOut) && row.optedOut.length > 0 ? `${plural(row.optedOut.length, "trigger opts", "triggers opt")} out: ${row.optedOut.map((i) => `#${i}`).join(", ")}` : "no trigger opts out",
+  ];
+}
+
+/**
+ * The bundles view as plain text (`/dispatch secrets list`, `/dispatch triggers`, the panel's narrow path), or "" when
+ * the triggers file binds none. Every string through `scrubControls`: the lenient reader admits any string, and two
+ * of these surfaces are plain text with no other gate in front of the terminal. `names: false` leaves out the last
+ * run's variable names, for the model-visible `/dispatch triggers` channel: they are the manager's contents, which no
+ * model context needs to hold.
+ */
+export function renderSecretBundles(view, { names = true } = {}) {
+  const rows = Array.isArray(view?.bundles) ? view.bundles : [];
+  if (rows.length === 0) return "";
+  const out = ["Secret bundles (triggers.json; names only, never a reference or a value):"];
+  for (const row of rows) {
+    out.push(scrubControls(`  ${row.id}: ${bundleFacts(row).join("; ")}`));
+    if (names) out.push(scrubControls(row.last ? `    last run ${row.last.jobId ?? "-"} received: ${row.last.variables.length > 0 ? row.last.variables.join(", ") : "none"}` : "    no run in view recorded it yet"));
+  }
+  return out.join("\n");
+}
+
+/**
+ * The bundle a trigger's row and drill-in name (issue #704): `{ id, optedOut }` from `secretBundlesView`'s `byIndex`,
+ * or null when the deployment binds no bundle or the trigger neither belongs to a bundled project nor opts out.
+ */
+export function triggerBundleOf(trigger, view) {
+  if (!view || !Number.isInteger(trigger?.index)) return null;
+  const at = view.byIndex?.[trigger.index];
+  if (!at || (at.id === null && !at.optedOut)) return null;
+  return { id: at.id, optedOut: at.optedOut };
+}
+
+/**
+ * Why a job ran without its project's bundle, one sentence per `bundleSkipped` reason (the worker's
+ * BUNDLE_SKIPPED_REASONS, imported, and held to this table by a test so a new reason cannot render as nothing).
+ */
+export const BUNDLE_SKIPPED_TEXT = Object.freeze({
+  manual: "a manual run (no trigger made it), so it got no bundle",
+  chained: "a chained /outbox child, so it got no bundle: the grant was to the trigger, not to what its job queues",
+  "opted-out": "its trigger sets run.secretBundle: false",
+  fork: "a pull request from another repository, and the bundle does not set forkReviews",
+  "head-unverified": "the forge would not say whose pull request this is (401, 403 or 404), so it ran as a fork's, without the bundle",
+});
+
+/**
+ * A record's bundle facts (issue #704, INT-RUN-HISTORY-FILE-CONTRACT): `{ bundle, bundleSkipped }`, each null when
+ * absent or not valid, or null when the record carries neither (every record of a project with no bundle). `bundle` is
+ * the worker's own rebuild (`recordedBundle`: names held to the environment-name charset, counts bounded), so a record
+ * file read back from disk or a mirror cannot put free text on a surface through it; `bundleSkipped` is the closed enum.
+ */
+export function recordBundle(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return null;
+  const bundle = Object.hasOwn(record, "bundle") ? recordedBundle(record.bundle) : null;
+  const bundleSkipped = Object.hasOwn(record, "bundleSkipped") && BUNDLE_SKIPPED_REASONS.includes(record.bundleSkipped) ? record.bundleSkipped : null;
+  return bundle === null && bundleSkipped === null ? null : { bundle, bundleSkipped };
+}
+
+/**
+ * A run record as a MODEL-CALLABLE tool returns it (issue #704 review): its `bundle` as COUNTS, `{ id, received,
+ * shadowed, placeholders?, plain? }`, never the variable names. The names are the operator's manager's contents: the
+ * operator's own views (the panel, the console, `/dispatch secrets`) show them, and no model context needs them to
+ * reason about a run. A `bundle` the worker's rebuild refuses is dropped whole. Every other key is the record's own, and
+ * a record with no `bundle` is returned as it is (the same object), so every other run reads byte-identical.
+ */
+export function modelRunRecord(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record) || !Object.hasOwn(record, "bundle")) return record;
+  const { bundle: raw, ...rest } = record;
+  const b = recordedBundle(raw);
+  if (b === null) return rest;
+  return { ...rest, bundle: { id: b.id, received: b.variables.length, shadowed: b.shadowed.length, ...(Number.isSafeInteger(b.placeholders) ? { placeholders: b.placeholders, plain: b.plain } : {}) } };
+}
+
+/** "Variables received: A, B, C (from bundle shop)", or "No variables received from bundle shop". */
+export function bundleReceivedText(b) {
+  if (b === null || typeof b !== "object") return "";
+  return b.variables.length > 0 ? `Variables received: ${b.variables.join(", ")} (from bundle ${b.id})` : `No variables received from bundle ${b.id}`;
+}
+
+/** "3 as placeholders, 2 as values" (the openshell venues' counts), or "" when the record has none. */
+export function bundleCountsText(b) {
+  if (!Number.isSafeInteger(b?.placeholders) || !Number.isSafeInteger(b?.plain)) return "";
+  return `${plural(b.placeholders, "as a placeholder", "as placeholders")}, ${plural(b.plain, "as a value", "as values")}`;
 }
 
 /**

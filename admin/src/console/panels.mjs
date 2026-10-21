@@ -55,7 +55,7 @@ import {
 import { fmtCost } from "../panel.mjs";
 import { renderWhatIf } from "../render.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
-import { checkpointsText, forgeLinkOf, isProgressSnapshot, progressStaleFor, recordRecovery, recoveredText, secretProfileNames } from "../read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
@@ -769,6 +769,24 @@ function recoveryRows(r) {
   ];
 }
 
+/**
+ * The run summary's secret-bundle rows (issue #704): "Secret bundle" (the variable NAMES the run received and the bundle
+ * they came from, the names a trigger's own run.secrets shadowed, and on an openshell venue how many were placeholders),
+ * or why the run went without its project's bundle. `recordBundle`'s rebuild (names held to the environment-name
+ * charset, a closed enum), escaped by the renderer like every record string; no row for a record that carries neither
+ * key, so every run outside a bundled project renders byte-identical.
+ */
+function bundleRows(r) {
+  const got = recordBundle(r);
+  if (got === null) return [];
+  const b = got.bundle;
+  const said = b ? [bundleReceivedText(b), b.shadowed.length > 0 ? `shadowed by the trigger's own run.secrets: ${b.shadowed.join(", ")}` : null, bundleCountsText(b) || null].filter(Boolean) : [];
+  return [
+    ["Secret bundle", said.length > 0 ? said.join("; ") : null],
+    ["Bundle skipped", got.bundleSkipped !== null ? `${got.bundleSkipped}: ${BUNDLE_SKIPPED_TEXT[got.bundleSkipped]}` : null],
+  ];
+}
+
 export const runSummary = withRun("Run", (r, view, source) => {
   const started = msOf(r.startedAt);
   const ended = msOf(r.endedAt);
@@ -786,6 +804,7 @@ export const runSummary = withRun("Run", (r, view, source) => {
     ["Host", cell(r.host)],
     ["Venue", cell(r.backend)],
     ["Project", cell(r.project)],
+    ...bundleRows(r),
     ["Provider and model", [r.provider, r.model].filter(Boolean).join(" / ") || "-"],
     ["Turns", cell(r.turns)],
     ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? `#${r.triggerIndex} (${cell(r.triggerType)})` : "-"],
@@ -1194,12 +1213,20 @@ function triggerOn(t) {
   }
 }
 
+/** A trigger's project secret bundle (issue #704) in words: the bundle a cron trigger's jobs hold, or its opt-out. */
+function triggerBundleNote(t, bundles) {
+  const at = triggerBundleOf(t, bundles);
+  if (at === null) return null;
+  return at.optedOut ? `opted out of ${at.id !== null ? `bundle ${at.id}` : "every project's bundle"}` : `bundle ${at.id}`;
+}
+
 /** What a trigger's jobs carry beyond the flow: each a short word or count, never a value. */
-function triggerNotes(t) {
+function triggerNotes(t, bundles = null) {
   return [
     t.resume ? "keeps a session" : null,
     t.replicas ? `${t.replicas} replicas` : null,
     t.secrets > 0 ? `${t.secrets} secrets${t.secretsProfile ? ` (profile ${t.secretsProfile})` : ""}` : null,
+    triggerBundleNote(t, bundles),
     Array.isArray(t.mcp) ? `mcp ${t.mcp.join(", ")}` : null,
     t.packages === false ? null : "staged packages",
     t.instructions ? "has instructions" : null,
@@ -1229,7 +1256,7 @@ export const configTriggers = fromSnapshot("Triggers", (s, view) => {
       const what = t.command ? `command ${t.command}` : `flow ${cell(t.flow)}`;
       const where = t.type === "cron" ? (t.folder ? ` in ${shownPath(t.folder)}` : "") : t.forge ? ` on ${t.forge}` : "";
       const model = [t.provider, t.model].filter(Boolean).join(" / ") || "deployment default";
-      return html`<tr><td class="num">${i}</td><td>${triggerOn(t)}</td><td>${what}${where}</td><td>${model}</td><td>${triggerNotes(t) || "-"}</td></tr>`;
+      return html`<tr><td class="num">${i}</td><td>${triggerOn(t)}</td><td>${what}${where}</td><td>${model}</td><td>${triggerNotes(t, s.secretBundles) || "-"}</td></tr>`;
     }),
     "The triggers file declares no trigger.",
   )}${triggersEditor(view)}`;
@@ -1348,6 +1375,40 @@ export const configSecretProfiles = fromSnapshot("Secret profiles", (s, view) =>
   const names = secretProfileNames(s.settings);
   if (names.length === 0) return html`<p class="note">No secret profile is declared.</p>${profilesEditor(view)}`;
   return html`<p class="note">Names only: a profile's resolver and its references stay in the settings file.</p><ul class="plain">${names.map((n) => html`<li class="mono">${n}</li>`)}</ul>${profilesEditor(view)}`;
+});
+
+/** The bundle resolvers editor (issue #704): a name, its resolver's absolute path and the format it prints. */
+function bundleProfilesEditor(view) {
+  if (!canAct(view)) return null;
+  return editor("Change the bundle resolvers", html`${actForm("secret-bundle-add", { fields: html`${field("name", "Name", { required: true, max: 64 })}${field("path", "Resolver (absolute path)", { required: true, max: 4096 })}${field("format", "Format it prints (dotenv or json)", { required: true, max: 16, placeholder: "dotenv" })}`, label: "Preview the add" })}${actForm("secret-bundle-remove", { fields: field("name", "Name", { required: true, max: 64 }), label: "Preview the removal" })}`);
+}
+
+/**
+ * The project secret bundles (issue #704): the overlay's bundle resolvers (names and formats), then each bundle the
+ * triggers file binds, with its project, its profile and whether this deployment declares it, fork reviews, the
+ * endpoints, the triggers that opt out and the variable NAMES the newest run in view received. Never a reference or a
+ * value, and nothing is resolved to draw it: `pi-dispatch doctor --secrets` does that on the host that runs the jobs.
+ */
+export const configSecretBundles = fromSnapshot("Secret bundles", (s, view) => {
+  const resolvers = overlayBundleProfiles(s.settings);
+  const names = Object.keys(resolvers).sort();
+  const rows = Array.isArray(s.secretBundles?.bundles) ? s.secretBundles.bundles : [];
+  const declared = names.length === 0 ? html`<p class="note">No bundle resolver is declared in the settings overlay.</p>` : html`<p class="note">Bundle resolvers in the settings overlay (names and formats; the path stays in the file):</p><ul class="plain">${names.map((n) => html`<li class="mono">${n} (${cell(resolvers[n].format)})</li>`)}</ul>`;
+  return html`${declared}${table(
+    "Secret bundles",
+    ["Bundle", "Project", "Profile", "Fork reviews", "Endpoints", "Opted out", "Last received"],
+    rows.map((b) => {
+      // Under the column headers, so each cell holds the value alone (final review: no repeated label).
+      const project = `${b.project ?? "-"}${b.projectKnown === false ? " (not in projects.json)" : ""}`;
+      const profile = `${b.profile ?? "-"} (${bundleDeclaredText(b)})`;
+      const fork = b.forkReviews ? "yes" : "no";
+      const ends = Array.isArray(b.endpoints) && b.endpoints.length > 0 ? bundleEndpointsText(b) : "none";
+      const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map((i) => `#${i}`).join(", ") : "none";
+      const last = b.last ? html`${b.last.variables.length > 0 ? b.last.variables.join(", ") : "none"} (${b.last.jobId ? runLink(b.last.jobId) : "-"})` : "no run in view";
+      return html`<tr><td class="mono">${cell(b.id)}</td><td>${project}</td><td${b.declared === "env" || b.declared === "overlay" ? null : html` class="warn"`}>${profile}</td><td>${fork}</td><td class="mono">${ends}</td><td>${opted}</td><td class="mono">${last}</td></tr>`;
+    }),
+    "The triggers file binds no secret bundle.",
+  )}${bundleProfilesEditor(view)}`;
 });
 
 // ---- audit -----------------------------------------------------------------------------------------------------------

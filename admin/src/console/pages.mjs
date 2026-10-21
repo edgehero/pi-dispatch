@@ -29,6 +29,7 @@ import {
   configPauseWindows,
   configProjects,
   configScopedLimits,
+  configSecretBundles,
   configSecretProfiles,
   configSettings,
   configTriggers,
@@ -98,7 +99,7 @@ const PAGE_PANELS = Object.freeze({
   parked: [["p-parked", parkedInbox]],
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
-  config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles]],
+  config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles], ["p-secret-bundles", configSecretBundles]],
   audit: [["p-audit", auditLog]],
 });
 
