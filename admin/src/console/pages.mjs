@@ -70,6 +70,7 @@ import {
 import { chatFactsOf, parkedAnswerCheckOf } from "./run-api.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
+import { SPEND_TITLE } from "../words.mjs";
 
 /**
  * The screens. `path` is the route, `auth` the least role that may open it, `live` whether the page opens the event
@@ -87,7 +88,7 @@ export const PAGES = Object.freeze({
   runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs" }),
   run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null }),
   parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked" }),
-  insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: "Spend and insights", nav: "Spend" }),
+  insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE }),
   fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet" }),
   config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration" }),
   audit: Object.freeze({ path: "/audit", auth: "operator", live: false, title: "Audit log", nav: "Audit" }),
@@ -335,7 +336,7 @@ async function childrenOf(fleet, record) {
     }
     if (!Array.isArray(pageRead?.runs)) break;
     searched += pageRead.runs.length;
-    for (const r of pageRead.runs) if (r?.parentJobId === record.jobId) children.push({ jobId: r.jobId ?? null, outcome: r.outcome ?? null, startedAt: r.startedAt ?? null });
+    for (const r of pageRead.runs) if (r?.parentJobId === record.jobId) children.push({ jobId: r.jobId ?? null, outcome: r.outcome ?? null, reason: typeof r.reason === "string" ? r.reason : null, startedAt: r.startedAt ?? null });
     if (pageRead.next === null || pageRead.next === undefined || (Number.isFinite(startMs) && pageRead.next <= startMs)) break;
     before = pageRead.next;
   }

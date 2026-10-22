@@ -55,8 +55,8 @@ const WIDTH = 80;
 const CDP_STEP_MS = 30_000;
 /** The longest the first command to a `--url` Valkey may take before the run fails. */
 const URL_CONNECT_MS = 3_000;
-/** The commands transcript's width in columns: its widest line (the runs table, 131) with a little room. */
-const COMMANDS_WIDTH = 134;
+/** The commands transcript's width in columns: its widest line (the runs table, 136 since its OUTCOME column says "awaiting input", issue #710) with a little room. */
+const COMMANDS_WIDTH = 139;
 /** The terminal images the npm page shows (admin/README.md), so the ones `--png` rasterises. */
 const PNG_IMAGES = ["dispatch-dashboard", "dispatch-hosts", "dispatch-allocation"];
 /** What the commands transcript shows for the deployment's temporary folder. */

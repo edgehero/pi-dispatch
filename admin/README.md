@@ -129,7 +129,7 @@ Four things to know before you build on it:
 One command puts a live terminal view over the whole deployment:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-14-641" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-22-710" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
 </p>
 
 - **MCP servers, read-only.** A trigger that names MCP servers says so on its row (`[mcp ...]`), and its
@@ -154,7 +154,7 @@ One command puts a live terminal view over the whole deployment:
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-14" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-22-710" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what

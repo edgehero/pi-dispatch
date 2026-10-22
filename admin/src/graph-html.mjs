@@ -1388,7 +1388,7 @@ function relSpan(ms) {
   return `${Math.floor(h / 24)}d`;
 }
 
-function buildTip(n, flags, groupLabel, nowMs) {
+function buildTip(n, flags, groupLabel, nowMs, outcomeWords) {
   const lines = [];
   if (n.kind === "trigger") {
     lines.push(`trigger · ${n.onType ?? "?"} · ${n.label ?? ""}`.trim());
@@ -1422,7 +1422,7 @@ function buildTip(n, flags, groupLabel, nowMs) {
   if (n.kind === "trigger") {
     if (n.runs > 0) {
       const rel = relTime(nowMs, n.lastEndedAt);
-      lines.push(`runs: ${n.runs}${n.lastOutcome !== null ? ` · last ${n.lastOutcome}${rel !== null ? ` ${rel}` : ""}` : ""}`);
+      lines.push(`runs: ${n.runs}${n.lastOutcome !== null ? ` · last ${Object.hasOwn(outcomeWords, n.lastOutcome) ? outcomeWords[n.lastOutcome] : n.lastOutcome}${rel !== null ? ` ${rel}` : ""}` : ""}`);
     } else {
       lines.push("no runs in window");
     }
@@ -1887,7 +1887,10 @@ if (typeof document === "object" && document !== null && document.getElementsByT
  * server-side composition state for the caller; only `svgBody`/`graphData` strings belong in a
  * page, and they carry minted ordinals alone.
  */
-export function buildGraphScene(model, { now, fullPaths } = {}) {
+export function buildGraphScene(model, { now, fullPaths, outcomeWords } = {}) {
+  // The console's outcome words (words.mjs, #710 round 2), handed in by the caller as a plain map, since this module
+  // loads nothing: a tip says "last refused", never the record's "policy". Without a map an outcome reads as itself.
+  const words = outcomeWords !== null && typeof outcomeWords === "object" ? outcomeWords : {};
   let norm;
   try {
     norm = normalizeModel(model);
@@ -1931,7 +1934,7 @@ export function buildGraphScene(model, { now, fullPaths } = {}) {
     nodeParts.push(nodeSvg(p, flags, drawIn, drawOut));
     const a = adj.get(p.id);
     graphData.nodes[p.id] = {
-      tip: buildTip(n, flags, group ? group.label : null, nowMs),
+      tip: buildTip(n, flags, group ? group.label : null, nowMs, words),
       nb: a ? [...a.nb].sort() : [],
       w: a ? [...a.w].sort() : [],
     };

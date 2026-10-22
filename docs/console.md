@@ -294,13 +294,34 @@ console.
 | Page | What it shows |
 |---|---|
 | `/` | The overview: whether the fleet is paused, the queue counts, the hosts online and how long ago each last checked in, today's spend against the caps, how many runs are waiting for an answer (and how many of those are being answered now), and the failures of the last 24 hours. |
-| `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. |
+| `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. The Outcome column says completed, refused, failed, awaiting input or cancelled, amber for refused, awaiting input and cancelled and red for failed. A refused or failed run also names its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). |
 | `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
-| `/insights?range=30d` | Spend and insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
-| `/fleet` | Job counts per queue and state, held waits, each host with its slots, budget, running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
+| `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
+| `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget, running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |
+
+### Outcomes and reasons
+
+The console and the `/dispatch` panel use the same words for how a run ended. The run record's `outcome` is
+`completed`, `policy` or `failed`; both surfaces say completed, refused (for `policy`) and failed. Two reasons change
+the word: a completed run with `awaiting-input` is **awaiting input**, and a run with `operator-cancel` is
+**cancelled**. The record's `backend` is the **Venue**, the spend page is **Spend** (its insights are the page's
+content, still at `/insights`), and the jobs held on a wait are **Held**. The query and field names stay the
+record's (`outcome=policy`, `backend=`); `outcome=refused` is refused with a message naming the three values.
+
+In the runs list, a refused or failed run shows its reason as a short sentence after the word, for example
+`refused · This project's run cap for the window was already reached…`. The sentence is the reason catalog's
+explanation ([reasons.md](reasons.md)), cut to fit a row: the leading verdict ("Refused:") is dropped, the first
+sentence is kept, and a longer one first loses its asides (a part in parentheses, a ", which ...," clause) and is then
+cut at a word with an ellipsis: never on a word like "so" or "the" (except where backing off would leave fewer than 24
+characters), never on a "not" or "no" without the word before it, and never inside a parenthesis. Hover it for the reason's word itself; click it to list every run with the same outcome and
+reason. A reason this console does not know (from a newer worker) is shown as its word with "no explanation yet".
+Only the record's reason word is ever shown in a list, never a job's own failure text. In pi, the panel's list row
+says the word and puts the reason's word last (`✘ failed · 3t · 12.3k · container-never-started`), so a narrow
+terminal cuts the reason before the counts, and its run detail prints the whole sentence and the next step under the
+reason. `/dispatch runs` says the same word in its OUTCOME column and the reason's word in REASON.
 
 **The Venues panel** on `/fleet` lists every venue this release knows, and any venue a newer worker blesses that it does
 not. For each one: the hosts that bless it and the ones whose default it is, each host's
@@ -448,7 +469,7 @@ The runs page takes these filters in its query string. Each one is matched exact
 | `project` | project id |
 | `host` | worker name |
 | `backend` | venue, as the Venues panel on `/fleet` names it (a run recorded before venues were recorded counts as `local`) |
-| `outcome` | outcome: `completed`, `policy` or `failed` |
+| `outcome` | outcome: `completed`, `policy` or `failed` (a refused or cancelled run is `policy`; any other value is refused) |
 | `reason` | reason, such as `awaiting-input` or `over-budget` |
 | `model` | model id |
 | `q` | target, any part of it, ignoring case (`web#12`) |

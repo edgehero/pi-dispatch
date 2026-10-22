@@ -20,7 +20,7 @@ system. pi-dispatch adds exactly that layer and nothing else. It is not another 
 the one you use. It is the queue, the budget and the box around the pi you already run, steered by the
 `.pi/` setup your repo already has.
 
-![The /dispatch dashboard: live queue state, day, week and month job meters with a daily token counter, the dollar windows, the triggers pane with a portfolio trigger, pause windows, scoped limits with a project row and a model row showing their dollar caps, held and failed jobs, and the interactive runs list with each run's project and the u hosts key on its divider, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2026-10-14-641)
+![The /dispatch dashboard: live queue state, day, week and month job meters with a daily token counter, the dollar windows, the triggers pane with a portfolio trigger, pause windows, scoped limits with a project row and a model row showing their dollar caps, held and failed jobs, and the interactive runs list with each run's project and the u hosts key on its divider, in one framed terminal view](docs/images/dispatch-dashboard.svg?v=2026-10-22-710)
 
 What you get:
 
@@ -73,7 +73,7 @@ what each of them costs, whether a subscription pays off, and how busy each mach
 ([`docs/insights.md`](docs/insights.md)). Both are on one page, `/insights` in the web console
 (`pi-dispatch-console serve`, see [`docs/console.md`](docs/console.md)), and `/dispatch insights` prints its address:
 
-![The insights page: KPI tiles, budget dials, the budget split with each project's share, spend and floor and the split's history, a plan verdict, daily and cumulative spend charts, per flow trends, five breakdowns (flow, trigger, model, repo and project), the job sizes, how busy each host was with a chart of the jobs running at once against its slots and hatched stretches with no data, and the trigger and flow topology with spend shown on each trigger](docs/images/insights-view.png?v=2026-10-14)
+![The insights page: KPI tiles, budget dials, the budget split with each project's share, spend and floor and the split's history, a plan verdict, daily and cumulative spend charts, per flow trends, five breakdowns (flow, trigger, model, repo and project), the job sizes, how busy each host was with a chart of the jobs running at once against its slots and hatched stretches with no data, and the trigger and flow topology with spend shown on each trigger](docs/images/insights-view.png?v=2026-10-22-710)
 
 ## Quickstart
 
@@ -525,13 +525,13 @@ In the panel:
 `Enter` on a run opens its full record. In that view, `b` reopens the run's workspace, which is not the
 list's `b`:
 
-![The run detail view of a parked triage run: completed with the reason awaiting-input, its issue and flow, timing, host and backend, its project, the dollars it settled, turns, tokens and cost, the chain line, and the retained sandbox with its egress setting](docs/images/dispatch-run-detail.svg?v=2026-10-14)
+![The run detail view of a parked triage run: awaiting input, with the reason's sentence and next step, its issue and flow, timing, host and venue, its project, the dollars it settled, turns, tokens and cost, the chain line, and the retained sandbox with its egress setting](docs/images/dispatch-run-detail.svg?v=2026-10-22-710)
 
 The same data is there as plain commands, all local, with no model involved: `/dispatch status | runs |
 logs | budget | triggers | insights | run | pause | resume | set | unset | settings | priorities | setup |
 secrets`.
 
-![Transcript of /dispatch status, budget, runs, triggers and priorities: queue counts and budget, the scoped limits with their dollar rows, the run history table with tokens, cost, chain and replica per job and a run awaiting input, the triggers list with a portfolio trigger and a trigger with an MCP server, and the budget split with its history](docs/images/dispatch-commands.svg?v=2026-10-14)
+![Transcript of /dispatch status, budget, runs, triggers and priorities: queue counts and budget, the scoped limits with their dollar rows, the run history table with tokens, cost, chain and replica per job and a run awaiting input, the triggers list with a portfolio trigger and a trigger with an MCP server, and the budget split with its history](docs/images/dispatch-commands.svg?v=2026-10-22-710)
 
 The insights page also draws the trigger and flow topology ([`docs/graph.md`](docs/graph.md)):
 

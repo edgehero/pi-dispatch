@@ -68,12 +68,13 @@ test("render-images: two runs draw byte-identical SVGs of the panel's views and 
   assert.match(allocation, /refused plan-too-soon/, "the history holds a refused plan");
   const detail = svgRows(first["dispatch-run-detail.svg"]).join("\n");
   assert.match(detail, /run gh-2f6a/);
-  assert.match(detail, /✔ completed · awaiting-input/, "the run detail shows the parked run");
+  assert.match(detail, /✔ awaiting input · awaiting-input/, "the run detail shows the parked run, in the console's word (issue #710)");
+  assert.match(detail, /what +The run asked a question and stopped to wait for the/, "with the reason catalog's sentence under it");
   assert.match(detail, /b sandbox/, "and offers its retained sandbox");
-  assert.match(list, /triage · ✔ awaiting-input/, "the LIST names the parked run's reason");
+  assert.match(list, /triage · ✔ awaiting input/, "the LIST says the parked run awaits input");
   const commands = svgRows(first["dispatch-commands.svg"]).join("\n");
   for (const sub of ["status", "budget", "runs 5", "triggers", "priorities"]) assert.ok(commands.includes(`› /dispatch ${sub}\n`), `the transcript runs /dispatch ${sub}`);
   assert.match(commands, /\[mcp linear\]/, "the triggers list shows the MCP trigger");
-  assert.match(commands, /completed +awaiting-input/, "the runs table shows the parked run");
+  assert.match(commands, /gh-2f6a +acme\/api#131 +triage +awaiting input +awaiting-input /, "the runs table shows the parked run, in the console's word and then the record's token (issue #710)");
   assert.match(commands, /~\/pi-work\/work\/site\/tidy/, "a local folder is shown under the display path");
 });

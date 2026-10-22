@@ -50,11 +50,15 @@
  */
 import { FIT_JS } from "../graph-html.mjs";
 import { PAGES } from "./pages.mjs";
+import { OUTCOME_WORD_OF } from "../words.mjs";
 
 export const CONSOLE_SCRIPT = `"use strict";
 (function () {
   var page = document.body ? document.body.getAttribute("data-page") : null;
   var PAGE_PATHS = ${JSON.stringify(Object.values(PAGES).map((p) => p.path))};
+  // The console's outcome words (words.mjs, #710 round 2), written in from the one table: a stream's end says "refused",
+  // never the record's "policy". An outcome not in it shows as itself.
+  var OUTCOME_WORD = ${JSON.stringify(OUTCOME_WORD_OF)};
   function say(text) {
     var el = document.getElementById("notice");
     if (el) el.textContent = text;
@@ -521,7 +525,7 @@ ${FIT_JS}
       var outcome = "unknown";
       try {
         var d = JSON.parse(ev.data);
-        if (d && typeof d.outcome === "string") outcome = d.outcome;
+        if (d && typeof d.outcome === "string") outcome = Object.prototype.hasOwnProperty.call(OUTCOME_WORD, d.outcome) ? OUTCOME_WORD[d.outcome] : d.outcome;
       } catch (e) { /* keep unknown */ }
       tmark("ended (" + outcome + ")", "ended");
     });

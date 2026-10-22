@@ -850,6 +850,19 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (pointer, env, cwd scaffold all absent AND the queue unreachable — an ops outage on a configured
   deployment keeps the unreachable banner, never an offer), and a once-ever notify-only
   `session_start` nudge.
+  **AMENDED 2026-10-22 (#710)**: the panel speaks the operator console's words, read from one module both surfaces
+  import (`admin/src/words.mjs`): a run's outcome is completed, refused (the record's `policy`), failed, awaiting input
+  (a completed run with `awaiting-input`) or cancelled (`operator-cancel`), each with the panel's glyph and a tone
+  (refused, awaiting input and cancelled warn, failed is an error); the record's `backend` is the venue; the SPEND
+  section and the HELD section carry the console's Spend and Held. A list row shows the word in its outcome cell and
+  a reason the word does not already say as its last cell, after the turns and tokens, so those stay on an 80-column
+  row for the longest token (`job-image-observable-runner-unsupported`); the plain degraded list does the same, and
+  `/dispatch runs` prints the word in its OUTCOME column and the record's token in REASON. The run detail prints,
+  under the reason, the reason catalog's sentence and next step (`INT-REASON-CATALOG`), wrapped inside the frame, and
+  "no explanation yet" for a token the catalog does not know. The live tail's end line says the word too
+  (`(run ended: refused)`, round 2). Acceptance: `admin/test/words.test.mjs` (the outcome words held both ways to
+  `INT-RUN-HISTORY-FILE-CONTRACT`'s outcome union and the runner's completed reasons, both surfaces' imports, the run
+  detail's sentence and next step at every width), `admin/test/dashboard.test.mjs`.
 - **Scope**: The operator's interactive session on the worker host. The admin surface triggers no jobs
   except the gated `dispatch_run` enqueue, and is never materialised into a job's `/job` inputs —
   `INT-CONTAINER-JOB-INPUTS` mounts the serviced repo's own `.pi/` extensions, not this one.
@@ -1206,7 +1219,26 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     records, the page answers with what it found and a link that continues from where it stopped, rather than reading
     on without bound; given the mirror unreachable, the page shows this host's runs and says so; given a mirror read,
     nothing in Valkey is written (no prune). Each row shows its outcome, host, model, tokens, its cost (classified as
-    the cost fold classifies it) and the dollar cap the job was held to. Tests:
+    the cost fold classifies it) and the dollar cap the job was held to. **AMENDED 2026-10-22 (#710)**: the outcome is
+    the panel's word (`REQ-ADMIN-VIA-PI-EXTENSION`: completed, refused, failed, awaiting input, cancelled), its cell
+    classed by the word's tone (`warn` for refused, awaiting input and cancelled, `bad` for failed, none for completed;
+    a class, never a `style=`, which the CSP forbids); a refused or failed run's reason follows as `· <short
+    sentence>`, the reason catalog's sentence cut by `shortSentence` (the leading verdict of at most four words and a
+    colon dropped, the first sentence kept, backticks dropped; one over 72 characters loses its asides (every closed
+    parenthetical and a `, which ...,` clause) and is cut at a word, by code points, to at most 72 characters with an
+    ellipsis, the cut backed off past a trailing comma, an unclosed parenthesis and a word that cannot end a phrase,
+    never below 24 characters, a negation only together with the word before it; every cut row is at least 40
+    characters),
+    linked to `/runs?outcome=<outcome>&reason=<token>` only when the runs filter accepts that pair, with the token in
+    the link's `title`; a token the catalog does not know is shown as itself with "no explanation yet", and one the
+    runs filter refuses is printed once, unlinked, cut to 64 characters, with no `title`. The runs filter's `outcome`
+    takes the record's three values only and refuses any other (`outcome=refused` included) with a refusal naming
+    them, rather than matching nothing (round 2). The live transcript's end, the Progress panel's "has ended" line,
+    the browser's stream status and the topology's "last" tip say the same words (round 2). Only
+    the record's closed `reason` enum reaches the row, never a job's `failedReason` (`REQ-CONSOLE-SECURITY` (l)). The
+    run detail's Outcome row and the chain's children say the same words (a child's `reason` is read with it, so a
+    waiting or cancelled child says so) (`admin/test/console-panels.test.mjs`,
+    "the runs table: the outcome in the panel's words ...", and `admin/test/words.test.mjs`). Tests:
     `admin/test/read-model-pages.test.mjs` (since issue #668, "every priced bare model id is a filter that finds its
     run"), `worker/test/run-mirror.test.mjs`, `worker/test/run-mirror.integration.test.mjs`,
     `admin/test/console-pages.test.mjs`.
@@ -5286,6 +5318,9 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-22 (#710, PR 2, round 2) | Review round 2. **`REQ-OPERATOR-CONSOLE-SCREENS` (b) AMENDED, CORRECTED**: the short sentence drops its asides (every closed parenthetical, wherever it opens, and a `, which ...,` clause) before it is cut, so four rows that backed off to their subject keep their verb (`podman-conf-widens-job`, `secret-name-reserved`, `netns-keeper-crash-loop`; `podman-service-restart-hold-expired` kept its verb already), and every cut row is at least 40 characters; a negation is backed off only together with the word before it, never alone ("could not" no longer reads "could"); the cut counts code points, so it never splits a surrogate pair; the runs filter's `outcome` refuses a value outside `completed`, `policy` and `failed` with a refusal naming them (`outcome=refused` matched nothing before); the live transcript's end, the Progress panel, the browser's stream status and the topology tip say refused, not `policy`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the live tail's end line says the word. `REQ-CONSOLE-SECURITY` UNCHANGED, checked: the filter refusal names the field's values, never the value given, and the browser's table is written into the served script from `words.mjs`, not read from a page. |
+| 2026-10-22 (#710, PR 2, round 1) | Review round 1. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel's list row shows the word in the outcome cell and the reason token as its last cell (not in parentheses beside the word, which pushed the turns and tokens off an 80-column row); the plain degraded list and `/dispatch runs`' OUTCOME column say the shared words, REASON keeps the token. **`REQ-OPERATOR-CONSOLE-SCREENS` (b) AMENDED**: the short sentence's cut backs off past a dangling word, a trailing comma and an unclosed parenthesis; a reason the runs filter refuses is printed once, cut to 64 characters, with no `title`; the chain's children carry their reason. `REQ-CONSOLE-SECURITY` UNCHANGED, checked: still only the closed `reason` enum, escaped, and the refused token is now bounded. |
+| 2026-10-22 (#710) | Issue #710, PR 2: one vocabulary for the console and the panel. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel's outcome words (completed, refused for `policy`, failed, awaiting input, cancelled), its venue label and its Spend and Held titles come from `admin/src/words.mjs`, which the console imports too; the run detail prints the reason catalog's sentence and next step under the reason. **`REQ-OPERATOR-CONSOLE-SCREENS` (b) AMENDED**: the runs table says the same words, classes the outcome cell by tone (`warn`, `bad`), and shows a refused or failed run's reason as a short sentence derived from the catalog, linked to the runs with that outcome and reason, the token in `title`; the nav and the spend page say Spend, the fleet's held panel says Held, the trigger edit's `backend` field is labelled Venue. `REQ-CONSOLE-SECURITY` is UNCHANGED, checked: only the closed `reason` enum and the catalog's fixed text reach a list row, never `failedReason` ((l)), and every value is escaped by the `html` template with no `style=`. |
 | 2026-10-21 (#708) | Issue #708, the console command. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Statement gains `console` (`/dispatch console [page] [--link [name]] [--no-open]`: a page's address by the `insights` rules, whether the console runs from one probe of this host's loopback or its socket, a one-time sign-in link for an operator token audited before it is minted, and the browser on a local session only; operator-typed, never a tool, a notice and never model context, the one subcommand that spawns a browser); the Acceptance gains its clauses and the login-codes directory guard's. The model-callable tool list is UNCHANGED, checked (the spec scan in `admin/test/wiring.test.mjs` still holds), and "binds no network port" is UNCHANGED, checked: a probe is a client connection. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the code still sits after `#`, sessions and guards are untouched, and the new `next` return path is validated against the console's own pages on the server (`returnPathOf`, the page parser) and again in the script, so it is not an open redirect; it rides in the fragment and the sign-in POST body, never a query string. **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: no page changes; a code sign-in may now land on a named page instead of `/`. Review round 1: the Acceptance adds the running-only, TUI-only and guarded-drop refusals of `--link`, the private redirect page, the firmlink alias and the consumer's own refusals. |
 | 2026-10-21 (#708) | Issue #708, PR 3: the console as a service. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, its Scope: `pi-dispatch service` addresses one service per invocation, the worker, `--receiver` or `--console` (the operator console, `pi-dispatch-console serve --deployment <folder>`), the two flags mutually exclusive; `install --console` refuses before writing anything when the console package cannot be found or the tokens file holds no operator token. User level by default, system scope printed, the `--env-setup` clauses (1) to (3) and doctor's unit read UNCHANGED, checked. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the unit runs the same `serve` with the same refusals, and doctor's probe sends one request to a loopback address or the socket, never across a network. |
 | 2026-10-21 (#712) | Issue #712, part D: OpenShell run facts and the secret profiles view. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g): each secret profile's use on the configuration page (source, roots, triggers, projects, last resolve, advertising hosts), still with no resolver path, and the run page's sandbox policy, rule hosts and secrets profile; the names-only rule UNCHANGED, checked. **`REQ-TRIGGER-SECRETS` AMENDED**, a dated acceptance paragraph: an armed run records `secretsProfile` (a name); the console, the panel and `/dispatch secrets list` show each profile's use; no model-callable tool returns a resolver path. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: every new value is escaped by the console's one helper and scrubbed in the panel, and nothing new reaches `/api/state` (`stateOf` builds it field by field). |

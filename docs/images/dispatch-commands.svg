@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1112 1264" width="1112" height="1264" role="img" aria-label="pi · /dispatch status · budget · runs · triggers · priorities">
-  <rect width="1112" height="1264" rx="10" fill="#0d1117" stroke="#30363d"/>
-  <rect width="1112" height="34" rx="10" fill="#161b22"/>
-  <rect y="24" width="1112" height="10" fill="#161b22"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1152 1264" width="1152" height="1264" role="img" aria-label="pi · /dispatch status · budget · runs · triggers · priorities">
+  <rect width="1152" height="1264" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <rect width="1152" height="34" rx="10" fill="#161b22"/>
+  <rect y="24" width="1152" height="10" fill="#161b22"/>
   <circle cx="20" cy="17" r="6" fill="#ff5f57"/>
   <circle cx="42" cy="17" r="6" fill="#febc2e"/>
   <circle cx="64" cy="17" r="6" fill="#28c840"/>
-  <text x="556" y="21" text-anchor="middle" fill="#8b949e" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">pi · /dispatch status · budget · runs · triggers · priorities</text>
+  <text x="576" y="21" text-anchor="middle" fill="#8b949e" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">pi · /dispatch status · budget · runs · triggers · priorities</text>
   <text x="16" y="47" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="rgb(88,166,255)">› /dispatch status</tspan></text>
   <text x="16" y="66" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">Queue: running</tspan></text>
   <text x="16" y="85" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  waiting 0  active 4  paused 0  delayed 3  failed 1</tspan></text>
@@ -32,12 +32,12 @@
   <text x="16" y="484" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  model:anthropic/claude-sonnet-5-5: week $32.458614/$80.00</tspan></text>
   <text x="16" y="503" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
   <text x="16" y="522" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="rgb(88,166,255)">› /dispatch runs 5</tspan></text>
-  <text x="16" y="541" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">JOB ID      TARGET        FLOW          OUTCOME    REASON          TURNS  TOKENS  COST     CHAIN  REPLICA  ENDED</tspan></text>
-  <text x="16" y="560" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-2f6a     acme/api#131  triage        completed  awaiting-input  11     125448  $0.2096  -      -        2026-10-08T15:13:08.000Z</tspan></text>
-  <text x="16" y="579" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-9575     acme/web#490  fix           completed  -               9      150126  $0.2442  -      -        2026-10-08T15:12:02.000Z</tspan></text>
-  <text x="16" y="598" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-4add     acme/web#489  fix           completed  -               8      139830  $0.2131  -      -        2026-10-08T14:39:02.000Z</tspan></text>
-  <text x="16" y="617" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-a3ac     acme/web#487  fix           completed  -               14     98910   $0.1725  -      -        2026-10-08T14:34:02.000Z</tspan></text>
-  <text x="16" y="636" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-8251-r2  acme/web#408  frontend-fix  completed  -               14     212921  $0.3590  -      r2/2     2026-10-08T14:17:02.000Z</tspan></text>
+  <text x="16" y="541" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">JOB ID      TARGET        FLOW          OUTCOME         REASON          TURNS  TOKENS  COST     CHAIN  REPLICA  ENDED</tspan></text>
+  <text x="16" y="560" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-2f6a     acme/api#131  triage        awaiting input  awaiting-input  11     125448  $0.2096  -      -        2026-10-08T15:13:08.000Z</tspan></text>
+  <text x="16" y="579" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-9575     acme/web#490  fix           completed       -               9      150126  $0.2442  -      -        2026-10-08T15:12:02.000Z</tspan></text>
+  <text x="16" y="598" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-4add     acme/web#489  fix           completed       -               8      139830  $0.2131  -      -        2026-10-08T14:39:02.000Z</tspan></text>
+  <text x="16" y="617" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-a3ac     acme/web#487  fix           completed       -               14     98910   $0.1725  -      -        2026-10-08T14:34:02.000Z</tspan></text>
+  <text x="16" y="636" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">gh-8251-r2  acme/web#408  frontend-fix  completed       -               14     212921  $0.3590  -      r2/2     2026-10-08T14:17:02.000Z</tspan></text>
   <text x="16" y="655" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
   <text x="16" y="674" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="rgb(88,166,255)">› /dispatch triggers</tspan></text>
   <text x="16" y="693" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">Schedulers:</tspan></text>

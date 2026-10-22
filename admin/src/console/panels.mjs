@@ -57,7 +57,9 @@ import { renderWhatIf } from "../render.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
 import { BUNDLE_SKIPPED_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, venuesView, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf, PROFILE_ROOTS_TEXT, PROFILE_SOURCE_TEXT, profileHostsText, profileLastText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile } from "../read-model.mjs";
-import { RUN_FILTER_FIELDS } from "../run-filter.mjs";
+import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
+// The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
+import { HELD_LABEL, NO_EXPLANATION, OUTCOME_WORD_OF, SPEND_TITLE, TONE_CLASS, VENUE_LABEL, outcomeWord, reasonWords } from "../words.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { html, trustedRenderer } from "./html.mjs";
@@ -396,7 +398,7 @@ export const overviewActive = fromSnapshot("Active jobs", (s, view) => activeTab
 // ---- runs ------------------------------------------------------------------------------------------------------------
 
 /** What each filter field is called on the form. */
-const FILTER_LABELS = Object.freeze({ repo: "Repository", kind: "Forge", flow: "Flow", trigger: "Trigger", project: "Project", host: "Host", backend: "Venue", outcome: "Outcome", reason: "Reason", model: "Model", q: "Target contains" });
+const FILTER_LABELS = Object.freeze({ repo: "Repository", kind: "Forge", flow: "Flow", trigger: "Trigger", project: "Project", host: "Host", backend: VENUE_LABEL, outcome: "Outcome", reason: "Reason", model: "Model", q: "Target contains" });
 
 /** The runs filter, a plain GET form: it works without the script, and its values are the query's, escaped. */
 export function runsFilter(view) {
@@ -425,12 +427,50 @@ function runVenue(r) {
   return typeof r?.backend === "string" && r.backend !== "" ? r.backend : UNATTRIBUTED_BACKEND;
 }
 
-/** One run as a table row. */
+/**
+ * A record's outcome in the console's words (words.mjs, the panel's too): completed, refused, failed, awaiting input or
+ * cancelled; an outcome this release does not know is shown as it is (escaped, like every record string).
+ */
+function outcomeText(r) {
+  const w = outcomeWord(r?.outcome, r?.reason);
+  return w.known ? w.word : cell(r?.outcome);
+}
+
+/**
+ * The reason part of a runs row (issue #710): `· <short sentence>`, linked to every run with the same outcome and
+ * reason, with the token itself in the link's `title`. ONLY THE RECORD'S CLOSED `reason` ENUM comes here, never a job's
+ * free-text `failedReason` (REQ-CONSOLE-SECURITY (l)); the sentence is the reason catalog's own fixed text, cut by
+ * `shortSentence`. A token the catalog does not know (a newer worker's) is shown as it is with "no explanation yet". The
+ * link is built only for a pair the runs filter accepts (`parseRunFilter`), so it never leads to a refusal; a reason
+ * that is one of the outcome's words (awaiting input, cancelled) says nothing more, since the word already says it.
+ * A token the filter REFUSES is not one this release can write (the filter takes the record's reason charset and
+ * length), so it is printed once, cut to `ODD_TOKEN_MAX` characters, with no `title` copy: a malformed record's
+ * reason could otherwise put an unbounded string into the row twice.
+ */
+function reasonPart(r) {
+  if (typeof r?.reason !== "string" || r.reason === "") return null;
+  const w = outcomeWord(r.outcome, r.reason);
+  if (w.qualified) return null;
+  const said = reasonWords(r.reason, typeof r.why === "string" ? r.why : null);
+  const query = w.known ? { outcome: r.outcome, reason: r.reason } : { reason: r.reason };
+  const href = parseRunFilter(query).filter ? `/runs?${new URLSearchParams(query)}` : null;
+  if (href === null) {
+    if (said.known) return html` · <span title="${r.reason}">${said.short}</span>`;
+    const chars = [...r.reason];
+    const token = chars.length > ODD_TOKEN_MAX ? `${chars.slice(0, ODD_TOKEN_MAX).join("")}…` : r.reason;
+    return html` · ${token}, ${NO_EXPLANATION}`;
+  }
+  return html` · <a href="${href}" title="${r.reason}">${said.known ? said.short : `${r.reason}, ${NO_EXPLANATION}`}</a>`;
+}
+
+/** The most of a reason token the runs filter refuses that a row prints, in code points, before its ellipsis. */
+const ODD_TOKEN_MAX = 64;
+
+/** One run as a table row. The outcome cell takes its tone's class (`warn` for refused, awaiting input and cancelled, `bad` for failed). */
 function runRow(r, env, subscriptions) {
   const at = msOf(r.endedAt ?? r.startedAt);
-  const outcome = [r.outcome, r.reason].filter((x) => typeof x === "string" && x !== "").join(" / ");
-  const failed = r.outcome === "failed";
-  return html`<tr><td>${utcText(at)}</td><td>${runLink(r.jobId)}</td><td>${targetLink(r, env)}</td><td>${cell(r.flow)}</td><td>${cell(r.host)}</td><td>${runVenue(r)}</td><td${failed ? html` class="bad"` : null}>${cell(outcome)}</td><td>${cell(r.model)}</td><td class="num">${Number.isFinite(r.tokens?.total) ? count(r.tokens.total) : "-"}</td><td class="num">${costText(runCost(r, subscriptions))}</td><td class="num">${usdText(capMicrosOf(r))}</td></tr>`;
+  const tone = TONE_CLASS[outcomeWord(r.outcome, r.reason).tone] ?? null;
+  return html`<tr><td>${utcText(at)}</td><td>${runLink(r.jobId)}</td><td>${targetLink(r, env)}</td><td>${cell(r.flow)}</td><td>${cell(r.host)}</td><td>${runVenue(r)}</td><td${tone !== null ? html` class="${tone}"` : null}>${outcomeText(r)}${reasonPart(r)}</td><td>${cell(r.model)}</td><td class="num">${Number.isFinite(r.tokens?.total) ? count(r.tokens.total) : "-"}</td><td class="num">${costText(runCost(r, subscriptions))}</td><td class="num">${usdText(capMicrosOf(r))}</td></tr>`;
 }
 
 export function runsTable(view) {
@@ -448,7 +488,7 @@ export function runsTable(view) {
   const pager = html`<div class="pager">${view.query?.before !== undefined && view.query?.before !== null ? html`<a href="${runsHref(filter)}">Newest runs</a>` : null}${page.next !== null && page.next !== undefined ? html`<a href="${runsHref(filter, { before: page.next })}">Older runs</a>` : null}</div>`;
   return titled(
     "Runs",
-    html`${notes}${table("Runs", ["When", "Job", "Target", "Flow", "Host", "Venue", "Outcome", "Model", { num: "Tokens" }, { num: "Cost" }, { num: "Job cap" }], runs.map((r) => runRow(r, view.env, subs)), "No run matches.")}${pager}`,
+    html`${notes}${table("Runs", ["When", "Job", "Target", "Flow", "Host", VENUE_LABEL, "Outcome", "Model", { num: "Tokens" }, { num: "Cost" }, { num: "Job cap" }], runs.map((r) => runRow(r, view.env, subs)), "No run matches.")}${pager}`,
   );
 }
 
@@ -526,7 +566,7 @@ function liveProgressBody(g, view) {
   const operator = view.role === "operator";
   const stale = progressStaleFor(g, now);
   const open = (r) => (stale === null ? `running ${Number.isFinite(now) && now >= r.since ? ageText(now - r.since) : "-"}` : `open ${g.updatedAt >= r.since ? ageText(g.updatedAt - r.since) : "-"} at the last update`);
-  const running = g.running.length === 0 ? html`<p class="note">${g.ended ? `The run has ended (${g.outcome ?? "unknown"}).` : "No step is running."}</p>` : html`<ul class="plain">${g.running.map((r) => html`<li><span class="mono">${r.tool}</span> ${open(r)}</li>`)}</ul>`;
+  const running = g.running.length === 0 ? html`<p class="note">${g.ended ? `The run has ended (${typeof g.outcome === "string" ? (outcomeWord(g.outcome).word ?? g.outcome) : "unknown"}).` : "No step is running."}</p>` : html`<ul class="plain">${g.running.map((r) => html`<li><span class="mono">${r.tool}</span> ${open(r)}</li>`)}</ul>`;
   const recent = [...g.recent].reverse();
   return html`${stale !== null ? html`<p class="warn">Stale: ${staleText(stale)}.</p>` : null}${facts([
     ["Turn", count(g.turn)],
@@ -860,14 +900,14 @@ export const runSummary = withRun("Run", (r, view, source) => {
     ["Target", targetLink(r, view.env)],
     ["Forge", cell(r.kind)],
     ["Flow", cell(r.flow)],
-    ["Outcome", cell(r.outcome)],
+    ["Outcome", outcomeText(r)],
     ["Reason", cell(r.reason)],
     ["Detail", r.why ?? null],
     ["Exit code", cell(r.exitCode)],
     ["Attempt", cell(r.attempt)],
     ...recoveryRows(r),
     ["Host", cell(r.host)],
-    ["Venue", cell(r.backend)],
+    [VENUE_LABEL, cell(r.backend)],
     ...skipRows(r),
     ...openshellRows(r),
     ["Project", cell(r.project)],
@@ -934,7 +974,7 @@ export const runChain = withRun("Chain", (r, view) => {
     ["Parent", r.parentJobId ? runLink(r.parentJobId) : "none"],
     ["Depth", cell(r.chainDepth)],
     ["Refused chain requests", cell(r.chainRefused)],
-  ])}<h3>Children</h3>${kids.length === 0 ? html`<p class="note">No child run among the ${count(view.data?.childrenSearched ?? 0)} newest runs.</p>` : html`<ul class="plain">${kids.map((k) => html`<li>${runLink(k.jobId)} ${cell(k.outcome)}</li>`)}</ul>`}`;
+  ])}<h3>Children</h3>${kids.length === 0 ? html`<p class="note">No child run among the ${count(view.data?.childrenSearched ?? 0)} newest runs.</p>` : html`<ul class="plain">${kids.map((k) => html`<li>${runLink(k.jobId)} ${outcomeText(k)}</li>`)}</ul>`}`;
 });
 
 // ---- parked ----------------------------------------------------------------------------------------------------------
@@ -1070,7 +1110,7 @@ function windowsLineHtml(windowLabel, scene) {
  */
 export function insightsBody(payload, nowMs, { fullPaths = false } = {}) {
   const p = payload !== null && typeof payload === "object" ? payload : {};
-  const scene = buildGraphScene(p.graph, { now: nowMs, fullPaths: fullPaths === true });
+  const scene = buildGraphScene(p.graph, { now: nowMs, fullPaths: fullPaths === true, outcomeWords: OUTCOME_WORD_OF });
   const nf = guarded(() => normFold(p.fold), null);
   const spend = nf === null ? null : guarded(() => normSpendMap(p.costByTrigger), null);
   const nb = guarded(() => normBudget(p.budget), null);
@@ -1107,8 +1147,8 @@ export function insightsBody(payload, nowMs, { fullPaths = false } = {}) {
 
 export function insightsPanel(view) {
   const d = view.data ?? {};
-  if (d.insightsError) return titled("Spend and insights", html`<p class="warn">${d.insightsError}</p>`);
-  return html`<h2>Spend and insights, ${insightsWindowLabel(view.query?.range ?? INSIGHTS_DEFAULT_RANGE)}</h2>${insightsBody(d.insights, view.now, { fullPaths: insightsFullPaths(view) })}`;
+  if (d.insightsError) return titled(SPEND_TITLE, html`<p class="warn">${d.insightsError}</p>`);
+  return html`<h2>${SPEND_TITLE}, ${insightsWindowLabel(view.query?.range ?? INSIGHTS_DEFAULT_RANGE)}</h2>${insightsBody(d.insights, view.now, { fullPaths: insightsFullPaths(view) })}`;
 }
 
 /** The flows the what-if form suggests: the window's flows from the fold, in the skill-name charset, sorted. */
@@ -1172,7 +1212,7 @@ export const fleetQueues = fromSnapshot("Queues", (s, view) => {
 
 export const fleetActive = fromSnapshot("Active jobs", (s, view) => activeTable(s, view.now, canAct(view)));
 
-export const fleetHeld = fromSnapshot("Held on a wait", (s, view) => {
+export const fleetHeld = fromSnapshot(HELD_LABEL, (s, view) => {
   const h = s.held;
   if (!h || h.unreachable) return html`<p class="warn">The held jobs could not be read.</p>`;
   const rows = Array.isArray(h.rows) ? h.rows : [];
@@ -1393,7 +1433,7 @@ function triggerNotes(t, bundles = null) {
 /** The triggers editor: a JSON entry to add (the add tool's fields), the edit tool's fields, and a delete by row. */
 function triggersEditor(view) {
   if (!canAct(view)) return null;
-  return editor("Change the triggers", html`${actForm("trigger-add", { fields: area("trigger", "New trigger, as the add tool's fields (JSON)", { type: "json", rows: 6, required: true, placeholder: '{"kind": "label", "labels": ["pi"], "flow": "triage"}' }), label: "Preview the add" })}${actForm("trigger-edit", { fields: html`${indexField()}${field("flow", "Flow", { required: true })}${field("backend", "Venue (optional)")}${field("provider", "Provider (optional)")}${field("model", "Model (optional)")}`, label: "Preview the edit" })}${actForm("trigger-delete", { fields: indexField(), label: "Preview the delete" })}`);
+  return editor("Change the triggers", html`${actForm("trigger-add", { fields: area("trigger", "New trigger, as the add tool's fields (JSON)", { type: "json", rows: 6, required: true, placeholder: '{"kind": "label", "labels": ["pi"], "flow": "triage"}' }), label: "Preview the add" })}${actForm("trigger-edit", { fields: html`${indexField()}${field("flow", "Flow", { required: true })}${field("backend", `${VENUE_LABEL} (optional)`)}${field("provider", "Provider (optional)")}${field("model", "Model (optional)")}`, label: "Preview the edit" })}${actForm("trigger-delete", { fields: indexField(), label: "Preview the delete" })}`);
 }
 
 export const configTriggers = fromSnapshot("Triggers", (s, view) => {

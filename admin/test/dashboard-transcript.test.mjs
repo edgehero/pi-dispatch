@@ -103,6 +103,19 @@ test("the end entry names the outcome, and the tail stops reading after it", { t
   assert.equal(s.calls.length, 1, "nothing is read after the end");
 });
 
+test("the ended line says the console's word for a refused run, never the record's policy (#710 round 2)", { timeout: 20_000 }, async () => {
+  const s = scripted({ start: { entries: [e("1-1", "user", "do it"), e("1-2", "end", null, { outcome: "policy" })], next: "1-2", ended: true, outcome: "policy" } });
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 15, deps: deps(s) });
+  await flush();
+  comp.handleInput("l");
+  await until(() => s.calls.length >= 1, "the first read");
+  await delay(120);
+  const out = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(out, /\(run ended: refused\)/);
+  assert.doesNotMatch(out, /policy/);
+});
+
 test("a run with no stream falls back to this host's .log, told the job's host", { timeout: 20_000 }, async () => {
   const s = scripted({}, { meta: { exists: false } });
   const logCalls = [];

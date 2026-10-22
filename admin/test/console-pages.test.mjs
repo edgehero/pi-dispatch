@@ -412,7 +412,7 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["insights.viewer"].html, /<ol id="graph-nodes" class="hidden-tips" hidden><li data-id="n0"/);
   assert.match(first["insights.viewer"].html, /<section id="p-whatif" data-panel><h2>What if<\/h2>/);
   assert.match(first["insights-whatif.viewer"].html, /<pre class="answer">What-if fix @ acme\/model-1:\n  estimate ~\$[\d.]+ est\. total · ~\$[\d.]+ est\. per run\n  coverage \d+% of observed runs ledgered/, "the estimate over the fixture's ledgered runs");
-  assert.match(first["insights-whatif.operator"].html, /<h2>Spend and insights, last 30d<\/h2>/, "a what-if keeps the page's default window");
+  assert.match(first["insights-whatif.operator"].html, /<h2>Spend, last 30d<\/h2>/, "a what-if keeps the page's default window");
   assert.doesNotMatch(first["insights.viewer"].html, /Show full local paths/, "a viewer is offered no paths toggle");
   assert.match(first["insights.operator"].html, /Show full local paths/, "an operator is");
   assert.match(first["config.viewer"].html, /\.\.\.\/site/, "a local folder is shown by its basename");
