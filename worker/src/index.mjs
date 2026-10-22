@@ -6,6 +6,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
 import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS, runJob } from "./processor.mjs";
+import { CANCELLED_BEFORE_START_COMMENT, SIZE_REFUSAL_COMMENTS } from "./comment-tables.mjs";
 import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
 import { earlierFrom, targetFor } from "./run-history.mjs";
@@ -1740,19 +1741,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
  */
 export const CANCEL_STOP_BOUND_MS = 1_000;
 
-/**
- * The forge comments for the two never-fits refusals (issue #596, phase 2). GENERIC on purpose: never the size, the
- * budget or the project, which are operator configuration an issue author can act on none of. The worker log, the run
- * record and doctor name both sizes. There is no fleet refusal (gate round 1 of phase 2): a job on the shared
- * queue waits for a host it fits on.
- */
-export const SIZE_REFUSAL_COMMENTS = Object.freeze({
-	"job-size-exceeds-host": "Refused: this job's size is larger than the worker host's job budget, so it could never start there. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise the host budget. Not run.",
-	"job-size-exceeds-share": "Refused: this job's size is larger than the share of the worker host's job budget its project may use, so it could never start there. No container was started and nothing was spent. Ask the operator to lower this project's job size or raise its host share. Not run.",
-});
-
-/** The comment for a job the operator cancelled before it started, where it would have been held or retried (gate of PR #479). */
-export const CANCELLED_BEFORE_START_COMMENT = "Stopped: the operator cancelled this run before it started. Nothing was spent. Not retried.";
+// The never-fits refusals' comments (SIZE_REFUSAL_COMMENTS, issue #596) and the cancelled-before-start one live in
+// comment-tables.mjs since issue #710, re-exported here under the names they always had.
+export { CANCELLED_BEFORE_START_COMMENT, SIZE_REFUSAL_COMMENTS };
 
 /**
  * Store the keeper starts a crash loop was seen at on the job (gate of PR #479), outside the hold's 30 s window, so a

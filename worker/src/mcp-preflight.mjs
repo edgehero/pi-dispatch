@@ -260,3 +260,12 @@ export const MCP_REFUSAL_COMMENT = Object.freeze({
 	"mcp-egress-unreachable": "the egress policy does not let a job reach that server",
 	"mcp-package-runner": "the egress policy does not let a job reach the registry that server is fetched from",
 });
+
+/**
+ * The whole public comment of an MCP refusal before starting: the server's NAME when the check named one (operator
+ * configuration, the same class as the image ref on the image refusals) and the reason's clause above. One function
+ * for the processor, which posts it, and the reason catalog (issue #710), which reads the nameless form as its sentence.
+ */
+export function mcpRefusalComment(refused, name) {
+	return `Refused: this trigger names MCP server${name ? ` "${name}"` : "s"} in \`run.mcp\`, and ${MCP_REFUSAL_COMMENT[refused] ?? "it cannot be used"}. The job would have run without the servers its flow was written against; the worker's log says why (\`refused_mcp\`). Not run.`;
+}

@@ -9,6 +9,7 @@ import { authRefusalFor, makeRedisClient, onValkeyError, parseConnection, valkey
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
 import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
+import { FAILED_COMMENT, FAILED_COMMENT_BY_REASON, RECOVERY_HOST_LOST_COMMENT } from "./comment-tables.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { githubFailureFields } from "./octokit-log.mjs";
@@ -64,7 +65,7 @@ import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-regi
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, hostBackendsField, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { makeOpenshellBackend, makeOpenshellReaper, openshellBootVersions } from "./backend-openshell.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
-import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
+import { makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
 import { piProviders, providerKeyCandidates, resolveProviderCredential } from "./env-allowlist.mjs";
@@ -2495,27 +2496,8 @@ export async function startWorker(
 	// another recovery returns `failed`/`recovery-failed` (the processor posts its own sentence), so it reaches the
 	// completed listener and never the failed one: without this it would be the only paid terminal that pages nobody.
 	const pagesAsReturnedFailure = (result) => Boolean(onFailure) && result?.outcome === "failed" && result.reason === "recovery-failed";
-	// The infra-terminal sentence (issue #288). FIXED, never err.message: the message classes that reach
-	// a failedReason carry host paths and library words (the #310 record), and for a local job this text
-	// lands verbatim in the service log through the adapter's stdout fallthrough. The worker log already
-	// holds the truncated reason on the job_failed line beside it.
-	const FAILED_COMMENT = "Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.";
-	// Issue #458 (PR #463 round 2): a job that never started because the podman venue's rootless network keeper did not
-	// hold says so, since the generic line sends an operator to a log that only says the job failed. Fixed text keyed by
-	// the fixed reason token, never the error's own words: a forge comment carries nothing a host read produced.
-	const FAILED_COMMENT_BY_REASON = Object.freeze({
-		// Neutral on the cause (PR #463 round 3): a keeper that is not running and a proxy that must restart after it both land here.
-		[NETNS_KEEPER_NOT_HOLDING]: "Failed before it started: this worker's rootless Podman egress proxy did not pass its pre-start check (its rootless network keeper, pi-dispatch-netns-keeper), so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker for the exact fix.",
-		// Issue #476: a job held on a young keeper that kept restarting while it waited.
-		[NETNS_KEEPER_CRASH_LOOP]: "Failed before it started: this worker's rootless network keeper (pi-dispatch-netns-keeper), which its Podman egress proxy needs, kept restarting while the job waited for it, so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker and read the keeper's log (`journalctl --user -u pi-dispatch-netns-keeper.service`).",
-		// Issue #448 (gate round 2 of PR #473): the hold's own ending, so the comment names the cause and the fix.
-		[PODMAN_RESTART_HOLD_EXPIRED]: "Failed before it started: rootful Podman's service on this worker kept running with a containers.conf older than its files (or a file's change time stayed ahead of the host's clock) for an hour, so the job was held and never run. Nothing was spent. Ask the operator to restart it while no local job runs (`sudo systemctl restart podman.service`), then run the job again.",
-	});
-
-	// Issue #645: a recovery that waited past its deadline for the host holding its run's checkpoint, taken back off the
-	// queue by the host-lost sweep. Fixed text, like every failure sentence here. It says what happened and what is lost
-	// (the work since the run's start is on that host, not gone), and sends the operator to the host, the one fix.
-	const RECOVERY_HOST_LOST_COMMENT = "Failed: this run stopped on a worker that has not come back, and its checkpoint lives on that worker, so it could not be continued and will not be retried further. Ask the operator to check that worker, then run the job again.";
+	// The infra-terminal sentences (FAILED_COMMENT, FAILED_COMMENT_BY_REASON, issue #288) and the host-lost one
+	// (RECOVERY_HOST_LOST_COMMENT, issue #645) are module constants in comment-tables.mjs since issue #710, with why each is fixed.
 	// Fleet-wide, on every host: whichever host's sweep claims a due recovery first tells its run. The record says it too,
 	// so the panel's history shows the run ended rather than a recovery that vanished.
 	const sweepHostLost = makeHostLostSweepFn({

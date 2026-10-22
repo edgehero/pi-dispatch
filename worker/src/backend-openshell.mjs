@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { isJobNamespace, jobContainerName, JOB_NAME_PREFIX, reaperExec } from "./backend-local.mjs";
 import { FORGES } from "./forges.mjs";
 import { NON_SECRET_ENV_KEYS } from "./redact-secrets.mjs";
-import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND, OPENSHELL_BIND_LINGERING } from "./backends.mjs";
+import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
 import { BUNDLE_ENV_FILE_CAPABILITY, makeImagePreflight, normalizeImageId, resolveJobImage } from "./image-preflight.mjs";
 import { LAYOUTS } from "./job-layout.mjs";
@@ -18,6 +18,7 @@ import { bindProbeArgs, driverConfigFor, judgeBindAnswer, judgeGatewayStatus, ju
 export { judgePtraceScope, PTRACE_SCOPE_PATH };
 import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { makeRunContainer } from "./run-container.mjs";
+import { OPENSHELL_REFUSALS } from "./comment-tables.mjs";
 
 /**
  * The `openshell` venue (issue #683, `DES-OPENSHELL-VENUE`): one NVIDIA OpenShell sandbox per job, on a gateway this
@@ -789,38 +790,9 @@ export function credentialReadsValue(provider, hostEnv = {}) {
 	return typeof hostEnv?.ANTHROPIC_API_KEY === "string" && hostEnv.ANTHROPIC_API_KEY.includes("sk-ant-oat");
 }
 
-/**
- * The fixed comments of this venue's own refusals, by reason. Fixed text, so nothing the gateway said reaches a forge
- * comment; the evidence goes to the operator's log.
- */
-export const OPENSHELL_REFUSALS = Object.freeze({
-	"openshell-gateway-not-local": "Refused: this job's venue is an OpenShell gateway that is not observed on this host, and the venue holds the job's credentials in that gateway, so it runs only on a gateway this deployment runs itself. Not run.",
-	"openshell-global-policy": "Refused: the OpenShell gateway has a gateway-wide policy in force, which would replace the policy the worker generates for this job. Not run.",
-	"openshell-landlock-missing": "Refused: this host's kernel does not offer Landlock, which the OpenShell venue needs to confine the job's sandbox and to keep its inputs read-only. Not run.",
-	"openshell-recover-unsupported": "Refused: this trigger asks for runs that continue after a lost worker, which the OpenShell venue cannot checkpoint yet. Run it on another venue, or without run.recover. Not run.",
-	"openshell-credential-reads-value": "Refused: this job's model provider reads its credential's value inside the job (to sign requests, pick an auth scheme or decode it), and on the OpenShell venue the job sees only a placeholder for it. Run it on another venue, or with a provider whose key is sent as it is. Not run.",
-	"openshell-gateway-untested": "Refused: the OpenShell gateway runs another release than the one this venue was measured on. Not run.",
-	// Issue #730: the key holders run readable here, so what keeps a job's tools from the key in their memory is three
-	// things: OpenShell's workload seccomp (process_vm_readv, ptrace, pidfd_getfd), Yama for /proc/<pid>/mem, and the
-	// entrypoint's ulimit -c 0 for a core. The setting goes to the operator's log.
-	"openshell-ptrace-scope-unprotected": "Refused: this host's kernel does not stop a process from reading the memory of the process that started it (Yama ptrace_scope is 0, or cannot be read here), and on the OpenShell venue that is what keeps the job's own tools away from the key that signs its result. Set kernel.yama.ptrace_scope to 1 on this host. Not run.",
-	// Issue #730: scope 2 or 3 also denies the broker its read of the workload (ATTACH is admin-only), so a job would reserve and then fail. The setting goes to the operator's log.
-	"openshell-ptrace-scope-too-strict": "Refused: this host's kernel allows a process to read another's memory only for an administrator (Yama ptrace_scope is 2 or 3), which also stops the OpenShell sandbox from observing the job well enough to let it reach the network, so the job would start and then fail. Set kernel.yama.ptrace_scope to exactly 1 on this host. Not run.",
-	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
-	// Issue #686 part 3, review round 2 of #714: the bind venue's named result for a sandbox not confirmed gone (backends.mjs).
-	[OPENSHELL_BIND_LINGERING.reason]: OPENSHELL_BIND_LINGERING.comment,
-	// Issue #704 part 3: a project secret bundle this venue cannot hold as declared (`judgeBundle` says why for each), each
-	// refused before the sandbox exists and before spend. The variable's name and the host go to the operator's log
-	// (`refused_openshell_bundle`), never to a forge comment: a bundle's names are its manager's contents.
-	"openshell-bundle-endpoint-not-allowed": "Refused: this job's project has a secret bundle whose endpoints name a host the job's network policy does not admit by that exact name, and a bundle may not widen what the job reaches. Add the host to egress-allowlist.conf (as itself, not under a wildcard entry), or remove it from the bundle's endpoints. Not run.",
-	"openshell-bundle-endpoint-shared": "Refused: this job's project has a secret bundle whose endpoints name a host the job's own forge, model or MCP credentials are sent to, and on the OpenShell venue a host is bound to one credential provider, so the job's own would stop working there. Remove that host from the bundle's endpoints. Not run.",
-	"openshell-bundle-endpoint-unknown": "Refused: this job's project has a secret bundle whose endpoints name a variable the bundle's resolver did not deliver, so a variable meant to be held as a placeholder could be missing or reach the agent as a value. Fix the name in the bundle's endpoints, or add the variable in the manager. Not run.",
-	"openshell-bundle-name-taken": "Refused: this job's project has a secret bundle with a variable the OpenShell sandbox already sets itself, so one of the two would be silently lost. Rename the variable in the manager. Not run.",
-	"openshell-bundle-unpassable": "Refused: this job's project has a secret bundle with a variable the OpenShell venue cannot hold as a placeholder (a value over 8 KiB, or more endpoint variables or hosts than a sandbox's providers hold). Run the project on another venue, or change the bundle's endpoints. Not run.",
-	"openshell-bundle-image-too-old": "Refused: this job's project has a secret bundle whose variables reach the job as values, and on the OpenShell venue they reach it by a file only a newer job image reads, so this image would run the job without them. Rebuild the job image from a version that declares bundleEnvFile. Not run.",
-	// Issue #686 part 3, bind mode only. The setting goes to the operator's log (`openshell_bind_mounts_disabled`).
-	"openshell-bind-mounts-disabled": "Refused: this job's venue mounts its files into an OpenShell sandbox, and the OpenShell gateway is not configured to allow that (its gateway.toml must allow driver config and bind mounts, and turn resource admission off), so the operator must change it before jobs run there. Not run.",
-});
+// The fixed comments of this venue's own refusals (OPENSHELL_REFUSALS) live in comment-tables.mjs since issue #710, so the
+// reason catalog reads them without this adapter; re-exported here under the name they always had.
+export { OPENSHELL_REFUSALS };
 
 /**
  * How long a bind-settings answer is kept (issue #686 part 3), per bundle and so per gateway: an admitting one ten

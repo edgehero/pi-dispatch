@@ -114,6 +114,7 @@
     "./runtime-settings": "./src/runtime-settings.mjs",
     "./secret-profiles": "./src/secret-profiles.mjs",
     "./run-history": "./src/run-history.mjs",
+    "./reason-catalog": "./src/reason-catalog.mjs",
     "./run-mirror": "./src/run-mirror.mjs",
     "./run-budget-ledger": "./src/run-budget-ledger.mjs",
     "./recovery-queue": "./src/recovery-queue.mjs",

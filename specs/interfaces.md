@@ -6130,6 +6130,9 @@ validator rather than a second copy of it.
   free-form and never payload text — and `turns` is `null` when the container died before emitting the
   runner `exit` line. `turns` is the BUDGETED count: the exit line's `retryTurns` (pi's own auto-retry
   turns, issue #449) is deliberately not recovered into the record (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
+  Every token of the `reason` enum, and of the nested `session.reason`, `recoverSkipped` and `plan.reason` enums, has a
+  fixed sentence and next step in `INT-REASON-CATALOG` (issue #710), each held to its enum both ways by a test (this line, for
+  `reason`).
 
   **A container exit `2` records `runner-policy` unless the runner named a reason the worker keeps**
   (issue #437). Eleven such reasons: `provider-auth-refused`, the provider refused the credential (a 401/403,
@@ -6437,6 +6440,73 @@ validator rather than a second copy of it.
   recreated, or one a pruning reader emptied, while a start from before stayed, then that start is not trusted and the
   next write replaces it with the index's oldest run; given a pruning reader that removes runs whose bodies expired,
   then `runs:horizon` holds the newest of them.
+
+## INT-REASON-CATALOG
+
+**worker → operator console and `/dispatch` panel (issue #710).**
+
+- **Contract**: one explanation per reason a run record can carry, exported by the worker as
+  `@edgehero/pi-dispatch/reason-catalog` (`worker/src/reason-catalog.mjs`):
+  ```
+  REASONS:              { "<token>": { sentence, next, anchor } }   // every token of INT-RUN-HISTORY-FILE-CONTRACT's `reason` enum
+  SESSION_REASON_TEXT:  { "<token>": { sentence, next, anchor } }   // `session.reason`, SESSION_REASONS
+  RECOVER_SKIPPED_TEXT: { "<token>": { sentence, next, anchor } }   // `recoverSkipped`, RECOVER_SKIPPED_REASONS
+  PLAN_REASON_TEXT:     { "<token>": { sentence, next, anchor } }   // `plan.reason`, PLAN_RECORD_REASONS
+  BUNDLE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, LIVE_SKIPPED_TEXT: { "<token>": "<clause>" }   // `bundleSkipped`, `steerSkipped`, `liveSkipped`
+  explainReason(token, { why, field }) -> { known: true, token, sentence, next, anchor } | { known: false }
+  ```
+  `sentence` says what happened, `next` what to do, `anchor` is `docs/reasons.md#<token>` for a top-level reason and the
+  nested enum's section (`#session-reasons`, `#recovery-skipped-reasons`, `#plan-reasons`) for the others. Every string
+  is FIXED: none takes a record value, none holds a control byte, so the catalog adds no record text to any surface
+  (`REQ-CONSOLE-SECURITY` is unchanged by it; the console still escapes everything it renders). `explainReason` answers
+  `{ known: false }` for anything that is not an own key of the table (a newer worker's token, a non-string,
+  `__proto__`) and never throws, for any token and any options (absent, `null`, a non-object, which reads as none, or
+  one whose getter throws, which answers `{ known: false }`); the caller shows such a token as it is. `field` (`session.reason`, `recoverSkipped`,
+  `plan.reason`) reads a nested table instead of `REASONS`. `why` picks a variant only where the comment table is keyed
+  by it: `model-unknown` with a `why` starting `overlay-` (the overlay refusal's comment), `model-not-allowed` with
+  `fallback-unlisted`; any other `why` keeps the reason's sentence. The three skip tables are clauses (the surfaces print
+  them after the token) and moved here from `admin/src/read-model.mjs`, which re-exports them unchanged.
+- **Built from the forge comments, never copied.** Where the worker posts a fixed comment for a reason, that comment is
+  the reason's `sentence`, read from the table the call site posts from. Those tables live in
+  `worker/src/comment-tables.mjs`, a leaf that imports only reason constants from `backends.mjs` and `run-history.mjs`:
+  importing the processor, the pickup gate (`index.mjs`), the wiring (`start.mjs`) or the OpenShell adapter would put the
+  job path (pi-ai's provider tables, a BullMQ worker, every forge client) into both admin bundles. Each of those modules
+  imports its tables from the leaf and re-exports them under the names they always had. The MCP pickup refusals are the
+  one template read: `mcpRefusalComment(reason, null)` in `mcp-preflight.mjs`, the processor's own comment without a
+  server name. The catalog writes a general sentence for a reason whose comment carries runtime values (a wait profile,
+  an image ref, a cap's numbers), for one that posts no comment, and for the eight a record cannot tell apart, each
+  posted by two or more paths with different comments and no `why` saying which: `model-not-allowed` (the pickup and
+  the runner), `mcp-config-invalid` (the pickup and the runner), `secret-name-reserved` (`run.secrets` and a bundle),
+  `operator-cancel` (a cancel while running, and one before the start, which posts `CANCELLED_BEFORE_START_COMMENT`),
+  `awaiting-input` (an issue's park, a pull request's, whose reply starts with the comment phrase, and a held reply
+  already taken), `job-user-unmappable` (`JOB_USER_COMMENTS`, keyed by a cause the record does not carry),
+  `envelope-mismatch` (`ENVELOPE_MISMATCH_COMMENTS`, keyed by its cause: no envelope, or a different one) and
+  `podman-conf-widens-job` (`PODMAN_CONF_COMMENTS`, keyed by the source and the finding). A table keyed by a cause is
+  classified by the reason it serves, and that reason is one of these eight, its general sentence none of the table's
+  rows but a row a `why` picks (`MODEL_NOT_ALLOWED_COMMENTS`' `fallback-unlisted`).
+  `next` is always the catalog's own. A token twice in any of the catalog's tables is an error when the module loads,
+  never a silent override.
+- **Forge comment text is UNCHANGED.** The processor's fixed inline comment literals moved into named tables in the
+  leaf (`REFUSAL_COMMENTS`, `MODEL_NOT_ALLOWED_COMMENTS`, `ENVELOPE_MISMATCH_COMMENTS`, `PODMAN_CONF_COMMENTS`,
+  `VENUE_REFUSED_COMMENT`, `VENUE_BUNDLE_REFUSED_COMMENT`), and every call site posts the table's entry, so each comment
+  is byte-identical to what it was; the existing comment tests pass with their assertions untouched. A comment that
+  carries a runtime value stays a template at its call site.
+- **Bolts** (`worker/test/reason-catalog.test.mjs`): `REASONS`' keys are the record enum, both ways, parsed by the one
+  shared parser `worker/test/helpers/spec-enum.mjs` (bare tokens: the leading space and the trailing `...` dropped);
+  each nested table's keys are its enum, both ways, against `run-history.mjs` and against the record shape's own nested
+  enums (`session.reason`, `plan.reason`, `recoverSkipped`), parsed by the same helper; every sentence and next step is
+  non-empty and fixed; the checked comment tables are DERIVED, every plain-object export of the leaf: one whose keys
+  are all reason tokens is a catalog source and each row is that reason's sentence (identical), one keyed by a cause or
+  a `why` is named as such and may hold no reason token, and one whose keys collide with reason tokens but mean
+  something else must be excluded by name with its reason; each ambiguous reason names the two or more comments its
+  paths post, every reason-keyed row for it is among them, and its sentence is none of them; the other derived entries
+  are pinned to their sources by name; a repeated token fails the module load; `explainReason` is held to never
+  throwing on a grid of hostile tokens and options; the `###`
+  headings of `docs/reasons.md` are exactly the record enum, and its nested tables exactly their enums under the
+  headings the anchors name; and the processor holds no double-quoted `Refused:`, `Stopped:` or `Failed:` literal.
+- **Consumers**: none yet in this PR; the console and the panel read it from #710's later parts.
+- **Location**: worker/src/reason-catalog.mjs -> REASONS, explainReason, and the nested tables;
+  worker/src/comment-tables.mjs -> the comment tables it reads.
 
 ## INT-CAPACITY-REPORT
 
@@ -10958,3 +11028,6 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
 | 2026-10-22 (#730) | Issue #730: a readable runner on the OpenShell venues, gated on Yama. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the exit-key protection paragraph gains the OpenShell case (the runner is readable there, since the sandbox's broker reads its memory; the key is kept by OpenShell's workload seccomp for `process_vm_readv`/`ptrace`/`pidfd_getfd` and by Yama for `/proc/<pid>/mem`, the worker refusing the venue before spend below `ptrace_scope` 1; a tool can reopen the dumpable supervisor's fd-0 steer-frame pipe and drop/delay/break frames, never forge one, never read the key; the environ holds only placeholders), and the `exitAuth` capability description names the readable `runner-observable` with the same flags. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: a dated bullet for the `observableRunner` capability, `PI_RUNNER_OBSERVABLE=1` (reserved, non-secret), the 0755 same-bytes copy at `/opt/pi-dispatch/runner-observable`, the net-binaries entry, the `openshell-ptrace-scope-unprotected` and `job-image-observable-runner-unsupported` pre-spend refusals, and the image-release obligation. **UNCHANGED, checked**: `INT-STEER-INBOX-CONTRACT` (frames still MAC'd under the key; the fd-0 residual is weaker than the read-only mount, as already stated), `INT-EGRESS-POLICY-CONTRACT` (the policy now lists `runner-observable` beside `runner-node`, no rule changes), `INT-CONTAINER-RUNTIME-CONTRACT` (the readable node is the entrypoint's choice, no flag added). **Code evidence**: image/Dockerfile, image/entrypoint.sh, image/verify-image.sh, image/runner/src/supervise.mjs, worker/src/backend-openshell.mjs, worker/src/openshell-cli.mjs -> judgePtraceScope, worker/src/openshell-policy.mjs, worker/src/image-preflight.mjs, worker/src/env-allowlist.mjs, worker/src/reserved-env.mjs, worker/src/doctor-openshell.mjs. |
 | 2026-10-22 (#730, review round 1) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the OpenShell exit-key protection now names THREE properties beside the readable runner: the sandbox's workload seccomp, Yama for `/proc/<pid>/mem` with the worker refusing before spend unless `ptrace_scope` is EXACTLY 1 (`openshell-ptrace-scope-unprotected` at 0 or unreadable, NEW `openshell-ptrace-scope-too-strict` at 2 or 3, added to the record reason enum), and `ulimit -c 0` in the entrypoint so a tool's `SIGABRT` of a holder drops no core carrying the key (a pipe `core_pattern` goes to a host-root handler outside the sandbox, and the hard 0 writes none anyway); and that a tool may reopen a holder's fd 0, 1 and 2 (a fd link needs `PTRACE_MODE_READ`, not `ATTACH`) and break or garble the frame stream or the exit-line read, never forge a signed line without the key. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the readable copy is 0755 installed and 0555 at runtime, the `ulimit -c 0` and the exact-1 Yama rule stated. **Code evidence**: image/entrypoint.sh, image/verify-image.sh -> core_limit_probe, worker/src/openshell-cli.mjs -> judgePtraceScope, worker/src/backend-openshell.mjs, worker/src/doctor-openshell.mjs, .github/scripts/openshell-keyguard-judge.mjs. |
 | 2026-10-22 (#730, review round 2) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**, wording only: OpenShell's workload seccomp already refuses `prlimit64` on another pid (the entrypoint's `ulimit -c 0` stays, the default soft limit being unknown); a `SIGABRT` between the job's own processes is the route the core limit closes; a file `core_pattern` writes nothing and a pipe one goes to a host-root handler outside the sandbox. The three properties and both refusals UNCHANGED, checked. |
+| 2026-10-22 (#710) | Issue #710, PR 1: the reason catalog. **NEW `INT-REASON-CATALOG`**: `@edgehero/pi-dispatch/reason-catalog` gives every token of the record's `reason` enum a fixed `{ sentence, next, anchor }`, and the nested `session.reason`, `recoverSkipped` and `plan.reason` enums the same shape; `explainReason(token, { why, field })` answers `{ known: false }` for anything that is not an own key; the `bundleSkipped`, `steerSkipped` and `liveSkipped` clauses moved from `admin/src/read-model.mjs` (re-exported there unchanged). Each sentence is the worker's own forge comment wherever that comment is fixed, read from the table the call site posts from, now in the leaf `worker/src/comment-tables.mjs` (the processor's, the pickup gate's, the wiring's and the OpenShell adapter's tables, each re-exported under its old name); the catalog writes a general sentence only for templated comments, silent reasons and the three reasons two paths share (`model-not-allowed`, `mcp-config-invalid`, `secret-name-reserved`). Forge comment text is UNCHANGED, checked: the processor's 19 fixed inline literals moved into named tables its call sites post from, and the comment tests pass with their assertions untouched. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, a pointer only: its `reason` enum names the catalog as where each token is explained; the enum itself is UNCHANGED. `REQ-CONSOLE-SECURITY` is UNCHANGED, checked: every catalog string is fixed and holds no record text or control byte, so nothing new reaches a list row, and (l)'s rule that only the closed `reason` enum goes inline is untouched. No console or panel change yet (later parts of #710). |
+| 2026-10-22 (#710, round 1) | Issue #710, PR 1, review round 1. **`INT-REASON-CATALOG` CORRECTED**: three more reasons are ambiguous and get a general sentence instead of one path's comment: `operator-cancel` (a cancel before the start posts `CANCELLED_BEFORE_START_COMMENT`, "Nothing was spent", under the same token, so "Partial work may exist" was wrong for it), `awaiting-input` (a pull request's park asks for the comment phrase, and a held reply already taken asks for nothing; the next step now says the phrase) and `job-user-unmappable` (its comments are keyed by a cause the record does not carry, `runtime-unreadable` among them). Next steps widened to their causes: `model-not-allowed` names a changed request and the job log, as the runner's stops do; `plan.reason` `plan-busy` names an operator revert, which takes the same lock. `explainReason` never throws for any options (`null` and non-objects read as none; a throwing getter answers `{ known: false }`), and a repeated token in a catalog table fails the module load instead of overriding. Bolts tightened: the checked comment tables are every plain-object export of the leaf, each classified as reason-keyed (a source) or cause-keyed (named), with an excluded-by-name list for a colliding table (empty); each ambiguous reason names its comments; the nested `session.reason`, `plan.reason` and `recoverSkipped` tables are held to the record shape's own enums, parsed by `worker/test/helpers/spec-enum.mjs`. Forge comment text is UNCHANGED, checked: no comment table moved a byte. `INT-RUN-HISTORY-FILE-CONTRACT` is UNCHANGED, checked: its enums are read, not edited. `REQ-CONSOLE-SECURITY` is UNCHANGED, checked: every catalog string is still fixed. |
+| 2026-10-22 (#710, round 2) | Issue #710, PR 1, review round 2. **`INT-REASON-CATALOG` CORRECTED**: two more reasons are ambiguous, making eight: `envelope-mismatch` (`ENVELOPE_MISMATCH_COMMENTS` is keyed by its cause, no envelope or a different one) and `podman-conf-widens-job` (`PODMAN_CONF_COMMENTS` is keyed by the source and the finding), both recorded with no cause, as `job-user-unmappable` is. Their catalog sentences were already general; the test now holds it: each cause-keyed table names the reason it serves, that reason must be ambiguous, and its named comments must cover every row of the table but a row a `why` picks (`MODEL_NOT_ALLOWED_COMMENTS`' `fallback-unlisted`, held to `WHY_VARIANTS`). `job-user-unmappable`'s next step names its causes as examples, the primary-group ones among them, not as a full list. The repeated-token guard is tested on each catalog table (the top-level one and the three nested ones), not only the first. Forge comment text is UNCHANGED, checked: `comment-tables.mjs` is untouched. `INT-RUN-HISTORY-FILE-CONTRACT` is UNCHANGED, checked: no enum edited. `REQ-CONSOLE-SECURITY` is UNCHANGED, checked: every catalog string is still fixed. |
