@@ -295,7 +295,7 @@ console.
 |---|---|
 | `/` | The overview: whether the fleet is paused, the queue counts, the hosts online and how long ago each last checked in, today's spend against the caps, how many runs are waiting for an answer (and how many of those are being answered now), and the failures of the last 24 hours. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. The Outcome column says completed, refused, failed, awaiting input or cancelled, amber for refused, awaiting input and cancelled and red for failed. A refused or failed run also names its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). |
-| `/run?id=<job id>` | One run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
+| `/run?id=<job id>` | One run, led by its **Outcome**: the outcome word, what the reason means, what to do about it, and a link to the reason's entry in [reasons.md](reasons.md) on GitHub ([The run page's outcome](#the-run-pages-outcome)). Then the run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget, running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
@@ -358,6 +358,32 @@ An operator can answer an issue's parked run from this page ([Answering a parked
 is the worker's own message, trimmed and cleaned, but it can still carry a fragment of something a job touched, so
 only the operator role sees it, on the fleet page, in a "Why each failed" element below the failed jobs that you
 open per job, never in a list row.
+
+### The run page's outcome
+
+A run's page starts with an **Outcome** panel, the same for a viewer and an operator: the outcome word (completed,
+refused, failed, awaiting input or cancelled, in its colour), the reason's whole explanation from the reason catalog,
+**What to do**, and a link to the reason's heading in [reasons.md](reasons.md) on the repository's GitHub page (the
+console serves no docs of its own, and the link goes to `main`, which holds every reason a released worker can write).
+Where the record's detail (`why`) says which of a reason's messages the worker posted, the panel says that one. A
+reason this console does not know (from a newer worker) is shown as its word with "no explanation yet", and an
+outcome word it does not know is shown as it is, cut at 64 characters.
+
+When the page has no record to show, the Outcome panel says why, once: the id is not a run id, the run is still going
+(a record is written when a run ends), the job is queued, the job ended but its record is on another host with no run
+mirror, or no such run is known. The record's panels are then left out rather than each saying the same thing. A
+queued or running job's sentence is a grey note (nothing is wrong, the record comes at its end); the others are
+amber. A queued job's page has no live transcript section either: reload once it runs, and the section is there.
+
+For a run waiting for an answer, **What to do** names answering from the console only where the page's Chat panel can
+take the answer; when it cannot (for example, the queue no longer holds the job's data), it says to reply on the issue
+or pull request instead.
+
+A run **refused before it started** (refused, with no tokens, no exit code and no budget slot held, which is what most
+refusals before any spend write) never had a container, so its page has no Progress, Chat or live transcript section.
+
+The Session and plan panel and the Recovery row say what their words mean too: `fresh (absent): No saved conversation:
+...`, the plan's reason with its sentence, and `recovery skipped (local): A folder job is never recovered, ...`.
 
 ### Doctor results
 
@@ -578,7 +604,14 @@ Re-run on a run's page queues the same work again:
   another flow, the re-run is refused: start it again from the forge.
 
 A run whose data has expired, a `/command` run, and an answer to a parked run (answer the parked run again instead)
-are refused by name. The same issue and flow run or queued within the last 10 minutes take a forge re-run as a
+are refused by name. The run's page offers the re-run only where these checks pass: for a run that cannot be re-run
+for one of them, or for a kind the console cannot re-run, the page says "Not offered for a re-run:" and the reason, in
+the same words the preview would give. The page asks the queue for the run's data at most every 15 seconds; when it
+cannot, it judges from the record alone, and then only says the data is gone once the run ended more than 8 days ago (a local run:
+a week and a day) or 31 days and a day ago (a forge run, or a recovery of either kind). It looks in the same queues the
+preview does, including the queue of a host that has stopped and left the host registry; when the registry or the
+list of queues cannot be read, it does not conclude the data is gone, and judges from the record alone. The rest (the triggers file, the folder, the trigger now) is
+checked when you press it, as before. The same issue and flow run or queued within the last 10 minutes take a forge re-run as a
 duplicate, and a local or scheduled re-run within the same minute likewise; the console says so and nothing is
 queued.
 
@@ -628,7 +661,14 @@ read the panel says so rather than guess.
 A run's page shows the command that reopens its sandbox, `pi-dispatch sandbox <job id>`, to copy and run in a shell on
 the host that ran the job. Only for a run whose venue has a sandbox shell (`local` and `podman`): an `openshell` run says "Its workspace is not
 reopenable (openshell has no sandbox shell)" instead, and an `openshell-bind` run "Its workspace is not reopenable
-(openshell-bind has no sandbox shell)", the words the panel's sandbox pane uses. The console never opens a shell or starts a container itself: a terminal in the browser
+(openshell-bind has no sandbox shell)", the words the panel's sandbox pane uses. A run refused before it started has
+no workspace, and says so. For a run of the console's own host, the page also reads the run's sandbox manifest, as the
+panel's sandbox pane does, at most every 15 seconds: a workspace that was swept, never kept (retention off), moved or
+belongs to another run says so instead of the command, and one past its retention window gets the command with
+`--pin`. For a run of another host the console cannot see the manifest, so it shows the command and the CLI on that
+host decides. The console also never decides which venues your shell may open: that is the `PI_BACKENDS` of the shell
+you run the command in, which the console does not read, so a `podman` run always gets its command and
+`pi-dispatch sandbox` refuses it there, by name, if that shell does not bless `podman`. The console never opens a shell or starts a container itself: a terminal in the browser
 would put an interactive shell one stolen session away from anyone.
 
 ## Live updates

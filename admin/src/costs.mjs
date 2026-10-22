@@ -219,7 +219,7 @@ function floorCounted(tokens) {
  * apart would mean keying on the reason, a list every new gate would have to join; a fact the record states itself
  * would be the way to count them as $0.
  */
-function refusedBeforeSpend(record) {
+export function refusedBeforeSpend(record) {
   return (record.tokens === null || record.tokens === undefined) && (record.exitCode === null || record.exitCode === undefined) && record.budgetReserved === false;
 }
 

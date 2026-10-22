@@ -469,6 +469,70 @@ function currentTriggerFor(entries, kind, data) {
   return { run };
 }
 
+/** What a re-run says of a run id outside the run-id charset: the planner's first refusal, and `rerunRefusalOf`'s. */
+export const RERUN_BAD_ID = "a run id is letters, digits and . _ : -, at most 200 characters";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long the queue keeps a finished job's data, by kind, at the LONGEST it can (queue.mjs: a local job's
+ * `removeOnComplete` is 24 hours and its `removeOnFail` 7 days; a forge job's, and a recovery job's, 31 days either way).
+ * The record does not say which of BullMQ's two ends a local job met (a policy refusal or a failure the worker returned
+ * is BullMQ's "completed", a thrown one its "failed"), so a record alone may only infer the data gone past the longer.
+ * A recovery job (a record with `recoveryOf`, `<runId>.r<n>`) is kept 31 days whatever its kind (recovery-queue.mjs
+ * adds it with the forge jobs' retention), so a local run's recovery is judged by that window, not the local one.
+ */
+export const RERUN_DATA_KEPT_MS = Object.freeze({ local: 7 * DAY_MS, forge: 31 * DAY_MS, recovery: 31 * DAY_MS });
+
+/**
+ * The slack past `RERUN_DATA_KEPT_MS` before a record alone says the data is gone. The window runs from BullMQ's
+ * `finishedOn`, and the record's `endedAt` can be earlier: the record of an attempt a later attempt retried without
+ * writing its own (last-write-wins), or another host's clock. BullMQ also removes by age only when a later job finishes,
+ * so data can outlive its window on a quiet queue; a day is room for both. Too little slack would hide a re-run that
+ * works; too much only shows a form whose click refuses, which the planner then says.
+ */
+export const RERUN_KEPT_SLACK_MS = DAY_MS;
+
+/**
+ * The re-run refusals that need neither git nor the triggers file (issue #710): what the console's run page asks to
+ * decide whether to offer the re-run form at all, and what `planRerun` asks FIRST, so the two cannot disagree. Pure.
+ * `record` is the run record (its `jobId` and `kind`, and `endedAt` for the inference below); `now` the instant in
+ * millis; `data` the retained job's data as the queue holds it: an object, `null` when the queue holds none, or
+ * `undefined` when it was not read. Returns the refusal sentence, byte for byte the planner's, or null.
+ *
+ * In the planner's order:
+ *   - a run id outside the run-id charset;
+ *   - a cron run (`repeat:`/`manual:` ids) is rebuilt from its trigger, never from data, so nothing here refuses it;
+ *   - the data gone: `data === null`, or, NOT READ, a record that ended longer ago than its kind's longest retention
+ *     (`RERUN_DATA_KEPT_MS` plus `RERUN_KEPT_SLACK_MS`; a recovery record's is 31 days), which is the one refusal a
+ *     record alone can make;
+ *   - a `/command` run, and a forge run that answered a parked run (both facts of the data, which the record does not
+ *     carry: unread data refuses neither);
+ *   - a kind the console cannot re-run (judged on the data's kind, the planner's, so only with the data read).
+ * Everything after (a local folder's rule, the cron trigger, the forge trigger now, a replica) is the planner's alone.
+ */
+export function rerunRefusalOf(record, now, data) {
+  const jobId = record?.jobId;
+  if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return RERUN_BAD_ID;
+  const kind = typeof data?.kind === "string" ? data.kind : record.kind;
+  if (kind === "local" && cronTriggerId(jobId) !== null) return null;
+  const forge = isForgeKind(kind);
+  const ended = typeof record.endedAt === "string" ? Date.parse(record.endedAt) : Number.NaN;
+  const recovery = typeof record.recoveryOf === "string" && record.recoveryOf !== "";
+  const windowed = kind === "local" || forge;
+  const keptMs = !windowed ? null : recovery ? RERUN_DATA_KEPT_MS.recovery : kind === "local" ? RERUN_DATA_KEPT_MS.local : RERUN_DATA_KEPT_MS.forge;
+  const inferredGone = data === undefined && keptMs !== null && Number.isFinite(ended) && Number.isFinite(now) && now - ended > keptMs + RERUN_KEPT_SLACK_MS;
+  if (data === null || inferredGone) {
+    const kept = recovery ? "a recovery job's data is kept 31 days" : kind === "local" ? "a local job's data is kept 24 hours after it completes and 7 days after it fails" : "a forge job's data is kept 31 days";
+    return `the queue no longer holds ${jobId}'s data (${kept}), and the run record cannot rebuild it, so it cannot be re-run from here`;
+  }
+  if (data === undefined || data === null || typeof data !== "object") return null;
+  if (data.command !== undefined) return `${jobId} ran the command /${data.command}, and a /command run is not re-run from the console; it runs from its reviewed trigger`;
+  if (kind === "local") return null;
+  if (forge) return data.parkedReply === true ? `${jobId} answered a parked run; answer the parked run again from the parked inbox instead of re-running the answer` : null;
+  return `${jobId} is a ${String(kind)} run, which the console cannot re-run`;
+}
+
 /**
  * Plan a RE-RUN of a finished run (issue #642). Free: reads the run record, the retained BullMQ job and the triggers
  * file, writes nothing. `{ plan }` or `{ refusal }`.
@@ -489,7 +553,9 @@ function currentTriggerFor(entries, kind, data) {
  *     wait profile needs one).
  *
  * Refused by name: no record, data expired, a `/command` run (commands run only from their reviewed trigger), an answer
- * to a parked run (answer the parked run again instead), and whatever the original path refuses. The 10-minute
+ * to a parked run (answer the parked run again instead), and whatever the original path refuses. The cheap ones of these
+ * (the id, the data gone, a `/command`, a parked answer, an unsupported kind) are `rerunRefusalOf`'s, asked first (issue
+ * #710), which is also what the console's run page asks before it offers the form. The 10-minute
  * semantic window can still swallow a forge re-run; only the enqueue can tell, so `enqueueRerun` reports it.
  *
  * `plan`: `{ kind: "local" | "cron" | "forge", jobId (the run re-run), queue, job (the data to enqueue), reserve,
@@ -516,8 +582,9 @@ export async function planRerun({
   random = randomBytes,
   fs = nodeFs,
   timeoutMs = 2500,
+  now = Date.now,
 } = {}) {
-  if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: "a run id is letters, digits and . _ : -, at most 200 characters" };
+  if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: RERUN_BAD_ID };
   let redis = null;
   let fleet = null;
   try {
@@ -531,6 +598,11 @@ export async function planRerun({
     const data = found?.job?.data ?? null;
     const kind = typeof data?.kind === "string" ? data.kind : record.kind;
     const reserveOf = (jobData) => estimateReserve(jobData, { overlay, env, modelEndpoints, builtinModel });
+    // Issue #710: the cheap refusals first, through the very function the run page asks before it offers the form, so
+    // the page never offers a re-run this refuses on the record and the data alone, and never hides one this would plan.
+    // The record under the id asked for, so each sentence names it as before.
+    const cheap = rerunRefusalOf({ ...record, jobId }, now(), data);
+    if (cheap !== null) return { refusal: cheap };
 
     const triggerId = kind === "local" ? cronTriggerId(jobId) : null;
     if (triggerId !== null) {
@@ -549,12 +621,6 @@ export async function planRerun({
       return { plan: { kind: "cron", jobId, queue: localQueueName(env), schedule, job: schedule.data, reserve: reserveOf(schedule.data) } };
     }
 
-    if (data === null) {
-      const kept = kind === "local" ? "a local job's data is kept 24 hours after it completes and 7 days after it fails" : "a forge job's data is kept 31 days";
-      return { refusal: `the queue no longer holds ${jobId}'s data (${kept}), and the run record cannot rebuild it, so it cannot be re-run from here` };
-    }
-    if (data.command !== undefined) return { refusal: `${jobId} ran the command /${data.command}, and a /command run is not re-run from the console; it runs from its reviewed trigger` };
-
     if (kind === "local") {
       if (typeof data.flow !== "string" || data.flow.trim() === "") return { refusal: `${jobId} named no flow, and a run needs one` };
       if (typeof data.folder !== "string" || data.folder === "") return { refusal: `${jobId}'s data names no folder` };
@@ -565,7 +631,6 @@ export async function planRerun({
     }
 
     if (isForgeKind(kind)) {
-      if (data.parkedReply === true) return { refusal: `${jobId} answered a parked run; answer the parked run again from the parked inbox instead of re-running the answer` };
       // WHERE comes from the retained job, WHAT RUNS from the triggers file now. The retained run fields are what the
       // trigger said 31 days ago at most: replaying them would run a cap, a model list, a secret profile or an image the
       // operator has since narrowed or removed, under a trigger that may be gone. So the trigger at the retained index
@@ -592,6 +657,8 @@ export async function planRerun({
       };
       return { plan: { kind: "forge", forge: kind, jobId, deliveryId, queue: forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), reserve: reserveOf(job) } };
     }
+    // Unreachable: `rerunRefusalOf` refused every kind that is neither local nor a forge's. Kept so a kind added to one
+    // and not the other still refuses rather than returning nothing.
     return { refusal: `${jobId} is a ${String(kind)} run, which the console cannot re-run` };
   } catch (err) {
     return { refusal: `could not read the run or its job (${err?.message ?? String(err)}); nothing was queued` };

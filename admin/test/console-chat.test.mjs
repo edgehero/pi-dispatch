@@ -40,7 +40,9 @@ test("Chat panel: nothing without a job-state reader, a warning when the queue i
   assert.match(String(runChat(view("viewer", { chat: { unreachable: true } }))), /queue could not be read/);
   for (const [state, says] of [["queued", CHAT_REFUSALS.queued], ["answered", CHAT_REFUSALS.answered], ["unknown", CHAT_REFUSALS.unknown]]) {
     for (const role of ["operator", "viewer"]) {
-      const out = String(runChat(view(role, { chat: chat(state, null, { says }) })));
+      // Issue #710: with no record, a queued or unknown job is the outcome banner's to say, so the panel draws nothing.
+      if (state !== "answered") assert.equal(String(runChat(view(role, { chat: chat(state, null, { says }) }))), "", `${state} ${role}: no record, the banner says it`);
+      const out = String(runChat(view(role, { chat: chat(state, null, { says }), run: { record: RECORD } })));
       assert.match(out, /<h2>Chat<\/h2>/);
       assert.ok(out.includes(says.replace(/'/g, "&#39;")), `${state} ${role}: the sentence`);
       assert.ok(!out.includes("data-action") && !out.includes("pi-dispatch chat"), `${state} ${role}: no form, no command`);

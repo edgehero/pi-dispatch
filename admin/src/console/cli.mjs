@@ -50,7 +50,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -71,8 +71,9 @@ export async function loadModules() {
     import("@edgehero/pi-dispatch/model-endpoints"),
     import("@edgehero/pi-dispatch/model-catalog"),
     import("./whatif.mjs"),
+    import("../sandbox-verdict.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -387,7 +388,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // goes through `killSwitchPlan` over THIS deployment's folder (`killSwitchPlanFn`), so the two-Valkey refusal of a
     // resume holds here exactly as it does for the tools and the TUI. `readOnly` covers `snapshot()` alone.
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
-    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn });
+    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const pricing = pricingOf(m.pricing);
     const pageDeps = {
       fleet,

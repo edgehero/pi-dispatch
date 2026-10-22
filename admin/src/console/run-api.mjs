@@ -291,6 +291,42 @@ export async function parkedAnswerCheckOf(fleet, id, record, { now = Date.now } 
   return (await parkCheckCached(answerCheckCache, fleet, id, record, now, read, (got) => got !== null && typeof got === "object" && !got.unreachable)).got;
 }
 
+// The run page's action checks (issue #710), per fleet reader, then per run id, `parkCheckCached`'s entries.
+const rerunCheckCache = new WeakMap();
+const sandboxCheckCache = new WeakMap();
+
+/** A fleet check of run `id`, never throwing (an error reads as unreachable), reused as the parked answer's is. */
+async function actionCheckOf(cache, fleet, method, id, record, now) {
+  if (typeof fleet?.[method] !== "function") return null;
+  const read = async () => {
+    try {
+      return await fleet[method](id, record);
+    } catch {
+      return { unreachable: true };
+    }
+  };
+  return (await parkCheckCached(cache, fleet, id, record, now, read, (got) => got !== null && typeof got === "object" && !got.unreachable)).got;
+}
+
+/**
+ * Whether run `id` (with `record`) can be offered a re-run (issue #710): `fleet.rerunCheck`, the planner's own cheap
+ * refusals over the record and the job's retained data (`rerunRefusalOf`), reused by the run page's live loop for
+ * `PARK_CHECK_CACHE_MS` per run id while `record` is the same one, as `parkedAnswerCheckOf` is; an unreadable check is
+ * read again on the next tick. `{ refusal }`, `{ ok: true }`, `{ unreachable: true }`, or null without the reader.
+ */
+export async function rerunCheckOf(fleet, id, record, { now = Date.now } = {}) {
+  return actionCheckOf(rerunCheckCache, fleet, "rerunCheck", id, record, now);
+}
+
+/**
+ * Whether run `id`'s workspace is still re-openable on this host (issue #710): `fleet.sandboxCheck`, the panel's
+ * manifest verdict (`sandboxRetentionOf`), reused like `rerunCheckOf`. `{ retained, why }`, `{ elsewhere: true }`,
+ * `{ unreachable: true }`, or null without the reader.
+ */
+export async function sandboxCheckOf(fleet, id, record, { now = Date.now } = {}) {
+  return actionCheckOf(sandboxCheckCache, fleet, "sandboxCheck", id, record, now);
+}
+
 /**
  * The chat facts of run `id` with `record` (its run record or null), read through `fleet`: `{ unreachable: true }` when
  * the queue cannot be read, else `{ found, jobState, activeJobId, queuedJobId, newer, answeringJobId, state, mode, says }`.

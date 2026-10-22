@@ -1279,6 +1279,32 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `answering` refusal and links the job taking the answer; a run whose recovery job is queued links that job; a live
     run whose inbox could not be read says so in a warning instead of "not steer-armed". Tests:
     `admin/test/console-chat.test.mjs`, `admin/test/console-pages.test.mjs` (the run page fixtures).
+    **AMENDED 2026-10-22 (#710): the page leads with its outcome.** Its first panel is "Outcome" (`p-outcome`,
+    `runOutcome`), the same for both roles: the outcome in the panel's word and tone (`words.mjs`), the reason's
+    catalog sentence (`INT-REASON-CATALOG`; the record's `why` picks the catalog's variant where it has one), its next
+    step, and a link to the reason's heading in `docs/reasons.md` on the repository's forge (`DOCS_ROOT`, held to the
+    repository URL the packages publish), every string the catalog's fixed text escaped by the template; a token the
+    catalog does not know is printed once, cut to 64 characters, with "no explanation yet", and an outcome word the
+    console does not know is cut the same (round 1); a record with no reason gets one fixed sentence per outcome word.
+    The `awaiting-input` next step offers the console ("or answer from the console's run page") only where the page's
+    own Chat panel takes the answer: where the planner's check refuses it (`parkedAnswerCheck`, the value that panel
+    reads) or the run takes no reply now, the step is the catalog's line without that path (round 1). No free text and no `failedReason` reaches it
+    (`REQ-CONSOLE-SECURITY` (l)). Given no record, the banner says why ONCE (not a run id; a running job with no record
+    yet, with its stale progress; a queued job; a job the queue holds as ended whose record this host cannot read; no
+    such run), and the record panels (Run, Tokens and dollars, Resources, Session and plan, Chain) draw nothing, their
+    empty sections hidden by `section[data-panel]:empty`; that sentence is a grey note for a job that exists and has
+    not ended (queued, running) and amber for what the page cannot show (not a run id, no such run, an ended job whose
+    record is not readable here), never with an outcome word; a queued job's page has no transcript section (round 1:
+    its "not started yet" said the banner's sentence again), unless its stream exists or could not be read; the Progress panel draws nothing unless the job is running,
+    and the Chat panel nothing for a job that is itself queued or that nothing knows, so no sentence is said twice.
+    Given a run REFUSED BEFORE IT STARTED (a `policy` outcome whose record the cost fold reads as spending nothing,
+    `refusedBeforeSpend`: no tokens, no exit code, `budgetReserved: false`), Progress and Chat draw nothing and the page
+    has no transcript section; a page with no record that nothing knows has none either. A live panel that becomes
+    empty is swapped in empty and hidden, and swapped back when it fills. The Session and plan panel and the Recovery
+    row print each nested token with its catalog sentence: `fresh (<session.reason>): <sentence>`, `<plan outcome>
+    (<plan.reason>): <sentence>` and `recovery skipped (<recoverSkipped>): <sentence>`, a token the catalog does not
+    know with "no explanation yet". Tests: `admin/test/console-run-outcome.test.mjs`, `admin/test/console-panels.test.mjs`,
+    `admin/test/console-chat.test.mjs`, `admin/test/console-pages.test.mjs` (the run page fixtures).
   - (d) **Parked inbox** (`/parked`). Given runs that ended `completed` with `awaiting-input`, each shows its target,
     its forge link where one can be built, its age and its session chain count, newest first; given a later run on the
     same kind and target, the parked run shows as answered; given `PI_SESSIONS_DIR` not on the console's host, a key
@@ -1444,7 +1470,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     data (naming the retention), a `/command` run, an answer to a parked run, a cron trigger gone from the file or
     served by another host, and a duplicate the 10-minute semantic window (or a minute window) takes, with nothing
     queued. The preview shows the reserve. Tests: `admin/test/job-actions.test.mjs` (the three `planRerun` tests),
-    `admin/test/console-actions.test.mjs`.
+    `admin/test/console-actions.test.mjs`. **AMENDED 2026-10-22 (#710): offered only where it can work.** The refusals
+    that need neither git nor the triggers file are one pure function, `rerunRefusalOf(record, now, data)` (a bad id;
+    the data gone, or with the data unread, a record that ended longer ago than its kind's longest retention, 7 days
+    local and 31 days forge, plus a day's slack; a `/command`; a parked answer; a kind the console cannot re-run), which
+    `planRerun` asks FIRST, so its sentences are the planner's byte for byte and the two cannot disagree. The run page
+    asks it through the fleet reader over the retained job's data (`rerunCheck`, cached 15 s per run id, the data never
+    leaving the reader), else over the record alone, and draws "Not offered for a re-run: <sentence>." in place of the
+    form; the click still runs the whole planner. A recovery record (`recoveryOf`) is judged by 31 days whatever its
+    kind, the recovery queue's retention (round 1). The retained job is looked for in the PLANNERS' queues
+    (`fleetQueuesOn`, which `readFleetQueues` and so `openFleet` are: the live registry unioned with the queues that
+    exist), so a host out of the registry still has its queue asked; when that list is degraded (the registry or the
+    keyspace scan unread) a job no queue holds reads as unreadable, never cached, and the page judges from the record
+    alone (round 1). Tests: `admin/test/job-actions.test.mjs` ("planRerun and rerunRefusalOf agree on every cheap
+    refusal, both ways"), `admin/test/console-run-outcome.test.mjs`.
   - (f) **Answer a parked run** (kind `parked-answer`, paid). Given a parked forge issue run, the job queued is the
     receiver's phrase-free reply for that issue field for field, except the delivery id, the sender, the comment
     text, the GitHub association and `console: {by: <the token's name>}`; the text is scrubbed of control and bidi
@@ -1488,7 +1527,21 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     verify` passes. Tests: `admin/test/audited-write.test.mjs`, `worker/test/console-audit.test.mjs`.
   - (l) **The sandbox command.** Given a run whose sandbox can be reopened, the run page shows `pi-dispatch sandbox
     <jobId>` as text to copy (only for an id the run-id charset accepts), and no route starts a container. Test:
-    `admin/test/console-actions.test.mjs`.
+    `admin/test/console-actions.test.mjs`. **AMENDED 2026-10-22 (#710): shown only where it can work.** In its place,
+    one line saying why: a venue with no sandbox shell (`sandboxShellRefusal`, as since #712), a run refused before it
+    started (no workspace was made), and, for a run of the console's own host (the record's `host` against the
+    worker's name rule; a manifest is on the host that ran the job), a manifest the panel's own verdict refuses
+    (`sandboxRetentionOf`, moved from the panel's `readSandboxInfo` into `admin/src/sandbox-verdict.mjs` so both surfaces ask one
+    function: retention off, swept, another run's directory, no image, the workspace gone, the venue), read through
+    the fleet reader's `sandboxCheck` and cached 15 s per run id. Past its retention window the command carries
+    `--pin`. A run of another host, an unreadable venue list or a check that could not be read keeps the command (the
+    CLI checks again). **AMENDED 2026-10-22 (#710, round 1): a venue policy never hides it.** The console never sees
+    the `PI_BACKENDS` the shell that runs `pi-dispatch sandbox` opens under (`OQ-038`: not a key it takes from the
+    deployment's `.env`), so it asks the verdict with the venue policy unknown (`venuePolicy: "unknown"`: every venue
+    with a launcher reads as blessed) and hides the command only for a verdict true whatever that shell blesses
+    (retention off, swept, another run's directory, no image, the workspace gone, a venue with no sandbox shell);
+    `unblessed`, `policy-unreadable` or any other word keeps it, and the opener's own venue check decides. Tests: `admin/test/console-run-outcome.test.mjs`, `admin/test/sandbox-session.test.mjs` (the
+    panel's words, unchanged).
   - (m) **Live pages follow a write.** Given an action that landed, every open live page shows the change within
     about two seconds with no reload, and a live panel holding a form in use is not redrawn under it. Tests:
     `admin/test/console-actions.test.mjs` (the hub is ticked after every apply), the browser lab.
@@ -5318,6 +5371,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-22 (#710, PR 3, round 1) | Issue #710, PR 3, review round 1. **`REQ-OPERATOR-CONSOLE-ACTIONS` (l) AMENDED**: a venue-policy verdict never hides the sandbox command; the console asks `sandboxRetentionOf` with `venuePolicy: "unknown"` (it never sees the opener's `PI_BACKENDS`, `OQ-038`, so every podman run was hidden as `unblessed`) and hides only what is certain (retention off, swept, another run's directory, no image, the workspace gone, a venue with no shell), the panel's `SANDBOX_CERTAIN` the backstop. **`REQ-OPERATOR-CONSOLE-ACTIONS` (e) AMENDED**: the retained job is looked for in the planners' queues (`fleetQueuesOn`, shared with `readFleetQueues`), a degraded list making not-found unreadable and uncached, and a recovery record is judged by 31 days. **`REQ-OPERATOR-CONSOLE-SCREENS` (c) AMENDED**: an unknown outcome word is cut at 64 code points; the `awaiting-input` next step drops its console path where the Chat panel cannot take the answer; the no-record tone is stated (grey for queued or running, amber for what the page cannot show, no outcome word); a queued job's page has no transcript section. The run page's HTTP status is UNCHANGED, checked: a queued page, a running page with no transcript or progress, and an unknown one answer 404 on `main` too, by the same expression. `REQ-CONSOLE-SECURITY` UNCHANGED, checked: the banner is still the same for both roles and holds fixed text and closed enums only. **Code evidence**: admin/src/read-model.mjs -> fleetQueuesOn, readFleetQueues, createFleetReader (retainedJob, sandboxCheck, killSwitchQueues); worker/src/queue.mjs -> discoverHostQueuesReporting; admin/src/sandbox-verdict.mjs -> sandboxRetentionOf; admin/src/console/panels.mjs -> SANDBOX_CERTAIN, sandboxLine, bannerCut, runOutcome, AWAITING_INPUT_ELSEWHERE, absentOutcome; admin/src/console/pages.mjs -> runHasTranscript; admin/src/job-actions.mjs -> RERUN_DATA_KEPT_MS, rerunRefusalOf; worker/src/sandbox-policy.mjs. |
+| 2026-10-22 (#710, PR 3) | Issue #710, PR 3: the run page leads with its outcome and offers only what can work. **`REQ-OPERATOR-CONSOLE-SCREENS` (c) AMENDED**: the first panel is "Outcome" (`p-outcome`): the outcome word and tone, the catalog sentence (`why` picking its variant), the next step and a link to the reason's heading in `docs/reasons.md` on the repository's forge, the same for both roles, no free text; with no record it says why once (not a run id, running, queued, ended elsewhere, unknown) and the record panels draw nothing (hidden by `section[data-panel]:empty`, also after a live swap); Progress and Chat draw nothing for a run refused before it started (`refusedBeforeSpend` on a `policy` record) and the page has no transcript section then; the session, plan and recovery-skipped tokens print with their catalog sentences. **`REQ-OPERATOR-CONSOLE-ACTIONS` (e) and (l) AMENDED**: the re-run form is drawn only where `rerunRefusalOf` (the planner's first step, byte-identical sentences: a bad id, the data gone or past its kind's longest retention plus a day, a `/command`, a parked answer, an unsupported kind) does not refuse, over the retained data through the fleet reader (`rerunCheck`, cached 15 s) or the record alone; the sandbox command only where the venue has a shell, the run was not refused before it started, and, for a run of this host, the panel's own manifest verdict (`sandboxRetentionOf`, moved into `admin/src/sandbox-verdict.mjs`, handed to the fleet reader as a seam, through `sandboxCheck`, cached 15 s) does not refuse, with `--pin` past the window; unknown keeps the action. `REQ-CONSOLE-SECURITY` UNCHANGED, checked: the banner holds only closed enums and the catalog's fixed text for both roles, never `failedReason`; the actions stay operator-only and go through the same CSRF-guarded preview and confirm; the retained job's data never leaves the fleet reader. `REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked: the panel's verdict and words are byte-identical (`admin/test/sandbox-session.test.mjs`). `REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: the panel's RUN_DETAIL reads the same verdict through `readSandboxInfo`. **Code evidence**: admin/src/console/panels.mjs -> runOutcome, refusedBeforeStart, withRun, runProgress, runChat, runActions, sandboxLine, rerunLine, runSession, recoveryRows; admin/src/console/pages.mjs -> PAGE_PANELS, loadPageData, renderPage; admin/src/console/run-api.mjs -> rerunCheckOf, sandboxCheckOf; admin/src/job-actions.mjs -> rerunRefusalOf, planRerun; admin/src/sandbox-verdict.mjs -> sandboxRetentionOf; admin/src/read-model.mjs -> createFleetReader (rerunCheck, sandboxCheck, sandboxRetentionFn); admin/src/console/cli.mjs -> loadModules; admin/src/costs.mjs -> refusedBeforeSpend; admin/src/words.mjs -> DOCS_ROOT, docsHref; admin/src/index.ts -> readSandboxInfo. |
 | 2026-10-22 (#710, PR 2, round 2) | Review round 2. **`REQ-OPERATOR-CONSOLE-SCREENS` (b) AMENDED, CORRECTED**: the short sentence drops its asides (every closed parenthetical, wherever it opens, and a `, which ...,` clause) before it is cut, so four rows that backed off to their subject keep their verb (`podman-conf-widens-job`, `secret-name-reserved`, `netns-keeper-crash-loop`; `podman-service-restart-hold-expired` kept its verb already), and every cut row is at least 40 characters; a negation is backed off only together with the word before it, never alone ("could not" no longer reads "could"); the cut counts code points, so it never splits a surrogate pair; the runs filter's `outcome` refuses a value outside `completed`, `policy` and `failed` with a refusal naming them (`outcome=refused` matched nothing before); the live transcript's end, the Progress panel, the browser's stream status and the topology tip say refused, not `policy`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the live tail's end line says the word. `REQ-CONSOLE-SECURITY` UNCHANGED, checked: the filter refusal names the field's values, never the value given, and the browser's table is written into the served script from `words.mjs`, not read from a page. |
 | 2026-10-22 (#710, PR 2, round 1) | Review round 1. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel's list row shows the word in the outcome cell and the reason token as its last cell (not in parentheses beside the word, which pushed the turns and tokens off an 80-column row); the plain degraded list and `/dispatch runs`' OUTCOME column say the shared words, REASON keeps the token. **`REQ-OPERATOR-CONSOLE-SCREENS` (b) AMENDED**: the short sentence's cut backs off past a dangling word, a trailing comma and an unclosed parenthesis; a reason the runs filter refuses is printed once, cut to 64 characters, with no `title`; the chain's children carry their reason. `REQ-CONSOLE-SECURITY` UNCHANGED, checked: still only the closed `reason` enum, escaped, and the refused token is now bounded. |
 | 2026-10-22 (#710) | Issue #710, PR 2: one vocabulary for the console and the panel. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the panel's outcome words (completed, refused for `policy`, failed, awaiting input, cancelled), its venue label and its Spend and Held titles come from `admin/src/words.mjs`, which the console imports too; the run detail prints the reason catalog's sentence and next step under the reason. **`REQ-OPERATOR-CONSOLE-SCREENS` (b) AMENDED**: the runs table says the same words, classes the outcome cell by tone (`warn`, `bad`), and shows a refused or failed run's reason as a short sentence derived from the catalog, linked to the runs with that outcome and reason, the token in `title`; the nav and the spend page say Spend, the fleet's held panel says Held, the trigger edit's `backend` field is labelled Venue. `REQ-CONSOLE-SECURITY` is UNCHANGED, checked: only the closed `reason` enum and the catalog's fixed text reach a list row, never `failedReason` ((l)), and every value is escaped by the `html` template with no `style=`. |

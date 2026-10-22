@@ -59,6 +59,7 @@ import {
   runChat,
   runCostPanel,
   runInbox,
+  runOutcome,
   runProgress,
   runResources,
   runSession,
@@ -66,8 +67,9 @@ import {
   runsFilter,
   runsTable,
   RUN_ID_RE,
+  refusedBeforeStart,
 } from "./panels.mjs";
-import { chatFactsOf, parkedAnswerCheckOf } from "./run-api.mjs";
+import { chatFactsOf, parkedAnswerCheckOf, rerunCheckOf, sandboxCheckOf } from "./run-api.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
 import { SPEND_TITLE } from "../words.mjs";
@@ -98,7 +100,7 @@ export const PAGES = Object.freeze({
 const PAGE_PANELS = Object.freeze({
   overview: [["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-parked", overviewParked], ["p-failures", overviewFailures], ["p-active", overviewActive]],
   runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
-  run: [["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
+  run: [["p-outcome", runOutcome], ["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
@@ -279,7 +281,7 @@ export function returnPathOf(raw) {
 const PAGE_READS = Object.freeze({
   overview: ["snapshot"],
   runs: ["runsPage", "subscriptions"],
-  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat"],
+  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions"],
   parked: ["snapshot"],
   insights: ["insights"],
   fleet: ["snapshot"],
@@ -446,6 +448,16 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.chatAnswer = await parkedAnswerCheckOf(deps.fleet, q.id, data.run?.record ?? null, { now: () => now });
     }
   }
+  if (reads.includes("actions") && data.run?.record) {
+    // Issue #710: whether the run's two actions can work, so the page offers only those (REQ-OPERATOR-CONSOLE-ACTIONS):
+    // the planner's cheap re-run refusals over the retained job's data (`rerunCheck`) and the panel's sandbox manifest
+    // verdict for a run of this host (`sandboxCheck`), each reused for PARK_CHECK_CACHE_MS per run id, so the live loop
+    // does not read them every tick. Read for both roles, as all page data is; only an operator's page draws the actions.
+    // A run refused before it started has no workspace, whatever a manifest says, so its sandbox check is not read.
+    const record = data.run.record;
+    data.rerunCheck = await rerunCheckOf(deps.fleet, q.id, record, { now: () => now });
+    if (!refusedBeforeStart(record)) data.sandboxCheck = await sandboxCheckOf(deps.fleet, q.id, record, { now: () => now });
+  }
   if (reads.includes("insights")) {
     const fullPaths = q.paths === "full" && who?.role === "operator";
     try {
@@ -504,6 +516,24 @@ export async function pagePanels(name, ctx) {
   return panelFragments(name, ctx).map(({ id, fragment }) => ({ id, html: String(fragment) }));
 }
 
+/**
+ * Whether the run page draws its live transcript section (issue #710): not for a run refused before it started (it never
+ * had one), not for an id that is not a run id, and not for a job with no record that the queue does not know either
+ * (the chat facts' `unknown`) or holds as queued (`queued`, review: the section's "not started yet" said the banner's
+ * sentence a second time), each of which the outcome banner says once, unless a stream exists or its read failed (the
+ * section says which). The section is static (the browser attaches to a stream that exists when the page loads, and
+ * the absent sentence always said to reload), so a queued page loses no live behaviour: the panels still swap live when
+ * the job starts, and the reload the banner names draws the section. Every other page keeps it: a running job, and a
+ * page whose reader has no chat facts, which cannot tell a queued job from none.
+ */
+function runHasTranscript(data) {
+  const record = data?.run?.record ?? null;
+  if (record) return !refusedBeforeStart(record);
+  if (data?.run?.invalid) return false;
+  if (data?.transcript?.exists === true || data?.transcript?.unreachable) return true;
+  return data?.chat?.state !== "unknown" && data?.chat?.state !== "queued";
+}
+
 /** The signed-in header: the console's name, the screens, who is signed in, the live state and sign-out. */
 function headerHtml(name, ctx) {
   const s = ctx?.session ?? {};
@@ -529,7 +559,9 @@ export async function renderPage(name, ctx) {
   const heading = name === "run" && ctx?.query?.id ? html`${meta.title} <span class="mono">${ctx.query.id}</span>` : meta.title;
   // The run detail's live transcript (issue #643) is a section of its own, never a panel: a panel is what the hub
   // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
-  const extra = name === "run" ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
+  // Issue #710: none for a run that never had one to show: refused before it started, or no record of a run that is not
+  // running (not a run id, queued, or unknown), which the outcome banner says once.
+  const extra = name === "run" && runHasTranscript(ctx?.data) ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
   const body = html`${headerHtml(name, ctx)}<main><h1>${heading}</h1>${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}${extra}</main>`;
   // A run with no record yet but a live transcript or progress snapshot is a running job (its record is written at its
   // end): 200, not 404.

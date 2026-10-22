@@ -25,7 +25,7 @@
  * one exception is the spend screen's `?paths=full`, which an OPERATOR may ask for (`insightsFullPaths`).
  */
 import { formatMicros } from "@edgehero/pi-dispatch/money";
-import { classifyRow } from "../costs.mjs";
+import { classifyRow, refusedBeforeSpend } from "../costs.mjs";
 import { bannersHtml, buildGraphScene } from "../graph-html.mjs";
 import {
   breakdownHtml,
@@ -59,7 +59,10 @@ import { UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
 import { BUNDLE_SKIPPED_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, venuesView, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf, PROFILE_ROOTS_TEXT, PROFILE_SOURCE_TEXT, profileHostsText, profileLastText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
 // The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
-import { HELD_LABEL, NO_EXPLANATION, OUTCOME_WORD_OF, SPEND_TITLE, TONE_CLASS, VENUE_LABEL, outcomeWord, reasonWords } from "../words.mjs";
+import { HELD_LABEL, NO_EXPLANATION, OUTCOME_WORD_OF, SPEND_TITLE, TONE_CLASS, VENUE_LABEL, docsHref, outcomeWord, reasonWords } from "../words.mjs";
+import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
+import { QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
+import { rerunRefusalOf } from "../job-actions.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { html, trustedRenderer } from "./html.mjs";
@@ -494,20 +497,153 @@ export function runsTable(view) {
 
 // ---- run detail ------------------------------------------------------------------------------------------------------
 
-/** The run, or the sentence that replaces every run panel when there is none. */
+/**
+ * Whether the page's run is RUNNING with no record yet (a record is written at its end): its live transcript exists, a
+ * live progress snapshot has not ended, or the queue says the job is active.
+ */
+function runningWithoutRecord(view) {
+  if (view.data?.run?.record) return false;
+  return view.data?.transcript?.exists === true || (isProgressSnapshot(view.data?.progress) && !view.data.progress.ended) || view.data?.chat?.jobState === "active";
+}
+
+/**
+ * Whether the record is a run REFUSED BEFORE IT STARTED (issue #710): a policy outcome (never retried,
+ * CONST-RETRY-INFRA-ONLY, so no later attempt of the same id can start) whose record says no spend at all, the cost
+ * fold's own `refusedBeforeSpend` (no tokens, no exit code, `budgetReserved: false`). Such a run made no container and
+ * no workspace, so its page draws no Progress, no Chat, no transcript section and no sandbox command. A refusal the fold
+ * cannot tell from a spend (one that kept its count slot, `over-budget`) keeps those panels, and says what they say.
+ */
+export function refusedBeforeStart(record) {
+  return record !== null && typeof record === "object" && record.outcome === "policy" && refusedBeforeSpend(record);
+}
+
+/**
+ * The record panels of the run page. With no record they draw NOTHING (issue #710): the empty section is hidden by the
+ * stylesheet's `section[data-panel]:empty`, and the outcome banner (`runOutcome`) says once why there is no record,
+ * where every panel used to say it again.
+ */
 function withRun(title, render) {
   return (view) => {
     const got = view.data?.run;
-    if (!got?.record) {
-      // A running job has no record yet (it is written at the end); its live transcript or progress says it exists.
-      const running = view.data?.transcript?.exists === true || (isProgressSnapshot(view.data?.progress) && !view.data.progress.ended);
-      // A snapshot the worker stopped rewriting (its heartbeat is 30 s) may be a run that will never write a record.
-      const stale = isProgressSnapshot(view.data?.progress) ? progressStaleFor(view.data.progress, view.now) : null;
-      const why = got?.invalid ? "That is not a run id." : running ? `This run has no record yet: a run's record is written when it ends.${stale !== null ? ` Its progress has had ${staleText(stale)}.` : ""}` : "No run with that id is in this host's history or the fleet's run mirror.";
-      return titled(title, html`<p class="${running && !got?.invalid ? "note" : "warn"}">${why}</p>`);
-    }
+    if (!got?.record) return html``;
     return titled(title, render(got.record, view, got.source));
   };
+}
+
+// ---- the outcome banner (issue #710) ---------------------------------------------------------------------------------
+
+/**
+ * The most of a token the catalog or the words do not know (a reason, or an outcome word from a newer worker) that the
+ * banner prints, in code points, before its ellipsis.
+ */
+const BANNER_TOKEN_MAX = 64;
+
+/** `token` cut to `BANNER_TOKEN_MAX` code points with an ellipsis (code points, so a surrogate pair is never split). */
+function bannerCut(token) {
+  const chars = [...String(token)];
+  return chars.length > BANNER_TOKEN_MAX ? `${chars.slice(0, BANNER_TOKEN_MAX).join("")}…` : String(token);
+}
+
+/**
+ * A nested reason's sentence (issue #710): the catalog's table for the record field (`session.reason`,
+ * `recoverSkipped`, `plan.reason`), its fixed text with the Markdown backticks dropped (a facts value is plain text), or
+ * "no explanation yet" for a token the catalog does not know. The token itself is printed beside it by the caller.
+ */
+function nestedText(field, token) {
+  const said = explainReason(token, { field });
+  return said.known ? said.sentence.replace(/`/g, "") : NO_EXPLANATION;
+}
+
+/** A catalog string with its Markdown code spans (`run.mcp`) as `<code>`, every part escaped by the template. */
+function catalogText(text) {
+  return String(text)
+    .split("`")
+    .map((part, i) => (i % 2 === 1 ? html`<code>${part}</code>` : part));
+}
+
+/** What the banner says of a record that names no reason, by its outcome word. */
+const NO_REASON_TEXT = Object.freeze({
+  completed: "The run finished, and its record names no reason to say more.",
+  refused: "The run was refused, and its record names no reason.",
+  failed: "The run failed, and its record names no reason. Its exit code and the worker log say more.",
+});
+
+/**
+ * The `awaiting-input` next step where THIS page cannot take the answer (review of issue #710): the catalog's line
+ * without its console path. The catalog's own next step ends "or answer from the console's run page", which the Chat
+ * panel beside it contradicts when the planner refuses the answer here (the queue no longer holds the job's data, a pull
+ * request's park, a forge with no reply route) or when the run is no longer waiting for one. Fixed text, as the
+ * catalog's is, and the same for both roles (an operator's Chat panel says why; a viewer's shows no chat).
+ */
+const AWAITING_INPUT_ELSEWHERE = "If no reply was taken yet, answer the question: reply on the issue or pull request (on a pull request, start the reply with this repository's pi-dispatch comment phrase). This console cannot take the answer for this run.";
+
+/**
+ * Whether the page's own Chat panel offers no answer for a parked record: the planner's check refused it
+ * (`data.chatAnswer`, the very value that panel reads), or the chat facts say the run takes no reply now. Unknown
+ * facts (no reader, an unreadable check) are not a contradiction: the catalog's line stays.
+ */
+function answerRefusedHere(view) {
+  const chat = view.data?.chat ?? null;
+  if (typeof view.data?.chatAnswer?.refusal === "string") return true;
+  return chat !== null && typeof chat === "object" && !chat.unreachable && typeof chat.mode === "string" && chat.mode !== "reply";
+}
+
+/**
+ * Why the page has no record, said ONCE (issue #710): not a run id, a running job (a record is written at its end), a
+ * queued job, a job the queue holds as ended whose record this host cannot read, or no such run. `{ cls, text }`.
+ *
+ * THE TONE IS THE JOB'S, DELIBERATELY, and none of these prints an outcome word (there is no outcome yet, or none this
+ * page can read). A job that exists and has not ended (queued, running) is a grey `note`: nothing is wrong, the record
+ * comes at its end. What the page cannot show is an amber `warn`: an id that is not one, a run no history or mirror
+ * holds, and an ended job whose record is not readable here. Never `bad`: no run failed that this page knows of.
+ */
+function absentOutcome(view) {
+  const got = view.data?.run;
+  if (got?.invalid) return { cls: "warn", text: "That is not a run id." };
+  if (runningWithoutRecord(view)) {
+    // A snapshot the worker stopped rewriting (its heartbeat is 30 s) may be a run that will never write a record.
+    const stale = isProgressSnapshot(view.data?.progress) ? progressStaleFor(view.data.progress, view.now) : null;
+    return { cls: "note", text: `This run has no record yet: a run's record is written when it ends.${stale !== null ? ` Its progress has had ${staleText(stale)}.` : ""}` };
+  }
+  const state = view.data?.chat?.jobState ?? null;
+  if (typeof state === "string" && QUEUED_STATES.includes(state)) return { cls: "note", text: "This job is queued and has not started yet: a run's record is written when it ends, and its live transcript is on this page once it runs (reload then)." };
+  if (state === "completed" || state === "failed") return { cls: "warn", text: "This job has ended, but its record is not in this host's history or the fleet's run mirror (another host's run, with the mirror off?)." };
+  return { cls: "warn", text: "No run with that id is in this host's history or the fleet's run mirror." };
+}
+
+/**
+ * The run page's first panel (issue #710, REQ-OPERATOR-CONSOLE-SCREENS (c)): what happened, why and what now. The
+ * outcome in the console's words (words.mjs, the panel's too) in its tone, the reason's catalog sentence (the record's
+ * `why` picks its variant where the catalog has one), its next step and a link to its heading in `docs/reasons.md`.
+ *
+ * THE SAME FOR BOTH ROLES, AND NO FREE TEXT (REQ-CONSOLE-SECURITY (l)): the outcome and reason are the record's closed
+ * enums, which the run summary already shows a viewer; every sentence is the catalog's fixed text, escaped like any
+ * value; a job's free-text `failedReason` never comes here. A token the catalog does not know (a newer worker's) is
+ * printed once, cut to `BANNER_TOKEN_MAX`, with "no explanation yet"; an outcome word it does not know is cut the same.
+ */
+export function runOutcome(view) {
+  const title = "Outcome";
+  const r = view.data?.run?.record ?? null;
+  if (!r) {
+    const { cls, text } = absentOutcome(view);
+    return titled(title, html`<p class="${cls}">${text}</p>`);
+  }
+  const w = outcomeWord(r.outcome, r.reason);
+  const tone = w.tone === "success" ? "good" : (TONE_CLASS[w.tone] ?? null);
+  // An outcome word this console does not know is cut like an unknown reason (review round 1): a record is the worker's,
+  // but the banner's big line is no place for an unbounded string.
+  const word = w.known ? w.word : typeof r.outcome === "string" && r.outcome !== "" ? bannerCut(r.outcome) : cell(r.outcome);
+  const token = typeof r.reason === "string" && r.reason !== "" ? r.reason : null;
+  const head = html`<p class="big${tone !== null ? ` ${tone}` : ""}">${word}</p>`;
+  if (token === null) return titled(title, html`${head}<p>${Object.hasOwn(NO_REASON_TEXT, String(w.word)) ? NO_REASON_TEXT[w.word] : NO_REASON_TEXT.failed}</p>`);
+  const said = explainReason(token, { why: typeof r.why === "string" ? r.why : null });
+  if (!said.known) {
+    return titled(title, html`${head}<p><span class="mono">${bannerCut(token)}</span>, ${NO_EXPLANATION}.</p>`);
+  }
+  const href = docsHref(said.anchor);
+  const more = href !== null ? html`: <a href="${href}" rel="noreferrer noopener" target="_blank">read more in the reasons docs</a>` : null;
+  const next = token === "awaiting-input" && answerRefusedHere(view) ? AWAITING_INPUT_ELSEWHERE : said.next;
+  return titled(title, html`${head}<p>${catalogText(said.sentence)}</p><p><strong>What to do:</strong> ${catalogText(next)}</p><p class="note">Reason <span class="mono">${token}</span>${more}.</p>`);
 }
 
 // ---- run progress (issue #644) ---------------------------------------------------------------------------------------
@@ -607,6 +743,9 @@ export function runProgress(view) {
   const title = "Progress";
   const record = view.data?.run?.record ?? null;
   const g = view.data?.progress ?? null;
+  // Issue #710: a run refused before it started made no container, so it has no progress to show and the panel draws
+  // nothing (its empty section is hidden); and with no record and no live snapshot, the outcome banner says why once.
+  if (refusedBeforeStart(record)) return html``;
   // Issue #662: an attempt whose run went on as a #645 recovery (its record says `recovery-enqueued`). The key is the
   // RUN's, so it now holds the recovery's progress: pairing it here would show another job's live steps as this
   // attempt's. The attempt shows its own record's progress, and names the job that continues it (its own page reads the
@@ -642,6 +781,8 @@ export function runProgress(view) {
   if (live) return titled(title, liveProgressBody(live, view));
   if (g?.unreachable) return titled(title, html`<p class="warn">The run's progress could not be read (is Valkey reachable?).</p>`);
   if (g?.invalid) return titled(title, html`<p class="warn">The run's progress key is not one this console reads (a newer or older worker?).</p>`);
+  // No record and no snapshot: a queued job, or no run at all, which the banner names. A running job keeps the sentence.
+  if (!runningWithoutRecord(view)) return html``;
   return titled(title, html`<p class="note">${progressAbsentText(record)}</p>`);
 }
 
@@ -740,6 +881,11 @@ function chatHeldBy(chat) {
 export function runChat(view) {
   const chat = view.data?.chat ?? null;
   if (chat === null || typeof chat !== "object") return html``;
+  // Issue #710: nothing to chat with in a run refused before it started; and a job with no record that is itself queued,
+  // or that nothing knows, is the outcome banner's to say, once. Every other state keeps its sentence.
+  const record = view.data?.run?.record ?? null;
+  if (refusedBeforeStart(record)) return html``;
+  if (record === null && !chat.unreachable && (chat.state === "unknown" || (chat.state === "queued" && typeof chat.queuedJobId !== "string"))) return html``;
   const title = "Chat";
   if (chat.unreachable) return titled(title, html`<p class="warn">The queue could not be read (is Valkey reachable?), so whether this run can chat is unknown. The next refresh tries again.</p>`);
   const jobId = typeof view.query?.id === "string" && RUN_ID_RE.test(view.query.id) ? view.query.id : null;
@@ -777,7 +923,6 @@ export function runChat(view) {
     return titled(title, html`${status}<p class="note">Its question is the last assistant entry of its transcript <a href="#transcript">below</a> (kept 24 hours), and on ${link}. An answer resumes it, as a reply there would.</p>${why}${form}${readOnly}${refusal === null ? terminal(jobId) : null}`);
   }
   // fork: whether the record names a session the host-local fork can find, said before the command is offered.
-  const record = view.data?.run?.record ?? null;
   const kept = record?.session !== null && typeof record?.session === "object";
   const why = !kept ? "This run's trigger keeps no session (no run.resume), so there is no transcript to fork." : sessionKeyOfRecord(record) === null ? "This run's session cannot be found from its record (a pull or merge request's session is keyed by its head branch, which the record does not carry), so a fork would refuse." : null;
   if (why !== null) return titled(title, html`${status}<p class="note">${why}</p>`);
@@ -816,16 +961,72 @@ function chatDrawsSteer(view) {
  * (`pi-dispatch sandbox <jobId>`, shown to copy and never run: a browser terminal was rejected, DES-OPERATOR-CONSOLE),
  * and the re-run form, whose preview shows the reserve the worker will hold. A job id outside the run-id charset gets
  * neither: it could not be typed back as one argument.
+ *
+ * ONLY WHAT CAN WORK (issue #710, REQ-OPERATOR-CONSOLE-ACTIONS): each is replaced by one line saying why it cannot,
+ * where that is known for certain before the click. The sandbox (`sandboxLine`) and the re-run (`rerunLine`) each say
+ * how they know.
  */
 function runActions(r, view) {
   if (view.role !== "operator" || typeof r.jobId !== "string" || !RUN_ID_RE.test(r.jobId)) return null;
-  // Issue #712: the command only for a venue with a sandbox shell (`serves.sandboxShell`, held to the worker's
-  // SANDBOX_LAUNCHERS), and otherwise the reason the panel's sandbox pane gives, in its words (`sandboxShellRefusal`). A
-  // record with no `backend` is a `local` run from before attribution (`UNATTRIBUTED_BACKEND`), as the sandbox reads it.
+  return html`<h3>Actions</h3>${sandboxLine(r, view)}${rerunLine(r, view)}`;
+}
+
+/**
+ * What the run page says of a sandbox whose manifest this host read and refused (`sandboxRetentionOf`'s `why`), when
+ * the pane's own words (`reason`) would not read as a sentence after "Its workspace is".
+ */
+const SANDBOX_KEPT_TEXT = Object.freeze({
+  "retention-off": "Its workspace was not kept: sandbox retention is off on this host (PI_SANDBOX_RETENTION_HOURS=0).",
+  swept: "Its workspace is no longer kept on this host: it was swept after its retention window, or never kept.",
+});
+
+/**
+ * The verdicts (`sandboxRetentionOf`'s `why`) that hide the sandbox command: the ones true whatever the shell that runs
+ * it blesses. A venue-policy verdict (`unblessed`, `policy-unreadable`, and any word added later) never hides it
+ * (review round 1): the console never sees the PI_BACKENDS that shell opens under (`OQ-038`), so it would hide the
+ * command of every podman run, and the opener's own venue check (`sandboxVenueRefusal`) is the one that can tell. The
+ * fleet reader asks with the policy unknown, so those words should not reach here; this list is the backstop.
+ */
+const SANDBOX_CERTAIN = new Set(["retention-off", "swept", "id-mismatch", "no-image", "workspace-gone", "venue", "no-venue", "no-launcher"]);
+
+/**
+ * The sandbox line. Hidden, with the reason, for a venue that has no sandbox shell (`sandboxShellRefusal`, held to the
+ * worker's SANDBOX_LAUNCHERS; a record with no `backend` is a `local` run from before attribution), for a run refused
+ * before it started (no workspace was ever made), and for a workspace this host's manifest says cannot be reopened (the
+ * panel's verdict, `sandboxRetentionOf`, read through the fleet reader for a run of THIS host and cached 15 s:
+ * `data.sandboxCheck`) and only where that verdict is certain (`SANDBOX_CERTAIN`). Past its window, the command carries
+ * `--pin`, which the CLI needs then. A venue-policy verdict, a check that could not be read, a run of another host, or a
+ * page with no check keeps the command, as before: the CLI checks again.
+ */
+function sandboxLine(r, view) {
   const venue = typeof r.backend === "string" && r.backend !== "" ? r.backend : UNATTRIBUTED_BACKEND;
   const refused = sandboxShellRefusal(venue);
-  const reopen = refused === null ? html`<p>Open its retained workspace on the host: <code class="mono">${`pi-dispatch sandbox ${r.jobId}`}</code></p>` : html`<p class="note">Its workspace is ${refused}.</p>`;
-  return html`<h3>Actions</h3>${reopen}${canAct(view) ? actForm("rerun", { hidden: [["jobId", r.jobId]], label: "Preview a re-run" }) : null}`;
+  if (refused !== null) return html`<p class="note">Its workspace is ${refused}.</p>`;
+  if (refusedBeforeStart(r)) return html`<p class="note">No workspace to reopen: the run was refused before it started, so none was made.</p>`;
+  const check = view.data?.sandboxCheck ?? null;
+  if (check?.retained === false && typeof check.why === "string") {
+    if (check.why === "past-window") return html`<p>Its workspace is past its retention window; the command pins it first: <code class="mono">${`pi-dispatch sandbox ${r.jobId} --pin`}</code></p>`;
+    if (SANDBOX_CERTAIN.has(check.why)) {
+      if (Object.hasOwn(SANDBOX_KEPT_TEXT, check.why)) return html`<p class="note">${SANDBOX_KEPT_TEXT[check.why]}</p>`;
+      if (typeof check.reason === "string") return html`<p class="note">Its workspace is ${check.reason}.</p>`;
+    }
+  }
+  return html`<p>Open its retained workspace on the host: <code class="mono">${`pi-dispatch sandbox ${r.jobId}`}</code></p>`;
+}
+
+/**
+ * The re-run line: the form, or, where the planner would refuse on the record and the job's retained data alone, its
+ * sentence instead. The refusal is `rerunRefusalOf`'s, the function `planRerun` asks first, so the page cannot offer
+ * what the planner refuses on those, nor hide what it would plan: from the fleet's check (`data.rerunCheck`, which read
+ * the retained data, cached 15 s), else from the record alone. The click still runs the whole planner (the triggers
+ * file, git, a replica). Drawn only where actions can be taken (`canAct`).
+ */
+function rerunLine(r, view) {
+  if (!canAct(view)) return null;
+  const check = view.data?.rerunCheck ?? null;
+  const refusal = typeof check?.refusal === "string" ? check.refusal : check?.ok === true ? null : rerunRefusalOf(r, view.now);
+  if (refusal !== null) return html`<p class="note">Not offered for a re-run: ${refusal}.</p>`;
+  return actForm("rerun", { hidden: [["jobId", r.jobId]], label: "Preview a re-run" });
 }
 
 /**
@@ -866,7 +1067,7 @@ function openshellRows(r) {
 function recoveryRows(r) {
   const rec = recordRecovery(r);
   if (rec === null) return [];
-  const said = [rec.recovered ? recoveredText(rec.recovered) : null, rec.recoverSkipped ? `recovery skipped: ${rec.recoverSkipped}` : null].filter(Boolean);
+  const said = [rec.recovered ? recoveredText(rec.recovered) : null, rec.recoverSkipped ? `recovery skipped (${rec.recoverSkipped}): ${nestedText("recoverSkipped", rec.recoverSkipped)}` : null].filter(Boolean);
   return [
     ["Recovery of", rec.recoveryOf !== null ? runLink(rec.recoveryOf) : null],
     ["Recovery", said.length > 0 ? said.join("; ") : null],
@@ -961,9 +1162,9 @@ export const runSession = withRun("Session and plan", (r) => {
   const s = r.session ?? null;
   const p = r.plan ?? null;
   return facts([
-    ["Session", s ? (s.resumed ? "resumed" : `fresh (${cell(s.reason)})`) : "this trigger keeps no session"],
+    ["Session", s ? (s.resumed ? "resumed" : `fresh (${cell(s.reason)})${typeof s.reason === "string" ? `: ${nestedText("session.reason", s.reason)}` : ""}`) : "this trigger keeps no session"],
     ["Transcript", s && Number.isFinite(s.bytes) ? `${count(s.bytes)} bytes` : null],
-    ["Plan", p ? `${cell(p.outcome)}${p.reason ? ` (${p.reason})` : ""}${p.clamped ? ", clamped" : ""}` : "none"],
+    ["Plan", p ? `${cell(p.outcome)}${p.reason ? ` (${p.reason})` : ""}${p.clamped ? ", clamped" : ""}${typeof p.reason === "string" && p.reason !== "" ? `: ${nestedText("plan.reason", p.reason)}` : ""}` : "none"],
     ["Plan id", p?.planId ? html`<span class="mono">${p.planId}</span>` : null],
   ]);
 });
