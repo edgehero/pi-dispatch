@@ -97,13 +97,50 @@ jobs:
       # host aliases. It records what each request carried in its credential headers (only fake values reach it), so the
       # script can tell a swapped value from a placeholder, and asks git for Basic auth on info/refs. Issue #704 part 3:
       # its second alias (host.docker.internal) is the secret-bundle case's endpoint host, read off the same log.
+      # Issue #725: it is also the steering case's model, a zero-rated OpenAI-compatible fake (`POST /v1/chat/completions`,
+      # streamed). A request whose body holds no `tool` message (the run's first, or pi's retry of it) is HELD until the
+      # conformance script touches STEER_SIGNAL_FILE, which it does once the relay has written the second message's
+      # frame (at most 30 s, then it answers anyway and the case fails on its own assertions), and then asks for `read`
+      # of the job's prompt file; any request carrying a tool result answers "done". Held on that event and not a
+      # timer, so the second frame is written mid-run however slow the host; chosen by the body and not a request
+      # count, so a retry is held again. The body is read, never logged: the log line stays method, path and the two
+      # credential headers, as for every other route, and every other route answers exactly as before.
       - name: A stand-in server on the gateway host
         run: |
           cat > "$RUNNER_TEMP/standin.mjs" <<'JS'
           import { createServer } from "node:http";
-          import { appendFileSync } from "node:fs";
+          import { appendFileSync, existsSync } from "node:fs";
+          const signalled = async () => {
+            for (let waited = 0; waited < 30000 && !existsSync(process.env.STEER_SIGNAL_FILE ?? ""); waited += 100) await new Promise((r) => setTimeout(r, 100));
+          };
+          const completion = (req, res) => {
+            let body = "";
+            req.on("data", (c) => (body += c));
+            req.on("end", async () => {
+              let messages = [];
+              try {
+                messages = JSON.parse(body).messages ?? [];
+              } catch {}
+              const first = !messages.some((m) => m?.role === "tool");
+              res.writeHead(200, { "content-type": "text/event-stream" });
+              const chunk = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+              const base = { id: "r", object: "chat.completion.chunk", created: 0, model: "m1" };
+              const usage = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 };
+              if (first) {
+                await signalled();
+                chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_read", type: "function", function: { name: "read", arguments: JSON.stringify({ path: "/sandbox/job/prompt.md" }) } }] }, finish_reason: null }] });
+                chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage });
+              } else {
+                chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "done" }, finish_reason: null }] });
+                chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage });
+              }
+              res.write("data: [DONE]\n\n");
+              res.end();
+            });
+          };
           createServer((req, res) => {
             appendFileSync(process.env.STANDIN_LOG, JSON.stringify({ method: req.method, path: req.url, xApiKey: req.headers["x-api-key"] ?? null, authorization: req.headers.authorization ?? null }) + "\n");
+            if (req.method === "POST" && req.url === "/v1/chat/completions") return completion(req, res);
             if (req.url.includes("/info/refs") && !req.headers.authorization) {
               res.writeHead(401, { "WWW-Authenticate": 'Basic realm="standin"' });
               return res.end();
@@ -112,10 +149,10 @@ jobs:
             res.end("");
           }).listen(18080, "0.0.0.0");
           JS
-          STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" nohup node "$RUNNER_TEMP/standin.mjs" > "$RUNNER_TEMP/standin.log" 2>&1 &
+          STEER_SIGNAL_FILE="$RUNNER_TEMP/steer-second-written" STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" nohup node "$RUNNER_TEMP/standin.mjs" > "$RUNNER_TEMP/standin.log" 2>&1 &
 
       - name: Conformance (the real bundle, the real runner)
-        run: STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" GATEWAY_LOG="$RUNNER_TEMP/gateway.log" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
+        run: STEER_SIGNAL_FILE="$RUNNER_TEMP/steer-second-written" STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" GATEWAY_LOG="$RUNNER_TEMP/gateway.log" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-conformance.mjs
 
       # Issue #686 part 3: bind mode. First on the gateway as it is, whose default settings must refuse it before spend
       # (the probe create refused with upstream's allow_driver_config sentence).
@@ -150,7 +187,7 @@ jobs:
       # Issue #704 part 3: its secret-bundle case reads the stand-in's log too (the stand-in outlives the restart).
       - name: Bind-mode conformance (the real bind bundle, the real runner)
         if: always()
-        run: STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs
+        run: STEER_SIGNAL_FILE="$RUNNER_TEMP/steer-second-written" STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs
 
       # Issue #707: the setup commands on the real host. `pi-dispatch up --yes` in a scratch deployment folder whose .env
       # blesses only the openshell venue: the gateway is already running and registered here, so the gate reads it and

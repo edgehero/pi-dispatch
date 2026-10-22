@@ -19,8 +19,8 @@ function fake(over = {}) {
 		"openshell policy": { code: 1, stdout: "", stderr: NO_GLOBAL },
 		"docker version": { code: 0, stdout: "28.0.4\n" },
 		"podman version": { code: 0, stdout: "5.4.0\n" },
-		"docker image": { code: 0, stdout: "replicas,exitAuth,sandboxLayout\n" },
-		"podman image": { code: 0, stdout: "replicas,exitAuth,sandboxLayout\n" },
+		"docker image": { code: 0, stdout: "replicas,exitAuth,sandboxLayout,observableRunner\n" },
+		"podman image": { code: 0, stdout: "replicas,exitAuth,sandboxLayout,observableRunner\n" },
 		...over,
 	};
 	const run = async (bin, args) => {
@@ -36,9 +36,9 @@ const lines = (checks) => checks.map((c) => `${c.ok ? (c.warn ? "warn" : "ok") :
 
 test("a ready host: every line passes (blessable since #684, so no note says otherwise)", async () => {
 	const { run } = fake();
-	const checks = await openshellChecks({}, { run, platform: "linux", readLsm: () => "lockdown,capability,landlock,yama" });
+	const checks = await openshellChecks({}, { run, platform: "linux", readLsm: () => "lockdown,capability,landlock,yama", readPtraceScope: () => "1" });
 	assert.deepEqual(lines(checks).filter((l) => !l.startsWith("ok")), []);
-	assert.equal(checks.length, 8, "the CLI, the locality, the gateway version, the driver, the global policy, the engine, Landlock, the image");
+	assert.equal(checks.length, 10, "the CLI, the locality, the gateway version, the driver, the global policy, the engine, Landlock, Yama, the image's two capabilities");
 });
 
 test("each fault is its own failing line with a fix", async () => {
@@ -49,18 +49,34 @@ test("each fault is its own failing line with a fix", async () => {
 		[{ "openshell policy": { code: 0, stdout: "{}" } }, /no gateway-wide policy is in force/],
 		[{ "openshell policy": { code: 1, stdout: "", stderr: "connection refused" } }, /could be read/],
 		[{ "docker version": { code: 0, stdout: "27.4.0\n" } }, /docker is 28 or later/],
-		[{ "docker image": { code: 0, stdout: "replicas,exitAuth\n" } }, /declares sandboxLayout/],
+		[{ "docker image": { code: 0, stdout: "replicas,exitAuth,observableRunner\n" } }, /declares sandboxLayout/],
+		[{ "docker image": { code: 0, stdout: "replicas,exitAuth,sandboxLayout\n" } }, /declares observableRunner/],
 		[{ "docker image": { code: 1, stdout: "" } }, /is in docker's store/],
 	];
 	for (const [over, label] of cases) {
-		const checks = await openshellChecks({}, { run: fake(over).run, platform: "linux", readLsm: () => "landlock" });
+		const checks = await openshellChecks({}, { run: fake(over).run, platform: "linux", readLsm: () => "landlock", readPtraceScope: () => "1" });
 		const failed = checks.filter((c) => !c.ok);
 		assert.equal(failed.length, 1, `${label}: ${JSON.stringify(lines(checks))}`);
 		assert.match(failed[0].label, label);
 		assert.ok(typeof failed[0].fix === "string" && failed[0].fix.length > 0, "names the fix");
 	}
-	const noLandlock = await openshellChecks({}, { run: fake().run, platform: "linux", readLsm: () => "lockdown,yama" });
+	const noLandlock = await openshellChecks({}, { run: fake().run, platform: "linux", readLsm: () => "lockdown,yama", readPtraceScope: () => "1" });
 	assert.deepEqual(noLandlock.filter((c) => !c.ok).map((c) => c.label), ["openshell: this kernel offers Landlock"]);
+});
+
+test("issue #730: Yama ptrace_scope must be EXACTLY 1; 0 and unreadable and 2/3 are each a failing line naming the sysctl (review round 1)", async () => {
+	for (const [read, ok, fix] of [
+		[() => "1\n", true, null],
+		[() => "0\n", false, /kernel\.yama\.ptrace_scope is 0.*set it to 1/],
+		[() => { throw new Error("ENOENT"); }, false, /cannot be read here.*Yama at exactly 1/],
+		[() => "2", false, /ptrace_scope is 2.*start and then fail.*exactly 1/],
+		[() => "3\n", false, /ptrace_scope is 3.*start and then fail.*exactly 1/],
+	]) {
+		const checks = await openshellChecks({}, { run: fake().run, platform: "linux", readLsm: () => "landlock", readPtraceScope: read });
+		const line = checks.find((c) => /Yama ptrace_scope/.test(c.label));
+		assert.equal(line.ok, ok, line.label);
+		if (!ok) assert.match(line.fix, fix);
+	}
 });
 
 test("a missing CLI or a gateway that does not answer stops the section there, with the fix", async () => {
@@ -74,11 +90,11 @@ test("a missing CLI or a gateway that does not answer stops the section there, w
 test("off Linux the Landlock line is said, never passed; an unreadable driver list is a warning; Podman has its own floor", async () => {
 	const mac = await openshellChecks({}, { run: fake().run, platform: "darwin" });
 	assert.ok(mac.some((c) => c.warn && /Landlock cannot be read/.test(c.label) && /LinuxKit/.test(c.fix)));
-	const noAdmin = await openshellChecks({}, { run: fake({ "openshell gateway": { code: 1, stdout: "" } }).run, platform: "linux", readLsm: () => "landlock" });
+	const noAdmin = await openshellChecks({}, { run: fake({ "openshell gateway": { code: 1, stdout: "" } }).run, platform: "linux", readLsm: () => "landlock", readPtraceScope: () => "1" });
 	assert.ok(noAdmin.some((c) => c.ok && c.warn && /compute driver could not be read/.test(c.label)));
 	assert.deepEqual(ENGINE_FLOORS, { docker: [28, 0], podman: [5, 0] });
 	const { run, calls } = fake({ "openshell gateway": { code: 0, stdout: JSON.stringify({ compute_drivers: [{ name: "podman" }] }) }, "podman version": { code: 0, stdout: "4.9.3\n" } });
-	const podman = await openshellChecks({ PI_OPENSHELL_ENGINE: "podman", PI_OPENSHELL_GATEWAY: "lab" }, { run, platform: "linux", readLsm: () => "landlock" });
+	const podman = await openshellChecks({ PI_OPENSHELL_ENGINE: "podman", PI_OPENSHELL_GATEWAY: "lab" }, { run, platform: "linux", readLsm: () => "landlock", readPtraceScope: () => "1" });
 	assert.deepEqual(podman.filter((c) => !c.ok).map((c) => c.label), ["openshell: podman is 5 or later"]);
 	assert.ok(calls.filter((c) => c[0] === "openshell").every((c) => c[1] === "--gateway" && c[2] === "lab"), "every CLI call names the gateway");
 	assert.ok(calls.some((c) => c[0] === "podman" && c[1] === "image"), "the image is read on the gateway's engine");
@@ -122,7 +138,7 @@ function bindFake({ info = DOCKER_INFO(), probe = { code: 1, stderr: "Error: san
 	};
 	return { run, calls };
 }
-const bindOpts = (run, extra = {}) => ({ run, platform: "linux", readLsm: () => "landlock", modes: { copy: false, bind: true }, ids: { euid: 1001, egid: 1001 }, mkdtemp: () => "/tmp/probe-src", rmdir: () => {}, ...extra });
+const bindOpts = (run, extra = {}) => ({ run, platform: "linux", readLsm: () => "landlock", readPtraceScope: () => "1", modes: { copy: false, bind: true }, ids: { euid: 1001, egid: 1001 }, mkdtemp: () => "/tmp/probe-src", rmdir: () => {}, ...extra });
 
 test("bind mode on a ready gateway: the settings line passes, upstream's warning is quoted, and sandboxLayout is not asked (#686 part 3)", async () => {
 	const { run, calls } = bindFake();

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DAEMON_FACTS_ARGS, parseDaemonFacts } from "./daemon-facts.mjs";
 import { decideJobUser, JOB_USER_FIX, resolveImageUser } from "./job-user.mjs";
-import { bindProbeArgs, GATEWAY_TOML_WHERE, gatewayTomlFor, judgeBindAnswer, judgeGatewayStatus, OPENSHELL_BREW_INSTALL, OPENSHELL_TESTED_VERSION, UPSTREAM_BIND_WARNING } from "./openshell-cli.mjs";
+import { bindProbeArgs, GATEWAY_TOML_WHERE, gatewayTomlFor, judgeBindAnswer, judgeGatewayStatus, judgePtraceScope, OPENSHELL_BREW_INSTALL, OPENSHELL_TESTED_VERSION, PTRACE_SCOPE_PATH, UPSTREAM_BIND_WARNING } from "./openshell-cli.mjs";
 
 /**
  * `pi-dispatch doctor --openshell` (issue #683): whether this host can run the `openshell` venue, asked before
@@ -24,7 +24,10 @@ import { bindProbeArgs, GATEWAY_TOML_WHERE, gatewayTomlFor, judgeBindAnswer, jud
  *   - that engine is Docker 28 or later, or Podman 5 or later (measured: Docker Desktop 27.4 refused every create);
  *   - this host's kernel offers Landlock, on Linux, where the gateway on this host shares it; elsewhere it cannot be
  *     read here, and Docker Desktop's LinuxKit kernel has none (measured), which is said, never passed;
- *   - the job image declares `sandboxLayout`, read on that engine, the store the gateway runs images from (copy mode).
+ *   - this host's Yama `ptrace_scope` is readable and 1 or more (issue #730), the setting the per-job check refuses
+ *     without, since the job's key holders run readable on this venue;
+ *   - the job image declares `sandboxLayout`, read on that engine, the store the gateway runs images from (copy mode);
+ *   - the job image declares `observableRunner` (issue #730, both modes), without which no connection of a job is made.
  *
  * BIND MODE (issue #686 part 3, `openshell-bind` blessed): its engine is Docker (the Podman driver is refused for it), the
  * gateway's three bind settings are on (one probe create that can only be refused, the adapter's own
@@ -90,9 +93,9 @@ const atLeast = (have, want) => have !== null && (have[0] > want[0] || (have[0] 
 
 /**
  * The checks, as doctor's `{ ok, warn?, label, fix? }`. `run` is the seam every spawn goes through; `env` is the
- * service environment doctor resolved; `platform` and `readLsm` are the Landlock read's.
+ * service environment doctor resolved; `platform` and `readLsm` are the Landlock read's, `readPtraceScope` Yama's.
  */
-export async function openshellChecks(env = {}, { run = runQuiet, platform = process.platform, readLsm = () => readFileSync("/sys/kernel/security/lsm", "utf8"), image = env.PI_JOB_IMAGE || "pi-job:latest", modes = { copy: true, bind: false }, ids = { euid: typeof process.geteuid === "function" ? process.geteuid() : null, egid: typeof process.getegid === "function" ? process.getegid() : null }, jobsDir = null, mkdtemp = () => probeSourceIn(jobsDir), rmdir = (dir) => rmSync(dir, { recursive: true, force: true }) } = {}) {
+export async function openshellChecks(env = {}, { run = runQuiet, platform = process.platform, readLsm = () => readFileSync("/sys/kernel/security/lsm", "utf8"), readPtraceScope = () => readFileSync(PTRACE_SCOPE_PATH, "utf8"), image = env.PI_JOB_IMAGE || "pi-job:latest", modes = { copy: true, bind: false }, ids = { euid: typeof process.geteuid === "function" ? process.geteuid() : null, egid: typeof process.getegid === "function" ? process.getegid() : null }, jobsDir = null, mkdtemp = () => probeSourceIn(jobsDir), rmdir = (dir) => rmSync(dir, { recursive: true, force: true }) } = {}) {
 	const checks = [];
 	const engine = env.PI_OPENSHELL_ENGINE === undefined || env.PI_OPENSHELL_ENGINE === "" ? "docker" : env.PI_OPENSHELL_ENGINE;
 	const gateway = env.PI_OPENSHELL_GATEWAY || null;
@@ -150,9 +153,19 @@ export async function openshellChecks(env = {}, { run = runQuiet, platform = pro
 	} else {
 		checks.push({ ok: true, warn: true, label: "openshell: Landlock cannot be read from this host", fix: "the gateway's engine runs in a VM whose kernel must offer Landlock ABI 3; Docker Desktop's LinuxKit kernel offers none (measured), so every create fails there" });
 	}
+	// Issue #730: the same judgement the per-job check makes, so doctor says before a job does.
+	const yama = judgePtraceScope(() => readPtraceScope());
+	const yamaFix = yama.reason === "too-strict"
+		? `this host's kernel.yama.ptrace_scope is ${yama.scope}, which also stops the OpenShell sandbox from observing a job well enough to let it reach the network, so every job here would start and then fail; set it to exactly 1 (\`sysctl -w kernel.yama.ptrace_scope=1\`, and in /etc/sysctl.d to keep it)`
+		: yama.scope === 0
+			? `this host's kernel.yama.ptrace_scope is 0, so a job's tools could read the memory of the processes holding the key that signs its result; set it to 1 (\`sysctl -w kernel.yama.ptrace_scope=1\`, and in /etc/sysctl.d to keep it), or every job here is refused`
+			: `${PTRACE_SCOPE_PATH} cannot be read here (a kernel without Yama, or not Linux), so whether a job's tools could read its key holders' memory is not known, and every job here is refused; run the gateway on a Linux host whose kernel has Yama at exactly 1`;
+	checks.push(yama.ok ? { ok: true, label: `openshell: Yama ptrace_scope is 1 (a tool cannot read its ancestor, the broker can)` } : { ok: false, label: "openshell: Yama ptrace_scope is exactly 1", fix: yamaFix });
 
 	const labels = await run(engine, ["image", "inspect", "--format", '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}', image]);
 	const caps = labels.code === 0 ? labels.stdout.trim().split(",") : null;
+	// Issue #730: both modes. Said only when the image was read; the store line below says when it was not.
+	if (caps !== null) checks.push(caps.includes("observableRunner") ? { ok: true, label: `openshell: the job image (${image}) declares observableRunner` } : { ok: false, label: `openshell: the job image (${image}) declares observableRunner`, fix: "use a job image built after issue #730 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it): it starts the runner from a node the sandbox can observe, without which no job here reaches its model" });
 	// Bind mode alone reads the `mounts` layout, so `sandboxLayout` is copy mode's line only.
 	if (modes.copy !== true) {
 		checks.push(caps === null ? { ok: false, label: `openshell: the job image (${image}) is in ${engine}'s store`, fix: `build or pull ${image} into ${engine}, the store the gateway runs images from` } : { ok: true, label: `openshell: the job image (${image}) is in ${engine}'s store` });

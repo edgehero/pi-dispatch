@@ -29,4 +29,24 @@ set -eu
 # (or `process._debugProcess(pid)`) would open this node's inspector on 127.0.0.1:9229, which exists under
 # `--network none`, and a heap snapshot from there holds the key. The exec-only node closes /proc, not the inspector:
 # that is the process serving its own memory. The supervisor starts the runner with the same flag.
-exec /opt/pi-dispatch/runner-node --disable-sigusr1 /app/image/runner/supervise.mjs
+#
+# Issue #730: on a venue whose connections are mediated by a broker that must read the caller's memory (OpenShell), the
+# worker sets PI_RUNNER_OBSERVABLE=1 and both key holders start from the readable copy instead (image/Dockerfile says
+# why, and what protects the key there). Read here, once, from the exec's environment, which the worker alone writes:
+# the supervisor picks the runner's node from the same variable, and nothing a tool does later reaches either. Strict:
+# unset or empty is the exec-only node, "1" the readable one, anything else a worker defect, refused rather than guessed.
+# Issue #730 (review round 1, H1): a readable key holder can be core-dumped (a SIGABRT between the job's own processes),
+# and a core would hold the exit-line key. OpenShell's seccomp already refuses prlimit64 on another pid, but the default
+# soft limit is not known, so it is set here: `ulimit -c 0` in dash sets the soft AND hard limit, so nothing without
+# CAP_SYS_RESOURCE (the sandbox has none) can raise it again; the holders inherit it across exec. On both branches,
+# harmless where the node is already unreadable, so one path.
+ulimit -c 0
+case "${PI_RUNNER_OBSERVABLE:-}" in
+"") node=/opt/pi-dispatch/runner-node ;;
+1) node=/opt/pi-dispatch/runner-observable ;;
+*)
+	echo "entrypoint: PI_RUNNER_OBSERVABLE must be 1 or unset" >&2
+	exit 2
+	;;
+esac
+exec "$node" --disable-sigusr1 /app/image/runner/supervise.mjs

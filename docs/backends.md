@@ -694,7 +694,16 @@ What it is, in this page's terms:
 which runs unarmed as on every venue), a gateway at another release than the tested one
 (`openshell-gateway-untested`, read per job as well as at boot), and a model provider that reads its key's value inside
 the job (`openshell-credential-reads-value`: Bedrock, Vertex, Codex, Copilot, and an Anthropic OAuth token), which a
-placeholder cannot stand in for.
+placeholder cannot stand in for, and (issue #730) a gateway host whose `kernel.yama.ptrace_scope` is not exactly
+1 (`openshell-ptrace-scope-unprotected` at 0 or unreadable; `openshell-ptrace-scope-too-strict` at 2 or 3, where the
+sandbox's broker cannot read the job well enough to let it reach the network, so a job would start and then fail).
+Yama is one of the things that keep a job's own tools away from the exit-line key the runner holds: on this venue the
+runner runs under a readable node, because the sandbox's connect broker must read the runner's memory to let it reach
+the network and a non-dumpable runner refuses it, so what protects the key is OpenShell's workload seccomp
+(`process_vm_readv`, `ptrace`, `pidfd_getfd`), Yama (`/proc/<pid>/mem`), and `ulimit -c 0` in the entrypoint (so a
+tool's `SIGABRT` of a key holder drops no core holding the key); the venue refuses rather than run with Yama off or
+too strict. Set it with `sysctl -w kernel.yama.ptrace_scope=1` (and in `/etc/sysctl.d/` to keep it). The job image must declare `observableRunner` (the readable runner and the entrypoint
+that chooses it), or the job is refused before it spends (`job-image-observable-runner-unsupported`).
 - **A secret no provider can carry** (a `run.secrets` key or a `PI_FORWARD_ENV` name no shell can spell, or longer
   than 128) reaches the sandbox not at all, never as a value on the exec's argv, and is named in the log
   (`openshell_secret_unbindable`). A forwarded name the redactor does not know as non-secret (`TZ`, `LANG`) is a
@@ -721,7 +730,8 @@ placeholder cannot stand in for.
 - **`pi-dispatch doctor --openshell`** says whether this host is ready: the CLI and the gateway at the tested release
   (`OPENSHELL_TESTED_VERSION`, exactly, since OpenShell marks these interfaces experimental), the gateway on loopback,
   its compute driver the engine `PI_OPENSHELL_ENGINE` names (`docker` by default, or `podman`), no gateway-wide policy,
-  Docker 28 or Podman 5 or later, Landlock in the kernel, and the job image declaring `sandboxLayout`.
+  Docker 28 or Podman 5 or later, Landlock in the kernel, this host's Yama `ptrace_scope` at exactly 1 (issue #730),
+  and the job image declaring `sandboxLayout` and `observableRunner`.
   `PI_OPENSHELL_GATEWAY` names a registered gateway when the CLI's active one is not it.
 - **CI**: `openshell-conformance.yml` runs `.github/scripts/openshell-conformance.mjs` against a real gateway on every
   pull request, advisory until it has passed across a round.

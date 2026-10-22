@@ -1103,12 +1103,21 @@ test("an empty or non-string value emits NO variable at all, never `NAME=`", { s
 	assert.equal(env.GOOD, "x");
 });
 
+test("issue #730: PI_RUNNER_OBSERVABLE is the venue's alone: written on observableRunner, absent otherwise, never from a forwarded or secret value", { skip }, () => {
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, observableRunner: true }).PI_RUNNER_OBSERVABLE, "1");
+	assert.equal("PI_RUNNER_OBSERVABLE" in mod.buildContainerEnv({ ...secretsBase }), false, "every other venue keeps the exec-only node");
+	const smuggled = mod.buildContainerEnv({ ...secretsBase, hostEnv: { ...secretsBase.hostEnv, PI_RUNNER_OBSERVABLE: "1" }, forwardEnv: ["PI_RUNNER_OBSERVABLE"], secrets: { PI_RUNNER_OBSERVABLE: "1" } });
+	assert.equal("PI_RUNNER_OBSERVABLE" in smuggled, false, "settled after both loops, so a forwarded or secret value is removed");
+	assert.ok(CONTAINER_ENV_NAMES.has("PI_RUNNER_OBSERVABLE"), "reserved, so the triggers loader refuses it in run.secrets");
+});
+
 test("the reserved-name list triggers.mjs refuses covers every STATIC name this map writes", { skip }, () => {
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, transcriptStderr: true, reportProgress: true, recover: true, recovering: true, steer: true, bundleEnvFile: true });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, transcriptStderr: true, reportProgress: true, recover: true, recovering: true, steer: true, bundleEnvFile: true, observableRunner: true });
 	assert.equal(env.PI_STEER, "1", "the drift check must see PI_STEER (issue #646)");
+	assert.equal(env.PI_RUNNER_OBSERVABLE, "1", "the drift check must see PI_RUNNER_OBSERVABLE (issue #730)");
 	assert.equal(env.PI_BUNDLE_ENV, "1", "the drift check must see PI_BUNDLE_ENV (issue #704 part 3)");
 	assert.equal(env.PI_TRANSCRIPT, "stderr", "the drift check must see PI_TRANSCRIPT (issue #686)");
 	assert.equal(env.PI_REPORT_PROGRESS, "1", "the drift check must see PI_REPORT_PROGRESS (issue #644)");

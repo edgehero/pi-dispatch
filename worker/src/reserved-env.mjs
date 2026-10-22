@@ -32,6 +32,9 @@ export const KEYLESS_ENV_NAME = "PI_DISPATCH_KEYLESS";
  * a variable added to the closed map and not to this list fails there rather than becoming a hole here.
  */
 export const CONTAINER_ENV_NAMES = new Set([
+	// Issue #730: the worker's choice of the readable runner node on the OpenShell venues (image/entrypoint.sh). Reserved,
+	// so neither `run.secrets` nor `PI_FORWARD_ENV` can make a job's key holders readable on any venue.
+	"PI_RUNNER_OBSERVABLE",
 	"PI_PROVIDER",
 	"PI_MODEL",
 	"PI_MAX_TURNS",

@@ -374,7 +374,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -590,6 +590,14 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	// env-internal PI_BUNDLE_ENV: written into the job's closed env map here, never read from the worker's environment.
 	if (bundleEnvFile === true) env.PI_BUNDLE_ENV = "1";
 	else delete env.PI_BUNDLE_ENV;
+
+	// Issue #730: the readable runner node (image/entrypoint.sh), for a venue whose connections are mediated by a broker
+	// that reads the caller's memory (OpenShell, both modes), and no other. Settled after both loops like the flags above,
+	// so no forwarded or secret value can set it, and deleted otherwise: on every other venue the key holders stay on
+	// the exec-only node.
+	// env-internal PI_RUNNER_OBSERVABLE: written into the job's closed env map here, never read from the worker's environment.
+	if (observableRunner === true) env.PI_RUNNER_OBSERVABLE = "1";
+	else delete env.PI_RUNNER_OBSERVABLE;
 
 	// Issue #500: the runner sets these in its own environment, for its child processes, and no value from outside
 	// may arrive first. Both lists refuse them upstream (config.mjs for PI_FORWARD_ENV, the triggers loader for

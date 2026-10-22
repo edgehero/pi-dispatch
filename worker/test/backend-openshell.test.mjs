@@ -122,7 +122,7 @@ function jobDirs() {
 }
 
 function bundle(fake, over = {}) {
-	return mod.makeOpenshellBackend({ image: "pi-job:x", hostEnv: { ANTHROPIC_API_KEY: "sk-real" }, onOutput: () => {}, exec: fake.exec, spawnFn: fake.spawnFn, platform: "linux", readLsm: () => "lockdown,capability,landlock,yama", ...over });
+	return mod.makeOpenshellBackend({ image: "pi-job:x", hostEnv: { ANTHROPIC_API_KEY: "sk-real" }, onOutput: () => {}, exec: fake.exec, spawnFn: fake.spawnFn, platform: "linux", readLsm: () => "lockdown,capability,landlock,yama", readPtraceScope: () => "1\n", ...over });
 }
 
 const JOB = { id: "j1", kind: "github", provider: "anthropic", model: "m", maxTurns: 5 };
@@ -186,6 +186,7 @@ test("one run: create sized and labelled under the generated policy, read it bac
 	assert.equal(env.PI_SESSION_FILE, "/sandbox/session/current.jsonl");
 	assert.equal(env.HOME, "/home/pi");
 	assert.equal(env.PI_EXIT_AUTH, "stdin");
+	assert.equal(env.PI_RUNNER_OBSERVABLE, "1", "issue #730: the key holders start from the readable node, which the sandbox's broker can observe");
 	for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NODE_USE_ENV_PROXY"]) assert.equal(env[name], undefined, `${name}: the layer is the egress control`);
 	assert.equal(execCall[execCall.indexOf("--workdir") + 1], "/sandbox/workspace");
 	assert.equal(execCall[execCall.indexOf("--timeout") + 1], "0", "the worker owns the job's timeout");
@@ -334,6 +335,58 @@ test("the image preflight reads the gateway's own engine and needs sandboxLayout
 	const answer = await b.imagePreflight({ kind: "github" });
 	assert.equal(answer.sandboxLayoutUnsupported, "pi-job:x");
 	assert.equal(calls[0][0], "podman");
+	// Issue #730: both modes are brokered, so an image with every earlier capability but not observableRunner is refused.
+	const older = "replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile";
+	const spawnOlder = () => {
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		queueMicrotask(() => {
+			child.stdout.emit("data", `sha256:abc|1.2.0|github|${older}\n`);
+			child.emit("close", 0);
+		});
+		return child;
+	};
+	for (const mode of ["copy", "bind"]) {
+		const refused = await mod.makeOpenshellBackend({ mode, image: "pi-job:x", spawnFn: spawnOlder, exec: fakeOpenshell().exec }).imagePreflight({ kind: "github" });
+		assert.equal(refused.observableRunnerUnsupported, "pi-job:x", mode);
+	}
+});
+
+test("issue #730: the venue refuses before spend unless this host's Yama ptrace_scope is EXACTLY 1 (review round 1)", { skip }, async () => {
+	// Exactly 1: 0 (or unreadable/garbled) leaves the readable key holders open to a tool; 2 or 3 also stops the broker,
+	// so the job would reserve and fail. Scopes 0, 1, 2, 3, missing and garbled, each judged.
+	for (const [text, verdict] of [
+		["1\n", { ok: true, scope: 1 }],
+		["0\n", { ok: false, reason: "unprotected", scope: 0 }],
+		["2", { ok: false, reason: "too-strict", scope: 2 }],
+		["3\n", { ok: false, reason: "too-strict", scope: 3 }],
+		["", { ok: false, reason: "unprotected", scope: null }],
+		["one", { ok: false, reason: "unprotected", scope: null }],
+		["-1", { ok: false, reason: "unprotected", scope: null }],
+	]) {
+		assert.deepEqual(mod.judgePtraceScope(() => text), verdict, JSON.stringify(text));
+	}
+	assert.deepEqual(mod.judgePtraceScope(() => { throw Object.assign(new Error("no"), { code: "ENOENT" }); }), { ok: false, reason: "unprotected", scope: null }, "no Yama, or not Linux: nothing is known, so refused");
+	assert.equal(mod.PTRACE_SCOPE_PATH, "/proc/sys/kernel/yama/ptrace_scope");
+	for (const mode of ["copy", "bind"]) {
+		for (const [read, refusal, reason, scope] of [
+			[() => "0\n", "openshell-ptrace-scope-unprotected", "unprotected", 0],
+			[() => "2\n", "openshell-ptrace-scope-too-strict", "too-strict", 2],
+			[() => { throw new Error("x"); }, "openshell-ptrace-scope-unprotected", "unprotected", null],
+		]) {
+			const logs = [];
+			const fake = fakeOpenshell();
+			const answer = await bundle(fake, { mode, readPtraceScope: read, log: (e, f) => logs.push([e, f]) }).observationPreflight({ kind: "github" });
+			assert.deepEqual(answer, { venueRefused: { reason: refusal, comment: mod.OPENSHELL_REFUSALS[refusal] } }, `${mode} ${reason}`);
+			assert.deepEqual(logs, [["openshell_ptrace_scope_refused", { reason, ...(scope === null ? {} : { scope }) }]], "the setting goes to the operator's log");
+			assert.equal(fake.state.calls.length, 0, "a free local read, before any gateway call");
+		}
+		// Exactly 1 passes the Yama gate (it goes on to read the gateway).
+		assert.equal((await bundle(fakeOpenshell(), { mode, readPtraceScope: () => "1\n" }).observationPreflight({ kind: "github" })).venueRefused?.reason, undefined, `${mode}: scope 1 passes the Yama gate`);
+	}
+	assert.match(mod.OPENSHELL_REFUSALS["openshell-ptrace-scope-unprotected"], /^Refused: .*kernel\.yama\.ptrace_scope.* Not run\.$/);
+	assert.match(mod.OPENSHELL_REFUSALS["openshell-ptrace-scope-too-strict"], /^Refused: .*(2 or 3).* Not run\.$/);
 });
 
 test("the bundle refuses what it was not built for: another engine, a malformed gateway name, an unknown option (#683)", { skip }, () => {
@@ -423,7 +476,7 @@ test("a job's network policy (#684): generated from the deployment's allowlist a
 	assert.equal(result.code, 0);
 	const rules = Object.values(fake.state.written.policy.network_policies);
 	assert.deepEqual(rules.map((r) => `${r.endpoints[0].host}:${r.endpoints[0].port}`).sort(), ["*.github.com:443", "api.anthropic.com:443", "github.com:443", "host.docker.internal:11434"]);
-	assert.deepEqual(rules[0].binaries, [{ path: "/opt/pi-dispatch/runner-node" }, { path: "/usr/local/bin/node" }], "the runner's node, then the image's own declared binaries");
+	assert.deepEqual(rules[0].binaries, [{ path: "/opt/pi-dispatch/runner-node" }, { path: "/opt/pi-dispatch/runner-observable" }, { path: "/usr/local/bin/node" }], "the runner's nodes, then the image's own declared binaries");
 	// The same written body without the baseline addition would be a mismatch, and is: never started.
 	const strict = fakeOpenshell();
 	const dirs2 = jobDirs();

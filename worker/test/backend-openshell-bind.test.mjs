@@ -152,7 +152,7 @@ const delay = async (ms) => {
 	clock += ms;
 };
 function bundle(fake, over = {}) {
-	return mod.makeOpenshellBackend({ mode: "bind", image: "pi-job:x", hostEnv: { ANTHROPIC_API_KEY: "sk-real" }, onOutput: () => {}, exec: fake.exec, spawnFn: fake.spawnFn, platform: "linux", readLsm: () => "landlock", euid: 1234, egid: 1235, now: () => clock, delay, ...over });
+	return mod.makeOpenshellBackend({ mode: "bind", image: "pi-job:x", hostEnv: { ANTHROPIC_API_KEY: "sk-real" }, onOutput: () => {}, exec: fake.exec, spawnFn: fake.spawnFn, platform: "linux", readLsm: () => "landlock", readPtraceScope: () => "1\n", euid: 1234, egid: 1235, now: () => clock, delay, ...over });
 }
 
 const JOB = { id: "j1", kind: "github", provider: "anthropic", model: "m", maxTurns: 5 };
@@ -469,7 +469,7 @@ test("the bind gate: each settings refusal is a policy refusal before spend with
 	assert.equal(missing.state.probes, 0);
 	// Copy mode never probes.
 	const copy = fakeOpenshell({ probe: "allow_driver_config" });
-	await mod.makeOpenshellBackend({ image: "pi-job:x", exec: copy.exec, spawnFn: copy.spawnFn, platform: "linux", readLsm: () => "landlock" }).observationPreflight(JOB);
+	await mod.makeOpenshellBackend({ image: "pi-job:x", exec: copy.exec, spawnFn: copy.spawnFn, platform: "linux", readLsm: () => "landlock", readPtraceScope: () => "1\n" }).observationPreflight(JOB);
 	assert.equal(copy.state.probes, 0);
 });
 
@@ -542,7 +542,7 @@ test("bind mode serves run.recover; copy mode still refuses it (#686 part 3)", {
 	const job = { ...JOB, recover: true };
 	assert.deepEqual(await bundle(fakeOpenshell()).observationPreflight(job), { observations: { openshellGatewayLocal: true } });
 	const copy = fakeOpenshell();
-	const refused = await mod.makeOpenshellBackend({ image: "pi-job:x", exec: copy.exec, spawnFn: copy.spawnFn, platform: "linux", readLsm: () => "landlock" }).observationPreflight(job);
+	const refused = await mod.makeOpenshellBackend({ image: "pi-job:x", exec: copy.exec, spawnFn: copy.spawnFn, platform: "linux", readLsm: () => "landlock", readPtraceScope: () => "1\n" }).observationPreflight(job);
 	assert.equal(refused.venueRefused.reason, "openshell-recover-unsupported");
 });
 

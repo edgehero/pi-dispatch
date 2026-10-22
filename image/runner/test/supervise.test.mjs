@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { authenticExitLines, EXIT_OOM_KILLED, parseExitOomKilled } from "../../../worker/src/run-history.mjs";
-import { BY_SUPERVISOR, deathFields, FORWARDED_SIGNALS, KILLED, OOM_KILLED, RAISE_THEN_EXEC, RUNNER_NODE, RUNNER_NODE_FLAGS, RUNNER_SCRIPT, superviseRunner, TERMINATED } from "../src/supervise.mjs";
+import { BY_SUPERVISOR, deathFields, FORWARDED_SIGNALS, KILLED, OOM_KILLED, RAISE_THEN_EXEC, RUNNER_NODE, RUNNER_NODE_FLAGS, RUNNER_OBSERVABLE, RUNNER_OBSERVABLE_ENV, RUNNER_SCRIPT, runnerNodeFor, superviseRunner, TERMINATED } from "../src/supervise.mjs";
 
 /**
  * Issue #596: the supervisor between the container's init and the runner. Every effect is a seam here; the last test
@@ -47,6 +48,17 @@ function run({ env = { PI_EXIT_AUTH: "stdin", PI_JOB_ID: "j1" }, raw = `${KEY}\n
 	});
 	return { child, out, exits, spawned, handlers, drained: () => drained };
 }
+
+test("issue #730: on PI_RUNNER_OBSERVABLE=1 the runner starts from the readable copy, otherwise from the exec-only node", () => {
+	assert.equal(RUNNER_OBSERVABLE, "/opt/pi-dispatch/runner-observable");
+	assert.equal(RUNNER_OBSERVABLE_ENV, "PI_RUNNER_OBSERVABLE");
+	const { spawned } = run({ env: { PI_EXIT_AUTH: "stdin", PI_JOB_ID: "j1", PI_RUNNER_OBSERVABLE: "1" } });
+	assert.deepEqual(spawned[0].args, ["-c", RAISE_THEN_EXEC, RUNNER_OBSERVABLE, "--disable-sigusr1", RUNNER_SCRIPT], "the same flags: the runner still holds the key");
+	// Only the exact "1" the worker writes; the entrypoint refuses any other value before this runs, and the default is
+	// the exec-only node, so a value that slipped past it can only keep the stricter one.
+	for (const value of [undefined, "", "0", "true", " 1", "yes"]) assert.equal(runnerNodeFor(value === undefined ? {} : { PI_RUNNER_OBSERVABLE: value }), RUNNER_NODE, String(value));
+	assert.equal(runnerNodeFor(null), RUNNER_NODE);
+});
 
 test("the runner is started under the exec-only node through a shell that raises its OOM score, then execs it", () => {
 	const { spawned } = run();
@@ -165,7 +177,25 @@ test("the image runs the supervisor from an entry file that always calls it: no 
 test("the entrypoint starts the supervisor under the exec-only node with --disable-sigusr1, and the supervisor is the file the Dockerfile copies", () => {
 	const entrypoint = readFileSync(new URL("../../entrypoint.sh", import.meta.url), "utf8");
 	// The supervisor holds the key: a tool's SIGUSR1 would otherwise open its inspector on 127.0.0.1:9229.
-	assert.match(entrypoint, /\nexec \/opt\/pi-dispatch\/runner-node --disable-sigusr1 \/app\/image\/runner\/supervise\.mjs\n/);
+	assert.match(entrypoint, /\nexec "\$node" --disable-sigusr1 \/app\/image\/runner\/supervise\.mjs\n/);
+	// Issue #730: which node, run for real. Outside the image neither node exists, so the shell's exec fails naming the
+	// path it tried (126 or 127): the exec-only node by default, the readable copy on exactly "1", and any other value
+	// refused with 2 before anything is started.
+	const path = new URL("../../entrypoint.sh", import.meta.url).pathname;
+	const tried = (value) => {
+		const env = { PATH: process.env.PATH, ...(value === undefined ? {} : { PI_RUNNER_OBSERVABLE: value }) };
+		return spawnSync("/bin/sh", [path], { encoding: "utf8", env, timeout: 10000 });
+	};
+	for (const [value, node] of [[undefined, "/opt/pi-dispatch/runner-node"], ["", "/opt/pi-dispatch/runner-node"], ["1", "/opt/pi-dispatch/runner-observable"]]) {
+		const r = tried(value);
+		assert.notEqual(r.status, 0, String(value));
+		assert.match(r.stderr, new RegExp(node.replace(/[/.-]/g, "\\$&")), `${value} tries ${node}`);
+	}
+	for (const value of ["0", "true", "yes", " 1"]) {
+		const r = tried(value);
+		assert.equal(r.status, 2, value);
+		assert.match(r.stderr, /PI_RUNNER_OBSERVABLE must be 1 or unset/);
+	}
 	const dockerfile = readFileSync(new URL("../../Dockerfile", import.meta.url), "utf8");
 	assert.match(dockerfile, /\nCOPY image\/runner \/app\/image\/runner\n/, "the whole runner directory, entry file and src/ alike");
 });
@@ -175,7 +205,6 @@ test("the entry file, run by node, runs the supervisor: never a silent exit 0", 
 	// shell's exec fails (126 or 127, by shell) and the supervisor exits with the runner's code. What matters is that the entry file RAN
 	// the supervisor: a guard that read false exited 0 here with no output. (No --disable-sigusr1: the node running the
 	// suite may predate it; the flag is pinned on the entrypoint above and in RUNNER_NODE_FLAGS.)
-	const { spawnSync } = await import("node:child_process");
 	const r = spawnSync(process.execPath, [new URL("../supervise.mjs", import.meta.url).pathname], { encoding: "utf8", env: { PATH: process.env.PATH }, timeout: 20000 });
 	assert.ok(r.status === 126 || r.status === 127, `the runner's own code, got ${r.status}: ${r.stderr}`);
 });
