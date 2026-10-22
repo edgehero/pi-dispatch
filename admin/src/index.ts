@@ -103,8 +103,8 @@ import {
   createFleetReader,
   planParkedAnswer,
   enqueueParkedAnswer,
-  sandboxShellRefusal,
 } from "./read-model.mjs";
+import { sandboxRetentionOf } from "./sandbox-verdict.mjs";
 // The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
 import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
@@ -163,8 +163,7 @@ import { COSTS_WINDOWS, PROJECT_KEY_RE } from "./costs.mjs";
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
 import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
-import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
-import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
+import { openSandbox, sandboxEgress, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
 import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderAllocations } from "./render.mjs";
 import { makeDashboard, createDashboardDeps, switchFailure, withAuditedWrites } from "./dashboard.ts";
 // `/dispatch chat` (issue #647, part 2): pi-free, so its tests drive it with fakes; `chatIo` below wires it.
@@ -2142,96 +2141,17 @@ export function chatIo(paths: any, ctx: any, notify: Notify, seams: any = {}): a
  */
 export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env = process.env }: { now?: () => number; env?: any } = {}): any {
   if (!jobId) return null;
-  if (!paths?.sandboxRetentionHours) return { retained: false, reason: "retention off" };
-  const manifest = readManifest({ sandboxDir: paths.sandboxDir, jobId });
-  if (!manifest) return { retained: false, reason: "swept" };
-  // Issue #446: the same `id-mismatch` refusal `resolveSandbox` makes, so `b` is not offered for a directory that holds
-  // another run (two ids that differ only in characters a file name cannot hold share one).
-  if (typeof manifest.jobId === "string" && manifest.jobId !== String(jobId)) return { retained: false, reason: "not reopenable (another run holds its directory)" };
-  // #277: the SAME venue refusal `resolveSandbox` applies when the key is pressed, asked here so the panel
-  // never advertises `b` for a run this host cannot re-open. `retained` is this object's "re-openable"
-  // verdict, which is what the dashboard's key guard reads.
-  // THE THREE refusals `resolveSandbox` decides from the manifest alone, through the SAME predicate it
-  // uses (issue #337), so the panel does not advertise `b` for a run this host cannot re-open.
-  //
-  // NOT every one, and the exception is named rather than left to be discovered: `decideSandboxJobUser`
-  // can also refuse from the manifest alone, when the recorded job user is malformed (issue #341), and
-  // that check is not in this predicate. The reason is MEASURED and lives at `sandboxSyncRefusal`'s own
-  // declaration; the superseded one ("it would change what the CLI refuses and when") was corrected there
-  // and left standing here for a round, which is the recurrence this round keeps catching (issue #367).
-  // In short: that function checks the PLATFORM before it reads the stamp, so one malformed manifest
-  // refuses on linux and every other posix and returns `{ user: null, home: null }` on darwin and win32.
-  // Folding it in would make whether this panel offers `b` depend on the OPERATOR'S OS for an identical
-  // run, where every other refusal here is a property of the run.
-  //
-  // It used to ask only the venue one, so a run whose manifest names no image, or whose local
-  // folder moved, was offered the key, given two lines of egress detail about the session it would get,
-  // and refused the moment the key was pressed. Copying the other two here instead of sharing them would
-  // have been the shape `openSandbox`'s own docblock warns about: two callers assembling the same answer
-  // from parts is how one of them drops a part.
-  //
-  // What stays in `openSandbox` is anything needing docker (a proxy that is not running, a sandbox
-  // already up). This read is synchronous by design so RUN_DETAIL can do it once on entry inside a key
-  // handler, and that residual is `OQ-038`'s rather than this function's.
-  //
-  // The MESSAGE is this pane's own, not the refusal's: `resolveSandbox` names the workspace path, and
-  // the rule here is a retention state and never a path, because a manifest path embeds an account name
-  // on Windows and this view renders beside PII-free record fields.
-  //
-  // WHICH VENUES OPEN HERE is this shell's `PI_BACKENDS` (issue #429), read through the worker's own parser exactly as
-  // `openSandboxSession` will read it when `b` is pressed, and never the deployment's (`OQ-038`). A panel started
-  // without it sees `local` alone, so a podman run is NOT offered here rather than offered and then launched under
-  // docker: the launcher is the run's own venue's, and an unblessed venue is refused before anything is asked. A
-  // malformed value is its own state, as a malformed `PI_EGRESS` is: the key press would refuse, so neither is offered.
-  let policy;
-  try {
-    policy = sandboxVenuePolicy(env);
-  } catch {
-    return { retained: false, reason: "not reopenable (PI_BACKENDS or PI_BACKEND_FLOOR unreadable here)" };
-  }
-  const refusal = sandboxSyncRefusal({ jobId, manifest, blessed: policy.blessed });
-  if (refusal) {
-    // The venue the refusal itself read: a manifest with no `backend` key is a `local` run from before attribution,
-    // so in a shell whose PI_BACKENDS leaves `local` out its cause is that variable, not a missing record.
-    const venue = sandboxVenueOf(manifest);
-    const named = typeof venue === "string" && venue !== "";
-    // A venue this build CAN open, left out of this shell's PI_BACKENDS: the one reason here an operator fixes in
-    // their own shell, so it says which variable. Kept under the pane's 53 columns.
-    const unblessed = named && sandboxLauncher(venue) !== null;
-    const reason =
-      refusal.refused === "no-image"
-        ? "not reopenable (the manifest names no image)"
-        : refusal.refused === "workspace-gone"
-          ? "not reopenable (the workspace has moved or been deleted)"
-          : unblessed
-            ? `not reopenable here (PI_BACKENDS lacks ${venue})`
-            : named
-              ? // Issue #712: the console's run page says the same words for the same venue (`sandboxShellRefusal`).
-                (sandboxShellRefusal(venue) ?? `not reopenable here (ran on ${venue})`)
-              : "not reopenable (no venue recorded)";
-    return { retained: false, reason };
-  }
-  // Issue #446: a run past its deadline, or within the opener's grace of it, is refused when `b` is pressed unless the
-  // open pins it first, and this panel has no pin. So it is not offered: the SAME predicate `resolveSandbox` asks, never
-  // a copy of the window maths, and the reason names where the pin is (the CLI), kept under the pane's 53 columns. The
-  // key press itself inherits the refusal from `openSandbox`, whose message carries the whole command.
-  const at = now();
-  if (sandboxWindowRefusal({ jobId, manifest, retentionHours: paths.sandboxRetentionHours, at })) {
-    return { retained: false, reason: "past its window: open it with the CLI's --pin" };
-  }
+  // The verdict is `sandboxRetentionOf`'s (sandbox-verdict.mjs), the console run page's too since issue #710, so the two
+  // surfaces offer a sandbox for the same runs; its refusals and their reasons are documented there. WHICH VENUES OPEN
+  // HERE is this shell's `PI_BACKENDS` (issue #429), never the deployment's (`OQ-038`), so `env` is this process's.
+  const kept = sandboxRetentionOf(paths, jobId, { now, env });
+  if (!kept.retained) return { retained: false, reason: kept.reason };
   // The runtime `b` would open this run in, so the pane can say where an egress-off shell lands (issue #429).
-  // Issue #683: a venue with no launcher row (`openshell`) is refused by `sandboxSyncRefusal` above; if one ever reached
-  // here, it is not reopenable, never reopened under docker.
-  const launcher = sandboxLauncher(sandboxVenueOf(manifest));
-  if (!launcher) return { retained: false, reason: sandboxShellRefusal(sandboxVenueOf(manifest)) ?? "not reopenable (its venue has no sandbox shell)" };
-  const runtime = launcher.bin;
-  // The sweep's own deadline rule (issue #446): the pin, else the earlier of the `retainUntil` the worker wrote and
-  // `createdAt` plus this shell's window.
-  const { until, source } = sandboxDeadline(manifest, paths.sandboxRetentionHours);
+  const runtime = kept.launcher.bin;
   const egress = sandboxEgressPosture(env);
-  if (until === null) return { retained: true, egress, runtime };
-  const hours = Math.max(0, Math.round((until - at) / 3600000));
-  return { retained: true, pinned: source === "pin", expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`, egress, runtime };
+  if (kept.until === null) return { retained: true, egress, runtime };
+  const hours = Math.max(0, Math.round((kept.until - kept.at) / 3600000));
+  return { retained: true, pinned: kept.source === "pin", expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`, egress, runtime };
 }
 
 /**

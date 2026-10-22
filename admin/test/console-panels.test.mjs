@@ -238,7 +238,9 @@ test("the run page's Progress panel (issue #644): a finished run shows its recor
   assert.match(String(runProgress(view("operator", { run: { record: { jobId: "gh-1" } }, progress: { absent: true } }))), /record holds no progress/);
   assert.match(String(runProgress(view("operator", { run: { missing: true }, progress: { unreachable: "x" } }))), /could not be read/);
   assert.match(String(runProgress(view("operator", { run: { missing: true }, progress: { invalid: "x" } }))), /not one this console reads/);
-  assert.match(String(runProgress(view("viewer", { run: { missing: true }, progress: { absent: true } }))), /No live progress: not published \(PI_RUN_PROGRESS=0\)/);
+  assert.match(String(runProgress(view("viewer", { run: { missing: true }, progress: { absent: true }, transcript: { exists: true } }))), /No live progress: not published \(PI_RUN_PROGRESS=0\)/);
+  // Issue #710: no record and nothing running (a queued job, or no run at all): the outcome banner says it, this draws nothing.
+  assert.equal(String(runProgress(view("viewer", { run: { missing: true }, progress: { absent: true } }))), "");
 });
 
 test("the Progress panel of an attempt whose run continues as a recovery (issue #662): its own record's progress and a link, never the recovery's live key", async () => {
@@ -352,7 +354,7 @@ test("the run page's recovery rows (issue #645): where a durable run came from, 
     assert.match(html, /<dt>Checkpoints<\/dt><dd>5 written, 0 failed, 1 skipped<\/dd>/, role);
   }
   const skipped = String(await page("viewer", { ...record, recoveryOf: undefined, recovered: undefined, checkpoints: undefined, recoverSkipped: "local" }));
-  assert.match(skipped, /<dt>Recovery<\/dt><dd>recovery skipped: local<\/dd>/);
+  assert.match(skipped, /<dt>Recovery<\/dt><dd>recovery skipped \(local\): A folder job is never recovered, so it ran as it would without run\.recover\.<\/dd>/, "the token and the catalog's sentence (issue #710)");
   assert.doesNotMatch(skipped, /Recovery of|Checkpoints/);
   assert.match(String(await page("viewer", { ...record, recovered: { from: "exit", n: 2, orphans: 0 } })), /<dd>recovered from an exit checkpoint \(recovery 2\): 0 orphaned calls<\/dd>/, "an attempt and a checkpoint the record lacks are left out");
   // A record of a job that never armed recovery, and one whose every recovery value is hostile, render the same bytes.

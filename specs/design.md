@@ -12369,6 +12369,51 @@ a tunnel.
     rejection of browser-side rendering below stands).
   - **`/api/state`'s parked rows** gain `jobId`, so a script or the terminal can open or answer one without a second
     lookup.
+- **The run page leads with its outcome** (AMENDED 2026-10-22, #710 PR 3, `REQ-OPERATOR-CONSOLE-SCREENS` (c),
+  `REQ-OPERATOR-CONSOLE-ACTIONS` (e) and (l)):
+  - **The banner** (`runOutcome`, `p-outcome`, first in `PAGE_PANELS.run`): the outcome word and tone (`words.mjs`), the
+    catalog's sentence (`explainReason`, `why` picking the variant), its next step and a link to the reason's heading.
+    The link goes to the repository's `docs/reasons.md` on its forge, on `main` (`DOCS_ROOT`, a test holds it to
+    `worker/package.json`'s repository URL). REJECTED: a docs page served by the console (it serves none, and its other
+    docs mentions are plain `docs/console.md` text); the running release's tag (a tag older than a reason's heading
+    answers a page without it, while `main` holds every heading a released worker can write). Both roles see the same
+    banner: every string is the catalog's fixed text or a closed enum the summary already shows a viewer.
+  - **Said once.** `withRun` used to replace each of five record panels with the same "no record" sentence; it now
+    draws nothing, the stylesheet's existing `section[data-panel]:empty` hides the section, and the banner says why
+    (not a run id, running, queued, ended elsewhere, unknown). A live swap to an empty fragment empties the section the
+    same way (`innerHTML = ""`), and a fill swaps it back, so no page state is kept beside the hub's digests. The
+    Progress and Chat panels follow: nothing for a job that is not running and has no record, or that the banner
+    names, and nothing for a run refused before it started (`refusedBeforeStart`: a `policy` outcome, never retried,
+    whose record the cost fold's own `refusedBeforeSpend`, now exported from `admin/src/costs.mjs`, reads as spending
+    nothing). REJECTED: deriving "never started" from the reason (a list every new gate would have to join; the record
+    states the fact itself), and including `failed` records (an infra failure is retried under the same id, whose next
+    attempt has progress and a chat).
+  - **Only the actions that can work.** The re-run's cheap refusals are `rerunRefusalOf`, the planner's first step, so
+    the page and the click cannot disagree on them. The run page asks it over the retained job's data through the
+    fleet reader (`rerunCheck`, one `getJob` per queue, the `parkedAnswerCheck` pattern) and caches the answer 15 s per
+    run id and record (`rerunCheckOf`, `parkedAnswerCheckOf`'s cache). The record alone (no check, or an unreadable one)
+    can infer only that the data is gone, past the kind's longest retention plus a day: a local record does not say
+    which of BullMQ's two ends its job met, the record's `endedAt` can precede `finishedOn`, and BullMQ removes by age
+    only when a later job finishes. REJECTED: a record-only `/command` or parked-answer check (the record carries
+    neither fact). The sandbox reuses the panel's manifest verdict: `readSandboxInfo`'s refusals moved into
+    `admin/src/sandbox-verdict.mjs` as `sandboxRetentionOf`, which the panel and the console's `sandboxCheck` both call
+    (a module of its own, handed to the fleet reader as a seam: it imports the read model, so an import back would be
+    a cycle), read only for a record of the console's own host (a manifest lives on the host that ran the job), and
+    cached like the re-run's. Unknown keeps the action: another host's run, an unreadable venue list or a check that
+    could not be read shows the command, and the CLI decides.
+  - **Round 1: what the console cannot know it does not judge.** The venue policy: the console asks the verdict with
+    `venuePolicy: "unknown"` and hides the command only for a verdict true under any `PI_BACKENDS`. REJECTED: reading
+    the deployment's `PI_BACKENDS` from its `.env` (`OQ-038`: the opener's shell is what blesses, and the worker's and
+    the opener's routinely differ), and passing the deployment's env as before (the console takes no such key, so every
+    podman run read `unblessed` and lost its command). The queues: the retained-job read and the planners share one
+    discovery, `fleetQueuesOn` (`readFleetQueues` is it over a client of its own), so they ask the same queues by
+    construction; a degraded discovery makes not-found unreadable (uncached, the record alone decides), never "the data
+    is gone". REJECTED: the per-tick registry set (a host stopped more than ~90 s drops out of it while its queue holds
+    the job). The bundle: the predicates the verdict needs moved into the worker's leaf `sandbox-policy.mjs`
+    (`@edgehero/pi-dispatch/sandbox-policy`), re-exported by `sandbox.mjs` under the same names; importing
+    `/sandbox` had pulled the container env builder and the provider SDKs into the console (3.08 MB to 6.90 MB; 3.13 MB
+    now), and `admin/test/console-bundle.test.mjs` holds the bundle free of them. REJECTED: a seam that defers the
+    import (the console needs the verdict on every run page, so the graph would load anyway).
 - **Doctor results** (AMENDED 2026-10-21, #712 PR C, `DES-DOCTOR-RESULTS-PUBLISHED`, `INT-DOCTOR-RESULTS-KEY`): the
   fleet reader's snapshot carries `doctor`, each host's last published doctor run, read for the index's hosts and the
   live ones at most every 15 s (a host publishes daily, so a per-tick MGET would be load for nothing), never pruning
@@ -13921,3 +13966,5 @@ a tunnel.
 | 2026-10-22 (#710) | Issue #710, PR 2. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: one vocabulary, `admin/src/words.mjs`, read by the panel and the console; `policy` reads as refused, `awaiting-input` and `operator-cancel` change the word under their own outcome only, and an unknown outcome prints as itself; the panel's list row keeps the token in parentheses, its run detail prints the catalog's sentence and next step; the console's short sentence is derived from the catalog, never written by hand, and not cut at a clause (rejected, with the measurement). `DES-OPERATOR-CONSOLE` is UNCHANGED, checked: the console still renders on the server through the `html` template, and the tone is a class from its existing stylesheet. |
 | 2026-10-22 (#710, PR 2, round 1) | Review round 1. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED, CORRECTED**: the panel's list row no longer puts the reason token in parentheses beside the word (the longest token pushed the turns and tokens off an 80-column row); the word stays in the outcome cell and the token is the row's last cell, clipped first; the plain degraded list and `/dispatch runs`' OUTCOME column use the shared words (REASON keeps the token); the console's short sentence backs off past a dangling word, a trailing comma and an unclosed parenthesis, never below 24 characters, and drops an unclosed aside that opens below that floor (measured over the catalog's 180 sentences, 157 cut: 77 dangling and 19 open-parenthesis endings before, none after); the chain's children carry their `reason`, so a waiting or cancelled child says so; a reason the runs filter refuses is printed once, cut to 64 characters, with no `title` copy. `DES-OPERATOR-CONSOLE` UNCHANGED, checked. |
 | 2026-10-22 (#710, PR 2, round 2) | Review round 2. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED, CORRECTED**: the console's short sentence drops every closed aside (a parenthetical wherever it opens, and a `, which ...,` clause) before it is cut, replacing round 1's early-aside rule, which backed four rows off to their subject; 147 of 180 sentences cut, each cut row at least 40 characters, with 0 dangling endings, 0 open parentheses and 0 over 72; a negation is backed off only with the word before it; the cut counts code points; keeping the better of two cuts by the words after the subject was rejected (no mechanical subject). The live transcript's end, the Progress panel, the panel's tail, the browser's stream status and the topology tip map the outcome through `words.mjs` (the script and `graph-html.mjs` are handed the table, since neither loads a module); the runs filter's `outcome` refuses a value outside the record's three, naming them. `DES-OPERATOR-CONSOLE` UNCHANGED, checked: the script is still one served string, and `graph-html.mjs` still loads nothing. |
+| 2026-10-22 (#710, PR 3) | Issue #710, PR 3. **`DES-OPERATOR-CONSOLE` AMENDED**: a "The run page leads with its outcome" bullet: the banner (`runOutcome`, `p-outcome`, first) with its docs link to the repository's `docs/reasons.md` on `main` (rejected: a console-served docs page, the running release's tag); the absent record said once, the record panels empty and hidden by `section[data-panel]:empty`, also after a live swap; Progress and Chat empty for a run refused before it started, judged by the cost fold's own `refusedBeforeSpend` on a `policy` record (rejected: a reason list, and `failed` records, which are retried under the same id); the re-run's cheap refusals as `rerunRefusalOf`, the planner's first step, asked over the retained data through the fleet reader and cached 15 s, the record alone inferring only expired data past the longest retention plus a day (rejected: a record-only `/command` or parked-answer check, facts the record does not carry); the sandbox's manifest verdict moved from the panel into `admin/src/sandbox-verdict.mjs` (`sandboxRetentionOf`, a fleet reader seam, since the sandbox module reaches typebox) and asked for a run of the console's own host only; unknown keeps an action. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` (the panel's sandbox verdict and words are the same, now read through the moved function), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (nothing about opening a sandbox changes; the page reads the manifest the panel read, and asks docker nothing at render). |
+| 2026-10-22 (#710, PR 3, round 1) | Issue #710, PR 3, review round 1. **`DES-OPERATOR-CONSOLE` AMENDED**: a "Round 1: what the console cannot know it does not judge" bullet: the sandbox verdict asked with the venue policy unknown (rejected: the deployment's `PI_BACKENDS`, `OQ-038`; the deployment's env as before, which hid every podman run); the retained-job read sharing the planners' discovery, `fleetQueuesOn`, a degraded one reading as unreadable (rejected: the per-tick registry set); the predicates moved to the worker's leaf `sandbox-policy.mjs` so the console bundle carries no provider SDK (3.08 MB on main, 6.90 MB at PR 3, 3.13 MB now; rejected: a deferred import). The seam's reason corrected: a cycle, no longer typebox. `DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked: the predicates moved without a change (`sandbox.mjs` re-exports the same functions, a test holds identity). |

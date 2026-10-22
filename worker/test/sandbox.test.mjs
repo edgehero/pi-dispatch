@@ -253,8 +253,10 @@ test("held means a venue with a LAUNCHER, by name, never by `remote: false` (#27
 	// today (local and podman are the two non-remote venues), so no behavioural test can catch a swap to the second --
 	// which the design rejects, because a future non-remote venue on a third runtime would then be reopened under one of
 	// these two. The relation is pinned here as text rather than manufactured as behaviour.
-	const src = readFileSync(new URL("../src/sandbox.mjs", import.meta.url), "utf8");
-	const body = src.slice(src.indexOf("export function sandboxVenueRefusal"), src.indexOf("export function resolveSandbox"));
+	// In sandbox-policy.mjs since issue #710 (the leaf the console imports; sandbox.mjs re-exports it).
+	const src = readFileSync(new URL("../src/sandbox-policy.mjs", import.meta.url), "utf8");
+	const body = src.slice(src.indexOf("export function sandboxVenueRefusal"), src.indexOf("export function sandboxVenueOf"));
+	assert.ok(body.length > 0, "the slice found its two ends");
 	assert.match(body, /const launcher = sandboxLauncher\(venue\);/);
 	assert.match(body, /if \(launcher && held\) return null;/);
 	assert.doesNotMatch(body, /\.remote/);

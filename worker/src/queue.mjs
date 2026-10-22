@@ -547,12 +547,23 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
  * being wrong costs money, not for a reader that runs every second. Fails open to `[]`, so an unreadable
  * keyspace degrades to the registry's answer rather than refusing.
  */
-export async function discoverHostQueues(redis, { timeoutMs = 2_000, count = 500 } = {}) {
+export async function discoverHostQueues(redis, opts = {}) {
+	return (await discoverHostQueuesReporting(redis, opts)).names;
+}
+
+/**
+ * `discoverHostQueues`, and whether its answer is the whole keyspace (issue #710, review round 1): `{ names, incomplete }`,
+ * `incomplete` null for a scan that reached its end, else why it did not (the scan threw, or ran out of time with
+ * `names` the part it read). For a reader for which a queue it did not ask is not an answer: the console's run page
+ * asks whether a job's data is still held, and "no queue holds it" off a scan that never finished is a false refusal.
+ * The kill switch keeps `discoverHostQueues`, which fails open to what it read.
+ */
+export async function discoverHostQueuesReporting(redis, { timeoutMs = 2_000, count = 500 } = {}) {
 	const prefix = `bull:${QUEUE}@`;
 	const names = new Set();
+	let cursor = "0";
 	try {
 		const deadline = Date.now() + timeoutMs;
-		let cursor = "0";
 		do {
 			// BOUNDED, because BullMQ's connections carry `maxRetriesPerRequest: null` and a command against
 			// an unreachable server therefore QUEUES FOREVER rather than rejecting -- so an unguarded await
@@ -578,11 +589,11 @@ export async function discoverHostQueues(redis, { timeoutMs = 2_000, count = 500
 				if (WORKER_NAME_RE.test(name)) names.add(name);
 			}
 		} while (cursor !== "0" && Date.now() < deadline);
-	} catch {
-		// Fail open: the registry's answer alone is still better than refusing to pause.
-		return [];
+	} catch (err) {
+		// Fail open: the registry's answer alone is still better than refusing to pause. Nothing read is kept, as before.
+		return { names: [], incomplete: err?.message ?? String(err) };
 	}
-	return [...names].sort().map(hostQueueName);
+	return { names: [...names].sort().map(hostQueueName), incomplete: String(cursor) === "0" ? null : "the queue scan ran out of time" };
 }
 
 /**

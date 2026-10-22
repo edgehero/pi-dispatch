@@ -14,6 +14,7 @@ import {
   planFailedBulk,
   planParkedAnswer,
   planRerun,
+  rerunRefusalOf,
   PENDING_SCAN_BUDGET,
   readPendingAnswer,
   planSteer,
@@ -375,6 +376,49 @@ test("planRerun of a forge run: the where from retained data, the run fields fro
   }
 });
 
+test("planRerun and rerunRefusalOf agree on every cheap refusal, both ways: the planner asks it first, with the same bytes (issue #710)", live, async () => {
+  const v = await freshValkey();
+  const dir = tempDir("pd-710-rerun-agree-");
+  const logsDir = join(dir, "logs");
+  const triggersPath = join(dir, "triggers.json");
+  try {
+    forgeTriggers(triggersPath);
+    const shared = await v.q("pi-jobs");
+    const forge = { kind: "github", repo: "org/repo", target: { type: "issue", number: 7 }, flow: "fix", trigger: { matched: { index: 0, type: "label", label: "pi" } } };
+    // [name, record, the job's data (undefined: no job in the queue)]
+    const cases = [
+      ["forge data gone", { jobId: "gh-gone", kind: "github" }, undefined],
+      ["local data gone", { jobId: "local-gone", kind: "local" }, undefined],
+      ["a forge /command", { jobId: "gh-cmd", kind: "github" }, { ...forge, flow: undefined, command: "triage" }],
+      ["a local /command", { jobId: "local-cmd", kind: "local" }, { kind: "local", folder: dir, flow: "f", command: "tidy" }],
+      ["a parked answer", { jobId: "gh-reply", kind: "github" }, { ...forge, parkedReply: true }],
+      ["an unsupported kind", { jobId: "jira-1", kind: null }, { kind: "jira" }],
+      // Cheap checks that pass: the planner goes on and refuses (or plans) for its own reasons, never a cheap one.
+      ["a forge run past the cheap checks", { jobId: "gh-ok", kind: "github" }, forge],
+      ["a local run past the cheap checks", { jobId: "local-ok", kind: "local" }, { kind: "local", folder: join(dir, "not-a-repo"), flow: "f" }],
+    ];
+    const cheap = new Set();
+    for (const [, record, data] of cases) {
+      writeRecord(logsDir, { ...record, outcome: "completed", endedAt: new Date().toISOString() });
+      if (data !== undefined) await shared.add("job", data, { jobId: record.jobId });
+      const held = (await shared.getJob(record.jobId))?.data ?? null;
+      const said = rerunRefusalOf(record, Date.now(), held);
+      if (said !== null) cheap.add(said);
+    }
+    for (const [name, record] of cases) {
+      const held = (await shared.getJob(record.jobId))?.data ?? null;
+      const said = rerunRefusalOf(record, Date.now(), held);
+      const planned = await planRerun({ url: URL12, logsDir, jobId: record.jobId, triggersPath });
+      if (said !== null) assert.equal(planned.refusal, said, `${name}: the planner refuses with rerunRefusalOf's bytes`);
+      else assert.ok(!cheap.has(planned.refusal), `${name}: passed by rerunRefusalOf, so the planner says no cheap refusal (${planned.refusal ?? "a plan"})`);
+    }
+    assert.ok(cheap.size >= 6, "every cheap refusal was met");
+    assert.equal((await planRerun({ url: URL12, logsDir, jobId: "gh <x>" })).refusal, rerunRefusalOf({ jobId: "gh <x>" }, Date.now(), undefined), "a bad id");
+  } finally {
+    await v.done();
+  }
+});
+
 test("a forge re-run takes its authority from the trigger NOW: deleted, replaced by another kind, narrowed, a console field never copied", live, async () => {
   const v = await freshValkey();
   const dir = tempDir("pd-642-rerun-auth-");
@@ -493,15 +537,15 @@ test("planRerun of a cron run fires its trigger as the file says now (`pi-dispat
     const folder = gitRepo("pd-642-cron-");
     writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder, flow: "audit", task: "t" } }] }));
     writeRecord(logsDir, { jobId: "repeat:nightly:1760500000000", kind: "local", target: "local:x", outcome: "completed" });
-    const planned = await planRerun({ url: URL12, logsDir, jobId: "repeat:nightly:1760500000000", triggersPath, env: {} });
+    const planned = await planRerun({ url: URL12, logsDir, jobId: "repeat:nightly:1760500000000", triggersPath, env: {}, now });
     assert.equal(planned.plan.kind, "cron");
     assert.equal(planned.plan.queue, "pi-jobs");
     assert.equal(planned.plan.job.flow, "audit");
     const ok = await enqueueRerun(planned.plan, { url: URL12, now });
     assert.deepEqual(ok, { ok: true, jobId: manualTriggerJobId({ triggerId: "nightly", now: new Date(now()) }), queue: "pi-jobs" });
     writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
-    assert.match((await planRerun({ url: URL12, logsDir, jobId: "repeat:nightly:1760500000000", triggersPath, env: {} })).refusal, /no cron trigger with id "nightly" .* any more/);
-    assert.match((await planRerun({ url: URL12, logsDir, jobId: "repeat:nightly:1760500000000", env: {} })).refusal, /triggers file is not known here/);
+    assert.match((await planRerun({ url: URL12, logsDir, jobId: "repeat:nightly:1760500000000", triggersPath, env: {}, now })).refusal, /no cron trigger with id "nightly" .* any more/);
+    assert.match((await planRerun({ url: URL12, logsDir, jobId: "repeat:nightly:1760500000000", env: {}, now })).refusal, /triggers file is not known here/);
   } finally {
     await v.done();
   }

@@ -62,7 +62,7 @@ import { resolveJobSize } from "@edgehero/pi-dispatch/job-size";
 import { projectBudgetRow, publishedBudget } from "@edgehero/pi-dispatch/host-budget";
 import { peakSeries, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
 import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
-import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
+import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueuesReporting, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { RUNS_INDEX, RUNS_INDEX_MAX, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
@@ -339,17 +339,8 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
     // read's degraded answer, like a down Valkey, never a throw out of a function that fails open.
     redis = redisFn(url);
     redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
-    // CONCURRENTLY, sharing one budget. Serialising them doubled the worst case, so a status read against
-    // an unreachable Valkey took twice as long to say the same thing.
-    // The inner per-operation bound is HALVED, like `readHosts`: `readLiveHosts` walks `1 + N` operations
-    // sequentially, so an inner bound equal to the outer one lets a single hung operation consume the whole
-    // budget and the two timers fire together. Halved, one slow host costs half the budget rather than all
-    // of it, and the walk can still finish.
-    const [fleet, existing] = await Promise.all([
-      withTimeout(readLiveHosts(redis, { timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) }), timeoutMs, { unreachable: "timed out reaching the registry" }),
-      discoverHostQueues(redis, { timeoutMs }),
-    ]);
-    return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing), blind: fleet?.unreachable ?? null, hosts: fleet?.hosts ?? [] };
+    const { names, blind, hosts } = await fleetQueuesOn(redis, { timeoutMs });
+    return { names, blind, hosts };
   } catch (err) {
     return { names: [QUEUE], blind: err?.message ?? String(err), hosts: [] };
   } finally {
@@ -359,6 +350,41 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
       // best-effort teardown
     }
   }
+}
+
+/**
+ * `readFleetQueues`' discovery on a client the caller holds (issue #710, review round 1): the live registry unioned with
+ * the queues that exist (`unionQueueNames`), `{ names, blind, hosts, incomplete }`. ONE function for the planners
+ * (through `readFleetQueues`) and the fleet reader's retained-job read (the run page's re-run and parked-answer checks),
+ * so the page asks exactly the queues the click will: a host out of the registry (stopped more than ~90 s) still has
+ * its queue, and a page that searched the registry alone said "the data is gone" for a job the planner then found.
+ * `blind` is the registry's degradation, `incomplete` the keyspace scan's (`discoverHostQueuesReporting`); either
+ * means a job no queue named here holds may still be held. `readLiveHostsFn`/`discoverFn` are seams; a `discoverFn`
+ * answering a bare list (the kill switch's shape) reads as complete. Never throws for a read that fails: it degrades.
+ */
+export async function fleetQueuesOn(redis, { timeoutMs = 2500, prune, readLiveHostsFn = readLiveHosts, discoverFn = discoverHostQueuesReporting } = {}) {
+  // CONCURRENTLY, sharing one budget. Serialising them doubled the worst case, so a status read against
+  // an unreachable Valkey took twice as long to say the same thing.
+  // The inner per-operation bound is HALVED, like `readHosts`: `readLiveHosts` walks `1 + N` operations
+  // sequentially, so an inner bound equal to the outer one lets a single hung operation consume the whole
+  // budget and the two timers fire together. Halved, one slow host costs half the budget rather than all
+  // of it, and the walk can still finish.
+  const [fleet, existing] = await Promise.all([
+    withTimeout(
+      Promise.resolve()
+        .then(() => readLiveHostsFn(redis, { timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)), ...(prune === undefined ? {} : { prune }) }))
+        .catch((err) => ({ unreachable: err?.message ?? String(err) })),
+      timeoutMs,
+      { unreachable: "timed out reaching the registry" },
+    ),
+    Promise.resolve()
+      .then(() => discoverFn(redis, { timeoutMs }))
+      .catch((err) => ({ names: [], incomplete: err?.message ?? String(err) })),
+  ]);
+  const found = Array.isArray(existing) ? { names: existing, incomplete: null } : { names: Array.isArray(existing?.names) ? existing.names : [], incomplete: existing?.incomplete ?? (Array.isArray(existing?.names) ? null : "the queue scan answered nothing") };
+  const hosts = Array.isArray(fleet?.hosts) ? fleet.hosts : [];
+  const blind = fleet?.unreachable ?? (Array.isArray(fleet?.hosts) ? null : "registry unreadable");
+  return { names: unionQueueNames(fleetQueueNames(hosts), found.names), blind, hosts, incomplete: found.incomplete };
 }
 
 /**
@@ -824,8 +850,8 @@ export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
  * size alone and are re-exported here, so every caller still reaches the queue through this one funnel. And the
  * worker's reserve rule, for the reserve a paid action shows before confirm.
  */
-import { parkedAnswerRefusalOf } from "./job-actions.mjs";
-export { BULK_MAX, enqueueParkedAnswer, enqueueRerun, enqueueSteer, parkedAnswerRefusalOf, planFailedBulk, planParkedAnswer, planRerun, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
+import { parkedAnswerRefusalOf, rerunRefusalOf, RERUN_BAD_ID } from "./job-actions.mjs";
+export { BULK_MAX, enqueueParkedAnswer, enqueueRerun, enqueueSteer, parkedAnswerRefusalOf, planFailedBulk, planParkedAnswer, planRerun, rerunRefusalOf, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
 export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 
 /**
@@ -3637,7 +3663,7 @@ export function createFleetReader(
     parseConnectionFn = parseConnection,
     redisFn = makeRedisClient,
     readLiveHostsFn = readLiveHosts,
-    discoverHostQueuesFn = discoverHostQueues,
+    discoverHostQueuesFn = discoverHostQueuesReporting,
     // The env the deployment's dollar caps are read from (issue #501, part 7): the console's `deploymentEnv()`, whose
     // pointer reads the deployment's `.env`. Empty by default, so a test or a caller that passes none sees the
     // overlay's caps alone.
@@ -3654,6 +3680,11 @@ export function createFleetReader(
     killSwitchPlanFn = null,
     // Issue #712: the published doctor results' read (`readDoctorResults`), a seam so a test hands rows without a Valkey.
     readDoctorResultsFn = readDoctorResults,
+    // Issue #710: the panel's sandbox manifest verdict (`sandboxRetentionOf`, admin/src/sandbox-verdict.mjs), a seam
+    // rather than an import because that module imports this one (`sandboxShellRefusal`), and the read model is
+    // imported by modules held to a small graph (insights-assembly, write-plans). Null: `sandboxCheck` cannot tell, so
+    // the run page keeps the command. The console passes the real one.
+    sandboxRetentionFn = null,
   } = {},
 ) {
   const prune = readOnly !== true;
@@ -3694,13 +3725,37 @@ export function createFleetReader(
     return lastNames.map((n) => pool.get(n));
   };
 
+  // One job by id across the fleet's queues (the first that knows it): the Job, null when no queue holds it, or undefined
+  // when that cannot be said. Its `.data` stays with the caller in this file. The queues are the PLANNERS' set
+  // (`fleetQueuesOn`, which `readFleetQueues` is: the registry unioned with the queues that exist), never the per-tick
+  // registry set, so a host that left the registry still has its queue asked (review round 1 of issue #710). A
+  // degraded discovery (the registry or the keyspace scan unread) turns "no queue holds it" into undefined, which the
+  // checks report as unreachable: neither cached nor a refusal, so the page falls back to the record alone. Bounded by
+  // the discovery's budget plus the read timeout for the lookups.
+  const retainedJob = async (jobId) => {
+    const read = (async () => {
+      const fleet = await fleetQueuesOn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS, prune, readLiveHostsFn, discoverFn: discoverHostQueuesFn });
+      for (const name of fleet.names) {
+        if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
+        const q = pool.get(name);
+        if (typeof q?.getJob !== "function") continue;
+        const job = await q.getJob(jobId);
+        if (job) return job;
+      }
+      return fleet.blind !== null || fleet.incomplete !== null ? undefined : null;
+    })();
+    return withTimeout(read, 2 * FLEET_READ_TIMEOUT_MS, undefined);
+  };
+
   // The KILL SWITCH's set, which is not the per-tick set. A registry row is a lease that expires ninety seconds after a
   // host stops writing, while that host's queue and its paused flag are permanent -- so pausing off the registry alone
   // misses a host that has gone quiet but is still draining, and resuming off it leaves that host's queue paused
   // forever with nothing able to name it. The union adds a SCAN of BullMQ's own meta keys, which is far too expensive
   // for a reader that runs every second and entirely affordable for a keypress.
   const killSwitchQueues = async () => {
-    const existing = await discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    // The seam answers `discoverHostQueuesReporting`'s shape or a bare list; a part-read keyspace still pauses what it read.
+    const got = await discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    const existing = Array.isArray(got) ? got : Array.isArray(got?.names) ? got.names : [];
     for (const name of unionQueueNames(lastNames, existing)) {
       if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
     }
@@ -4095,21 +4150,48 @@ export function createFleetReader(
     async parkedAnswerCheck(jobId) {
       if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { refusal: "a run id is letters, digits and . _ : -, at most 200 characters" };
       try {
-        const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
-        const read = (async () => {
-          for (const q of queues) {
-            if (typeof q?.getJob !== "function") continue;
-            const job = await q.getJob(jobId);
-            if (job) return job;
-          }
-          return null;
-        })();
-        const job = await withTimeout(read, FLEET_READ_TIMEOUT_MS, undefined);
+        const job = await retainedJob(jobId);
         if (job === undefined) return { unreachable: true };
         const judged = parkedAnswerRefusalOf({ jobId, data: job?.data ?? null, triggersPath: paths.triggersPath ?? null, fs });
         return judged.refusal ? { refusal: judged.refusal } : { ok: true };
       } catch {
         return { unreachable: true };
+      }
+    },
+    // Whether run `jobId` (its record `record`) can be offered a re-run (issue #710): the planner's own cheap refusals
+    // (`rerunRefusalOf`, which `planRerun` asks first) over the record and the job's retained data, so the run page hides
+    // the form exactly where the planner refuses on those alone. `{ refusal }` (a sentence), `{ ok: true }` or
+    // `{ unreachable: true }`. The job's `.data` never leaves this method. Never throws.
+    async rerunCheck(jobId, record) {
+      if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { refusal: RERUN_BAD_ID };
+      try {
+        const job = await retainedJob(jobId);
+        if (job === undefined) return { unreachable: true };
+        const refusal = rerunRefusalOf({ ...(record ?? {}), jobId }, nowFn(), job?.data ?? null);
+        return refusal !== null ? { refusal } : { ok: true };
+      } catch {
+        return { unreachable: true };
+      }
+    },
+    // Whether run `jobId`'s workspace is still re-openable (issue #710): the panel's manifest verdict
+    // (`sandboxRetentionOf`, through the `sandboxRetentionFn` seam), read only for a record THIS host wrote, since the
+    // manifest is on the host that ran the job and the console's host can say nothing of another's. `{ retained, why }`,
+    // or `{ elsewhere: true }` for a run of another host, a host name this reader cannot tell, or no verdict wired. The
+    // venue policy is unknown here (review round 1): PI_BACKENDS is the opener's shell's, never a key the console takes
+    // (`OQ-038`), so the verdict is asked with `venuePolicy: "unknown"` and can refuse only what no shell's PI_BACKENDS
+    // could open. Never throws.
+    async sandboxCheck(jobId, record) {
+      if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { elsewhere: true };
+      try {
+        const env = dollarEnvFn() ?? {};
+        const self = doctorSelfName(env);
+        const host = typeof record?.host === "string" && record.host !== "" ? record.host : null;
+        if (host !== null && host !== self) return { elsewhere: true };
+        if (typeof sandboxRetentionFn !== "function") return { elsewhere: true };
+        const got = sandboxRetentionFn(paths, jobId, { now: nowFn, venuePolicy: "unknown" });
+        return got.retained ? { retained: true, why: null } : { retained: false, why: got.why, reason: got.reason };
+      } catch {
+        return { elsewhere: true };
       }
     },
     // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing
@@ -5463,6 +5545,7 @@ export function sandboxShellRefusal(venue) {
   if (serves?.sandboxShell === "yes") return null;
   return serves !== null ? `not reopenable (${venue} has no sandbox shell)` : `not reopenable here (ran on ${venue})`;
 }
+
 
 /**
  * A record's OpenShell policy facts (issue #712, INT-RUN-HISTORY-FILE-CONTRACT): the worker's own rebuild

@@ -74,6 +74,22 @@ export const SPEND_TITLE = "Spend";
 /** The jobs held on wait conditions: the console's fleet panel and the panel's HELD section and `h` view. */
 export const HELD_LABEL = "Held";
 
+/**
+ * Where a catalog anchor (`docs/reasons.md#<token>`, a path from the repository root) is read (issue #710): the
+ * repository's docs on its forge, on `main`. The console serves no docs of its own (its other docs mentions are plain
+ * `docs/console.md` text), and an operator reading a run page is on a browser, not in a checkout. `main` and not the
+ * running release's tag: a release tag that predates a reason's heading would answer a page without it, while `main`
+ * keeps every heading a released worker can write (the catalog's tokens only grow). The root is held by a test to the
+ * repository URL the packages publish (`worker/package.json`'s `repository.url`).
+ */
+export const DOCS_ROOT = "https://github.com/edgehero/pi-dispatch/blob/main/";
+
+/** A catalog anchor as a link into the repository's docs (`DOCS_ROOT`), or null for anything that is not one. */
+export function docsHref(anchor) {
+  if (typeof anchor !== "string" || !/^docs\/[a-z0-9-]+\.md(?:#[a-z0-9-]+)?$/.test(anchor)) return null;
+  return `${DOCS_ROOT}${anchor}`;
+}
+
 /** What a surface says for a reason the catalog does not know (a newer worker's token): the token itself, then this. */
 export const NO_EXPLANATION = "no explanation yet";
 
