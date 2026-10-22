@@ -141,6 +141,14 @@ case "$c" in
 		/opt/pi-dispatch/runner-observable /opt/pi-dispatch-probe/netpath.mjs runner 2>/tmp/netpath.err; echo "probe netpath observable exit=$?"
 		head -c 2000 /tmp/netpath.err | head -n 8 | sed 's/^/probe netpath observable stderr=/'
 		exit 0 ;;
+	inv-stdin)
+		# Issue #730, before the fix: what the job supervisor's stdin (the exec's stdin, which carries every frame) is
+		# under OpenShell, and whether a same-uid process could open it again through /proc if the holder were dumpable.
+		# This shell is dumpable and holds the very same descriptor the supervisor would. Each open is O_NONBLOCK and
+		# closed at once: nothing is read or written.
+		echo "probe stdin kind=$(readlink /proc/self/fd/0)"
+		node -e 'const fs=require("fs"),c=fs.constants,p="/proc/"+process.argv[1]+"/fd/0";for(const [m,f] of [["read",c.O_RDONLY],["write",c.O_WRONLY]]){try{const d=fs.openSync(p,f|c.O_NONBLOCK);fs.closeSync(d);console.log("probe stdin reopen-"+m+"=opened")}catch(e){console.log("probe stdin reopen-"+m+"=error "+e.code)}}' "$$"
+		exit 0 ;;
 	inv-e1)
 		# Issue #730 E1: the mechanism's inputs, from inside the sandbox. A nondumpable process's /proc is root-owned and
 		# ptrace-gated, which is what the broker's same-uid memory read hits.
@@ -620,6 +628,21 @@ await invRun("e2-newpath", probeImageNewPath, "netpath-obs", "netpath");
 await invRun("e34-parent-node", probeImage, "inv-child-node", "e");
 await invRun("e34-parent-runner", probeImage, "inv-child-runner", "e");
 await invRun("e34-parent-runner-dumpable", probeImage0755, "inv-child-runner", "e");
+// The exec's stdin as a steered job has it: exitAuth with the frame channel, so the worker's key frame goes down it
+// and the pipe stays open, through a relay that writes nothing more.
+{
+	output.set("last", "");
+	const relay = { start: async () => {}, stop: async () => ({}), delivered: async () => {}, attach() {}, closeStdin() {}, counts: () => ({}) };
+	const opener = makeLiveTranscriptOpener({ redis: { status: "ready", multi() { const tx = { del: () => tx, pexpire: () => tx, xadd: () => tx, exec: async () => [] }; return tx; } }, transcripts: true, progress: false, steer: true });
+	let code = "no-run";
+	try {
+		code = (await bundleFor(probeImage, { ...POLICY_SOURCES, openInboxRelay: () => relay, openLiveTranscript: opener }).runContainer({ job: { ...JOB, steer: true }, prepared: jobDirFor("inv-stdin"), name: `pi-job-conformance-${nonce}-stdin`, signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, steerStdin: true, jobId: `inv-stdin-${nonce}`, size: { memMiB: 1024, cpuCenti: 100 } })).code;
+	} catch (e) {
+		code = `threw ${e?.reason ?? e?.message ?? e}`;
+	}
+	const lines = String(output.get("last") ?? "").split("\n").filter((l) => l.startsWith("probe stdin ")).map((l) => l.slice("probe ".length));
+	console.log(`diag    #730 the exec's stdin under a steered job (exit ${code}):\n${lines.map((l) => `          ${l}`).join("\n") || "          none printed"}`);
+}
 
 // Issue #686, part 2: the real runner STEERED over the exec's stdin. The real relay (inbox-relay.mjs) over an in-memory
 // inbox holding one queued steer, the real publisher with the steer ack consumer (the opener start.mjs builds), and the
