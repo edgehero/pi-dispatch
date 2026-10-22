@@ -2389,6 +2389,23 @@ adversarial passes did.
   swapped: loud, never a leak; every host the job's own credentials are known to go to (a forge's, a callable model's
   composed `baseUrl`, a model endpoint's, an HTTP MCP server's) is refused as a bundle host for it (review round 1). The
   other residuals UNCHANGED, checked.
+- **AMENDED 2026-10-22 (#730): a readable runner, and what it exposes.** OpenShell's connect broker reads the
+  connecting process's memory, which a non-dumpable runner refuses, so on both OpenShell venues the supervisor and the
+  runner run under a readable node (`observableRunner`, `PI_RUNNER_OBSERVABLE=1`; `0755` installed, `0555` at runtime).
+  The exit-line key they hold is then kept from the job's tools by THREE things (review round 1): OpenShell's workload
+  seccomp (`process_vm_readv`, `ptrace`, `pidfd_getfd`); Yama for `/proc/<pid>/mem`, the worker refusing the venue
+  before spend unless the host's `ptrace_scope` is EXACTLY 1 (`openshell-ptrace-scope-unprotected` at 0 or unreadable,
+  `openshell-ptrace-scope-too-strict` at 2 or 3, where ATTACH is admin-only so the broker itself cannot read the
+  workload and the job would reserve then fail); and `ulimit -c 0` in the entrypoint, so a core of a holder (a
+  `SIGABRT` between the job's own processes) carries no key (dash sets soft and hard together; OpenShell's seccomp
+  already refuses `prlimit64` on another pid, and the line stays because the default soft limit is not known; a file
+  `core_pattern` writes nothing, a pipe one goes to a host-root handler outside the sandbox). This makes the key's protection depend on a host sysctl and on the core limit, named
+  as residuals of this venue rather than silent assumptions. Measured: a tool child reads a dumpable ancestor's environ
+  (placeholders and configuration only, no secret value) and can reopen a holder's `/proc/<pid>/fd/0`, `1` and `2` (a
+  fd link needs `PTRACE_MODE_READ`, not `ATTACH`), so it can break or garble a steered job's frame stream or the
+  worker's exit-line read, but never forge a signed line (each frame and exit line is MAC'd under the key) nor read the
+  key (frame 1 is consumed before any tool exists). The upstream fix that would restore a non-dumpable runner is
+  `OQ-049`.
 - **Related**: `OQ-011` (the custody half of its close condition is admitted on this venue, the accounting half
   stays open), `OQ-012` (a vendor runtime builds the box itself, so its isolation words are `asserted`), `OQ-028`
   (closes on this venue once #684 ships; **closed there since #684 part 2, AMENDED 2026-10-19**; a secret bundle's plain
@@ -2397,6 +2414,29 @@ adversarial passes did.
 - **Needs**: maintainer ratification that a vendor supervisor may hold the job's credentials and see its provider
   and forge plaintext, bounded by token scope and the provider spend limit rather than by trusting its code, given
   that the venue is opt-in and Docker and Podman keep the agent-held key.
+
+## OQ-049: An OpenShell broker that can observe a non-dumpable workload
+
+- **Status**: **OPEN** (2026-10-22, issue #730). A follow-up ask on upstream OpenShell, not a change this project makes.
+- **What it is**: OpenShell 0.1.4's sandbox mediates every workload `connect` with a seccomp user notification whose
+  broker runs as the workload uid with no capability and reads the caller's `sockaddr` out of the caller's memory
+  (`process_vm_readv`, then `/proc/<tid>/mem`, `openshell-sandbox/src/linux/task_memory.rs`), and hashes the caller's
+  and every ancestor's `/proc/<pid>/exe` for its binary identity (`openshell-binary-identity`). A workload process that
+  exec'd a binary its uid cannot read is not dumpable, and all of that is then refused, so such a process reaches
+  nothing (measured, #730). pi-dispatch's exit-line key protection (issue #545) relied on exactly that non-dumpability,
+  so on this venue it had to give it up and lean on the sandbox's seccomp and Yama instead (`OQ-047`, `observableRunner`,
+  the `ptrace_scope` refusal). OpenShell's own startup probe states the assumption it rests on: "an exec'd workload must
+  be observable by its same-UID ancestor".
+- **What would close it**: an OpenShell release whose broker can observe a non-dumpable workload, for example by
+  reading the `sockaddr` from the notification's own data rather than the caller's memory, or by a configured
+  `CAP_SYS_PTRACE` the broker alone holds. Then pi-dispatch could keep the exec-only (non-dumpable) `runner-node` on the
+  OpenShell venues too, and drop both `observableRunner` and the `ptrace_scope` refusal.
+- **What it costs while open**: the exit-line key's protection on the OpenShell venues depends on the host's Yama
+  setting (refused unless exactly 1) and on OpenShell's workload seccomp, rather than on the runner being unreadable as on
+  `local` and `podman`. Named in `OQ-047`.
+- **Related**: `OQ-047` (the layer's residuals, where this venue's key-protection trade-off lives), `OQ-011`.
+- **Needs**: an upstream OpenShell capability; tracked here so the worker's `ptrace_scope` refusal and the readable
+  runner can be removed when it lands.
 
 ## OQ-048: 1Password (or any manager) through OpenShell itself
 
@@ -2569,3 +2609,6 @@ adversarial passes did.
 | 2026-10-19 | Issue #704, part 2: project secret bundles. **`OQ-028` AMENDED** (status stays ACCEPTED RISK for Docker and Podman): a bundled job's host argv carries up to 64 more `-e NAME=VALUE` elements, whatever the manager holds at the job's start; the mechanism and its bounds are unchanged, the quantity is not, and the docs say so; on the openshell venues the closure holds, since bundle values take the `run.secrets` path there. **`OQ-032` UNCHANGED, checked** (it stays CLOSED): a bundle is deliberately not routed, because the need depends on the job's project, which only the worker resolves; the worker's pre-spend `secret-bundle-profile-unknown` refusal is the backstop, and doctor fails on a host that lacks a bound profile. **`OQ-027` UNCHANGED, checked**: a bundle resolver's exit code is the same convention, and the recipes say what each must exit. **`OQ-047` UNCHANGED, checked**: no shared provider is introduced; the openshell bundle endpoints are #704 part 3. |
 | 2026-10-20 | Issue #704, part 3: project secret bundles on both OpenShell venues. **`OQ-028` AMENDED twice in this PR** (review round 1 closed it again on the OpenShell venues: plain values moved off the exec, whose env the gateway logs, into a job-directory file a `bundleEnvFile` runner reads), its part 2 bullet's "the bundle's values take the `run.secrets` path" CORRECTED: it RE-OPENS on `openshell` and `openshell-bind` for a bundle's plain variables only, which reach the sandbox as `sandbox exec --env NAME=VALUE` on the CLI's argv; measured at the pin (v0.1.4) that the exec takes `KEY=VALUE` only, with no bare form and no env file (the bare form is `provider create --credential KEY`'s), and that the gateway refuses an exec value with a line break or over 32 KiB (turned into a pre-spend refusal); what would close it named. Status: closed there for every credential the provider path carries, ACCEPTED RISK for plain bundle variables; Docker and Podman UNCHANGED. **`OQ-047` AMENDED**, a dated "Added in #704 part 3" bullet: the supervisor holds up to 64 more values (per-job providers, one per bundle host), the kind of the custody residual unchanged and no provider shared, so its widening condition is not reached; NEW residual, one provider per endpoint at the pin, so another credential sent to a bundle host is refused 403 by the supervisor; the other residuals UNCHANGED, checked. **NEW `OQ-048`**: a manager through OpenShell itself, OPEN and not built: an operator-owned provider attached per job (collides with `OQ-047` and with 1Password's per-connection approval and TTL) or the gateway's external credential driver (proto/credential_driver.proto, one per gateway, handed values at `provider create`, so a read-only manager needs a driver that keeps per-job values or a handle-based create the 0.1.4 CLI lacks); the resolver seam already covers the read-only service account; nothing 1Password-specific in the repository, by decision. |
 | 2026-10-21 (#708) | Issue #708. **`OQ-024` REOPENED and CLOSED again**: `/dispatch console` opens a console page (the insights page among them) through the shared opener, which met the reopening condition; it is closed again by the local-session rule (no SSH variable; macOS, Windows or a display; a TCP listener at a concrete address; not with `--no-open`; not for a console found stopped), the URL printed every time, and the Windows `&` defect found by reading fixed and pinned by argv (`rundll32 url.dll,FileProtocolHandler`). What would reopen it is named. UNCHANGED, checked: `OQ-016`. |
+| 2026-10-22 (#730) | Issue #730: OpenShell's connect broker reads the caller's memory, which a non-dumpable runner refuses, so the venue needs a readable runner. **`OQ-047` AMENDED**: a dated bullet that on both OpenShell venues the key holders run readable (`observableRunner`), the exit-line key then kept by the sandbox's workload seccomp and by Yama (the worker refusing below `ptrace_scope` 1), and measured: a tool reads a dumpable ancestor's environ (placeholders only) and, through the supervisor's fd-0 steer-frame pipe, can drop/delay/break a steered job's frames but never forge one nor read the key. **`OQ-049` NEW, OPEN**: an upstream ask for an OpenShell broker that can observe a non-dumpable workload (reading the `sockaddr` from the notification, or a broker-only `CAP_SYS_PTRACE`), which would let the exec-only runner return to the OpenShell venues and the `ptrace_scope` refusal be dropped; what it costs while open is `OQ-047`'s. **UNCHANGED, checked**: `OQ-048` (a manager through OpenShell itself is untouched). |
+| 2026-10-22 (#730, review round 1) | **`OQ-047` AMENDED**: the readable OpenShell runner's key is kept by THREE properties, not two: the sandbox's seccomp, Yama at EXACTLY 1 (0/unreadable `-unprotected`, 2/3 `-too-strict`), and `ulimit -c 0` suppressing core dumps (a `kill -ABRT` route that does not go through Yama); and a tool may reopen a holder's fd 0, 1 and 2 to break or garble but never forge a signed line. **`OQ-049` UNCHANGED, checked**: the upstream ask is unchanged. |
+| 2026-10-22 (#730, review round 2) | **`OQ-047` CORRECTED**, wording only: `prlimit64` on another pid is already refused by OpenShell's seccomp, a file `core_pattern` writes nothing and a pipe one goes to a host-root handler outside the sandbox. **`OQ-049` CORRECTED**: its cost line says the venue is refused unless Yama is exactly 1. |

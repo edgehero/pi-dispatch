@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseAllowlist } from "../src/egress-allowlist.mjs";
-import { forgeGitHost, forgeGitRules, hostsOfEntry, networkPolicyFor, RUNNER_NODE } from "../src/openshell-policy.mjs";
+import { forgeGitHost, forgeGitRules, hostsOfEntry, networkPolicyFor, RUNNER_NODE, RUNNER_OBSERVABLE } from "../src/openshell-policy.mjs";
 
 /**
  * Issue #684: the openshell venue's network policy is generated from the sources the squid venues read. These pin the
@@ -10,7 +10,8 @@ import { forgeGitHost, forgeGitRules, hostsOfEntry, networkPolicyFor, RUNNER_NOD
  */
 
 const LABEL = ["/usr/local/bin/node", "/usr/bin/git"];
-const bins = [RUNNER_NODE, ...LABEL].map((path) => ({ path }));
+// Issue #730: the readable runner node second, on every rule, whatever the label says (the key holders start from it).
+const bins = [RUNNER_NODE, RUNNER_OBSERVABLE, ...LABEL].map((path) => ({ path }));
 /** Every rule's single endpoint, by host and port, so a test does not depend on the key's spelling. */
 const byHost = (policy) => Object.fromEntries(Object.values(policy.network_policies).map((r) => [`${r.endpoints[0].host}:${r.endpoints[0].port}`, r]));
 
@@ -36,9 +37,10 @@ test("the scaffolded allowlist, a github job: github.com carries the git transpo
 test("the runner's node is always first, even when an image's label leaves it out; a bad label entry is skipped and named", () => {
 	const skipped = [];
 	const policy = networkPolicyFor({ allowlist: ["example.org"], binaries: ["/usr/bin/git", "git", "/usr/*/node", " /usr/bin/gh ", RUNNER_NODE], onSkipped: (w) => skipped.push(w) });
-	assert.deepEqual(Object.values(policy.network_policies)[0].binaries, [RUNNER_NODE, "/usr/bin/git", "/usr/bin/gh"].map((path) => ({ path })));
+	assert.deepEqual(Object.values(policy.network_policies)[0].binaries, [RUNNER_NODE, RUNNER_OBSERVABLE, "/usr/bin/git", "/usr/bin/gh"].map((path) => ({ path })));
 	assert.deepEqual(skipped, [{ binary: "git" }, { binary: "/usr/*/node" }]);
-	assert.deepEqual(Object.values(networkPolicyFor({ allowlist: ["example.org"] }).network_policies)[0].binaries, [{ path: RUNNER_NODE }], "no label at all");
+	assert.deepEqual(Object.values(networkPolicyFor({ allowlist: ["example.org"] }).network_policies)[0].binaries, [{ path: RUNNER_NODE }, { path: RUNNER_OBSERVABLE }], "no label at all");
+	assert.equal(RUNNER_OBSERVABLE, "/opt/pi-dispatch/runner-observable");
 });
 
 test("the shipped image's label is what the rules name, its runner first (image/Dockerfile)", () => {
@@ -47,7 +49,8 @@ test("the shipped image's label is what the rules name, its runner first (image/
 	assert.ok(label, "the image declares its network binaries");
 	const rule = Object.values(networkPolicyFor({ allowlist: ["example.org"], binaries: label }).network_policies)[0];
 	assert.equal(rule.binaries[0].path, RUNNER_NODE);
-	assert.deepEqual(rule.binaries.map((b) => b.path), [...new Set([RUNNER_NODE, ...label])]);
+	assert.ok(label.includes(RUNNER_OBSERVABLE), "the shipped label names the readable runner node too (issue #730)");
+	assert.deepEqual(rule.binaries.map((b) => b.path), [...new Set([RUNNER_NODE, RUNNER_OBSERVABLE, ...label])]);
 });
 
 test("every endpoint enforces (OpenShell's default is audit), and model endpoints open exactly their port", () => {

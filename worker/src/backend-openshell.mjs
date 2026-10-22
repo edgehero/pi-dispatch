@@ -13,7 +13,9 @@ import { LAYOUTS } from "./job-layout.mjs";
 import { DAEMON_FACTS_MAX_BUFFER, DAEMON_FACTS_TIMEOUT_MS } from "./daemon-facts.mjs";
 import { JOB_USER_FACTS_MAX_AGE_MS, decideJobUser, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { networkPolicyFor } from "./openshell-policy.mjs";
-import { bindProbeArgs, driverConfigFor, judgeBindAnswer, judgeGatewayStatus, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
+import { bindProbeArgs, driverConfigFor, judgeBindAnswer, judgeGatewayStatus, judgePtraceScope, OPENSHELL_TESTED_VERSION, PTRACE_SCOPE_PATH } from "./openshell-cli.mjs";
+// Re-exported for the venue's tests and readers, which know them as this module's (issue #730).
+export { judgePtraceScope, PTRACE_SCOPE_PATH };
 import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 
@@ -798,6 +800,12 @@ export const OPENSHELL_REFUSALS = Object.freeze({
 	"openshell-recover-unsupported": "Refused: this trigger asks for runs that continue after a lost worker, which the OpenShell venue cannot checkpoint yet. Run it on another venue, or without run.recover. Not run.",
 	"openshell-credential-reads-value": "Refused: this job's model provider reads its credential's value inside the job (to sign requests, pick an auth scheme or decode it), and on the OpenShell venue the job sees only a placeholder for it. Run it on another venue, or with a provider whose key is sent as it is. Not run.",
 	"openshell-gateway-untested": "Refused: the OpenShell gateway runs another release than the one this venue was measured on. Not run.",
+	// Issue #730: the key holders run readable here, so what keeps a job's tools from the key in their memory is three
+	// things: OpenShell's workload seccomp (process_vm_readv, ptrace, pidfd_getfd), Yama for /proc/<pid>/mem, and the
+	// entrypoint's ulimit -c 0 for a core. The setting goes to the operator's log.
+	"openshell-ptrace-scope-unprotected": "Refused: this host's kernel does not stop a process from reading the memory of the process that started it (Yama ptrace_scope is 0, or cannot be read here), and on the OpenShell venue that is what keeps the job's own tools away from the key that signs its result. Set kernel.yama.ptrace_scope to 1 on this host. Not run.",
+	// Issue #730: scope 2 or 3 also denies the broker its read of the workload (ATTACH is admin-only), so a job would reserve and then fail. The setting goes to the operator's log.
+	"openshell-ptrace-scope-too-strict": "Refused: this host's kernel allows a process to read another's memory only for an administrator (Yama ptrace_scope is 2 or 3), which also stops the OpenShell sandbox from observing the job well enough to let it reach the network, so the job would start and then fail. Set kernel.yama.ptrace_scope to exactly 1 on this host. Not run.",
 	"openshell-egress-untranslatable": "Refused: this deployment's egress settings hold an entry the OpenShell venue cannot turn into its network policy without widening it, so the operator must change it before jobs run there. Not run.",
 	// Issue #686 part 3, review round 2 of #714: the bind venue's named result for a sandbox not confirmed gone (backends.mjs).
 	[OPENSHELL_BIND_LINGERING.reason]: OPENSHELL_BIND_LINGERING.comment,
@@ -836,7 +844,7 @@ export const BIND_GATE_REFUSED_MS = 60_000;
 export const BIND_SETTLE_MS = 60_000;
 const BIND_SETTLE_POLL_MS = 1_000;
 
-const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["mode", "euid", "egid", "now", "jobsDir", "readDaemonFacts", "image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "openInboxRelay", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "platform", "delay", "reap", "makeRunContainer"]);
+const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["mode", "euid", "egid", "now", "jobsDir", "readDaemonFacts", "image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "openInboxRelay", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "readPtraceScope", "platform", "delay", "reap", "makeRunContainer"]);
 
 /**
  * Build the `openshell` bundle. `engine` is the gateway's compute driver, `docker` or `podman` (the only two in v1),
@@ -891,6 +899,8 @@ export function makeOpenshellBackend(opts = {}) {
 		jobsDir = null,
 		readDaemonFacts = null,
 		readLsm = () => readFileSync("/sys/kernel/security/lsm", "utf8"),
+		// Issue #730: this host's Yama setting, which is the sandbox's, since the gateway must run on this host.
+		readPtraceScope = () => readFileSync(PTRACE_SCOPE_PATH, "utf8"),
 		delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 		platform = process.platform,
 		// The boot-built reaper (`makeOpenshellReaper`), so the sweep and the registry hold the same function; none builds
@@ -1316,6 +1326,8 @@ export function makeOpenshellBackend(opts = {}) {
 		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway, mode }),
 		// Issue #704 part 3: a bundle's plain variables reach the runner by file (`BUNDLE_ENV_FILE`), never the exec.
 		bundleEnvFile: true,
+		// Issue #730: the sandbox's connect broker must read the caller's memory, so the key holders start readable.
+		observableRunner: true,
 		memoryLimitOf: (_args, built) => (built.size?.memMiB ?? DEFAULT_JOB_SIZE.memMiB) * 1024 * 1024,
 		// Copy mode: no recovery staging, since the session file is in the sandbox until the download, so a tail on the host
 		// reads nothing. The live transcript comes over the exec's stderr instead, and steering over its stdin (issue #686).
@@ -1347,6 +1359,15 @@ export function makeOpenshellBackend(opts = {}) {
 		if (credentialReadsValue(job?.provider, hostEnv)) {
 			log("openshell_credential_reads_value", { provider: typeof job?.provider === "string" ? job.provider : null });
 			return { venueRefused: { reason: "openshell-credential-reads-value", comment: OPENSHELL_REFUSALS["openshell-credential-reads-value"] } };
+		}
+		// Issue #730: a free local read, before any CLI call, so the answer does not wait on the gateway. Yama must be
+		// EXACTLY 1: 0 (or unreadable) leaves the readable key holders' memory open to a tool, and 2 or 3 stops the
+		// broker too, so the job would reserve and then fail.
+		const yama = judgePtraceScope(() => readPtraceScope());
+		if (!yama.ok) {
+			const reason = yama.reason === "too-strict" ? "openshell-ptrace-scope-too-strict" : "openshell-ptrace-scope-unprotected";
+			log("openshell_ptrace_scope_refused", { reason: yama.reason, ...(yama.scope === null ? {} : { scope: yama.scope }) });
+			return { venueRefused: { reason, comment: OPENSHELL_REFUSALS[reason] } };
 		}
 		let status;
 		try {
@@ -1505,7 +1526,8 @@ export function makeOpenshellBackend(opts = {}) {
 		binds: binding,
 		runContainer,
 		// The gateway's own engine, and in copy mode `copies`, which arms the `sandboxLayout` capability row on every job.
-		imagePreflight: makeImagePreflight({ image, bin: engine, copies: !binding, spawnFn }),
+		// Both modes are brokered (issue #730), which arms the `observableRunner` row on every job.
+		imagePreflight: makeImagePreflight({ image, bin: engine, copies: !binding, brokered: true, spawnFn }),
 		...(binding ? { jobUserPreflight, settleJobDir } : {}),
 		// The layer's policy is the egress control; there is no proxy to look for.
 		egressPreflight: async () => ({}),

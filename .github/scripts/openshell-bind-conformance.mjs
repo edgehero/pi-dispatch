@@ -39,6 +39,8 @@ const { READ_BACK_BY_A_LIVE_PROBE, runBackendConformance } = await load("worker/
 const { buildRecord, makeLogSink } = await load("worker/src/run-history.mjs");
 const { networkPolicyFor } = await load("worker/src/openshell-policy.mjs");
 const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs");
+const { KEYLESS_API_KEY } = await load("worker/src/model-endpoints.mjs");
+const { judgeKeyguard, judgeCoreguard, probeFields } = await import(pathToFileURL(join(root, ".github/scripts/openshell-keyguard-judge.mjs")).href);
 
 // Every owned sandbox the gateway still lists, polled until the listing is empty or 30 s have passed: a delete is
 // asynchronous (measured in #684), so a single read can see one on its way out.
@@ -372,6 +374,88 @@ if (!readings.readOnlyJobInputs?.ok) failed = true;
 		const ok = result.code === 0 && /^2000 gid=2000$/.test(got.uid ?? "") && owner === 2000 && got.home === "writable";
 		console.log(`${ok ? "ok     " : "FAIL   "} run_as_user 2000: exit ${result.code}, ${JSON.stringify(got)}, the bound file's owner ${owner}`);
 		if (!ok) failed = true;
+	}
+}
+
+// Issue #730, PERMANENT, bind mode: the same two claims the copy pass holds, under bind mode's own sandbox.
+// The stand-in (the workflow's, still running across the gateway restart) serves the zero-rated fake model and answers
+// GET /, and the endpoint below admits it, as the copy pass's policy does.
+const STANDIN_ENDPOINT = { id: "lab-a", host: "host.openshell.internal", port: 18080, slots: 1 };
+const standinCompletions = () => {
+	try {
+		return nodeFs.readFileSync(process.env.STANDIN_LOG ?? "", "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.path === "/v1/chat/completions").length;
+	} catch {
+		return 0;
+	}
+};
+// A real zero-cost model call from the real runner: the keyless fake (every rate 0) at the stand-in, under a cap of 0,
+// through the image's real entrypoint (the readable runner on this venue). The stand-in holds a first request until the
+// steering signal exists, so it is touched first: this case has no second message to wait for.
+{
+	if (process.env.STEER_SIGNAL_FILE) nodeFs.writeFileSync(process.env.STEER_SIGNAL_FILE, "");
+	const model = { id: "m1", name: "m1", api: "openai-completions", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000, compat: { maxTokensField: "max_tokens" } };
+	const models = { providers: { "steer-fake": { baseUrl: "http://host.openshell.internal:18080/v1", apiKey: KEYLESS_API_KEY, api: "openai-completions", models: [model] } } };
+	const overlay = join(scratch, "overlay-model");
+	nodeFs.mkdirSync(overlay);
+	nodeFs.writeFileSync(join(overlay, "models.json"), `${JSON.stringify(models)}\n`);
+	const modelEndpoints = { endpoints: [{ ...STANDIN_ENDPOINT, keyless: true }], models };
+	const b = bundleFor("bind", image, { openJobLog: makeLogSink({ logsDir: join(scratch, "logs-model"), enabled: false }), globalPiDir: overlay, readEndpoints: () => [STANDIN_ENDPOINT], readAllowlist: () => ["api.anthropic.com", ".github.com"] });
+	nodeFs.mkdirSync(join(scratch, "logs-model"), { recursive: true });
+	const before = standinCompletions();
+	output.set("last", "");
+	let result = { code: "no-run" };
+	try {
+		result = await b.runContainer({ job: { ...JOB, provider: "steer-fake", model: "m1", maxTurns: 2, maxCostMicros: 0 }, prepared: jobDirFor("Read your prompt file, then reply with the single word done."), modelEndpoints, name: `pi-job-bind-conformance-${nonce}-model`, signal: new AbortController().signal, exitAuth: true, jobId: `bind-model-${nonce}`, size: { memMiB: 2048, cpuCenti: 200 } });
+	} catch (e) {
+		result = { code: `threw ${e?.reason ?? e?.message ?? e}` };
+	}
+	const said = String(output.get("last") ?? "");
+	const calls = standinCompletions() - before;
+	const refusedCost = /"event":"cost_refused"/.test(said) || result.exitReason === "cost-cap";
+	const ok = result.code === 0 && result.exitAuth === "verified" && calls >= 1 && !refusedCost;
+	console.log(`${ok ? "ok     " : "FAIL   "} #730 bind: a real zero-cost model call from the real runner: exit ${result.code} ${result.exitReason ?? "none"} (${result.exitAuth ?? "no line"}), the stand-in saw ${calls} completion request(s), cost refused ${refusedCost}`);
+	if (!ok) {
+		console.log(said.split("\n").slice(-15).join("\n"));
+		failed = true;
+	}
+}
+// A tool child of the readable runner reaches an allowed host and cannot read the key: the copy pass's keyguard probe
+// image (handed over in a file), run in bind mode. The same judgement as the copy pass's.
+{
+	let img = null;
+	try {
+		img = nodeFs.readFileSync(process.env.KEYGUARD_IMAGE_FILE ?? join(process.env.RUNNER_TEMP ?? scratch, "keyguard-image"), "utf8").trim();
+	} catch {}
+	if (!img) {
+		console.log("FAIL    #730 bind: the copy pass handed over no keyguard probe image");
+		failed = true;
+	} else {
+		output.set("last", "");
+		let code = "no-run";
+		try {
+			code = (await bundleFor("bind", img, { readEndpoints: () => [STANDIN_ENDPOINT], readAllowlist: () => ["api.anthropic.com", ".github.com"] }).runContainer({ job: JOB, prepared: jobDirFor("keyguard"), name: `pi-job-bind-conformance-${nonce}-keyguard`, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 200 } })).code;
+		} catch (e) {
+			code = `threw ${e?.reason ?? e?.message ?? e}`;
+		}
+		const said = probeFields(output.get("last"), "keyguard");
+		const v = judgeKeyguard(said);
+		const ok = code === 0 && v.ok;
+		console.log(`${ok ? "ok     " : "FAIL   "} #730 bind: a tool child of the readable runner reaches an allowed host and cannot read the key: ${v.detail} (exit ${code})`);
+		if (!ok) { console.log(String(output.get("last") ?? "").split("\n").slice(-12).join("\n")); failed = true; }
+		// Review round 2, M1: the same image's coreguard probe, in bind mode (where a file core would land in the bound
+		// host /workspace), with the copy pass's judgement.
+		output.set("last", "");
+		let ccode = "no-run";
+		try {
+			ccode = (await bundleFor("bind", img, { readEndpoints: () => [STANDIN_ENDPOINT], readAllowlist: () => ["api.anthropic.com", ".github.com"] }).runContainer({ job: JOB, prepared: jobDirFor("coreguard"), name: `pi-job-bind-conformance-${nonce}-coreguard`, signal: new AbortController().signal, size: { memMiB: 1024, cpuCenti: 200 } })).code;
+		} catch (e) {
+			ccode = `threw ${e?.reason ?? e?.message ?? e}`;
+		}
+		const cv = judgeCoreguard(probeFields(output.get("last"), "coreguard"));
+		const cok = ccode === 0 && cv.ok;
+		console.log(`${cok ? "ok     " : "FAIL   "} #730 bind: a tool's SIGABRT of a readable key holder leaves no core: ${cv.detail} (exit ${ccode})`);
+		if (!cok) { console.log(String(output.get("last") ?? "").split("\n").slice(-12).join("\n")); failed = true; }
+		await run("docker", ["image", "rm", "-f", img]);
 	}
 }
 

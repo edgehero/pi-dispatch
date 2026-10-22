@@ -61,11 +61,15 @@ export function resolveJobImage(job, defaultImage) {
  * `unavailable` and retry; if it comes up between them we report `missing` on an image that is genuinely
  * absent. Nothing is cached, deliberately -- see the note at the call site in start.mjs.
  */
-export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", copies = false }) {
+export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", copies = false, brokered = false }) {
 	// Issue #683: `copies` is the venue's, not the job's: a venue that copies the job's files into the box (`binds:
 	// false`, `openshell`) needs the `sandboxLayout` row below on EVERY job, and a binding venue never does. A boolean
 	// and nothing else, so a truthy string from a hand-built bundle cannot arm a gate it did not mean.
 	if (typeof copies !== "boolean") throw new TypeError("makeImagePreflight: `copies` must be a boolean");
+	// Issue #730: `brokered` is the venue's too: a venue whose every connection is mediated by a broker that reads the
+	// caller's memory (both OpenShell venues, copy and bind) needs the `observableRunner` row below on EVERY job. A
+	// boolean, for the same reason.
+	if (typeof brokered !== "boolean") throw new TypeError("makeImagePreflight: `brokered` must be a boolean");
 	// Issue #354: `bin` is the venue's CLI. Both probes go through it, because a `podman image inspect` answered by one
 	// store and an `info` answered by another daemon would tell "absent" from "unavailable" about two different hosts.
 	return async function imagePreflight(job) {
@@ -108,7 +112,7 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", cop
 			// the job actually carries the feature it guards. The gates, their order and why each exists are
 			// the CAPABILITY_GATES table; the first one this job needs and the image lacks refuses.
 			for (const gate of CAPABILITY_GATES) {
-				if (gate.needed(job, { copies }) && !(capabilities ?? []).includes(gate.token)) {
+				if (gate.needed(job, { copies, brokered }) && !(capabilities ?? []).includes(gate.token)) {
 					return { [gate.result]: wanted, declared: capabilities ?? [] };
 				}
 			}
@@ -275,6 +279,19 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-sandbox-layout-unsupported",
 		event: "refused_image_sandbox_layout_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for a venue that copies the job's files into its sandbox (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would not find them, and could not keep the agent from rewriting them. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #730: on a venue whose connections are mediated by a broker that must read the caller's memory (OpenShell,
+	// both modes), a runner started from the exec-only node cannot be read, so its own provider call and every tool's
+	// connection below it are refused: the job would reserve, start, and fail its first model call. An image that has
+	// the readable copy and the entrypoint that chooses it declares `observableRunner`. Armed by the VENUE, on every job
+	// there, never by a trigger.
+	Object.freeze({
+		token: "observableRunner",
+		needed: (_job, { brokered } = {}) => brokered === true,
+		result: "observableRunnerUnsupported",
+		reason: "job-image-observable-runner-unsupported",
+		event: "refused_image_observable_runner_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for a venue whose sandbox must observe the runner to let it reach the network (\`dev.pi-dispatch.capabilities\` ${declared}), so the job could reach neither its model nor anything else. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

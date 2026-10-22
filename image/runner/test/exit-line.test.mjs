@@ -166,8 +166,13 @@ test("image entrypoint runs the runner under the exec-only node the Dockerfile i
 	// Issue #596: the entrypoint starts the supervisor, which holds the key too, under the same exec-only node and with
 	// --disable-sigusr1, and it starts the runner the same way in turn (src/supervise.mjs RUNNER_NODE, RUNNER_NODE_FLAGS
 	// and RUNNER_SCRIPT, pinned in supervise.test.mjs).
-	assert.match(entrypoint, /\nexec \/opt\/pi-dispatch\/runner-node --disable-sigusr1 \/app\/image\/runner\/supervise\.mjs\n/);
+	// Issue #730: the entrypoint picks the node from PI_RUNNER_OBSERVABLE, defaulting to the exec-only one; the supervisor
+	// (supervise.mjs runnerNodeFor) picks the runner's from the same variable.
+	assert.match(entrypoint, /\n""\) node=\/opt\/pi-dispatch\/runner-node ;;\n/);
+	assert.match(entrypoint, /\n1\) node=\/opt\/pi-dispatch\/runner-observable ;;\n/);
+	assert.match(entrypoint, /\nexec "\$node" --disable-sigusr1 \/app\/image\/runner\/supervise\.mjs\n/);
 	assert.match(dockerfile, /\nRUN install -o root -g root -m 0711 \/usr\/local\/bin\/node \/opt\/pi-dispatch\/runner-node\n/);
+	assert.match(dockerfile, /\nRUN install -o root -g root -m 0755 \/usr\/local\/bin\/node \/opt\/pi-dispatch\/runner-observable\n/, "issue #730: the readable copy for the OpenShell venues");
 	assert.ok(dockerfile.indexOf("runner-node") < dockerfile.indexOf("chmod -R a-w /opt/pi-dispatch"), "installed before /opt/pi-dispatch is made read-only");
 });
 

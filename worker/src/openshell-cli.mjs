@@ -119,3 +119,37 @@ export function driverConfigFor(engine, mounts) {
 export function bindProbeArgs({ name, image, source, engine = "docker", ownerLabel, owner, modeLabel, gateway = null }) {
 	return [...(typeof gateway === "string" && gateway !== "" ? ["--gateway", gateway] : []), "sandbox", "create", "--detach", "--name", name, "--from", image, "--label", `${ownerLabel}=${owner}`, "--label", `${modeLabel}=bind`, "--driver-config-json", driverConfigFor(engine, [{ source, target: "/sandbox", readOnly: true }]), "--no-auto-providers", "-o", "json"];
 }
+
+/**
+ * Issue #730: the Yama setting that keeps a job's tools from the memory of their ancestors, the job's key holders,
+ * which run readable on this venue (image/Dockerfile, `observableRunner`). OpenShell's workload seccomp denies
+ * process_vm_readv, ptrace and pidfd_getfd on every host; opening and reading /proc/<pid>/mem is not a syscall it
+ * filters, and Yama's ptrace_scope EXACTLY 1 is what refuses that to a descendant while still letting the broker read
+ * the workload (measured on the lane: EACCES to a tool at scope 1). At 0, the kernel default where nothing sets it, a
+ * same-uid tool reads a dumpable ancestor's memory (issue #545 measured exactly that on Fedora and Docker Desktop). At
+ * 2 or 3 the kernel admits a PTRACE_MODE_ATTACH read only from a process with CAP_SYS_PTRACE in the target's user namespace, which the
+ * broker is NOT, so its own process_vm_readv of the workload fails and every job would reserve and then fail its first
+ * connection: refused with a distinct reason, never run. Nothing in the sandbox can lower the sysctl (a host-wide
+ * setting; the sandbox holds no capability), so the host value is the sandbox's.
+ */
+export const PTRACE_SCOPE_PATH = "/proc/sys/kernel/yama/ptrace_scope";
+
+/**
+ * `{ ok: true, scope: 1 }` only when Yama is present and EXACTLY 1; otherwise `{ ok: false, reason, scope }`:
+ * `unprotected` (scope 0, or a read that failed/garbled/absent: refused, since the key would be exposed or nothing is
+ * known) or `too-strict` (scope 2 or 3: the broker cannot read the workload, so every job would reserve then fail).
+ * Strict: the file's text must be one decimal integer.
+ */
+export function judgePtraceScope(read) {
+	let text;
+	try {
+		text = String(read());
+	} catch {
+		return { ok: false, reason: "unprotected", scope: null };
+	}
+	const trimmed = text.trim();
+	if (!/^[0-9]{1,3}$/.test(trimmed)) return { ok: false, reason: "unprotected", scope: null };
+	const scope = Number(trimmed);
+	if (scope === 1) return { ok: true, scope };
+	return { ok: false, reason: scope >= 2 ? "too-strict" : "unprotected", scope };
+}

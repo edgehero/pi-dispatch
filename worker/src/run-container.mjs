@@ -137,6 +137,10 @@ export function makeRunContainer({
 	// PI_BUNDLE_ENV=1. A construction option, the venue's own statement like `transcript`: every binding venue passes
 	// them as env and leaves it off, so its env is byte-identical.
 	bundleEnvFile = false,
+	// Issue #730: this venue's connections are mediated by a broker that must read the caller's memory (OpenShell), so
+	// every attempt gets PI_RUNNER_OBSERVABLE=1 and its key holders start from the readable node. Every other venue
+	// leaves it off and its env is byte-identical.
+	observableRunner = false,
 }) {
 	// Refused at construction rather than written into a job's env: a guessed layout reads nothing.
 	const paths = layoutFor(layout);
@@ -389,6 +393,7 @@ export function makeRunContainer({
 			// Issue #686: PI_EXIT_AUTH=stdin-frames, only for an attempt armed above for stdin steering (beside PI_STEER=1).
 			steerStdin: stdinSteered,
 			bundleEnvFile: bundleEnvFile === true && Array.isArray(bundleKeys?.plain) && bundleKeys.plain.length > 0,
+			observableRunner: observableRunner === true,
 		}));
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's

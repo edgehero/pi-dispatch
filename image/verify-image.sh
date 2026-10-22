@@ -121,6 +121,76 @@ fi
 #
 # Its polarity is the opposite of `forges` above: declaring nothing means "no claim", and the worker then
 # refuses replica jobs on this image rather than admitting them.
+# The key-holder probe (issue #596's review, factored out for issue #730): runs the image's own entrypoint and
+# supervisor with a stand-in runner, whose tool child finds every key holder by executable (VERIFY_HOLDER, the
+# exec-only node unless given), pokes each one's inspector, then a plain node as the control. Extra docker run
+# arguments (an -e) are passed through. Prints the probe line, or nothing.
+# Issue #730 (review round 1, H1): every key holder must have RLIMIT_CORE 0/0, so a tool's `kill -ABRT` of it (not
+# through Yama) cannot drop a core holding the exit key. Runs the image's own entrypoint and supervisor with a stand-in
+# runner that prints its own and its parent's (the supervisor's) "Max core file size" from /proc/<pid>/limits. Extra
+# docker run args (the -e that picks the node) pass through. Prints the probe line, or nothing.
+core_limit_probe() {
+	cdir=$(mktemp -d)
+	cat >"$cdir/run-job.mjs" <<'CORE'
+import { readFileSync } from "node:fs";
+const lim = (pid) => { const l = readFileSync("/proc/" + pid + "/limits", "utf8").split("\n").find((x) => x.startsWith("Max core file size")); const m = /Max core file size\s+(\S+)\s+(\S+)/.exec(l); return m ? m[1] + " " + m[2] : "?"; };
+console.log("core-limit runner=[" + lim("self") + "] supervisor=[" + lim(String(process.ppid)) + "]");
+CORE
+	chmod -R a+rX "$cdir"
+	# --ulimit core=-1:-1 starts the container with an unlimited core limit, so only the image's own entrypoint can make
+	# it 0 0 (review round 2, L3): a daemon default of 0 would otherwise pass a missing line.
+	cout=$(docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges --ulimit core=-1:-1 "$@" \
+		-v "$cdir/run-job.mjs:/app/image/runner/run-job.mjs:ro" "$IMAGE_REF" 2>&1) || true
+	rm -rf "$cdir"
+	echo "$cout" | grep '^core-limit ' | tail -1
+}
+
+holder_probe() {
+	probe_dir=$(mktemp -d)
+	cat >"$probe_dir/run-job.mjs" <<'PROBE'
+import { spawn } from "node:child_process";
+const tool = `
+const { spawn } = require("node:child_process");
+const { readdirSync, readFileSync } = require("node:fs");
+const HOLDER = process.env.VERIFY_HOLDER || "/opt/pi-dispatch/runner-node";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const open = () => fetch("http://127.0.0.1:9229/json/list", { signal: AbortSignal.timeout(1000) }).then(() => true, () => false);
+async function poke(pid) {
+	try { process._debugProcess(pid); } catch { return "unsignalled"; }
+	for (let i = 0; i < 20; i++) { await sleep(100); if (await open()) return "open"; }
+	return "closed";
+}
+function argv0(pid) {
+	try { return readFileSync("/proc/" + pid + "/cmdline", "latin1").split("\\0")[0]; } catch { return ""; }
+}
+(async () => {
+	const holders = readdirSync("/proc").filter((p) => /^[0-9]+$/.test(p)).map(Number).filter((p) => p !== process.pid && argv0(p) === HOLDER).sort((a, b) => a - b);
+	const states = [];
+	for (const pid of holders) states.push(pid + ":" + await poke(pid));
+	const control = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { stdio: "ignore" });
+	await sleep(300);
+	const c = await poke(control.pid);
+	control.kill("SIGKILL");
+	console.log("inspector-probe holders=" + (states.join(",") || "none") + " control=" + c);
+})();
+`;
+// spawn, never spawnSync: a node whose main thread is blocked cannot start its inspector, so a stand-in waiting in
+// spawnSync would read `closed` with or without the flag and prove nothing.
+const child = spawn("node", ["-e", tool], { stdio: ["ignore", "inherit", "inherit"] });
+const stop = setTimeout(() => child.kill("SIGKILL"), 30000);
+child.on("exit", () => {
+	clearTimeout(stop);
+	process.exit(0);
+});
+PROBE
+	chmod -R a+rX "$probe_dir"
+	probe_out=$(docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges "$@" \
+		-v "$probe_dir/run-job.mjs:/app/image/runner/run-job.mjs:ro" "$IMAGE_REF" 2>&1) || true
+	rm -rf "$probe_dir"
+	probe_line=$(echo "$probe_out" | grep '^inspector-probe ' | tail -1)
+	echo "$probe_line"
+}
+
 any_uid=0
 capabilities=$(docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" 2>/dev/null)
 if [ -z "$capabilities" ] || [ "$capabilities" = "<no value>" ]; then
@@ -317,8 +387,8 @@ PROBE
 				auth_want=$(printf '%s' "$auth_body" | openssl dgst -sha256 -hmac "$auth_key" | awk '{print $NF}')
 				[ -n "$auth_mac" ] && [ "$auth_mac" = "$auth_want" ] \
 					|| fail "the image declares 'exitAuth' but a job handed a key on stdin did not end on an exit line signed with it ($auth_exit)"
-				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --entrypoint grep "$IMAGE_REF" -q "exec /opt/pi-dispatch/runner-node " /entrypoint.sh 2>/dev/null \
-					|| fail "the image declares 'exitAuth' but its entrypoint does not run the runner under /opt/pi-dispatch/runner-node"
+				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --entrypoint grep "$IMAGE_REF" -q '^"") node=/opt/pi-dispatch/runner-node ;;$' /entrypoint.sh 2>/dev/null \
+					|| fail "the image declares 'exitAuth' but its entrypoint does not run the runner under /opt/pi-dispatch/runner-node by default"
 				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --entrypoint /opt/pi-dispatch/runner-node "$IMAGE_REF" \
 					-e 'const r = require("node:child_process").spawnSync("sh", ["-c", "cat /proc/$PPID/environ"], { stdio: "ignore" }); process.exit(r.status === 0 ? 1 : 0)' >/dev/null 2>&1 \
 					|| fail "the image declares 'exitAuth' but a child of /opt/pi-dispatch/runner-node can read its /proc entries -- the job's tools could read the exit line's key out of the runner"
@@ -338,50 +408,14 @@ PROBE
 				# supervisor and the runner), every one `closed`. The tool runs on plain node, so it is never one of them. Once
 				# one process opens, the port stays taken and every later poke reads `open` too: any `open` fails, and the
 				# FIRST names it.
-				probe_dir=$(mktemp -d)
-				cat >"$probe_dir/run-job.mjs" <<'PROBE'
-import { spawn } from "node:child_process";
-const tool = `
-const { spawn } = require("node:child_process");
-const { readdirSync, readFileSync } = require("node:fs");
-const HOLDER = "/opt/pi-dispatch/runner-node";
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const open = () => fetch("http://127.0.0.1:9229/json/list", { signal: AbortSignal.timeout(1000) }).then(() => true, () => false);
-async function poke(pid) {
-	try { process._debugProcess(pid); } catch { return "unsignalled"; }
-	for (let i = 0; i < 20; i++) { await sleep(100); if (await open()) return "open"; }
-	return "closed";
-}
-function argv0(pid) {
-	try { return readFileSync("/proc/" + pid + "/cmdline", "latin1").split("\\0")[0]; } catch { return ""; }
-}
-(async () => {
-	const holders = readdirSync("/proc").filter((p) => /^[0-9]+$/.test(p)).map(Number).filter((p) => p !== process.pid && argv0(p) === HOLDER).sort((a, b) => a - b);
-	const states = [];
-	for (const pid of holders) states.push(pid + ":" + await poke(pid));
-	const control = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { stdio: "ignore" });
-	await sleep(300);
-	const c = await poke(control.pid);
-	control.kill("SIGKILL");
-	console.log("inspector-probe holders=" + (states.join(",") || "none") + " control=" + c);
-})();
-`;
-// spawn, never spawnSync: a node whose main thread is blocked cannot start its inspector, so a stand-in waiting in
-// spawnSync would read `closed` with or without the flag and prove nothing.
-const child = spawn("node", ["-e", tool], { stdio: ["ignore", "inherit", "inherit"] });
-const stop = setTimeout(() => child.kill("SIGKILL"), 30000);
-child.on("exit", () => {
-	clearTimeout(stop);
-	process.exit(0);
-});
-PROBE
-				chmod -R a+rX "$probe_dir"
-				probe_out=$(docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
-					-v "$probe_dir/run-job.mjs:/app/image/runner/run-job.mjs:ro" "$IMAGE_REF" 2>&1) || true
-				rm -rf "$probe_dir"
-				probe_line=$(echo "$probe_out" | grep '^inspector-probe ' | tail -1)
+				probe_line=$(holder_probe)
 				echo "$probe_line" | grep -Eq '^inspector-probe holders=[0-9]+:closed(,[0-9]+:closed)+ control=open$' \
 					|| fail "the image declares 'exitAuth' but a tool's SIGUSR1 opens the Node inspector of a process holding the exit line's key, fewer than two key holders run under /opt/pi-dispatch/runner-node, or the probe could not run (${probe_line:-no probe line}): run the supervisor and the runner under /opt/pi-dispatch/runner-node, both with --disable-sigusr1"
+				# Issue #730 (review round 1, H1): the key holders must not be core-dumpable on the default path either, so
+				# one entrypoint keeps the one guarantee everywhere.
+				def_core=$(core_limit_probe)
+				[ "$def_core" = "core-limit runner=[0 0] supervisor=[0 0]" ] \
+					|| fail "the image declares 'exitAuth' but a key holder can be core-dumped: its RLIMIT_CORE is not 0/0 (${def_core:-no probe line}); set ulimit -c 0 in the entrypoint"
 				;;
 			excludeTools)
 				# Same evidence style as 'commands': the baked runner config must actually read the variable.
@@ -609,6 +643,27 @@ STPROBE
 					|| fail "the image declares 'steerStdin' but the frame after the key did not round-trip (delivered and acked under the key), or the forged one was not dropped and counted ($st_exit)"
 				[ "$st_probe" = "steer-stdin-probe bash=/dev/null,no-fd3 inherit=/dev/null,no-fd3" ] && ! echo "$st_out" | grep -q '"event":"steer_stdin_shared"' \
 					|| fail "the image declares 'steerStdin' but a tool child of the steered runner does not see /dev/null on stdin, or holds an fd 3 (${st_probe:-no probe line}): the frames are reachable from it"
+				;;
+			observableRunner)
+				# Issue #730. The OpenShell venues start both key holders from a readable copy of the runner's node, because
+				# the sandbox's connect broker must read the caller's memory. Held here: the copy exists at its path, is
+				# root-owned and readable (0555 at runtime), has runner-node's exact bytes (so a policy hash and a version are one answer), is named in
+				# the net-binaries label (else a policy matches nothing), and on PI_RUNNER_OBSERVABLE=1 the entrypoint and
+				# the supervisor really start the supervisor AND the runner from it, both still with --disable-sigusr1 (the
+				# holder probe, by executable). The default stays the exec-only node (the exitAuth checks above).
+				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --entrypoint /bin/sh "$IMAGE_REF" \
+					-c '[ "$(stat -c "%a %U:%G" /opt/pi-dispatch/runner-observable)" = "555 root:root" ] && cmp -s /opt/pi-dispatch/runner-observable /usr/local/bin/node' >/dev/null 2>&1 \
+					|| fail "the image declares 'observableRunner' but /opt/pi-dispatch/runner-observable is missing, not root-owned and readable (555 after /opt/pi-dispatch is made read-only; installed 0755), or not the image's node byte for byte"
+				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --user 0 --entrypoint cmp "$IMAGE_REF" \
+					-s /opt/pi-dispatch/runner-observable /opt/pi-dispatch/runner-node >/dev/null 2>&1 \
+					|| fail "the image declares 'observableRunner' but /opt/pi-dispatch/runner-observable differs from /opt/pi-dispatch/runner-node"
+				case ",$net_binaries," in *,/opt/pi-dispatch/runner-observable,*) ;; *) fail "the image declares 'observableRunner' but dev.pi-dispatch.net-binaries does not name /opt/pi-dispatch/runner-observable: an OpenShell policy would match no rule for the runner" ;; esac
+				obs_line=$(holder_probe -e PI_RUNNER_OBSERVABLE=1 -e VERIFY_HOLDER=/opt/pi-dispatch/runner-observable)
+				echo "$obs_line" | grep -Eq '^inspector-probe holders=[0-9]+:closed(,[0-9]+:closed)+ control=open$' \
+					|| fail "the image declares 'observableRunner' but on PI_RUNNER_OBSERVABLE=1 fewer than two key holders run under /opt/pi-dispatch/runner-observable, or one opens its inspector (${obs_line:-no probe line})"
+				obs_core=$(core_limit_probe -e PI_RUNNER_OBSERVABLE=1)
+				[ "$obs_core" = "core-limit runner=[0 0] supervisor=[0 0]" ] \
+					|| fail "the image declares 'observableRunner' but a readable key holder can be core-dumped: its RLIMIT_CORE is not 0/0, so a tool's SIGABRT could drop a core holding the exit key (${obs_core:-no probe line}); set ulimit -c 0 in the entrypoint"
 				;;
 			bundleEnvFile)
 				# Issue #704 part 3. The runner reads a project secret bundle's plain variables from /job/bundle-env.json on

@@ -24,7 +24,8 @@
  *
  * THE BINARIES ARE NOT A CONTROL HERE, and saying so is the point. A rule's `binaries` match the connecting process or
  * ANY of its ancestors (OpenShell's own documentation), and every process of a job descends from
- * `/opt/pi-dispatch/runner-node`, which must reach the provider. So each rule names the image's declared network
+ * the runner's node (`/opt/pi-dispatch/runner-observable` on this venue since issue #730, `runner-node` before), which
+ * must reach the provider. So each rule names the image's declared network
  * binaries (`dev.pi-dispatch.net-binaries`), the runner first, and that admits every tool the agent starts: the host
  * list is the boundary, exactly as it is on squid. The runner's node is put first whatever an image's label says,
  * since without it no provider call matches (an operator-built image's label may predate it).
@@ -36,6 +37,13 @@ import { allowlistEntryFor } from "./egress-allowlist.mjs";
 
 /** The binary the runner and pi run as, which every job process descends from: always the first binary of every rule. */
 export const RUNNER_NODE = "/opt/pi-dispatch/runner-node";
+/**
+ * Issue #730: the readable copy the job's key holders start from on the OpenShell venues (image/Dockerfile), so the
+ * binary every provider call there leaves through. Listed beside RUNNER_NODE on every rule for the same reason that one
+ * is: an image that predates the label still gets its runner named, and this venue refuses before spend an image that
+ * lacks the copy (`observableRunner`).
+ */
+export const RUNNER_OBSERVABLE = "/opt/pi-dispatch/runner-observable";
 
 /** A refusal this module returns instead of guessing: `{ refused, entry? }`. */
 const refusal = (refused, extra = {}) => ({ refused, ...extra });
@@ -118,7 +126,7 @@ export function networkPolicyFor({ allowlist = [], endpoints = [], kind = null, 
 	// skipped and named (a glob would widen the rule), never a refusal of every job for a label typo.
 	const declared = (Array.isArray(binaries) ? binaries : []).map((b) => String(b).trim()).filter((b) => b !== "");
 	for (const b of declared) if (!b.startsWith("/") || /[*?[\]{}]/.test(b)) onSkipped({ binary: b });
-	const bins = [...new Set([RUNNER_NODE, ...declared.filter((b) => b.startsWith("/") && !/[*?[\]{}]/.test(b))])].map((path) => ({ path }));
+	const bins = [...new Set([RUNNER_NODE, RUNNER_OBSERVABLE, ...declared.filter((b) => b.startsWith("/") && !/[*?[\]{}]/.test(b))])].map((path) => ({ path }));
 	const policies = {};
 	const add = (key, endpoint) => {
 		policies[key] = { name: key, endpoints: [{ ...endpoint, enforcement: "enforce" }], binaries: bins };

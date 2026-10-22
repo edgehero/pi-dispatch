@@ -62,6 +62,19 @@ import { FRAME_FD, readKeyFrame } from "./steer-frames.mjs";
 /** The runner the image's entrypoint supervises, under the exec-only node (issue #545). */
 export const RUNNER_NODE = "/opt/pi-dispatch/runner-node";
 /**
+ * The readable copy of that node (issue #730, image/Dockerfile): on a venue whose connections are mediated by a broker
+ * that reads the caller's memory (OpenShell), the worker sets RUNNER_OBSERVABLE_ENV to "1" and the entrypoint starts
+ * this supervisor from it, so the runner must start from it too: a nondumpable runner would refuse every connection of
+ * its own and of every tool below it. The variable is read from this process's own environment, which the exec set and
+ * no tool can change, and the entrypoint has already refused any value but "1" or unset.
+ */
+export const RUNNER_OBSERVABLE = "/opt/pi-dispatch/runner-observable";
+export const RUNNER_OBSERVABLE_ENV = "PI_RUNNER_OBSERVABLE";
+/** The node the runner starts from, given the supervisor's environment. */
+export function runnerNodeFor(env) {
+	return env?.[RUNNER_OBSERVABLE_ENV] === "1" ? RUNNER_OBSERVABLE : RUNNER_NODE;
+}
+/**
  * The node flags the runner starts with. `--disable-sigusr1` because the runner holds the key too: without it a job's
  * tool (same uid) sends SIGUSR1, or calls `process._debugProcess(pid)`, and the runner opens its inspector on
  * 127.0.0.1:9229, where a heap snapshot carries the key (measured on the issue #596 image: open without the flag, shut
@@ -92,7 +105,7 @@ export function deathFields(signal, resources) {
 
 export function superviseRunner({
 	env = process.env,
-	command = ["/bin/sh", ["-c", RAISE_THEN_EXEC, RUNNER_NODE, ...RUNNER_NODE_FLAGS, RUNNER_SCRIPT]],
+	command = ["/bin/sh", ["-c", RAISE_THEN_EXEC, runnerNodeFor(env), ...RUNNER_NODE_FLAGS, RUNNER_SCRIPT]],
 	spawnFn = spawn,
 	drain = drainStdin,
 	write = (line) => writeAllSync(1, line),

@@ -274,6 +274,20 @@ COPY guardrails/PORTFOLIO_PROTOCOL.md /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md
 # binary, and both cost the same one 120MB layer. The entrypoint execs this one.
 RUN install -o root -g root -m 0711 /usr/local/bin/node /opt/pi-dispatch/runner-node
 
+# The runner's node for a venue whose connections are mediated by a broker that reads the caller's memory (issue #730):
+# OpenShell 0.1.4's sandbox answers every workload connect through a seccomp notification whose broker runs as the
+# job's uid with no capabilities and copies the caller's sockaddr out of the caller's memory (process_vm_readv, then
+# /proc/<tid>/mem), and hashes the caller's and every ancestor's executable. A process started from the exec-only copy
+# above is not dumpable, so that read is refused and every connect of the runner AND of every tool below it fails
+# (measured on the openshell lane, copy and bind: EAI_AGAIN for the runner, EACCES for a tool child). So the OpenShell
+# venues start the supervisor and the runner from this readable copy instead, chosen by the worker-set
+# PI_RUNNER_OBSERVABLE=1 (the entrypoint). Same bytes, mode 0755, its own path, named in the net-binaries label below.
+# What keeps the exit key from the job's tools there is not this file's mode but three things: OpenShell's workload
+# seccomp denies process_vm_readv, ptrace and pidfd_getfd; Yama (ptrace_scope exactly 1, which the worker requires
+# before spend) refuses a tool /proc/<pid>/mem of its ancestor; and the entrypoint's ulimit -c 0 keeps a holder's core
+# from carrying the key. Every other venue keeps runner-node.
+RUN install -o root -g root -m 0755 /usr/local/bin/node /opt/pi-dispatch/runner-observable
+
 # The write confinement a copying venue starts the runner through (issue #683): root-owned, so the agent cannot replace
 # the helper that confines it (COPY keeps root:root and the 0755 gcc gave it; the chmod below takes the write bit), and
 # readable, because it holds no secret. Only the worker's own exec argv on such a venue names it; a binding venue's
@@ -420,7 +434,11 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # exec's argv, which the gateway logs. A gate on those venues only: a job there that would carry plain bundle variables
 # on an image without it is refused before spend (openshell-bundle-image-too-old). verify-image.sh runs an offline job
 # with such a file and checks a workspace extension sees the variable, a multi-line one intact.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile"
+# `observableRunner` (issue #730) tells the worker this image has /opt/pi-dispatch/runner-observable and an entrypoint
+# that starts the supervisor and the runner from it on PI_RUNNER_OBSERVABLE=1, which an OpenShell venue needs before any
+# connection of the job can be made. A gate on those venues only: an image without it is refused there before spend.
+# verify-image.sh holds the copy to runner-node's bytes, its mode, its label entry, and both key holders to it.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it
@@ -431,7 +449,8 @@ LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCa
 # provider call leaves through it, not through /usr/local/bin/node. Playwright's Chromium is deliberately NOT listed:
 # its path carries a build number and the architecture, and a job's browser reaches its own dev server on loopback,
 # which no egress rule governs; a trigger that needs it to reach the internet is #684's to decide.
-LABEL dev.pi-dispatch.net-binaries="/opt/pi-dispatch/runner-node,/usr/local/bin/node,/usr/bin/git,/usr/lib/git-core/git-remote-http,/usr/bin/gh,/usr/local/bin/glab,/usr/local/bin/tea,/usr/local/bin/github-mcp-server,/usr/bin/wget"
+# /opt/pi-dispatch/runner-observable SECOND (issue #730): the runner's node on the OpenShell venues.
+LABEL dev.pi-dispatch.net-binaries="/opt/pi-dispatch/runner-node,/opt/pi-dispatch/runner-observable,/usr/local/bin/node,/usr/bin/git,/usr/lib/git-core/git-remote-http,/usr/bin/gh,/usr/local/bin/glab,/usr/local/bin/tea,/usr/local/bin/github-mcp-server,/usr/bin/wget"
 
 USER pi
 WORKDIR /sandbox
