@@ -23,6 +23,7 @@ import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { HOST_VENUE_NAME_RE, UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
 import { repoOfTarget } from "./costs.mjs";
+import { OUTCOME_WORDS } from "./words.mjs";
 
 /** The query parameters this filter reads, in the order a page states them. Anything else in the query is not its. */
 export const RUN_FILTER_FIELDS = Object.freeze(["repo", "kind", "flow", "trigger", "project", "host", "backend", "outcome", "reason", "model", "q"]);
@@ -64,7 +65,10 @@ const RULES = Object.freeze({
   // newer worker can bless and record a venue this console does not know, the Venues view lists it by name, and a
   // filter refusing it would hide runs that exist.
   backend: { ok: (v) => HOST_VENUE_NAME_RE.test(v), says: "a venue name (lowercase letters, digits and '-', starting with a letter, at most 32 characters)" },
-  outcome: { ok: (v) => /^[a-z][a-z-]{0,31}$/.test(v), says: "an outcome (lowercase letters and '-', at most 32 characters)" },
+  // The record's closed outcome enum (INT-RUN-HISTORY-FILE-CONTRACT, words.mjs's keys), not a shape: the console SAYS
+  // "refused" for `policy` (#710), so `outcome=refused` is the filter an operator types, and a shape check let it
+  // match nothing at all, silently (round 2). The refusal names the three values and which one a refused run is.
+  outcome: { ok: (v) => Object.hasOwn(OUTCOME_WORDS, v), says: `one of ${Object.keys(OUTCOME_WORDS).join(", ")} (the record's values: a refused or cancelled run is policy)` },
   reason: { ok: (v) => /^[a-z0-9][a-z0-9-]{0,63}$/.test(v), says: "a reason (lowercase letters, digits and '-', at most 64 characters)" },
   // The record's `model` is the bare host-effective model id; the usage ledger's allowlist admits a leading `@` or `~`,
   // so this is the same shape with case allowed, bounded (RUN_MODEL_RE).

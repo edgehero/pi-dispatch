@@ -71,3 +71,14 @@ export function recordReasonEnum(spec = readFileSync(SPEC_URL, "utf8")) {
 	if (line === undefined) throw new Error("the record's reason enum line is not in specs/interfaces.md");
 	return fixedEnumTokens(line);
 }
+
+/**
+ * The record's `outcome` union (issue #710, PR 2): the quoted strings on the record shape's `"outcome":   ` line, the one
+ * written with three spaces (the nested `plan` object's outcome is on its opening line, with one). Found by the key and
+ * its spacing, never by its first value, and throws when the line is gone, so a test cannot pass on nothing.
+ */
+export function recordOutcomeEnum(spec = readFileSync(SPEC_URL, "utf8")) {
+	const lines = spec.split("\n").filter((l) => l.trimStart().startsWith('"outcome":   "'));
+	if (lines.length !== 1) throw new Error(`the record's outcome line is in specs/interfaces.md ${lines.length} times, not once`);
+	return quotedUnionTokens(lines[0], "outcome");
+}

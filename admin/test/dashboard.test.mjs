@@ -884,13 +884,14 @@ test("RUN_DETAIL names the reason's detail after it, and points an unboundable c
     return lines.map((l) => l.trim()).find((l) => /^│ [⚠✔✘] /.test(l)) ?? null;
   };
   const row = (value) => `│ ${value.padEnd(66)} │`;
-  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "unboundable" }), row("⚠ policy · cost-cap (unboundable: see compat.maxTokensField)"));
-  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "over-cap" }), row("⚠ policy · cost-cap (over-cap)"));
-  assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "overlay-link" }), row("⚠ policy · model-unknown (overlay-link)"));
-  assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "unboundable" }), row("⚠ policy · model-unknown (unboundable)"), "the pointer is cost-cap's alone");
+  // The outcome reads in the console's word since issue #710: `policy` is "refused".
+  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "unboundable" }), row("⚠ refused · cost-cap (unboundable: see compat.maxTokensField)"));
+  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "over-cap" }), row("⚠ refused · cost-cap (over-cap)"));
+  assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "overlay-link" }), row("⚠ refused · model-unknown (overlay-link)"));
+  assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "unboundable" }), row("⚠ refused · model-unknown (unboundable)"), "the pointer is cost-cap's alone");
   // No `why` (null, absent, empty): the header is what it always was.
   for (const extra of [{}, { why: null }, { why: "" }]) {
-    assert.equal(await header({ outcome: "policy", reason: "cost-cap", ...extra }), row("⚠ policy · cost-cap"), JSON.stringify(extra));
+    assert.equal(await header({ outcome: "policy", reason: "cost-cap", ...extra }), row("⚠ refused · cost-cap"), JSON.stringify(extra));
   }
 });
 
@@ -2921,7 +2922,7 @@ test("RUN_DETAIL names the venue a job resolved to, beside the host and without 
   const lines = withBoth.render(80).map((l) => stripAnsi(l));
   await withBoth.dispose();
   const hostAt = lines.findIndex((l) => /host\s+mac-mini-1/.test(l));
-  const backendAt = lines.findIndex((l) => /backend\s+local/.test(l));
+  const backendAt = lines.findIndex((l) => /venue\s+local/.test(l));
   assert.ok(hostAt >= 0 && backendAt === hostAt + 1, "the venue sits directly under the machine");
   const widths = new Set(lines.map((l) => visibleLen(l)));
   assert.equal(widths.size, 1, `every drill-in line is one width, got ${[...widths].join(", ")}`);
@@ -2932,14 +2933,14 @@ test("RUN_DETAIL names the venue a job resolved to, beside the host and without 
   });
   const bare = stripAnsi(noHost.render(80).join("\n"));
   await noHost.dispose();
-  assert.match(bare, /backend\s+far/);
+  assert.match(bare, /venue\s+far/, "the venue line says Venue, the console's word (issue #710)");
   assert.ok(!/^\s*│?\s*host\s/m.test(bare));
 
   // A record written before the field existed shows no line, and the panel does not infer `local` for it.
   const old = await openRunDetail();
   const oldText = stripAnsi(old.render(80).join("\n"));
   await old.dispose();
-  assert.ok(!/backend\s/.test(oldText), "no venue line on a record that carries none");
+  assert.ok(!/│\s*venue\s/.test(oldText) && !/backend\s/.test(oldText), "no venue line on a record that carries none");
 });
 
 // --- the panel's REAL deps factory (issue #57) -----------------------------------------------------------
@@ -3803,19 +3804,19 @@ test("`forge` in run.mcp is the forge's own server (DES-FORGE-MCP), never read a
   assert.doesNotMatch(bare.detail, /every job is refused/);
 });
 
-test("a parked run's row names its reason, where a finished one says done (REQ-AWAIT-INPUT)", async () => {
+test("a parked run's row says awaiting input, where a finished one says completed (REQ-AWAIT-INPUT)", async () => {
   // A completed run with the reason `awaiting-input` asked a person a question and ended to wait for the answer. The
   // row said "✔ done" for it, so the LIST told the operator nothing waited on them while `/dispatch runs` and the
-  // drill-in both named the reason.
+  // drill-in both named the reason. Since issue #710 both words are the console's (words.mjs).
   const parked = { ...SNAPSHOT.runs[0], jobId: "j2", target: "o/r#6", reason: "awaiting-input", endedAt: "2026-07-21T00:01:00.000Z" };
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [parked, SNAPSHOT.runs[0]] }) }) });
   await flush();
   const lines = stripAnsi(comp.render(80).join("\n")).split("\n");
   await comp.dispose();
   const row = (id) => lines.find((l) => l.includes(`${id} · `)) ?? "";
-  assert.match(row("j2"), /fix · ✔ awaiting-input · 4t/, row("j2"));
-  assert.doesNotMatch(row("j2"), /done/, "a parked run is not done");
-  assert.match(row("j1"), /fix · ✔ done · 4t/, "a completed run without a reason still reads done");
+  assert.match(row("j2"), /fix · ✔ awaiting input · 4t/, row("j2"));
+  assert.doesNotMatch(row("j2"), /completed/, "a parked run is not completed");
+  assert.match(row("j1"), /fix · ✔ completed · 4t/, "a completed run without a reason reads completed");
 });
 
 // --- sending a message into the running job (issue #646) -------------------------------------------------------------

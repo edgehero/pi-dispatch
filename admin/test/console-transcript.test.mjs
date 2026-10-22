@@ -81,7 +81,8 @@ test("entry html: a header (kind, tool, error, UTC time), the text in a pre with
   assert.equal(call, `<article class="t-entry t-tool-call"><header><span class="t-kind">tool call</span> <span class="t-tool mono">bash</span> <time datetime="2026-10-14T12:34:56.000Z">12:34:56 UTC</time> <span class="t-trunc warn">truncated</span></header><details><summary>arguments</summary><pre>{&quot;cmd&quot;:&quot;ls&quot;}</pre></details></article>`);
   const result = String(transcriptEntryHtml({ id: "3-0", kind: "tool-result", ts: null, text: "boom", tool: "bash", error: true, truncated: false }));
   assert.equal(result, `<article class="t-entry t-tool-result"><header><span class="t-kind">tool result</span> <span class="t-tool mono">bash</span> <span class="t-error bad">error</span></header><details><summary>result</summary><pre>boom</pre></details></article>`);
-  assert.match(String(transcriptEntryHtml({ id: "4-0", kind: "end", ts, outcome: "policy" })), /<p class="note">The run is over \(policy\)\.<\/p><\/article>$/);
+  assert.match(String(transcriptEntryHtml({ id: "4-0", kind: "end", ts, outcome: "policy" })), /<p class="note">The run is over \(refused\)\.<\/p><\/article>$/, "the console's word (#710 round 2)");
+  assert.match(String(transcriptEntryHtml({ id: "4-1", kind: "end", ts, outcome: "unknown" })), /The run is over \(unknown\)\./);
   assert.match(String(transcriptEntryHtml({ id: "5-0", kind: "reset", ts })), /starts over/);
   assert.match(String(transcriptEntryHtml({ id: "6-0", kind: "skipped", ts })), /left out/);
   assert.match(String(transcriptEntryHtml({ id: "7-0", kind: "invented", ts, text: "x" })), /^<article class="t-entry t-note">/, "an unknown kind is a note");
@@ -112,6 +113,8 @@ test("the run page's section: an operator with a stream gets [data-transcript]; 
   assert.match(live, /<h2>Live transcript<\/h2><p class="note">The run is publishing its transcript\.<\/p><p class="t-status" data-transcript-status role="status" aria-live="polite">not live<\/p><div class="transcript" data-transcript data-job="gh-1" tabindex="0"><\/div>/);
   const ended = String(runTranscriptSection(view("operator", { transcript: { exists: true, ended: true, outcome: "completed" }, run: { record: { endedAt: "x" } } })));
   assert.match(ended, /has ended \(completed\)/);
+  const refused = String(runTranscriptSection(view("operator", { transcript: { exists: true, ended: true, outcome: "policy" }, run: { record: { endedAt: "x" } } })));
+  assert.match(refused, /has ended \(refused\)/, "the console's word (#710 round 2)");
   assert.match(ended, /data-transcript /);
   const gone = String(runTranscriptSection(view("operator", { transcript: { exists: false }, run: { record: { endedAt: "2026-10-14T11:00:00Z" } } })));
   assert.ok(gone.includes(TRANSCRIPT_ABSENT));

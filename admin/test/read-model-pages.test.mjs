@@ -76,6 +76,13 @@ test("the backend filter (#712): any venue-shaped name, the table's and a newer 
   for (const value of ["Local", "local,podman", "toString", "-x", "a".repeat(33), "far venue"]) assert.match(parseRunFilter({ backend: value }).refusal, /^backend must be a venue name/, value);
 });
 
+test("the outcome filter takes the record's three values, and refuses the console's words with a message naming them (#710 round 2)", () => {
+  for (const o of ["completed", "policy", "failed"]) assert.deepEqual(parseRunFilter({ outcome: o }).filter, { outcome: o });
+  for (const value of ["refused", "cancelled", "awaiting-input", "vapour", "__proto__", "constructor", "Completed"]) {
+    assert.equal(parseRunFilter({ outcome: value }).refusal, "outcome must be one of completed, policy, failed (the record's values: a refused or cancelled run is policy)", value);
+  }
+});
+
 test("parseRunFilter refuses a hostile value in every field, and never echoes it back", () => {
   const hostile = ["a\u001b[2Jb", "x\u0000", "‮evil", "<script>", "a\"b", "'", "x".repeat(300), " acme/web", "acme/web ", "a\nb", "a\u0085b"];
   for (const field of RUN_FILTER_FIELDS) {
@@ -164,7 +171,8 @@ test("runMatches: q ignores case on the record's side too; a trigger index is at
 });
 
 test("parseRunFilter: each field takes a value at its length bound and refuses one character more", () => {
-  const bounds = { repo: 200, flow: 64, trigger: 128, project: 32, host: 64, outcome: 32, reason: 64, model: 128, q: 100 };
+  // `outcome` is the record's closed enum, not a bounded shape (#710 round 2): its own test above holds it.
+  const bounds = { repo: 200, flow: 64, trigger: 128, project: 32, host: 64, reason: 64, model: 128, q: 100 };
   for (const [field, n] of Object.entries(bounds)) {
     assert.deepEqual(parseRunFilter({ [field]: "a".repeat(n) }).filter, { [field]: "a".repeat(n) }, `${field} at ${n}`);
     assert.match(parseRunFilter({ [field]: "a".repeat(n + 1) }).refusal ?? "", new RegExp(`^${field} must be`), `${field} at ${n + 1}`);

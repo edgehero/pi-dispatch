@@ -41,6 +41,8 @@ import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { LIVE_MAX_ENTRIES } from "@edgehero/pi-dispatch/live-transcript";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
+// The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
+import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords } from "./words.mjs";
 import { doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -1771,7 +1773,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
       ),
     },
     {
-      title: "SPEND",
+      title: SPEND_TITLE.toUpperCase(),
       lines: [
         ...toLines(renderBudget({ budget: snapshot.budget, settings: snapshot.settings })),
         ...budgetMeters(snapshot.budget, snapshot.settings, 24),
@@ -1798,7 +1800,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   const dollarText = renderDollarWindows(snapshot.dollars);
   if (dollarText) sections.splice(2, 0, { title: "DOLLAR WINDOWS", lines: toLines(dollarText) });
   const heldText = renderHeldJobs({ held: snapshot.held });
-  if (heldText) sections.push({ title: "HELD", lines: toLines(heldText) });
+  if (heldText) sections.push({ title: HELD_LABEL.toUpperCase(), lines: toLines(heldText) });
   // The parked runs (issue #641), only when one waits: the framed section's facts, plain.
   const parked: any[] = Array.isArray(snapshot.parked) ? snapshot.parked : [];
   if (parked.length > 0) sections.push({ title: `PARKED · ${parked.length} · k view`, lines: parked.slice(0, PARKED_ON_DASHBOARD).map(parkedPlain).concat(parked.length > PARKED_ON_DASHBOARD ? [`${parked.length - PARKED_ON_DASHBOARD} more`] : []) });
@@ -1916,7 +1918,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt), ...delayedBreakdownLine(snapshot, inner, styler)] },
     // `b split` rides this divider's meta when the deployment has an allocation envelope (issue #504 part C): the footer
     // has no headroom for another hint (`keyHints`' arithmetic), the `j projects` precedent on the runs divider.
-    { key: "spend", head: ["spend & limits", `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
+    { key: "spend", head: [`${SPEND_TITLE.toLowerCase()} & limits`, `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
     ...dollarSection(snapshot.dollars, inner, styler),
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     ...bundlesSection(snapshot.secretBundles, inner, styler),
@@ -2093,7 +2095,7 @@ function heldSection(held: any, inner: number, styler: any): any[] {
   if (!held) return [];
   if (held.unreachable) {
     // No viewKey on the degraded row: the view would render an empty list over an unreadable index.
-    return [{ key: "held", priority: 5, head: ["held", "waiting on conditions"], body: [styler.cell(`unreadable (${cellOf(held.unreachable)})`, inner, { color: "error" })] }];
+    return [{ key: "held", priority: 5, head: [HELD_LABEL.toLowerCase(), "waiting on conditions"], body: [styler.cell(`unreadable (${cellOf(held.unreachable)})`, inner, { color: "error" })] }];
   }
   const rows: any[] = Array.isArray(held.rows) ? held.rows : [];
   if (rows.length === 0) return [];
@@ -2105,7 +2107,7 @@ function heldSection(held: any, inner: number, styler: any): any[] {
   // `truncated` means the index was longer than the reader would hydrate, so the count is a FLOOR. Said as
   // "200+" rather than stated flat: a header that names a number it cannot stand behind is the invented
   // figure this panel refuses everywhere else.
-  return [{ key: "held", priority: 5, viewKey: "h", head: ["held", `${total}${held.truncated ? "+" : ""} waiting · h view`], body }];
+  return [{ key: "held", priority: 5, viewKey: "h", head: [HELD_LABEL.toLowerCase(), `${total}${held.truncated ? "+" : ""} waiting · h view`], body }];
 }
 
 /** One HELD_LIST row: the section's cells plus a cursor and the id-only jobId the cancel would take. */
@@ -3511,6 +3513,10 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     styler.fg("dim", Number.isFinite(r.tokens?.total) ? fmtTokens(r.tokens.total) : "-"),
     // Last, so a narrow frame clips the venue before the outcome; only a run off `local` carries it (`recordVenue`).
     ...(recordVenue(r) === null ? [] : [styler.fg("muted", cell(recordVenue(r)))]),
+    // The reason's token LAST of all (issue #710, round 1): the outcome cell says the word, and a token beside it
+    // (`✘ failed (job-image-observable-runner-unsupported)`, 51 columns) pushed the turns and the tokens off an 80-column
+    // row. Here a narrow frame clips the token first, the token the drill-in explains in a sentence.
+    ...(reasonToken(r.outcome, r.reason) === null ? [] : [styler.fg("dim", cell(reasonToken(r.outcome, r.reason)))]),
   ];
   return fitLine(`${cursor} ${tree}${rep}${cells.join(sep)}`, inner, styler);
 }
@@ -3518,14 +3524,19 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
 function outcomeColored(outcome: any, reason: any, styler: any): string {
   // Compared against the RAW values and rendered from scrubbed ones, so a control byte can change what a
   // row looks like but never what it says a run did.
-  const shown = (v: any): string => scrubControl(String(v));
-  // A completed run WITH a reason is not done: the only one the worker writes is `awaiting-input` (REQ-AWAIT-INPUT), a
-  // run that asked a person a question and ended to wait for the answer. "✔ done" told the operator nothing waited on
-  // them, while `/dispatch runs` and the drill-in both name the reason. The glyph stays (it completed, it is promoted,
-  // it is never retried); the word is the reason, in warning, since a person has to act.
-  if (outcome === "completed") return reason ? styler.fg("warning", `✔ ${shown(reason)}`) : styler.fg("success", "✔ done");
-  if (outcome === "policy") return styler.fg("warning", `⚠ ${shown(reason ?? "policy")}`);
-  return styler.fg("error", `✘ ${shown(reason ?? outcome ?? "failed")}`);
+  // The console's words (issue #710, words.mjs): completed, refused, failed, and the two reasons that change the word,
+  // awaiting input (a completed run waiting on a person, REQ-AWAIT-INPUT: the word "done" once told the operator nothing waited
+  // on them) and cancelled. Any other reason is its own cell at the row's end (`reasonToken`). An outcome this release
+  // does not know prints as itself, as a failure.
+  const w = outcomeWord(outcome, reason);
+  const word = w.known ? w.word : scrubControl(String(outcome ?? "failed"));
+  return styler.fg(w.tone, `${w.glyph} ${word}`);
+}
+
+/** The reason a list row names after its other cells: a reason the outcome's word does not already say, or null. */
+function reasonToken(outcome: any, reason: any): any {
+  if (reason === null || reason === undefined || reason === "") return null;
+  return outcomeWord(outcome, reason).qualified ? null : reason;
 }
 
 /** A compact colored settings summary (the full editor is the `s` drill-in). */
@@ -4068,7 +4079,11 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     const rep = run?.replica > 0 ? cellOf(`r${run.replica}/${run.replicas ?? "?"} `) : "";
     const project = recordProject(run);
     const venue = recordVenue(run);
-    const cells = [run?.jobId, run?.target, ...(project === null ? [] : [project]), run?.flow, run?.outcome, run?.turns, run?.tokens?.total, ...(venue === null ? [] : [venue])].map(cellOf).join(" · ");
+    // The outcome in the console's word (issue #710), the raw value only for an outcome this release does not know, and
+    // the reason's token last, as the colored row has them.
+    const said = outcomeWord(run?.outcome, run?.reason);
+    const token = reasonToken(run?.outcome, run?.reason);
+    const cells = [run?.jobId, run?.target, ...(project === null ? [] : [project]), run?.flow, said.known ? said.word : run?.outcome, run?.turns, run?.tokens?.total, ...(venue === null ? [] : [venue]), ...(token === null ? [] : [token])].map(cellOf).join(" · ");
     out.push(clipData(`${cursor} ${rep}${cells}`, w));
   }
   const below = rows.length - top - count;
@@ -4219,7 +4234,7 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
   const ended = snapshot?.activeJobId !== tailJobId;
   // The transcript's own end entry is the better word than the active slot: it names the outcome, and it is right for a
   // run on another host too. The source is named in the header, so a transcript cannot pass for the raw log.
-  const streamEnded = tail?.stream && typeof tail.ended === "string" ? `(run ended: ${scrubControl(tail.ended)})` : null;
+  const streamEnded = tail?.stream && typeof tail.ended === "string" ? `(run ended: ${scrubControl(outcomeWord(tail.ended).word ?? tail.ended)})` : null;
   const endedLine = streamEnded ?? (ended ? "(run ended -- Esc to go back)" : null);
   const source = tail?.stream ? "live transcript, " : "";
   const note = tail?.stream && typeof tail.note === "string" && tail.note !== "" ? `(transcript read failed: ${scrubControl(tail.note)}; retrying)` : null;
@@ -4287,16 +4302,14 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // Header: colored outcome glyph + word, plus the reason when it is not a clean completion. `outcome` is
   // a record STRING and goes through `show` like every other one; the enum comparisons below read
   // `r.outcome` directly, so a scrubbed display value cannot change a colour or a glyph.
-  const oc = show(r.outcome ?? "-");
   // Compared RAW and rendered SCRUBBED. The two readings happen to be equivalent for this class, since
-  // scrubbing replaces a control byte with a space and can never turn a dirty value INTO one of the two
+  // scrubbing replaces a control byte with a space and can never turn a dirty value INTO one of the
   // enum words, so no mutation distinguishes them; the split is here because a comparison is a decision
   // and a decision should read the stored value, which is what the comment beside it has claimed since
-  // the first draft.
-  const outcome = r.outcome;
-  const outcomeColor = outcome === "completed" ? "success" : outcome === "policy" ? "warning" : "error";
-  const glyph = outcome === "completed" ? "✔" : outcome === "policy" ? "⚠" : "✘";
-  let head = styler.bold(styler.fg(outcomeColor, `${glyph} ${oc}`));
+  // the first draft. The word is the console's (words.mjs, issue #710); an unknown outcome prints as itself.
+  const w = outcomeWord(r.outcome, r.reason);
+  const oc = w.known ? w.word : show(r.outcome ?? "-");
+  let head = styler.bold(styler.fg(w.tone, `${w.glyph} ${oc}`));
   // The reason's detail (the record's `why`, a fixed token, PR #558) in parentheses after it, so a refusal says WHICH
   // rule refused: `model-unknown (overlay-link)`, and since issue #507 `cost-cap (unboundable)`. That one carries a
   // pointer too, because its usual cause is one models.json field (docs/egress.md, "Local model servers"): a run the
@@ -4305,6 +4318,19 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   const hint = r.reason === "cost-cap" && why === "unboundable" ? ": see compat.maxTokensField" : "";
   if (r.reason) head += styler.fg("dim", ` · ${show(r.reason)}${why !== null ? ` (${show(why)}${hint})` : ""}`);
   out.push(fitLine(head, inner, styler));
+  // WHAT THE REASON MEANS AND WHAT TO DO (issue #710): the reason catalog's sentence (its `why` variant where it has one)
+  // and next step, WRAPPED under their labels, never clipped, since half a sentence reads as a whole one. Fixed catalog
+  // text, but it still goes through `show` like every line here. A token the catalog does not know (a newer worker's)
+  // says so in one dim line. A record with no reason (a clean completion) renders as before.
+  if (r.reason) {
+    const said = reasonWords(r.reason, why);
+    const wrapped = (k: string, v: string, color: string) =>
+      wrapColumns(show(v), Math.max(1, inner - 13), styler).forEach((part: string, i: number) => out.push(kv(i === 0 ? k : "", part, color)));
+    if (said.known) {
+      wrapped("what", said.sentence, "text");
+      wrapped("next", said.next, "accent");
+    } else wrapped("what", NO_EXPLANATION, "dim");
+  }
   out.push(styler.cell("", inner));
 
   // Nothing on this line is wrapped in a link, and the copy seam asks `targetUrl` for itself.
@@ -4329,7 +4355,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // Absent on a record that carries no field (written before #277, or by an older host in a mixed fleet),
   // and nothing is inferred for it -- the panel shows a record, it decides nothing from one. Unlike the host
   // line, every record this version writes carries the field, so the line is the normal case.
-  if (typeof r.backend === "string" && r.backend !== "") out.push(kv("backend", show(r.backend)));
+  if (typeof r.backend === "string" && r.backend !== "") out.push(kv(VENUE_LABEL.toLowerCase(), show(r.backend)));
   // THE SANDBOX POLICY an openshell run was given (issue #712): its mode, the credential providers and placeholders, then
   // the hosts its policy admitted, WRAPPED under the label (a cut host list would read as the whole policy), at most four
   // lines, the rest counted. `recordOpenshell` is the worker's rebuild (the host-name charset, counts bounded), and each

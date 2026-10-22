@@ -284,6 +284,10 @@ test("the Progress panel of a retried job (issue #644): a key newer than the rec
   const done = String(runProgress(view("operator", { run: { record }, progress: { ...attempt2, running: [], ended: true, outcome: "completed" } })));
   assert.match(done, /An earlier attempt of this run ended \(failed\)/);
   assert.match(done, /The run has ended \(completed\)\./);
+  // In the console's words (#710 round 2): a refused run's progress never says the record's "policy".
+  const endedRefused = String(runProgress(view("operator", { run: { record }, progress: { ...attempt2, running: [], ended: true, outcome: "policy" } })));
+  assert.match(endedRefused, /The run has ended \(refused\)\./);
+  assert.doesNotMatch(endedRefused, /\(policy\)/);
   // A key of the record's own attempt: ended, started before the record ended. Its names join the record.
   const same = String(runProgress(view("operator", { run: { record }, progress: { ...attempt2, startedAt: ended - 600_000, updatedAt: ended, running: [], ended: true, outcome: "failed" } })));
   assert.match(same, /<dt>Last phase<\/dt><dd>4 of 4<\/dd>/);
@@ -503,7 +507,7 @@ test("the spend screen opens on 30d, states both windows, and draws the topology
   const range = String(insightsRange({ query: q, role: "viewer" }));
   assert.match(range, /<a href="\/insights\?range=30d" aria-current="page">last 30d<\/a>/);
   const page = String((await renderPage("insights", ctxOf("viewer", { insights: PAYLOAD(), pricedModels: [] }, q))).html);
-  assert.match(page, /<h2>Spend and insights, last 30d<\/h2>/);
+  assert.match(page, /<h2>Spend, last 30d<\/h2>/);
   assert.ok(page.includes('<p id="windows" class="note">spend window: last 30d · topology: fixed 30d record window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap</p>'), "the two-window line, with the retention and scan-cap note");
   assert.match(page, /<ol id="graph-nodes" class="hidden-tips" hidden><li data-id="n0" data-nb="[nw\d ]*" data-w="[nw\d ]*">/, "the chips' data, as a hidden list");
   assert.match(page, /data-node="n\d+"/, "a breakdown row names its chip by minted id");
@@ -886,4 +890,94 @@ test("the spend screen makes zero external requests: every reference is this con
   assert.match(csp, /default-src 'none'/);
   // `data:` (images only) is inline bytes, not a request; no directive names a host, a scheme to fetch from, or a wildcard.
   for (const d of csp.split(";").map((x) => x.trim())) assert.doesNotMatch(d, /https?:|wss?:|\*/, `${d} names no other origin`);
+});
+
+// ---- one vocabulary, reasons as sentences (issue #710, PR 2) -----------------------------------------------------------
+
+test("the runs table: the outcome in the panel's words, its tone as a class, and the reason as a short sentence linked to its runs", async () => {
+  const { REASONS } = await import("@edgehero/pi-dispatch/reason-catalog");
+  const { shortSentence } = await import("../src/words.mjs");
+  const base = { kind: "github", target: "acme/web#1", endedAt: "2026-10-08T15:00:00Z", tokens: { total: 5, cost: 0.1 } };
+  const runs = [
+    { ...base, jobId: "gh-c", outcome: "completed" },
+    { ...base, jobId: "gh-a", outcome: "completed", reason: "awaiting-input" },
+    { ...base, jobId: "gh-r", outcome: "policy", reason: "scope-cap" },
+    { ...base, jobId: "gh-x", outcome: "policy", reason: "operator-cancel" },
+    { ...base, jobId: "gh-f", outcome: "failed", reason: "container-never-started", failedReason: "FREE-TEXT <b>" },
+    { ...base, jobId: "gh-n", outcome: "policy", reason: "brand-new-reason" },
+    { ...base, jobId: "gh-h", outcome: "policy", reason: "<img src=x>" },
+    { ...base, jobId: "gh-u", outcome: "vapour" },
+    { ...base, jobId: "gh-l", outcome: "policy", reason: `LONG${"z".repeat(500)}` },
+    { ...base, jobId: "gh-m", outcome: "policy", reason: "model-unknown" },
+    { ...base, jobId: "gh-mv", outcome: "policy", reason: "model-unknown", why: "overlay-link" },
+    { ...base, jobId: "gh-f2", outcome: "policy", reason: "model-not-allowed" },
+    { ...base, jobId: "gh-f2v", outcome: "policy", reason: "model-not-allowed", why: "fallback-unlisted" },
+  ];
+  const out = (await pagePanels("runs", ctxOf("viewer", { runsPage: { runs, next: null, mirror: "ok" } }, parsePageQuery("runs", "").query))).map((p) => p.html).join("");
+  const rowOf = (id) => out.match(new RegExp(`<tr><td>[^<]*</td><td><a class="mono" href="/run\\?id=${id}">.*?</tr>`))?.[0] ?? "";
+  const cellOf = (id) => rowOf(id).split("</td>")[6] ?? "";
+  // The words and the tones: no class for completed, warn for refused, awaiting input and cancelled, bad for failed.
+  assert.equal(cellOf("gh-c"), "<td>completed");
+  assert.equal(cellOf("gh-a"), '<td class="warn">awaiting input', "the word says it all: no reason part");
+  assert.equal(cellOf("gh-x"), '<td class="warn">cancelled');
+  const scope = shortSentence(REASONS["scope-cap"].sentence);
+  assert.equal(cellOf("gh-r"), `<td class="warn">refused · <a href="/runs?outcome=policy&amp;reason=scope-cap" title="scope-cap">${scope.replace(/'/g, "&#39;")}</a>`);
+  assert.match(cellOf("gh-f"), /^<td class="bad">failed · <a href="\/runs\?outcome=failed&amp;reason=container-never-started" title="container-never-started">/);
+  // REQ-CONSOLE-SECURITY (l): a job's free text never reaches a list row, only the closed enum.
+  assert.ok(!out.includes("FREE-TEXT"), "no failedReason in a list row");
+  // An unknown token: shown raw, with no explanation, still linked when the filter accepts it.
+  assert.equal(cellOf("gh-n"), '<td class="warn">refused · <a href="/runs?outcome=policy&amp;reason=brand-new-reason" title="brand-new-reason">brand-new-reason, no explanation yet</a>');
+  // A token the filter refuses: escaped text, once, no link (its /runs would answer with a refusal) and no title copy.
+  assert.equal(cellOf("gh-h"), '<td class="warn">refused · &lt;img src=x&gt;, no explanation yet');
+  // And bounded: a very long one is cut to 64 characters, printed once (#710 round 1).
+  assert.equal(cellOf("gh-l"), `<td class="warn">refused · LONG${"z".repeat(60)}…, no explanation yet`);
+  assert.equal(out.split("LONGzz").length - 1, 1, "the long token appears once in the page");
+  // The why variant changes the row's sentence, as the catalog's variant does.
+  const { explainReason } = await import("@edgehero/pi-dispatch/reason-catalog");
+  for (const [plainId, variantId, reason, why] of [["gh-m", "gh-mv", "model-unknown", "overlay-link"], ["gh-f2", "gh-f2v", "model-not-allowed", "fallback-unlisted"]]) {
+    const shortOf = (w) => shortSentence(explainReason(reason, { why: w }).sentence).replace(/'/g, "&#39;");
+    assert.notEqual(shortOf(why), shortOf(null), `${reason}/${why} has its own short sentence`);
+    assert.ok(cellOf(variantId).includes(`>${shortOf(why)}</a>`), cellOf(variantId));
+    assert.ok(cellOf(plainId).includes(`>${shortOf(null)}</a>`), cellOf(plainId));
+  }
+  // An outcome this release does not know: shown as itself, as a failure.
+  assert.equal(cellOf("gh-u"), '<td class="bad">vapour');
+  // Every link in the column is one the runs filter accepts.
+  for (const m of out.matchAll(/href="\/runs\?([^"]*)"/g)) assert.equal(parsePageQuery("runs", new URLSearchParams(m[1].replace(/&amp;/g, "&"))).refusal, undefined, m[1]);
+  assert.ok(!/style=/.test(out), "no inline style (the CSP forbids it)");
+  assert.match(out, /<th scope="col">Venue<\/th>/);
+});
+
+test("the run summary and the chain say the panel's words; the nav, the spend page and the held panel use its titles", async () => {
+  const record = { jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "policy", reason: "operator-cancel", backend: "local", startedAt: "2026-10-08T14:00:00Z", endedAt: "2026-10-08T15:00:00Z" };
+  const data = { run: { record, source: "local" }, children: [{ jobId: "gh-2", outcome: "completed", reason: "awaiting-input" }], childrenSearched: 1 };
+  const run = (await pagePanels("run", ctxOf("viewer", data, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
+  assert.match(run, /<dt>Outcome<\/dt><dd>cancelled<\/dd><dt>Reason<\/dt><dd>operator-cancel<\/dd>/, "the word, then the token");
+  assert.match(run, /<dt>Venue<\/dt><dd>local<\/dd>/);
+  assert.match(run, /<a class="mono" href="\/run\?id=gh-2">gh-2<\/a> awaiting input<\/li>/);
+  assert.equal(PAGES.insights.nav, "Spend");
+  assert.equal(PAGES.insights.title, "Spend");
+  const fleet = (await pagePanels("fleet", ctxOf("viewer", { snapshot: snapshot() }))).map((p) => p.html).join("");
+  assert.match(fleet, /<h2>Held<\/h2>/);
+  assert.ok(!fleet.includes("Held on a wait"));
+});
+
+test("the chain's children carry their reason through loadPageData, so a waiting or cancelled child says so (issue #710)", async () => {
+  const { loadPageData } = await import("../src/console/pages.mjs");
+  const record = { jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "completed", startedAt: "2026-10-08T14:00:00Z", endedAt: "2026-10-08T15:00:00Z" };
+  const kid = (jobId, outcome, reason, startedAt) => ({ jobId, parentJobId: "gh-1", kind: "github", target: "acme/web#2", outcome, reason, startedAt, endedAt: startedAt });
+  const runs = [
+    kid("gh-2", "completed", "awaiting-input", "2026-10-08T14:10:00Z"),
+    kid("gh-3", "policy", "operator-cancel", "2026-10-08T14:20:00Z"),
+    kid("gh-4", "policy", "scope-cap", "2026-10-08T14:30:00Z"),
+    { ...kid("gh-5", "failed", null, "2026-10-08T14:40:00Z"), reason: 7 },
+  ];
+  const fleet = { runById: async () => ({ record, source: "local" }), runsPage: async () => ({ runs, next: null }), inbox: async () => ({ found: false }) };
+  const data = await loadPageData("run", { id: "gh-1" }, { fleet, now: NOW });
+  assert.deepEqual(data.children.map((c) => c.reason), ["awaiting-input", "operator-cancel", "scope-cap", null], "the reason is kept, a non-string one is null");
+  const run = (await pagePanels("run", ctxOf("viewer", data, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
+  assert.match(run, /href="\/run\?id=gh-2">gh-2<\/a> awaiting input<\/li>/);
+  assert.match(run, /href="\/run\?id=gh-3">gh-3<\/a> cancelled<\/li>/);
+  assert.match(run, /href="\/run\?id=gh-4">gh-4<\/a> refused<\/li>/);
+  assert.match(run, /href="\/run\?id=gh-5">gh-5<\/a> failed<\/li>/);
 });

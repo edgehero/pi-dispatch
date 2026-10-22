@@ -17,6 +17,7 @@
 import { LIVE_OUTCOMES, LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { TRANSCRIPT_ID_RE, transcriptAbsentText } from "../read-model.mjs";
 import { html } from "./html.mjs";
+import { outcomeWord } from "../words.mjs";
 
 /** The kinds that carry text worth folding: a tool call's arguments and a tool's result go in a `<details>`. */
 const FOLDED = Object.freeze({ "tool-call": "arguments", "tool-result": "result" });
@@ -50,6 +51,9 @@ export function preText(text) {
   return parts.map((p) => (p === "\n" ? html`\n` : p === "\t" ? html`\t` : html`${p}`));
 }
 
+/** A live stream's end outcome in the console's words (words.mjs, #710 round 2): `policy` reads "refused", "unknown" and any other value as itself. */
+const endedWord = (o) => (typeof o === "string" && o !== "" ? (outcomeWord(o).word ?? o) : "unknown");
+
 /**
  * One transcript entry (`readTranscriptSince`'s shape: `{id, kind, ts, text, tool, error, truncated, outcome}`) as an
  * `<article>`: a header (kind, tool, error marker, UTC time, truncated), then the text in an escaped `<pre>`, inside a
@@ -64,7 +68,7 @@ export function transcriptEntryHtml(entry) {
   let body;
   if (kind === "reset") body = html`<p class="note">The session file was rewritten; what follows starts over.</p>`;
   else if (kind === "skipped") body = html`<p class="note">A line was left out (too large or unreadable).</p>`;
-  else if (kind === "end") body = html`<p class="note">The run is over (${typeof e.outcome === "string" && e.outcome !== "" ? e.outcome : "unknown"}).</p>`;
+  else if (kind === "end") body = html`<p class="note">The run is over (${endedWord(e.outcome)}).</p>`;
   else if (typeof e.text !== "string") body = null;
   else if (Object.hasOwn(FOLDED, kind)) body = html`<details><summary>${FOLDED[kind]}</summary><pre>${preText(e.text)}</pre></details>`;
   else body = html`<pre>${preText(e.text)}</pre>`;
@@ -124,6 +128,6 @@ export function runTranscriptSection(view) {
   const meta = view?.data?.transcript ?? null;
   if (meta?.unreachable) return html`${title}<p class="warn">The live transcript could not be read (is Valkey reachable?). Reload to try again.</p>`;
   if (meta?.exists !== true) return html`${title}<p class="note">${transcriptAbsentText(view?.data?.run?.record ?? null)} Reload to check again.</p>`;
-  const note = html`<p class="note">${meta.ended ? `The run has ended (${meta.outcome ?? "unknown"}); its stream is kept 24 hours.` : "The run is publishing its transcript."}</p>`;
+  const note = html`<p class="note">${meta.ended ? `The run has ended (${endedWord(meta.outcome)}); its stream is kept 24 hours.` : "The run is publishing its transcript."}</p>`;
   return html`${title}${note}<p class="t-status" data-transcript-status role="status" aria-live="polite">not live</p><div class="transcript" data-transcript data-job="${id}" tabindex="0"></div>`;
 }

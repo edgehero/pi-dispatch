@@ -24,6 +24,8 @@ import { clip, columnsOf, fmtCost, pad, scrubControls, sliceColumns } from "./pa
 // was the second one. Imported straight from the worker rather than through read-model.mjs: this module
 // is asserted to do no I/O of its own, and reaching for it through the I/O module is the wrong direction.
 import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
+// The one vocabulary the console and the panel read (issue #710): the runs table's OUTCOME column says the same words.
+import { outcomeWord } from "./words.mjs";
 
 // The three spend windows and the overlay cap key each reads. Order is day -> week -> month.
 const BUDGET_WINDOWS = [
@@ -36,7 +38,13 @@ const RUN_COLUMNS = [
   { key: "jobId", header: "JOB ID" },
   { key: "target", header: "TARGET" },
   { key: "flow", header: "FLOW" },
-  { key: "outcome", header: "OUTCOME" },
+  // The outcome in the console's word (issue #710, words.mjs): `policy` reads "refused", and the two reasons that change
+  // the word read "awaiting input" and "cancelled"; an outcome this release does not know prints as itself. REASON keeps
+  // the record's token beside it, so the table still names what the record says.
+  { key: "outcome", header: "OUTCOME", derive: (r) => {
+    const w = outcomeWord(r?.outcome, r?.reason);
+    return w.known ? w.word : r?.outcome;
+  } },
   { key: "reason", header: "REASON" },
   { key: "turns", header: "TURNS" },
   // Per-job token accounting (issue #25). `tokens` is `{ input, output, total, cost }` | null; a derive

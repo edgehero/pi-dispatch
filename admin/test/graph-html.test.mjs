@@ -96,6 +96,20 @@ test("graph-html.mjs is fully pure: no module loads, no clock, no randomness, no
   assert.ok(!src.includes("<!doctype"), "graph-html emits scene pieces, never a whole document");
 });
 
+test("a chip's tip says the console's outcome word the caller hands in, and the raw value without one (#710 round 2)", () => {
+  const model = CANNED();
+  model.cronStats.byId.nightly.lastOutcome = "policy";
+  const tips = Object.values(nodeTips(pageOf(buildGraphModel(model))));
+  assert.ok(tips.some((t) => /runs: 41 · last refused/.test(t)), tips.join("\n"));
+  assert.ok(!tips.some((t) => /last policy/.test(t)), "the console's spend screen never says the record's policy");
+  const bare = Object.values(buildGraphScene(buildGraphModel(model), { now: NOW }).graphData.nodes).map((n) => n.tip);
+  assert.ok(bare.some((t) => /runs: 41 · last policy/.test(t)), "no map: the value as itself");
+  // An own key only: an inherited name is never a word.
+  model.cronStats.byId.nightly.lastOutcome = "constructor";
+  const odd = Object.values(buildGraphScene(buildGraphModel(model), { now: NOW, outcomeWords: { policy: "refused" } }).graphData.nodes).map((n) => n.tip);
+  assert.ok(odd.some((t) => /runs: 41 · last constructor/.test(t)));
+});
+
 // ---- 2. kind parity ----
 
 test("GRAPH_HTML_KINDS is the assembler's GRAPH_EDGE_KINDS, byte for byte, frozen", () => {
