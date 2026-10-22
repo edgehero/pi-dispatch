@@ -92,6 +92,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 // Issue #471: the ONE resolver of a deployment's service keys, shared with `doctor` (the package boundary allows it: the
 // admin already takes its config helpers from the worker the same way).
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
+import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT } from "@edgehero/pi-dispatch/reason-catalog";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -5238,17 +5239,11 @@ export function triggerBundleOf(trigger, view) {
   return { id: at.id, optedOut: at.optedOut };
 }
 
-/**
- * Why a job ran without its project's bundle, one sentence per `bundleSkipped` reason (the worker's
- * BUNDLE_SKIPPED_REASONS, imported, and held to this table by a test so a new reason cannot render as nothing).
- */
-export const BUNDLE_SKIPPED_TEXT = Object.freeze({
-  manual: "a manual run (no trigger made it), so it got no bundle",
-  chained: "a chained /outbox child, so it got no bundle: the grant was to the trigger, not to what its job queues",
-  "opted-out": "its trigger sets run.secretBundle: false",
-  fork: "a pull request from another repository, and the bundle does not set forkReviews",
-  "head-unverified": "the forge would not say whose pull request this is (401, 403 or 404), so it ran as a fork's, without the bundle",
-});
+// Why a job ran without its project's bundle (`BUNDLE_SKIPPED_TEXT`), and why a run went without steering or a live transcript
+// (`STEER_SKIPPED_TEXT`, `LIVE_SKIPPED_TEXT`): the worker's reason catalog holds all three since issue #710
+// (INT-REASON-CATALOG), so the console, the panel and the catalog say one thing. Re-exported under the names every surface
+// already imports.
+export { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT };
 
 // ---------------------------------------------------------------------------------------------------------------------
 // What a venue serves, and why a run went without a feature (issue #712): the sentences the console and the panel say,
@@ -5256,21 +5251,6 @@ export const BUNDLE_SKIPPED_TEXT = Object.freeze({
 // `LIVE_SKIPPED_REASONS`), each held to its table by admin/test/venue-words.test.mjs so a new venue word, custody or
 // reason cannot render as nothing. No surface restates which venue does what: it asks `servesOf`.
 // ---------------------------------------------------------------------------------------------------------------------
-
-/** Why a steer-armed run went without steering (the record's `steerSkipped`), keyed like STEER_SKIPPED_REASONS. */
-export const STEER_SKIPPED_TEXT = Object.freeze({
-  "venue-copies": "its venue copies the job's files (no /inbox mount) and its job image does not declare steerStdin, so no message could reach the run",
-  "no-exit-key": "its job image does not declare exitAuth, so no delivery could be verified",
-  "no-transcript": "nothing could read the delivery acks: on a venue that copies the job's files its job image does not declare transcriptStderr (the acks come back over that stream), or no transcript could be staged, or this worker has no tail or relay wired",
-  "no-inbox": "the run's inbox directory could not be made",
-});
-
-/** Why a run had no live transcript, and so no live progress (the record's `liveSkipped`), keyed like LIVE_SKIPPED_REASONS. */
-export const LIVE_SKIPPED_TEXT = Object.freeze({
-  "venue-copies": "its venue copies the job's files and does not stream the transcript back",
-  "no-capability": "its venue streams the transcript only from a job image that declares transcriptStderr, and this one does not",
-  "no-exit-key": "its job image does not declare exitAuth, so a streamed transcript could not be verified",
-});
 
 /** Each `serves` entry's value in words (BACKENDS[*].serves), for every word SERVES_WORDS admits. */
 export const SERVES_TEXT = Object.freeze({

@@ -15,6 +15,7 @@
 
 import { realpathSync } from "node:fs";
 import { execDockerBounded } from "./backend-local.mjs";
+import { PODMAN_RESTART_HOLD_EXPIRED } from "./comment-tables.mjs";
 import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_CONF_WIDENS_JOB, PODMAN_ROOTFUL_WIDENING_KEYS, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 
 /**
@@ -1123,7 +1124,8 @@ export function rootfulConfResidual(unread) {
  */
 export const PODMAN_RESTART_HOLD_RECHECK_MS = 60_000;
 export const PODMAN_RESTART_HOLD_MAX_MS = 3_600_000;
-export const PODMAN_RESTART_HOLD_EXPIRED = "podman-service-restart-hold-expired";
+// The expiry's reason token lives in comment-tables.mjs beside its comment (issue #710); re-exported under its old name.
+export { PODMAN_RESTART_HOLD_EXPIRED };
 
 /** Whether a rootful finding holds jobs back only until something heals by itself (a retry), not a configuration fix. */
 export function rootfulConfRetries(found) {

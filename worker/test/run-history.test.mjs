@@ -7,6 +7,7 @@ import { authenticExitLines, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { recordReasonEnum } from "./helpers/spec-enum.mjs";
 import { RESOURCE_KEYS as RUNNER_RESOURCE_KEYS } from "../../image/runner/src/cgroup-usage.mjs";
 
 /**
@@ -1530,8 +1531,7 @@ test("docs/mcp.md's and INT-RUNNER-EXIT-CODE-PROTOCOL's exit-2 MCP reasons are M
 	assert.deepEqual([...fromDoc].sort(), [...MCP_RUNNER_REASONS].sort());
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
 	// The record contract's reason enum (INT-RUN-HISTORY-FILE-CONTRACT) names every reason the record can carry.
-	const enumLine = spec.split("\n").find((l) => l.includes('"reason":    "<fixed enum:'));
-	const tokens = enumLine.slice(enumLine.indexOf("<fixed enum:") + "<fixed enum:".length, enumLine.indexOf(">")).split("|");
+	const tokens = recordReasonEnum(spec);
 	for (const reason of RUNNER_POLICY_REASONS) assert.ok(tokens.includes(reason), `${reason} is in the record's reason enum`);
 	const fromSpec = new Set([...spec.matchAll(/\| `2` \/ `(mcp-[a-z-]+)`/g)].map((m) => m[1]));
 	assert.deepEqual([...fromSpec].sort(), [...MCP_RUNNER_REASONS].sort());
@@ -1541,8 +1541,7 @@ test("docs/mcp.md's and INT-RUNNER-EXIT-CODE-PROTOCOL's exit-2 MCP reasons are M
 test("every OPENSHELL_REFUSALS reason is in the record's reason enum (#686 part 3)", async () => {
 	const { OPENSHELL_REFUSALS } = await import("../src/backend-openshell.mjs");
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
-	const enumLine = spec.split("\n").find((l) => l.includes('"reason":    "<fixed enum:'));
-	const tokens = enumLine.slice(enumLine.indexOf("<fixed enum:") + "<fixed enum:".length, enumLine.indexOf(">")).split("|");
+	const tokens = recordReasonEnum(spec);
 	for (const reason of Object.keys(OPENSHELL_REFUSALS)) assert.ok(tokens.includes(reason), `${reason} is in the record's reason enum`);
 	assert.ok(Object.hasOwn(OPENSHELL_REFUSALS, "openshell-bind-mounts-disabled"));
 });
@@ -2160,7 +2159,9 @@ test("the refusals before a slot that the capacity report reads are the processo
 	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
 	const waits = new Set([...src.matchAll(/refuseWait\("([a-z-]+)"/g)].map((m) => m[1]));
 	assert.deepEqual([...WAIT_REFUSAL_REASONS].sort(), [...waits].sort(), "every wait gate refusal, and nothing else");
-	const sizes = src.slice(src.indexOf("export const SIZE_REFUSAL_COMMENTS"));
+	// The table moved to the comment-tables leaf in issue #710 (index.mjs re-exports it), so its keys are read there.
+	const tables = readFileSync(new URL("../src/comment-tables.mjs", import.meta.url), "utf8");
+	const sizes = tables.slice(tables.indexOf("export const SIZE_REFUSAL_COMMENTS"));
 	const sized = [...sizes.slice(0, sizes.indexOf("});")).matchAll(/^\t"([a-z-]+)":/gm)].map((m) => m[1]);
 	assert.deepEqual([...SIZE_REFUSAL_REASONS], sized);
 });

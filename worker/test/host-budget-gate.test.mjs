@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { recordReasonEnum } from "./helpers/spec-enum.mjs";
 import { test } from "node:test";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
 import { parseProjects } from "../src/projects.mjs";
@@ -430,9 +431,8 @@ test("the two never-fits reasons are the record contract's own tokens, each with
 	// Pinned against the spec's reason enum (INT-RUN-HISTORY-FILE-CONTRACT), read from the file, so a fourth reason or a
 	// renamed one cannot ship without the contract naming it.
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
-	const enumLine = spec.split("\n").find((l) => l.includes('"reason":    "<fixed enum:'));
-	assert.ok(enumLine, "the record's reason enum line");
-	const tokens = enumLine.slice(enumLine.indexOf("<fixed enum:") + "<fixed enum:".length, enumLine.indexOf(">")).split("|");
+	const tokens = recordReasonEnum(spec); // throws when the line is gone
+	assert.ok(tokens.length > 0, "the record's reason enum line");
 	assert.deepEqual(Object.keys(mod.SIZE_REFUSAL_COMMENTS), ["job-size-exceeds-host", "job-size-exceeds-share"]);
 	assert.equal(tokens.includes("job-size-exceeds-fleet"), false, "no longer emitted, so no longer in the contract");
 	for (const reason of Object.keys(mod.SIZE_REFUSAL_COMMENTS)) assert.ok(tokens.includes(reason), `${reason} is in the record's reason enum`);

@@ -9,6 +9,9 @@ only the hook has a knob, and a deployment that leaves `PI_ON_FAILURE` unset get
 byte-identically. So the one visible change on upgrading, with nothing configured, is that these
 previously-silent failures now comment.
 
+Every reason a run record can carry, and what to do about it, is explained in [reasons.md](reasons.md). Each
+reason below has its own entry there.
+
 ## The worker's own terminal comments
 
 These are always on, because they discharge a promise the spec already made ("exactly one completion or
