@@ -151,8 +151,8 @@
     "start": "node src/cli.mjs worker"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.2.0",
-    "@earendil-works/pi-tui": "1.2.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@octokit/auth-app": "8.2.0",
     "@octokit/rest": "22.0.1",
     "bullmq": "5.80.4",
