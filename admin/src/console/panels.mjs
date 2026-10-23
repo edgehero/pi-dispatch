@@ -52,12 +52,14 @@ import {
   topologySectionHtml,
   topologySpend,
 } from "../insights-html.mjs";
-import { fmtCost } from "../panel.mjs";
+import { fmtCost, usd2 } from "../panel.mjs";
 import { renderWhatIf } from "../render.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
-import { BUNDLE_SKIPPED_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, venuesView, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf, PROFILE_ROOTS_TEXT, PROFILE_SOURCE_TEXT, profileHostsText, profileLastText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile } from "../read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, venuesView, liveAbsentCause, progressAbsentText, recordSkips, resolveWorkerCount, sandboxShellRefusal, bundleCountsText, bundleDeclaredText, bundleEndpointsText, bundleReceivedText, checkpointsText, forgeLinkOf, isProgressSnapshot, overlayBundleProfiles, progressStaleFor, recordBundle, recordRecovery, recoveredText, secretProfileNames, triggerBundleOf, PROFILE_ROOTS_TEXT, PROFILE_SOURCE_TEXT, profileHostsText, profileLastText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile } from "../read-model.mjs";
 import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
+import { coresText } from "@edgehero/pi-dispatch/size-suggest";
+import { formatCpus } from "@edgehero/pi-dispatch/job-size";
 // The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
 import { HELD_LABEL, NO_EXPLANATION, OUTCOME_WORD_OF, SPEND_TITLE, TONE_CLASS, VENUE_LABEL, docsHref, outcomeWord, reasonWords } from "../words.mjs";
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
@@ -95,12 +97,38 @@ export function utcText(ms) {
   return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
+/**
+ * An instant as a `<time>` element (issue #710): `utcText`'s bytes as its text, so a page without the script reads UTC
+ * exactly as before, and the instant in `datetime` (ISO 8601, UTC), which the browser script (`script.mjs`) rewrites to
+ * the reader's local time, keeping the UTC text in `title`. The server never formats a zone it does not know: a page is
+ * the same bytes for every reader, and only the reader's own browser knows the reader's zone. "unknown" stays plain text.
+ */
+export function timeHtml(ms) {
+  const text = utcText(ms);
+  if (text === "unknown") return text;
+  return html`<time datetime="${new Date(ms).toISOString()}">${text}</time>`;
+}
+
 /** A record's ISO instant as millis, or NaN. */
 const msOf = (iso) => (typeof iso === "string" ? Date.parse(iso) : Number.NaN);
 
 /** Micro-dollars as `$1.20`, `-` for a value that is not an amount. */
 export function usdText(micros) {
   return Number.isSafeInteger(micros) && micros >= 0 ? `$${formatMicros(micros)}` : "-";
+}
+
+/**
+ * Micro-dollars for a list row or an overview line (issue #710): `usd2`'s one fixed form, `$1,234.56`, with the exact
+ * amount (`usdText`, every digit the counter holds) in the `title`, so a reader sees a number they can read at a glance
+ * and can still hover for the one the ledger holds. `spent: true` for an amount read against a cap, which `usd2` rounds
+ * DOWN, so a window one micro-dollar short of its cap never reads as the cap. `-` for a value that is not an amount.
+ * Review round 1: the panel's `fmtUsd` was here first, and its ladder printed `$99.99`, `$412` and `$4.1k` in one
+ * column, so two rows of a table were not comparable at a glance.
+ */
+export function moneyHtml(micros, { spent = false } = {}) {
+  const full = usdText(micros);
+  if (full === "-") return full;
+  return html`<span title="${full}">${usd2(micros, { spent })}</span>`;
 }
 
 /** A whole number with thousands separators (fixed to `en-US`, so not the host's locale). */
@@ -259,31 +287,102 @@ export function navHtml(pages, current, role) {
 
 // ---- overview --------------------------------------------------------------------------------------------------------
 
-/** Paused, partly paused or running, as words and a class. */
-function pausedState(q) {
+/**
+ * Paused, partly paused or running, as words and a class. A queue no worker drains (`online === false`) is never green
+ * (issue #710): "running" there means only that nothing paused it, and jobs pile up behind it.
+ */
+function pausedState(q, online = true) {
   if (q?.pausedState) return html`<span class="bad">paused (the kill switch is on)</span>`;
   if (q?.pausedPartial) return html`<span class="warn">partly paused: some hosts' queues are paused and others are not</span>`;
+  if (online === false) return html`<span class="warn">not paused, but no worker is online</span>`;
   return html`<span class="good">running</span>`;
 }
+
+/**
+ * How old a host's last beat may be for the host to count as online (issue #710): a minute, four of the worker's 15 s
+ * beats. The hosts tables mark an older beat amber by the same bound (`beatCell`). Not the registry row's 90 s TTL,
+ * past which the row is gone anyway: a row that still lives with no beat for a minute is a worker that is wedged or
+ * dying, and an overview that called it online would say jobs are being run when none is.
+ */
+export const BEAT_FRESH_MS = MIN;
+
+/**
+ * Who drains the queue (issue #710): `{ count, online, connected, staleBeats, none }`.
+ *
+ * - `count` is the registry-aware worker count (`resolveWorkerCount`, the status line's rule: the registry's rows when it
+ *   has any, else BullMQ's `getWorkers`, else "unknown").
+ * - `online` is how many registry rows beat within `BEAT_FRESH_MS`, or BullMQ's count for a deployment whose registry
+ *   holds no row (a fallback that cannot see beats), or null when the registry could not be read (the page then says it
+ *   shows the fleet as last seen, and judges nothing).
+ * - `connected` is BullMQ's own worker list for the shared queue (`queue.workers`, 0 where it is "unknown"), and
+ *   `staleBeats` is true when it sees more workers than there are fresh beats.
+ * - `none` is the overview's warning: no fresh beat AND no worker BullMQ can see.
+ *
+ * WHY BULLMQ CAN OVERRULE THE BEATS (review round 1). A beat's age is the console's clock minus the worker's own `beatAt`
+ * (`readLiveHosts`), so a worker whose clock runs 50 s behind reads 50 s staler than it is and, with a 15 s beat, drops
+ * past the minute for part of every minute. BullMQ's list is read from Valkey's client connections and holds no clock at
+ * all, so while it sees a worker the page never says "no worker online" nor turns the queue amber; it says the beats look
+ * stale instead. The price, taken knowingly: a wedged worker keeps its connection too, so a fleet whose every worker is
+ * wedged reads as the note rather than the warning, while the hosts tables still mark each stale beat amber. The other
+ * way round is kept: a fresh beat with no BullMQ worker is online, because `getWorkers` rests on
+ * CLIENT SETNAME, which some providers do not support (`resolveWorkerCount`'s reason for preferring the registry).
+ *
+ * REJECTED, for now: measuring a beat's age on Valkey's clock, as the row's TTL minus its PTTL (each beat PEXPIREs the
+ * row to the full `HOST_TTL_MS`). That number is clock-free, but it belongs to `readLiveHosts` in the worker, which
+ * routing (`capabilities.mjs`), capacity and doctor read too, and doctor's skew check needs `staleMs` to stay the
+ * wall-clock difference it is; a second field would be one more round trip per host on a read the console makes every
+ * second. BullMQ's list already answers the one question this page asks, without either.
+ */
+export function workersOnline(s) {
+  const q = s?.queue ?? {};
+  const hosts = Array.isArray(s?.hostBudgets) ? s.hostBudgets : [];
+  const { count: n } = resolveWorkerCount({ hosts, workerCount: q.workers });
+  const connected = Number.isSafeInteger(q.workers) && q.workers > 0 ? q.workers : 0;
+  if (q.fleetDegraded) return { count: n, online: null, connected, staleBeats: false, none: false };
+  if (hosts.length === 0) return { count: n, online: connected, connected, staleBeats: false, none: connected === 0 };
+  const online = hosts.filter((h) => Number.isSafeInteger(h?.staleMs) && h.staleMs <= BEAT_FRESH_MS).length;
+  return { count: n, online, connected, staleBeats: connected > online, none: online === 0 && connected === 0 };
+}
+
+/** The sentence the overview leads with when no worker drains the queue (issue #710). */
+export const NO_WORKER_TEXT = "No worker online: jobs queue but nothing runs them.";
+
+/**
+ * The softer note when BullMQ sees more workers than beat freshly (review round 1). It claims only what both sources say:
+ * a clock out of step is the likely cause, and a wedged worker (which keeps its connection) the other one, so it never
+ * says jobs are being run.
+ */
+export const STALE_BEATS_TEXT = "Host beats look stale (clock skew?), but the queue still sees its workers connected.";
 
 export const overviewState = fromSnapshot("Fleet", (s) => {
   const q = s.queue ?? {};
   const c = q.counts ?? {};
-  return html`${facts([
-    ["Queue", pausedState(q)],
-    ["Workers", cell(q.workers)],
+  const w = workersOnline(s);
+  const none = w.none;
+  // A count BullMQ could not give ("unknown", no registry row either) is not printed as a number of hosts registered.
+  const workers =
+    w.online === null || (w.online === w.count && !w.staleBeats)
+      ? cell(w.count)
+      : typeof w.count === "number"
+        ? `${count(w.count)} registered, ${count(w.online)} online (a beat in the last minute)${w.staleBeats ? `, ${count(w.connected)} connected to the queue` : ""}`
+        : w.online === 0
+          ? "none online"
+          : `${count(w.online)} online`;
+  return html`${none ? html`<p class="warn">${NO_WORKER_TEXT}</p>` : w.staleBeats ? html`<p class="note">${STALE_BEATS_TEXT}</p>` : null}${facts([
+    ["Queue", pausedState(q, !none)],
+    ["Workers", workers],
     ["Queues", cell(q.queues)],
     ["Waiting", count(c.waiting ?? 0)],
     ["Active", count(c.active ?? 0)],
     ["Delayed", count(c.delayed ?? 0)],
-    ["Failed (kept by the queue)", count(c.failed ?? 0)],
+    ["Failed jobs awaiting retry", count(c.failed ?? 0)],
   ])}${q.fleetDegraded ? html`<p class="warn">The host registry could not be read; this shows the fleet as it was last seen.</p>` : null}`;
 });
 
-/** A host's last beat as an age, with a warning class once it is more than a minute old. */
+/** A host's last beat as an age, with a warning class once it is older than `BEAT_FRESH_MS`. */
 function beatCell(staleMs) {
   if (!Number.isSafeInteger(staleMs)) return html`<td>unknown</td>`;
-  return staleMs > MIN ? html`<td class="warn">${ageText(staleMs)} ago</td>` : html`<td>${ageText(staleMs)} ago</td>`;
+  return staleMs > BEAT_FRESH_MS ? html`<td class="warn">${ageText(staleMs)} ago</td>` : html`<td>${ageText(staleMs)} ago</td>`;
 }
 
 /**
@@ -307,12 +406,15 @@ export const overviewHosts = fromSnapshot("Hosts online", (s) => {
   );
 });
 
-/** The count windows: `[label, reserved key, overlay cap key]`. */
+/** The count windows: `[label, counter key, overlay cap key]`. Each counter is the jobs the budget let start. */
 const COUNT_WINDOWS = Object.freeze([
-  ["Today", "day", "dailyCap"],
-  ["This week", "week", "weeklyCap"],
-  ["This month", "month", "monthlyCap"],
+  ["Jobs started today", "day", "dailyCap"],
+  ["Jobs started this week", "week", "weeklyCap"],
+  ["Jobs started this month", "month", "monthlyCap"],
 ]);
+
+/** The line under the spend windows: they reset on UTC boundaries, not on the reader's local ones. */
+export const COUNT_WINDOWS_UTC_TEXT = "Days, weeks (Monday to Sunday) and months here are UTC, as the budget counts them.";
 
 /** A dollar window's name as a page shows it. */
 function dollarWindowName(row) {
@@ -321,22 +423,27 @@ function dollarWindowName(row) {
   return shownPath(row.name);
 }
 
-/** The count and token caps against what is reserved, and every dollar window against its cap. */
+/**
+ * The count and token caps against what the windows used (the jobs started, the tokens spent), and every dollar window
+ * against its cap, money in `moneyHtml`'s fixed form with the exact amount on hover (issue #710).
+ */
 function spendBody(s) {
   const overlay = s.settings?.overlay ?? {};
   const b = s.budget ?? {};
-  const capOf = (v) => (Number.isInteger(v) ? count(v) : "not set");
+  const capOf = (v) => (Number.isInteger(v) ? count(v) : "no cap");
   const countRows = COUNT_WINDOWS.map(([label, key, capKey]) => html`<tr><td>${label}</td><td class="num">${count(Number(b[key] ?? 0))}</td><td class="num">${capOf(overlay[capKey])}</td></tr>`);
-  countRows.push(html`<tr><td>Tokens today</td><td class="num">${count(Number(b.tokensToday ?? 0))}</td><td class="num">${capOf(overlay.dailyTokenCap)}</td></tr>`);
-  const counts = table("Job and token windows", ["Window", { num: "Reserved" }, { num: "Cap" }], countRows, "");
+  countRows.push(html`<tr><td>Tokens used today</td><td class="num">${count(Number(b.tokensToday ?? 0))}</td><td class="num">${capOf(overlay.dailyTokenCap)}</td></tr>`);
+  const counts = table("Job and token windows", ["Window", { num: "Used" }, { num: "Cap" }], countRows, "");
   const d = s.dollars;
   let dollars;
   if (!d) dollars = html`<p class="note">No dollar window is set.</p>`;
   else {
-    const rows = (Array.isArray(d.rows) ? d.rows : []).map((r) => html`<tr${r.full ? html` class="warn"` : null}><td>${dollarWindowName(r)}</td><td>${cell(r.window)}</td><td class="num">${r.counterMicros === null ? "unread" : usdText(r.counterMicros)}</td><td class="num">${usdText(r.capMicros)}</td><td>${r.full ? "full" : "open"}</td></tr>`);
+    const rows = (Array.isArray(d.rows) ? d.rows : []).map((r) => html`<tr${r.full ? html` class="warn"` : null}><td>${dollarWindowName(r)}</td><td>${cell(r.window)}</td><td class="num">${r.counterMicros === null ? "unread" : moneyHtml(r.counterMicros, { spent: true })}</td><td class="num">${moneyHtml(r.capMicros)}</td><td>${r.full ? "full" : "open"}</td></tr>`);
     dollars = html`${d.unreachable ? html`<p class="warn">The dollar counters could not be read.</p>` : null}${Array.isArray(d.invalid) && d.invalid.length > 0 ? html`<p class="warn">Not a dollar amount: ${d.invalid.join(", ")}</p>` : null}${table("Dollar windows", ["Window", "Period", { num: "Spent and held" }, { num: "Cap" }, "State"], rows, "No dollar window is set.")}`;
   }
-  return html`${counts}<h3>Dollars</h3>${dollars}`;
+  // Both kinds of window are the budget's own keys (worker/src/budget.mjs, dollar-budget.mjs): UTC days, Monday-to-Sunday
+  // UTC weeks and UTC months, whatever zone the page's times are shown in (review round 1).
+  return html`${counts}<h3>Dollars</h3>${dollars}<p class="note">${COUNT_WINDOWS_UTC_TEXT}</p>`;
 }
 
 export const overviewSpend = fromSnapshot("Spend against caps", (s) => spendBody(s));
@@ -350,10 +457,38 @@ export const overviewParked = fromSnapshot("Parked, waiting for a person", (s) =
   return html`<p><span class="big">${count(n)}</span> ${n === 1 ? "run is" : "runs are"} waiting for an answer${answering > 0 ? `, and ${count(answering)} ${answering === 1 ? "is" : "are"} being answered now` : ""}. <a href="/parked">Open the parked inbox</a></p>`;
 });
 
-export const overviewFailures = fromSnapshot("Failures in the last 24 hours", (s) => {
+/**
+ * One of the day's most frequent refusal reasons (issue #710): its catalog sentence cut for a row (`reasonWords`), linked
+ * to the runs it refused, with the token in the link's `title` and the count after it. The link only for a pair the
+ * runs filter accepts (`parseRunFilter`, the runs row's rule); a token the catalog does not know is printed as itself,
+ * cut to `ODD_TOKEN_MAX`, with "no explanation yet". Only the record's closed `reason` enum comes here.
+ */
+function refusalItem({ reason, count: n }) {
+  const said = reasonWords(reason);
+  const query = { outcome: "policy", reason };
+  const chars = [...String(reason)];
+  const words = said.known ? said.short : `${chars.length > ODD_TOKEN_MAX ? `${chars.slice(0, ODD_TOKEN_MAX).join("")}…` : reason}, ${NO_EXPLANATION}`;
+  const link = parseRunFilter(query).filter ? html`<a href="${`/runs?${new URLSearchParams(query)}`}" title="${reason}">${words}</a>` : words;
+  return html`<li>${link} <span class="note">(${count(n)})</span></li>`;
+}
+
+/**
+ * The overview's day of trouble (issue #710): the failed runs and the refused ones of the last 24 hours, the refusals
+ * with their five most frequent reasons. A refusal is what both surfaces call "refused" (`refusalsIn`): an operator's
+ * cancel is a `policy` record too, and it is not counted, which the line says, since the runs list it links to shows
+ * every `policy` record. Both counts come from the one wide window, so both are floors together.
+ */
+export const overviewFailures = fromSnapshot("Problems (24h)", (s) => {
   if (s.failures24h === null || s.failures24h === undefined) return html`<p class="warn">The run history could not be read.</p>`;
+  const floor = s.failures24hFloor ? "at least " : "";
   const n = s.failures24h;
-  return html`<p><span class="big${n > 0 ? " warn" : ""}">${s.failures24hFloor ? "at least " : ""}${count(n)}</span> failed ${n === 1 ? "run" : "runs"}.${s.failures24hFloor ? html` <span class="note">Every run read was inside the day, so there may be more.</span>` : null} <a href="${`/runs?${new URLSearchParams({ outcome: "failed" })}`}">See failed runs</a></p>`;
+  const failed = html`<p><span class="big${n > 0 ? " warn" : ""}">${floor}${count(n)}</span> failed ${n === 1 ? "run" : "runs"}. <a href="${`/runs?${new URLSearchParams({ outcome: "failed" })}`}">See failed runs</a></p>`;
+  const r = s.refusals24h;
+  const refused =
+    r && Number.isSafeInteger(r.count)
+      ? html`<p><span class="big${r.count > 0 ? " warn" : ""}">${floor}${count(r.count)}</span> refused ${r.count === 1 ? "run" : "runs"}, not counting runs an operator cancelled. <a href="${`/runs?${new URLSearchParams({ outcome: "policy" })}`}">See refused runs</a></p>${Array.isArray(r.top) && r.top.length > 0 ? html`<ul class="plain">${r.top.map(refusalItem)}</ul>` : null}`
+      : null;
+  return html`${failed}${refused}${s.failures24hFloor ? html`<p class="note">Every run read was inside the day, so there may be more.</p>` : null}`;
 });
 
 /** The words a stale snapshot carries (`progressStaleFor`): whole minutes since the last write. */
@@ -391,7 +526,8 @@ function activeTable(s, now, act = false) {
   return table(
     "Active jobs",
     ["Job", "Queue", "Host", "Started", "Running for", "Progress", ...(act ? ["Action"] : [])],
-    rows.map((j) => html`<tr><td>${runLink(j.jobId)}</td><td>${cell(j.queue)}</td><td>${cell(j.host)}</td><td>${j.startedAt ? utcText(j.startedAt) : "-"}</td><td>${j.startedAt ? ageText(now - j.startedAt) : "-"}</td><td>${progressText(j.progress, now)}</td>${cancel(j)}</tr>`),
+    // The job id keeps to one line (`keep`): first on the overview, it was broken a character a line on a phone.
+    rows.map((j) => html`<tr><td class="keep">${runLink(j.jobId)}</td><td>${cell(j.queue)}</td><td>${cell(j.host)}</td><td>${j.startedAt ? timeHtml(j.startedAt) : "-"}</td><td>${j.startedAt ? ageText(now - j.startedAt) : "-"}</td><td>${progressText(j.progress, now)}</td>${cancel(j)}</tr>`),
     "Nothing is running.",
   );
 }
@@ -473,7 +609,7 @@ const ODD_TOKEN_MAX = 64;
 function runRow(r, env, subscriptions) {
   const at = msOf(r.endedAt ?? r.startedAt);
   const tone = TONE_CLASS[outcomeWord(r.outcome, r.reason).tone] ?? null;
-  return html`<tr><td>${utcText(at)}</td><td>${runLink(r.jobId)}</td><td>${targetLink(r, env)}</td><td>${cell(r.flow)}</td><td>${cell(r.host)}</td><td>${runVenue(r)}</td><td${tone !== null ? html` class="${tone}"` : null}>${outcomeText(r)}${reasonPart(r)}</td><td>${cell(r.model)}</td><td class="num">${Number.isFinite(r.tokens?.total) ? count(r.tokens.total) : "-"}</td><td class="num">${costText(runCost(r, subscriptions))}</td><td class="num">${usdText(capMicrosOf(r))}</td></tr>`;
+  return html`<tr><td>${timeHtml(at)}</td><td>${runLink(r.jobId)}</td><td>${targetLink(r, env)}</td><td>${cell(r.flow)}</td><td>${cell(r.host)}</td><td>${runVenue(r)}</td><td${tone !== null ? html` class="${tone}"` : null}>${outcomeText(r)}${reasonPart(r)}</td><td>${cell(r.model)}</td><td class="num">${Number.isFinite(r.tokens?.total) ? count(r.tokens.total) : "-"}</td><td class="num">${costText(runCost(r, subscriptions))}</td><td class="num">${moneyHtml(capMicrosOf(r))}</td></tr>`;
 }
 
 export function runsTable(view) {
@@ -710,9 +846,9 @@ function liveProgressBody(g, view) {
     ["Interrupted steps", g.interrupted > 0 ? count(g.interrupted) : null],
     // The resume prior: what the session's earlier runs did before this run resumed it, not this job's retries.
     ["Earlier runs of this session", g.prior ? `${count(g.prior.turns)} turns, ${count(g.prior.steps)} steps before this run resumed the session` : null],
-    ["Started", utcText(g.startedAt)],
-    ["Updated", utcText(g.updatedAt)],
-  ])}<h3>Running now</h3>${running}<h3>Phase</h3>${phaseBody(g, operator)}<h3>Recent steps</h3>${table("Recent steps", ["Tool", "Status", { num: "Took" }, "At"], recent.map((r) => html`<tr${r.status === "ok" ? null : html` class="warn"`}><td class="mono">${r.tool}</td><td>${r.status}</td><td class="num">${stepDuration(r.durationMs)}</td><td>${utcText(r.at)}</td></tr>`), "No step has finished yet.")}`;
+    ["Started", timeHtml(g.startedAt)],
+    ["Updated", timeHtml(g.updatedAt)],
+  ])}<h3>Running now</h3>${running}<h3>Phase</h3>${phaseBody(g, operator)}<h3>Recent steps</h3>${table("Recent steps", ["Tool", "Status", { num: "Took" }, "At"], recent.map((r) => html`<tr${r.status === "ok" ? null : html` class="warn"`}><td class="mono">${r.tool}</td><td>${r.status}</td><td class="num">${stepDuration(r.durationMs)}</td><td>${timeHtml(r.at)}</td></tr>`), "No step has finished yet.")}`;
 }
 
 /**
@@ -840,7 +976,7 @@ export function runInbox(view) {
       : table(
           "Inbox",
           ["Message", "Mode", "Source", "State", "Sent", { num: "Bytes" }, ...(act ? ["Action"] : [])],
-          entries.map((e) => html`<tr><td class="mono">${cell(e.id)}</td><td>${cell(MODE_WORD[e.mode])}</td><td>${cell(e.source)}</td><td>${cell(e.state)}</td><td>${Number.isSafeInteger(e.at) ? utcText(e.at) : "-"}</td><td class="num">${count(e.bytes)}</td>${withdraw(e)}</tr>`),
+          entries.map((e) => html`<tr><td class="mono">${cell(e.id)}</td><td>${cell(MODE_WORD[e.mode])}</td><td>${cell(e.source)}</td><td>${cell(e.state)}</td><td>${Number.isSafeInteger(e.at) ? timeHtml(e.at) : "-"}</td><td class="num">${count(e.bytes)}</td>${withdraw(e)}</tr>`),
           "No message has been sent to this run.",
         );
   // Issue #647: when the Chat panel draws the message forms (a live run an operator can steer), they are drawn THERE and
@@ -1117,8 +1253,8 @@ export const runSummary = withRun("Run", (r, view, source) => {
     ["Turns", cell(r.turns)],
     ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? `#${r.triggerIndex} (${cell(r.triggerType)})` : "-"],
     ["Replica", Number.isInteger(r.replica) ? `${r.replica} of ${cell(r.replicas)}` : null],
-    ["Started", utcText(started)],
-    ["Ended", utcText(ended)],
+    ["Started", timeHtml(started)],
+    ["Ended", timeHtml(ended)],
     ["Took", Number.isFinite(started) && Number.isFinite(ended) ? ageText(ended - started) : "-"],
     ["Read from", source === "mirror" ? "the fleet's run mirror" : "this host's run history"],
   ])}${runActions(r, view)}`;
@@ -1149,7 +1285,7 @@ export const runResources = withRun("Resources", (r) => {
   const x = r.resources ?? null;
   const size = r.size ?? null;
   return facts([
-    ["Size given", size ? `${count(size.memMiB)} MiB, ${Number.isFinite(size.cpuCenti) ? (size.cpuCenti / 100).toFixed(2) : "-"} CPUs (${cell(size.source)})` : "-"],
+    ["Size given", size ? `${count(size.memMiB)} MiB, ${Number.isSafeInteger(size.cpuCenti) && size.cpuCenti >= 0 ? coresText(size.cpuCenti) : "- cores"} (${cell(size.source)})` : "-"],
     ["Peak memory", x ? mib(x.memPeak) : "not reported"],
     ["Out-of-memory kills", x ? cell(x.oomKills) : null],
     ["CPU time", x && Number.isFinite(x.cpuUsec) ? `${(x.cpuUsec / 1e6).toFixed(1)} s` : null],
@@ -1212,7 +1348,7 @@ export const parkedInbox = fromSnapshot("Parked runs", (s, view) => {
   return html`<p class="note">A parked run asked a question and ended; a reply on its issue or merge request resumes it, and an operator can answer it from here.</p>${table(
     "Parked runs",
     ["Target", "Forge", "Job", "Parked", "Waiting", { num: "Chain" }, "Answer"],
-    rows.map((p) => html`<tr><td>${targetLink(p, view.env)}</td><td>${cell(p.kind)}</td><td>${runLink(p.jobId)}</td><td>${utcText(p.parkedAt)}</td><td>${ageText(p.ageMs)}</td><td class="num">${Number.isInteger(p.chainCount) ? p.chainCount : "unknown"}</td><td>${answerCell(p)}</td></tr>`),
+    rows.map((p) => html`<tr><td>${targetLink(p, view.env)}</td><td>${cell(p.kind)}</td><td>${runLink(p.jobId)}</td><td>${timeHtml(p.parkedAt)}</td><td>${ageText(p.ageMs)}</td><td class="num">${Number.isInteger(p.chainCount) ? p.chainCount : "unknown"}</td><td>${answerCell(p)}</td></tr>`),
     "Nothing is parked.",
   )}${unknownNote}${answers}`;
 });
@@ -1403,7 +1539,8 @@ export const fleetQueues = fromSnapshot("Queues", (s, view) => {
   const q = s.queue ?? {};
   const fleet = act ? html`<div class="bar">${q.pausedState ? null : actForm("fleet-pause", { label: "Pause the fleet" })}${q.pausedState || q.pausedPartial ? actForm("fleet-resume", { label: "Resume the fleet" }) : null}</div>` : null;
   const one = (row) => (act && typeof row.queue === "string" ? html`<td>${actForm(row.paused ? "queue-resume" : "queue-pause", { hidden: [["queue", row.queue]], label: row.paused ? "Resume" : "Pause" })}</td>` : act ? html`<td>-</td>` : null);
-  return html`${facts([["Fleet", pausedState(s.queue)]])}${fleet}${table(
+  // Issue #710: the overview's rule, so the two pages never disagree on whether the queue is being drained.
+  return html`${facts([["Fleet", pausedState(s.queue, !workersOnline(s).none)]])}${fleet}${table(
     "Queues",
     ["Queue", "State", ...COUNT_KEYS.map((k) => ({ num: k[0].toUpperCase() + k.slice(1) })), ...(act ? ["Action"] : [])],
     rows.map((row) => html`<tr><td class="mono">${cell(row.queue)}</td><td>${row.paused ? "paused" : "running"}</td>${COUNT_KEYS.map((k) => html`<td class="num">${count(row.counts?.[k] ?? 0)}</td>`)}${one(row)}</tr>`),
@@ -1434,15 +1571,35 @@ function budgetText(used, budget, unit) {
   return unit ? `${cell(used)} / ${budget} ${unit}` : `${cell(used)} / ${budget}`;
 }
 
+/** A registry CPU field (hundredths of a core, as text or a number) as a whole number, or null for anything else. */
+function centiOf(v) {
+  const n = typeof v === "string" && /^\d{1,9}$/.test(v) ? Number(v) : v;
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+/**
+ * A host's CPU budget in cores (issue #710): `1.5 / 8 cores`, the worker's own formatter (`formatCpus`, `coresText`),
+ * where the page once printed the registry's hundredths (`150 / 800`). `off`, `-`, or the raw text for a value that
+ * is not hundredths (escaped like every value), so an odd row is shown, never hidden.
+ */
+function cpuBudgetText(used, budget) {
+  if (budget === "off") return "off";
+  if (budget === "" || budget === undefined || budget === null) return "-";
+  const b = centiOf(budget);
+  if (b === null) return budgetText(used, budget, null);
+  const u = centiOf(used);
+  return `${u === null ? cell(used) : formatCpus(u)} / ${coresText(b)}`;
+}
+
 export const fleetHosts = fromSnapshot("Hosts", (s, view) => {
   const hosts = Array.isArray(s.hostBudgets) ? s.hostBudgets : [];
   return table(
     "Hosts",
-    ["Host", { num: "Slots" }, "Memory", "CPU (centi)", { num: "Waiting" }, "Running jobs", "Venues", "Routes", "Last beat"],
+    ["Host", { num: "Slots" }, "Memory", "CPU", { num: "Waiting" }, "Running jobs", "Venues", "Routes", "Last beat"],
     hosts.map((h) => {
       const jobs = Array.isArray(h.jobs) ? h.jobs : null;
       const list = jobs === null ? (h.jobsUnreadable ? "unreadable" : "-") : jobs.length === 0 ? "none" : html`${jobs.map((j, i) => html`${i > 0 ? ", " : ""}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? html` <span class="note">${ageText(view.now - j.at)}</span>` : null}`)}${h.jobsMore > 0 ? ` and ${h.jobsMore} more` : ""}`;
-      return html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td>${budgetText(h.usedMemMiB, h.budgetMemMiB, "MiB")}</td><td>${budgetText(h.usedCpuCenti, h.budgetCpuCenti, null)}</td><td class="num">${cell(h.waiters)}</td><td>${list}</td><td>${blessedText(h)}</td><td>${h.routes === false || h.routes === "false" ? "no" : "yes"}</td>${beatCell(h.staleMs)}</tr>`;
+      return html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td>${budgetText(h.usedMemMiB, h.budgetMemMiB, "MiB")}</td><td>${cpuBudgetText(h.usedCpuCenti, h.budgetCpuCenti)}</td><td class="num">${cell(h.waiters)}</td><td>${list}</td><td>${blessedText(h)}</td><td>${h.routes === false || h.routes === "false" ? "no" : "yes"}</td>${beatCell(h.staleMs)}</tr>`;
     }),
     "No host is registered.",
   );
@@ -1530,11 +1687,25 @@ export const fleetSchedulers = fromSnapshot("Schedules", (s, view) => {
     list.map((x) => {
       const id = x.name ?? x.key;
       const n = Number(stalls[id] ?? 0);
-      return html`<tr><td class="mono">${cell(id)}</td><td class="mono">${cell(x.pattern ?? (x.every ? `every ${x.every} ms` : null))}</td><td>${x.next !== null && x.next !== undefined ? utcText(x.next) : "-"}</td><td${x.overdueMs ? html` class="warn"` : null}>${x.overdueMs ? ageText(x.overdueMs) : "no"}</td><td class="num${n > 0 ? " warn" : ""}">${n}${Number.isInteger(max) ? ` / ${max}` : ""}</td></tr>`;
+      return html`<tr><td class="mono">${cell(id)}</td><td class="mono">${cell(x.pattern ?? (x.every ? `every ${x.every} ms` : null))}</td><td>${x.next !== null && x.next !== undefined ? timeHtml(x.next) : "-"}</td><td${x.overdueMs ? html` class="warn"` : null}>${x.overdueMs ? ageText(x.overdueMs) : "no"}</td><td class="num${n > 0 ? " warn" : ""}">${n}${Number.isInteger(max) ? ` / ${max}` : ""}</td></tr>`;
     }),
     "No schedule is registered.",
   );
 });
+
+/**
+ * A failed job's "why" cell (issue #710): its run record's reason (the snapshot's `reason`, the newest record of that job
+ * in the fleet reader's wide window), as the token and its catalog sentence cut for a row, or "no record" for a job
+ * that wrote none (a job that failed before the processor recorded anything, or one older than the window). ONLY THE
+ * RECORD'S CLOSED ENUM comes here: BullMQ's `failedReason` is free text, the operator's, in the details below
+ * (REQ-CONSOLE-SECURITY (l)).
+ */
+function failedWhy(r) {
+  if (typeof r?.reason !== "string" || r.reason === "") return html`<span class="note">no record</span>`;
+  const said = reasonWords(r.reason);
+  const token = html`<span class="mono">${bannerCut(r.reason)}</span>`;
+  return said.known ? html`${token} · ${said.short}` : html`${token}, ${NO_EXPLANATION}`;
+}
 
 export const fleetFailed = fromSnapshot("Failed jobs", (s, view) => {
   const f = s.failed;
@@ -1556,8 +1727,9 @@ export const fleetFailed = fromSnapshot("Failed jobs", (s, view) => {
   const bulk = act && rows.length > 0 ? editor("Retry or remove failed jobs in bulk", html`${actForm("retry-all-failed", { fields: filters, label: "Preview retry of all" })}${actForm("remove-all-failed", { fields: filters, label: "Preview removal of all" })}`) : null;
   return html`${table(
     "Failed jobs",
-    ["Job", "Queue", { num: "Attempts" }, "Failed", ...(act ? ["Action"] : [])],
-    rows.map((r) => html`<tr><td class="mono">${cell(r.jobId)}</td><td class="mono">${cell(r.queue)}</td><td class="num">${cell(r.attemptsMade)}</td><td>${r.endedAt ? utcText(r.endedAt) : "-"}</td>${jobForms(r)}</tr>`),
+    ["Job", "Queue", { num: "Attempts" }, "Failed", "Why (its record)", ...(act ? ["Action"] : [])],
+    // The id, queue and time cells keep to one line (`keep`): the reason cell beside them is the one that wraps.
+    rows.map((r) => html`<tr><td class="keep">${runLink(r.jobId)}</td><td class="mono keep">${cell(r.queue)}</td><td class="num">${cell(r.attemptsMade)}</td><td class="keep">${r.endedAt ? timeHtml(r.endedAt) : "-"}</td><td>${failedWhy(r)}</td>${jobForms(r)}</tr>`),
     "No failed job is kept by the queue.",
   )}${bulk}${f.more > 0 ? html`<p class="note">${count(f.more)} more failed.</p>` : null}${operator ? details : html`<p class="note">Failure reasons are shown to operators only.</p>`}`;
 });
@@ -1848,7 +2020,7 @@ export function auditLog(view) {
       return html`<tr class="warn"><td colspan="7">Not an audit row: ${where}${r.reason ? ` (${r.reason})` : ""}. Run pi-dispatch doctor to check the chain.</td></tr>`;
     }
     const actor = r.actor && typeof r.actor === "object" ? `${cell(r.actor.name)} (${cell(r.actor.role)})` : "-";
-    return html`<tr><td class="num">${cell(r.seq)}</td><td>${utcText(msOf(r.at))}</td><td>${actor}</td><td>${cell(r.action)}${r.kind ? html` <span class="mono">${cell(r.kind)}</span>` : null}</td><td class="mono">${cell(r.target)}</td><td${r.outcome === "ok" ? null : html` class="warn"`}>${cell(r.outcome)}</td><td>${cell(r.reason)}${Number.isSafeInteger(r.reserve) ? html` reserve ${usdText(r.reserve)}` : null}${Number.isSafeInteger(r.count) ? html` (one of ${r.count})` : null}</td></tr>`;
+    return html`<tr><td class="num">${cell(r.seq)}</td><td>${timeHtml(msOf(r.at))}</td><td>${actor}</td><td>${cell(r.action)}${r.kind ? html` <span class="mono">${cell(r.kind)}</span>` : null}</td><td class="mono">${cell(r.target)}</td><td${r.outcome === "ok" ? null : html` class="warn"`}>${cell(r.outcome)}</td><td>${cell(r.reason)}${Number.isSafeInteger(r.reserve) ? html` reserve ${usdText(r.reserve)}` : null}${Number.isSafeInteger(r.count) ? html` (one of ${r.count})` : null}</td></tr>`;
   });
   const pager = html`<div class="pager">${view.query?.before !== undefined && view.query?.before !== null ? html`<a href="/audit">Newest rows</a>` : null}${a.next !== null && a.next !== undefined ? html`<a href="${`/audit?${new URLSearchParams({ before: String(a.next) })}`}">Older rows</a>` : null}</div>`;
   return titled("Audit log", html`${a.unreadable ? html`<p class="warn">${a.unreadable}</p>` : null}${table("Audit log", [{ num: "Seq" }, "At", "Who", "Action", "Target", "Outcome", "Reason"], body, "The audit log is empty.")}${pager}`);

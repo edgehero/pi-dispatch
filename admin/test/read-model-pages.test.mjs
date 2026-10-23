@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { createFleetReader, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, revParseHead, secretProfileNames } from "../src/read-model.mjs";
+import { REFUSALS_TOP, createFleetReader, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
 import { parseRunFilter, runMatches, RUN_FILTER_FIELDS } from "../src/run-filter.mjs";
 import { makeRunMirror } from "@edgehero/pi-dispatch/run-mirror";
@@ -753,6 +753,57 @@ test("createFleetReader: the day's failures skip a run dated in the future, and 
   for (let i = 1; i <= 1000; i++) writeLocal(deep, rec(`r${i}`, AT - 2 * i * MIN, i === 3 ? { outcome: "failed" } : {}));
   const exact = await fleetOf(deep, emptyRedis()).snapshot();
   assert.deepEqual([exact.failures24h, exact.failures24hFloor], [1, false]);
+  // The day's first instant is inside it, as `refusalsIn` counts it (review round 1): a failed run at exactly AT - 24 h
+  // counts, one a millisecond older does not, and so do the refusals beside them, from the same window.
+  const edge = tempDir("pd-710-day-edge-");
+  writeLocal(edge, rec("f-edge", AT - 24 * 60 * MIN, { outcome: "failed" }));
+  writeLocal(edge, rec("f-past", AT - 24 * 60 * MIN - 1, { outcome: "failed" }));
+  writeLocal(edge, rec("p-edge", AT - 24 * 60 * MIN, { outcome: "policy", reason: "scope-cap" }));
+  writeLocal(edge, rec("p-past", AT - 24 * 60 * MIN - 1, { outcome: "policy", reason: "scope-cap" }));
+  const day = await fleetOf(edge, emptyRedis()).snapshot();
+  assert.deepEqual([day.failures24h, day.refusals24h], [1, { count: 1, top: [{ reason: "scope-cap", count: 1 }] }]);
+});
+
+test("refusalsIn: the day's refused runs by the console's word (an operator's cancel is not one), the top reasons by count then token", () => {
+  const runs = [
+    rec("p1", AT - MIN, { outcome: "policy", reason: "scope-cap" }),
+    rec("p2", AT - 2 * MIN, { outcome: "policy", reason: "scope-cap" }),
+    rec("p3", AT - 3 * MIN, { outcome: "policy", reason: "over-budget" }),
+    rec("p4", AT - 4 * MIN, { outcome: "policy", reason: "operator-cancel" }), // "cancelled": not a refusal
+    rec("p5", AT - 5 * MIN, { outcome: "policy", reason: null }), // counted, never listed
+    rec("p6", AT - 6 * MIN, { outcome: "policy", reason: "<img src=x>" }), // outside the charset: counted, never listed
+    rec("p7", AT - 25 * 60 * MIN, { outcome: "policy", reason: "scope-cap" }), // outside the day
+    rec("p9", AT - 24 * 60 * MIN, { outcome: "policy", reason: "edge-cap" }), // exactly a day old: the window's first instant, counted
+    rec("p10", AT - 24 * 60 * MIN - 1, { outcome: "policy", reason: "edge-cap" }), // a millisecond older: outside
+    rec("p8", AT + MIN, { outcome: "policy", reason: "scope-cap" }), // dated ahead of the clock
+    rec("f1", AT - MIN, { outcome: "failed", reason: "container-lost" }),
+    rec("c1", AT - MIN, { outcome: "completed", reason: "operator-cancel" }), // the token under another outcome: not a refusal either
+    ...["a-1", "b-1", "c-1", "d-1", "e-1"].map((r, i) => rec(`t${i}`, AT - (10 + i) * MIN, { outcome: "policy", reason: r })),
+  ];
+  const got = refusalsIn(runs, AT);
+  assert.equal(got.count, 11);
+  assert.equal(REFUSALS_TOP, 5);
+  assert.deepEqual(got.top, [{ reason: "scope-cap", count: 2 }, { reason: "a-1", count: 1 }, { reason: "b-1", count: 1 }, { reason: "c-1", count: 1 }, { reason: "d-1", count: 1 }]);
+  // The boundary alone (review round 1): `>=` keeps the record at exactly AT - DAY_MS, a `>` would drop it.
+  assert.deepEqual(refusalsIn([runs.find((r) => r.jobId === "p9")], AT), { count: 1, top: [{ reason: "edge-cap", count: 1 }] });
+  assert.deepEqual(refusalsIn([runs.find((r) => r.jobId === "p10")], AT), { count: 0, top: [] });
+  assert.deepEqual(refusalsIn([], AT), { count: 0, top: [] });
+  assert.deepEqual(refusalsIn(null, AT), { count: 0, top: [] });
+});
+
+test("createFleetReader: the day's refusals beside its failures, and each failed job's record reason, the closed enum only (#710)", async () => {
+  const logsDir = tempDir("pd-710-refusals-");
+  writeLocal(logsDir, rec("gh-r1", AT - 10 * MIN, { outcome: "policy", reason: "scope-cap" }));
+  writeLocal(logsDir, rec("gh-r2", AT - 20 * MIN, { outcome: "policy", reason: "operator-cancel" }));
+  writeLocal(logsDir, rec("gh-dead", AT - 30 * MIN, { outcome: "failed", reason: "container-lost" }));
+  writeLocal(logsDir, rec("gh-odd", AT - 40 * MIN, { outcome: "failed", reason: "NOT A TOKEN <b>" }));
+  const failedJobs = [{ id: "gh-dead", attemptsMade: 3, failedReason: "FREE TEXT", finishedOn: AT - 30 * MIN }, { id: "gh-odd", attemptsMade: 1, failedReason: "x", finishedOn: AT - 40 * MIN }, { id: "gh-none", attemptsMade: 1, failedReason: "y", finishedOn: AT - 50 * MIN }];
+  const queue = (_c, opts) => ({ ...quietQueue()(_c, opts), async getFailed() { return opts?.name ? [] : failedJobs; } });
+  const snap = await fleetOf(logsDir, emptyRedis(), { seams: { makeQueueFn: queue } }).snapshot();
+  assert.deepEqual(snap.refusals24h, { count: 1, top: [{ reason: "scope-cap", count: 1 }] });
+  assert.equal(snap.failures24h, 2);
+  assert.deepEqual(snap.failed.rows.map((r) => [r.jobId, r.reason]), [["gh-dead", "container-lost"], ["gh-odd", null], ["gh-none", null]], "the record's token, null for one outside the charset or with no record");
+  assert.equal(snap.failed.rows[0].failedReason, "FREE TEXT", "BullMQ's text is still the operator's, beside it");
 });
 
 test("createFleetReader: an answered parked run costs the snapshot no session-store read", async () => {

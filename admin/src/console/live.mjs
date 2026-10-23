@@ -523,6 +523,16 @@ function inboxOf(a) {
   }));
 }
 
+/** A record reason in a state document: the record's token charset (the runs filter's), else null. */
+const REASON_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** The snapshot's `refusals24h` rebuilt by name (issue #710): `{ count, top: [{ reason, count }] }`, or null. */
+function refusalsOf(r) {
+  if (r === null || typeof r !== "object" || num(r.count) === null) return null;
+  const top = Array.isArray(r.top) ? r.top : [];
+  return { count: num(r.count), top: top.filter((t) => typeof t?.reason === "string" && REASON_RE.test(t.reason) && num(t.count) !== null).map((t) => ({ reason: t.reason, count: num(t.count) })) };
+}
+
 /** The `/api/state` document's version: a script checks it before it reads a field, and a breaking change bumps it. */
 export const STATE_VERSION = 1;
 
@@ -588,6 +598,9 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     // True when the parked list could not be read: `parked: []` then means "unknown", never "nobody is waiting".
     parkedUnknown: Boolean(s.parkedUnreachable),
     failures24h: num(s.failures24h),
+    // Issue #710: the day's refusals (`refusalsIn`: what both surfaces call "refused", so an operator's cancel is not
+    // one), each listed reason held to the record's token charset; null where `failures24h` is (the runs unread).
+    refusals24h: refusalsOf(s.refusals24h),
     failures24hFloor: Boolean(s.failures24hFloor),
     active: (Array.isArray(s.active) ? s.active : []).map((a) => ({ jobId: str(a?.jobId), queue: str(a?.queue), startedAt: num(a?.startedAt), host: str(a?.host), progress: progressOf(a?.progress), steer: a?.steer === true, inbox: inboxOf(a) })),
     schedulers: (Array.isArray(s.schedulers) ? s.schedulers : []).map((x) => {

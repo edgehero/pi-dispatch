@@ -3287,13 +3287,16 @@ test("f opens the FAILED view with every hydrated row and the retention split; E
   await clean.dispose();
 });
 
-test("the deps layer projects a failed Job to five host-chosen fields -- .data never enters the snapshot (key-set pin)", async () => {
+test("the deps layer projects a failed Job to five host-chosen fields and its record's reason -- .data never enters the snapshot (key-set pin)", async () => {
   const v = fakePanelValkey({ hosts: [] });
   const deps = createDashboardDeps(panelPaths, v.deps);
   const snap = await deps.fetchSnapshot();
   await deps.dispose();
   const row = snap.failed.rows[0];
-  assert.deepEqual(Object.keys(row).sort(), ["attemptsMade", "endedAt", "failedReason", "jobId", "queue"], "the projection is CLOSED -- a grown key is a review question, not a drive-by");
+  // Issue #710 grew it by `reason`, answered in review: it is NOT read off the Job but off the job's own run record (the
+  // newest in the wide window), the record's closed enum alone, null without one; the Job still gives five fields.
+  assert.deepEqual(Object.keys(row).sort(), ["attemptsMade", "endedAt", "failedReason", "jobId", "queue", "reason"], "the projection is CLOSED -- a grown key is a review question, not a drive-by");
+  assert.equal(row.reason, null, "no record of the job in the window: no reason, never a guess");
   assert.equal(row.jobId, "gh-dead-1");
   assert.equal(row.attemptsMade, 2);
   const line = JSON.stringify(snap.failed);

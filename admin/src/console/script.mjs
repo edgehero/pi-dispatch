@@ -45,6 +45,9 @@
  *     "ended (<outcome>)" or "not live", through `textContent`. `event: done` (the run is over) closes the stream, so it
  *     is not reopened; `event: end` (the session ended) goes to `/login`. A dropped stream reconnects by itself and
  *     resends the last entry's id as `Last-Event-ID`, so nothing is appended twice.
+ *   - every page's TIMES (issue #710): each `<time datetime>` the server drew (its text the UTC instant) is rewritten to
+ *     the reader's local time with its UTC offset, its `title` set to the UTC text, on load and inside each panel a
+ *     live update swaps in. Without the script a page reads UTC, as it always did.
  * Server text is shown with `textContent`, never as markup; the `innerHTML` writes are the panel swap, the preview
  * swap and the transcript append above, all of server-escaped fragments into elements the server marked for them.
  */
@@ -116,6 +119,29 @@ export const CONSOLE_SCRIPT = `"use strict";
     var q = path.indexOf("?");
     return PAGE_PATHS.indexOf(q < 0 ? path : path.slice(0, q)) >= 0 ? path : "/";
   }
+  // ---- local time (issue #710) ----
+  // The server writes every instant as UTC text inside <time datetime="<ISO, UTC>">, the same bytes for every reader.
+  // Here, and only here, it becomes the reader's own time: the text is rewritten to local time with its offset, and the
+  // UTC text goes in the title. The UTC text is rebuilt from the datetime (never read back from the text), so running
+  // this twice over one element changes nothing. An element whose datetime is not an ISO instant is left as it is.
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function localTimes(root) {
+    if (!root || !root.querySelectorAll) return;
+    var els = root.querySelectorAll("time[datetime]");
+    for (var i = 0; i < els.length; i++) {
+      var iso = els[i].getAttribute("datetime");
+      if (typeof iso !== "string" || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$/.test(iso)) continue;
+      var d = new Date(iso);
+      var ms = d.getTime();
+      if (!isFinite(ms)) continue;
+      var off = -d.getTimezoneOffset();
+      var abs = Math.abs(off);
+      var zone = off === 0 ? "UTC" : "UTC" + (off > 0 ? "+" : "-") + Math.floor(abs / 60) + (abs % 60 ? ":" + pad2(abs % 60) : "");
+      els[i].textContent = d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + " " + zone;
+      els[i].setAttribute("title", iso.slice(0, 16).replace("T", " ") + " UTC");
+    }
+  }
+  try { localTimes(document); } catch (e) { /* the times stay UTC */ }
   var out = document.getElementById("logout");
   if (out) out.addEventListener("click", function () {
     post("/logout", {}).then(function () { location.assign("/login"); }, function () { location.assign("/login"); });
@@ -486,6 +512,7 @@ ${FIT_JS}
       if (!el || !el.hasAttribute("data-panel")) return;
       if (inUse(el)) return;
       el.innerHTML = msg.html;
+      try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
       mark("live", "on");
     });
     es.addEventListener("end", function () {
