@@ -292,7 +292,7 @@ default, or on a unix socket at mode 0600, and refuses any other address unless 
 The threat model, and what answers each part:
 
 - **A local user on the host.** Any account on the machine can connect to a loopback port. Every request but
-  `/healthz`, the sign-in pages and the console's script and stylesheet needs a session, and a session needs a named token (256 random bits) or a one-time login code that only
+  `/healthz`, an empty `/favicon.ico`, the sign-in pages and the console's script and stylesheet needs a session, and a session needs a named token (256 random bits) or a one-time login code that only
   the deployment's account can mint. Login attempts are rate limited and every failure is audited. In unix-socket
   mode the socket is 0600 in a directory only the deployment's account can enter, so another account cannot connect
   at all.
@@ -319,6 +319,22 @@ The threat model, and what answers each part:
   impossible by construction; the CSP allows scripts only from the console's own files and no inline script; run text
   reaches a page only for the operator role and never in a list view; no response carries an
   `Access-Control-*` header.
+- **The theme cookie is a preference, and the CSP is unchanged** (issue #737). The theme button keeps a person's
+  choice in the cookie `pd_theme`, which is not a credential: it signs nobody in and opens nothing. The console reads
+  it as a closed set (only an exact `light` or `dark` counts; anything else, or a second copy, means the system's
+  theme), puts its own constant in the page and never the cookie's bytes, never sets it (the console's script writes
+  it in the browser), and logs and audits nothing of it. It is `SameSite=Lax` (so a cross-site link to the sign-in page
+  or a one-time sign-in link draws the chosen theme; every other page needs the `Strict` session cookie, so it is a
+  redirect to sign-in from another site anyway) and not `HttpOnly` (the script writes it), so any page on the
+  console's host name, whatever its port, can read it, overwrite it or plant a second copy for a path of its own,
+  which holds the pages under that path to the system's theme, and the browser sends it to other services on that
+  host name. On a console served under a domain name, a copy planted with a `Domain` attribute (or one a sibling host
+  set for the parent domain) is a second copy on EVERY page, which holds every page to the system's theme until it
+  expires (on `localhost` or an IP address such a copy replaces the person's instead, measured in Chrome). All of it
+  is cosmetic, since the cookie reaches no session, no page content and no write. The redesign left
+  the CSP exactly as it was: one stylesheet and one script, both the console's own files, no inline style or script,
+  no external resource, and a check in CI loads every page in a real browser, at a phone's width and its top bar at
+  two phone widths and eight desktop widths, and fails on any violation it reports.
 - **A leaked tokens file grants nothing.** The file stores sha256 hashes, never a token; a token is shown once, at
   `token add` or `token rotate`, and appears in no log, audit row or page. Revoking or rotating a token, or
   `sessions end-all`, ends the affected sessions on their next request.

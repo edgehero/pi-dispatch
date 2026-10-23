@@ -194,7 +194,9 @@ install --console` ([above](#keep-it-running-as-a-service)).
 
 ## Sessions
 
-Signing in sets one cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`). A session ends:
+Signing in sets one cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`). The theme button sets a second one,
+`pd_theme`, which holds only your theme choice and is no part of a session ([Look and theme](#look-and-theme)). A
+session ends:
 
 - after `PI_CONSOLE_IDLE_MINUTES` without a request (default 60);
 - `PI_CONSOLE_MAX_HOURS` after sign-in, however busy (default 12);
@@ -291,6 +293,35 @@ folder path on the insights page (an operator can ask for those with `?paths=ful
 forms that change something ([Actions](#actions)) are shown to operators only, and not at all on a read only
 console.
 
+Every page has the same bar along the top: the navigation (Overview, Runs, Parked, Fleet, Spend and Configuration),
+the live pill on the pages that update themselves ([Live updates](#live-updates)), the theme button
+([Look and theme](#look-and-theme)), a "Read-only console" chip when `PI_CONSOLE_READ_ONLY=1` is set, who is signed
+in, and Sign out. Spend is the `/insights` page. Parked shows how many parked runs are waiting for an answer, kept
+current on the pages that update themselves; it shows no number when none is waiting or the count could not be
+read. An operator also gets **More**, which holds the audit log; a viewer has no More. The first thing the keyboard
+reaches is a "Skip to content" link, which jumps past the bar.
+
+The bar's layout depends only on the window's width and on whether the console is read-only, never on what the bar
+shows, so it does not move, on a phone or a desktop, when the live pill's state changes, when the theme button
+appears or when the Parked count changes. The theme button's place is kept for it while the page loads (and, without
+JavaScript, stays an empty gap), so showing it moves nothing either.
+
+- On a wide window (1440 pixels or more, 1600 on a read-only console) the bar is one row: pi-dispatch, the
+  navigation, then the rest.
+- On a narrower desktop window it is two rows: pi-dispatch with the rest of the bar, then the navigation across the
+  whole width with every pill in view (below 940 pixels it breaks after Fleet onto a second line). Where the first row
+  is short of room the signed-in name and role give way, cut with an ellipsis; the tooltip over who is signed in
+  holds both whole ("ops, Operator").
+- On a phone (760 pixels or less) the navigation is a row of its own that scrolls sideways. The page you are on is
+  scrolled into view once when the page loads, and a pill the keyboard moves to is scrolled wholly into view, its
+  focus ring included; the row never scrolls back by itself, so where you scrolled it stays.
+
+More opens its list right under its own button. It closes on Escape, on a click outside it and when the keyboard's
+focus leaves it. On a phone, opening it (a tap, a click or a screen reader's activation) first scrolls its button
+wholly into view, and it closes when you then scroll the navigation (or turn the phone) so far that its button is
+wholly out of view. On a phone the live pill is one small mark whose shape says the state, its word kept for screen
+readers ([Live updates](#live-updates)).
+
 | Page | What it shows |
 |---|---|
 | `/` | The overview ([The overview](#the-overview)): the running jobs and how many runs are waiting for an answer (and how many of those are being answered now) first, then whether the fleet is paused and whether any worker is online, the queue counts, today's spend against the caps, the hosts online and how long ago each last checked in, and the problems of the last 24 hours: failed runs, and refused runs with their most frequent reasons. |
@@ -300,7 +331,75 @@ console.
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
-| `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |
+| `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. A line that is not a valid row is shown as broken in its place, never skipped. |
+
+### Look and theme
+
+The console follows your system's light or dark setting. The theme button in the top bar cycles three choices:
+follow the system (the default), light, and dark; its tooltip says which one is on. A choice of light or dark is kept
+in your browser as the cookie `pd_theme`, which holds `light` or `dark` for a year, for every page of this console
+(`Path=/`, `SameSite=Lax`); going back to the system's setting deletes it. The console reads it to draw each page,
+the sign-in page included, in your theme from its first byte, so a page never shows the other theme first. It is `Lax`
+so that this holds also when you arrive from another site, where the pages you can land on are the sign-in page and a
+one-time sign-in link (`pi-dispatch-console link`) opened from a chat or a mail: `Strict` would withhold the cookie on
+exactly that first request. Any other console page you reach from another site is first a redirect to the sign-in
+page, because the session cookie is `Strict`. The console itself never sets it.
+
+The cookie is a preference, not a credential: it signs nobody in and opens nothing. The console takes only an exact
+`light` or `dark` from it, and anything else, or two copies of it (set for two paths), draws the system's theme. What
+it holds is never copied into a page, a log line or the audit log.
+
+It is not `HttpOnly`, because the console's own script writes it when you click the button, and a browser keeps
+cookies per host name, not per port. So any page served from the console's host name (another service on `localhost`,
+say) can read it, and your browser sends it to those services too: they learn your theme choice and nothing else.
+Such a page can also overwrite it, or plant a second copy for a path of its own. A copy for a path is sent only
+with the pages under that path, so those pages, and only those, carry two copies and are drawn in the system's theme,
+and there the theme button changes only the page you are on, until the stray copy expires or you clear the site's
+cookies. A copy planted with a `Domain` attribute depends on how you reach the console (measured in Chrome): on
+`localhost` or an IP address it replaces yours, but on a console served under a domain name it is a second copy beside
+yours on EVERY page, as is a copy that a site on a sibling host name set for the parent domain. Then every page is drawn
+in the system's theme, and the theme button changes only the page you are on, until that copy expires or you clear
+the site's cookies. All of this is cosmetic: none of it reaches a session, what a page shows or a write.
+
+Without JavaScript the theme button is not shown (its place in the bar stays empty), and a page follows the system (or
+a choice the cookie already holds).
+
+A test holds every colour pair the design declares (56 in each theme: each text colour on the grounds it is used
+on, each status's ink on its tint and its text on its solid colour, the focus ring on the canvas and every surface)
+to WCAG AA contrast in both themes. A status mark's own colour is exempt (the amber attention mark is 2:1 against a
+card in the light theme), because a mark is not what tells a state: every status badge is an icon and a word; the
+kit's coloured dot is, by its rule, drawn only beside the word it marks (given a label, it also carries a name for a
+screen reader), though no page draws one yet; and every state of the live pill is a word beside its mark, except on a
+phone, where the pill is one mark whose shape says the state (a dot for Live, a retry arrow for Reconnecting, a stop
+square for Not live, the sign-out arrow for Signed out), each at 3:1 or more against the bar in both themes, its word
+kept for screen readers. Until a page is redrawn in the new design its panels are the old ones, and their colour
+combinations are not measured.
+
+Every page is checked in CI at a phone's width, 375 pixels, where it must not scroll sideways: wide tables, the
+navigation and the charts scroll inside their own box. The top bar is checked too, at 320 and 375 pixels as a phone and
+at 761, 800, 940, 1024, 1180, 1280, 1440 and 1600, for an operator, a viewer, a read-only console and the longest name a
+token can have, with the bar read in every combination of the live pill's states, the theme button shown and hidden,
+and the Parked count as drawn, emptied and five digits long. In each of those reads no two of its parts overlap and
+the page does not scroll sideways; above a phone's width every pill of the navigation is wholly in view, focus ring
+included; at every width, a phone's too, the bar keeps its height through all of those reads; from 1440 pixels the
+bar of a console that is not read-only is one row, as the design draws it; a name or role that is cut ends in an ellipsis and
+its tooltip holds it whole, and the longest name is always cut where the bar shows it; and More, opened by a click
+(on a phone with its button left half scrolled out of the navigation and nothing focused, as a screen reader's
+activation is), opens inside the window right under its button, its button whole. One more run opens More with the
+page's script switched off and fails unless it opens under its button all the same. Each run first checks two top
+bars built to fail, one built to break nine of its rules and a phone's bar built to break four (a jump with the last
+live word and one with its Parked count emptied, a page that scrolls sideways only while the count is emptied, and a
+More that shuts itself when opened with its button cut), and fails unless each fails with exactly those, so a check
+that stopped seeing one of those thirteen could not pass in silence. The other rules are held by the check's own
+tests.
+
+The console works in Chrome or Edge 88, Safari 14 and Firefox 78, or newer. In an older browser parts of the look are
+lost. A few details need a newer browser. Without one, some spacing and the focus ring fall back to
+the browser's own. Where `:has()` is missing (before Chrome and Edge 105, Safari 15.4 and Firefox 121) the More pill is not
+marked as the page you are on while you read the audit log (Audit inside the menu still is), and on a phone a wide
+table on a page not yet redrawn is squeezed into the screen instead of scrolling in its box. Where
+`overflow-wrap: anywhere` is missing (Safari 14 to 15.3) a long id does not break inside itself: in a panel it wraps
+less neatly, and a page titled with a very long unbroken run id can scroll sideways.
 
 ### The overview
 
@@ -716,14 +815,31 @@ would put an interactive shell one stolen session away from anyone.
 The overview, runs, parked, fleet and run pages update themselves while open; the run page reads its data about
 every 2 seconds, for its progress ([Run progress](#run-progress)), and its live transcript streams on its own
 ([The live transcript](#the-live-transcript)). Insights, configuration and the audit log are drawn once per load;
-reload them to refresh. A small marker in the corner says `live`, or `reconnecting` while the
-browser reconnects. The console reads Valkey once a second for every open page together, and only while a page is
-open, so ten open tabs cost the deployment what one does; the runs page, whose filters make each view its own read,
+reload them to refresh. The live pill in the top bar says:
+
+- **Live** while updates arrive.
+- **Reconnecting** while the connection is down (the console was killed or crashed, or the network dropped): the page
+  stays as it is and the browser tries again every 2 seconds, back to Live if the console is still there.
+- **Not live** until the page's script has connected (so a page without JavaScript always says so), when the console
+  refused the stream because the page was past a stream limit (below), and also once a killed console is running
+  again: it keeps sessions in memory, so the new process does not know yours and refuses the reconnect. The pill's
+  tooltip then still says to reload after closing another console tab; after a restart, reload the page and sign in
+  again.
+- **Signed out** when your session ends, and also when the console is stopped or restarted the ordinary way, since it
+  ends every open page's updates as it stops. The page then goes to the sign-in page, which loads once the console is
+  running again.
+
+Each state is a word as well as a colour, and only Live pulses; Signed out shows the sign-out mark in place of the
+dot. On a phone the pill never changes size: it is one small mark whose shape says the state, a dot for Live, a retry
+arrow for Reconnecting, a stop square for Not live and the sign-out arrow for Signed out, and a screen reader still
+hears the word, so neither the first load (drawn Not live, then Live) nor a reconnect moves the page. The console reads
+Valkey once a second for every open page together,
+and only while a page is open, so ten open tabs cost the deployment what one does; the runs page, whose filters make each view its own read,
 refreshes every 5 seconds. Only the parts of the page that changed are sent.
 
 A live page holds one connection open. Each token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all
 its sign-ins, and the console 32 in all, of which 8 are kept for operators. A page opened past either limit still loads, but stays still until you reload it after closing
-another tab; its marker then says `not live`.
+another tab; its pill then says Not live.
 
 **An open page does not keep you signed in.** Only a page load or a request counts as activity. A page left open
 signs out after `PI_CONSOLE_IDLE_MINUTES`, and its updates stop and send you to the sign-in page when:
