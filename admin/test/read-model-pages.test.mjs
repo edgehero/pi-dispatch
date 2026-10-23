@@ -705,6 +705,105 @@ test("createFleetReader: an unreachable run mirror makes the parked list unknown
   assert.equal(up.parkedUnreachable, null);
 });
 
+test("createFleetReader: parkedCount is the snapshot's unanswered parked runs, off the same cached window, with no chain read; unknown is null (issue #737)", async () => {
+  const logsDir = tempDir("pd-737-parked-count-");
+  writeLocal(logsDir, rec("gh-p1", AT - 3 * MIN, { target: "acme/web#2", reason: "awaiting-input" }));
+  writeLocal(logsDir, rec("gh-p2", AT - 2 * MIN, { target: "acme/web#3", reason: "awaiting-input" }));
+  writeLocal(logsDir, rec("gh-q", AT - 5 * MIN, { target: "acme/web#4", reason: "awaiting-input" }));
+  writeLocal(logsDir, rec("gh-q2", AT - 4 * MIN, { target: "acme/web#4" })); // answers gh-q
+  const sessionsDir = tempDir("pd-737-parked-count-sessions-");
+  const nodeFs = await import("node:fs");
+  const looked = [];
+  const fs = { ...nodeFs, lstatSync: (p, ...rest) => (looked.push(String(p)), nodeFs.lstatSync(p, ...rest)) };
+  const redis = emptyRedis();
+  const reader = createFleetReader(
+    { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2, sessionsDir },
+    { makeQueueFn: quietQueue(), parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => AT, fs },
+  );
+  assert.equal(await reader.parkedCount(), 2, "the two unanswered parks");
+  assert.ok(!looked.some((p) => p.startsWith(sessionsDir)), "no session-store read: a count needs no chain counter");
+  const reads = redis.ranges.length;
+  assert.equal(reads, 1, "one read of the mirror's wide window");
+  assert.equal(await reader.parkedCount(), 2);
+  assert.equal(redis.ranges.length, reads, "a second count inside the cache window reads nothing");
+  const snap = await reader.snapshot();
+  assert.deepEqual(snap.parked.map((p) => p.jobId), ["gh-p2", "gh-p1"], "the snapshot lists the same runs");
+  const afterSnapshot = redis.ranges.length;
+  assert.equal(await reader.parkedCount(), snap.parked.length);
+  assert.equal(redis.ranges.length, afterSnapshot, "and a count after a snapshot shares its window");
+  // A partial window (the mirror unread) is not a count, and neither is one that throws.
+  assert.equal(await fleetOf(logsDir, emptyRedis({ mirrorDown: true })).parkedCount(), null);
+  const denied = { ...nodeFs, readdirSync: (p, ...rest) => (p === logsDir ? (() => { throw Object.assign(new Error("denied"), { code: "EACCES" }); })() : nodeFs.readdirSync(p, ...rest)) };
+  assert.equal(await fleetOf(logsDir, emptyRedis(), { seams: { fs: denied } }).parkedCount(), null, "an unreadable logs dir");
+  const throwing = { ...emptyRedis(), async zrevrangebyscore() { throw new Error("boom"); } };
+  assert.equal(await fleetOf(logsDir, throwing).parkedCount(), null);
+  assert.equal(await fleetOf(tempDir("pd-737-parked-none-"), emptyRedis()).parkedCount(), 0, "nothing parked is a known zero");
+});
+
+test("createFleetReader: concurrent counts and snapshots share ONE wide-window read, at first and when the cache runs out; a read that fails is not handed out again (issue #737)", async () => {
+  const logsDir = tempDir("pd-737-wide-shared-");
+  writeLocal(logsDir, rec("gh-p1", AT - 3 * MIN, { target: "acme/web#2", reason: "awaiting-input" }));
+  writeLocal(logsDir, rec("gh-p2", AT - 2 * MIN, { target: "acme/web#3", reason: "awaiting-input" }));
+  // The mirror's wide-window read (the one asking for 1000 ids) waits on a gate, so every caller arrives while it runs.
+  let gate = null;
+  const wideReads = [];
+  const base = emptyRedis();
+  const redis = {
+    ...base,
+    async zrevrangebyscore(...args) {
+      if (args.at(-1) === 1000) {
+        wideReads.push(args);
+        await gate;
+      }
+      return [];
+    },
+  };
+  let t = AT;
+  // While set, every walk of the logs dir throws (a burst may start more than one read, and each must fail).
+  let failing = false;
+  const fs = { ...nodeFs, readdirSync: (p, ...rest) => {
+    if (p === logsDir && failing) {
+      // Not an fs error (those make the window partial, a value): a throw out of the read itself.
+      return { [Symbol.iterator]() { throw new Error("index walk failed"); } };
+    }
+    return nodeFs.readdirSync(p, ...rest);
+  } };
+  const reader = fleetOf(logsDir, redis, { seams: { nowFn: () => t, fs } });
+  const burst = async () => {
+    let open;
+    gate = new Promise((r) => (open = r));
+    const asked = [reader.parkedCount(), reader.parkedCount(), reader.snapshot().then((s) => s.parked.length), reader.parkedCount()];
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
+    const during = wideReads.length;
+    open();
+    return { got: await Promise.all(asked), during };
+  };
+  const first = await burst();
+  assert.deepEqual(first.got, [2, 2, 2, 2]);
+  assert.equal(first.during, 1, "four callers at an empty cache: one read, in flight while they all waited");
+  assert.equal(wideReads.length, 1);
+  assert.equal(await reader.parkedCount(), 2);
+  assert.equal(wideReads.length, 1, "inside the cache window: no read");
+  // The cache runs out: the next burst makes one read again.
+  t += 60_000;
+  const second = await burst();
+  assert.deepEqual(second.got, [2, 2, 2, 2]);
+  assert.equal(wideReads.length, 2, "a burst at expiry: one more read, not four");
+  // A read that throws answers each waiting caller with its failure, as a failure: the count says null, and the
+  // snapshot (review round 2, R04: a failed read handed on as a value would have made its fold throw) still answers,
+  // with no parked runs and the reason they are not known, never an empty list alone.
+  t += 60_000;
+  failing = true;
+  gate = Promise.resolve();
+  const [countA, countB, snap] = await Promise.all([reader.parkedCount(), reader.parkedCount(), reader.snapshot()]);
+  failing = false;
+  assert.deepEqual([countA, countB], [null, null]);
+  assert.deepEqual(snap.parked, []);
+  assert.match(snap.parkedUnreachable ?? "", /index walk failed/, "the snapshot names why its parked list is not known");
+  // And the next caller makes a fresh read instead of being handed the failed one.
+  assert.equal(await reader.parkedCount(), 2, "the next caller reads again, and the read succeeds");
+});
+
 test("createFleetReader: a park whose answer is queued or running is marked answering (the shared scan), listed at most once per 15 s; an unlistable queue is unknown (issue #647)", async () => {
   const logsDir = tempDir("pd-647-answering-");
   writeLocal(logsDir, rec("gh-p", AT - MIN, { target: "acme/web#2", reason: "awaiting-input" }));

@@ -17,11 +17,16 @@
  * THE ROLE RULE lives in the panels (`panels.mjs` header): the operator alone sees a failure reason and the audit log,
  * and (issue #642) the action controls, which a read-only console draws for nobody.
  * Data is read once for both roles, and the role decides only what is drawn, so a stream must be rendered per role.
+ *
+ * THE FRAME (issue #737) is `shell.mjs`'s: the top bar, the navigation and the title bar, around a page's panels. A page
+ * whose panels are still the old markup is in `LEGACY_PAGES`, and its panels are drawn inside `<div class="legacy">`
+ * (`legacyWrap`), byte for byte as before, until that page's own pull request converts it.
  */
 import { CONSOLE_AUDIT_CURSOR_RE } from "@edgehero/pi-dispatch/console-audit";
 import { FORGES } from "@edgehero/pi-dispatch/forges";
 import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
 import { html, page } from "./html.mjs";
+import { legacyWrap, NAV_PARKED_ID, navParkedHtml, shellHtml } from "./shell.mjs";
 import {
   auditLog,
   configMcp,
@@ -47,7 +52,6 @@ import {
   insightsRange,
   insightsWhatIf,
   WHATIF_FLOW_RE,
-  navHtml,
   overviewActive,
   overviewFailures,
   overviewHosts,
@@ -79,22 +83,36 @@ import { SPEND_TITLE } from "../words.mjs";
  * stream (a screen whose data changes while it is open), `title` the heading, `nav` the navigation label (none for
  * the run detail, which is reached from a run). Insights is not live: its assembly is the expensive read (cached 30 s
  * by the caller), and the range picker is its refresh; its what-if form is a GET of the same page. Configuration and
- * the audit log change by a person's hand.
+ * the audit log change by a person's hand. `icon` is the sprite icon (`pulse-icons.mjs`) its navigation pill carries
+ * (issue #737); the run detail's is Runs', the screen it counts as.
  * The run detail is live since issue #644: a running job's progress panel moves, and a run that ends gets its record's
  * panels without a reload; since issue #646 its inbox panel moves too, a message's state from queued to delivered. Its
  * data is read at most once per `LIVE_DEFAULTS.pageMinMs.run` (live.mjs), since a run's load also reads its record and
  * searches for its children.
  */
 export const PAGES = Object.freeze({
-  overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview" }),
-  runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs" }),
-  run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null }),
-  parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked" }),
-  insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE }),
-  fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet" }),
-  config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration" }),
-  audit: Object.freeze({ path: "/audit", auth: "operator", live: false, title: "Audit log", nav: "Audit" }),
+  overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview", icon: "home" }),
+  runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs", icon: "runs" }),
+  run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null, icon: "runs" }),
+  parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked", icon: "parked" }),
+  insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE, icon: "spend" }),
+  fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet", icon: "fleet" }),
+  config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration", icon: "config" }),
+  audit: Object.freeze({ path: "/audit", auth: "operator", live: false, title: "Audit log", nav: "Audit", icon: "audit" }),
 });
+
+/**
+ * The pages still drawn in the old markup (issue #737): every screen, the two sign-in pages and the operators-only
+ * refusal (`forbidden`, which renders with its screen's `data-page`). Each wraps its content in `<div class="legacy">`,
+ * the one place the compatibility stylesheet (`compat-css.mjs`) applies. A page's own pull request converts it and
+ * takes its name out; `console-compat.test.mjs` fails a converted page whose golden still holds the wrapper, and, once
+ * this is empty, a compatibility layer that still exists.
+ *
+ * WRITTEN OUT, NOT DERIVED FROM `PAGES`, so a page a later pull request adds is drawn in the Pulse markup from its
+ * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
+ * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
+ */
+export const LEGACY_PAGES = Object.freeze(["overview", "runs", "run", "parked", "insights", "fleet", "config", "audit", "login", "login-code", "forbidden"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
@@ -109,9 +127,14 @@ const PAGE_PANELS = Object.freeze({
   audit: [["p-audit", auditLog]],
 });
 
-/** The panel ids of a screen, in page order (for the stream's tests and the hub). */
+/**
+ * The panel ids of a screen, in page order (for the stream's tests and the hub), then on a live screen the shell's
+ * Parked count (issue #737), which sits in the navigation above them but is listed last so a screen's first panel is
+ * still its first.
+ */
 export function panelIds(name) {
-  return (PAGE_PANELS[name] ?? []).map(([id]) => id);
+  const ids = (PAGE_PANELS[name] ?? []).map(([id]) => id);
+  return PAGES[name]?.live === true ? [...ids, NAV_PARKED_ID] : ids;
 }
 
 // ---- the query -------------------------------------------------------------------------------------------------------
@@ -278,16 +301,19 @@ export function returnPathOf(raw) {
 
 // ---- reading ---------------------------------------------------------------------------------------------------------
 
-/** What each screen reads beside the clock. */
+/**
+ * What each screen reads beside the clock. A screen that reads no snapshot reads `parkedCount` for the navigation's
+ * Parked count (issue #737); one that reads the snapshot takes the count from it, so no screen reads both.
+ */
 const PAGE_READS = Object.freeze({
   overview: ["snapshot"],
-  runs: ["runsPage", "subscriptions"],
-  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions"],
+  runs: ["runsPage", "subscriptions", "parkedCount"],
+  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
   parked: ["snapshot"],
-  insights: ["insights"],
+  insights: ["insights", "parkedCount"],
   fleet: ["snapshot"],
   config: ["snapshot"],
-  audit: ["audit"],
+  audit: ["audit", "parkedCount"],
 });
 
 /** The runs a screen shows per page, and how far the run detail looks for a run's children. */
@@ -321,6 +347,21 @@ async function subscriptionsOf(deps) {
 }
 
 /**
+ * The navigation's Parked count for a screen that reads no snapshot (issue #737): the fleet reader's `parkedCount`, a
+ * whole number of unanswered parked runs, or null when the reader has none, it throws, or it answers anything else
+ * (the shell then draws no count, never a 0).
+ */
+async function parkedCountOf(deps) {
+  if (typeof deps.fleet?.parkedCount !== "function") return null;
+  try {
+    const n = await deps.fleet.parkedCount();
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * A run's children: runs whose `parentJobId` is its id, among the newest `CHILD_SEARCH.pages` pages of runs (a child
  * starts after its parent, so the search stops at the first page older than the parent's start). `{ children,
  * searched }`, `searched` the number of runs examined, which the page states rather than claiming none exist.
@@ -350,7 +391,8 @@ async function childrenOf(fleet, record) {
 /**
  * Read what screen `name` shows for `query` (a `parsePageQuery` result's `query`). `deps`:
  *
- *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`). `snapshot()` is called at most once.
+ *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`, and `parkedCount` for the screens that
+ *     read no snapshot). `snapshot()` is called at most once.
  *   - `insights(window, { fullPaths })`: the assembled insights payload for a window (the caller caches it: it is the
  *     expensive read). `fullPaths` is true only for an operator's `paths=full`.
  *   - `whatIf({ model, flow })` (optional): the what-if answer (`whatif.mjs`'s reader, cached and bounded by the caller).
@@ -491,6 +533,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.audit = null;
     }
   }
+  if (reads.includes("parkedCount")) data.parkedCount = await parkedCountOf(deps);
   return data;
 }
 
@@ -510,11 +553,13 @@ function panelFragments(name, ctx) {
 
 /**
  * The panels of screen `name`, `[{ id, html }]`: the inner HTML of each `<section id="<id>" data-panel>` that
- * `renderPage` draws, from the same renderers, for the live stream to swap in. `ctx` is `renderPage`'s.
+ * `renderPage` draws, from the same renderers, for the live stream to swap in, and on a live screen last the shell's
+ * `<span id="p-nav-parked" data-panel>` (`panelIds`' order). `ctx` is `renderPage`'s.
  */
 export async function pagePanels(name, ctx) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
-  return panelFragments(name, ctx).map(({ id, fragment }) => ({ id, html: String(fragment) }));
+  const panels = panelFragments(name, ctx).map(({ id, fragment }) => ({ id, html: String(fragment) }));
+  return PAGES[name].live ? [...panels, { id: NAV_PARKED_ID, html: String(navParkedHtml(ctx?.data)) }] : panels;
 }
 
 /**
@@ -535,16 +580,11 @@ function runHasTranscript(data) {
   return data?.chat?.state !== "unknown" && data?.chat?.state !== "queued";
 }
 
-/** The signed-in header: the console's name, the screens, who is signed in, the live state and sign-out. */
-function headerHtml(name, ctx) {
-  const s = ctx?.session ?? {};
-  return html`<header class="top"><a class="brand" href="/">pi-dispatch console</a>${navHtml(PAGES, name, s.role)}<span class="who">${s.name ?? "-"} (${s.role ?? "-"})${ctx?.readOnly ? ", read-only console" : ""}</span>${PAGES[name].live ? html`<span id="live-status" role="status" aria-live="polite"></span>` : null}<button id="logout" type="button">Sign out</button></header>`;
-}
-
 /**
- * The whole page for screen `name`: `{ status, html }`. `ctx = { query, session: { name, role }, data, readOnly }`.
- * Status 200; 404 for a run that does not exist (the panels say so); 403 for the audit log asked by a viewer (the route
- * table refuses that first; this is the belt, and it draws no panel).
+ * The whole page for screen `name`: `{ status, html }`. `ctx = { query, session: { name, role }, data, readOnly,
+ * theme }`, `theme` the request's theme choice (`theme.mjs` `themeOf`). Status 200; 404 for a run that does not exist
+ * (the panels say so); 403 for the audit log asked by a viewer (the route table refuses that first; this is the belt,
+ * and it draws no panel).
  */
 export async function renderPage(name, ctx) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
@@ -552,21 +592,21 @@ export async function renderPage(name, ctx) {
   const role = ctx?.session?.role ?? null;
   const live = meta.live ? name : null;
   const query = pageQueryString(name, ctx?.query);
+  const theme = ctx?.theme ?? null;
   if (meta.auth === "operator" && role !== "operator") {
-    const body = html`${headerHtml(name, ctx)}<main><h1>${meta.title}</h1><p class="warn">This page is for operators only.</p></main>`;
-    return { status: 403, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body }) };
+    const body = shellHtml(name, ctx, legacyWrap("forbidden", html`<p class="warn">This page is for operators only.</p>`));
+    return { status: 403, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, theme }) };
   }
   const panels = panelFragments(name, ctx);
-  const heading = name === "run" && ctx?.query?.id ? html`${meta.title} <span class="mono">${ctx.query.id}</span>` : meta.title;
   // The run detail's live transcript (issue #643) is a section of its own, never a panel: a panel is what the hub
   // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
   // Issue #710: none for a run that never had one to show: refused before it started, or no record of a run that is not
   // running (not a run id, queued, or unknown), which the outcome banner says once.
   const extra = name === "run" && runHasTranscript(ctx?.data) ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
-  const body = html`${headerHtml(name, ctx)}<main><h1>${heading}</h1>${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}${extra}</main>`;
+  const body = shellHtml(name, ctx, legacyWrap(name, html`${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}${extra}`));
   // A run with no record yet but a live transcript or progress snapshot is a running job (its record is written at its
   // end): 200, not 404.
   const progressing = ctx?.data?.progress !== null && typeof ctx?.data?.progress === "object" && ctx.data.progress.v === 1;
   const status = name === "run" && !ctx?.data?.run?.record && ctx?.data?.transcript?.exists !== true && !progressing ? 404 : 200;
-  return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query }) };
+  return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query, theme }) };
 }

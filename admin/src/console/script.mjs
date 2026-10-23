@@ -13,12 +13,26 @@
  *     code, the server answers the page it accepts (`returnPathOf`, one of this console's own pages, else `/`), and
  *     the script navigates there only if the answer is also one of `PAGES`' paths (`ownPage`), never anywhere else.
  *   - every signed-in page: the sign-out button (`#logout`).
+ *   - the SHELL (issue #737, `shell.mjs`): the theme button (`[data-theme-toggle]`, drawn hidden) is shown where the
+ *     page can be re-themed and cycles the system's theme, light and dark: it sets or removes `data-theme` on `<html>`
+ *     and the `color-scheme` meta's content, and writes the `pd_theme` cookie (`theme.mjs`) the server draws the next
+ *     page from. It reads the current choice from `<html data-theme>` (what the server drew), never from
+ *     `document.cookie`; the sign-in pages carry the button too. The navigation's More menu (`details.more`) closes on
+ *     Escape, a click elsewhere or focus leaving it; on a phone, where the navigation scrolls sideways inside itself,
+ *     the script also scrolls its button whole into view whenever it opens, places its list under the button and
+ *     closes it when a later scroll takes the button wholly out of view, and scrolls the current screen's pill (or
+ *     More's button, for a screen inside More) into view once on load and a focused pill fully into view. The theme
+ *     button keeps its space while hidden (`SHELL_CSS`), so showing it moves nothing. A command box's Copy button
+ *     (`[data-copy]`, drawn hidden) is shown, on load and in each swapped panel, only where the clipboard can be
+ *     written (`navigator.clipboard` in a secure context), and copies the text of its box's `<code>`.
  *   - a LIVE page (issue #641; `data-live` on the body): opens `/api/events?page=<data-live>&<data-query>` with
  *     `EventSource`. An `event: panel` carries `{id, html}`, and its html replaces the inner HTML of the element with
  *     that id ONLY when that element carries `data-panel`: the server renders and escapes the fragment (the same
  *     renderer as the page load), and the guard keeps a message from aiming at any other element. `event: end` (the
- *     session ended, was revoked or expired) closes the stream and goes to `/login`. `#live-status` says "live" or
- *     "reconnecting", through `textContent`; `EventSource` reconnects by itself and resends `Last-Event-ID`.
+ *     session ended, was revoked or expired) closes the stream and goes to `/login`. The live pill (`#live-status`)
+ *     says Live, Reconnecting, Not live or Signed out (`shell.mjs` `LIVE_STATES`: its classes, which pick the dot or the
+ *     state's glyph the server drew, its word in `[data-live-word]` through `textContent`, and the sentence in its
+ *     title, removed where a state has none); `EventSource` reconnects by itself and resends `Last-Event-ID`.
  *   - the SPEND SCREEN (`insights`): what the offline insights page's own script did, under this CSP. The insights
  *     renderers mark each bar with `data-tip="<n>"` and the page lists the texts in `#insights-tips` (escaped by the
  *     server); hovering a bar shows its text in the topology's `#tip` box through `textContent`. The topology pans
@@ -53,6 +67,8 @@
  */
 import { FIT_JS } from "../graph-html.mjs";
 import { PAGES } from "./pages.mjs";
+import { LIVE_STATES } from "./shell.mjs";
+import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "./theme.mjs";
 import { OUTCOME_WORD_OF } from "../words.mjs";
 
 export const CONSOLE_SCRIPT = `"use strict";
@@ -146,6 +162,195 @@ export const CONSOLE_SCRIPT = `"use strict";
   if (out) out.addEventListener("click", function () {
     post("/logout", {}).then(function () { location.assign("/login"); }, function () { location.assign("/login"); });
   });
+  // ---- the shell (issue #737): the theme button, the More menu, the current pill, the Copy buttons ----
+  // Every DOM API below is checked before it is used: the sign-in pages hold none of these elements, and the test stubs
+  // this script also runs on have no documentElement, no cookie and no clipboard. The listeners are added only where
+  // their element exists, and before the spend screen's, which handles Escape and clicks for its topology too.
+  var THEME_COOKIE = ${JSON.stringify(THEME_COOKIE)};
+  var THEME_ORDER = ${JSON.stringify(["system", ...THEMES])};
+  var THEME_LABELS = ${JSON.stringify(THEME_LABELS)};
+  var docEl = document.documentElement;
+  var themeBtn = typeof document.querySelector === "function" ? document.querySelector("[data-theme-toggle]") : null;
+  if (themeBtn && docEl && typeof docEl.getAttribute === "function" && typeof docEl.setAttribute === "function" && "cookie" in document) {
+    // The choice the server drew, from <html data-theme>; anything else there is the system's.
+    var themeNow = function () {
+      var t = docEl.getAttribute("data-theme");
+      return THEME_ORDER.indexOf(t) > 0 ? t : "system";
+    };
+    var themeSay = function (t) {
+      themeBtn.setAttribute("aria-label", THEME_LABELS[t]);
+      themeBtn.setAttribute("title", THEME_LABELS[t]);
+    };
+    themeSay(themeNow());
+    themeBtn.hidden = false;
+    themeBtn.addEventListener("click", function () {
+      var next = THEME_ORDER[(THEME_ORDER.indexOf(themeNow()) + 1) % THEME_ORDER.length];
+      var meta = document.querySelector('meta[name="color-scheme"]');
+      if (next === "system") docEl.removeAttribute("data-theme");
+      else docEl.setAttribute("data-theme", next);
+      if (meta) meta.setAttribute("content", next === "system" ? ${JSON.stringify(SYSTEM_SCHEME)} : next);
+      // Max-Age=0 forgets a choice: a page with no cookie follows the system. A browser that keeps no cookie (or a
+      // sandboxed frame, where the setter throws) still re-themes this page; the next one follows the system again.
+      try {
+        document.cookie = THEME_COOKIE + "=" + (next === "system" ? "" : next) + "; Path=/; Max-Age=" + (next === "system" ? 0 : ${THEME_COOKIE_MAX_AGE_SEC}) + "; SameSite=${THEME_COOKIE_SAME_SITE}";
+      } catch (e) { /* this page only */ }
+      themeSay(next);
+    });
+  }
+  var more = typeof document.querySelector === "function" ? document.querySelector("details.more") : null;
+  if (more && typeof more.contains === "function") {
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape" || !more.open) return;
+      var inside = more.contains(document.activeElement);
+      more.open = false;
+      // Focus goes back to the menu's button when it was inside the menu, so the keyboard does not lose its place.
+      var summary = inside && typeof more.querySelector === "function" ? more.querySelector("summary") : null;
+      if (summary && typeof summary.focus === "function") summary.focus();
+    });
+    document.addEventListener("click", function (e) {
+      if (more.open && e.target && !more.contains(e.target)) more.open = false;
+    });
+    // Tabbing past the menu's last link (or back before its button) closes it: an open list the keyboard has left would
+    // cover the page under it with nothing to say it is still open. Focus that goes nowhere (a click on bare page) is the
+    // click handler's.
+    if (typeof more.addEventListener === "function") more.addEventListener("focusout", function (e) {
+      if (more.open && e && e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
+    });
+  }
+  // On a phone the navigation scrolls sideways inside itself, and a scroll box clips every descendant positioned against
+  // itself or anything inside it, so there the More menu's list is positioned against the whole top bar (the CSS leaves
+  // the details unpositioned, page-css.mjs SHELL_CSS) and this script moves it under its own button: its right edge
+  // under the button's, its top 6 px below it, kept inside the row. EVERY OPENING first scrolls the button whole into
+  // the navigation's view, focus ring included, and then places the list: a tap, a click or a script's click() on a
+  // button the row had cut opens the menu under a whole button. (The third review measured element.click(), which
+  // moves no focus, opening and at once closing the menu at every phone width: the opening measured the cut button
+  // as out of view.) After that the list follows the button when the navigation scrolls or the bar changes size, and
+  // the menu CLOSES only when such a later move (a scroll of the navigation, or a window turned or resized) leaves no
+  // part of its button in view: a sliver still shows where it hangs from. Above the phone the navigation never
+  // scrolls, the details is the list's containing block and the CSS alone puts it under its button (no script needed,
+  // and right without one): there this only clears what it set, should the window have been a phone's when the menu
+  // opened. Which case holds is read from the details' computed position, so the breakpoint lives in the stylesheet
+  // alone, and a browser that cannot say leaves the list to the CSS. Element.style is the CSSOM, which the CSP's
+  // style-src governs only for markup (the spend screen's tooltip is placed the same way). Also in the frame after the
+  // click, so the list is laid out and measured before it is painted (the toggle event may come after that paint).
+  var moreSummary = more && typeof more.querySelector === "function" ? more.querySelector("summary") : null;
+  var moreList = more && typeof more.querySelector === "function" ? more.querySelector("summary + div") : null;
+  var moreBar = more && typeof more.closest === "function" ? more.closest(".top") : null;
+  var moreNav = more && typeof more.closest === "function" ? more.closest("nav") : null;
+  function scriptPlacesMore() {
+    return typeof getComputedStyle === "function" && getComputedStyle(more).position === "static";
+  }
+  // The navigation's own box is what the reader sees of the row: on a phone it runs past the bar to the screen's
+  // edges, so the list is kept inside it (not the bar, which would pull it off a button at the screen's edge).
+  function moreView() {
+    return moreNav && typeof moreNav.getBoundingClientRect === "function" ? moreNav.getBoundingClientRect() : moreBar.getBoundingClientRect();
+  }
+  function placeMore() {
+    if (!more.open) return;
+    if (!scriptPlacesMore()) {
+      moreList.style.left = "";
+      moreList.style.right = "";
+      moreList.style.top = "";
+      return;
+    }
+    var button = moreSummary.getBoundingClientRect();
+    var bar = moreBar.getBoundingClientRect();
+    var view = moreView();
+    // Right edges aligned where the button's shows (else at the row's end), and never past the row's start.
+    var width = moreList.getBoundingClientRect().width;
+    var left = Math.max(view.left, Math.min(button.right, view.right) - width) - bar.left;
+    moreList.style.left = Math.round(left) + "px";
+    moreList.style.right = "auto";
+    moreList.style.top = Math.round(button.bottom - bar.top + 6) + "px";
+  }
+  // The opening: the button whole into view with its ring (reveal and RING are the navigation's, below), then the list.
+  function openMore() {
+    if (!more.open) return;
+    if (moreNav && scriptPlacesMore()) reveal(moreNav, moreSummary, false, RING);
+    placeMore();
+  }
+  // A later move (the navigation scrolled, the bar resized): the list follows its button, and on a phone the menu
+  // closes once no part of the button shows.
+  function moreMoved() {
+    if (!more.open) return;
+    if (scriptPlacesMore()) {
+      var button = moreSummary.getBoundingClientRect();
+      var view = moreView();
+      if (button.right <= view.left || button.left >= view.right) {
+        more.open = false;
+        return;
+      }
+    }
+    placeMore();
+  }
+  if (moreSummary && moreList && moreBar && typeof moreBar.getBoundingClientRect === "function" && typeof moreSummary.getBoundingClientRect === "function" && moreList.style) {
+    moreSummary.addEventListener("click", function () {
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(openMore);
+    });
+    more.addEventListener("toggle", openMore);
+    if (moreNav && typeof moreNav.addEventListener === "function") moreNav.addEventListener("scroll", moreMoved);
+    if (typeof ResizeObserver === "function") new ResizeObserver(moreMoved).observe(moreBar);
+  }
+  // On a phone the navigation scrolls sideways inside itself and starts at its first pill: a page further along (Fleet,
+  // Audit inside More) would open with no pill saying where the reader is. So ONCE, on load, the current pill (or More's
+  // button, for a page inside More) is scrolled into view, centred, when it is not already in full view. And a pill the
+  // keyboard focuses is scrolled fully into view WITH its focus ring (bundle.css draws a 2 px outline 2 px out, and the
+  // scroll box clips it): the browser's own focus scrolling stops at the pill's edge. Nothing re-centres on a resize or
+  // a live word change, so a reader's own scrolling stands (issue #737's second review measured a re-centre on every
+  // reconnect undoing it). Only the navigation's scrollLeft moves: scrollIntoView would also scroll the page, and undo
+  // a restored scroll position. Above the phone the navigation never scrolls, so neither ever has anything to move.
+  var nav = typeof document.querySelector === "function" ? document.querySelector("nav.pillnav") : null;
+  var RING = 4;
+  // The pill scrolled into the row's view by moving the row's scrollLeft alone: centred (on load), or by the least move
+  // that shows it whole with a ring of that many px around it. Nothing moves when it already shows so. (Also how More's
+  // opening brings its button into view, above.)
+  function reveal(row, pill, centre, ring) {
+    if (!row || !pill || typeof pill.getBoundingClientRect !== "function" || typeof row.getBoundingClientRect !== "function" || typeof row.scrollLeft !== "number") return;
+    var box = row.getBoundingClientRect();
+    var at = pill.getBoundingClientRect();
+    if (at.left - ring >= box.left && at.right + ring <= box.right) return;
+    if (centre) row.scrollLeft += at.left - box.left - (box.width - at.width) / 2;
+    else if (at.left - ring < box.left) row.scrollLeft -= box.left - (at.left - ring);
+    else row.scrollLeft += at.right + ring - box.right;
+  }
+  if (nav) {
+    try {
+      var current = typeof nav.querySelector === "function" ? nav.querySelector('a[aria-current="page"]') : null;
+      var inMore = current && typeof current.closest === "function" ? current.closest("details.more") : null;
+      if (inMore) current = typeof inMore.querySelector === "function" ? inMore.querySelector("summary") : null;
+      reveal(nav, current, true, 0);
+    } catch (e) { /* the navigation stays where it is */ }
+    if (typeof nav.addEventListener === "function") nav.addEventListener("focusin", function (e) {
+      // A pill or More's button; a link inside More's open list is not in the scrolling row (the list is placed
+      // outside it), and its button showed whole when the menu opened.
+      var t = e && e.target;
+      var pill = t && typeof t.closest === "function" ? t.closest("nav.pillnav > a, details.more > summary") : null;
+      try { reveal(nav, pill, false, RING); } catch (err) { /* the navigation stays where it is */ }
+    });
+  }
+  // A secure context is what the clipboard needs (a page served from localhost is one; one served over plain http under
+  // a tunnel's own name is not), so no page shows a button that cannot copy.
+  var canCopy = typeof navigator !== "undefined" && !!navigator && !!navigator.clipboard && typeof navigator.clipboard.writeText === "function" && typeof isSecureContext !== "undefined" && isSecureContext === true;
+  function copyButtons(root) {
+    if (!canCopy || !root || typeof root.querySelectorAll !== "function") return;
+    var btns = root.querySelectorAll("button[data-copy][hidden]");
+    for (var i = 0; i < btns.length; i++) wireCopy(btns[i]);
+  }
+  function wireCopy(btn) {
+    var label = btn.textContent;
+    btn.hidden = false;
+    btn.addEventListener("click", function () {
+      var box = btn.closest ? btn.closest(".cmd") : null;
+      var code = box ? box.querySelector("code") : null;
+      if (!code) return;
+      var said = function (text) {
+        btn.textContent = text;
+        setTimeout(function () { btn.textContent = label; }, 2000);
+      };
+      navigator.clipboard.writeText(code.textContent).then(function () { said("Copied"); }, function () { said("Not copied"); });
+    });
+  }
+  try { copyButtons(document); } catch (e) { /* the Copy buttons stay hidden */ }
   // ---- the spend screen: chart tooltips and the interactive topology ----
   if (page === "insights") {
     try { fitInsightsLabels(); } catch (e) { /* the labels stay as drawn */ }
@@ -176,8 +381,9 @@ ${FIT_JS}
       var items = nodeList.getElementsByTagName("li");
       for (var b = 0; b < items.length; b++) {
         var nid = items[b].getAttribute("data-id");
-        // Minted ordinals only, by the server's own rules (panels.mjs, NODE_ID_RE and WIRE_ID_RE): a chip id for the item
-        // and its neighbours, a wire id for its wires. A prototype-chain key or a stray attribute never becomes a node.
+        // Minted ordinals only, by the server's own rules (panels/insights.mjs, NODE_ID_RE and WIRE_ID_RE): a chip id
+        // for the item and its neighbours, a wire id for its wires. A prototype-chain key or a stray attribute never
+        // becomes a node.
         if (nid === null || !/^n\\d{1,6}$/.test(nid)) continue;
         var words = function (v, re) { return (v || "").split(" ").filter(function (w) { return re.test(w); }); };
         NODES[nid] = { tip: items[b].textContent, nb: words(items[b].getAttribute("data-nb"), /^n\\d{1,6}$/), w: words(items[b].getAttribute("data-w"), /^w\\d{1,6}$/) };
@@ -491,18 +697,26 @@ ${FIT_JS}
   if (live && typeof EventSource === "function") {
     var query = document.body.getAttribute("data-query") || "";
     var status = document.getElementById("live-status");
-    var mark = function (text, cls) {
-      if (!status) return;
-      status.textContent = text;
-      status.className = cls;
+    var word = status && typeof status.querySelector === "function" ? status.querySelector("[data-live-word]") : null;
+    // The live pill's states, written in from shell.mjs's table, which also draws its first state on the server.
+    var LIVE = ${JSON.stringify(Object.fromEntries(Object.entries(LIVE_STATES).filter(([k]) => k !== "start")))};
+    var mark = function (state) {
+      var st = LIVE[state];
+      if (!status || !st) return;
+      status.className = st.cls;
+      if (word) word.textContent = st.word;
+      if (typeof status.setAttribute === "function") {
+        if (st.title) status.setAttribute("title", st.title);
+        else status.removeAttribute("title");
+      }
     };
     var es = new EventSource("/api/events?page=" + encodeURIComponent(live) + (query ? "&" + query : ""));
-    es.addEventListener("open", function () { mark("live", "on"); });
+    es.addEventListener("open", function () { mark("on"); });
     // A refused stream (429 over the stream limit, 401 signed out) is CLOSED by the browser and never retried; only a
     // dropped one reconnects. Say which, so a still page is not mistaken for a live one.
     es.addEventListener("error", function () {
-      if (es.readyState === 2) mark("not live: reload after closing another console tab", "off");
-      else mark("reconnecting", "off");
+      if (es.readyState === 2) mark("off");
+      else mark("retry");
     });
     es.addEventListener("panel", function (ev) {
       var msg;
@@ -513,11 +727,12 @@ ${FIT_JS}
       if (inUse(el)) return;
       el.innerHTML = msg.html;
       try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
-      mark("live", "on");
+      try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
+      mark("on");
     });
     es.addEventListener("end", function () {
       es.close();
-      mark("signed out", "off");
+      mark("out");
       location.assign("/login");
     });
   }

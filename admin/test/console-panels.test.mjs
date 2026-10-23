@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PAGES, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
-import { BEAT_FRESH_MS, COUNT_WINDOWS_UTC_TEXT, NO_WORKER_TEXT, STALE_BEATS_TEXT, ageText, insightsBody, moneyHtml, navHtml, runCost, shownPath, timeHtml, usdText, utcText, workersOnline } from "../src/console/panels.mjs";
-import { CONSOLE_CSS, DARK_THEME, LIGHT_THEME } from "../src/console/style.mjs";
+import { BEAT_FRESH_MS, COUNT_WINDOWS_UTC_TEXT, NO_WORKER_TEXT, STALE_BEATS_TEXT, ageText, insightsBody, moneyHtml, runCost, shownPath, timeHtml, usdText, utcText, workersOnline } from "../src/console/panels.mjs";
+import { LEGACY_CSS } from "../src/console/compat-css.mjs";
+import { CONSOLE_CSS } from "../src/console/style.mjs";
 
 // The console's panels (issue #641): the cost class per run, the formatting, the role rule and determinism, on small
 // hand-built data. The pages over a real seeded deployment are console-pages.test.mjs's.
@@ -36,14 +37,6 @@ test("formatting: ages, UTC instants, dollars and paths, never the host's zone o
   assert.equal(shownPath("/srv/work/site"), ".../site");
   assert.equal(shownPath("C:\\work\\site"), ".../site");
   assert.equal(shownPath("github:acme/web"), "github:acme/web");
-});
-
-test("the navigation marks the current screen and lists the audit log for the operator only", () => {
-  const viewer = String(navHtml(PAGES, "run", "viewer"));
-  assert.match(viewer, /<a href="\/runs" aria-current="page">Runs<\/a>/, "the run detail counts as Runs");
-  assert.ok(!viewer.includes("/audit"));
-  assert.equal((viewer.match(/aria-current/g) ?? []).length, 1);
-  assert.match(String(navHtml(PAGES, "audit", "operator")), /<a href="\/audit" aria-current="page">Audit<\/a>/);
 });
 
 /** A snapshot with one of everything the panels draw, hostile where a value can be. */
@@ -118,7 +111,8 @@ test("the configuration shows names and basenames, never a parser message or a r
 });
 
 test("panels state degraded reads instead of drawing nothing: no snapshot, a floor, a partly paused fleet", async () => {
-  const none = (await pagePanels("overview", ctxOf("viewer", { snapshot: null }))).map((p) => p.html);
+  // The shell's Parked count (`p-nav-parked`) is a panel too; with no snapshot it is drawn empty, never "could not be read".
+  const none = (await pagePanels("overview", ctxOf("viewer", { snapshot: null }))).filter((p) => p.id !== "p-nav-parked").map((p) => p.html);
   assert.equal(none.length, 6);
   for (const h of none) assert.match(h, /could not be read/);
   const some = (await pagePanels("overview", ctxOf("viewer", { snapshot: snapshot() }))).map((p) => p.html).join("");
@@ -191,13 +185,19 @@ test("the insights body renders an empty payload and lists no tips", () => {
   assert.match(html, /<ol id="insights-tips" class="hidden-tips" hidden><\/ol>$/);
 });
 
-test("the stylesheet is the insights CSS on tokens, with a light override and SVG attribute re-pointing", () => {
+test("the stylesheet draws the old panels on the Pulse tokens, inside .legacy, with the charts' colours re-pointed", () => {
+  // The whole stylesheet is console-stylesheet.test.mjs's and the legacy layer's ratchet console-compat.test.mjs's; this
+  // holds what the panels drawn here rely on.
   assert.ok(!/<|@import|url\(/.test(CONSOLE_CSS), "plain rules, nothing fetched");
-  for (const hex of Object.values(DARK_THEME)) assert.ok(!new RegExp(`:${hex}(?![0-9a-f])`, "i").test(CONSOLE_CSS.split("@media (prefers-color-scheme: light)")[0].replace(/:root\{[^}]*\}/, "").replace(/svg \[[^\]]*\]/g, "")), `${hex} is a token, not a literal`);
-  assert.match(CONSOLE_CSS, /@media \(prefers-color-scheme: light\)\{html\{color-scheme:light\}:root\{--pd-canvas:#ffffff;/);
-  assert.match(CONSOLE_CSS, /svg \[fill="#58a6ff"\]\{fill:var\(--pd-accent\)\}/);
-  assert.deepEqual(Object.keys(LIGHT_THEME).sort(), Object.keys(DARK_THEME).sort(), "every dark role has a light value");
-  assert.match(CONSOLE_CSS, /body\{background:var\(--pd-canvas\)/, "the body background is explicit");
+  assert.ok(CONSOLE_CSS.endsWith(LEGACY_CSS), "the old panels' rules come last");
+  assert.match(CONSOLE_CSS, /@media \(prefers-color-scheme: dark\)\{:root:not\(\[data-theme="light"\]\)\{color-scheme:dark;--canvas:/, "the system's dark preference, unless the page forces light");
+  assert.match(CONSOLE_CSS, /\nbody \{ margin: 0; background: var\(--canvas\);/, "the body background is explicit");
+  // The old palette is a set of properties defined from the tokens, so it follows the theme; no literal is left in a rule.
+  assert.match(LEGACY_CSS, /\.legacy\{--pd-canvas:var\(--canvas\);--pd-panel:var\(--surface\);/);
+  assert.match(LEGACY_CSS, /\.legacy svg \[fill="#58a6ff"\]\{fill:var\(--pd-accent\)\}/, "a chart's presentation attribute follows the theme");
+  assert.match(LEGACY_CSS, /\.legacy>section\[data-panel\],\.legacy>section\.transcript-section\{[^}]*border-radius:var\(--radius-lg\);background:var\(--surface\)\}/, "each old panel is a card");
+  const declarations = LEGACY_CSS.replace(/\[[^\]]*\]/g, "");
+  assert.ok(!/#[0-9a-f]{3,8}\b/i.test(declarations), "no colour literal outside an attribute selector");
 });
 
 test("the audit page names each write's kind, a paid action's reserve and a bulk row's size (issue #642)", async () => {
@@ -872,15 +872,25 @@ test("the spend screen's script: pan and zoom use the svg's uniform scale, the z
   assert.equal(d.els.tip.style.display, "block", "a move off both leaves the chip's box to the topology");
 });
 
-test("the spend screen makes zero external requests: every reference is this console's, the CSP allows only self", async () => {
+test("the spend screen makes zero external requests: every reference is this console's or the page's own, the CSP allows only self", async () => {
   const q = parsePageQuery("insights", "whatif=acme%2Fm-1&flow=tidy").query;
   const data = { insights: PAYLOAD(), pricedModels: ["acme/m-1"], whatIf: { model: "acme/m-1", flow: "tidy", unknown: true, near: ["acme/m-2"] } };
   for (const role of ["viewer", "operator"]) {
     const page = String((await renderPage("insights", ctxOf(role, data, q))).html);
-    const refs = [...page.matchAll(/\s(?:src|href|action|formaction|xlink:href)\s*=\s*"([^"]*)"/g)].map((m) => m[1]);
+    // A reference is a path on this console, or an element of this very page (the skip link's `#main`, a sprite icon's
+    // `#i-name`, a pattern's `url(#hatch)`) whose id the page holds: nothing another origin or document could answer.
+    const refs = [
+      ...[...page.matchAll(/\s(?:src|href|action|formaction|xlink:href)\s*=\s*"([^"]*)"/g)].map((m) => m[1]),
+      ...[...page.matchAll(/url\(\s*([^)]*?)\s*\)/g)].map((m) => m[1].replace(/^["']|["']$/g, "")),
+    ];
+    const ids = new Set([...page.matchAll(/\sid="([^"]*)"/g)].map((m) => m[1]));
     assert.ok(refs.length > 5, "the check sees the page's references");
-    for (const r of refs) assert.match(r, /^\/(?!\/)/, `${role}: ${r} is a path on this console`);
-    for (const needle of ["url(", "@import", "<iframe", "<object", "<embed", "<img", "<link rel=\"preload", "http-equiv"]) assert.ok(!page.includes(needle), `${role}: no ${needle}`);
+    for (const r of refs) {
+      const own = /^#([a-z][a-z0-9-]*)$/.exec(r);
+      if (own) assert.ok(ids.has(own[1]), `${role}: ${r} names an element this page holds`);
+      else assert.match(r, /^\/(?!\/)/, `${role}: ${r} is a path on this console`);
+    }
+    for (const needle of ["@import", "<iframe", "<object", "<embed", "<img", "<link rel=\"preload", "http-equiv"]) assert.ok(!page.includes(needle), `${role}: no ${needle}`);
     assert.deepEqual(page.match(/<script[^>]*>/g), ['<script src="/static/console.js" defer>'], "the one script, by path");
     assert.deepEqual(page.match(/<link[^>]*>/g), ['<link rel="stylesheet" href="/static/console.css">'], "the one stylesheet, by path");
   }
@@ -990,7 +1000,7 @@ const overviewOf = async (snap, role = "viewer") => (await pagePanels("overview"
 
 test("the overview leads with what needs a person: Active, then Parked, then the fleet, spend, hosts and the day's problems (#710)", async () => {
   const ids = (await overviewOf(snapshot())).map(([id]) => id);
-  assert.deepEqual(ids, ["p-active", "p-parked", "p-state", "p-spend", "p-hosts", "p-failures"]);
+  assert.deepEqual(ids, ["p-active", "p-parked", "p-state", "p-spend", "p-hosts", "p-failures", "p-nav-parked"]);
 });
 
 test("Problems (24h): failed and refused runs, the top reasons linked by their short sentence, an unknown token raw and cut, cancels not counted (#710)", async () => {

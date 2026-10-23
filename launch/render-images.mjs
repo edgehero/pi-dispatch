@@ -39,11 +39,12 @@
  * rendering and are not held to bytes.
  */
 import { spawn } from "node:child_process";
-import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { frozenDateSource, openChrome as openChromePipe } from "./chrome-pipe.mjs";
 import { findOnPath } from "./server-binary.mjs";
 import { NOW, QUEUE_STATE, WORKERS, FAILED, RUNNING, LOCAL_HOST, PARKED, seedDeployment, writeDeployment } from "./fixture-deployment.mjs";
 
@@ -134,6 +135,8 @@ if (opts.png) {
 const work = mkdtempSync(join(tmpdir(), "pi-dispatch-images-"));
 /** The child processes still running (the server, Chrome), killed by `cleanup` whatever ends the run. */
 const children = new Set();
+/** The browser once `--png` has opened it: `cleanup` removes the singleton directory Chrome leaves on macOS through it. */
+let browserPipe = null;
 let cleaned = false;
 const cleanup = () => {
 	if (cleaned) return;
@@ -145,28 +148,10 @@ const cleanup = () => {
 			// already gone
 		}
 	}
-	chromeSingletonCleanup();
+	browserPipe?.removeSingleton();
 	rmSync(work, { recursive: true, force: true });
 };
 process.on("exit", cleanup);
-/**
- * Chrome on macOS keeps its singleton socket in the user's own temp directory (NSTemporaryDirectory, which TMPDIR does
- * not move), linked from the profile as `SingletonSocket`, and leaves that `com.google.Chrome.*` directory behind. It
- * is removed here through the profile's link, and only a directory of that name.
- */
-let chromeSingletonDir = null;
-/** Remember the singleton directory while Chrome runs (it removes the link, not the directory, when it exits). */
-function noteChromeSingleton() {
-	try {
-		const dir = dirname(readlinkSync(join(work, "chrome", "SingletonSocket")));
-		if (/\/com\.google\.Chrome\.[A-Za-z0-9]+$/.test(dir)) chromeSingletonDir = dir;
-	} catch {
-		// no link (another platform, or not made yet)
-	}
-}
-function chromeSingletonCleanup() {
-	if (chromeSingletonDir) rmSync(chromeSingletonDir, { recursive: true, force: true });
-}
 // An interrupt leaves no server and no directory behind: 128 plus the signal's number, as a shell reports it.
 for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
 	process.on(signal, () => {
@@ -449,115 +434,27 @@ function transcriptSvg(lines, title, { renderTranscript, svgRows, columnsOf }) {
 
 // ---- Chrome, over its DevTools pipe ------------------------------------------------------------------------------
 /**
- * A headless Chrome driven over `--remote-debugging-pipe` (the DevTools protocol on fds 3 and 4, NUL-terminated JSON):
- * no browser library, no port, and nothing it loads can reach the network (`--host-resolver-rules`).
+ * A headless Chrome over its DevTools pipe (`launch/chrome-pipe.mjs`, shared with the console's width check), with its
+ * profile and temp files in this run's directory, killed by `cleanup` with the other children.
  */
 async function openChrome() {
-	const profile = join(work, "chrome");
-	mkdirSync(profile);
-	const args = [
-		"--headless=new",
-		"--remote-debugging-pipe",
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--disable-gpu",
-		"--hide-scrollbars",
-		"--disable-extensions",
-		"--disable-background-networking",
-		"--disable-component-update",
-		"--disable-sync",
-		"--disable-default-apps",
-		"--host-resolver-rules=MAP * ~NOTFOUND",
-		`--user-data-dir=${profile}`,
-		"about:blank",
-	];
-	// TMPDIR inside the work directory, so no `com.google.Chrome.*` directory is left in the system's temp directory.
-	const chromeTmp = join(work, "chrome-tmp");
-	mkdirSync(chromeTmp);
-	const child = spawn(chrome, args, { env: { HOME: process.env.HOME, TMPDIR: chromeTmp }, stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
-	children.add(child);
-	const exited = new Promise((resolve) => child.once("exit", resolve));
-	const toChrome = child.stdio[3];
-	const fromChrome = child.stdio[4];
-	const pending = new Map();
-	const waiters = [];
-	// Once Chrome has gone (it exited, crashed, or closed its pipe) every call still waiting fails, and every later
-	// one fails at once: without this a dead browser left the script waiting forever.
-	let gone = null;
-	const fail = (why) => {
-		if (gone) return;
-		gone = new Refusal(`Chrome ${why}`);
-		for (const p of pending.values()) p.reject(gone);
-		pending.clear();
-		for (const w of waiters.splice(0)) w.reject(gone);
-	};
-	child.once("exit", (code, signal) => (children.delete(child), fail(`exited (${signal ?? code})`)));
-	child.once("error", (err) => fail(`could not start (${err?.message ?? err})`));
-	fromChrome.once("close", () => fail("closed its DevTools pipe"));
-	fromChrome.on("error", () => fail("closed its DevTools pipe"));
-	toChrome.on("error", () => fail("closed its DevTools pipe"));
-	let buf = "";
-	fromChrome.on("data", (d) => {
-		buf += d.toString("utf8");
-		for (let i; (i = buf.indexOf("\0")) >= 0; ) {
-			const msg = JSON.parse(buf.slice(0, i));
-			buf = buf.slice(i + 1);
-			if (msg.id !== undefined && pending.has(msg.id)) {
-				const p = pending.get(msg.id);
-				pending.delete(msg.id);
-				if (msg.error) p.reject(new Error(`${p.method}: ${msg.error.message}`));
-				else p.resolve(msg.result);
-			} else {
-				for (const w of [...waiters]) if (w.match(msg)) waiters.splice(waiters.indexOf(w), 1), w.resolve(msg);
-			}
-		}
-	});
-	let next = 0;
-	/** One DevTools call, answered within `CDP_STEP_MS` or failed. */
-	const send = (method, params = {}, sessionId) =>
-		new Promise((resolve, reject) => {
-			if (gone) return reject(gone);
-			const id = ++next;
-			const timer = setTimeout(() => {
-				pending.delete(id);
-				reject(new Refusal(`Chrome did not answer ${method} within ${CDP_STEP_MS / 1000} s`));
-			}, CDP_STEP_MS);
-			const done = (fn) => (v) => (clearTimeout(timer), fn(v));
-			pending.set(id, { resolve: done(resolve), reject: done(reject), method });
-			toChrome.write(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
-		});
-	/** The first event `match` accepts, within `CDP_STEP_MS` or failed. */
-	const event = (match, what) =>
-		new Promise((resolve, reject) => {
-			if (gone) return reject(gone);
-			const timer = setTimeout(() => {
-				const i = waiters.indexOf(w);
-				if (i >= 0) waiters.splice(i, 1);
-				reject(new Refusal(`Chrome sent no ${what} within ${CDP_STEP_MS / 1000} s`));
-			}, CDP_STEP_MS);
-			const w = { match, resolve: (v) => (clearTimeout(timer), resolve(v)), reject: (e) => (clearTimeout(timer), reject(e)) };
-			waiters.push(w);
-		});
+	const pipe = await openChromePipe({ chrome, work, children, Refusal, stepMs: CDP_STEP_MS, env: { HOME: process.env.HOME } });
+	browserPipe = pipe;
 	return {
 		/**
 		 * Load `url` in a `width` px viewport at `scale`, with the page's clock fixed at `clockMs` when given, and write a
 		 * PNG of `height` px, or of the whole page.
 		 */
 		async shoot({ url, out, width, height = 900, scale, fullPage = false, clockMs = null }) {
-			const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-			noteChromeSingleton();
-			const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
-			const s = (method, params) => send(method, params, sessionId);
+			const { sessionId, send: s, close } = await pipe.openTarget();
 			await s("Page.enable");
 			const metrics = (h) => s("Emulation.setDeviceMetricsOverride", { width, height: h, deviceScaleFactor: scale, mobile: false });
 			await metrics(height);
 			if (clockMs !== null) {
 				// The page's "generated N ago" reads the BROWSER's clock: fixed one minute after the page was generated.
-				await s("Page.addScriptToEvaluateOnNewDocument", {
-					source: `(() => { const T = ${clockMs}; const R = Date; class D extends R { constructor(...a) { if (a.length === 0) super(T); else super(...a); } static now() { return T; } } globalThis.Date = D; })();`,
-				});
+				await s("Page.addScriptToEvaluateOnNewDocument", { source: frozenDateSource(clockMs) });
 			}
-			const loaded = event((m) => m.method === "Page.loadEventFired" && m.sessionId === sessionId, "load event");
+			const loaded = pipe.event((m) => m.method === "Page.loadEventFired" && m.sessionId === sessionId, "load event");
 			await s("Page.navigate", { url });
 			await loaded;
 			await sleep(500); // fonts and the charts' first layout
@@ -570,13 +467,9 @@ async function openChrome() {
 			}
 			const { data } = await s("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width, height: h, scale: 1 } });
 			writeFileSync(out, Buffer.from(data, "base64"));
-			await send("Target.closeTarget", { targetId });
+			await close();
 		},
-		async close() {
-			await send("Browser.close").catch(() => {});
-			await Promise.race([exited, sleep(5000)]);
-			if (child.exitCode === null) child.kill("SIGKILL");
-		},
+		close: () => pipe.close(),
 	};
 }
 

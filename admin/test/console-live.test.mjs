@@ -866,7 +866,8 @@ test("integration: every real page renders through the server, and a real live s
     assert.equal(/<script(?![^>]*src=)/.test(res.text), false, `${path}: no inline script`);
     assert.equal(/ style=/.test(res.text), false, `${path}: no inline style`);
     for (const id of (await realPages.pagePanels(name, { query: name === "run" ? { id: "job-1" } : {}, session: { name: "alice", role: "operator" }, data: await realPages.loadPageData(name, name === "run" ? { id: "job-1" } : {}, pageDeps), readOnly: false })).map((p) => p.id)) {
-      assert.match(res.text, new RegExp(`<section id="${id}" data-panel>`), `${path}: panel ${id} is a live region`);
+      // A screen's panels are sections; the shell's Parked count (issue #737) is a span inside its navigation pill.
+      assert.match(res.text, new RegExp(`<${id === "p-nav-parked" ? "span" : "section"} id="${id}" data-panel>`), `${path}: panel ${id} is a live region`);
     }
   }
   assert.equal((await send({ path: "/run?id=nope", headers: { cookie: op } })).status, 404, "an unknown run id");

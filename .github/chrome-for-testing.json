@@ -1,0 +1,15 @@
+{
+	"version": "155.0.8059.39",
+	"channel": "Stable",
+	"released": "2026-10-06",
+	"downloads": {
+		"linux64": {
+			"url": "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/linux64/chrome-linux64.zip",
+			"sha256": "55672d1f392fd3e7b7a08621b6e804e6bcb39d40cf155504abb74b3a021ea8ea"
+		},
+		"mac-arm64": {
+			"url": "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/mac-arm64/chrome-mac-arm64.zip",
+			"sha256": "529a71bd61aaa2ef266a4d4bd300ae9572ba6a3468a8d55c3023ffeffb5b6b4e"
+		}
+	}
+}

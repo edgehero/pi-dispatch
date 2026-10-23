@@ -1,0 +1,463 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { tempDir } from "./temp-dir.mjs";
+
+/**
+ * The render behind `console-pages.test.mjs` (issue #641; moved here in issue #737 so later files can share it): the
+ * canned deployment seeded through the project's own writers, every screen read and rendered for both roles at the
+ * fixture's frozen instant (and once more for the operator on a read-only console), and the properties every rendered
+ * page must hold (`assertClean`, `assertPanelsMatch`).
+ *
+ * HOW IT RUNS. The render happens in a CHILD process (this module, run with `CONSOLE_PAGES_CHILD` set), for
+ * render-images' reasons: the readers take the clock from `Date` (the day's budget keys, a held job's age, a scheduler's
+ * next fire), so `Date` is frozen at the fixture's `NOW` before any project module loads, and the environment is
+ * emptied so no deployment pointer or key of this machine is read. The child writes its pages to a JSON file the parent
+ * reads.
+ *
+ * Only the queue's live state is canned (`cannedQueues`, render-images' own): counts, workers, the active jobs and the
+ * failed one, which only a running fleet produces. The pricing façade is the real one with its `piAiVersion` pinned to
+ * the version the fixture's records carry, so a pi bump does not rewrite the spend footer.
+ *
+ * VALKEY: `VALKEY_TEST_URL`, database 8. Not render-images' 7: without a server binary on PATH that test seeds
+ * database 7 of the same server, and the two files run concurrently. The database must be empty and is emptied again
+ * when done. Without `VALKEY_TEST_URL` the render tests are skipped.
+ */
+
+const SELF = fileURLToPath(import.meta.url);
+export const FIXTURES = fileURLToPath(new URL("../fixtures/console/", import.meta.url));
+const BASE = process.env.VALKEY_TEST_URL;
+const URL_8 = BASE ? `${BASE.replace(/\/\d*$/, "")}/8` : null;
+export const skip = URL_8 === null ? "needs VALKEY_TEST_URL" : false;
+const run = promisify(execFile);
+
+/** The screens and the query each is rendered with. */
+export const SHOTS = Object.freeze([
+  ["overview", "overview", ""],
+  ["runs", "runs", ""],
+  ["runs-filtered", "runs", "project=web&outcome=completed"],
+  ["run", "run", "id=gh-2f6a"],
+  // Issue #644: a running job's detail (no record yet), with a progress snapshot that declared phases and left a note.
+  ["run-live", "run", "id=gh-b3d7"],
+  ["parked", "parked", ""],
+  ["insights", "insights", "range=7d"],
+  // The what-if (the insights move to the console): a priced model over the fixture's ledgered fix runs, at the scan's
+  // own ceiling, with the canned pricing below so a pi bump moves no byte of it.
+  ["insights-whatif", "insights", "whatif=acme%2Fmodel-1&flow=fix"],
+  ["fleet", "fleet", ""],
+  ["config", "config", ""],
+  ["audit", "audit", ""],
+]);
+export const ROLES = Object.freeze(["viewer", "operator"]);
+
+// Control bytes are built, never typed.
+export const ESC = String.fromCharCode(27);
+const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
+const HOST_PATH_RE = /\/Users\/|\/home\/|\/private\/|\/tmp\/|\/var\/folders\//;
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}/;
+// Inside a tag only: escaped text never holds a `<`, and a hostile value that reads "onload=" as text is the point.
+const ACTIVE_MARKUP_RE = /<script(?! src="\/static\/console\.js" defer><\/script>)|<style|<[^>]*\s(?:on[a-z]+|style)\s*=|<[^>]*\s(?:href|src)\s*=\s*"?\s*javascript:/i;
+
+/** The hostile values the second variant seeds. */
+const HOSTILE = Object.freeze({
+  jobId: `gh-<script>alert(1)</script>"'${ESC}[31m`,
+  target: `acme/web"><script>alert(2)</script>${ESC}#7`,
+  jsTarget: "javascript:alert(3)/x#5",
+  reason: `SECRET-FAILURE-TEXT <img src=x onerror=alert(4)>${ESC}[0m`,
+  activeId: `gh-<b onmouseover=alert(5)>`,
+  // Issue #644: model text in the progress key. Raw control bytes on purpose, although the worker escapes them: the
+  // console's own scrub is the belt this pins.
+  phase: `<script>alert(6)</script>${ESC}[2J`,
+  note: `PHASE-NOTE-TEXT <img src=x onerror=alert(7)>${ESC}]8;;x${String.fromCharCode(7)}`,
+});
+
+/** The progress snapshots the child seeds (issue #644): a phased run on mini1, a phaseless one on the remote build3. */
+function progressSeeds(NOW, hostile) {
+  const base = { v: 1, interrupted: 0, prior: null, startedAt: NOW - 12 * 60_000, updatedAt: NOW - 2_000, ended: false, outcome: null, commentId: null };
+  return {
+    "gh-b3d7": {
+      ...base,
+      turn: 7,
+      steps: 12,
+      failed: 1,
+      running: [{ tool: "bash", since: NOW - 40_000 }],
+      recent: [
+        { tool: "read", status: "ok", durationMs: 120, at: NOW - 90_000 },
+        { tool: "bash", status: "error", durationMs: 2300, at: NOW - 60_000 },
+        { tool: "edit", status: "ok", durationMs: null, at: NOW - 45_000 },
+      ],
+      phase: { index: 1, done: 3, total: 10 },
+      phases: hostile ? ["survey", HOSTILE.phase, "verify", "report"] : ["survey", "migrate the schema", "verify", "report"],
+      note: hostile ? HOSTILE.note : "three of ten tables migrated",
+    },
+    "gh-e802": { ...base, turn: 31, steps: 58, failed: 0, running: [], recent: [{ tool: "grep", status: "ok", durationMs: 15, at: NOW - 5_000 }], phase: null, phases: [], note: null, prior: { turns: 4, steps: 9 } },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The child: seed, read, render, write JSON. Runs only with CONSOLE_PAGES_CHILD set.
+// ---------------------------------------------------------------------------------------------------------------------
+
+async function renderInChild() {
+  const variant = process.env.CONSOLE_PAGES_CHILD;
+  const url = process.env.CONSOLE_PAGES_URL;
+  const out = process.env.CONSOLE_PAGES_OUT;
+  const { NOW, QUEUE_STATE, WORKERS, FAILED, RUNNING, LOCAL_HOST, PARKED, seedDeployment, writeDeployment } = await import("../../../launch/fixture-deployment.mjs");
+
+  // The environment, emptied; the clock, frozen; both before any project module loads.
+  for (const k of Object.keys(process.env)) delete process.env[k];
+  const work = tempDir("console-pages-");
+  Object.assign(process.env, { TZ: "UTC", HOME: join(work, "home"), PI_CODING_AGENT_DIR: join(work, "agent") });
+  mkdirSync(process.env.HOME, { recursive: true });
+  mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+  const RealDate = Date;
+  class FrozenDate extends RealDate {
+    constructor(...a) {
+      if (a.length === 0) super(NOW);
+      else super(...a);
+    }
+    static now() {
+      return NOW;
+    }
+  }
+  globalThis.Date = FrozenDate;
+
+  const W = {
+    connection: await import("../../../worker/src/connection.mjs"),
+    queue: await import("../../../worker/src/queue.mjs"),
+    runHistory: await import("../../../worker/src/run-history.mjs"),
+    runMirror: await import("../../../worker/src/run-mirror.mjs"),
+    hostRegistry: await import("../../../worker/src/host-registry.mjs"),
+    liveJobs: await import("../../../worker/src/live-jobs.mjs"),
+    backends: await import("../../../worker/src/backends.mjs"),
+    budget: await import("../../../worker/src/budget.mjs"),
+    scopedLimits: await import("../../../worker/src/scoped-limits.mjs"),
+    allocation: await import("../../../worker/src/allocation.mjs"),
+    waitState: await import("../../../worker/src/wait-state.mjs"),
+    dollarBudget: await import("../../../worker/src/dollar-budget.mjs"),
+    doctorResults: await import("../../../worker/src/doctor-results.mjs"),
+  };
+  const RM = await import("../../src/read-model.mjs");
+  const DW = await import("../../src/dollar-windows.mjs");
+  const { assembleInsights } = await import("../../src/insights-assembly.mjs");
+  const { makeWhatIfReader } = await import("../../src/console/whatif.mjs");
+  const pricing = await import("../../../worker/src/pricing.mjs");
+  const { makeConsoleAudit, readConsoleAudit } = await import("../../../worker/src/console-audit.mjs");
+  const { sessionKeyFor } = await import("../../../worker/src/session-key.mjs");
+  const P = await import("../../src/console/pages.mjs");
+  const version = JSON.parse(readFileSync(fileURLToPath(new URL("../../../worker/package.json", import.meta.url)), "utf8")).version;
+
+  const admin = W.connection.makeRedisClient(url);
+  admin.on?.("error", () => {});
+  let seeded = false;
+  let reader = null;
+  const opened = [];
+  try {
+    const size = await admin.dbsize();
+    if (size !== 0) throw new Error(`database 8 of VALKEY_TEST_URL holds ${size} keys: these render tests need it empty`);
+    seeded = true;
+    const deployment = join(work, "deployment");
+    const paths = writeDeployment(deployment);
+    const env = {
+      VALKEY_URL: url,
+      PI_WORKER_NAME: LOCAL_HOST,
+      PI_LOG_RETENTION_DAYS: "30",
+      PI_LOGS_DIR: paths.logs,
+      PI_SETTINGS_FILE: paths.settings,
+      PI_TRIGGERS_FILE: paths.triggers,
+      PI_PAUSE_WINDOWS_FILE: paths.pause,
+      PI_SCOPED_LIMITS_FILE: paths.limits,
+      PI_PROJECTS_FILE: paths.projects,
+      PI_ENVELOPE_FILE: paths.envelope,
+      PI_SUBSCRIPTIONS_FILE: paths.subs,
+      PI_GLOBAL_PI_DIR: paths.overlay,
+    };
+    Object.assign(process.env, env);
+    // Issue #712: records naming a real venue, so the goldens are a normal local run's pages.
+    await seedDeployment({ url, paths, mods: { W, RM, DW, version }, venue: "local" });
+
+    // The parked run's session chain counter, as the session store keeps it, so the inbox shows a known count.
+    const sessionsDir = join(deployment, "sessions");
+    const parkedKey = sessionKeyFor({ kind: "github", repo: PARKED.repo, target: { type: "issue", number: PARKED.number } });
+    mkdirSync(join(sessionsDir, parkedKey), { recursive: true });
+    writeFileSync(join(sessionsDir, parkedKey, "resume-chain"), "2\n");
+
+    // The console's audit log: four rows through its own writer, then one damaged line.
+    const audit = makeConsoleAudit({ logsDir: paths.logs, now: () => NOW - 3600_000, alive: () => true });
+    audit.append({ actor: { name: "console", role: "operator", session: null }, action: "serve-started", outcome: "ok" });
+    const at = (ms) => makeConsoleAudit({ logsDir: paths.logs, now: () => ms, alive: () => true });
+    at(NOW - 1800_000).append({ actor: { name: "ops", role: "operator", session: "a1b2c3d4" }, action: "login", outcome: "ok" });
+    at(NOW - 1700_000).append({ actor: { name: "anonymous", role: "none", session: null }, action: "login-failed", target: "/login", outcome: "refused", reason: "no token matched" });
+    at(NOW - 1600_000).append({ actor: { name: "ops", role: "operator", session: "a1b2c3d4" }, action: "write", target: "pause-windows.json", outcome: "ok", beforeDigest: "0".repeat(64), afterDigest: "1".repeat(64), ticket: "abcdef012345" });
+    appendFileSync(join(paths.logs, "console-audit", "2026-10.jsonl"), "this line is not an audit row\n");
+
+    const hostile = variant === "hostile";
+    // The progress keys (issue #644), written as the worker writes them (`serializeProgress` under `progressKeyFor`).
+    const RP = await import("../../../worker/src/run-progress.mjs");
+    for (const [id, snap] of Object.entries(progressSeeds(NOW, hostile))) await admin.set(RP.progressKeyFor(id), RP.serializeProgress(snap));
+    if (hostile) {
+      // Records written as a file another writer could leave: the local index reads every *.json in the logs dir.
+      const base = { flow: "triage", host: "mini1", provider: "anthropic", model: "claude-sonnet-5-5", tokens: null, dollars: null };
+      const iso = (ms) => new RealDate(ms).toISOString();
+      writeFileSync(join(paths.logs, "hostile-1.json"), JSON.stringify({ ...base, jobId: HOSTILE.jobId, kind: "github", target: HOSTILE.target, outcome: "completed", reason: "awaiting-input", startedAt: iso(NOW - 9 * 60_000), endedAt: iso(NOW - 8 * 60_000) }));
+      writeFileSync(join(paths.logs, "hostile-2.json"), JSON.stringify({ ...base, jobId: "gh-js01", kind: "github", target: HOSTILE.jsTarget, outcome: "completed", reason: "awaiting-input", startedAt: iso(NOW - 7 * 60_000), endedAt: iso(NOW - 6 * 60_000), parentJobId: HOSTILE.jobId }));
+    }
+
+    // The queue's live state, canned by queue name (render-images' own), with the real BullMQ queue for schedulers.
+    const queueFn = (connection, { name = W.queue.QUEUE } = {}) => {
+      const real = name === W.queue.QUEUE ? W.queue.makeQueue(connection) : null;
+      if (real) opened.push(real);
+      const host = name.includes("@") ? name.slice(name.indexOf("@") + 1) : null;
+      const active = host ? [...(RUNNING[host] ?? [])].sort((a, b) => a.at - b.at).map((e) => ({ id: e.id, processedOn: e.at })) : [];
+      if (hostile && host === "mini1") active.push({ id: HOSTILE.activeId, processedOn: NOW - 60_000 });
+      return {
+        name,
+        isPaused: async () => false,
+        getJobCounts: async () => ({ ...(QUEUE_STATE[name]?.counts ?? { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }) }),
+        getWorkers: async () => WORKERS.map((w) => ({ name: w })),
+        getJobSchedulers: (...a) => (real ? real.getJobSchedulers(...a) : Promise.resolve([])),
+        getActive: async () => active,
+        // Issue #647: the run page's Chat panel asks the queue for the job's state; an active job reads as active, with
+        // no `.data` (so it is not steer-armed and its run id is its own), and any other id is not this queue's.
+        getJob: async (id) => (active.some((e) => e.id === id) ? { id, data: {}, getState: async () => "active" } : null),
+        // The pending-answer scan (issue #647) lists the running and waiting jobs: the running ones, with no `.data`.
+        getJobs: async ([state]) => (state === "active" ? active.map((e) => ({ id: e.id, data: {} })) : []),
+        getFailed: async () => (name === W.queue.QUEUE ? [hostile ? { ...FAILED, id: HOSTILE.jobId, failedReason: HOSTILE.reason } : { ...FAILED }] : []),
+        pause: async () => {},
+        resume: async () => {},
+        close: async () => {},
+      };
+    };
+    const fleetPaths = { ...RM.resolvePaths(env), sessionsDir };
+    reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW });
+    const deps = {
+      fleet: reader,
+      insights: (window) => assembleInsights(fleetPaths, window, { pricing: { ...pricing, piAiVersion: () => "0.99.1" }, nowMs: NOW, envFn: () => env }),
+      // A canned catalog of two ids and a rate of $1 in and $5 out per million tokens: the what-if's own arithmetic over
+      // the fixture's real records, with nothing a pi bump can move.
+      whatIf: makeWhatIfReader({
+        pricing: {
+          getPricedModel: (p, id) => (p === "acme" && (id === "model-1" || id === "model-2") ? { provider: p, id } : null),
+          listPricedModels: () => [{ provider: "acme", id: "model-1" }, { provider: "acme", id: "model-2" }],
+          reprice: (q) => ({ usd: (q.input + 5 * q.output) / 1_000_000, ratesVersion: "0.99.1" }),
+        },
+        scan: () => RM.scanRunRecords({ logsDir: paths.logs, nowMs: NOW }),
+        now: () => NOW,
+      }),
+      pricedModels: () => ["acme/model-1", "acme/model-2"],
+      audit: ({ limit, before }) => readConsoleAudit({ logsDir: paths.logs, limit, before }),
+      subscriptions: () => RM.readSubscriptions({ subscriptionsPath: paths.subs }),
+      env: { ...env, GITLAB_URL: "https://gitlab.example.com" },
+      now: () => NOW,
+    };
+    const pages = {};
+    const readOnly = {};
+    const draw = async (name, ctx) => {
+      const rendered = await P.renderPage(name, ctx);
+      return { status: rendered.status, html: String(rendered.html), panels: await P.pagePanels(name, ctx) };
+    };
+    for (const [shot, name, qs] of SHOTS) {
+      const parsed = P.parsePageQuery(name, new URLSearchParams(qs));
+      if (parsed.refusal) throw new Error(`${shot}: ${parsed.refusal}`);
+      const data = await P.loadPageData(name, parsed.query, deps);
+      for (const role of ROLES) {
+        pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data, readOnly: false });
+      }
+      // The operator's page on a read-only console (serve's read-only mode, issue #737 review round 2): the frame draws
+      // its chip and every write form is withheld, so it is a page of its own, held to the same rules but to no golden.
+      readOnly[shot] = await draw(name, { query: parsed.query, session: { name: "ops", role: "operator" }, data, readOnly: true });
+    }
+    if (hostile) {
+      // The hostile run's own detail page: its id is outside the run-id charset, so the query is refused before any read.
+      pages.hostileRunQuery = P.parsePageQuery("run", new URLSearchParams({ id: HOSTILE.jobId }));
+    }
+    writeFileSync(out, JSON.stringify({ pages, readOnly }));
+  } finally {
+    await reader?.dispose();
+    await Promise.all(opened.map((q) => q.close().catch(() => {})));
+    if (seeded) await admin.flushdb().catch(() => {});
+    admin.disconnect();
+  }
+}
+
+if (process.env.CONSOLE_PAGES_CHILD) {
+  try {
+    await renderInChild();
+    process.exit(0);
+  } catch (err) {
+    console.error(err?.stack ?? err);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The parent's side: the render in a child, and the checks every rendered page gets.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Render every screen in a child process for `variant` ("plain" or "hostile"): `{ pages, readOnly }`, where `pages` is
+ * keyed `<shot>.<role>` (the goldens' names) and `readOnly` by shot alone, each the operator's page on a read-only
+ * console. A page is `{ status, html, panels }`.
+ */
+export async function renderAll(variant) {
+  const dir = tempDir("console-pages-out-");
+  const out = join(dir, "pages.json");
+  const env = { PATH: process.env.PATH ?? "", CONSOLE_PAGES_CHILD: variant, CONSOLE_PAGES_URL: URL_8, CONSOLE_PAGES_OUT: out, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) };
+  try {
+    await run(process.execPath, [SELF], { env, timeout: 180_000, maxBuffer: 16 * 1024 * 1024 });
+  } catch (err) {
+    throw new Error(`the render child failed:\n${err.stderr ?? err.message}`);
+  }
+  return JSON.parse(readFileSync(out, "utf8"));
+}
+
+/** A link out of the console that a person follows: http(s), and it hands the other page no opener and no Referer. */
+const OUTBOUND_LINK_RE = /^<a [^>]*href="https?:\/\/[^"]+" rel="noreferrer noopener" target="_blank">$/;
+
+/**
+ * A start tag as a browser reads it: `<` and a letter, the name up to a space, `/` or `>`, then attributes up to the
+ * first `>` that is not inside a quoted value (a quoted `>` does not end the tag, so `title="a>b" src=...` still has
+ * its `src`).
+ */
+const TAG_RE = /<([A-Za-z][^\s/>]*)((?:"[^"]*"|'[^']*'|[^"'>])*)>/g;
+/**
+ * One attribute: its name after a space, a `/` (`<img/src=...>`) or straight after the closing quote of the one before
+ * (`alt=""src=...`), all three of which a browser reads as a new attribute, and its value double-, single- or unquoted.
+ */
+const ATTR_RE = /(?:[\s/]|(?<=["']))([^\s=>"'/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+
+/**
+ * Each start tag of a page, `{ tag, name, attrs }`, its name and attribute names lower-cased and its attributes as
+ * `[name, value]` (null for a bare one). THE one parser every page rule reads, so an id in single quotes, an `<H1>`
+ * and an unquoted `src` count the same as the forms `html` writes. Asserted to have read every tag the page opens
+ * (each `<` before a letter: escaped text never holds a `<`), so a tag it cannot read fails the page instead of
+ * hiding its attributes from every rule.
+ */
+function tagsOf(key, html) {
+  const tags = [...html.matchAll(TAG_RE)].map((t) => ({
+    tag: t[0],
+    name: t[1].toLowerCase(),
+    attrs: [...t[2].matchAll(ATTR_RE)].map((a) => [a[1].toLowerCase(), a[2] ?? a[3] ?? a[4] ?? null]),
+  }));
+  assert.equal(tags.length, (html.match(/<[A-Za-z]/g) ?? []).length, `${key}: the page rules read every tag it opens`);
+  return tags;
+}
+
+/** Every `id` a page's tags carry, in order, a repeated one repeated. */
+const idsOf = (tags) => tags.flatMap((t) => t.attrs.filter(([a, v]) => a === "id" && v !== null).map(([, v]) => v));
+
+/**
+ * The attributes whose value is one URL, on any element: `href`, `src`, `action`, `formaction`, `xlink:href`, `poster`,
+ * `data` (an `<object>`'s), `background` (a table's, a cell's, the body's) and `codebase` (an `<object>`'s base, which
+ * its `data` resolves against). On any element, never only the one that fetches it today: no element of the console
+ * carries one of these names for anything but a URL, and a rule that asks which element it is on is one more place
+ * for a gap.
+ */
+const URL_ATTRS = new Set(["src", "href", "action", "formaction", "xlink:href", "poster", "data", "background", "codebase"]);
+/** The attributes whose value is a list of image candidates, "url width, url width": `srcset` and a preload's `imagesrcset`. */
+const SRCSET_ATTRS = new Set(["srcset", "imagesrcset"]);
+/** The five entities `html` writes; a browser decodes any other (`&#x2F;`, `&sol;`) into the URL it requests. */
+const ENTITIES = Object.freeze({ "&amp;": "&", "&quot;": '"', "&#39;": "'", "&lt;": "<", "&gt;": ">" });
+
+/**
+ * An attribute's URL as the browser requests it: the five entities decoded (any other `&` fails: `/&#x2F;evil.example`
+ * is `//evil.example`, a host), each tab and newline removed and the ends trimmed, as the URL parser does (`/` then a
+ * newline then `/evil.example` is `//evil.example` too).
+ */
+function urlOf(key, value, tag) {
+  const decoded = value.replace(/&(?:amp|quot|#39|lt|gt);/g, (e) => ENTITIES[e]);
+  const at = value.replace(/&(?:amp|quot|#39|lt|gt);/g, "").indexOf("&");
+  assert.equal(at, -1, `${key}: a URL attribute writes an & only as one of html's five entities (${tag.slice(0, 120)})`);
+  return decoded.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+}
+
+/**
+ * Every reference a page makes is this console's own (issue #737 extends the spend screen's zero-external-requests rule
+ * to every page): each `URL_ATTRS` value, every URL of a `srcset`, an `imagesrcset` and a `ping`, and each `url(...)`,
+ * read as the browser reads it (`urlOf`), is a path on this console (`/...`, never `//host` or `/\host`) or an element
+ * of this very page (`#id`, the skip link's `#main`, a sprite icon's `#i-name`, a pattern's `url(#hatch)`) whose `id`
+ * the page holds; and no `<meta http-equiv>` at all, since a `refresh` is a navigation no attribute above names (the
+ * headers are the server's, never the page's). The one exception is a link a person follows out of the console (a
+ * run's issue on its forge, a reason's docs page): an `<a>`, never a request the page makes, and only in
+ * `OUTBOUND_LINK_RE`'s shape, which is the one `kit.mjs` `outLink` writes (the kit test holds each of its link forms to
+ * this rule).
+ *
+ * What it does NOT read: an `<iframe srcdoc>` (a whole document in one attribute), and the values SVG animation sets
+ * (`<animate>`'s and `<set>`'s `values`, `from`, `to` and `by`, which can animate an `href`). No page draws either.
+ * What they could FETCH the CSP holds instead: a `srcdoc` document inherits the page's policy, and an image or a
+ * script an animation points elsewhere is refused by the same `img-src` and `script-src` the page's own answer to,
+ * which the width check, reporting every violation, would show. A link an animation pointed elsewhere is not a
+ * request, so nothing here or in the CSP stops it: a page that draws `<animate>` must first teach this rule to read it.
+ */
+export function assertOwnReferences(key, html) {
+  const tags = tagsOf(key, html);
+  const ids = new Set(idsOf(tags));
+  const refs = [...html.matchAll(/url\(\s*([^)]*?)\s*\)/g)].map((m) => ({ attr: "url", ref: m[1].replace(/^["']|["']$/g, ""), tag: m[0] }));
+  for (const { tag, attrs } of tags) {
+    for (const [attr, value] of attrs) {
+      if (attr === "http-equiv") assert.fail(`${key}: a <meta http-equiv> is a header in the page (${tag.slice(0, 120)})`);
+      if (value === null) continue;
+      if (URL_ATTRS.has(attr)) refs.push({ attr, ref: urlOf(key, value, tag), tag });
+      // A srcset is "url width, url width"; a ping is URLs split on spaces.
+      if (SRCSET_ATTRS.has(attr)) for (const part of value.split(",")) refs.push({ attr, ref: urlOf(key, part, tag).split(/\s+/)[0], tag });
+      if (attr === "ping") for (const part of value.trim().split(/\s+/)) refs.push({ attr, ref: urlOf(key, part, tag), tag });
+    }
+  }
+  assert.ok(refs.length > 5, `${key}: the check sees the page's references`);
+  for (const { attr, ref, tag } of refs) {
+    const own = /^#([a-z][a-z0-9-]*)$/.exec(ref);
+    if (own) assert.ok(ids.has(own[1]), `${key}: ${ref} names an element this page holds`);
+    else if (/^\/(?![/\\])/.test(ref)) continue;
+    else assert.ok(attr === "href" && OUTBOUND_LINK_RE.test(tag), `${key}: ${attr}="${ref}" is neither this console's nor this page's (${tag.slice(0, 120)})`);
+  }
+}
+
+/**
+ * A page's structure (review D3, REQ-OPERATOR-CONSOLE-SCREENS), read off the parsed tags (`tagsOf`, so `id='x'` and
+ * `<H1>` count): every id once, exactly one `<main>` and it is `#main` (the skip link's target), one `<h1>`, one icon
+ * sprite (an element of class `sprite`), and every live panel (`data-panel`) an element that carries its `id` and
+ * `data-panel` and nothing else, so the stream's swap of its inner HTML can never lose a class or a role it had.
+ */
+export function assertStructure(key, html) {
+  const tags = tagsOf(key, html);
+  const ids = idsOf(tags);
+  const twice = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+  assert.deepEqual(twice, [], `${key}: every id once`);
+  const mains = tags.filter((t) => t.name === "main");
+  assert.equal(mains.length, 1, `${key}: one main`);
+  assert.deepEqual(idsOf(mains), ["main"], `${key}: the main is #main`);
+  assert.equal(tags.filter((t) => t.name === "h1").length, 1, `${key}: one h1`);
+  assert.equal(tags.filter((t) => t.attrs.some(([a, v]) => a === "class" && v !== null && v.split(/\s+/).includes("sprite"))).length, 1, `${key}: one sprite`);
+  for (const { tag, attrs } of tags.filter((t) => t.attrs.some(([a]) => a === "data-panel"))) {
+    assert.deepEqual(attrs.map(([a]) => a).sort(), ["data-panel", "id"], `${key}: a panel carries only its id and data-panel (${tag})`);
+  }
+}
+
+/** The properties every rendered page holds, whatever it shows. */
+export function assertClean(key, html) {
+  assert.ok(!CONTROL_RE.test(html), `${key} carries no control byte`);
+  assert.doesNotMatch(html, HOST_PATH_RE, `${key} names no path of this machine`);
+  assert.doesNotMatch(html, EMAIL_RE, `${key} holds no email address`);
+  assert.doesNotMatch(html, ACTIVE_MARKUP_RE, `${key} carries no inline script, style, handler or javascript: link`);
+  const host = hostname().split(".")[0];
+  if (host.length >= 3) assert.ok(!html.toLowerCase().includes(host.toLowerCase()), `${key} does not name this machine`);
+  assertOwnReferences(key, html);
+  assertStructure(key, html);
+}
+
+/**
+ * Each panel `pagePanels` returns is exactly the inner HTML of its element in the page: a screen's `<section>`, or the
+ * shell's Parked count, a `<span>` in the navigation (issue #737).
+ */
+export function assertPanelsMatch(key, page) {
+  assert.ok(page.panels.length > 0, `${key} has panels`);
+  for (const { id, html } of page.panels) {
+    assert.match(id, /^p-[a-z-]+$/, `${key}: panel id ${id}`);
+    const tag = id === "p-nav-parked" ? "span" : "section";
+    assert.ok(page.html.includes(`<${tag} id="${id}" data-panel>${html}</${tag}>`), `${key}: panel ${id} is the page's ${tag}, byte for byte`);
+  }
+}

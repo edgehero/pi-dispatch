@@ -402,6 +402,7 @@ test("the route table: every route declares auth and write, writes are POST, and
   assert.equal(fixed["GET /api/state"], "viewer");
   assert.equal(fixed["GET /api/events"], "viewer");
   assert.equal(fixed["GET /static/console.css"], "none");
+  assert.equal(fixed["GET /favicon.ico"], "none");
   // Issue #642: two operator write routes per action, generated from the table; #640's paths stay as aliases.
   for (const a of ACTIONS) {
     for (const step of ["preview", "confirm"]) {
@@ -422,6 +423,21 @@ test("the server carries its limits", async () => {
   assert.equal(c.server.headersTimeout, 10000);
   assert.equal(c.server.requestTimeout, 30000);
   assert.equal(c.server.maxConnections, 64);
+});
+
+test("GET /favicon.ico answers 204 with no body and every security header, signed in or not (issue #737)", async () => {
+  const c = await start();
+  const { cookie } = await c.login();
+  for (const headers of [{}, { cookie }]) {
+    for (const method of ["GET", "HEAD"]) {
+      const res = await c.send({ method, path: "/favicon.ico", headers });
+      assert.equal(res.status, 204, `${method} ${headers.cookie ? "signed in" : "anonymous"}`);
+      assert.equal(res.text, "");
+      assert.equal(res.headers.location, undefined, "no redirect to sign-in");
+      assertSecurityHeaders(res, `${method} /favicon.ico`);
+    }
+  }
+  assert.deepEqual(lookupRoute("POST", "/favicon.ico"), { allow: ["GET", "HEAD"] });
 });
 
 // ---- auth, role, read-only (REQ-CONSOLE-SECURITY d) ----
@@ -955,6 +971,62 @@ test("pause windows: a preview refuses a field the file does not take, a non-obj
   const res = await c.send({ method: "POST", path: "/api/pause-windows/preview", headers: c.writeHeaders({ cookie }), body: deep });
   assert.equal(res.status, 400);
   assert.equal(c.tickets.held.size, 0, "no ticket was issued for any of them");
+});
+
+// ---- the theme cookie (issue #737): read for every page, never set, never echoed ----
+
+test("pd_theme: only an exact light or dark reaches a page, a hostile value is in no body, and no response sets the cookie", async () => {
+  const themes = [];
+  const pages = {
+    ...realPages,
+    loadPageData: async (name) => ({ name }),
+    pagePanels: async () => [],
+    renderPage: async (name, ctx) => (themes.push(ctx.theme), { status: 200, html: page({ title: name, name, body: html`<main></main>`, theme: ctx.theme }) }),
+  };
+  const c = await start({ pages });
+  const { cookie: session } = await c.login();
+  const MARK = "HOSTILE-THEME";
+  const matrix = [
+    [null, null],
+    ["pd_theme=light", "light"],
+    ["pd_theme=dark", "dark"],
+    ["other=1; pd_theme=dark; more=2", "dark"],
+    ["pd_theme= dark ", "dark"],
+    ["pd_theme=DARK", null],
+    ["PD_THEME=dark", null],
+    ["pd_theme=Light", null],
+    ["pd_theme=system", null],
+    ["pd_theme=", null],
+    ["pd_theme", null],
+    ['pd_theme="dark"', null],
+    ["pd_theme=dark; pd_theme=dark", null],
+    ["pd_theme=dark; pd_theme=light", null],
+    ["pd_themes=dark", null],
+    [`pd_theme=${MARK}"><script>alert(1)</script>`, null],
+    [`pd_theme=dark${MARK}`, null],
+    ["pd_theme=__proto__", null],
+  ];
+  for (const [header, want] of matrix) {
+    const label = JSON.stringify(header);
+    for (const path of ["/login", "/login/code"]) {
+      const res = await c.send({ path, headers: header === null ? {} : { cookie: header } });
+      assert.equal(res.status, 200, `${path} ${label}`);
+      assert.match(res.text, want === null ? /<html lang="en">\n/ : new RegExp(`<html lang="en" data-theme="${want}">\n`), `${path} ${label}`);
+      assert.match(res.text, new RegExp(`<meta name="color-scheme" content="${want ?? "light dark"}">`), `${path} ${label}`);
+      assert.ok(!res.text.includes(MARK) && !res.text.includes("<script>alert"), `${path} ${label}: the cookie's bytes are in no body`);
+      assert.equal(res.headers["set-cookie"], undefined, `${path} ${label}: the server never sets a cookie on a page`);
+    }
+    const before = themes.length;
+    const res = await c.send({ path: "/", headers: { cookie: header === null ? session : `${session}; ${header}` } });
+    assert.equal(res.status, 200, `/ ${label}`);
+    assert.deepEqual(themes.slice(before), [want], `/ ${label}: the page is drawn in ${want ?? "the system's theme"}`);
+    assert.ok(!res.text.includes(MARK), `/ ${label}`);
+    assert.equal(res.headers["set-cookie"], undefined, `/ ${label}`);
+  }
+  // A signed-out page request with a theme still redirects to sign-in, carrying nothing of the cookie.
+  const out = await c.send({ path: "/", headers: { cookie: `pd_theme=${MARK}` } });
+  assert.equal(out.status, 303);
+  assert.ok(!JSON.stringify(out.headers).includes(MARK));
 });
 
 // ---- the real session cookie, when the session module is present ----

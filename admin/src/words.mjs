@@ -17,14 +17,23 @@
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 
 /**
+ * The console's status kinds (issue #737): the closed set a Pulse badge, chip, tile or banner is drawn in. Each is one
+ * tone and one icon in the console's kit (`console/kit.mjs` `STATUS`, held to this list by its test), so a status says
+ * itself with an icon and a word, never by colour alone. `cancelled` is its own kind with the idle tone: a stopped run
+ * reads as stopped, not as a failure and not as a refusal.
+ */
+export const STATUS_KINDS = Object.freeze(["running", "parked", "failed", "refused", "attention", "ok", "idle", "cancelled"]);
+
+/**
  * The record's `outcome` values, each with its word, the panel's glyph and its tone. The tone is the panel's colour name
  * (`success`, `warning`, `error`) and the console's class (`TONE_CLASS`). Refused is a warning, not an error: nothing
- * broke, a rule said no, and the operator may want to change the rule.
+ * broke, a rule said no, and the operator may want to change the rule. The `status` is the console's (`STATUS_KINDS`):
+ * the panel keeps its glyph and tone, the Pulse console draws the status.
  */
 export const OUTCOME_WORDS = Object.freeze({
-  completed: Object.freeze({ word: "completed", glyph: "✔", tone: "success" }),
-  policy: Object.freeze({ word: "refused", glyph: "⚠", tone: "warning" }),
-  failed: Object.freeze({ word: "failed", glyph: "✘", tone: "error" }),
+  completed: Object.freeze({ word: "completed", glyph: "✔", tone: "success", status: "ok" }),
+  policy: Object.freeze({ word: "refused", glyph: "⚠", tone: "warning", status: "refused" }),
+  failed: Object.freeze({ word: "failed", glyph: "✘", tone: "error", status: "failed" }),
 });
 
 /** Each outcome's word alone, as a plain map: what the browser script and the topology (which load no module) are handed. */
@@ -33,18 +42,19 @@ export const OUTCOME_WORD_OF = Object.freeze(Object.fromEntries(Object.entries(O
 /**
  * The reasons that change the outcome's word, each with the one outcome it qualifies. `awaiting-input` keeps the
  * completed glyph (it completed, its work is promoted, it is never retried) with a warning tone, since a person has to
- * act. `operator-cancel` keeps the refused glyph and tone: the run did not complete, and someone chose that.
+ * act. `operator-cancel` keeps the refused glyph and tone: the run did not complete, and someone chose that. On the
+ * console each has its own status: a run awaiting input is parked (a person answers it), a cancelled run is cancelled.
  */
 export const REASON_WORDS = Object.freeze({
-  "awaiting-input": Object.freeze({ outcome: "completed", word: "awaiting input", glyph: "✔", tone: "warning" }),
-  "operator-cancel": Object.freeze({ outcome: "policy", word: "cancelled", glyph: "⚠", tone: "warning" }),
+  "awaiting-input": Object.freeze({ outcome: "completed", word: "awaiting input", glyph: "✔", tone: "warning", status: "parked" }),
+  "operator-cancel": Object.freeze({ outcome: "policy", word: "cancelled", glyph: "⚠", tone: "warning", status: "cancelled" }),
 });
 
 /** The tone of a word that is not one of ours (an outcome value this release does not know): shown raw, as a failure. */
-const UNKNOWN = Object.freeze({ known: false, word: null, glyph: "✘", tone: "error" });
+const UNKNOWN = Object.freeze({ known: false, word: null, glyph: "✘", tone: "error", status: "failed" });
 
 /**
- * The word for a record's outcome and reason: `{ known, word, glyph, tone }`. Compared against the RAW values, never a
+ * The word for a record's outcome and reason: `{ known, word, glyph, tone, status }`. Compared against the RAW values, never a
  * scrubbed copy, so a control byte can change what a row looks like but never what it says a run did. `known: false`
  * (an outcome that is not an own key of `OUTCOME_WORDS`, `__proto__` included) has no word: the caller prints the value
  * itself, scrubbed or escaped, as a failure, which is what the panel always did with one.
@@ -53,10 +63,10 @@ export function outcomeWord(outcome, reason) {
   if (typeof outcome !== "string" || !Object.hasOwn(OUTCOME_WORDS, outcome)) return UNKNOWN;
   if (typeof reason === "string" && Object.hasOwn(REASON_WORDS, reason) && REASON_WORDS[reason].outcome === outcome) {
     const q = REASON_WORDS[reason];
-    return { known: true, word: q.word, glyph: q.glyph, tone: q.tone, qualified: true };
+    return { known: true, word: q.word, glyph: q.glyph, tone: q.tone, status: q.status, qualified: true };
   }
   const o = OUTCOME_WORDS[outcome];
-  return { known: true, word: o.word, glyph: o.glyph, tone: o.tone, qualified: false };
+  return { known: true, word: o.word, glyph: o.glyph, tone: o.tone, status: o.status, qualified: false };
 }
 
 /** The console's CSS class for each tone (style.mjs `.good`, `.warn`, `.bad`); a completed run takes none, as before. */
