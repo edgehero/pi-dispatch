@@ -1000,7 +1000,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: The operator console (`pi-dispatch-console serve`, `DES-OPERATOR-CONSOLE`) shall be a separate
   process that listens only on loopback or on a 0600 unix socket unless the operator opts into a public bind; shall
-  answer every request but `/healthz` and login only within a session obtained from a named token or a one-time
+  answer every request but `/healthz`, `/favicon.ico` (an empty 204, issue #737) and login only within a session obtained from a named token or a one-time
   login code; shall accept a write only when it is same-origin, JSON, by the operator role, on a console that is not
   read-only, and confirmed by a single-use ticket bound to the diff the operator saw; shall make every write through
   the read model's existing funnels; shall send the same security headers on every response and escape every value
@@ -1015,7 +1015,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   there (`paths=full`) for the operator role alone; and, since #647, shall hold a non-browser client (the terminal
   chat, `REQ-TERMINAL-CHAT`) to the same guards as a browser, with no second way in, and shall serve a transcript
   entry as JSON to the operator role alone and a run's chat facts (`/api/run`) to either role only because they carry
-  no free text.
+  no free text; and, since #737 (PR 1), shall keep its CSP unchanged under the new visual design, read the theme
+  preference cookie only as a closed set whose bytes never reach a page, a log line or an audit row, and make every
+  reference a page holds a console path or an element of that same page, the one exception a link a person follows
+  out of the console, `<a href="https://...">` (or `http:` for a self-hosted forge) with `rel="noreferrer noopener"`
+  and `target="_blank"`, which the page never fetches.
 - **Scope**: the console process and its CLI. The pi extension is unchanged and still binds no port
   (`REQ-ADMIN-VIA-PI-EXTENSION`). #640 built login, logout, `whoami` and one reference write, the pause windows; #641
   added the read screens, `/api/state` and the event streams (`REQ-OPERATOR-CONSOLE-SCREENS`), which meet this
@@ -1068,11 +1072,29 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `no-referrer`, both cross-origin policies, `no-store` and the `Permissions-Policy` of `DES-OPERATOR-CONSOLE`; no
     page carries an inline script; every rendered value is escaped after the control-byte scrub. Tests:
     `admin/test/console-headers.test.mjs`, `admin/test/console-html.test.mjs`, `admin/test/console-server.test.mjs`.
+    **UNCHANGED, checked (2026-10-23, #737 PR 1)**: the CSP is the same string (`headers.mjs` is untouched). The
+    Pulse shell, its tokens, its icons and its theme add no inline style, no inline script and no external resource:
+    one stylesheet and one script, both from the console's own files, an inline SVG sprite whose references stay in
+    the page ((m)), and a theme stamped by the server. A real browser now holds every page to the CSP as well:
+    `REQ-OPERATOR-CONSOLE-SCREENS` (o) fails on any violation it reports.
   - (f) **No token or code anywhere it could leak.** Given a full test session (token login, one-time code login,
     a write, a refusal, logout, the CLI's token commands), no captured log line, audit row or response body
     contains the test token, the test code, the session cookie's value, or the `pdc_` prefix outside the one line
     `token add` and `token rotate` print; `token list` prints names and roles only. Tests:
     `admin/test/console-server.test.mjs`, `admin/test/console-cli.test.mjs`, `worker/test/console-audit.test.mjs`.
+    **AMENDED 2026-10-23 (#737 PR 1): the theme preference cookie.** `pd_theme` holds a person's theme choice
+    (`light` or `dark`; none means follow the system), is written only by the served script's theme button, and is
+    not a credential: it signs nobody in and opens nothing. Given a request to any page or sign-in page whose Cookie
+    header carries it, then only exactly `light` or `dark` (white space around the value aside), in one copy, draws
+    that theme, and what reaches the page is the console's own constant (`<html data-theme>` and the `color-scheme`
+    meta, from a frozen table), never the cookie's bytes; another case, `system`, an empty value, a quoted one, a
+    second copy, markup or `__proto__` draws the system's theme; no response sets the cookie; a signed-out request
+    that carries it is redirected with nothing of it in the headers; and no log line or audit row records it (the
+    request log line is the method, the path and the status, and no audit row holds a cookie). Its name is not
+    `pdc_...`, so the canary above still holds for every body, the served script that spells the name included.
+    Tests: `admin/test/console-server.test.mjs` ("pd_theme: only an exact light or dark reaches a page"),
+    `admin/test/console-html.test.mjs` (a page's theme from a closed table), `admin/test/console-shell.test.mjs` (the
+    script never parses `document.cookie` and holds no `pdc_` name).
   - (g) **Writes go through the funnel, behind a single-use ticket, for every entry of the action table** (issue
     #642 generalised it from the one pause-windows write). Given any action's preview, the confirm applies exactly the
     previewed change through that action's read-model funnel, whatever else the confirm's body carries: the ticket,
@@ -1151,14 +1173,26 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `admin/test/console-transcript.test.mjs` (the two `format=json` tests), `admin/test/console-run-api.test.mjs`
     ("no free text, job data or session key for either role", the `safeRunOf` test), `admin/test/console-chat.test.mjs`.
   - (m) **The insights page's reads** (2026-10-18, insights move to the console). Given a viewer's session, then
-    `/insights?whatif=<provider>/<model>&flow=<flow>` is answered as a read (a GET, no ticket, no audit row, no
-    write) and its record scan is bounded by the 92-day scan ceiling and cached 30 s, at most 64 answers; given
-    `paths=full` from a viewer, then the page still draws basenames and says full paths are for operators; given the
-    same from an operator, then the topology's group labels and the budget split's problem text carry full local
-    paths; given either role, then the page carries no inline script, its node data is a hidden escaped list and
-    never a script element, and its bytes hold no external `src`, `href`, `url()` or `@import`. Tests:
-    `admin/test/console-panels.test.mjs`, `admin/test/console-pages.test.mjs`, `admin/test/console-cli.test.mjs`,
-    `admin/test/console-headers.test.mjs`, `admin/test/insights-html.test.mjs`.
+    `/insights?whatif=<provider>/<model>&flow=<flow>` is answered as a read (a GET, no ticket, no audit row, no write)
+    and its record scan is bounded by the 92-day scan ceiling and cached 30 s, at most 64 answers; given `paths=full`
+    from a viewer, then the page still draws basenames and says full paths are for operators; given the same from an
+    operator, then the topology's group labels and the budget split's problem text carry full local paths; given either
+    role, then the page carries no inline script, its node data is a hidden escaped list and never a script element, and
+    its bytes hold no external `src`, `href`, `url()` or `@import`. Tests: `admin/test/console-panels.test.mjs`,
+    `admin/test/console-pages.test.mjs`, `admin/test/console-cli.test.mjs`, `admin/test/console-headers.test.mjs`,
+    `admin/test/insights-html.test.mjs`. **AMENDED 2026-10-23 (#737 PR 1): every page's references are its own.** Given
+    any page in `PAGES`, as either role, with plain and with hostile fixture values, then each `src`, `href`, `action`,
+    `formaction`, `xlink:href`, `poster`, `data`, `background` and `codebase` on any element, each URL of a `srcset`, an
+    `imagesrcset` or a `ping`, and each `url(...)` it holds, read as a browser reads the tag (any case, any quoting, its
+    entities decoded, and a tag it cannot read a failure), is a path on this console (`/...`, never `//host`) or a
+    fragment naming an element of that same page, `#<id>` whose `id` the page holds (the inline sprite's `<use
+    href="#i-<name>">`, the skip link's `#main`, a pattern's `url(#hatch)`); the one other kind is a link a person
+    follows out of the console (a run's issue on its forge, a reason's entry in the docs), an `<a>` whose `href` is an
+    `https:` URL (or `http:`, for a self-hosted forge) with `rel="noreferrer noopener"` and `target="_blank"`, which the
+    page never fetches; a page holds no `<meta http-equiv>`; and the stylesheet holds no `url(` and no `@import` at all,
+    so any other `url(` stays banned. Tests: `admin/test/console-pages.test.mjs` (`assertOwnReferences` in
+    `admin/test/helpers/console-pages-harness.mjs`, on every golden, the hostile variant and every screen's read-only
+    render), `admin/test/console-panels.test.mjs` (the insights page), `admin/test/console-stylesheet.test.mjs`.
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
@@ -1171,16 +1205,19 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the sandbox command only where the venue has a sandbox shell, the secrets disclosure by the venue's credential
   custody, steer keys only while the inbox is open, and an absent live transcript or progress blamed on the record's
   named skip or the venue where those are the cause, each sentence keyed by the worker's own tables
-  (`DES-OPERATOR-CONSOLE`).
+  (`DES-OPERATOR-CONSOLE`). **AMENDED 2026-10-23 (#737 PR 1)**: every page shall be drawn in one visual design,
+  inside one shell (the navigation, the live state, the theme, who is signed in), in the system's theme or the one
+  the person chose, with every colour pair readable at WCAG AA in both themes and every page usable on a phone 375 px
+  wide without scrolling sideways.
 - **Scope**: reads only. Every write and action, answering a parked run included, is #642's
   (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; the live transcript on
   the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's (`REQ-RUN-PROGRESS`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
-  (e), (k) and (l) above all, and (m) for the insights page. Since 2026-10-18 (insights move to the console) the
-  `/insights` page is the ONE analytics surface: the static insights export is retired (`REQ-INSIGHTS-HTML-EXPORT`),
-  and every normative clause it carried that is not about a file (the content bans, the allowlisting, determinism,
-  escaping, the labelling rules of `REQ-COST-ANALYTICS` and the visual clauses, and the budget, budget split, job
-  sizes and capacity sections) binds this page. The page's what-if, its `paths=full` view and its interactive
-  topology are reads too.
+  (e), (k) and (l) above all, and (m) for the insights page (since #737 for every page). Since 2026-10-18 (insights
+  move to the console) the `/insights` page is the ONE analytics surface: the static insights export is retired
+  (`REQ-INSIGHTS-HTML-EXPORT`), and every normative clause it carried that is not about a file (the content bans, the
+  allowlisting, determinism, escaping, the labelling rules of `REQ-COST-ANALYTICS` and the visual clauses, and the
+  budget, budget split, job sizes and capacity sections) binds this page. The page's what-if, its `paths=full` view
+  and its interactive topology are reads too.
 - **Why**: before #641 the operator's live surfaces were the panel and a static insights file whose reload re-read
   the same file. Until 2026-10-18 that file was kept beside the console as an offline copy, and its renderer drifted
   from the console's (a second page chrome, a second script, a second window default), so the file went and the
@@ -1436,7 +1473,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   - (i) **Byte-pinned pages.** Given the fixture deployment (`launch/fixture-deployment.mjs`) seeded into Valkey, every
     page renders byte-identical to its fixture in `admin/test/fixtures/console/`, twice in a row; no page holds an ESC
     byte, a host path or an email address; a hostile-value variant renders escaped. Test:
-    `admin/test/console-pages.test.mjs` (fixtures regenerated with `UPDATE_CONSOLE_FIXTURES=1`).
+    `admin/test/console-pages.test.mjs` (fixtures regenerated with `UPDATE_CONSOLE_FIXTURES=1`). **AMENDED 2026-10-23
+    (#737 PR 1): the fixtures hold the shell.** Each page's head gains only the `color-scheme` meta (`light dark` for
+    a request with no theme choice); its body opens with the skip link, the icon sprite and the top bar, then
+    `<main>` with the title bar and the page, and a page still drawn in the old markup (`LEGACY_PAGES`) has its
+    panels inside one `<div class="legacy">`, as they were drawn before, until that page's own pull request converts
+    them. Every panel the stream sends, the shell's Parked count included, is its element in the page byte for byte,
+    and that element carries only `id` and `data-panel` (`<section id="p-..." data-panel>`, the count
+    `<span id="p-nav-parked" data-panel>`), because a live swap replaces only its inner HTML; every page's references
+    are its own (`REQ-CONSOLE-SECURITY` (m)). Tests: `admin/test/console-pages.test.mjs` (`assertPanelsMatch`,
+    `assertClean`), `admin/test/console-compat.test.mjs` (a page not in `LEGACY_PAGES` has no `.legacy` in its
+    fixture, and a legacy page's has one).
   - (j) **Live updates.** Given a live page open, its stream first sends every panel of the page, then only the panels
     whose content changed; given a reconnect whose `Last-Event-ID` is the current id, nothing is resent, and any other
     id gets every panel again; given no change, a `: ping` arrives every 15 seconds; given a job added, a host beat or
@@ -1456,6 +1503,110 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     detail with Enter (reading the record by id when it is older than the panel's 50 runs), says "parked runs unknown"
     rather than "nothing parked" when the list could not be read, and writes nothing. Test:
     `admin/test/dashboard-parked.test.mjs`.
+  - (n) **Contrast, in both themes** (issue #737 PR 1). Given the design tokens (`PULSE_TOKENS`, `tokens.json`
+    verbatim and pinned by its sha256), then every declared pair of a foreground on a ground meets WCAG 2 AA in the
+    light theme and in the dark: the pairs come from each colour token's `usage` sentence (its named grounds, at the
+    ratio it states, else 4.5:1 for a text token and 3:1 for any other), from the bundle's tone classes (each tone's
+    ink on its tint, its on-colour on its solid) and from the pairs the design states besides (the focus ring on the
+    canvas and every surface, link text, `ink` and `ink-muted` on every tint); the merged set is pinned, so a token
+    edit that drops a pair fails; and every colour token is in a pair or named in `NO_PAIR` with its reason (a status
+    mark never stands alone, a hairline carries no information). A failing pair is fixed in the design, never by
+    lowering a ratio. The pairs held are the declared ones (56 a theme): a status colour as a mark is in `NO_PAIR`
+    (the attention mark is 2.00:1 on `surface` in the light theme), and the legacy layer's colour combinations, inside
+    `.legacy` until each page converts, are not measured. A state is a word, not a colour alone, with one exception:
+    every status the kit draws as a badge (`badge`, `outcomeBadge`) carries an icon and a word; a `chip` is its word,
+    with an icon only when given one; its `dot` is colour (given a `label`, an image with that accessible name) and the
+    kit's rule is to draw it only beside the word it marks (no page draws one yet), and its `count` is a number (given
+    a `label`, with that sentence visually hidden beside it); every state of the live pill is a word beside its mark,
+    except on a phone, where the pill is one mark whose SHAPE says the state (Live the dot, Reconnecting a retry arrow,
+    Not live the stop square, Signed out the sign-out arrow), each at 3:1 or more on the bar's ground in both themes,
+    its word kept for assistive technology ((p)); and no fragment the kit draws holds a Unicode symbol or an emoji.
+    Tests: `admin/test/console-contrast.test.mjs`, `admin/test/console-kit.test.mjs`,
+    `admin/test/console-stylesheet.test.mjs` (the phone marks' contrast).
+  - (o) **A phone's width and the top bar's, under the CSP, in a real browser** (issue #737 PR 1, and #711's phone
+    width). Given every page fixture of (i) for both roles and both sign-in pages, served with the console's own
+    security headers, stylesheet and script, in Chrome at 375 by 812 CSS pixels, in the light and the dark system theme
+    and with one page forced to each theme against the other (its `<html data-theme>` and `color-scheme` meta exactly as
+    `page()` draws them for that theme): then the page never scrolls sideways (`scrollWidth` at most 375), and every
+    element past the right edge sits inside a box that scrolls sideways (`overflow-x: auto` or `scroll`) and itself
+    fits, so wide tables, the navigation and the charts scroll in their own box; the browser reports no
+    Content-Security-Policy violation; the computed `--canvas` is the theme's; and every `PAGES` name has a fixture for
+    each role. A page is excused only through `WIDTH_PENDING`, a ratchet that can only shrink (a listed page that fits
+    fails the run), empty since PR 1. And given every page in `PAGES` drawn by `renderPage`, with its data empty but for
+    a Parked count and the run page titled with a 120-character unbroken run id, for an operator, a viewer, an operator
+    on a read-only console and the longest name `TOKEN_NAME_RE` allows (32 characters) on a read-only console, at 320
+    and 375 (as a phone) and 761, 800, 940, 1024, 1180, 1280, 1440 and 1600 CSS pixels, the bar read in every
+    combination of each live word, the theme button shown and hidden, and the Parked count as drawn, emptied and five
+    digits long: then the window is the one asked for (a phone's emulation read back from the page, not trusted from the
+    call that set it); the page never scrolls sideways (the same element rule, at the window's width, and its
+    `scrollWidth` in each of those reads); no two parts of the bar meet (each navigation item against the brand pill and
+    each part of the bar's end, the live pill, the theme button, the read-only chip, who is signed in and Sign out, and
+    those against each other), each judged by what it shows (its box and everything drawn inside it, each cut by what
+    clips it, so text spilling out of a fixed box counts); above 760 px every navigation item shows whole, its
+    focus ring included; at every width, a phone's included, the bar's height is the same in all of those reads; every
+    live word was read, and no two words are drawn with the same classes; from 1440 px the bar of a console that is not
+    read-only is one row; a signed-in name or role word cut off ends in an ellipsis and the title a reader gets there
+    holds it whole, and the longest name is cut off; the More menu, opened by a click on its button (on a phone with the
+    button cut in half at the navigation's edge, nothing focused and a click that moves no focus, the button never
+    scrolled into view by the check), opens with its button whole, focus ring included, shows whole inside the viewport,
+    covers no part of its button and, where the button shows, opens under it (right edges within 1 px, its top 4 to 8 px
+    below the button); and the browser reports no CSP violation. And given the operator's overview at 1024 px with page
+    scripts off, then More, opened by a real mouse click, opens under its button. And given the two negative controls,
+    synthetic top bars of fixed px boxes loaded first in every run, one at 1024 px built to break nine named rules once
+    each (a 60 px overlap under the navigation and a 20 px one between two parts of the end, a hidden pill, a jump with
+    the live word and one with the theme button, a name cut off without an ellipsis and without a title, a More list cut
+    off and opened 24 px left of its button) and one at 375 px as a phone built to fail four (a jump with the last live
+    word and one with its Parked count emptied, a page that scrolls sideways only while the count is emptied, and a More
+    its own script shuts when opened with its button cut): then the check fails the first with exactly those nine
+    sentences and the second with exactly those four sentences, or the run fails, so a measure that stopped seeing one
+    of those thirteen cannot pass; the other rules are held by the worker test. It runs as a step of the required
+    `contract-tests` job, against Chrome for Testing at the exact version and sha256 `.github/chrome-for-testing.json`
+    pins (the pin checked before the download, which takes https only, and the zip's sha256 before it is unzipped), with
+    the time zone, the locale and the clock fixed; without a Chrome it skips locally and fails under `--require`, which
+    CI passes. Tests: `.github/scripts/console-width-check.mjs --require` (in `.github/workflows/pi-upgrade-check.yml`),
+    `worker/test/console-width-check.test.mjs` (its rules on constructed measures, each control's sentences worked out
+    from its geometry and lost by each weakened measure, the emulation probe and More's click run against stubbed
+    pages, the sweep's widths held to the bar's breakpoints, its pin, `--check-pin` through the real entry point on a
+    broken pin, its ratchet, its glue from the Chrome lookup to the exit code with the browser faked, the workflow step
+    run as Actions runs it with its tools stubbed and held to exactly its four keys, and the workflow's comment, the
+    docs and these specs held to its widths and its controls' counts).
+  - (p) **The shell** (issue #737 PR 1). Given any page in `PAGES`, as either role and on a read-only console, then it
+    starts with a "Skip to content" link to `<main id="main" tabindex="-1">`, carries one icon sprite, one top bar and
+    one `h1`, and every id in it is unique (checked on every golden, on the hostile variants and on every screen's
+    operator page drawn on a read-only console); the navigation is Overview, Runs, Parked, Fleet, Spend (the `/insights`
+    page) and Configuration, in that order, `aria-current="page"` on the screen shown (the run detail counting as Runs),
+    and for an operator alone a More menu holding Audit, which opens under its button and is closed by Escape (focus
+    back on its button), by a click outside it or by focus leaving it; on a phone any opening, whether it moves focus or
+    not, first scrolls its button wholly into view, focus ring included, and it closes when a later scroll of the
+    navigation (or a resize) takes its button wholly out of view (a viewer has no More and no audit link); the top bar's layout
+    follows the viewport's width and the server's `top--ro` class for a read-only console and nothing the script
+    changes, so its height holds on a phone too, and the desktop's rules apply exactly where the phone's do not (no
+    fractional width matches neither): on a phone (at most 760 px)
+    the navigation is a row of its own that scrolls inside itself, the script scrolling a focused pill wholly into view
+    and, once on load, the current one (More's button for a page inside More), never re-centring on a resize or a live
+    word; above it the navigation never scrolls, on a row of its own under the brand pill and the bar's end, and from
+    1440 px (1600 px on a read-only console) on one row with them; the Parked pill carries the number of unanswered
+    parked runs as a panel, which the stream updates on a live page, drawn only when that number is known and above
+    zero; a live page has the live pill, which reads Not live until the script connects to the stream, then Live,
+    Reconnecting (the stream dropped and the browser tries again every 2 seconds), Not live (the stream was refused:
+    past a stream limit, or by a console restarted since, which no longer knows the session) or Signed out (the session
+    ended, or the console was stopped, which ends every stream), each a class and a word, and on a phone the pill never
+    changes size, one mark whose shape says the state (Live the dot, Reconnecting a retry arrow, Not live the stop
+    square, Signed out the sign-out arrow) with its word kept for assistive technology in every state; the theme
+    button, hidden until the script shows it but keeping its place in the bar meanwhile (not drawn, not focusable, not
+    read out), is named for the choice the page was drawn in and cycles the system's theme, light
+    and dark, each click setting `<html data-theme>`, the `color-scheme` meta and the `pd_theme` cookie (deleted for the
+    system's), and a request carrying that cookie gets its page in that theme from the first byte
+    (`REQ-CONSOLE-SECURITY` (f)); a read-only console shows a "Read-only console" chip; the top bar names who is signed
+    in and their role, escaped (the longer of the two cut first with an ellipsis where the bar is short of room, the
+    block's `title` holding both, "ops, Operator"), and offers Sign out; and the run detail's title names the run and
+    links back to Runs. The two sign-in pages carry
+    the skip link, the sprite, a top bar holding only the brand pill and the theme button, the page frame, the title bar
+    and the request's theme. Tests: `admin/test/console-shell.test.mjs`, `admin/test/console-pages.test.mjs` (the
+    fixtures' navigation and Parked count), `admin/test/console-live-pill.test.mjs` (the pill's states, More's closing
+    and placing, the phone navigation's load-time, focus and no-resize rules, the script run on stubbed documents),
+    `admin/test/console-stylesheet.test.mjs` (the breakpoints, the bar's grid, the phone row and the live pill's phone
+    form), and (o), which holds the layout in a real browser.
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
 
@@ -5413,6 +5564,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-23 (#737, PR 1) | Issue #737, PR 1: the Pulse foundation, every page in the new shell and look. **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement gains the CSP kept, the theme cookie read only as a closed set and every reference a page's own. **(e) UNCHANGED, checked**: the CSP is the same string (`headers.mjs` untouched); the shell, the tokens, the sprite and the theme add no inline style, no inline script and no external resource, and a real browser now also holds every page to the CSP through `REQ-OPERATOR-CONSOLE-SCREENS` (o). **(f) AMENDED**: `pd_theme` is a preference, not a credential, written only by the served script, read for every page and both sign-in pages as exactly `light` or `dark` in one copy, the page carrying the console's own constant and never the cookie's bytes, set by no response, in no log line or audit row, and not named `pdc_`, so the leak canary still holds for every body. **(m) AMENDED**: on every page in `PAGES`, both roles, plain and hostile, every reference is a console path or an in-page `#id` whose element the page holds (the sprite's `<use href="#i-...">`, the skip link's `#main`, `url(#hatch)`), the one other kind an outbound `<a>` with `rel="noreferrer noopener"` and `target="_blank"`; the stylesheet holds no `url(` at all. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the Statement gains one visual design inside one shell, AA contrast in both themes and a phone's width; the Scope's (m) now covers every page. **(i) AMENDED**: the fixtures hold the shell (the head gains only the `color-scheme` meta; the skip link, the sprite, the top bar and the title bar; a legacy page's panels inside one `.legacy`), and every panel element, the shell's Parked count included, carries only `id` and `data-panel`. **NEW (n)**, contrast: every declared token pair at WCAG 2 AA in both themes, the pair set pinned, every colour token in a pair or in `NO_PAIR` with its reason, no status by colour alone. **NEW (o)**, a phone's width: every page fixture and both sign-in pages in Chrome at 375 by 812, light and dark and forced each way, under the console's own headers: no sideways page scroll, no CSP violation, the theme's canvas, a fixture per page and role, a `WIDTH_PENDING` ratchet (empty), as a step of the required `contract-tests` job against Chrome for Testing at a pinned version and sha256. **NEW (p)**, the shell: the skip link; the navigation in order (Spend is `/insights`) with More holding Audit for an operator alone; the Parked count as a panel (updated by the stream on a live page) drawn only when known and above zero; the live pill's words (Live, Reconnecting, Not live, Signed out); the theme button cycling the system's theme, light and dark; the read-only chip; who is signed in; the run detail's back link. UNCHANGED, checked: `REQ-OPERATOR-CONSOLE-SCREENS` (j) (the shell's count is one more panel of a live page, sent in full first and then only on change, like any other) and (l); `REQ-CONSOLE-SECURITY` (l) (the shell shows a viewer a name, a role and fixed words only, and every panel is drawn as before); `REQ-OPERATOR-CONSOLE-ACTIONS` (no action is added or changed, every form is drawn inside the legacy wrapper as before, and the kit's command box with its hidden Copy button reaches no page yet); `REQ-LIVE-TRANSCRIPT` (the run page's transcript section is drawn as before, inside the legacy wrapper). **Review round 1 (same PR)**: the `REQ-CONSOLE-SECURITY` Statement and (m) name the one outbound link (`https:`, or `http:` for a self-hosted forge, with `rel="noreferrer noopener"` and `target="_blank"`). **(n) CORRECTED**: the pairs held are the 56 declared a theme, a status colour as a mark is in `NO_PAIR` (attention is 2.00:1 on a light `surface`) and the legacy layer's combinations are not measured; the kit's claim is narrowed to what holds (a badge is an icon and a word, a chip its word, `dot` and `count` colour drawn beside a word). **(o) AMENDED**: a forced page carries `page()`'s `color-scheme` meta as well as its `data-theme`; NEW, the shell sweep: every page drawn by `renderPage` for an operator, a viewer, a read-only console and the 32-character longest name on one, with a Parked count and a 120-character run id, at 375, 800, 1024, 1280 and 1440 px, failing on a sideways scroll, a navigation pill meeting the bar's end or a More menu that does not open whole inside the viewport clear of its button (on the PR's first CSS it measured pills up to 124 px under the live pill at 800 px, overlaps up to 1440 px on a read-only console, and More covering its own button on a read-only phone); the pin checked before an https-only download; the glue and the workflow step tested. **(p) CORRECTED**: unique ids are checked on every golden and on the hostile variants; Not live also follows a console restart (sessions live in memory) and Signed out a console stop; a phone keeps the live word for assistive technology. Round 1 review also: `GET /favicon.ico` answers an empty 204 without a session (REQ-CONSOLE-SECURITY Statement and DES-OPERATOR-CONSOLE item 2 name it), so a browser's own request is neither a 404 nor a sign-in redirect. **Review round 2 (same PR)**: the top bar's rule replaced, since round 1's navigation scrolled inside itself at every width, which hid pills from a mouse at desktop widths, clipped focus rings and let the bar jump 60 px when the live word or the revealed theme button crossed a wrap. **(p) AMENDED**: the layout follows the viewport's width and the server's `top--ro` alone; on a phone the navigation scrolls in its own row, a focused pill scrolled wholly into view and the current one once on load, never re-centred; above 760 px it never scrolls, under the brand pill and the end, and on one row with them from 1440 px (1600 on a read-only console); More opens under its button and also closes when focus leaves it, and on a phone when its button scrolls out of view; on a phone Live is a dot alone and every other state its word; a cut name is whole in its `title`; unique ids are also checked on each screen's read-only render; the tests named. **(n) NARROWED**: a state is a word but Live's dot on a phone, and the kit's `dot` is colour (an image with an accessible name, given a `label`) drawn only beside its word. **(o) AMENDED**: the shell sweep at 320 and 375 as a phone and 800, 1024, 1180, 1280 and 1440 px, the window's emulation read back from the page, the bar read at each live word with the theme button shown and hidden: every pair of the bar's parts apart (the end's against each other too), above 760 px every pill whole with its focus ring and one height, a cut name with an ellipsis and its `title` and the longest name cut, More opened under its button; NEW, a negative control in every run, a bar built to break each rule once, failed with exactly its nine sentences or the run fails. Measured with Chrome for Testing 155 on macOS, the check run in a copy of this round's tree with an earlier commit's whole `admin/src/console` put back (with only some of its modules put back the numbers differ): on this PR's first CSS the check fails 180 of the 224 shell runs (pills under the end from 800 to 1440 px, the page wider than its window at 320 and 800 px, More covering its button on a phone, the longest name never cut); on round 1's 171 (pills hidden or cut at every desktop width, the bar jumping at 800, 1024 and 1180 px, More away from its button at 320, 375 and 800 px, a cut name without a title); on this round's, none, each run about 62 s. **`REQ-CONSOLE-SECURITY` (m) AMENDED**: the reference rule names every attribute it reads (`poster`, `data`, `background` and `codebase` on any element, `srcset`, `imagesrcset` and `ping`), read as a browser reads the tag, no `<meta http-equiv>`, and every screen's read-only render. **(f) UNCHANGED, checked**: what the console reads and draws of `pd_theme` is as it was; only the docs' reasons were corrected (`Lax` serves the sign-in and one-time-link pages, since any other page reached from another site is a redirect to sign-in, and a planted copy for a path holds only the pages under that path to the system's theme). **Review round 3 (same PR)**: the phone's bar no longer moves, and the check now holds it there. **(p) AMENDED**: on a phone the live pill never changes size, one mark whose shape says the state (Live the dot, Reconnecting a retry arrow, Not live the stop square, Signed out the sign-out arrow) with its word kept for assistive technology, so neither the first load (drawn Not live, then Live) nor a reconnect moves the bar, which round 3 measured moving 50 to 52 px; the theme button keeps its place while hidden, so its reveal moves nothing; on a phone any opening of More first scrolls its button wholly into view and only a later scroll that takes it wholly out closes it (round 3 found that a click moving no focus could not open a button partly scrolled away at all); the block naming who is signed in carries the name and the role in its `title`, the longer of name and role cut first; the desktop's rules apply exactly where the phone's do not, so no fractional width matches neither. **(n) NARROWED**: on a phone each live state is a mark of its own shape at 3:1 or more, and the dot rule is the kit's (no page draws one yet). **(o) AMENDED**: the shell sweep gains 761, 940 and 1600 px (the layout's tightest places, held to `TOP_BAR`); the bar is also read with the Parked count emptied and five digits long, and the page's width in every read; the height rule holds at every width, a phone's included; every live word read, and no two drawn with the same classes; one row from 1440 px for a console that is not read-only; a part judged by its box and everything drawn inside it (a word spilling out of the phone's fixed slot meets its neighbour); a cut role word held to the title too; on a phone More is clicked with its button cut in half, nothing focused and never scrolled into view by the check, and must open with its button whole; one run with page scripts off; a second negative control, at 375 px as a phone (a jump with the last live word and one with its Parked count emptied, a page wide only while the count is emptied, a More its own script shuts when clicked cut), failed with exactly its four sentences; and the first control's claim NARROWED to the nine rules it breaks, every other rule held by the worker test. The round 2 figures above now say how they were measured. Measured the same way with this round's check: the first CSS fails 263 of its 321 shell runs (the 320 of the sweep and the run without scripts) and, before any run, its live table, which drew Not live and Signed out with the same classes; round 1's 264; round 2's 61, every one at 320 or 375 px (the bar 52 px taller while the server's Not live stood, the theme button's reveal moving the bar, More not opening on a click with its button cut); this round's none, a run about 80 s (63 s before this round's reads and widths). **`REQ-CONSOLE-SECURITY` (f) UNCHANGED, checked**: what the console reads and draws of `pd_theme` is as it was; the docs CORRECTED: on a console served under a domain name a copy planted with `Domain`, or a parent domain's from a sibling host, is a second copy on every page, holding every page to the system's theme until it expires (on `localhost` or an IP address it replaces the person's). |
 | 2026-10-23 (#710, PR 4, round 1) | Issue #710, PR 4, review round 1. **`REQ-OPERATOR-CONSOLE-SCREENS` (a) AMENDED**: "No worker online" now also needs BullMQ's own worker list (`queue.workers`, read from Valkey's connections, free of any host clock) to be empty, so a worker whose clock is behind the console's is not called offline; beats that look stale while BullMQ sees more workers than beat freshly give the note "Host beats look stale (clock skew?), but the queue still sees its workers connected" and the queue stays green; money is `usd2`'s one fixed `$1,234.56` form (rounded down for an amount spent against a cap) where it was `fmtUsd`'s ladder; a note says the count and dollar windows are UTC; the time clause is narrowed to what is true: console text instants and the Spend page's split and capacity instants are `<time>`, while chart tips, day labels and buckets, the split's short notice and transcript entry times stay UTC. Tests named: "clock skew", `usd2`, the insights `<time>` cases and the day boundary of `refusalsIn` and `failures24h` (a record at exactly 24 h counts, one a millisecond older does not). **(f) UNCHANGED, checked**: the Fleet state follows (a)'s rule, which now reads BullMQ too, by the same `workersOnline`. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the new note is fixed words; the new `<time>` elements on the Spend page carry an ISO instant built from a validated one and escaped text. |
 | 2026-10-23 (#710, PR 4) | Issue #710, PR 4: a truthful overview and readable numbers. **`REQ-OPERATOR-CONSOLE-SCREENS` (a) AMENDED**: the overview leads with Active jobs and Parked; with no live host beating within a minute (and a registry that was read) the Fleet panel warns "No worker online: jobs queue but nothing runs them" and the queue is never green, the Workers fact being the registry-aware count with how many are online; "Failed jobs awaiting retry"; "Problems (24h)": the failed and refused runs of the day (an operator's cancel not counted) with the five most frequent refusal reasons linked by their short sentence; money in the short form with the exact amount on hover; "Jobs started" and "Tokens used" against their caps, "no cap"; every instant a `<time datetime>` of UTC text that the browser script shows in the reader's zone, UTC kept in the `title`. **(f) AMENDED**: CPUs in cores on the hosts table and the run's Resources; the Fleet state follows the no-worker rule; a failed job's id links to its run page with its record's reason token and sentence inline, the free-text `failedReason` still only in the operator's details. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: (l) holds, only the closed `reason` enum reaches a row and the new `title` attributes carry an amount, a token or a UTC time; the served script adds no inline script or style and writes the localised time with `textContent`. **(k) UNCHANGED, checked**: `/api/state` gains a key (`INT-CONSOLE-STATE-API`), no role difference. |
 | 2026-10-22 (#710, PR 3, round 1) | Issue #710, PR 3, review round 1. **`REQ-OPERATOR-CONSOLE-ACTIONS` (l) AMENDED**: a venue-policy verdict never hides the sandbox command; the console asks `sandboxRetentionOf` with `venuePolicy: "unknown"` (it never sees the opener's `PI_BACKENDS`, `OQ-038`, so every podman run was hidden as `unblessed`) and hides only what is certain (retention off, swept, another run's directory, no image, the workspace gone, a venue with no shell), the panel's `SANDBOX_CERTAIN` the backstop. **`REQ-OPERATOR-CONSOLE-ACTIONS` (e) AMENDED**: the retained job is looked for in the planners' queues (`fleetQueuesOn`, shared with `readFleetQueues`), a degraded list making not-found unreadable and uncached, and a recovery record is judged by 31 days. **`REQ-OPERATOR-CONSOLE-SCREENS` (c) AMENDED**: an unknown outcome word is cut at 64 code points; the `awaiting-input` next step drops its console path where the Chat panel cannot take the answer; the no-record tone is stated (grey for queued or running, amber for what the page cannot show, no outcome word); a queued job's page has no transcript section. The run page's HTTP status is UNCHANGED, checked: a queued page, a running page with no transcript or progress, and an unknown one answer 404 on `main` too, by the same expression. `REQ-CONSOLE-SECURITY` UNCHANGED, checked: the banner is still the same for both roles and holds fixed text and closed enums only. **Code evidence**: admin/src/read-model.mjs -> fleetQueuesOn, readFleetQueues, createFleetReader (retainedJob, sandboxCheck, killSwitchQueues); worker/src/queue.mjs -> discoverHostQueuesReporting; admin/src/sandbox-verdict.mjs -> sandboxRetentionOf; admin/src/console/panels.mjs -> SANDBOX_CERTAIN, sandboxLine, bannerCut, runOutcome, AWAITING_INPUT_ELSEWHERE, absentOutcome; admin/src/console/pages.mjs -> runHasTranscript; admin/src/job-actions.mjs -> RERUN_DATA_KEPT_MS, rerunRefusalOf; worker/src/sandbox-policy.mjs. |
