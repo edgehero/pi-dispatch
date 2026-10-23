@@ -12,6 +12,7 @@ import {
   meter,
   sparkline,
   fmtUsd,
+  usd2,
   fmtCost,
   makeLineInput,
   LINE_INPUT_CURSOR,
@@ -215,6 +216,28 @@ test("fmtUsd compacts any magnitude into at most 7 characters", () => {
     assert.equal(fmtUsd(n), expected, `fmtUsd(${n})`);
     assert.ok(fmtUsd(n).length <= 7, `fmtUsd(${n}) stays within 7 chars`);
   }
+});
+
+test("usd2: one fixed two-decimal form from micro-dollars, half up by default and DOWN for a spend against a cap (#710)", () => {
+  // [micro-dollars, default, spent]
+  const table = [
+    [0, "$0.00", "$0.00"],
+    [4_999, "$0.00", "$0.00"],
+    [5_000, "$0.01", "$0.00"], // $0.005
+    [99_999_000, "$100.00", "$99.99"], // $99.999 against a $100 cap is not full
+    [100_000_000, "$100.00", "$100.00"],
+    [999_595_000, "$999.60", "$999.59"],
+    [999_600_000, "$999.60", "$999.60"],
+    [1_000_000_000, "$1,000.00", "$1,000.00"],
+    [1_234_565_000, "$1,234.57", "$1,234.56"],
+    [1_000_000_000_000, "$1,000,000.00", "$1,000,000.00"], // $1e6
+    [Number.MAX_SAFE_INTEGER, "$9,007,199,254.74", "$9,007,199,254.74"],
+  ];
+  for (const [m, dflt, spent] of table) {
+    assert.equal(usd2(m), dflt, `usd2(${m})`);
+    assert.equal(usd2(m, { spent: true }), spent, `usd2(${m}, spent)`);
+  }
+  for (const bad of [-1, -1_000_000, 1.5, NaN, Infinity, null, undefined, "3"]) assert.equal(usd2(bad), "-", `usd2(${String(bad)})`);
 });
 
 test("fmtCost renders each cost class with a distinct, non-overlapping shape", () => {

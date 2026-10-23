@@ -93,6 +93,8 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 // admin already takes its config helpers from the worker the same way).
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT } from "@edgehero/pi-dispatch/reason-catalog";
+// Issue #710: what counts as a refusal on the overview is what both surfaces call one.
+import { OUTCOME_WORDS, outcomeWord } from "./words.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -3983,13 +3985,20 @@ export function createFleetReader(
           // Answered runs are dropped BEFORE the chain counter is read, so a run nobody waits on costs no fs call.
           parked: readParkedRuns({ runs: w.runs, now: nowMs, sessionsDir: paths.sessionsDir ?? null, fs, unansweredOnly: true }),
           failures24h: w.runs.filter((r) => r?.outcome === "failed" && runAt(r) >= nowMs - DAY_MS && runAt(r) <= nowMs).length,
-          // A floor when the window ended before the day did: every one of WIDE_RUNS runs is inside the day.
+          // Issue #710: the day's refusals beside its failures, off the same window, so the overview says both.
+          refusals24h: refusalsIn(w.runs, nowMs),
+          // A floor when the window ended before the day did: every one of WIDE_RUNS runs is inside the day. The same
+          // window, so the same floor holds for `refusals24h`.
           failures24hFloor: w.runs.length >= WIDE_RUNS && runAt(w.runs[w.runs.length - 1]) >= nowMs - DAY_MS,
           parkedUnreachable: w.partial ? scrubReason(w.partial) : null,
+          recordReasons: newestReasonsOf(w.runs),
         }),
         // An empty `parked` alone would read as "nobody is waiting"; `parkedUnreachable` says the list is not known.
-        (err) => ({ parked: [], failures24h: null, failures24hFloor: false, parkedUnreachable: scrubReason(err?.message ?? String(err)) || "the runs could not be read" }),
+        (err) => ({ parked: [], failures24h: null, refusals24h: null, failures24hFloor: false, parkedUnreachable: scrubReason(err?.message ?? String(err)) || "the runs could not be read", recordReasons: new Map() }),
       );
+      // Issue #710: each failed job's record reason (its newest record in the wide window), the closed enum alone, so the
+      // fleet page can say why in the row. BullMQ's own `failedReason` stays the operator's free text, never in a row.
+      if (Array.isArray(failed?.rows)) for (const row of failed.rows) row.reason = fold.recordReasons.get(row.jobId) ?? null;
 
       // Issue #647: whether each waiting park is being answered now (a job queued or running on its target, which has no
       // record yet: `readPendingOnTargets`, the rule the Chat panel and the planner use). Read only while something is
@@ -4092,6 +4101,7 @@ export function createFleetReader(
         parked: fold.parked,
         parkedUnreachable: fold.parkedUnreachable,
         failures24h: fold.failures24h,
+        refusals24h: fold.refusals24h,
         failures24hFloor: fold.failures24hFloor,
       };
     },
@@ -4239,6 +4249,44 @@ export function createFleetReader(
 // `mergedRunsOn` split), and none writes: the mirror is read with `prune: false` or through the read-only page read.
 // (The fleet reader's `snapshot()` writes nothing only when it was built `readOnly`: see `createFleetReader`.)
 // ---------------------------------------------------------------------------------------------------------------------
+
+/** How many reasons the overview's refusals list (issue #710): the five most frequent of the day. */
+export const REFUSALS_TOP = 5;
+
+/** A record reason as the snapshot carries it: the record's token charset (the runs filter's and `/api/run`'s), else not one. */
+const RECORD_REASON_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * The refusals among `runs` in the 24 hours up to `nowMs` (issue #710), `{ count, top: [{ reason, count }] }`: runs whose
+ * outcome reads "refused" in the console's words (`outcomeWord`, words.mjs), so a `policy` record with `operator-cancel`,
+ * which both surfaces call "cancelled", is not counted: an operator stopping a run is not a rule saying no, and an
+ * overview that counted it would send the operator looking for a rule to change. `top` is the `REFUSALS_TOP` most
+ * frequent reasons, by count and then by token, so two reads of the same window list the same rows; a reason outside the
+ * record's token charset is counted and never listed. Pure, and exported for its tests.
+ */
+export function refusalsIn(runs, nowMs) {
+  const by = new Map();
+  let total = 0;
+  for (const r of Array.isArray(runs) ? runs : []) {
+    const at = runAt(r);
+    if (!(at >= nowMs - DAY_MS && at <= nowMs)) continue;
+    if (outcomeWord(r?.outcome, r?.reason).word !== OUTCOME_WORDS.policy.word) continue;
+    total += 1;
+    if (typeof r.reason === "string" && RECORD_REASON_RE.test(r.reason)) by.set(r.reason, (by.get(r.reason) ?? 0) + 1);
+  }
+  const top = [...by].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, REFUSALS_TOP).map(([reason, count]) => ({ reason, count }));
+  return { count: total, top };
+}
+
+/** Each job id's newest record reason in `runs` (newest first, as `mergeRuns` orders them), charset-checked, else null. */
+function newestReasonsOf(runs) {
+  const out = new Map();
+  for (const r of Array.isArray(runs) ? runs : []) {
+    if (typeof r?.jobId !== "string" || out.has(r.jobId)) continue;
+    out.set(r.jobId, typeof r.reason === "string" && RECORD_REASON_RE.test(r.reason) ? r.reason : null);
+  }
+  return out;
+}
 
 /** A record's instant in millis, `endedAt` else `startedAt`, as the mirror scores it; -Infinity when it has neither. */
 function runAt(r) {

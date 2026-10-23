@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PAGES, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
-import { ageText, insightsBody, navHtml, runCost, shownPath, usdText, utcText } from "../src/console/panels.mjs";
+import { BEAT_FRESH_MS, COUNT_WINDOWS_UTC_TEXT, NO_WORKER_TEXT, STALE_BEATS_TEXT, ageText, insightsBody, moneyHtml, navHtml, runCost, shownPath, timeHtml, usdText, utcText, workersOnline } from "../src/console/panels.mjs";
 import { CONSOLE_CSS, DARK_THEME, LIGHT_THEME } from "../src/console/style.mjs";
 
 // The console's panels (issue #641): the cost class per run, the formatting, the role rule and determinism, on small
@@ -386,7 +386,7 @@ test("the run page's Inbox panel (issue #646): the list for both roles without t
   const view = (role, inbox, readOnly = false, id = "gh-1") => ({ page: "run", role, readOnly, query: { id }, env: {}, now: NOW, data: { now: NOW, inbox } });
   const op = String(runInbox(view("operator", box)));
   assert.match(op, /<h2>Inbox<\/h2>/);
-  assert.match(op, new RegExp(`<td class="mono">${q}</td><td>steer</td><td>console</td><td>queued</td><td>2026-10-08 15:38 UTC</td><td class="num">18</td>`));
+  assert.match(op, new RegExp(`<td class="mono">${q}</td><td>steer</td><td>console</td><td>queued</td><td><time datetime="2026-10-08T15:38:38.000Z">2026-10-08 15:38 UTC</time></td><td class="num">18</td>`));
   assert.match(op, new RegExp(`<td class="mono">${w}</td><td>follow-up</td><td>forge</td><td>written</td>`));
   assert.match(op, /<td class="num">2,048<\/td>/);
   assert.equal((op.match(/data-action="steer-withdraw"/g) ?? []).length, 2, "a withdraw for the queued and the written message only, never the delivered one or an id outside the charset");
@@ -916,7 +916,7 @@ test("the runs table: the outcome in the panel's words, its tone as a class, and
     { ...base, jobId: "gh-f2v", outcome: "policy", reason: "model-not-allowed", why: "fallback-unlisted" },
   ];
   const out = (await pagePanels("runs", ctxOf("viewer", { runsPage: { runs, next: null, mirror: "ok" } }, parsePageQuery("runs", "").query))).map((p) => p.html).join("");
-  const rowOf = (id) => out.match(new RegExp(`<tr><td>[^<]*</td><td><a class="mono" href="/run\\?id=${id}">.*?</tr>`))?.[0] ?? "";
+  const rowOf = (id) => out.match(new RegExp(`<tr><td>(?:<time datetime="[^"]*">[^<]*</time>|[^<]*)</td><td><a class="mono" href="/run\\?id=${id}">.*?</tr>`))?.[0] ?? "";
   const cellOf = (id) => rowOf(id).split("</td>")[6] ?? "";
   // The words and the tones: no class for completed, warn for refused, awaiting input and cancelled, bad for failed.
   assert.equal(cellOf("gh-c"), "<td>completed");
@@ -982,4 +982,230 @@ test("the chain's children carry their reason through loadPageData, so a waiting
   assert.match(run, /href="\/run\?id=gh-3">gh-3<\/a> cancelled<\/li>/);
   assert.match(run, /href="\/run\?id=gh-4">gh-4<\/a> refused<\/li>/);
   assert.match(run, /href="\/run\?id=gh-5">gh-5<\/a> failed<\/li>/);
+});
+
+// ---- issue #710, PR 4: a truthful overview and readable numbers ----
+
+const overviewOf = async (snap, role = "viewer") => (await pagePanels("overview", ctxOf(role, { snapshot: snap }))).map((p) => [p.id, p.html]);
+
+test("the overview leads with what needs a person: Active, then Parked, then the fleet, spend, hosts and the day's problems (#710)", async () => {
+  const ids = (await overviewOf(snapshot())).map(([id]) => id);
+  assert.deepEqual(ids, ["p-active", "p-parked", "p-state", "p-spend", "p-hosts", "p-failures"]);
+});
+
+test("Problems (24h): failed and refused runs, the top reasons linked by their short sentence, an unknown token raw and cut, cancels not counted (#710)", async () => {
+  const { REASONS } = await import("@edgehero/pi-dispatch/reason-catalog");
+  const { shortSentence } = await import("../src/words.mjs");
+  const long = `zz${"q".repeat(80)}`;
+  const snap = { ...snapshot(), failures24h: 2, failures24hFloor: false, refusals24h: { count: 9, top: [{ reason: "scope-cap", count: 5 }, { reason: "brand-new-reason", count: 3 }, { reason: long, count: 1 }] } };
+  const html = new Map(await overviewOf(snap)).get("p-failures");
+  assert.match(html, /^<h2>Problems \(24h\)<\/h2>/);
+  assert.match(html, /<span class="big warn">2<\/span> failed runs\. <a href="\/runs\?outcome=failed">See failed runs<\/a>/);
+  assert.match(html, /<span class="big warn">9<\/span> refused runs, not counting runs an operator cancelled\. <a href="\/runs\?outcome=policy">See refused runs<\/a>/);
+  const scope = shortSentence(REASONS["scope-cap"].sentence).replace(/'/g, "&#39;");
+  assert.ok(html.includes(`<li><a href="/runs?outcome=policy&amp;reason=scope-cap" title="scope-cap">${scope}</a> <span class="note">(5)</span></li>`), html);
+  assert.ok(html.includes('<li><a href="/runs?outcome=policy&amp;reason=brand-new-reason" title="brand-new-reason">brand-new-reason, no explanation yet</a> <span class="note">(3)</span></li>'), "an unknown token: raw, linked, no explanation yet");
+  // A token the runs filter refuses (past its 64 characters) is printed once, cut, and not linked.
+  assert.ok(html.includes(`<li>${long.slice(0, 64)}…, no explanation yet <span class="note">(1)</span></li>`), html);
+  assert.ok(!html.includes(long), "never the whole odd token");
+  // Nothing refused: a zero without the warning class and no list; a floor says "at least" for both counts once.
+  const calm = new Map(await overviewOf({ ...snap, failures24h: 0, failures24hFloor: true, refusals24h: { count: 0, top: [] } })).get("p-failures");
+  assert.match(calm, /<span class="big">at least 0<\/span> failed runs/);
+  assert.match(calm, /<span class="big">at least 0<\/span> refused runs/);
+  assert.ok(!calm.includes("<ul"));
+  assert.equal((calm.match(/there may be more/g) ?? []).length, 1);
+  // The window unread: one warning, no zeros.
+  const lost = new Map(await overviewOf({ ...snap, failures24h: null, refusals24h: null })).get("p-failures");
+  assert.match(lost, /The run history could not be read/);
+  assert.ok(!lost.includes("refused runs"));
+});
+
+test("no worker online: the overview warns first and the queue is never green, by the hosts' beats (#710)", async () => {
+  const stateOfSnap = async (over) => new Map(await overviewOf({ ...snapshot(), ...over })).get("p-state");
+  const queue = { pausedState: false, pausedPartial: false, counts: { waiting: 4 }, workers: 2, queues: 1 };
+  const host = (name, staleMs) => ({ name, concurrency: "2", jobs: [], staleMs });
+  // Every row's last beat older than a minute and no worker BullMQ can see: nothing drains the queue.
+  const stale = await stateOfSnap({ queue: { ...queue, workers: "unknown" }, hostBudgets: [host("h1", BEAT_FRESH_MS + 1), host("h2", null)] });
+  assert.ok(stale.startsWith(`<h2>Fleet</h2><p class="warn">${NO_WORKER_TEXT}</p>`), stale);
+  assert.ok(!stale.includes('class="good"'), "never green");
+  assert.match(stale, /<dt>Queue<\/dt><dd><span class="warn">not paused, but no worker is online<\/span><\/dd>/);
+  assert.match(stale, /<dt>Workers<\/dt><dd>2 registered, 0 online \(a beat in the last minute\)<\/dd>/, "the registry's count, not BullMQ's");
+  assert.ok(!stale.includes(STALE_BEATS_TEXT));
+  assert.match(stale, /<dt>Failed jobs awaiting retry<\/dt>/);
+  const fleetQueuesHtml = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), queue: { ...queue, workers: "unknown" }, hostBudgets: [host("h1", BEAT_FRESH_MS + 1)] } }))).map((p) => [p.id, p.html])).get("p-queues");
+  assert.match(fleetQueuesHtml, /<dt>Fleet<\/dt><dd><span class="warn">not paused, but no worker is online<\/span>/, "the fleet page says the same");
+  assert.ok(!stale.includes("kept by the queue"));
+  // No registry row and no BullMQ worker either.
+  const empty = await stateOfSnap({ queue: { ...queue, workers: "unknown" }, hostBudgets: [] });
+  assert.ok(empty.includes(NO_WORKER_TEXT) && !empty.includes('class="good"'));
+  assert.match(empty, /<dt>Workers<\/dt><dd>none online<\/dd>/, "never \"unknown registered\"");
+  // A paused fleet with no worker stays red, and still warns.
+  const paused = await stateOfSnap({ queue: { ...queue, workers: "unknown", pausedState: true }, hostBudgets: [host("h1", 5 * 60_000)] });
+  assert.ok(paused.includes(NO_WORKER_TEXT) && paused.includes('<span class="bad">paused'));
+  // One fresh beat: running, green, no warning; a fleet whose registry is unreadable is judged by nobody.
+  const live = await stateOfSnap({ queue, hostBudgets: [host("h1", BEAT_FRESH_MS), host("h2", BEAT_FRESH_MS + 1)] });
+  assert.ok(!live.includes(NO_WORKER_TEXT) && live.includes('<span class="good">running</span>'));
+  assert.match(live, /<dt>Workers<\/dt><dd>2 registered, 1 online/);
+  const blind = await stateOfSnap({ queue: { ...queue, fleetDegraded: "registry unreadable" }, hostBudgets: [host("h1", 10 * 60_000)] });
+  assert.ok(!blind.includes(NO_WORKER_TEXT), "an unreadable registry is not an empty one");
+  assert.match(blind, /fleet as it was last seen/);
+  // A registry with no row: BullMQ's own count is the fallback (it cannot see beats).
+  assert.deepEqual(workersOnline({ queue: { workers: 3 }, hostBudgets: [] }), { count: 3, online: 3, connected: 3, staleBeats: false, none: false });
+  assert.deepEqual(workersOnline({ queue: { workers: "unknown" }, hostBudgets: [] }), { count: "unknown", online: 0, connected: 0, staleBeats: false, none: true });
+  assert.deepEqual(workersOnline({ queue: { workers: 1 }, hostBudgets: [host("h1", 1000)] }), { count: 1, online: 1, connected: 1, staleBeats: false, none: false });
+  assert.deepEqual(workersOnline({ queue: { workers: 3, fleetDegraded: "x" }, hostBudgets: [host("h1", 1000)] }), { count: 1, online: null, connected: 3, staleBeats: false, none: false });
+  assert.equal(BEAT_FRESH_MS, 60_000);
+});
+
+test("clock skew: a host whose beats look stale while BullMQ sees its worker is not \"no worker online\" (#710, review round 1)", async () => {
+  const stateOfSnap = async (over) => new Map(await overviewOf({ ...snapshot(), ...over })).get("p-state");
+  const queue = { pausedState: false, pausedPartial: false, counts: { waiting: 4 }, queues: 1 };
+  const host = (name, staleMs) => ({ name, concurrency: "2", jobs: [], staleMs });
+  // The repro: a worker 50 s behind with a 15 s beat reads 61 s stale for part of every minute; BullMQ, clock-free, sees it.
+  const skew = workersOnline({ queue: { workers: 1 }, hostBudgets: [{ staleMs: 61_000 }] });
+  assert.deepEqual(skew, { count: 1, online: 0, connected: 1, staleBeats: true, none: false });
+  const page = await stateOfSnap({ queue: { ...queue, workers: 1 }, hostBudgets: [host("h1", 61_000)] });
+  assert.ok(!page.includes(NO_WORKER_TEXT), page);
+  assert.ok(page.startsWith(`<h2>Fleet</h2><p class="note">${STALE_BEATS_TEXT}</p>`), "the softer note, not the warning");
+  assert.match(page, /<dt>Queue<\/dt><dd><span class="good">running<\/span><\/dd>/, "green: the queue is being drained");
+  assert.match(page, /<dt>Workers<\/dt><dd>1 registered, 0 online \(a beat in the last minute\), 1 connected to the queue<\/dd>/);
+  const fleet = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), queue: { ...queue, workers: 1 }, hostBudgets: [host("h1", 61_000)] } }))).map((p) => [p.id, p.html])).get("p-queues");
+  assert.match(fleet, /<dt>Fleet<\/dt><dd><span class="good">running<\/span>/, "the fleet page agrees");
+  // A fresh registry with BullMQ blind (no CLIENT SETNAME): online, no note, no warning.
+  const blind = await stateOfSnap({ queue: { ...queue, workers: "unknown" }, hostBudgets: [host("h1", 1000)] });
+  assert.ok(!blind.includes(NO_WORKER_TEXT) && !blind.includes(STALE_BEATS_TEXT) && blind.includes('<span class="good">running</span>'));
+  assert.deepEqual(workersOnline({ queue: { workers: "unknown" }, hostBudgets: [host("h1", 1000)] }), { count: 1, online: 1, connected: 0, staleBeats: false, none: false });
+  // Both say nobody: the warning.
+  const both = await stateOfSnap({ queue: { ...queue, workers: "unknown" }, hostBudgets: [host("h1", 61_000)] });
+  assert.ok(both.includes(NO_WORKER_TEXT) && both.includes("not paused, but no worker is online"));
+  // One fresh beat of two, BullMQ seeing the one: a host is down, not a clock; no note.
+  const one = await stateOfSnap({ queue: { ...queue, workers: 1 }, hostBudgets: [host("h1", 1000), host("h2", 5 * 60_000)] });
+  assert.ok(!one.includes(STALE_BEATS_TEXT) && !one.includes(NO_WORKER_TEXT));
+  assert.match(one, /<dt>Workers<\/dt><dd>2 registered, 1 online \(a beat in the last minute\)<\/dd>/);
+  assert.equal(BEAT_FRESH_MS, 60_000);
+});
+
+test("readable numbers: money in one fixed form with the exact amount on hover, jobs started against their caps, CPUs as cores (#710)", async () => {
+  assert.equal(String(moneyHtml(1_234_567)), '<span title="$1.234567">$1.23</span>');
+  assert.equal(String(moneyHtml(2_000_000)), '<span title="$2.00">$2.00</span>');
+  assert.equal(String(moneyHtml(1_500_000_000)), '<span title="$1500.00">$1,500.00</span>', "one fixed form: never $1.5k beside $2.00");
+  assert.equal(String(moneyHtml(99_999_000, { spent: true })), '<span title="$99.999">$99.99</span>', "spent rounds down");
+  assert.equal(String(moneyHtml(99_999_000)), '<span title="$99.999">$100.00</span>');
+  for (const bad of [-1, 1.5, null, "3"]) assert.equal(String(moneyHtml(bad)), "-");
+  const snap = { ...snapshot(), dollars: { rows: [{ ledger: "deployment", name: "deployment", window: "day", counterMicros: 1_234_567, capMicros: 50_000_000, full: false }, { ledger: "deployment", name: "deployment", window: "month", counterMicros: 99_999_000, capMicros: 100_000_000, full: false }] } };
+  const spend = new Map(await overviewOf(snap)).get("p-spend");
+  assert.match(spend, /<th scope="col" class="num">Used<\/th><th scope="col" class="num">Cap<\/th>/);
+  assert.match(spend, /<td>Jobs started today<\/td><td class="num">3<\/td><td class="num">10<\/td>/);
+  assert.match(spend, /<td>Jobs started this week<\/td><td class="num">4<\/td><td class="num">no cap<\/td>/);
+  assert.match(spend, /<td>Tokens used today<\/td>/);
+  assert.ok(!spend.includes("Reserved") && !spend.includes("not set"));
+  assert.match(spend, /<td class="num"><span title="\$1\.234567">\$1\.23<\/span><\/td><td class="num"><span title="\$50\.00">\$50\.00<\/span><\/td>/);
+  assert.match(spend, /<td class="num"><span title="\$99\.999">\$99\.99<\/span><\/td><td class="num"><span title="\$100\.00">\$100\.00<\/span><\/td>/, "a window short of its cap never reads as the cap");
+  assert.ok(spend.endsWith(`<p class="note">${COUNT_WINDOWS_UTC_TEXT}</p>`), "the windows are UTC, and say so");
+  assert.match(COUNT_WINDOWS_UTC_TEXT, /UTC/);
+  // The runs list's Job cap column.
+  const runs = [{ jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "completed", endedAt: "2026-10-08T15:00:00Z", dollars: { reservedMicros: 2_500_001 } }];
+  const list = (await pagePanels("runs", ctxOf("viewer", { runsPage: { runs, next: null, mirror: "ok" } }, parsePageQuery("runs", "").query))).map((p) => p.html).join("");
+  assert.match(list, /<td class="num"><span title="\$2\.500001">\$2\.50<\/span><\/td><\/tr>/);
+  // Fleet hosts: hundredths as cores; off and unknown as before; a value that is not hundredths shown as it is.
+  const hosts = [
+    { name: "h1", concurrency: "2", jobs: [], staleMs: 1000, budgetMemMiB: "8192", usedMemMiB: "2048", budgetCpuCenti: "800", usedCpuCenti: "150" },
+    { name: "h2", concurrency: "1", jobs: [], staleMs: 1000, budgetCpuCenti: "100", usedCpuCenti: "" },
+    { name: "h3", concurrency: "1", jobs: [], staleMs: 1000, budgetCpuCenti: "off" },
+    { name: "h4", concurrency: "1", jobs: [], staleMs: 1000, budgetCpuCenti: "lots", usedCpuCenti: "1" },
+  ];
+  const fleet = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), hostBudgets: hosts } }))).map((p) => [p.id, p.html])).get("p-hosts");
+  assert.match(fleet, /<th scope="col">CPU<\/th>/);
+  assert.ok(!fleet.includes("centi"));
+  assert.match(fleet, /<td>h1<\/td><td class="num">2<\/td><td>2048 \/ 8192 MiB<\/td><td>1\.5 \/ 8 cores<\/td>/);
+  assert.match(fleet, /<td>h2<\/td><td class="num">1<\/td><td>-<\/td><td>- \/ 1 core<\/td>/);
+  assert.match(fleet, /<td>h3<\/td><td class="num">1<\/td><td>-<\/td><td>off<\/td>/);
+  assert.match(fleet, /<td>h4<\/td><td class="num">1<\/td><td>-<\/td><td>1 \/ lots<\/td>/);
+  // The run page's Resources: the size in cores.
+  const record = { jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "completed", size: { memMiB: 4096, cpuCenti: 250, source: "trigger" } };
+  const run = (await pagePanels("run", ctxOf("viewer", { run: { record, source: "local" } }, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
+  assert.match(run, /<dt>Size given<\/dt><dd>4,096 MiB, 2\.5 cores \(trigger\)<\/dd>/);
+});
+
+test("failed jobs: each id links to its run, with its record's reason and short sentence inline, and BullMQ's text stays the operator's (#710)", async () => {
+  const { REASONS } = await import("@edgehero/pi-dispatch/reason-catalog");
+  const { shortSentence } = await import("../src/words.mjs");
+  const failed = {
+    rows: [
+      { jobId: "gh-f", attemptsMade: 3, failedReason: "REASON-TEXT <b>", queue: "pi-jobs", endedAt: NOW - 1000, reason: "container-never-started" },
+      { jobId: "gh-n", attemptsMade: 1, failedReason: "x", queue: "pi-jobs", endedAt: NOW - 2000, reason: null },
+      { jobId: "gh-u", attemptsMade: 1, failedReason: "y", queue: "pi-jobs", endedAt: NOW - 3000, reason: "brand-new-reason" },
+      { jobId: "<bad id>", attemptsMade: 1, failedReason: "z", queue: "pi-jobs", endedAt: NOW - 4000 },
+    ],
+    more: 0,
+  };
+  for (const role of ["viewer", "operator"]) {
+    const html = new Map((await pagePanels("fleet", ctxOf(role, { snapshot: { ...snapshot(), failed } }))).map((p) => [p.id, p.html])).get("p-failed");
+    const sentence = shortSentence(REASONS["container-never-started"].sentence).replace(/'/g, "&#39;");
+    assert.ok(html.includes(`<td class="keep"><a class="mono" href="/run?id=gh-f">gh-f</a></td>`), html);
+    assert.ok(html.includes(`<td><span class="mono">container-never-started</span> · ${sentence}</td>`), html);
+    assert.ok(html.includes('<td><span class="note">no record</span></td>'));
+    assert.ok(html.includes('<td><span class="mono">brand-new-reason</span>, no explanation yet</td>'));
+    assert.ok(html.includes('<td class="keep"><span class="mono">&lt;bad id&gt;</span></td>'), "an id outside the run-id charset is text, not a link");
+    assert.ok(!/<td[^>]*>[^<]*REASON-TEXT/.test(html), "BullMQ's free text is never in a row (REQ-CONSOLE-SECURITY (l))");
+    assert.equal(html.includes("REASON-TEXT"), role === "operator", "the operator's details only");
+  }
+});
+
+test("times: the server draws UTC text inside <time datetime>, the same bytes for every reader; unknown stays text (#710)", () => {
+  assert.equal(String(timeHtml(NOW)), '<time datetime="2026-10-08T15:39:08.000Z">2026-10-08 15:39 UTC</time>');
+  assert.equal(String(timeHtml(Number.NaN)), "unknown");
+  assert.equal(String(timeHtml(9e15)), "unknown");
+});
+
+/** Run the console script over a page holding `times` (`<time datetime>` stubs), in a zone `offsetMin` east of UTC. */
+function timeDom(times, offsetMin, { live = false } = {}) {
+  const RealDate = Date;
+  // The script's only clock-zone reads are getTimezoneOffset and the local getters: this Date answers them for a fixed
+  // zone, so the test does not depend on the machine's TZ.
+  class ZoneDate {
+    constructor(v) { this.ms = new RealDate(v).getTime(); this.l = new RealDate(this.ms + offsetMin * 60_000); }
+    getTime() { return this.ms; }
+    getTimezoneOffset() { return -offsetMin; }
+    getFullYear() { return this.l.getUTCFullYear(); }
+    getMonth() { return this.l.getUTCMonth(); }
+    getDate() { return this.l.getUTCDate(); }
+    getHours() { return this.l.getUTCHours(); }
+    getMinutes() { return this.l.getUTCMinutes(); }
+  }
+  const timeEl = (iso, text) => {
+    const attrs = { datetime: iso };
+    return { textContent: text, getAttribute: (n) => attrs[n] ?? null, setAttribute: (n, v) => { attrs[n] = v; }, attrs };
+  };
+  const els = times.map(([iso, text]) => timeEl(iso, text));
+  const swapped = [timeEl("2026-10-08T01:05:00.000Z", "2026-10-08 01:05 UTC")];
+  const panel = { hasAttribute: (n) => n === "data-panel", innerHTML: "", querySelector: () => null, contains: () => false, querySelectorAll: (sel) => (sel === "time[datetime]" ? swapped : []) };
+  const listeners = new Map();
+  function EventSource() { this.readyState = 1; this.addEventListener = (k, fn) => listeners.set(k, fn); this.close = () => {}; }
+  const document = {
+    body: { getAttribute: (n) => (n === "data-page" ? "overview" : n === "data-live" && live ? "overview" : null) },
+    getElementById: (id) => (id === "p-x" ? panel : null),
+    querySelectorAll: (sel) => (sel === "time[datetime]" ? els : []),
+    querySelector: () => null,
+    addEventListener() {},
+  };
+  new Function("document", "location", "history", "EventSource", "Date", CONSOLE_SCRIPT)(document, { hash: "", pathname: "/" }, { replaceState() {} }, live ? EventSource : undefined, ZoneDate);
+  return { els, swapped, panel, listeners };
+}
+
+test("the script shows each <time> in the reader's zone with the UTC text in its title, on load and after a live swap (#710)", () => {
+  const at = ["2026-10-08T15:39:08.000Z", "2026-10-08 15:39 UTC"];
+  const east = timeDom([at, ["2026-12-31T23:30:00.000Z", "2026-12-31 23:30 UTC"]], 120);
+  assert.deepEqual(east.els.map((e) => [e.textContent, e.attrs.title]), [["2026-10-08 17:39 UTC+2", "2026-10-08 15:39 UTC"], ["2027-01-01 01:30 UTC+2", "2026-12-31 23:30 UTC"]]);
+  assert.equal(timeDom([at], 330).els[0].textContent, "2026-10-08 21:09 UTC+5:30");
+  assert.equal(timeDom([at], -300).els[0].textContent, "2026-10-08 10:39 UTC-5");
+  assert.equal(timeDom([at], 0).els[0].textContent, "2026-10-08 15:39 UTC", "a reader in UTC reads what the server wrote");
+  // Not an ISO instant (a hand-edited page, a newer server's shape): left exactly as drawn.
+  const odd = timeDom([["2026-10-08", "kept"], ["<b>", "kept too"]], 120);
+  assert.deepEqual(odd.els.map((e) => [e.textContent, e.attrs.title]), [["kept", undefined], ["kept too", undefined]]);
+  // A live update: the swapped panel's own times are localised too.
+  const live = timeDom([at], 60, { live: true });
+  live.listeners.get("panel")({ data: JSON.stringify({ id: "p-x", html: "<time>" }) });
+  assert.equal(live.panel.innerHTML, "<time>");
+  assert.deepEqual([live.swapped[0].textContent, live.swapped[0].attrs.title], ["2026-10-08 02:05 UTC+1", "2026-10-08 01:05 UTC"]);
 });

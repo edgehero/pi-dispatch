@@ -274,7 +274,7 @@ test("with an envelope set, the split is read through readAllocations, without h
   assert.equal(slice.mismatch, false);
   const page = pageOf({ allocation: slice, window: "30d" }, 0);
   assert.ok(page.includes('<span class="wl">envelope</span><span>$100.00 per week · delegation on</span>'), "the envelope the worker's parser read");
-  assert.ok(page.includes("plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied 2026-10-05 06:00 UTC"));
+  assert.ok(page.includes('plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied <time datetime="2026-10-05T06:00:00Z">2026-10-05 06:00 UTC</time>'));
   assert.ok(page.includes("plans collected in runs on this host, last 30d: applied 1 · plan-absent 1 · plan-stale 1</div>"));
   assert.equal(ia.splitCounts({ unreachable: "EACCES" }), null, "an unread scan counts nothing");
   assert.equal(slice.outsideEdit, null);
@@ -508,7 +508,7 @@ test("assembleCapacityView: the page's window and instant reach the read, mtd fr
 test("the page carries the capacity section for its window, read with the page's own instant", async () => {
   const page = await assembledPage(cannedPaths(), "mtd", { now: CNOW });
   assert.ok(page.includes("<h2>capacity</h2>"));
-  assert.ok(page.includes("month to date, from 2026-10-01 00:00 UTC to 2026-10-08 12:00 UTC"), "the window is the page's, ending at its instant");
+  assert.ok(page.includes('month to date, from <time datetime="2026-10-01T00:00:00.000Z">2026-10-01 00:00 UTC</time> to <time datetime="2026-10-08T12:00:00.000Z">2026-10-08 12:00 UTC</time>'), "the window is the page's, ending at its instant");
   assert.ok(page.includes("Jobs only: a machine busy with other work reads as idle."));
 });
 

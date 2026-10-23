@@ -443,10 +443,17 @@ test("stateOf: a steer-armed active job carries its inbox, each entry rebuilt by
   }
 });
 
+test("stateOf: the day's refusals beside its failures, each listed reason held to the record's token charset; null when unread (#710)", () => {
+  const snap = { ...SNAPSHOT, refusals24h: { count: 7, top: [{ reason: "scope-cap", count: 4 }, { reason: "<b>x</b>", count: 2 }, { reason: "over-budget", count: "1" }, { reason: "new-token", count: 1, extra: "dropped" }] } };
+  for (const role of ["operator", "viewer"]) assert.deepEqual(stateOf(snap, role, { now: T0 }).refusals24h, { count: 7, top: [{ reason: "scope-cap", count: 4 }, { reason: "new-token", count: 1 }] });
+  assert.equal(stateOf({ ...SNAPSHOT, refusals24h: null }, "viewer").refusals24h, null);
+  assert.equal(stateOf(SNAPSHOT, "viewer").refusals24h, null, "a snapshot without the field (an older reader): null, never a zero");
+});
+
 test("stateOf: the named fields only, numbers as numbers, no error text, no host path, and failedReason for an operator alone", () => {
   const op = stateOf(SNAPSHOT, "operator", { now: T0 });
   const viewer = stateOf(SNAPSHOT, "viewer", { now: T0 });
-  assert.deepEqual(Object.keys(op).sort(), ["active", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "hosts", "parked", "parkedUnknown", "paused", "queues", "role", "schedulerStallMax", "schedulers", "version", "workers"]);
+  assert.deepEqual(Object.keys(op).sort(), ["active", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "role", "schedulerStallMax", "schedulers", "version", "workers"]);
   assert.equal(op.version, 1, "the scripts' interface carries its version");
   assert.deepEqual(op.paused, { state: false, partial: true });
   assert.deepEqual(op.counts, { waiting: 3, active: 1, paused: 0, delayed: 2, failed: 4 });

@@ -293,14 +293,54 @@ console.
 
 | Page | What it shows |
 |---|---|
-| `/` | The overview: whether the fleet is paused, the queue counts, the hosts online and how long ago each last checked in, today's spend against the caps, how many runs are waiting for an answer (and how many of those are being answered now), and the failures of the last 24 hours. |
+| `/` | The overview ([The overview](#the-overview)): the running jobs and how many runs are waiting for an answer (and how many of those are being answered now) first, then whether the fleet is paused and whether any worker is online, the queue counts, today's spend against the caps, the hosts online and how long ago each last checked in, and the problems of the last 24 hours: failed runs, and refused runs with their most frequent reasons. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. The Outcome column says completed, refused, failed, awaiting input or cancelled, amber for refused, awaiting input and cancelled and red for failed. A refused or failed run also names its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). |
 | `/run?id=<job id>` | One run, led by its **Outcome**: the outcome word, what the reason means, what to do about it, and a link to the reason's entry in [reasons.md](reasons.md) on GitHub ([The run page's outcome](#the-run-pages-outcome)). Then the run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
-| `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget, running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs. |
+| `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only. A line that is not a valid row is shown as broken in its place, never skipped. |
+
+### The overview
+
+The overview leads with what may need you: the jobs running now, then the parked runs waiting for an answer. Below
+them:
+
+- **Fleet**: whether the queue is paused, partly paused or running, and the workers. A worker is online when its host
+  checked in within the last minute (every worker checks in every 15 seconds). When no host has and the queue sees no
+  worker connected either, the panel starts with "No worker online: jobs queue but nothing runs them", and the queue's
+  state is never shown green, even when nothing is paused: jobs are accepted and wait, and nothing picks them up. A
+  host's check-in age is measured with the console host's clock against the worker's, so a worker whose clock is
+  behind looks staler than it is; while the queue still sees workers connected (a count with no clock in it), the
+  panel says "Host beats look stale (clock skew?), but the queue still sees its workers connected" instead, and the
+  queue stays green. Keep the hosts' clocks in sync (NTP) and the note goes away. The workers line says how many hosts
+  are registered and how many of those are online, and how many the queue sees connected when that is more. When the
+  host registry cannot be read, the page says it shows the fleet as last seen and judges nothing. "Failed jobs awaiting retry" is the queue's failed set: jobs whose last
+  attempt failed, which an operator can retry or remove on the fleet page.
+- **Spend against caps**: the jobs started today, this week and this month and the tokens used today, each against
+  its cap ("no cap" when none is set), then each dollar window. These windows are UTC days, Monday to Sunday UTC weeks
+  and UTC months, as the budget counts them, and the panel says so under them: "today" may have started at 02:00 your
+  time.
+- **Hosts online**, with how long ago each last checked in.
+- **Problems (24h)**: the failed runs and the refused runs of the last 24 hours, each linked to the runs list, and the
+  five most frequent refusal reasons, each as a short sentence linked to the runs it refused
+  (`/runs?outcome=policy&reason=<reason>`). A run an operator cancelled is not counted as refused: the runs list
+  shows it as cancelled, and nothing about it needs a rule changed. When every run the console read was inside the
+  day, both counts say "at least".
+
+Money in lists and on the overview is shown in one form, to the cent with thousands commas (`$1,234.56`), so the rows
+of a column compare at a glance; hover it for the exact amount. An amount spent against a cap is rounded down, so a
+window a fraction of a cent short of its cap never reads as the cap (and a spend under a cent reads `$0.00`); a cap
+or a price is rounded to the nearest cent.
+
+Times written out on a console page (the run lists, the run page, the fleet's schedules and failed jobs, the parked
+inbox, the audit log, and the instants in the Spend page's budget split and capacity text) are in your browser's
+time zone, with its UTC offset (`2026-10-08 17:39 UTC+2`); hover one for the UTC time. The console sends UTC (the same
+page for every reader), and the page's script turns it into local time, so with scripts off a page reads UTC. Some
+times stay UTC on purpose: the live transcript's entry times (`HH:MM:SS UTC`, to the second), the hover tips on the
+Spend page's charts (they say "UTC"), the charts' day labels and daily buckets (UTC days, the budget's), and the
+budget split's short "at MM-DD HH:MM" notice, which uses the panel's words. The insights file written by `/dispatch insights` runs no such script, so its times read UTC.
 
 ### Outcomes and reasons
 
@@ -735,7 +775,14 @@ rm ~/.pdc-cookies
 ```
 
 Each parked run in `parked` carries its `jobId` as well, so a script can open it or answer it without a second
-lookup. Whether a park is being answered is not in `/api/state`; `/api/run` says it per run (`pendingRunOnTarget`).
+lookup. `refusals24h` is the overview's refused count beside `failures24h`: `{count, top: [{reason, count}]}`, the
+runs refused in the last 24 hours (a run an operator cancelled is not counted) and the five most frequent reasons,
+or null when the run history could not be read; `failures24hFloor` marks both counts as a floor. Whether a worker is
+online is `hosts[].lastBeatAgeMs` with `workers`: the overview counts a host whose last beat is at most 60,000 ms
+old, and says no worker is online only when none is and `workers` (BullMQ's connected workers on the shared queue,
+which holds no clock; null, read as 0, when unknown) is not above zero either. With `fleetDegraded` true it judges
+neither way.
+Whether a park is being answered is not in `/api/state`; `/api/run` says it per run (`pendingRunOnTarget`).
 
 `GET /api/run?id=<job id>` (or `?url=<issue or pull request link>`, which finds the newest run on that target) returns
 one run and the chat it can have now: its state, `mode` (`live`, `reply`, `fork`, or null with a fixed `says`

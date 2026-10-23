@@ -104,6 +104,7 @@ table.grid th,table.grid td{text-align:left;padding:4px 10px 4px 0;border-bottom
 table.grid th{color:var(--pd-dim);font-weight:500}
 table.grid td.num,table.grid th.num{text-align:right}
 table.grid tr.warn td{color:var(--pd-amber)}
+table.grid td.keep,table.grid td.keep .mono{white-space:nowrap;overflow-wrap:normal}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}
 form.filters{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px 12px;align-items:end}
 form.filters label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--pd-dim)}

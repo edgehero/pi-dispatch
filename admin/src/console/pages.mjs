@@ -98,7 +98,8 @@ export const PAGES = Object.freeze({
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
-  overview: [["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-parked", overviewParked], ["p-failures", overviewFailures], ["p-active", overviewActive]],
+  // Issue #710: what needs a person first (the running jobs, then the parked ones), the fleet's state and spend after.
+  overview: [["p-active", overviewActive], ["p-parked", overviewParked], ["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-failures", overviewFailures]],
   runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
   run: [["p-outcome", runOutcome], ["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],

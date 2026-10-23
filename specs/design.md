@@ -12414,6 +12414,68 @@ a tunnel.
     `/sandbox` had pulled the container env builder and the provider SDKs into the console (3.08 MB to 6.90 MB; 3.13 MB
     now), and `admin/test/console-bundle.test.mjs` holds the bundle free of them. REJECTED: a seam that defers the
     import (the console needs the verdict on every run page, so the graph would load anyway).
+- **A truthful overview, readable numbers and local times** (AMENDED 2026-10-23, #710 PR 4,
+  `REQ-OPERATOR-CONSOLE-SCREENS` (a) and (f), `INT-CONSOLE-STATE-API`):
+  - **Order.** `PAGE_PANELS.overview` leads with Active jobs and Parked, the two panels a person may have to act on,
+    then the fleet's state, spend, hosts and the day's problems.
+  - **No worker online.** The overview judges who drains the queue from the registry's beats (`workersOnline`): a host
+    is online when its last beat is at most `BEAT_FRESH_MS` (a minute, four 15 s beats) old, the bound the hosts tables
+    already flag a beat by, and the count is the status line's `resolveWorkerCount` (the registry's rows, else BullMQ's
+    `getWorkers`, else unknown). With none online and a registry that was read, the panel leads with "No worker
+    online: jobs queue but nothing runs them" and the queue is never green. REJECTED: BullMQ's `getWorkers` as the
+    judge of who is online (it rests on CLIENT SETNAME, which some providers do not support, and a wedged process keeps
+    its connection); the registry row's 90 s TTL as the bound (a row that lives a minute without a beat is a worker
+    that is wedged or dying, and the overview would call it online); judging an unreadable registry (an empty fleet
+    and an unread one are different answers, the reader's own rule). **Review round 1: BullMQ may overrule "none".** A
+    beat's age is the console's clock minus the worker's own `beatAt` (`readLiveHosts`), so a worker whose clock is
+    50 s behind reads past the minute for part of every minute with a 15 s beat. BullMQ's worker list is read from
+    Valkey's client connections and carries no clock, so while `queue.workers > 0` the overview never says no worker
+    is online nor turns the queue amber; when it sees more workers than beat freshly it says "Host beats look stale
+    (clock skew?), but the queue still sees its workers connected" (a note, not a warning), and never that jobs are
+    being run, since a wedged worker keeps its connection too. The cost, accepted: a fleet whose every worker is
+    wedged reads as the note, not the warning; the hosts tables still mark each stale beat amber. A fresh beat with
+    no BullMQ worker still counts online (no CLIENT SETNAME). REJECTED for now: measuring the age on Valkey's clock
+    as `HOST_TTL_MS` minus the row's PTTL (each beat PEXPIREs the row to the full TTL). It is clock-free, but it
+    belongs to the worker's `readLiveHosts`, which routing, capacity and doctor share, doctor's skew check needs
+    `staleMs` to stay the wall-clock difference, and a second field costs a round trip per host on a read the console
+    makes every second; BullMQ's list answers the overview's one question without either.
+  - **Refusals beside failures.** The fleet reader folds `refusals24h` from the same wide window as `failures24h`
+    (`refusalsIn`, pure): the runs whose outcome both surfaces call "refused" (`outcomeWord`), so an operator's cancel,
+    a `policy` record the console calls "cancelled", is not counted. REJECTED: counting every `policy` record (an
+    overview that counted cancels would send the operator looking for a rule to change, where someone chose to stop a
+    run). The top five reasons by count, then token, so two reads list the same rows; a token outside the record's
+    charset is counted and never listed. The same window, so the same floor.
+  - **A failed job's record reason.** The failed list gains `reason`, the job's newest record's closed enum in the wide
+    window (null without one), so the fleet page names why in the row and links the run. BullMQ's `failedReason` stays
+    the operator's free text, in the details (`REQ-CONSOLE-SECURITY` (l)); the Job projection itself is unchanged (five
+    fields off the Job, the sixth off the record), and the panel's key-set pin says so.
+  - **Money.** Lists and overview rows use `usd2` (`panel.mjs`, a module with no import, so it adds no dependency to
+    the bundle): one fixed form, `$1,234.56`, two decimals and thousands commas, from integer micro-dollars, with the
+    exact `formatMicros` amount in a `title`. Half up to the cent for a cap or a price; DOWN for an amount spent
+    against a cap (`moneyHtml(m, { spent: true })`, the dollar windows' "Spent and held"), so 99,999,000 µ$ against a
+    $100.00 cap reads `$99.99`, never the cap; a spend under a cent then reads `$0.00`, with the exact amount beside it.
+    The run page's Tokens and dollars facts keep the exact amount: a detail page is where the digits are read.
+    REJECTED (review round 1): the panel's `fmtUsd`, which this PR first used: its ladder (`$99.99`, `$412`, `$4.1k`,
+    `<1¢`) is built for one tight TUI cell and printed one column in three shapes, and it rounds half up, so a window
+    a micro-dollar short of its cap read as the cap. CPUs read as cores through the worker's `formatCpus` and
+    `coresText`.
+  - **The time rule: UTC bytes, local by script.** Every instant a console panel writes as text is `timeHtml`: a
+    `<time datetime="<ISO, UTC>">` whose text is `utcText`'s, so a page is the same bytes for every reader and every
+    golden fixture keeps its UTC text. The Spend page's text instants are `<time>` too, built inside
+    `insights-html.mjs` (which may import neither `panels.mjs` nor the worker): the budget split's applied and until
+    instants and its history (`splitAtHtml`), and the capacity section's window and truncation instants
+    (`capWhenHtml`). What stays UTC, and says so where it is an instant: the charts' hover tips (strings shown through
+    `textContent`, where no `<time>` can live; each ends its instant with "UTC"), the charts' day labels and daily
+    buckets (the budget's UTC days), the split's short `MM-DD HH:MM` outside-edit notice (the panel's own words, held
+    equal to `render.mjs` by a test), the live transcript's `HH:MM:SS UTC` entry times (appended by the stream, never
+    swapped, and to the second), and the count and dollar windows, which say under them that they are UTC days, weeks
+    and months (review round 1). `/static/console.js` rewrites each `time[datetime]` to the reader's zone with its UTC offset
+    (`2026-10-08 17:39 UTC+2`) and sets its `title` to the UTC text rebuilt from the `datetime`, never read back from
+    the text, so running it twice changes nothing; it runs on load and inside every panel a live update swaps in. An
+    element whose `datetime` is not an ISO instant is left as drawn. Without the script a page reads UTC. No inline
+    script or style: the CSP is unchanged. REJECTED: formatting a zone on the server (it does not know the reader's,
+    and a cookie or header carrying it would make a page differ per reader); `Intl` zone names (long, and not on every
+    engine the same).
 - **Doctor results** (AMENDED 2026-10-21, #712 PR C, `DES-DOCTOR-RESULTS-PUBLISHED`, `INT-DOCTOR-RESULTS-KEY`): the
   fleet reader's snapshot carries `doctor`, each host's last published doctor run, read for the index's hosts and the
   live ones at most every 15 s (a host publishes daily, so a per-tick MGET would be load for nothing), never pruning
@@ -13968,3 +14030,5 @@ a tunnel.
 | 2026-10-22 (#710, PR 2, round 2) | Review round 2. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED, CORRECTED**: the console's short sentence drops every closed aside (a parenthetical wherever it opens, and a `, which ...,` clause) before it is cut, replacing round 1's early-aside rule, which backed four rows off to their subject; 147 of 180 sentences cut, each cut row at least 40 characters, with 0 dangling endings, 0 open parentheses and 0 over 72; a negation is backed off only with the word before it; the cut counts code points; keeping the better of two cuts by the words after the subject was rejected (no mechanical subject). The live transcript's end, the Progress panel, the panel's tail, the browser's stream status and the topology tip map the outcome through `words.mjs` (the script and `graph-html.mjs` are handed the table, since neither loads a module); the runs filter's `outcome` refuses a value outside the record's three, naming them. `DES-OPERATOR-CONSOLE` UNCHANGED, checked: the script is still one served string, and `graph-html.mjs` still loads nothing. |
 | 2026-10-22 (#710, PR 3) | Issue #710, PR 3. **`DES-OPERATOR-CONSOLE` AMENDED**: a "The run page leads with its outcome" bullet: the banner (`runOutcome`, `p-outcome`, first) with its docs link to the repository's `docs/reasons.md` on `main` (rejected: a console-served docs page, the running release's tag); the absent record said once, the record panels empty and hidden by `section[data-panel]:empty`, also after a live swap; Progress and Chat empty for a run refused before it started, judged by the cost fold's own `refusedBeforeSpend` on a `policy` record (rejected: a reason list, and `failed` records, which are retried under the same id); the re-run's cheap refusals as `rerunRefusalOf`, the planner's first step, asked over the retained data through the fleet reader and cached 15 s, the record alone inferring only expired data past the longest retention plus a day (rejected: a record-only `/command` or parked-answer check, facts the record does not carry); the sandbox's manifest verdict moved from the panel into `admin/src/sandbox-verdict.mjs` (`sandboxRetentionOf`, a fleet reader seam, since the sandbox module reaches typebox) and asked for a run of the console's own host only; unknown keeps an action. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` (the panel's sandbox verdict and words are the same, now read through the moved function), `DES-SANDBOX-IS-A-FRESH-CONTAINER` (nothing about opening a sandbox changes; the page reads the manifest the panel read, and asks docker nothing at render). |
 | 2026-10-22 (#710, PR 3, round 1) | Issue #710, PR 3, review round 1. **`DES-OPERATOR-CONSOLE` AMENDED**: a "Round 1: what the console cannot know it does not judge" bullet: the sandbox verdict asked with the venue policy unknown (rejected: the deployment's `PI_BACKENDS`, `OQ-038`; the deployment's env as before, which hid every podman run); the retained-job read sharing the planners' discovery, `fleetQueuesOn`, a degraded one reading as unreadable (rejected: the per-tick registry set); the predicates moved to the worker's leaf `sandbox-policy.mjs` so the console bundle carries no provider SDK (3.08 MB on main, 6.90 MB at PR 3, 3.13 MB now; rejected: a deferred import). The seam's reason corrected: a cycle, no longer typebox. `DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked: the predicates moved without a change (`sandbox.mjs` re-exports the same functions, a test holds identity). |
+| 2026-10-23 (#710, PR 4) | Issue #710, PR 4: a truthful overview and readable numbers. **`DES-OPERATOR-CONSOLE` AMENDED**: a "A truthful overview, readable numbers and local times" bullet: the overview's order (Active and Parked first); no worker online judged from the registry's beats within `BEAT_FRESH_MS` (a minute) with `resolveWorkerCount`'s count (rejected: BullMQ's `getWorkers`, the row's 90 s TTL, judging an unreadable registry); `refusals24h` from the same wide window, counting what both surfaces call "refused" so an operator's cancel is not one (rejected: every `policy` record); a failed job's record reason in the failed list, the free text still the operator's; money by the panel's `fmtUsd` with the exact amount in a `title` (no new dependency in the bundle, 8.0 KB of this change's own code; rejected: a second formatter); CPUs in cores; the time rule, UTC bytes in `<time datetime>` and local time by the served script on load and after each swap (rejected: a server-side zone, `Intl` zone names). UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` (the panel reads the same snapshot; its views and words are untouched, and its failed rows carry one more field it does not draw), `DES-DOCTOR-RESULTS-PUBLISHED` (the Doctor panel is untouched). |
+| 2026-10-23 (#710, PR 4, round 1) | Issue #710, PR 4, review round 1. **`DES-OPERATOR-CONSOLE` AMENDED**, the "A truthful overview, readable numbers and local times" bullet: (1) BullMQ may overrule "no worker online": a beat's age is the console's clock minus the worker's own `beatAt`, so a worker 50 s behind read offline for part of every minute; while `queue.workers > 0` (Valkey's connections, no clock) the overview neither warns nor turns the queue amber, and says "Host beats look stale (clock skew?), but the queue still sees its workers connected" when BullMQ sees more workers than beat freshly; accepted cost, a fleet whose every worker is wedged reads as the note; REJECTED for now, a beat age on Valkey's clock (`HOST_TTL_MS` minus the row's PTTL), since it belongs to the worker's shared `readLiveHosts`, doctor's skew check needs the wall-clock `staleMs`, and it costs a round trip per host each second. (2) Money is `usd2`, one `$1,234.56` form, half up for a cap and DOWN for a spend against one; the panel's `fmtUsd` REJECTED for console columns (three shapes in one column, and half-up let a window short of its cap read as the cap); the bundle-size figures went with it. (3) The time rule narrowed: the Spend page's split and capacity text instants are `<time>` (`splitAtHtml`, `capWhenHtml` in `insights-html.mjs`); chart tips (labelled "UTC"), day labels and buckets, the split's short outside-edit notice and transcript entry times stay UTC, and the count and dollar windows say they are UTC. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` (the panel draws none of this; `usd2` sits in `panel.mjs` beside `fmtUsd`, which is unchanged), `DES-HOST-REGISTRY` and the worker's `readLiveHosts` (not touched: no field, no round trip). |

@@ -506,6 +506,16 @@ function splitAt(v) {
   return `${m[1]} ${m[2]} UTC`;
 }
 
+/**
+ * A `splitAt` text as HTML (issue #710, review round 1): an instant inside a `<time datetime>`, the UTC text kept as its
+ * text, so the console's script shows it in the reader's zone as it does every console instant, and the file page (which
+ * runs no such script) reads the UTC text it always did. "?" and anything else is escaped text.
+ */
+function splitAtHtml(text) {
+  const m = typeof text === "string" ? /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) UTC$/.exec(text) : null;
+  return m ? `<time datetime="${m[1]}T${m[2]}:00Z">${escapeHtml(text)}</time>` : escapeHtml(text);
+}
+
 /** The outside-edit facts the assembler sends: two 8-hex digests (or "?") and an `MM-DD HH:MM` instant, else none. */
 function normOutsideEdit(v) {
   if (v === null || v === undefined || typeof v !== "object") return null;
@@ -1193,10 +1203,11 @@ export function splitSectionHtml(na, tips, names, windowLabel) {
   else if (na.stateProblem === "unreadable") rows.push('<div class="row"><span class="state">the applied split does not decode; the next pickup replaces it with the neutral split</span></div>');
   if (st) {
     const plan = st.planId !== null ? `plan ${st.planId}` : "neutral split, no plan";
-    const bits = [plan, `written by ${st.writer}`, `applied ${st.appliedAt}`];
-    if (st.validUntil !== null) bits.push(`until ${st.validUntil}`);
+    // Each piece escaped on its own, the two instants as `<time>` (splitAtHtml).
+    const bits = [escapeHtml(plan), escapeHtml(`written by ${st.writer}`), `applied ${splitAtHtml(st.appliedAt)}`];
+    if (st.validUntil !== null) bits.push(`until ${splitAtHtml(st.validUntil)}`);
     if (st.clamped) bits.push("clamped by the step");
-    rows.push(`<div class="row"><span class="wl">plan</span><span>${escapeHtml(bits.join(" · "))}</span></div>`);
+    rows.push(`<div class="row"><span class="wl">plan</span><span>${bits.join(" · ")}</span></div>`);
     // This console host's envelope, compared with the applied split's: the panel's and `/dispatch priorities`' sentence.
     // Another host with the matching envelope runs its jobs, so the page claims this host only.
     // With another total in this host's file, the line says so: render.mjs `fileTotalText`'s words, held equal by a test.
@@ -1215,7 +1226,7 @@ export function splitSectionHtml(na, tips, names, windowLabel) {
   rows.push(`<div class="small">${escapeHtml(splitCountsLine(`refusals in runs on this host, ${windowLabel}`, na.refusals, "none"))}</div>`);
   rows.push(`<div class="small">${escapeHtml(splitCountsLine(`plans collected in runs on this host, ${windowLabel}`, na.plans, "none"))}</div>`);
   if (na.log.length > 0) {
-    const tr = na.log.map((h) => `<tr><td>${escapeHtml(h.at)}</td><td>${escapeHtml(h.writer)}</td><td>${escapeHtml(h.outcome)}</td><td>${escapeHtml(h.reason ?? "")}</td><td class="pid">${escapeHtml(h.planId ?? "")}</td></tr>`);
+    const tr = na.log.map((h) => `<tr><td>${splitAtHtml(h.at)}</td><td>${escapeHtml(h.writer)}</td><td>${escapeHtml(h.outcome)}</td><td>${escapeHtml(h.reason ?? "")}</td><td class="pid">${escapeHtml(h.planId ?? "")}</td></tr>`);
     rows.push(`<h3>history, newest first (alloc:log, every host)</h3><table class="alog"><tr><th>at</th><th>writer</th><th>outcome</th><th>reason</th><th>plan</th></tr>${tr.join("")}</table>`);
   } else {
     rows.push('<div class="dim small">no outcomes yet</div>');
@@ -1873,6 +1884,16 @@ function capWhen(ms) {
   return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC` : "?";
 }
 
+/**
+ * `capWhen` for page text (issue #710, review round 1): a `<time datetime>` the console's script shows in the reader's
+ * zone, UTC text inside it. A chart tip keeps `capWhen`'s plain UTC text, which says "UTC": a tip is a string the page
+ * script shows through `textContent`, and no `<time>` can live in it.
+ */
+function capWhenHtml(ms) {
+  const text = capWhen(ms);
+  return text === "?" ? text : `<time datetime="${new Date(ms).toISOString()}">${escapeHtml(text)}</time>`;
+}
+
 /** Why a stretch of a host's chart has no data, by its kind and the host's state. */
 function capGapWhy(gap, host) {
   if (gap.kind === "after") return "after the report was read";
@@ -1915,10 +1936,10 @@ function capacityChartSvg(host, nc, tips, nowMs) {
 
 export function capacitySectionHtml(nc, tips, nowMs, windowLabel) {
   if (nc.unreachable) return `<div class="dim">capacity not read: ${escapeHtml(nc.unreachable)}</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
-  if (nc.noTime) return `<div class="dim">no time in this window yet: ${escapeHtml(windowLabel)} starts at ${escapeHtml(capWhen(nc.fromMs))}</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
+  if (nc.noTime) return `<div class="dim">no time in this window yet: ${escapeHtml(windowLabel)} starts at ${capWhenHtml(nc.fromMs)}</div><div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`;
   const hours = nc.window.bucketMs % 3_600_000 === 0 ? `${fmt(nc.window.bucketMs / 3_600_000)}h` : `${fmt(Math.round(nc.window.bucketMs / 60_000))}m`;
   const parts = [];
-  parts.push(`<div class="small">${escapeHtml(windowLabel)}, from ${escapeHtml(capWhen(nc.window.fromMs))} to ${escapeHtml(capWhen(nc.window.toMs))}. Each bar is one ${escapeHtml(hours)} bucket: how many jobs ran at once on average, with a tick at the most at once; the dashed line is the host's slot count. Hatched is no data, counted as neither busy nor idle; an idle stretch is empty.</div>`);
+  parts.push(`<div class="small">${escapeHtml(windowLabel)}, from ${capWhenHtml(nc.window.fromMs)} to ${capWhenHtml(nc.window.toMs)}. Each bar is one ${escapeHtml(hours)} bucket: how many jobs ran at once on average, with a tick at the most at once; the dashed line is the host's slot count. Hatched is no data, counted as neither busy nor idle; an idle stretch is empty.</div>`);
   parts.push(`<div class="dim small">${escapeHtml(INSIGHTS_CAPACITY_JOBS_ONLY)}</div>`);
   if (nc.truncated) parts.push(`<div class="small cap-warn">history truncated: the run mirror holds nothing older for at least one host, so its earlier time is drawn as no data, never as idle</div>`);
   if (nc.hosts.length === 0) parts.push(`<div class="dim">${escapeHtml(nc.noRun)}</div>`);
@@ -1940,7 +1961,7 @@ export function capacitySectionHtml(nc, tips, nowMs, windowLabel) {
       const used = [f.memory !== null && f.cpu !== null ? `promised: ${f.memory}, ${f.cpu}` : null, f.cpuUsed !== null ? `CPU used: ${f.cpuUsed}` : null, `wait for a slot: ${f.wait ?? "no run recorded one"}`].filter((x) => x !== null);
       block.push(`<div class="small">${escapeHtml(used.join(" · "))}</div>`);
       if (f.projects.length > 0) block.push(`<div class="small">projects by run time: ${escapeHtml(f.projects.join(", "))}</div>`);
-      if (host.truncated) block.push(`<div class="small cap-warn">history truncated: it starts at ${escapeHtml(capWhen(host.fromMs))}</div>`);
+      if (host.truncated) block.push(`<div class="small cap-warn">history truncated: it starts at ${capWhenHtml(host.fromMs)}</div>`);
       block.push(capacityChartSvg(host, nc, tips, nowMs));
       for (const c of host.caveats) block.push(`<div class="small cap-warn">${escapeHtml(c)}</div>`);
       if (host.notes !== null) block.push(`<div class="dim small">${escapeHtml(host.notes)}</div>`);

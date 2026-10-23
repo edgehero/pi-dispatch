@@ -1038,6 +1038,28 @@ export function fmtUsd(n) {
 }
 
 /**
+ * Micro-dollars in one fixed form, `$1,234.56`: always two decimals and thousands commas, for a column whose rows must
+ * compare at a glance (the console's money cells, issue #710 review round 1), where `fmtUsd`'s ladder would print
+ * `$99.99`, `$412` and `$4.1k` one above the other. Integer arithmetic on the micro-dollars, so no float rounding can move
+ * a cent.
+ *
+ * ROUNDING. Half up to the cent by default (`$999.60` for 999,595,000 µ$, a cap or a price). `spent: true` rounds DOWN,
+ * for an amount read against a cap: 99,999,000 µ$ against a $100.00 cap reads `$99.99`, never `$100.00`, which would
+ * say the window is full when it is not. The cost of that choice is that a spend under a cent reads `$0.00`; the caller
+ * puts the exact amount beside it (the console's `title`), which is why this is no place for `fmtUsd`'s `<1¢`.
+ * `-` for anything that is not a non-negative safe integer of micro-dollars (negative, fractional, NaN, null, a string),
+ * the console's convention for a value that is not an amount.
+ */
+export function usd2(micros, { spent = false } = {}) {
+  if (!Number.isSafeInteger(micros) || micros < 0) return "-";
+  const whole = Math.floor(micros / 10_000);
+  const cents = spent || micros - whole * 10_000 < 5_000 ? whole : whole + 1;
+  const dollars = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const c = cents % 100;
+  return `$${dollars}.${c < 10 ? "0" : ""}${c}`;
+}
+
+/**
  * THE single renderer of the typed cost value `{ usd, class, floor, coverage, planId }` -- every money
  * surface funnels here.
  *
