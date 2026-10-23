@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, HELD_LABEL, NO_EXPLANATION, docsHref, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, SHORT_MAX, SPEND_TITLE, TONE_CLASS, VENUE_LABEL, outcomeWord, reasonWords, shortSentence } from "../src/words.mjs";
+import { DOCS_ROOT, HELD_LABEL, NO_EXPLANATION, docsHref, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, TONE_CLASS, VENUE_LABEL, outcomeWord, reasonWords, shortSentence } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
 import { RUNNER_COMPLETED_REASONS } from "../../worker/src/run-history.mjs";
@@ -74,6 +74,24 @@ test("outcomeWord reads the raw values: a qualifier only under its own outcome, 
     const w = outcomeWord(bad, null);
     assert.deepEqual([w.known, w.word, w.glyph, w.tone], [false, null, "✘", "error"], String(bad));
   }
+});
+
+test("the console's status (issue #737): completed ok, refused refused, failed failed, awaiting input parked, cancelled cancelled, and an unknown outcome failed", () => {
+  assert.deepEqual(STATUS_KINDS, ["running", "parked", "failed", "refused", "attention", "ok", "idle", "cancelled"]);
+  assert.ok(Object.isFrozen(STATUS_KINDS));
+  assert.deepEqual(Object.fromEntries(Object.entries(OUTCOME_WORDS).map(([k, v]) => [k, v.status])), { completed: "ok", policy: "refused", failed: "failed" });
+  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.status])), { "awaiting-input": "parked", "operator-cancel": "cancelled" });
+  // outcomeWord hands the status on, and a qualifier changes it only under its own outcome, as it does the word.
+  const status = (o, r) => outcomeWord(o, r).status;
+  assert.equal(status("completed"), "ok");
+  assert.equal(status("completed", "awaiting-input"), "parked");
+  assert.equal(status("policy", "scope-cap"), "refused");
+  assert.equal(status("policy", "operator-cancel"), "cancelled");
+  assert.equal(status("policy", "awaiting-input"), "refused", "a qualifier under another outcome keeps the outcome's status");
+  assert.equal(status("failed", "operator-cancel"), "failed");
+  for (const bad of ["vapour", "__proto__", null, undefined]) assert.equal(status(bad), "failed", String(bad));
+  // Every status a word carries is a kind the console draws.
+  for (const w of [...Object.values(OUTCOME_WORDS), ...Object.values(REASON_WORDS), outcomeWord("vapour")]) assert.ok(STATUS_KINDS.includes(w.status), w.status);
 });
 
 test("the titles: Venue, Spend and Held", () => {
@@ -182,16 +200,20 @@ test("a cut never ends on a negation alone, and never splits a character (#710 r
 
 test("the panel and the console both import words.mjs, and neither keeps its own copy of a word", () => {
   const panel = SRC("dashboard.ts");
-  const panels = SRC("console/panels.mjs");
+  // Issue #737: the console's panels are one module per screen under console/panels/, which console/panels.mjs
+  // re-exports. Every one is read, the barrel too, so a module added later is held to the same rule.
+  const panelModules = readdirSync(fileURLToPath(new URL("../src/console/panels/", import.meta.url))).filter((f) => f.endsWith(".mjs")).sort();
+  assert.ok(panelModules.includes("common.mjs") && panelModules.includes("insights.mjs"), "the panels' modules were found");
+  const panels = [SRC("console/panels.mjs"), ...panelModules.map((f) => SRC(`console/panels/${f}`))].join("\n");
   const pages = SRC("console/pages.mjs");
   assert.match(panel, /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\/words\.mjs";$/m);
-  assert.match(panels, /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\.\/words\.mjs";$/m);
+  assert.match(panels, /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\.\/\.\.\/words\.mjs";$/m);
   assert.match(pages, /^import \{[^}]*\bSPEND_TITLE\b[^}]*\} from "\.\.\/words\.mjs";$/m);
   assert.match(SRC("render.mjs"), /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\/words\.mjs";$/m, "the /dispatch runs table too");
   // Round 2: every place a stream's end or a chip's last run is said (#710 round 2).
   assert.match(SRC("console/transcript.mjs"), /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\.\/words\.mjs";$/m, "the live transcript's end");
   assert.match(SRC("console/script.mjs"), /^import \{[^}]*\bOUTCOME_WORD_OF\b[^}]*\} from "\.\.\/words\.mjs";$/m, "the browser's stream status");
-  assert.match(panels, /^import \{[^}]*\bOUTCOME_WORD_OF\b[^}]*\} from "\.\.\/words\.mjs";$/m);
+  assert.match(panels, /^import \{[^}]*\bOUTCOME_WORD_OF\b[^}]*\} from "\.\.\/\.\.\/words\.mjs";$/m);
   assert.match(panels, /buildGraphScene\(p\.graph, \{[^}]*outcomeWords: OUTCOME_WORD_OF[^}]*\}\)/, "the topology, which loads no module, is handed the words");
   assert.match(panel, /\(run ended: \$\{scrubControl\(outcomeWord\(tail\.ended\)\.word \?\? tail\.ended\)\}\)/, "the panel's tail");
   for (const [name, src] of [["dashboard.ts", panel], ["panels.mjs", panels], ["pages.mjs", pages]]) {

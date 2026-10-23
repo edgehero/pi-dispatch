@@ -42,6 +42,12 @@ on:
       - ".github/scripts/pi-derived.mjs"
       - ".github/scripts/pi-bump.mjs"
       - ".github/workflows/pi-bump.yml"
+      # Issue #737: the console width check below drives Chrome through launch/chrome-pipe.mjs, and
+      # admin/test/render-images.test.mjs runs launch/render-images.mjs, so a launch/ change can break
+      # this workflow without touching anything listed above. The pin file is the browser it measures with.
+      - "launch/**"
+      - ".github/scripts/console-width-check.mjs"
+      - ".github/chrome-for-testing.json"
   # DELIBERATELY UNFILTERED, unlike the push trigger above. Five of the jobs below are REQUIRED status
   # checks on main (issue #105), and a required check that never reports blocks the merge FOREVER -- a
   # docs-only PR under the old path filter reported nothing at all (PR #106: "no checks reported") and
@@ -341,7 +347,10 @@ jobs:
         with:
           node-version-file: ".nvmrc" # pi requires >=22.19.0; engine-strict enforces it
 
-      - run: npm ci --no-audit --no-fund
+      # `id: install` so the console width check at the end can run after a red suite (it needs only the
+      # install), and only then: without node_modules its own failure would bury the real one.
+      - id: install
+        run: npm ci --no-audit --no-fund
 
       # A second, not two minutes: the fast half of issue #293's guard, so an author who paired a dated
       # fixture with a default clock hears about it before the suite has finished starting.
@@ -460,6 +469,55 @@ jobs:
             echo "::error::A test failed only because the wall clock moved 399 days forward. That is issue #284's class: a fixed instant in the test and a subject built on the DEFAULT Date.now, so the fixture and the clock drift apart until the subject's own window closes over it. Two correct fixes: pass an injected clock to the subject (now: () => AT), or stamp the fixture through the same clock the subject reads. worker/test/run-mirror.test.mjs is the worked example (AT + anchored). Do NOT move the fixture date forward, which re-arms the fuse."
             exit 1
           fi
+
+      # Issue #737. Every console page, both roles, light and dark, in a real browser at 375 px under the
+      # console's own security headers: a CSP violation, a page wider than the phone, an element past its
+      # edge outside a scroll box that fits, or the wrong --canvas for the theme fails the step, and so the
+      # required check. The goldens it loads are the ones the suite above pins byte for byte, so this sees
+      # exactly what the console serves. Then the top bar, the part that changes with the window: every page
+      # drawn for an operator, a viewer, a read-only console and the longest token name, at 320 and 375 px
+      # as a phone and at 761, 800, 940, 1024, 1180, 1280, 1440 and 1600 px, read with each live word, the
+      # theme button shown and hidden, and the Parked count as drawn, emptied and five digits long, fails on
+      # a page that scrolls sideways in any of those, any two parts of the bar that overlap, a navigation
+      # pill not shown whole above a phone's width, a bar whose height changes with any of them (a phone's
+      # too), a bar that is not one row from 1440 px on a console that is not read-only, a name or role word
+      # cut without an ellipsis or a title, or a More menu that a click (on a phone, with its button cut at
+      # the row's edge) does not open whole inside the window right under its own button; and More must open
+      # under its button with the page's script off too. Two negative controls run first, a bar built to
+      # break nine of those rules and a phone's bar built to break four (a jump with the last live word and
+      # one with its Parked count emptied, a page wide only while it is emptied, a More its own script shuts
+      # when clicked cut), and must fail with exactly their nine and four problems, so a measure gone blind
+      # to one of those thirteen cannot pass the real pages.
+      #
+      # A STEP rather than a job, for the 399-day step's reason: a new job is a new required-check context
+      # that only a branch-protection edit makes blocking. `success() || failure()` runs it after a red
+      # suite too, so one push reports both; `steps.install.outcome` keeps it from running with no
+      # node_modules, where its own failure would only bury the real one.
+      #
+      # THE BROWSER IS PINNED, because a required check must not go red on a tree nobody touched (issue
+      # #284's class again): Chrome for Testing at the exact version .github/chrome-for-testing.json names.
+      # `--check-pin` checks the whole pin BEFORE anything is downloaded and prints the url derived from its
+      # version (never a url read off the file, so a hand edit pointing elsewhere stops here); curl takes
+      # https only, redirects included; the zip's sha256 is checked BEFORE it is unzipped. A failure at any
+      # of the three fails here, loudly, and nothing after it runs. The runner's preinstalled google-chrome
+      # moves with every image update, so it is deliberately not used; the script fails in CI on any other
+      # version. Linux's fonts are wider than macOS's, so THIS run is the authority on width, whatever a
+      # maintainer's Mac said. worker/test/console-width-check.test.mjs runs this block with its tools
+      # stubbed and holds that order.
+      #
+      # timeout-minutes: the script has its own deadlines (20 s a navigation, 6 minutes a run); this caps
+      # the download and the unzip too, so a wait nothing ends frees the job long before its 45 minutes.
+      # Quoted: unquoted, YAML reads " #737)" as a comment and the step is named "...(issue".
+      - name: "The console under its CSP at two phone widths and eight desktop widths (issue #737)"
+        if: (success() || failure()) && steps.install.outcome == 'success'
+        timeout-minutes: 10
+        run: |
+          zip="$RUNNER_TEMP/chrome-linux64.zip"
+          url="$(node .github/scripts/console-width-check.mjs --check-pin --platform linux64)"
+          curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$zip" "$url"
+          node .github/scripts/console-width-check.mjs --verify-zip "$zip" --platform linux64
+          unzip -q "$zip" -d "$RUNNER_TEMP/cft"
+          CHROME="$RUNNER_TEMP/cft/chrome-linux64/chrome" node .github/scripts/console-width-check.mjs --require
 
   image:
     name: the job image holds its contract

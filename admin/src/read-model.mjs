@@ -3811,18 +3811,40 @@ export function createFleetReader(
   // false`) on every reader: the TUI's per-tick `mergedRunsOn` already prunes, and a second pruning read would only
   // race it.
   let wide = null;
+  // The read of the wide window in flight, if one is (issue #737): every caller that finds the cache expired while it
+  // runs waits on this one read instead of starting its own. Since the console's pages read the navigation's Parked
+  // count off this window (`parkedCount`) beside the live hub's snapshots, several requests can arrive in the same
+  // instant the cache runs out, and each would otherwise make its own mirror read of WIDE_RUNS runs. Cleared when it
+  // settles, so a read that failed is retried by the next caller, never handed out again.
+  let wideRead = null;
   // The last pending-answer scan for the parked rows (issue #647), `{ at, key, got }`, reused for DOLLAR_RECORDS_TTL_MS.
   let parkedPending = null;
   const wideRuns = async () => {
     const at = nowFn();
     if (wide && at >= wide.at && at - wide.at < DOLLAR_RECORDS_TTL_MS) return wide;
-    const local = localIndex.records();
-    const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS });
-    const runs = mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: WIDE_RUNS });
-    // Either side unread makes the window partial: a parked run on that side would be missing without a word.
-    const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
-    wide = { at, runs, mirror: degraded, partial };
-    return wide;
+    if (wideRead !== null) return wideRead;
+    const read = (async () => {
+      const local = localIndex.records();
+      const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS });
+      const runs = mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: WIDE_RUNS });
+      // Either side unread makes the window partial: a parked run on that side would be missing without a word.
+      const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
+      wide = { at, runs, mirror: degraded, partial };
+      return wide;
+    })();
+    // Cleared in the first reaction to the read, on either outcome, before any waiting caller resumes. What the callers
+    // hold is this derived promise, so a rejection reaches each of them and is handled there, as a direct call's was.
+    wideRead = read.then(
+      (w) => {
+        wideRead = null;
+        return w;
+      },
+      (err) => {
+        wideRead = null;
+        throw err;
+      },
+    );
+    return wideRead;
   };
 
   // The published doctor results (issue #712, `INT-DOCTOR-RESULTS-KEY`), `{ at, got }`, read at most once per
@@ -4104,6 +4126,28 @@ export function createFleetReader(
         refusals24h: fold.refusals24h,
         failures24hFloor: fold.failures24hFloor,
       };
+    },
+    /**
+     * The console navigation's Parked count (issue #737) on a page that reads no snapshot: how many unanswered parked
+     * runs the wide window holds, by the snapshot's own rule (`readParkedRuns`, `unansweredOnly`) off the same cached
+     * window (and the same read, when one is in flight), so it costs no read the snapshot did not already pay for
+     * within `DOLLAR_RECORDS_TTL_MS`. No chain counter is read (a count needs none), and no pending-answer scan. Null
+     * when the window is partial or unreadable, as the snapshot's `parkedUnreachable` would say: a side that could not
+     * be read is never offered as a whole count. Never throws.
+     *
+     * WHAT THE WINDOW CANNOT SEE. It is the newest WIDE_RUNS (1000) runs, so a park older than the 1000th run is not
+     * counted, and that is not marked partial: the window was read whole, it just ends. Exactly as the parked inbox
+     * (the snapshot's `parked`, the same fold of the same window) does not list such a park, so the count and the inbox
+     * agree; a deployment that runs a thousand jobs while one waits has a park neither shows.
+     */
+    async parkedCount() {
+      try {
+        const w = await wideRuns();
+        if (w.partial) return null;
+        return readParkedRuns({ runs: w.runs, now: nowFn(), sessionsDir: null, fs, unansweredOnly: true }).length;
+      } catch {
+        return null;
+      }
     },
     /** This reader's held client, local index and clock, for `readRunsPage`/`readRunById` off the same connection. */
     async runsPage(opts = {}) {

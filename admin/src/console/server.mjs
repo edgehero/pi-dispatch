@@ -28,6 +28,10 @@
  * NOTHING SECRET IS LOGGED OR ECHOED. The request log is `METHOD /path status`: the path only (the one-time code rides
  * in the fragment, which never reaches a request line), never a query, a header value, a cookie or a body. Audit rows
  * carry names, roles, a session digest and file digests, never a token, a code or a payload.
+ *
+ * THE THEME COOKIE IS READ, NEVER WRITTEN (issue #737). Every page and both sign-in pages are drawn in the theme the
+ * request's `pd_theme` cookie chose (`themeOf`, a closed set, so the cookie's own bytes never reach a page); the browser
+ * script's theme button is the only writer of that cookie, and no response here sets it.
  */
 import * as nodeFs from "node:fs";
 import { createServer } from "node:http";
@@ -36,13 +40,14 @@ import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { ACTIONS, actionNamed, confirmAction, previewAction } from "./actions.mjs";
 import { contentTypeRefusal, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
-import { loginCodePage, loginPage } from "./html.mjs";
 import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { getRun } from "./run-api.mjs";
 import * as realPages from "./pages.mjs";
 import { CONSOLE_SCRIPT } from "./script.mjs";
+import { loginCodePage, loginPage } from "./shell.mjs";
 import { CONSOLE_CSS } from "./style.mjs";
+import { themeOf } from "./theme.mjs";
 import { TRANSCRIPT_FORMATS } from "./transcript.mjs";
 
 /** The largest request body a write may send. A pause-windows file is a few hundred bytes; 64 KiB is generous. */
@@ -203,14 +208,14 @@ function pageQueryOr400(ctx, name, searchParams) {
   return parsed;
 }
 
-/** One screen: read its data, render it whole. HEAD runs the same and node sends no body. */
+/** One screen: read its data, render it whole, in the request's theme. HEAD runs the same and node sends no body. */
 function pageHandler(name) {
   return async (ctx) => {
     const parsed = pageQueryOr400(ctx, name, ctx.searchParams);
     if (!parsed) return;
     const { pages, pageDeps, config } = ctx.deps;
     const data = await pages.loadPageData(name, parsed.query, pageDeps, { role: ctx.session.role });
-    const out = await pages.renderPage(name, { query: parsed.query, session: { name: ctx.session.name, role: ctx.session.role }, data, readOnly: Boolean(config.readOnly) });
+    const out = await pages.renderPage(name, { query: parsed.query, session: { name: ctx.session.name, role: ctx.session.role }, data, readOnly: Boolean(config.readOnly), theme: themeOf(ctx.req.headers.cookie) });
     return sendHtml(ctx.res, out?.status ?? 200, out?.html ?? "");
   };
 }
@@ -348,9 +353,9 @@ export const ROUTES = Object.freeze([
     ctx.res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
     ctx.res.end("ok");
   } },
-  { method: "GET", path: "/login", auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, loginPage()) },
+  { method: "GET", path: "/login", auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie) })) },
   { method: "POST", path: "/login", auth: "none", write: true, readOnlyExempt: true, handler: postLogin },
-  { method: "GET", path: "/login/code", auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, loginCodePage()) },
+  { method: "GET", path: "/login/code", auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, loginCodePage({ theme: themeOf(ctx.req.headers.cookie) })) },
   { method: "POST", path: "/login/code", auth: "none", write: true, readOnlyExempt: true, handler: postLoginCode },
   { method: "POST", path: "/logout", auth: "viewer", write: true, readOnlyExempt: true, handler: postLogout },
   ...pageRoutes(realPages.PAGES),
@@ -362,6 +367,13 @@ export const ROUTES = Object.freeze([
   { method: "GET", path: "/static/console.css", auth: "none", write: false, handler: (ctx) => {
     ctx.res.writeHead(200, { "content-type": "text/css; charset=utf-8" });
     ctx.res.end(CONSOLE_CSS);
+  } },
+  // Issue #737: a browser asks for /favicon.ico when a page names no icon (no console page does), and the 404 it got
+  // on a first visit was logged as an error in the browser's console. No content and no auth: the answer holds nothing,
+  // and like every route it carries the security headers.
+  { method: "GET", path: "/favicon.ico", auth: "none", write: false, handler: (ctx) => {
+    ctx.res.writeHead(204);
+    ctx.res.end();
   } },
   { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
   // Issue #647: one run and the chat it can have (`run-api.mjs`); a viewer's, since the answer carries no text at all.

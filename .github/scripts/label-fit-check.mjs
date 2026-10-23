@@ -326,12 +326,15 @@ const HITS = `<script>
 </script>`;
 
 // The page: the console's insights body in its stylesheet, inline here because this harness serves one document and
-// no CSP; the fit is the exact string the console's script carries, run before the probes.
+// no CSP; the fit is the exact string the console's script carries, run before the probes. The panel sits inside
+// `<div class="legacy">`, as the console's pages hold it since issue #737: the insights renderers' rules apply only
+// there (compat-css.mjs scopes them under `.legacy`), so outside it the labels would be measured in a font and size
+// the console never draws them in.
 function page(graph, fitFold, withFit, costByTrigger = {}) {
   if (!CONSOLE_SCRIPT.includes(FIT_JS)) throw new Error("the console script does not carry FIT_JS verbatim");
   const body = String(insightsBody({ graph, fold: fitFold, costsUnreachable: null, window: "30d", costByTrigger, budget: null }, NOW));
   const fit = withFit ? `<script>${FIT_JS}</script>` : "";
-  return `<!doctype html>\n<meta charset="utf-8">\n<title>label fit</title>\n<style>${CONSOLE_CSS}</style>\n<body data-page="insights"><main><section data-panel>${body}</section></main>${fit}<pre id="fitout"></pre>${PROBE}<pre id="hitout"></pre>${HITS}</body>`;
+  return `<!doctype html>\n<meta charset="utf-8">\n<title>label fit</title>\n<style>${CONSOLE_CSS}</style>\n<body data-page="insights"><main><div class="legacy"><section data-panel>${body}</section></div></main>${fit}<pre id="fitout"></pre>${PROBE}<pre id="hitout"></pre>${HITS}</body>`;
 }
 
 function measure(html) {

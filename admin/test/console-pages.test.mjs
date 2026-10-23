@@ -1,12 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { ESC, FIXTURES, ROLES, SHOTS, assertClean, assertPanelsMatch, renderAll, skip } from "./helpers/console-pages-harness.mjs";
 
 /**
  * The console's screens rendered over the canned deployment (issue #641), in `render-images.test.mjs`'s style: the
@@ -22,320 +19,117 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  *
  * (then read the diff: the fixtures ARE the pages, so a change there is a change an operator will see).
  *
- * HOW IT RUNS. The render happens in a CHILD process (this file, run with `CONSOLE_PAGES_CHILD` set), for
- * render-images' reasons: the readers take the clock from `Date` (the day's budget keys, a held job's age, a scheduler's
- * next fire), so `Date` is frozen at the fixture's `NOW` before any project module loads, and the environment is
- * emptied so no deployment pointer or key of this machine is read. The child writes its pages to a JSON file the parent
- * reads.
- *
- * Only the queue's live state is canned (`cannedQueues`, render-images' own): counts, workers, the active jobs and the
- * failed one, which only a running fleet produces. The pricing façade is the real one with its `piAiVersion` pinned to
- * the version the fixture's records carry, so a pi bump does not rewrite the spend footer.
- *
- * VALKEY: `VALKEY_TEST_URL`, database 8. Not render-images' 7: without a server binary on PATH that test seeds
- * database 7 of the same server, and the two files run concurrently. The database must be empty and is emptied again
- * when done. Without `VALKEY_TEST_URL` the render tests are skipped.
+ * Since issue #737 the seeding, the child render and the checks every page gets are in the shared harness,
+ * `helpers/console-pages-harness.mjs`, so a later file can render and check its own group of screens the same way; its
+ * header says how the render runs and which Valkey database it needs. Without `VALKEY_TEST_URL` the render tests are
+ * skipped; the committed goldens are still held to every page rule (`assertClean`: the references, and since review D3
+ * the structure, one `#main`, one `h1`, one sprite, unique ids, bare panels). Each render also draws the operator's
+ * page of every screen on a read-only console, held to the same rules and to no golden (`assertReadOnlyPages`).
  */
 
-const SELF = fileURLToPath(import.meta.url);
-const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));
-const BASE = process.env.VALKEY_TEST_URL;
-const URL_8 = BASE ? `${BASE.replace(/\/\d*$/, "")}/8` : null;
-const skip = URL_8 === null ? "needs VALKEY_TEST_URL" : false;
-const run = promisify(execFile);
-
-/** The screens and the query each is rendered with. */
-const SHOTS = Object.freeze([
-  ["overview", "overview", ""],
-  ["runs", "runs", ""],
-  ["runs-filtered", "runs", "project=web&outcome=completed"],
-  ["run", "run", "id=gh-2f6a"],
-  // Issue #644: a running job's detail (no record yet), with a progress snapshot that declared phases and left a note.
-  ["run-live", "run", "id=gh-b3d7"],
-  ["parked", "parked", ""],
-  ["insights", "insights", "range=7d"],
-  // The what-if (the insights move to the console): a priced model over the fixture's ledgered fix runs, at the scan's
-  // own ceiling, with the canned pricing below so a pi bump moves no byte of it.
-  ["insights-whatif", "insights", "whatif=acme%2Fmodel-1&flow=fix"],
-  ["fleet", "fleet", ""],
-  ["config", "config", ""],
-  ["audit", "audit", ""],
-]);
-const ROLES = Object.freeze(["viewer", "operator"]);
-
-// Control bytes are built, never typed.
-const ESC = String.fromCharCode(27);
-const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
-const HOST_PATH_RE = /\/Users\/|\/home\/|\/private\/|\/tmp\/|\/var\/folders\//;
-const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}/;
-// Inside a tag only: escaped text never holds a `<`, and a hostile value that reads "onload=" as text is the point.
-const ACTIVE_MARKUP_RE = /<script(?! src="\/static\/console\.js" defer><\/script>)|<style|<[^>]*\s(?:on[a-z]+|style)\s*=|<[^>]*\s(?:href|src)\s*=\s*"?\s*javascript:/i;
-
-/** The hostile values the second variant seeds. */
-const HOSTILE = Object.freeze({
-  jobId: `gh-<script>alert(1)</script>"'${ESC}[31m`,
-  target: `acme/web"><script>alert(2)</script>${ESC}#7`,
-  jsTarget: "javascript:alert(3)/x#5",
-  reason: `SECRET-FAILURE-TEXT <img src=x onerror=alert(4)>${ESC}[0m`,
-  activeId: `gh-<b onmouseover=alert(5)>`,
-  // Issue #644: model text in the progress key. Raw control bytes on purpose, although the worker escapes them: the
-  // console's own scrub is the belt this pins.
-  phase: `<script>alert(6)</script>${ESC}[2J`,
-  note: `PHASE-NOTE-TEXT <img src=x onerror=alert(7)>${ESC}]8;;x${String.fromCharCode(7)}`,
+test("the page rules bite: a duplicate id, a second main, h1 or sprite, a dressed panel, every reference attribute to another host in any spelling a browser reads, and a tag they cannot read fail", () => {
+  // A page that holds every rule, with six references of its own; each case below breaks one, and only that one.
+  const icons = `<a href="#main">a</a><a href="/runs">b</a><a href="/fleet">c</a><a href="#x">d</a><img src="/static/i.png" alt=""><a href="/parked">e</a>`;
+  const good = (extra = "", { open = `<main id="main">`, close = "</main>", h1 = "<h1>T</h1>", sprite = `<svg class="sprite"></svg>`, panel = `<section id="p-a" data-panel>p</section>` } = {}) => `${sprite}${open}${h1}<p id="x">x</p>${panel}${icons}${extra}${close}`;
+  assertClean("good", good());
+  assertClean("an outbound link in the one shape", good(`<a class="link" href="https://github.com/acme/web/issues/1" rel="noreferrer noopener" target="_blank">i</a>`));
+  // What the browser reads as the same thing passes too: html's own entities, a single-quoted or unquoted value, a
+  // newline or a space a URL parser drops, and a quoted > inside a value.
+  assertClean("spellings the browser reads alike", good(`<a href='/runs?a=1&amp;b=&quot;2&quot;'>q</a><img src=/static/u.png alt=""><a href=" /fleet ">f</a><a title="a>b" href="/x">t</a>`));
+  const fails = {
+    "an id twice": good(`<p id="x">again</p>`),
+    "an id twice, the second in single quotes": good(`<p id='x'>again</p>`),
+    "an id twice, the second unquoted": good(`<p id=x>again</p>`),
+    // Each of these keeps the skip link's #main an element of the page, so the main rule alone is what fails.
+    "no main element": good("", { open: `<div id="main">`, close: "</div>" }),
+    "a main that is not #main": good(`<p id="main">m</p>`, { open: "<main>" }),
+    "a second main element": good("<main>m</main>"),
+    "a second main element, upper case": good("<MAIN>m</MAIN>"),
+    "a second #main": good(`<div id="main"></div>`),
+    "no h1": good("", { h1: "" }),
+    "a second h1": good("<h1>U</h1>"),
+    "a second h1, upper case": good("<H1>U</H1>"),
+    "no sprite": good("", { sprite: "" }),
+    "a second sprite": good(`<svg class="sprite"></svg>`),
+    "a second sprite, among other classes": good(`<svg class="x sprite"></svg>`),
+    "a panel with a class": good("", { panel: `<section id="p-a" class="card" data-panel>p</section>` }),
+    "a panel with a role": good("", { panel: `<section id="p-a" data-panel role="region">p</section>` }),
+    "a panel with a class in single quotes": good("", { panel: `<section id="p-a" class='card' data-panel>p</section>` }),
+    // Review round 2: every attribute a browser fetches or follows, on any element, in any spelling it reads.
+    "a srcset to another host": good(`<img src="/a.png" srcset="/a.png 1x, https://evil.example/b.png 2x" alt="">`),
+    "a preload's imagesrcset to another host": good(`<link rel="preload" as="image" imagesrcset="/a.png 1x, https://evil.example/a.png 2x">`),
+    "a ping to another host": good(`<a href="/runs" ping="/ok https://evil.example/t">p</a>`),
+    "a poster from another host": good(`<video src="/v.mp4" poster="https://evil.example/p.png"></video>`),
+    "an object's data from another host": good(`<object data="https://evil.example/x.svg"></object>`),
+    "a data attribute to another host on another element": good(`<embed data="https://evil.example/x.svg">`),
+    "an object's codebase on another host": good(`<object codebase="https://evil.example/" data="/x"></object>`),
+    "a table's background from another host": good(`<table background="https://evil.example/t.png"><tr><td>x</td></tr></table>`),
+    "a cell's background from another host": good(`<table><tr><td background="https://evil.example/t.png">x</td></tr></table>`),
+    "an unquoted src to another host": good(`<img src=https://evil.example/a.png alt="">`),
+    "a src after a slash": good(`<img/src="https://evil.example/a.png" alt="">`),
+    "a src straight after a quoted value": good(`<img alt=""src="https://evil.example/a.png">`),
+    "a src after a quoted >": good(`<img title="a>b" src="https://evil.example/a.png" alt="">`),
+    "an upper-case SRC": good(`<IMG SRC="https://evil.example/a.png" alt="">`),
+    "an entity-encoded second slash": good(`<img src="/&#x2F;evil.example/a.png" alt="">`),
+    "a named-entity slash": good(`<img src="/&sol;evil.example/a.png" alt="">`),
+    "a newline between the slashes": good(`<img src="/\n/evil.example/a.png" alt="">`),
+    "a backslash for the second slash": good(`<img src="/\\evil.example/a.png" alt="">`),
+    "a meta refresh": good(`<meta http-equiv="refresh" content="0;url=https://evil.example/">`),
+    "an outbound link without its rel": good(`<a href="https://github.com/acme/web/issues/1" target="_blank">i</a>`),
+    "a same-page query": good(`<a href="?x=1">q</a>`),
+    "a reference to an element the page lacks": good(`<a href="#nowhere">n</a>`),
+    // A tag the rules cannot read is a failure, never a tag they skip: here the second <img is inside the first tag.
+    "a tag the parser cannot read": good(`<img alt="a"<img src="/static/i.png">`),
+  };
+  for (const [what, page] of Object.entries(fails)) assert.throws(() => assertClean(what, page), assert.AssertionError, what);
+  // `data-*` attributes are not `data`: a panel's `data-panel` and a `data-query` name no URL.
+  assertClean("data attributes", good(`<div data-query="https://not.a.reference/"></div>`));
 });
 
-/** The progress snapshots the child seeds (issue #644): a phased run on mini1, a phaseless one on the remote build3. */
-function progressSeeds(NOW, hostile) {
-  const base = { v: 1, interrupted: 0, prior: null, startedAt: NOW - 12 * 60_000, updatedAt: NOW - 2_000, ended: false, outcome: null, commentId: null };
-  return {
-    "gh-b3d7": {
-      ...base,
-      turn: 7,
-      steps: 12,
-      failed: 1,
-      running: [{ tool: "bash", since: NOW - 40_000 }],
-      recent: [
-        { tool: "read", status: "ok", durationMs: 120, at: NOW - 90_000 },
-        { tool: "bash", status: "error", durationMs: 2300, at: NOW - 60_000 },
-        { tool: "edit", status: "ok", durationMs: null, at: NOW - 45_000 },
-      ],
-      phase: { index: 1, done: 3, total: 10 },
-      phases: hostile ? ["survey", HOSTILE.phase, "verify", "report"] : ["survey", "migrate the schema", "verify", "report"],
-      note: hostile ? HOSTILE.note : "three of ten tables migrated",
-    },
-    "gh-e802": { ...base, turn: 31, steps: 58, failed: 0, running: [], recent: [{ tool: "grep", status: "ok", durationMs: 15, at: NOW - 5_000 }], phase: null, phases: [], note: null, prior: { turns: 4, steps: 9 } },
-  };
-}
+test("the committed goldens hold every page rule (references, structure, no control byte), with or without a Valkey to render them", () => {
+  // The render test below checks the same on a fresh render, which equals these bytes; this one runs where it is
+  // skipped too, so a hand-edited golden or a merge that left one stale still answers to the rules.
+  const want = SHOTS.flatMap(([shot]) => ROLES.map((role) => `${shot}.${role}.html`)).sort();
+  assert.deepEqual(readdirSync(FIXTURES).filter((f) => f.endsWith(".html")).sort(), want, "a golden per shot and role, and no other");
+  for (const f of want) assertClean(`fixtures/console/${f}`, readFileSync(join(FIXTURES, f), "utf8"));
+});
 
-// ---------------------------------------------------------------------------------------------------------------------
-// The child: seed, read, render, write JSON. Runs only with CONSOLE_PAGES_CHILD set.
-// ---------------------------------------------------------------------------------------------------------------------
-
-async function renderInChild() {
-  const variant = process.env.CONSOLE_PAGES_CHILD;
-  const url = process.env.CONSOLE_PAGES_URL;
-  const out = process.env.CONSOLE_PAGES_OUT;
-  const { NOW, QUEUE_STATE, WORKERS, FAILED, RUNNING, LOCAL_HOST, PARKED, seedDeployment, writeDeployment } = await import("../../launch/fixture-deployment.mjs");
-
-  // The environment, emptied; the clock, frozen; both before any project module loads.
-  for (const k of Object.keys(process.env)) delete process.env[k];
-  const work = tempDir("console-pages-");
-  Object.assign(process.env, { TZ: "UTC", HOME: join(work, "home"), PI_CODING_AGENT_DIR: join(work, "agent") });
-  mkdirSync(process.env.HOME, { recursive: true });
-  mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
-  const RealDate = Date;
-  class FrozenDate extends RealDate {
-    constructor(...a) {
-      if (a.length === 0) super(NOW);
-      else super(...a);
-    }
-    static now() {
-      return NOW;
-    }
-  }
-  globalThis.Date = FrozenDate;
-
-  const W = {
-    connection: await import("../../worker/src/connection.mjs"),
-    queue: await import("../../worker/src/queue.mjs"),
-    runHistory: await import("../../worker/src/run-history.mjs"),
-    runMirror: await import("../../worker/src/run-mirror.mjs"),
-    hostRegistry: await import("../../worker/src/host-registry.mjs"),
-    liveJobs: await import("../../worker/src/live-jobs.mjs"),
-    backends: await import("../../worker/src/backends.mjs"),
-    budget: await import("../../worker/src/budget.mjs"),
-    scopedLimits: await import("../../worker/src/scoped-limits.mjs"),
-    allocation: await import("../../worker/src/allocation.mjs"),
-    waitState: await import("../../worker/src/wait-state.mjs"),
-    dollarBudget: await import("../../worker/src/dollar-budget.mjs"),
-    doctorResults: await import("../../worker/src/doctor-results.mjs"),
-  };
-  const RM = await import("../src/read-model.mjs");
-  const DW = await import("../src/dollar-windows.mjs");
-  const { assembleInsights } = await import("../src/insights-assembly.mjs");
-  const { makeWhatIfReader } = await import("../src/console/whatif.mjs");
-  const pricing = await import("../../worker/src/pricing.mjs");
-  const { makeConsoleAudit, readConsoleAudit } = await import("../../worker/src/console-audit.mjs");
-  const { sessionKeyFor } = await import("../../worker/src/session-key.mjs");
-  const P = await import("../src/console/pages.mjs");
-  const version = JSON.parse(readFileSync(fileURLToPath(new URL("../../worker/package.json", import.meta.url)), "utf8")).version;
-
-  const admin = W.connection.makeRedisClient(url);
-  admin.on?.("error", () => {});
-  let seeded = false;
-  let reader = null;
-  const opened = [];
-  try {
-    const size = await admin.dbsize();
-    if (size !== 0) throw new Error(`database 8 of VALKEY_TEST_URL holds ${size} keys: these render tests need it empty`);
-    seeded = true;
-    const deployment = join(work, "deployment");
-    const paths = writeDeployment(deployment);
-    const env = {
-      VALKEY_URL: url,
-      PI_WORKER_NAME: LOCAL_HOST,
-      PI_LOG_RETENTION_DAYS: "30",
-      PI_LOGS_DIR: paths.logs,
-      PI_SETTINGS_FILE: paths.settings,
-      PI_TRIGGERS_FILE: paths.triggers,
-      PI_PAUSE_WINDOWS_FILE: paths.pause,
-      PI_SCOPED_LIMITS_FILE: paths.limits,
-      PI_PROJECTS_FILE: paths.projects,
-      PI_ENVELOPE_FILE: paths.envelope,
-      PI_SUBSCRIPTIONS_FILE: paths.subs,
-      PI_GLOBAL_PI_DIR: paths.overlay,
-    };
-    Object.assign(process.env, env);
-    // Issue #712: records naming a real venue, so the goldens are a normal local run's pages.
-    await seedDeployment({ url, paths, mods: { W, RM, DW, version }, venue: "local" });
-
-    // The parked run's session chain counter, as the session store keeps it, so the inbox shows a known count.
-    const sessionsDir = join(deployment, "sessions");
-    const parkedKey = sessionKeyFor({ kind: "github", repo: PARKED.repo, target: { type: "issue", number: PARKED.number } });
-    mkdirSync(join(sessionsDir, parkedKey), { recursive: true });
-    writeFileSync(join(sessionsDir, parkedKey, "resume-chain"), "2\n");
-
-    // The console's audit log: four rows through its own writer, then one damaged line.
-    const audit = makeConsoleAudit({ logsDir: paths.logs, now: () => NOW - 3600_000, alive: () => true });
-    audit.append({ actor: { name: "console", role: "operator", session: null }, action: "serve-started", outcome: "ok" });
-    const at = (ms) => makeConsoleAudit({ logsDir: paths.logs, now: () => ms, alive: () => true });
-    at(NOW - 1800_000).append({ actor: { name: "ops", role: "operator", session: "a1b2c3d4" }, action: "login", outcome: "ok" });
-    at(NOW - 1700_000).append({ actor: { name: "anonymous", role: "none", session: null }, action: "login-failed", target: "/login", outcome: "refused", reason: "no token matched" });
-    at(NOW - 1600_000).append({ actor: { name: "ops", role: "operator", session: "a1b2c3d4" }, action: "write", target: "pause-windows.json", outcome: "ok", beforeDigest: "0".repeat(64), afterDigest: "1".repeat(64), ticket: "abcdef012345" });
-    appendFileSync(join(paths.logs, "console-audit", "2026-10.jsonl"), "this line is not an audit row\n");
-
-    const hostile = variant === "hostile";
-    // The progress keys (issue #644), written as the worker writes them (`serializeProgress` under `progressKeyFor`).
-    const RP = await import("../../worker/src/run-progress.mjs");
-    for (const [id, snap] of Object.entries(progressSeeds(NOW, hostile))) await admin.set(RP.progressKeyFor(id), RP.serializeProgress(snap));
-    if (hostile) {
-      // Records written as a file another writer could leave: the local index reads every *.json in the logs dir.
-      const base = { flow: "triage", host: "mini1", provider: "anthropic", model: "claude-sonnet-5-5", tokens: null, dollars: null };
-      const iso = (ms) => new RealDate(ms).toISOString();
-      writeFileSync(join(paths.logs, "hostile-1.json"), JSON.stringify({ ...base, jobId: HOSTILE.jobId, kind: "github", target: HOSTILE.target, outcome: "completed", reason: "awaiting-input", startedAt: iso(NOW - 9 * 60_000), endedAt: iso(NOW - 8 * 60_000) }));
-      writeFileSync(join(paths.logs, "hostile-2.json"), JSON.stringify({ ...base, jobId: "gh-js01", kind: "github", target: HOSTILE.jsTarget, outcome: "completed", reason: "awaiting-input", startedAt: iso(NOW - 7 * 60_000), endedAt: iso(NOW - 6 * 60_000), parentJobId: HOSTILE.jobId }));
-    }
-
-    // The queue's live state, canned by queue name (render-images' own), with the real BullMQ queue for schedulers.
-    const queueFn = (connection, { name = W.queue.QUEUE } = {}) => {
-      const real = name === W.queue.QUEUE ? W.queue.makeQueue(connection) : null;
-      if (real) opened.push(real);
-      const host = name.includes("@") ? name.slice(name.indexOf("@") + 1) : null;
-      const active = host ? [...(RUNNING[host] ?? [])].sort((a, b) => a.at - b.at).map((e) => ({ id: e.id, processedOn: e.at })) : [];
-      if (hostile && host === "mini1") active.push({ id: HOSTILE.activeId, processedOn: NOW - 60_000 });
-      return {
-        name,
-        isPaused: async () => false,
-        getJobCounts: async () => ({ ...(QUEUE_STATE[name]?.counts ?? { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }) }),
-        getWorkers: async () => WORKERS.map((w) => ({ name: w })),
-        getJobSchedulers: (...a) => (real ? real.getJobSchedulers(...a) : Promise.resolve([])),
-        getActive: async () => active,
-        // Issue #647: the run page's Chat panel asks the queue for the job's state; an active job reads as active, with
-        // no `.data` (so it is not steer-armed and its run id is its own), and any other id is not this queue's.
-        getJob: async (id) => (active.some((e) => e.id === id) ? { id, data: {}, getState: async () => "active" } : null),
-        // The pending-answer scan (issue #647) lists the running and waiting jobs: the running ones, with no `.data`.
-        getJobs: async ([state]) => (state === "active" ? active.map((e) => ({ id: e.id, data: {} })) : []),
-        getFailed: async () => (name === W.queue.QUEUE ? [hostile ? { ...FAILED, id: HOSTILE.jobId, failedReason: HOSTILE.reason } : { ...FAILED }] : []),
-        pause: async () => {},
-        resume: async () => {},
-        close: async () => {},
-      };
-    };
-    const fleetPaths = { ...RM.resolvePaths(env), sessionsDir };
-    reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW });
-    const deps = {
-      fleet: reader,
-      insights: (window) => assembleInsights(fleetPaths, window, { pricing: { ...pricing, piAiVersion: () => "0.99.1" }, nowMs: NOW, envFn: () => env }),
-      // A canned catalog of two ids and a rate of $1 in and $5 out per million tokens: the what-if's own arithmetic over
-      // the fixture's real records, with nothing a pi bump can move.
-      whatIf: makeWhatIfReader({
-        pricing: {
-          getPricedModel: (p, id) => (p === "acme" && (id === "model-1" || id === "model-2") ? { provider: p, id } : null),
-          listPricedModels: () => [{ provider: "acme", id: "model-1" }, { provider: "acme", id: "model-2" }],
-          reprice: (q) => ({ usd: (q.input + 5 * q.output) / 1_000_000, ratesVersion: "0.99.1" }),
-        },
-        scan: () => RM.scanRunRecords({ logsDir: paths.logs, nowMs: NOW }),
-        now: () => NOW,
-      }),
-      pricedModels: () => ["acme/model-1", "acme/model-2"],
-      audit: ({ limit, before }) => readConsoleAudit({ logsDir: paths.logs, limit, before }),
-      subscriptions: () => RM.readSubscriptions({ subscriptionsPath: paths.subs }),
-      env: { ...env, GITLAB_URL: "https://gitlab.example.com" },
-      now: () => NOW,
-    };
-    const pages = {};
-    for (const [shot, name, qs] of SHOTS) {
-      const parsed = P.parsePageQuery(name, new URLSearchParams(qs));
-      if (parsed.refusal) throw new Error(`${shot}: ${parsed.refusal}`);
-      const data = await P.loadPageData(name, parsed.query, deps);
-      for (const role of ROLES) {
-        const ctx = { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data, readOnly: false };
-        const rendered = await P.renderPage(name, ctx);
-        const panels = await P.pagePanels(name, ctx);
-        pages[`${shot}.${role}`] = { status: rendered.status, html: String(rendered.html), panels };
-      }
-    }
-    if (hostile) {
-      // The hostile run's own detail page: its id is outside the run-id charset, so the query is refused before any read.
-      pages.hostileRunQuery = P.parsePageQuery("run", new URLSearchParams({ id: HOSTILE.jobId }));
-    }
-    writeFileSync(out, JSON.stringify(pages));
-  } finally {
-    await reader?.dispose();
-    await Promise.all(opened.map((q) => q.close().catch(() => {})));
-    if (seeded) await admin.flushdb().catch(() => {});
-    admin.disconnect();
+/**
+ * The operator's page of every screen on a read-only console (serve's read-only mode): rendered, never a golden, and
+ * held to every page rule the goldens are (references, unique ids, one main, h1 and sprite, bare panels), so a frame
+ * that draws something only in that mode (the read-only chip, the read-only top bar) cannot carry what no golden shows.
+ */
+function assertReadOnlyPages(readOnly, operatorPages) {
+  assert.deepEqual(Object.keys(readOnly), SHOTS.map(([shot]) => shot), "a read-only render per shot");
+  for (const [shot, page] of Object.entries(readOnly)) {
+    const key = `${shot}.operator on a read-only console`;
+    assert.equal(page.status, 200, key);
+    assert.match(page.html, /Read-only console/, `${key} is drawn read-only`);
+    assert.notEqual(page.html, operatorPages[`${shot}.operator`].html, `${key} is not the writable page`);
+    assertClean(key, page.html);
+    assertPanelsMatch(key, page);
   }
 }
 
-if (process.env.CONSOLE_PAGES_CHILD) {
-  try {
-    await renderInChild();
-    process.exit(0);
-  } catch (err) {
-    console.error(err?.stack ?? err);
-    process.exit(1);
-  }
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
-// The parent: the tests.
-// ---------------------------------------------------------------------------------------------------------------------
-
-/** Render every screen in a child process for `variant` ("plain" or "hostile"). */
-async function renderAll(variant) {
-  const dir = tempDir("console-pages-out-");
-  const out = join(dir, "pages.json");
-  const env = { PATH: process.env.PATH ?? "", CONSOLE_PAGES_CHILD: variant, CONSOLE_PAGES_URL: URL_8, CONSOLE_PAGES_OUT: out, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) };
-  try {
-    await run(process.execPath, [SELF], { env, timeout: 180_000, maxBuffer: 16 * 1024 * 1024 });
-  } catch (err) {
-    throw new Error(`the render child failed:\n${err.stderr ?? err.message}`);
-  }
-  return JSON.parse(readFileSync(out, "utf8"));
-}
-
-/** The properties every rendered page holds, whatever it shows. */
-function assertClean(key, html) {
-  assert.ok(!CONTROL_RE.test(html), `${key} carries no control byte`);
-  assert.doesNotMatch(html, HOST_PATH_RE, `${key} names no path of this machine`);
-  assert.doesNotMatch(html, EMAIL_RE, `${key} holds no email address`);
-  assert.doesNotMatch(html, ACTIVE_MARKUP_RE, `${key} carries no inline script, style, handler or javascript: link`);
-  const host = hostname().split(".")[0];
-  if (host.length >= 3) assert.ok(!html.toLowerCase().includes(host.toLowerCase()), `${key} does not name this machine`);
-}
-
-/** Each panel `pagePanels` returns is exactly the inner HTML of its section in the page. */
-function assertPanelsMatch(key, page) {
-  assert.ok(page.panels.length > 0, `${key} has panels`);
-  for (const { id, html } of page.panels) {
-    assert.match(id, /^p-[a-z-]+$/, `${key}: panel id ${id}`);
-    assert.ok(page.html.includes(`<section id="${id}" data-panel>${html}</section>`), `${key}: panel ${id} is the page's section, byte for byte`);
-  }
-}
+test("the read-only pages answer to every page rule: a read-only render with a foreign src, or a panel that is not the page's, fails", () => {
+  // Fabricated, so this runs where the render cannot: one read-only page per shot that holds every rule, and the
+  // writable page each differs from.
+  const page = (extra = "") => `<svg class="sprite"></svg><main id="main"><h1>T</h1><span class="chip">Read-only console</span><section id="p-a" data-panel>p</section><a href="#main">a</a><a href="/runs">b</a><a href="/fleet">c</a><a href="/parked">d</a><a href="/config">e</a><img src="/static/i.png" alt="">${extra}</main>`;
+  const set = (first) => Object.fromEntries(SHOTS.map(([shot], i) => [shot, { status: 200, html: i === 0 ? first : page(), panels: [{ id: "p-a", html: "p" }] }]));
+  const writable = Object.fromEntries(SHOTS.map(([shot]) => [`${shot}.operator`, { html: "<main>the writable page</main>" }]));
+  assertReadOnlyPages(set(page()), writable);
+  assert.throws(() => assertReadOnlyPages(set(page(`<img src="https://evil.example/x.png" alt="">`)), writable), /src="https:\/\/evil\.example\/x\.png" is neither this console's nor this page's/, "the reference rule");
+  assert.throws(() => assertReadOnlyPages(set(page(`<p id="main">again</p>`)), writable), /every id once/, "the structure rule");
+  const stray = set(page());
+  stray[SHOTS[0][0]] = { ...stray[SHOTS[0][0]], panels: [{ id: "p-a", html: "another" }] };
+  assert.throws(() => assertReadOnlyPages(stray, writable), /panel p-a is the page's section, byte for byte/, "the panel rule");
+});
 
 test("console pages: every screen, both roles, byte-identical to the fixtures and to a second render", { skip, timeout: 400_000 }, async () => {
-  const first = await renderAll("plain");
+  const { pages: first, readOnly } = await renderAll("plain");
+  // First, so a golden that differs (a markup change not yet written back) cannot hide a read-only page that breaks a
+  // rule.
+  assertReadOnlyPages(readOnly, first);
   const update = process.env.UPDATE_CONSOLE_FIXTURES === "1";
   if (update) mkdirSync(FIXTURES, { recursive: true });
   for (const [shot] of SHOTS) {
@@ -347,11 +141,12 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
       assert.ok(first[key].html === readFileSync(file, "utf8"), `fixtures/console/${key}.html is not what the console renders now: run with UPDATE_CONSOLE_FIXTURES=1, read the diff, and commit it`);
     }
   }
-  const second = await renderAll("plain");
+  const { pages: second, readOnly: readOnlyAgain } = await renderAll("plain");
   for (const [key, page] of Object.entries(first)) {
     assert.equal(second[key].html, page.html, `${key} is the same bytes on a second render`);
     assertClean(key, page.html);
   }
+  for (const [shot, page] of Object.entries(readOnly)) assert.equal(readOnlyAgain[shot].html, page.html, `${shot} on a read-only console is the same bytes on a second render`);
   // Status: the audit log is the operator's (the viewer gets the refusal page), and the parked run's detail exists.
   for (const [shot, name] of SHOTS) {
     assert.equal(first[`${shot}.operator`].status, 200, `${shot} for the operator`);
@@ -369,19 +164,22 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   const overview = first["overview.operator"].html;
   assert.match(overview, /<h1>Overview<\/h1>/);
   assert.match(overview, /<body data-page="overview" data-live="overview" data-query="">/);
-  assert.match(overview, /<a href="\/" aria-current="page">Overview<\/a>/);
-  assert.match(first["overview.viewer"].html, /<nav aria-label="Console screens">/);
+  assert.match(overview, /<a href="\/" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-home"><\/use><\/svg>Overview<\/a>/);
+  assert.match(first["overview.viewer"].html, /<nav class="pillnav" aria-label="Console screens">/);
   assert.ok(!first["overview.viewer"].html.includes('href="/audit"'), "a viewer's nav has no audit link");
-  assert.ok(overview.includes('href="/audit"'), "an operator's has");
+  assert.ok(overview.includes('<details class="more">') && overview.includes('href="/audit"'), "an operator's has, under More");
+  // Issue #737: the shell's Parked count, the same on every page, from the snapshot or the reader's own count.
+  const parkedPill = /<a href="\/parked"(?: aria-current="page")?><svg class="ic" aria-hidden="true"><use href="#i-parked"><\/use><\/svg>Parked<span id="p-nav-parked" data-panel><span class="count tone-parked"><span aria-hidden="true">1<\/span><span class="sr">1 unanswered<\/span><\/span><\/span><\/a>/;
+  for (const [key, page] of Object.entries(first)) assert.match(page.html, parkedPill, `${key}: the fixture's one parked run`);
   assert.match(first["parked.viewer"].html, /href="https:\/\/github\.com\/acme\/api\/issues\/131" rel="noreferrer noopener" target="_blank">acme\/api#131<\/a>/, "the parked run links to its issue");
   assert.match(first["parked.viewer"].html, /<td class="num">2<\/td>/, "with the session store's chain count");
   assert.match(first["run.viewer"].html, /awaiting-input/);
   // Issue #643: the live transcript section, outside every panel. The fixture's run has ended and Valkey holds no
   // stream for it, so the operator reads why and nothing is opened; a viewer reads that transcripts are operators'.
-  assert.match(first["run.operator"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">No live transcript: not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet\. Reload to check again\.<\/p><\/section><\/main>/);
+  assert.match(first["run.operator"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">No live transcript: not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet\. Reload to check again\.<\/p><\/section><\/div>\n<\/main>/);
   // Issue #712: a local run's page shows the command that reopens its sandbox.
   assert.match(first["run.operator"].html, /<code class="mono">pi-dispatch sandbox gh-2f6a<\/code>/);
-  assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/main>/);
+  assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/div>\n<\/main>/);
   for (const key of ["run.operator", "run.viewer"]) assert.doesNotMatch(first[key].html, /data-transcript/, `${key}: no stream for an ended run without one`);
   // Issue #644: the active tables carry each job's progress as integers and a tool name, the remote host's job too; the
   // running job's detail shows its counters to everyone and its phase names, bar and note to the operator alone.
@@ -421,7 +219,7 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
 });
 
 test("console pages: hostile values are escaped or refused, and a viewer never sees a failure reason", { skip, timeout: 400_000 }, async () => {
-  const pages = await renderAll("hostile");
+  const { pages, readOnly } = await renderAll("hostile");
   for (const [key, page] of Object.entries(pages)) {
     if (key === "hostileRunQuery") continue;
     assertClean(key, page.html);
@@ -429,6 +227,8 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
     assert.ok(!page.html.includes("<b onmouseover"), `${key} has no live element from an active job id`);
     if (key.endsWith(".viewer")) assert.ok(!page.html.includes("SECRET-FAILURE-TEXT"), `${key} carries no failure reason`);
   }
+  assertReadOnlyPages(readOnly, pages);
+  for (const [shot, page] of Object.entries(readOnly)) assert.ok(!page.html.includes("<script>alert") && !page.html.includes("<b onmouseover"), `${shot} on a read-only console has no live markup from a value`);
   // Issue #644: the hostile phase name and note are escaped and scrubbed on the operator's run page, and absent from
   // every other page (a viewer's run page, every list, every hub panel).
   const liveRun = pages["run-live.operator"].html;
@@ -556,13 +356,14 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
 test("loadPageData reads only what a screen shows, the snapshot at most once, and keeps no env but the forge hosts", async () => {
   const { loadPageData, parsePageQuery, PAGES } = await import("../src/console/pages.mjs");
   for (const name of Object.keys(PAGES)) {
-    const calls = { snapshot: 0, runsPage: 0, runById: 0, transcriptMeta: 0, insights: 0, audit: 0, subscriptions: 0 };
+    const calls = { snapshot: 0, runsPage: 0, runById: 0, transcriptMeta: 0, insights: 0, audit: 0, subscriptions: 0, parkedCount: 0 };
     const deps = {
       fleet: {
         snapshot: async () => (calls.snapshot++, { parked: [] }),
         runsPage: async () => (calls.runsPage++, { runs: [], next: null, mirror: "off" }),
         runById: async () => (calls.runById++, { record: { jobId: "gh-1", startedAt: "2026-10-08T00:00:00Z" }, source: "local" }),
         transcriptMeta: async () => (calls.transcriptMeta++, { exists: true, ended: false, outcome: null, length: 3, firstId: "1-0", lastId: "3-0" }),
+        parkedCount: async () => (calls.parkedCount++, 2),
       },
       insights: async () => (calls.insights++, {}),
       audit: async () => (calls.audit++, { rows: [], next: null }),
@@ -575,8 +376,12 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
     assert.equal(data.now, 1234, `${name}: the clock is read once, into the data`);
     assert.deepEqual(data.env, { GITLAB_URL: "https://gl.example" }, `${name}: only forge host variables are kept`);
     assert.ok(calls.snapshot <= 1, `${name}: snapshot at most once`);
-    const expected = { overview: ["snapshot"], runs: ["runsPage", "subscriptions"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta"], parked: ["snapshot"], insights: ["insights"], fleet: ["snapshot"], config: ["snapshot"], audit: ["audit"] }[name];
+    // Issue #737: a screen that reads no snapshot reads the navigation's Parked count, once; one that does takes it from
+    // the snapshot, so no screen reads both.
+    const expected = { overview: ["snapshot"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot"], config: ["snapshot"], audit: ["audit", "parkedCount"] }[name];
     assert.deepEqual(Object.keys(calls).filter((k) => calls[k] > 0).sort(), [...expected].sort(), `${name} reads ${expected.join(", ")}`);
+    assert.ok(calls.parkedCount <= 1, `${name}: the count at most once`);
+    assert.equal(data.parkedCount, expected.includes("parkedCount") ? 2 : undefined, `${name}: the count is in the data where it was read`);
     if (name === "run") assert.deepEqual(data.transcript, { exists: true, ended: false, outcome: null, length: 3 }, "the stream's facts only, never an id or a byte of text");
   }
   // A read that throws is a stated absence, never a thrown page.
@@ -587,6 +392,13 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
   assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).transcript, { unreachable: true, exists: false }, "a transcript read that throws is a stated absence");
   assert.match((await loadPageData("insights", { range: "7d" }, broken)).insightsError, /could not be assembled/);
   assert.equal((await loadPageData("audit", { before: null }, broken)).audit, null);
+  // The Parked count: a reader without it, one that throws and one that answers something that is not a count are all
+  // "unknown", never 0.
+  assert.equal((await loadPageData("audit", { before: null }, broken)).parkedCount, null, "no parkedCount on the reader");
+  for (const answer of [() => { throw new Error("down"); }, async () => { throw new Error("down"); }, async () => -1, async () => 1.5, async () => "3", async () => null]) {
+    const fleet = { ...broken.fleet, parkedCount: answer };
+    assert.equal((await loadPageData("insights", { range: "7d" }, { ...broken, fleet })).parkedCount, null, String(answer));
+  }
 });
 
 test("the run page says the transcript could not be read when transcriptMeta is unreachable, never that it has not started", async () => {
@@ -680,7 +492,10 @@ test("renderPage answers 404 for a run that does not exist, and the stream's pan
   assert.equal(page.status, 404);
   const html = String(page.html);
   assert.match(html, /No run with that id/);
-  assert.match(html, /read-only console/);
+  assert.match(html, /Read-only console<\/span>/);
   assert.match(html, /<body data-page="run" data-live="run" data-query="id=gh-404">/, "the run detail is live (issue #644: its progress panel moves)");
-  for (const { id, html: inner } of await pagePanels("run", ctx)) assert.ok(html.includes(`<section id="${id}" data-panel>${inner}</section>`), id);
+  for (const { id, html: inner } of await pagePanels("run", ctx)) {
+    const tag = id === "p-nav-parked" ? "span" : "section";
+    assert.ok(html.includes(`<${tag} id="${id}" data-panel>${inner}</${tag}>`), id);
+  }
 });
