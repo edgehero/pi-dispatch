@@ -292,14 +292,16 @@ default, or on a unix socket at mode 0600, and refuses any other address unless 
 The threat model, and what answers each part:
 
 - **A local user on the host.** Any account on the machine can connect to a loopback port. Every request but
-  `/healthz`, an empty `/favicon.ico`, the sign-in pages and the console's script and stylesheet needs a session, and a session needs a named token (256 random bits) or a one-time login code that only
-  the deployment's account can mint. Login attempts are rate limited and every failure is audited. In unix-socket
-  mode the socket is 0600 in a directory only the deployment's account can enter, so another account cannot connect
-  at all.
+  `/healthz`, an empty `/favicon.ico`, the sign-in pages, sign-out (which ends only the sessions its own cookies name)
+  and the console's script and stylesheet needs a session, and a session needs a named token (256 random bits) or a
+  one-time login code that only the deployment's account can mint. Login attempts are rate limited and every failure is
+  audited. In unix-socket mode the socket is 0600 in a directory only the deployment's account can enter, so another
+  account cannot connect at all.
 - **The job container reaching loopback through the host gateway.** On Docker Desktop `host.docker.internal`
   reaches the host's loopback listeners, so a job may be able to open a connection to the console. The console
   refuses every request whose Host is `host.docker.internal`, `host.containers.internal` or
-  `gateway.docker.internal` before any route runs, refuses to start when `PI_CONSOLE_ALLOWED_HOSTS` names one, and
+  `gateway.docker.internal` before any route runs (but the three public files below, which hold no data), refuses to
+  start when `PI_CONSOLE_ALLOWED_HOSTS` names one, and
   still needs a token; a job holds none. The Host refusal stops a browser and any client that keeps the name it
   dialled; a program in the job can send `Host: localhost` instead, so against a job the token is the barrier, and
   failed sign-ins are rate limited. Unix-socket mode removes the path, because no job mounts the socket, and is the
@@ -313,7 +315,11 @@ The threat model, and what answers each part:
 - **DNS rebinding.** A hostile name that resolves to `127.0.0.1` reaches the port, but its requests carry the hostile
   name in `Host`. The console accepts only `127.0.0.1`, `localhost`, `[::1]` and names you list in
   `PI_CONSOLE_ALLOWED_HOSTS`, whatever the port (so an SSH tunnel on any local port works), and answers anything else
-  421.
+  421. Since issue #737 three files answer on any name, by GET or HEAD alone: the console's script, its stylesheet and
+  its empty favicon. They are public bytes, the same for everyone, needing no session and holding no data, and the
+  421 page loads them to draw itself; every other path, one that exists or not, and every write still meets the Host
+  check first, so a rebound name learns nothing about this deployment (the script names the console's page paths,
+  which are this release's, the same on every console that runs it).
 - **Hostile run text rendered in the page.** Issue titles, comments, tool output and transcripts are attacker text.
   Every value the console renders is scrubbed of control bytes and HTML-escaped by one template, so raw insertion is
   impossible by construction; the CSP allows scripts only from the console's own files and no inline script; run text
@@ -338,6 +344,47 @@ The threat model, and what answers each part:
 - **A leaked tokens file grants nothing.** The file stores sha256 hashes, never a token; a token is shown once, at
   `token add` or `token rotate`, and appears in no log, audit row or page. Revoking or rotating a token, or
   `sessions end-all`, ends the affected sessions on their next request.
+- **Why a session ended is told, and tells nothing else** (issue #737). A session that ends leaves a tombstone in
+  the console's memory: its 256-bit session id and one word from a closed list (idle, max, revoked, role, all,
+  elsewhere), so the next page request that presents that cookie is sent to `/login?ended=<word>` and the sign-in page
+  says why in the console's own sentence (an API request gets the word in its 401). The tombstone is kept under the session's own id, and its word describes that
+  session's own token, so it tells a browser nothing about any other token or session; a browser learns only why its
+  own sign-in stopped working, which signing in again would show it anyway. Only an id that was a live session gets
+  one (an unknown or planted cookie leaves none), at most 1024 are kept, oldest first out, and they die with the
+  process. A well-formed cookie the console never held may be told "it may have restarted", worded as a possibility
+  because a planted cookie looks the same, and only while the process has been up for less than a session's longest
+  life and has forgotten no tombstone. The sign-in page draws a notice only for exactly one word of the list and
+  echoes nothing from its address, so a crafted link can show only the console's own sentences; the browser script
+  navigates to `?ended=` only with a word of that list. A sign-out ends every session the browser presents and their
+  other tabs' streams at once (each session the console holds, so a second session cookie another local page planted
+  beside yours cannot make the sign-out end nothing); a sign-in over a cookie that was still live ends the old one
+  once that sign-in has succeeded (one refused because its audit row could not be written leaves the old session and
+  its tabs as they were) and its streams once the sign-in's answer has gone out. Such a tab then asks the console who this browser is,
+  and reloads only when the answer is the person the page was drawn for. **A page acts only as the person it was drawn
+  for.** A one-time link opened in this browser signs it in as that link's person, and a sign-in in another tab can
+  do the same, so every page says who it was drawn for when it opens its live updates and with every preview and
+  confirm, and the console refuses the request when that is not the person the browser's cookie now names: a live
+  stream that opens or reconnects for another person is refused, and the page goes to the sign-in page, which says
+  this browser is now signed in as someone else (a word of the list, which only the page uses: no session ends for
+  it), and a preview or confirm is refused with nothing changed and an audit row, its Look again going to that same
+  sign-in page rather than reloading into the other person's console. So a page drawn for you can neither
+  show another person's live data nor change anything as them, even a page that is not live. A request that says no
+  person (the terminal chat, a script) is held to its cookie alone, as before. Two costs are accepted. A client with
+  no token learns two things from the "it may have restarted" answer to a well-formed cookie: that the console
+  process is younger than `PI_CONSOLE_MAX_HOURS`, and that it has not yet forgotten an ended session (no reason has
+  been dropped), which is worth little. And a token holder can flush the 1024 remembered reasons with about 1024
+  sign-ins (each over the last one's cookie ends that session; about three and a half hours
+  at the sign-in limit of 5 a minute): the dropped reasons are lost, those sessions' next page goes to the sign-in
+  page with no notice, and the console never says "it may have restarted" again until it restarts. Nobody can plant
+  a reason for another person's session: one is written only under the id of a session the console held, in its own
+  word.
+- **A tokens file the console cannot read signs nobody out** (issue #737). While the file cannot be read (a permission
+  mistake, say), a request that carries a session cookie is answered 503 with no Set-Cookie and
+  nothing ended, so the browser keeps its session for when the file reads again, and every open live page is kept
+  connected and sent no data, only its pings and a `stale` that says the tokens file could not be read: no session is
+  judged, so no data goes to one. Signing out is the exception that still works: it judges nothing, so it needs no
+  tokens file, and ends every session its cookies name. Before, the same moment cleared every cookie and ended every
+  stream.
 - **Live pages hold connections, so streams are capped and end with their session.** A live page keeps one event
   stream open. A token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all its sign-ins, and the whole
   console 32, half of its 64 connections, of which 8 are kept for operators, so open dashboards can never keep page
@@ -346,7 +393,9 @@ The threat model, and what answers each part:
   ends them within a second. An open tab never keeps a session alive, so an unattended screen still signs out at the
   idle limit. A browser that stops reading is dropped once 2 MiB are waiting for it, so a slow reader cannot make
   the console buffer without bound. The console polls Valkey once a second for all streams together, and not at all
-  while none is open, so tabs do not multiply the load on the deployment.
+  while none is open, so tabs do not multiply the load on the deployment. Since issue #737 a stream's end names why,
+  with the same closed list as the sign-in page (and `shutdown` when the console stops, which the page and the terminal
+  chat wait out rather than treat as a sign-out); a word outside that list is never sent.
 - **Query strings are bounded before anything is read.** Every filter, cursor, range and id a page takes is checked
   against a fixed character set and length, and a bad one is refused by name, never echoed back. A run page reads at
   most 100 runs and examines at most 2000 records before it answers with what it found, so a filter that matches
@@ -374,6 +423,17 @@ The threat model, and what answers each part:
   fixed character set) are shown to both roles, in lists too, because they are integers and a checked name. The phase
   names and the note an agent reports with `report_progress` are model text, and follow the transcript's rule: the
   operator role alone, escaped, on the run page only, never in a list or `/api/state`.
+- **Error pages are pages under the same rules, and say less than they could** (issue #737). A refused or failed
+  navigation by a browser (a GET or HEAD outside `/api/` and `/static/` whose Accept asks for HTML) gets an error page;
+  everything else, every script, stream and write included, gets the JSON it always got. Every error page carries the
+  same security headers as every response, its CSP included, is built by the same escaping template, and holds no
+  inline script or style. It says only its kind's fixed sentences: a 404 never repeats the path it was asked for, so a
+  crafted link cannot make a console page show words of its choosing; a 400 names the parameter it refused, never the
+  value; a 500 never shows the error's text. A 421 (a Host the console does not answer to) reads no session and draws
+  no navigation, names the refused hostname escaped and cut to 64 characters, and gives an SSH tunnel command for the
+  address and port that connection reached, which the requester already knows; it never lists the extra names
+  `PI_CONSOLE_ALLOWED_HOSTS` allows, nor anything else of where the console listens. A 404's navigation reads the
+  session without counting it as activity, so a 404 neither extends nor ends one.
 - **Forge links are never guessed.** A run's link points at `github.com` for GitHub and, for GitLab, Forgejo and
   Azure DevOps, at the instance URL the deployment itself is configured with, http or https only. When there is no
   such URL, or the target does not parse as that forge's repository and number, no link is drawn: a link to a host
@@ -388,6 +448,12 @@ The threat model, and what answers each part:
   the file snapshots it was built from and the jobs it names, so a confirm applies the change the operator saw or is
   refused (a file another session wrote, a job that was retried, removed or failed again since the preview).
   Every write goes through the same validators and funnels as the `/dispatch` panel, with the same refusal words.
+  Since issue #737 every action takes only the body keys its preview reads and refuses any other by name before
+  anything is planned (a key that is not a plain identifier is called "a field it was sent"; a value is never
+  repeated), and the pi tool that adds a trigger (`dispatch_trigger_add`) refuses a field its trigger type does not
+  take the same way, before the operator is asked, where both used to drop such a field in silence. The banner a page shows after a write
+  names the change, who made it and its audit row; its Undo button is a form that PREVIEWS the way back like any
+  write, and no Undo carries a secret reference or a resolver path (a delete and a secret removal have none).
 - **Bulk actions are bounded and bound.** A bulk retry, remove or held-cancel previews at most 100 jobs, and its
   ticket binds that exact list and each job's state; the confirm re-checks every job alone, acts only on those still
   as previewed, and reports per job. A hostile request cannot widen the list after the preview, because the confirm
@@ -413,7 +479,9 @@ The threat model, and what answers each part:
   made from a browser. For both, the row is appended BEFORE the write and a write whose row cannot be appended does
   not happen. Refusals of requests with no session are written one row each up to 60 a minute and counted past
   that, so a flood cannot grow the log without bound. The chain makes an edit evident, not impossible: whoever can write that file can also rewrite every
-  row after the one they changed.
+  row after the one they changed. Nothing vouches for the newest row, and an edit to it is never seen: the next row
+  the console writes links to the newest row as it then is on disk, edit included. A last line cut short by a crash
+  leaves the row before it not verified.
 - **No terminal in the browser.** The run page shows the `pi-dispatch sandbox <job>` command to copy; the console
   never starts a container or a shell.
 
@@ -892,7 +960,14 @@ Stated openly rather than discovered later:
   Desktop a job container is such a client on a TCP listen. Unix-socket mode removes both paths for other accounts and
   for jobs. Live streams are capped below that, but a token holder (a viewer too) who signs in eight times can hold
   all 32 stream slots: other people's pages still load, but stay static until those streams close or that token is
-  revoked or rotated.
+  revoked or rotated. Since issue #737: a page on a hostile name that resolves to loopback can read the 421 it gets,
+  which holds only the name it sent and the address and port it reached, and the console's script and stylesheet,
+  which are the same public bytes for everyone; whoever plants a cookie of a session's shape is shown the "it may
+  have restarted" sentence while it could be true, which is why it is worded as a possibility, and learns from it that
+  the console process is younger than `PI_CONSOLE_MAX_HOURS`; a token holder can flush the remembered reasons why
+  sessions ended (above); and a page on another loopback port is the same site as the console, so it can make the
+  browser fetch a console page with the session cookie (`SameSite=Strict` does not stop it) and so take the banner a
+  write left for the next page, which is cosmetic: that page cannot read the answer, and the audit log keeps the row.
 - **An operator token speaks on the forge as the deployment** (issue #642). Answering a parked run makes the worker
   quote the operator's text on that issue under the deployment's identity, naming the token. Mentions are
   neutralised and the text is fenced as data for the agent, but what the words say is the operator's: whoever holds

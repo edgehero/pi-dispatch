@@ -10054,11 +10054,16 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     issue #708 `/dispatch console --link`: actor role `panel`, target the token's name, outcome `ok`, appended BEFORE
     the code is made (no code without the row), and a second row with outcome `failed` and the mint's refusal as
     `reason` when the mint is then refused; both rows carry the same `ticket` (12 hex, `writeTicket`), so a reader
-    takes the last row for the ticket as the outcome, as for every panel write. The row never holds the code.
+    takes the last row for the ticket as the outcome, as for every panel write. The row never holds the code. A
+    `logout` row names a session the console ended; since #737 (PR 2) a sign-out ends every session its cookies name
+    that the console holds, one `logout` row for each, and a sign-out with no session held (an unknown cookie, or
+    none) is still answered and still a row, one, `anonymous`, target `/logout`, outcome `ok`, reason "no session was
+    held, so only the cookie was cleared", rate limited like every other row without a session.
   - `outcome`, exactly one of: `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`).
   - `target`, `reason` (optional, absent when unset): short strings, control characters written out as `\u{XXXX}`,
     at most 200 characters. A refusal's `reason` starts with the guard (`host`, `origin`, `content-type`,
-    `read-only`, `role`, `auth`) followed by the console's own refusal sentence, which may name a refused Host
+    `read-only`, `role`, `auth`, and since #737 (PR 2) `person`, a write from a page drawn for another person than the
+    session's) followed by the console's own refusal sentence, which may name a refused Host
     hostname but never quotes a header value, a cookie or a body.
   - `beforeDigest`, `afterDigest` (optional): digests of the file before and after a write, so a row ties to a change
     without holding it. `ticket` (optional): the first 12 hex characters of the sha256 of the confirm ticket the
@@ -10085,7 +10090,11 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     paid, no dollar cap applies, or the action takes no new reserve (a `steer`, which spends from its run's own).
   - `count` (optional, issue #642): a bulk action's size, a positive safe integer. A bulk action writes one row per
     job, `target` that job's id, every row carrying the same `count` and `ticket`, so a reader groups a bulk action
-    by its ticket and reads each job's outcome from its own last row.
+    by its ticket and reads each job's outcome from its own last row. A resume (`fleet-resume`, `queue-resume`)
+    writes `count` too, as the number of jobs waiting to start in the queues it resumes, as its preview counted them
+    (none when none waits or the count could not be read), so a reader takes `count` by the row's `kind`. CORRECTED
+    2026-10-24 (#737 PR 2): this bullet called every `count` a bulk action's size, which a resume's has not been since
+    #642; the console's audit page says the two apart.
   - An answer to a parked run is recorded by the parked run's job id in `target` and the sha256 of the answer text
     in `afterDigest`; the text is never in a row.
   - A message into a running job (kind `steer`, issue #646) is recorded by `<job id>#<message id>` in `target`
@@ -10099,7 +10108,9 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 - **Rate-limited refusals**: a refusal of a request that carried no session (`actor.name` `anonymous`) is written
   one row each up to 60 a minute (burst 120). Past that, refusals are counted, and the count is written as one row,
   `action: "refused"`, `target: "(rate limited)"`, its `reason` starting with the number, just before the next
-  allowed row. A refusal from a signed-in session is always its own row.
+  allowed row. A refusal from a signed-in session is always its own row. Since #737 (PR 2) the anonymous `logout` row
+  of a sign-out with no session held is limited and counted the same way, so the count is of rows, and the reason
+  says so ("3 more rows without a session (refusals and sign-outs) went unwritten one by one (limit 60 a minute)").
 - **Never in a row**: a token, a login code, a cookie value, a session id, a request body, or any payload text.
 - **Head recovery**: the writer keeps no head in memory. Every append reads the newest month file's last line (a
   bounded 64 KiB tail read) under the append lock, so a restart, or a CLI command writing while `serve` runs,
@@ -10112,7 +10123,21 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   the first broken link. A row whose `kind`, `reserve` or `count` is present and not of the shape above is a broken
   link too. The first row of the oldest SURVIVING file is not checked against a predecessor: when the
   retention reaper removed older months, verify reports where the chain starts (`startsAt`, the file and `seq`), and
-  does not call it broken. A broken chain is a doctor warning.
+  does not call it broken. A broken chain is a doctor warning. Since #737 (PR 2) a caller may ask `withLast: true`
+  (the console's audit page does, cached 30 s), which adds three fields to either shape: `last: {file, line, seq}`, the
+  place and `seq` of the last row the chain vouches for (null when none); `suspect: {file, line, seq}`, the row before
+  a break whose line carries no `prev` that matches it, or null; and `files: [{file, seq, rows}]`, oldest first, each
+  month file the walk passed a row in, the `seq` of its first row (its line 1) and how many rows the walk passed in
+  it, so row `s` of an entry is at line `s - seq + 1` of its file. A row is vouched for only by the line after it,
+  when that line's `prev` matches the row's hash: an edit to a row leaves its own line well formed and moves only its
+  hash. So at a break whose line does not carry a matching `prev` (it does not parse, its `prev` is not a hash, or it
+  is another hash, whatever else is wrong with the line: the `prev` is compared before the line's action, outcome and
+  fields are judged), the row before is not vouched for either: it is `suspect`, and `last` is the row before it.
+  Only a line whose `prev` matched and that fails another check (its seq, action, outcome or fields) is damaged
+  alone, `last` then the row before it and `suspect` null. On an intact chain `last` is the newest row walked, which
+  no line vouches for yet, since none follows it. Without `withLast` the result is exactly
+  the one above, which doctor, the CLI and the tests compare whole. The row format, the files and the chain are
+  unchanged.
 - **Retention**: reaped on `PI_LOG_RETENTION_DAYS` by the worker (`makeConsoleAuditReaper`, at boot and on each
   retention sweep, beside the allocation log reaper), because the worker always runs and the console may not. Only
   names of the `YYYY-MM.jsonl` shape are touched, and the newest file is never reaped, since it holds the head.
@@ -10137,7 +10162,31 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
 - **Request**: `GET /api/state`, no query. It needs a session (`pdc_session`, from `POST /login` with a token, or
   from a one-time link); without one it is answered `401` with a JSON error, never a redirect, as every `/api/*`
   route is. The viewer role is enough. It is a GET and has no side effect beyond the request moving its session's
-  `lastSeen`, as every request does.
+  `lastSeen`, as every request does. **Since #737 (PR 2) the 401 body says why**, on every `/api/*` route and every
+  write that needs a session: `{ "error": "sign in first", "ended": "<reason>" }`, `ended` one of `ENDED_REASONS`
+  (`idle`, `max`, `revoked`, `role`, `all`, `elsewhere`, `restart`, `admin/src/console/session-ends.mjs`) when the
+  cookie names a session that ended (`restart` only as a possibility: a well-formed id this process does not know,
+  while it has been up for less than `PI_CONSOLE_MAX_HOURS` and has forgotten no ended session), and null otherwise
+  (no cookie, or one with no reason to give). The list's eighth word, `switched`, is never this 401's: no session
+  ends for it (below). The sign-in posts need no session and their own refusals are not this
+  401: `POST /login`'s wrong token (`{"error": "that token is not valid for this console"}`) and `POST /login/code`'s
+  refused link carry `error` alone. The 401 sends NO Set-Cookie, where before PR 2 it cleared the cookie: a script's
+  next request still carries the cookie, so it can still read why, and a 401 never clears a newer cookie another
+  tab's sign-in set meanwhile (a page's 303 to `/login` still clears it, and so does sign-out). `error` is the
+  sentence it always was, so a script that read it reads the same. And while the console cannot use its tokens file,
+  a request that carries a session cookie is answered `503` with `{ "error": "the console's tokens file cannot be used
+  right now; the operator should run pi-dispatch doctor" }` (`TOKENS_UNUSABLE`), with no Set-Cookie and the session
+  kept, on every route that needs a session (`REQ-CONSOLE-SECURITY` (i)): a script waits and asks again rather than
+  signing in. `POST /logout` needs none: it ends every session its cookies name that the console holds, and answers
+  `200` with the clearing Set-Cookie whatever the tokens file's state. **Since #737 (PR 2) a request may say whose page
+  it comes from**, `<name>.<role>`, in the header `x-console-as` (`PERSON_HEADER`; the console's own page sends it
+  on every preview and confirm, and an event stream says it in its query instead, `INT-CONSOLE-EVENT-STREAM`). When
+  it names another person than the session the cookie names, the request is refused after auth and before the role,
+  the body or the handler: `409` `{ "error": "this browser is now signed in as someone else, so nothing was changed;
+  sign in again", "ended": "switched" }` (`PERSON_CHANGED`), a write's with `html` (the confirm bar's refusal, whose
+  Look again the console's page sends to `/login?ended=switched`) and an audit row. A request that sends no such
+  header is not checked: a script is held to the cookie alone, as before. A write's `503` `TOKENS_UNUSABLE` carries
+  `html` too, the confirm bar's refusal with Look again.
 - **Response**: `200`, `Content-Type: application/json`, with the security headers of every console response
   (`Cache-Control: no-store` among them). The body is ONE fleet reader snapshot (`createFleetReader`, the reader the
   pages and the `/dispatch` panel read), projected by `stateOf` (`admin/src/console/live.mjs`) to these keys and no
@@ -10259,7 +10308,8 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
     `"candidates": [ { "target", "jobId" } ]` (the newest run per repository, at most 10); `503` for a queue that
     could not be read (a fixed sentence: a mode judged on half the facts is worse than none), a history that could not
     be searched for a URL (also one whose logs or run mirror could not be read: a partial history is not a known
-    absence), or a console with no fleet reader; `401` without a session.
+    absence), or a console with no fleet reader; `401` without a session, with `ended` beside its `error` as for
+    `/api/state` (since #737 PR 2), and `503` `TOKENS_UNUSABLE` while the tokens file cannot be used.
   - **What it never holds**: a record's free text (`why`, a failure reason), a Job's `.data`, transcript text, or a
     session key (it names a directory of unredacted transcript; a host-local fork re-derives it,
     `sessionKeyOfRecord`). That is why a viewer may read it (`REQ-CONSOLE-SECURITY` (l)).
@@ -10278,6 +10328,13 @@ script is its only intended client; it is documented so that what a stream may c
   page the session's role may not open is refused as the page itself would be. `Last-Event-ID` (the header the
   browser sends on a reconnect) is optional. An unknown page, a page that is not live (insights, config, audit;
   the run page too until issue #644 made it live for its Progress panel) or a refused query is answered 400 JSON; a page above the session's role is 403.
+  **Since #737 (PR 2)** the query may also carry `as=<name>.<role>` (`PERSON_PARAM`), the person the page was drawn
+  for, which the console's page always sends: it is taken off before the page's own query is parsed (no page's query
+  takes the name), and when it names another person than the cookie's session the stream is refused `401`
+  `{"error": PERSON_CHANGED_STREAM, "ended": "switched"}` ("this browser is now signed in as someone else, so this
+  page's live updates were refused") after auth and before any slot is taken (an EventSource cannot read the body;
+  the page learns why from its probe, below). A stream with no `as` is not checked, and on a route that is not an
+  event stream `as` is not read as a person.
 - **Admission**: at most `PI_CONSOLE_MAX_STREAMS` (default 4, 1 to 32) open streams per token across all its
   sessions, and at most 32 in the process, of which 8 are kept for the operator role; a stream over any of these is
   answered `429` with `Retry-After` and opens nothing. `HEAD` is answered `405`. The slot is taken before the response
@@ -10292,8 +10349,14 @@ script is its only intended client; it is documented so that what a stream may c
 
   : ping
 
-  event: end
+  event: stale
+  data: {"since":1760432400000,"what":"data"}
+
+  event: fresh
   data: {}
+
+  event: end
+  data: {"ended":"revoked"}
   ```
   - `panel`: `data` is one line of JSON, `{id, html}`. `id` is a panel region of the page (`p-<panel>`, the `id` of a
     `<section data-panel>` the page rendered); `html` is that region's complete new content, rendered on the server by
@@ -10316,27 +10379,71 @@ script is its only intended client; it is documented so that what a stream may c
     it.
   - `end`: the session is over (logout, revoke, rotate, a role change, `sessions end-all`, the idle or the absolute
     limit). The server closes the stream after it; the page goes to `/login` instead of reconnecting.
-    Its data is `{}`, because a browser fires no event that carries none.
-- **The first events**: a new stream gets every panel of its page, as of the latest tick, unless its
-  `Last-Event-ID` equals the current sequence for that page, query, role and name, in which case it missed nothing and gets
-  nothing until the next change. Any other `Last-Event-ID`, a stale one or garbage, gets every panel: the hub keeps
-  no history to replay, so a full set is the only correct answer to "I missed something".
+    Its data is `{}`, because a browser fires no event that carries none. **AMENDED 2026-10-24 (#737 PR 2): the data
+    says why.** It is `{"ended": <word>}`, never empty, the word one of `STREAM_ENDS` (`admin/src/console/session-ends.mjs`)
+    or null: `idle`, `max`, `revoked`, `role`, `all` (`sessions end-all`) and `elsewhere` (this session signed out,
+    which ends its streams at once, or the browser signed in again over its cookie, which ends them once the sign-in's
+    answer, with the new cookie, has gone out) are the session's own end, and `shutdown` is the console stopping, which is NOT a sign-out: a client keeps what it shows
+    and connects again once the console answers. `restart` is never sent (this process opened every stream it ends),
+    and null means ended for no reason the console can give. A client treats a word it does not know as an end with no
+    reason. The
+    browser page goes to `/login?ended=<word>` only for a member of `ENDED_REASONS`; on `shutdown` and on `elsewhere`
+    it waits 2 seconds (the browser may be storing a newer cookie) and asks `/api/whoami`, a 401 then meaning the
+    console no longer knows the session, and a 200 reloading the page only when it names the person the page was
+    drawn for (the top bar's name and role), else going to `/login?ended=switched` (the page's own word: no stream
+    ends with it). The terminal chat treats `shutdown` as a cut connection: it backs off and reconnects with the same
+    cookie, and the 401 of a restarted console signs it in again inside its retry loop. Its once-a-minute limit on
+    signing in again does not count a 401 that says `restart` or the first 401 after a `shutdown`, so a second
+    restart inside a minute does not end the chat; a real end still counts, and so does an `end` whatever its word
+    (only a 401 is a restart), and the free sign-in is had at most once per stream that opened since the last one, so
+    a console that answers every stream 401 `restart` ends the chat after one counted sign-in.
+  - `stale` and `fresh` (since #737 PR 2): a page stream's state, and its FIRST message, before any panel: `fresh`
+    (data `{}`) once its page's load and render succeeded, `stale` once they failed and its browser holds panels (a
+    load or a render that throws, and a tokens file the console cannot read, send `stale` to every stream they were
+    for, whatever it holds), each sent once and again only when it changes. `stale` says the console could not read this page's data (the load or
+    the render threw, or the load's primary read failed) or could not read its tokens file this tick, so it keeps the
+    panels it last sent rather than draw unreadable ones over them. Its data is `{"since": <ms or null>, "what":
+    "tokens" or "data"}`: `since` the hub's clock at that view's last good render, null when the hub holds none (a
+    view goes with its last stream, so a lone tab that reconnects is told null), and `what` which failed, the
+    console's tokens file or the page's data, so a client never blames the deployment's data for a tokens file. A
+    browser holds panels once a good render was sent to its stream, when its stream came with a `Last-Event-ID` (a
+    reconnect holds the panels it was drawn with), and once its stream was told `stale`: a read-failed load sends such
+    a stream `stale` and no panel, while a first stream that holds none is sent the degraded panels the load makes,
+    with no state before them (they say what the page already says). What a stream is sent after a failure is always
+    measured against the last good render: a degraded draw is never kept as what another stream of the same view
+    holds, so the next good render sends each stream that holds panels every panel that changed, and a reconnect with
+    a `Last-Event-ID` during the failure is sent the last good render. A reconnect is a new stream: told `stale` first while its page still fails,
+    `fresh` first once it recovered. At subscribe only the page's data and render are judged, never the tokens file
+    (the stream's own request has just read it). A client takes its stale state back on `fresh` alone, never when a
+    stream opens, and a page already marked keeps the time it was told when a `stale` comes with `since` null. Page
+    streams only: a
+    transcript stream never gets either.
+- **The first events**: a new stream gets its state (`fresh` or `stale`, above), then every panel of its page, as of
+  the latest tick, unless its `Last-Event-ID` equals the current sequence for that page, query, role and name, in
+  which case it missed nothing and gets no panel until the next change. Any other `Last-Event-ID`, a stale one or
+  garbage, gets every panel: the hub keeps no history to replay, so a full set is the only correct answer to "I missed
+  something".
 - **Only what changed**: after the first events, a panel is sent only when its rendered content differs from what
   the stream was last sent for it (a digest per panel). One poll of the fleet reader a second, in the console
   process, serves every stream, and only while at least one is open.
 - **When it ends**: on `end` (above); within a tick, about a second, of the session failing any check, which is
   re-judged every tick without moving its `lastSeen`, so an open stream never keeps a session alive; at once on
   logout; when the client's unsent buffer passes 2 MiB, without an `end` (the browser reconnects and, its
-  `Last-Event-ID` being stale by then, gets every panel again); and when the console stops. `requestTimeout` and
-  `headersTimeout` do not end it.
+  `Last-Event-ID` being stale by then, gets every panel again); and when the console stops (`end` with `shutdown`,
+  since #737 PR 2). `requestTimeout` and `headersTimeout` do not end it. **Since #737 PR 2 a tokens file the console
+  cannot read ends nothing**: for each tick it cannot be read no stream is ended and none is written a `panel` or an
+  `entry`, each page stream is sent `stale`, and the `: ping` goes on; the first tick that reads it again judges every
+  session, so one that ended meanwhile gets its `end` then. A request to open a stream with a session cookie while
+  the file cannot be used is `503` (`INT-CONSOLE-STATE-API`), and one without a session is `401` with `ended`.
 - **The transcript stream** (issue #643, `REQ-LIVE-TRANSCRIPT`, `DES-OPERATOR-CONSOLE`): `GET /api/transcript?id=<jobId>`,
   a second kind of event stream, opened by the run page's live transcript section, and since issue #647
   (`REQ-TERMINAL-CHAT`) by the terminal chat with `&format=json`.
   - **Request**: a GET with the session cookie, operator role only: a viewer is answered 403 before any slot is
     taken. `id` is a run id in the run-id charset, else 400. `format` (issue #647) is optional, at most once, `html`
     (the default) or `json`; any other value, or a second one, is 400 with a sentence that names the rule and never
-    echoes the value, and so is any other key. `Last-Event-ID`, when present, must match
-    `TRANSCRIPT_ID_RE` (`^\d{1,16}-\d{1,10}$`, a Valkey stream id, a different shape from the hub's
+    echoes the value, and so is any other key but `as`, the page's person, taken off and held to the session as for
+    the hub's stream (since #737 PR 2; the run page sends it, the terminal chat does not). `Last-Event-ID`, when
+    present, must match `TRANSCRIPT_ID_RE` (`^\d{1,16}-\d{1,10}$`, a Valkey stream id, a different shape from the hub's
     `<epoch>-<n>`); the stream then resumes after that entry. A malformed one, the hub's panel shape included, is ignored, and the
     stream is read from its start. `HEAD` is answered `405`.
   - **Admission and lifecycle**: the same slots as the hub's streams (per token, global, the operator reserve), the
@@ -11063,4 +11170,5 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
 | 2026-10-23 (#710, PR 4, round 1) | Issue #710, PR 4, review round 1. **`INT-CONSOLE-STATE-API` AMENDED** (words only, no key changed): whether a worker is online reads `queue.workers` beside `hosts[].lastBeatAgeMs`; the overview says none is only when no host beat within 60000 ms AND `queue.workers` (BullMQ's connected workers, free of any host clock) is not above zero, so a script reproducing the overview's rule needs both. **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: a `panel` event's `html` may carry the new note and the Spend page's new `<time>` elements; no event or payload shape changed. **`INT-HOST-REGISTRY` UNCHANGED, checked**: the registry row and `readLiveHosts` are untouched (no PTTL read, no new field). **Code evidence**: admin/src/console/panels.mjs -> workersOnline, STALE_BEATS_TEXT, moneyHtml, COUNT_WINDOWS_UTC_TEXT; admin/src/panel.mjs -> usd2; admin/src/insights-html.mjs -> splitAtHtml, capWhenHtml. |
 | 2026-10-23 (#710, PR 4, round 2) | Issue #710, PR 4, review round 2. **`INT-CONSOLE-STATE-API` CORRECTED** (words only, no key changed): the round-1 row and its text named the BullMQ count `queue.workers`, a key `/api/state` does not have; it is the top-level `workers` (null when unknown, which the overview reads as 0), and the rule judges neither way while `fleetDegraded` is true. **Code evidence**: admin/src/console/live.mjs -> stateOf (`workers`); admin/src/console/panels.mjs -> workersOnline. |
 | 2026-10-23 (#737, PR 1) | Issue #737, PR 1: the Pulse foundation. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: a `panel` event's `id` may also name the shell's panel, `p-nav-parked`, the `<span id="p-nav-parked" data-panel>` inside the navigation's Parked pill, drawn on every live page and sent after that page's own panels by the same digest rule; its `html` is the count of unanswered parked runs, or empty when none waits or the count is unknown, and an empty one is hidden by the stylesheet. No event, field or route changed, and the client's `data-panel` guard is the same. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: no key added or changed; the navigation's count is drawn from the snapshot the page read (the same `parked` rows `/api/state` projects) or from the fleet reader's new `parkedCount()`, which no route exposes. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: the theme choice is no action and writes no row, and no row holds its cookie; no `kind` added. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked**: the theme cookie is not a session or a token and is never read as one. **Code evidence**: admin/src/console/shell.mjs -> NAV_PARKED_ID, navParkedCount, navParkedHtml, shellHtml; admin/src/console/pages.mjs -> panelIds, pagePanels; admin/src/console/page-css.mjs -> SHELL_CSS; admin/src/read-model.mjs -> createFleetReader (`parkedCount`); admin/test/helpers/console-pages-harness.mjs -> assertPanelsMatch. |
+| 2026-10-24 (#737, PR 2) | Issue #737, PR 2 (most of #711). **`INT-CONSOLE-EVENT-STREAM` AMENDED**: `end`'s data is `{"ended": <word>}`, never empty, the word a member of `STREAM_ENDS` (`idle`, `max`, `revoked`, `role`, `all`, `elsewhere`, `shutdown`) or null, and never `restart`; `shutdown` is the console stopping and not a sign-out (the page keeps itself, waits and asks `/api/whoami`; the terminal chat backs off and reconnects with its cookie, signing in again on a restarted console's 401 inside its retry loop); `elsewhere` ends a session's streams at once on a sign-out, and on a sign-in over its cookie once that sign-in's answer, with the new cookie, has gone out; on `shutdown` and `elsewhere` the page waits 2 s, asks `/api/whoami` and reloads only into the person it was drawn for, else goes to sign-in with `switched`; the terminal chat's once-a-minute re-login does not count a 401 saying `restart` or the first 401 after a `shutdown`, never an `end`, and at most once per stream that opened since the last sign-in; the request's `as=<name>.<role>` (`PERSON_PARAM`, the hub's stream and the transcript's), taken off before the page's query is parsed, a stream whose person is not the session's refused 401 `PERSON_CHANGED_STREAM` with `ended: "switched"` before any slot, none sent not checked, and `as` not read as a person on any other route; two new events, `stale` (`{"since": <ms or null>, "what": "tokens" or "data"}`, the hub time of the view's last good render, null when the hub holds none, and which failed) and `fresh` (`{}`), page streams only, a stream's state and its first message before any panel, each said once and again when it changes, a stream whose browser holds panels (a good render sent, a `Last-Event-ID`, or a `stale` told it) sent `stale` and no panel by a read-failed load and a first stream that holds none the degraded panels, never kept as what another stream of the view holds, a throw and an unreadable tokens file sending `stale` to every stream they were for, at subscribe only data and render judged, a client taking its stale state back on `fresh` alone; a tick that cannot read the tokens file ends no stream and sends no panel and no entry, only `stale` and the pings; the example shows the new events. **`INT-CONSOLE-STATE-API` AMENDED**: the 401 of every `/api/*` route and every write that needs a session is `{"error": "sign in first", "ended": <reason or null>}`, the `error` sentence as it was, with no Set-Cookie (it cleared the cookie before; a page's 303 and sign-out still do); the sign-in posts' own refusals (`POST /login`'s wrong token, `POST /login/code`'s refused link) carry `error` alone, and `switched` is never this 401's; a request with a session cookie while the tokens file cannot be used is `503` `TOKENS_UNUSABLE` with no Set-Cookie and the session kept, and `POST /logout`, which needs no session, ends every session its cookies name and is `200` with the clearing Set-Cookie whatever the file; a request whose `x-console-as` (`PERSON_HEADER`, the page's previews and confirms) names another person than the session's is `409` `PERSON_CHANGED` ("...; sign in again") with `ended: "switched"`, a write's with `html` (whose Look again the page sends to `/login?ended=switched`) and an audit row, and one without the header is not checked; a write's `503` carries the confirm bar's refusal as `html` too; `/api/run`'s errors say the same. `/api/state`'s keys and `version` UNCHANGED, checked. **`INT-CONSOLE-AUDIT-LOG` AMENDED, words only**: the row, the files, the chain and the closed vocabularies are as they were (no action, outcome or kind added; a confirm wraps the writer in `capturingAudit`, outside `auditedWrite`, and appends the same rows); the Verification bullet gains the opt-in `withLast`, which the audit page asks for: `last: {file, line, seq}` (the last row the chain vouches for), `suspect` (the row before a break whose line carries no `prev` that matches it, the `prev` compared before the line's other checks, since only a next line's matching `prev` vouches for a row; `last` then the row before it) and `files: [{file, seq, rows}]` (each month file's first `seq` and the rows walked, so row s is at line `s - seq + 1`), the result without it as before; the `action` bullet gains a sign-out's `logout` row for each session it ended and, with none held, the one `anonymous` row (outcome `ok`, "no session was held, so only the cookie was cleared"); the `reason` bullet gains the `person` guard; "Rate-limited refusals" gains that anonymous `logout` row, so the count is of rows and its reason says so; the `count` bullet CORRECTED: a resume's `count` (since #642) is the jobs waiting to start in what it resumes, not a bulk action's size, so a reader takes `count` by the row's `kind`. The reader's opt-in `positions` (each entry's own `YYYY-MM:<line>`, parallel to `rows`) is not in this entry, which describes no reader option; `DES-OPERATOR-CONSOLE` says it. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked**: the file and its reader are as they were; only what the console does while it cannot use the file changed (`REQ-CONSOLE-SECURITY` (i)). **Code evidence**: admin/src/console/live.mjs (`finish`, `markStale` and its `what`, `failingNow`, `markFresh`, a stream's `holds`, `said` and `degraded`, `drawDegraded`, `runTick`, `drawTick`, `subscribe`, `close`); admin/src/console/session-ends.mjs (`PERSON_PARAM`, `PERSON_HEADER`, `switched`); admin/src/console/server.mjs (`resolveSession`, the auth step, the person check, `PERSON_CHANGED` and `PERSON_CHANGED_STREAM`, `startSession`, `postLogout`, the count row's words, `SIGN_IN_FIRST`, `TOKENS_UNUSABLE`); admin/src/console/sessions.mjs (`readSessionCookies`); admin/src/console/script.mjs (`streamEnded`, `probe`, `samePerson`, the person each request says, `RETRY_MS`); worker/src/console-client.mjs (`endedOf`, `STREAM_SHUTDOWN`, `stream`'s `sinceShutdown` and `openedSinceRelogin`, `RELOGIN_WINDOW_MS`); worker/src/console-audit.mjs (`verifyConsoleAudit`'s `withLast`: `last`, `suspect`, `files`; `readConsoleAudit`'s `positions`). |
 | 2026-10-25 | The maintainer notes moved from `CLAUDE.md` to `AGENTS.md`, so the hand-written-table bullet's pointer names `AGENTS.md`. Words only, no contract changes; the context files pi discovers (`AGENTS.md` and `CLAUDE.md`) are unchanged. |

@@ -76,6 +76,12 @@ to pick the verdicts worth paying for:
   "run": { "kind": "github", "flow": "address-review" } }
 ```
 
+The AI tool `dispatch_trigger_add` sets `reviewState` too, behind the operator's confirm, and the write checks it like
+the file's own (GitHub only, beside `review_submitted`, a non-empty list of `approved`, `changes_requested` and
+`commented`). **Upgrading:** before this release the tool's description offered `reviewState` but the tool dropped it
+without a word, so a review trigger added that way fired on every verdict. Check the review triggers you added with
+the tool, and add the narrowing by hand, or add them again.
+
 Two behaviours to know before you turn it on. A **Comment** type review whose remarks are all line comments
 and whose summary box is empty starts nothing. Those remarks arrive on an event this service
 does not read, so the review reaches us empty. Approve and Request changes still fire with an empty summary,
@@ -551,7 +557,20 @@ changed after the job was queued. Re-run those jobs too. Upgrade the worker and 
 receiver after editing the file.
 
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via
-the confirm-gated AI tools. Every write is validated. Both services reload it live. The worker itself
+the confirm-gated AI tools. Every write is validated. Both services reload it live.
+
+`dispatch_trigger_add` takes only the fields its trigger type uses. A field the type does not take is refused before
+the operator is asked to confirm, by its name and with the list the type does take, for example: "dispatch_trigger_add
+does not take repository for a pull_request trigger; it takes kind, action, reviewState, labels, any, number, once,
+flow, forge, backend, model, provider, maxTurns, progress, statusComment, recover, steer. Nothing was changed". A
+field whose name is not a plain word is called "a field it was sent", and the value is never repeated. Before this
+release such a field was dropped without a word (`repository` on a pull request or issue trigger, for one), and the
+operator approved an entry without it. The console's trigger form refuses the same way, in the same words, naming
+itself where the tool's name stands ("this form does not take repository for a pull_request trigger; ..."). The fields
+that decide what a trigger's jobs may spend, reach or hold (`maxCostUsd`, `models`, `mcp`, `secretBundle`) are
+refused first, as before: no AI tool sets them.
+
+The worker itself
 writes exactly one thing back, the `on.disarmed` mark. That mark spends a one-shot. Every local job also
 receives a read-only `/job/event.json`. It contains source, folder, and HEAD sha. Cron adds its id,
 pattern and schedule instants. A scheduled flow can triage only what changed since its last run.

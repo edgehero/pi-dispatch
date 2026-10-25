@@ -11867,7 +11867,10 @@ a tunnel.
   `DES-RUN-PROGRESS`); issue #646 part 3, steering (the bullet "Steering a running job" below, over
   `DES-STEER-VIA-READONLY-INBOX-MOUNT`); issue #647 part 1, run chat (the bullet "Run chat" below, over
   `DES-TERMINAL-CHAT`); issue #737 PR 1, the Pulse foundation (the bullet "The visual system" below, the amended "No
-  inline style", and the rejected options marked #737). This entry supersedes three of the
+  inline style", and the rejected options marked #737); issue #737 PR 2, most of #711: sessions and why they end,
+  error pages, the write flow's slot, Undo and banner, the live states and the audit page (the bullet "Sessions, error
+  pages, the write flow and the live states" below, the amended "The stream lifecycle", "The action table", "The
+  generic pipeline" and "The legacy layer", and the rejected options marked #737 PR 2). This entry supersedes three of the
   rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
@@ -11929,13 +11932,25 @@ a tunnel.
      cookie value or a request body. A refusal of a request that carries no session costs its sender nothing, so
      those rows are rate limited (60 a minute, burst 120) and the rest counted into one row written with the next
      allowed one: one row per request would let anyone who reaches the port grow the log, and the chain's verify
-     time, without bound. A refusal from a signed-in session, every sign-in and every write is
-     always its own row. Since #642 a signed-in write whose body is refused as too large or as not JSON is a row too
-     (the session's actor, a fixed `body:` reason, nothing of the body); a change the preview refuses as invalid is
-     answered without a row, since it got no further than the preview.
+     time, without bound (since #737 PR 2 a sign-out with no session held is such a row too, so the one row counts
+     rows: "3 more rows without a session (refusals and sign-outs) went unwritten one by one"). A refusal from a
+     signed-in session, every sign-in and every write is always its own row; since #737 PR 2 that includes a write
+     refused for a page drawn for another person than the session's (`person:`). Since #642 a signed-in write whose body
+     is refused as too large or as not JSON is a row too (the session's actor, a fixed `body:` reason, nothing of the
+     body); a change the preview refuses as invalid is answered without a row, since it got no further than the preview.
   The guards come from one route table, `{method, path, auth, write, handler}`, applied by one dispatcher in a fixed
   order: security headers, the Host check, the route lookup (404, 405), the write guards (origin, content type,
-  read-only, role), the session (401 JSON for `/api/*`, a 303 to `/login` for a page), the handler. A new route
+  read-only, role), the session (401 JSON for `/api/*`, a 303 to `/login` for a page; since #737 PR 2 the 401 carries
+  `ended` and NO Set-Cookie, the 303 `?ended=` with the cookie cleared, and a cookie the console cannot judge for want
+  of a tokens file is a 503 that ends nothing), then since #737 PR 2 the person a page's request says it was drawn
+  for, held to the session's (a stream that says another is 401 with `ended: "switched"`, a preview or confirm 409,
+  audited; "A page acts only as the person it was drawn for" below), and the handler. Since #737 PR 2 the routes marked
+  `anyHost` (`/static/console.js`, `/static/console.css`, `/favicon.ico`, GET and HEAD) are looked up before the Host
+  check and skip it, being public bytes with no session and no data that the 421 page itself loads; any other path, and
+  a write to those paths, meets the Host check first. The 401 clears nothing because the probe a page makes after its
+  stream closed must still carry the cookie to read why, and an old cookie's 401 must not clear a newer one another
+  tab's sign-in set. `POST /logout` is `auth: "none"` since then: it judges no session, so an unreadable tokens file
+  cannot keep a browser signed in that asked to sign out, and it ends every session its cookies name. A new route
   cannot skip a guard, and the tests iterate the table rather than a hand list. Login is a write for origin and
   content type and needs no session, and read-only mode and the viewer role do not refuse it. The server's own limits:
   `headersTimeout` 10 s, `requestTimeout` 30 s, a 64 KiB body (413), 64 connections, and a login rate limit that is
@@ -11975,7 +11990,8 @@ a tunnel.
      so the issue's rule (the Host must equal the configured host and port) would refuse every tunnel on another
      port. The rule is on the **hostname**: `127.0.0.1`, `localhost`, `[::1]` or a name in
      `PI_CONSOLE_ALLOWED_HOSTS`, compared case-insensitively with a trailing dot stripped, any port; anything else is
-     421. Rebinding is defeated by the hostname, which an attacker's DNS name never is, not by the port. The `Origin`
+     421, but for the three `anyHost` files (since #737 PR 2), which a rebound name may read as anyone may.
+     Rebinding is defeated by the hostname, which an attacker's DNS name never is, not by the port. The `Origin`
      check uses the Host the request carried, so it holds through any tunnel port. Measured on 2026-10-14 through a
      real tunnel to a unix socket (OpenSSH 9.9p2 on macOS to OpenSSH 9.2p1 in a Debian 12 container, `ssh -L
      9999:/home/op/run/console.sock`, the socket `srw-------` in a 0700 directory): Chrome 155 on `localhost:9999`
@@ -12171,7 +12187,12 @@ a tunnel.
   - `secretProfileNames` (names only, never a resolver path or a value), and the worker's `readConsoleAudit` (newest
     rows first, a position cursor, at most 500 rows a call, bounded memory over the chunked month files; a line that
     is not a row comes back as `{broken, file, line}` in its place rather than being skipped, because an audit screen
-    that drops a damaged line hides what `audit verify` exists to name).
+    that drops a damaged line hides what `audit verify` exists to name). Since #737 PR 2 the audit page asks it for
+    `positions: true` (each entry's own `YYYY-MM:<line>`, parallel to `rows`) and `verifyConsoleAudit` for `withLast:
+    true` (`last`, the last row the chain vouches for; `suspect`, the row before a break whose line carries no `prev`
+    that matches it, which it walked and cannot vouch for; and `files`, each month file's first `seq` and the rows
+    walked in it, by which the page finds a
+    row by its number), both opt-in so every other caller's result is the shape it was.
   - `forgeLinkOf(record, env)`: **derived from the deployment's environment, never guessed.** GitHub on
     `github.com`, as the panel always built it; GitLab, Forgejo and Azure on the deployment's own instance URL
     (`GITLAB_URL`, `FORGEJO_URL`, `AZURE_ORG_URL`, then the job-container names in `FORGES[kind].hostVars`), http
@@ -12230,7 +12251,12 @@ a tunnel.
   as a tab stayed open, turning `PI_CONSOLE_IDLE_MINUTES` into "never" for anyone who leaves the console open: **an
   open stream never extends a session; only a request does.** A stream whose session fails gets `event: end` and is
   closed, so revoke, rotate, a role change, `sessions end-all`, the idle limit and the absolute limit end it within a
-  tick, and logout ends that session's streams at once through the hub's registry (`endSession`). Slots: at most
+  tick, and logout ends that session's streams at once through the hub's registry (`endSession`). AMENDED 2026-10-24
+  (#737 PR 2): the end says why (`{"ended": <word>}`, the store's pure `verdict` asked for the word, never `get`), a
+  sign-in over a live cookie ends the old session's streams with `elsewhere` too, but only once its answer has gone
+  out (the response's `finish`, where a logout ends them at once), stopping the console ends
+  every stream with `shutdown`, and a tick that cannot read the tokens file ends none ("Sessions, error pages, the
+  write flow and the live states" below). Slots: at most
   `PI_CONSOLE_MAX_STREAMS` streams per token across all its sessions (default 4; per session would let one token
   multiply its budget by signing in again), and at most 32 in the whole process with 8 kept for the operator role,
   so streams can never take more than half of the 64 connections and a viewer token cannot lock operators out of
@@ -12254,7 +12280,8 @@ a tunnel.
   event stream, `GET /api/transcript?id=<jobId>` (`INT-CONSOLE-EVENT-STREAM`), operator only, implemented in
   `live.mjs` beside the hub as a second subscription type:
   - it shares the hub's slots (per token, global, the operator reserve), the per-tick session re-judging with
-    `peek` (`event: end` when the session ends) and the 2 MiB cut;
+    `peek` (`event: end` when the session ends, with the same reason as the page's stream since #737 PR 2, though
+    never `stale` or `fresh`: its entries are a log, not a picture that goes out of date) and the 2 MiB cut;
   - each tick it reads `transcriptSince` from the stream's own cursor, non-blocking `XRANGE` on the fleet reader's
     client, and writes each entry as `event: entry` with `id:` the stream entry id and data `{html}`;
   - the html is rendered on the server by the one template: a header (kind, tool, an error marker, the time in UTC)
@@ -12506,8 +12533,16 @@ a tunnel.
   dependencies, and disposes all of them on stop. `SERVER_LIMITS` is overridable for tests only.
 - **The action table** (issue #642, `REQ-OPERATOR-CONSOLE-ACTIONS`): every write the console makes is one entry of a
   frozen table, `ACTIONS` in `admin/src/console/actions.mjs`, shaped `{name, kind, paid, bulk, preview(body, ctx),
-  apply(entry, ctx)}`. `preview` answers `{refusal}`, `{unchanged}` or `{summary, diffHtml, expect, payload,
-  targets, reserve}`, and writes nothing; `apply` answers `{ok, results?}` or `{invalid}`. The routes are generated
+  apply(entry, ctx)}`, and since #737 PR 2 also `{fields, danger, undo(out, body), inverse(out, body),
+  confirmLabel(out), done(out, body, result)}` from one table of write rules (`WRITE_RULES`), which the table throws at
+  load without. An entry's `preview` answers `{refusal}`, `{unchanged}` or `{summary, diff, expect, payload, targets,
+  reserve}` (the `diff` an escaped fragment, and since #737 PR 2 sometimes `plan` and `beforeText` too, which never
+  leave the server, and `barLines`, the bar's own markup of the summary's lines, a change's values in bold; an
+  `unchanged` says why, `UNCHANGED`, with a setting's key and value where the action knows them), and writes nothing;
+  `apply` answers `{ok, results?}` or `{invalid}`, and since #737 PR 2 `{invalid, partial: true}` for a refusal that
+  came after part of the write was made (the kill switch reached some queues). CORRECTED 2026-10-24: this sentence named the
+  entry's diff `diffHtml`, which was the preview ANSWER's key; since #737 PR 2 that answer carries the whole bar as
+  `html` instead ("The generic pipeline"). The routes are generated
   from it, two per entry (a preview and a confirm, `auth: "operator"`, `write: true`; `POST /api/act/<name>/preview`
   and `/api/act/<name>/confirm`), so the #640 dispatcher puts every
   guard in front of every action and the tests that iterate the route table cover every action without a hand list.
@@ -12522,7 +12557,18 @@ a tunnel.
   1. The preview runs the entry's `preview` and, on a plan, issues a ticket holding `{action, payload, expect,
      targets, reserve, beforeDigest, afterDigest}`: what the confirm will do, the snapshots it was built from, the
      jobs it will touch, and the reserve the page showed. It answers the summary, the diff (a `SafeHtml` fragment
-     built by the one template, swapped by the served script into `[data-preview]` alone) and the ticket.
+     built by the one template, swapped by the served script into `[data-preview]` alone) and the ticket. AMENDED
+     2026-10-24 (#737 PR 2): before the entry's preview runs, a body key outside its `fields` is refused 400 by name;
+     the ticket also holds `meta` (`{title, undo, undoAfter, inverse, danger, done}`: the bar's Undo sentence and the
+     banner's, which never points at the preview the next page does not show, and the past-tense sentence the banner
+     leads with, null for a bulk act, whose `done` is asked at the confirm with how many jobs landed; decided where the
+     file as it was is known, so the browser cannot claim an Undo the preview did not offer), and a bulk retry's or
+     removal's payload carries its filter (`queue`, `repo`) for that sentence, which the apply never reads; and the
+     answer carries the whole bar as `html`
+     (`previewBarHtml`, `confirm-view.mjs`: the summary, the reserve, the diff, the Undo line, the confirm button's
+     words and the expiry), with `expiresAt`, `danger`, `confirmLabel` and `undo` beside it, which the script puts in
+     the page's one confirm slot (`diffHtml` is gone, and the script no longer writes into `[data-preview]`: the
+     hidden `.preview-area` the old forms still draw stays empty).
   2. The confirm redeems the ticket (single use, this session, this action, 5 minutes, unchanged from #640), appends
      the `ok` audit row with `kind`, the digests, `reserve` and `count`, then runs `apply`. A refusal or a throw
      appends a compensating `failed` row under the same ticket digest. An append that fails refuses the write
@@ -12530,7 +12576,11 @@ a tunnel.
   3. `apply` hands the ticket's `expect` to the funnel, so a confirm applies exactly what was previewed or refuses
      with "changed after this change was built from it" (a file) or "it changed since the preview" (a job), and the
      page answers 409 and asks for a fresh preview.
-  4. After an `apply` that landed, the hub is poked (`hub.tick()`) so every open live page shows the change.
+  4. After an `apply` that landed, the hub is poked (`hub.tick()`) so every open live page shows the change. Since
+     #737 PR 2 the confirm also answers `change` (what happened, in the past tense, by whom, its first and last audit
+     rows as `capturingAudit` saw them and how many it wrote, how many of them landed, the banner's Undo and its
+     inverse) and keeps it as the session's flash, which the next page the session draws shows once as a banner; a
+     bulk confirm where no job landed answers `change: null` and keeps none, and no tick is asked for.
   The served script handles every `form[data-action]` the same way: preview, show, confirm, reload. No inline
   handler, and the CSP is unchanged.
 - **The action groups**, each a funnel that already existed or one #642 added beside the others in the read model
@@ -12872,7 +12922,12 @@ a tunnel.
     shell reads it back, a plain one as it is and any other in single quotes, so a value holding `;`, `$(...)` or a
     quote is pasted as one argument; an argument starting with `=` (zsh, macOS's default shell, reads `=name` as the
     path of a command) and a first word holding `=` (an assignment) are quoted too, and a test reads each back through
-    `sh` and `zsh`. A table keeps its `<caption>` or `aria-label` and its `<th scope="col">` headers, and an id cell
+    `sh` and `zsh`. AMENDED 2026-10-24 (#737 PR 2): each argument is a `<span>` of its own, the spaces between them
+    text, so the `<code>`'s text, which Copy copies, is still exactly the line, and the box wraps (`SHELL_CSS`, after
+    bundle.css, which keeps a command on one line and scrolls it): between arguments, and inside one only when it is
+    wider than the box, so a phone never cuts a command and never breaks `--name` after its dashes. A catalog
+    sentence marks a command or a name in backticks, drawn in the code face (`withCode`, which refuses an unclosed
+    backtick). A table keeps its `<caption>` or `aria-label` and its `<th scope="col">` headers, and an id cell
     never breaks. `words.mjs` gives each outcome and reason word a `status` (completed `ok`, policy `refused`, failed
     and an outcome it does not know `failed`, `awaiting-input` `parked`, `operator-cancel` `cancelled`), which the kit
     maps to a tone and an icon; the panel's glyphs and tones are unchanged. A command box's Copy button is drawn
@@ -12903,7 +12958,10 @@ a tunnel.
     them. Every id and class the script relies on is kept (`#logout`, `#live-status`, `[data-theme-toggle]`,
     `details.more`, `#main`). The sign-in pages get the skip link, the sprite and a top bar holding only the brand pill
     and the theme button (nobody is signed in, so there is no navigation, live pill, name or Sign out), then the page
-    wrapper and the title bar.
+    wrapper and the title bar. AMENDED 2026-10-24 (#737 PR 2): the sign-in pages and the error pages are drawn by
+    `frameHtml`, the sign-in pages with "Skip to sign-in" and a visually hidden `h1` in place of the title bar (the
+    card's own heading leads the page), an error page with the signed-in bar where its kind keeps the navigation
+    (with no live pill, and no pill marked current).
   - **The top bar's layout depends only on the viewport's width and a class the server sets** (`SHELL_CSS` and its
     breakpoints `TOP_BAR`, `page-css.mjs`; `top--ro` for a read-only console), never on what the browser script changes
     (the live state, the revealed theme button, the Parked count), so the bar never changes height under the reader, on
@@ -12966,6 +13024,25 @@ a tunnel.
     names must still be emitted by old markup, so a converted page's dead rule fails; a page not in `LEGACY_PAGES`
     may carry no `.legacy` and no legacy-only class in its golden; and an empty `LEGACY_PAGES` forces
     `LEGACY_CSS === ""`. Configuration is the last legacy page and converts in PR 7a, which deletes the layer.
+    **AMENDED 2026-10-24 (#737 PR 2): a wrapper per section.** `renderPage` wraps each panel section (and the run
+    page's transcript section) in a `<div class="legacy">` of its own, not the page's sections in one, because the
+    confirm slot must sit outside every wrapper: inside one, `.legacy button` (one class and one element) beats the
+    bundle's `.btn--confirm-paid` (one class), `.legacy ul:not(.plain)` breaks `.confirm__list`, and the neutraliser
+    reverts `.confirm` and `.diff` there. The script puts the slot after the wrapper of the section that asked. The
+    spacing is the same: `main` is a grid whose gap is the old section margin, each section's margin goes to 0
+    inside its wrapper, and the wrapper draws no box of its own (`display: contents`, in `PULSE_LOOK`), so its one
+    section is the grid's cell: a panel with nothing to say is empty and not drawn (`section[data-panel]:empty`), and
+    takes no cell and no gap, where a wrapper drawn as a block was a cell of no height with a 16 px gap after it (the
+    run page drew a 112 px hole). The wrapper carried only what its section inherits (the `--pd-*` properties, the ink,
+    the font) and a ground that drew nothing, so no box is lost. REJECTED: hiding an empty panel's wrapper with
+    `:has()`, which needs Chrome 105, Safari 15.4 and Firefox 121, past the browser floor; `display: contents` is in
+    all three of the floor's versions. The kept-still note, the one piece of Pulse markup the script puts inside a
+    panel, says its spacing again at the panel (`section[data-panel]>.held`), which outranks the layer's reset of every
+    margin inside a legacy panel. The audit page, both sign-in pages and the operators-only page left the layer (Pulse markup;
+    `LEGACY_PAGES` is the seven other screens), and the rules nothing emits any more went with them (the old preview
+    area's summary, reserve and confirm, `pre.diff`, every `#login-form` rule), `.confirm` and `.diff`
+    leaving `NEUTRALISED` once the derivation agreed. REJECTED: one wrapper with the slot drawn inside it and its
+    classes restyled back (a second copy of the bar's look under the legacy layer, for a slot that moves anyway).
   - **Two checks hold the look.** `admin/test/console-contrast.test.mjs` derives the colour pairs from the tokens'
     `usage` sentences (their backticked grounds, and a stated `N:1`, else 4.5:1 for a text token and 3:1 for any other),
     the bundle's tone classes and the pairs the design states elsewhere (the focus ring on the canvas and every surface,
@@ -13037,6 +13114,16 @@ a tunnel.
     hash, unzip, `--require` is held) are tested in `worker/test/console-width-check.test.mjs`, which also works each
     control's verdict out from its geometry by the same rules and holds each weakened measure to failing it. Its
     DevTools pipe driver is `launch/chrome-pipe.mjs`, lifted out of `launch/render-images.mjs`, whose run is unchanged.
+    AMENDED 2026-10-24 (#737 PR 2): the check loads the panel goldens and the pages harness's static shots beside the
+    page goldens (a golden's role may be `anonymous`, `GOLDEN_ROLES`), so the sign-in pages are measured from their
+    goldens (`SIGN_IN` names the two files, and a missing one is a setup problem) rather than drawn by the check, and
+    every state a panel golden draws (`REQ-OPERATOR-CONSOLE-SCREENS` (i) names them) is measured at 375 px under the
+    CSP; a one-time link page is loaded with a code in its fragment and its post held open unanswered, so the script
+    leaves it in its drawn state; the run with page scripts off reads the theme button first and fails unless it is
+    still hidden (the proof the scripts were off; the read itself, `THEME_HIDDEN_READ`, is run against stubbed pages:
+    true for a hidden button, false for a shown one, null for a page with none), and `summarize` fails a check that never made that run; and each bar read keeps the Parked
+    panel's text as it stood (`parkedText`), so a read is credited only with the count its panel showed (a swap that
+    wrote the drawn count back passed every run before).
   - **The browser floor** is Chrome 88, Safari 14 and Firefox 78, the first versions that read `:is()` and
     `:where()`, which the legacy layer's neutraliser is built on: below it the old panels lose their look. A few
     details need newer versions and only refine the look, each falling back: a flex row's `gap` (Safari 14.1)
@@ -13062,7 +13149,389 @@ a tunnel.
     .github/chrome-for-testing.json, .github/workflows/pi-upgrade-check.yml; admin/test/console-stylesheet.test.mjs,
     console-contrast.test.mjs, console-compat.test.mjs, console-kit.test.mjs, console-shell.test.mjs,
     admin/test/helpers/console-pages-harness.mjs, worker/test/console-width-check.test.mjs.
+- **Sessions, error pages, the write flow and the live states (ADDED 2026-10-24, #737 PR 2, most of #711;
+  `REQ-CONSOLE-SECURITY` (i), (k) and (n), `REQ-OPERATOR-CONSOLE-SCREENS` (h), (i), (j), (o) and (p),
+  `REQ-OPERATOR-CONSOLE-ACTIONS` (o) to (r), `INT-CONSOLE-EVENT-STREAM`, `INT-CONSOLE-STATE-API`).**
+  - **Why a session ended, told without telling anything else.** One closed list, `ENDED_REASONS` in the pure leaf
+    `session-ends.mjs` (it imports nothing, so the server, the hub and the script's build share one list, which the
+    script embeds as JSON), with its sentences built for this console's own idle and longest-life limits
+    (`endedNotices`). The store keeps a TOMBSTONE for each session that WAS live when it ended, its id and its word,
+    written by `get` when a check fails, by the sweep (idle or max), by `destroy(id, "elsewhere")` for a sign-out and
+    for a sign-in over a live cookie once that sign-in has succeeded (a session already past a time limit keeps that
+    limit's word), and by `destroy(id, null)` for the session a sign-in made and then refused for its audit row (a
+    session that never reached a browser). A sign-in writes its audit row first and ends the old session only once
+    the row is written, so a refused sign-in leaves the old session, its streams and its other tabs as they were.
+    REJECTED: ending the old session before the audit row, the earlier shape, under which a sign-in refused for its
+    row had already signed the browser's other tabs out as `elsewhere`. The checks run in one
+    order, so a session that fails two always gets the same word: idle before max, then `all` (the file's
+    `generation` moved), `role` (its hash with another role), `revoked` (its hash gone). `peek` stays free of side
+    effects and `endedOf` is null for an id still held, so the hub asks the new pure `verdict(id, file)` for the word
+    and ends no session itself. Tombstones are keyed by the 256-bit id alone and each word describes that session's
+    own token, so nothing crosses tokens: a browser learns why ITS session ended. They are a FIFO of
+    `TOMBSTONE_MAX` (1024, under 100 KiB). `restart` is the one word with no tombstone behind it: a well-formed id
+    this process never held is a session from before a restart or a planted cookie, which look alike, so it is said
+    only as a possibility ("it may have restarted"), only while it can be true (up for less than a session's longest
+    life, `maxMs`) and only while nothing was forgotten (`evicted === 0`: once a tombstone is dropped, an unknown id
+    may be a forgotten one whose word is lost). A stream never ends with it, since this process opened every stream it
+    ends; `STREAM_ENDS` holds `shutdown` in its place. The list's last word, `switched`, is no session's end at all:
+    it is the page's own, for a browser now signed in as someone else ("A page acts only as the person it was drawn
+    for" below), so no tombstone, redirect or stream end ever holds it, and only the script navigates with it, to the
+    sign-in page's notice for it. Both ends hold the words to the list: the server's redirect is one of eight fixed
+    locations (never `?ended=switched`), `GET /login` maps exactly one member to its sentence and ignores anything
+    else, and the script navigates to `?ended=` only with a member. ACCEPTED, two costs of these rules: a client with
+    no token learns from the `restart` answer to a well-formed cookie that the console process is younger than
+    `PI_CONSOLE_MAX_HOURS` and has forgotten no ended session (`evicted` is 0), which is worth little; and the FIFO can
+    be flushed by about 1024 sign-ins, a token holder's (each over the last one's cookie ends that session and writes a
+    tombstone; about three and a half hours at the sign-in limit of 5 a minute), after which the dropped reasons are
+    lost (those sessions' next page goes to the sign-in page with no notice) and `restart` is never said again by that
+    process. Nobody can plant a reason for another session: a tombstone is written only under the id of a session this
+    store held, and its word is the console's own. REJECTED: a tombstone written by `peek` (the hub re-judges
+    every tick, and `peek`'s freedom from side effects is what keeps an open tab from ending or extending anything).
+  - **A tokens file the console cannot read signs nobody out.** Before PR 2 such a file judged every session
+    dead: a request's cookie was cleared, and the hub ended every stream within a tick, so a permission mistake signed
+    everyone out. Now the server answers a request with a session cookie 503 `TOKENS_UNUSABLE` (no Set-Cookie, no
+    tombstone, `get` not asked; `get` itself also ends nothing on an unusable file, a belt), a request without one
+    goes to sign-in as before, whose post answers the same 503; and the hub, on a tick that cannot read the file (a
+    throw, a refusal, or a file with no token list, which the store would read as nobody holding a token), ends no
+    stream and writes no panel and no entry (no data goes to a session nobody judged), tells each page stream
+    `stale` once with `what: "tokens"`, so the page names the tokens file and not the deployment's data, logs once and
+    keeps pinging; the first tick that reads the file again judges as usual. The page reads the 503 as "not reachable,
+    retrying". Sign-out is the one request that needs no tokens file: it judges nobody, it ends every session its
+    cookies name that the store holds (`auth: "none"`, `readSessionCookies`; `destroy` says who it ended, one audit row
+    for each, the anonymous row only when it ended none), so a permission mistake cannot keep a browser signed in that
+    asked to sign out, and the page goes to sign-in only on its 200; with no answer within `SIGN_OUT_TIMEOUT_MS` (10 s)
+    it says, once however often Sign out is pressed, that the sign-out was not confirmed, and a 200 that comes later
+    still goes to sign-in. Every session, and not the one cookie every other route runs as, because a sign-out runs as
+    nobody: a second `pdc_session` planted beside the real one (`Path=/logout`, set by another loopback port's page,
+    which the browser sends first) made the one-cookie rule read no session, and the sign-out a no-op answered 200 over
+    a session still live; a planted id ends nothing the store does not hold. REJECTED: ending every stream, the old
+    behaviour; sign-out behind the session auth, this PR's first shape, which answered it 503 and kept the session
+    while the page went to sign-in as though it had signed out; sign-out by the one cookie every other route reads,
+    for the planted cookie above.
+  - **The stream's end, and `shutdown`.** `finish` is the one writer of `event: end` and passes its word through
+    `streamEndOf`, so the data is never empty and never a word outside `STREAM_ENDS`. `close()` sends `shutdown`,
+    for which the browser keeps the page (it waits 2 s and asks `/api/whoami`: a 200 reloads, a 401 goes to sign-in
+    with the answer's word, else `restart`), and so does the terminal chat (`worker/src/console-client.mjs`), which
+    treated any `end` as a session's end and signed in again at once, to a console that was going away: `shutdown`
+    is now a cut connection, backed off and reconnected with the same cookie, and a restarted console's 401 signs it in
+    inside the retry loop, where a console still coming up refuses the sign-in as it refuses the stream. That sign-in,
+    a 401 saying `restart` or the first 401 after a `shutdown` no entry has followed, neither meets nor starts the
+    chat's once-a-minute re-login window, which counted it and ended the chat on a second restart inside a minute; a
+    real end still counts. Only a 401 is a restart (an `end` comes from a console that knows the session, whatever its
+    data says), and the free sign-in is had at most once per stream that opened (200) since the last sign-in
+    (`openedSinceRelogin`): a console that answers every stream 401 `restart`, or a hostile one, would otherwise have
+    the chat sign in again without bound. A restarted console opens the stream it is asked for, so a real restart is
+    counted only when it comes between a sign-in and the stream that sign-in reopens (a second restart during the
+    first one's sign-in), and the chat ends only on two counted sign-ins inside the minute. `elsewhere` asks too, and
+    waits the same 2 s (`RETRY_MS`) first, because a browser that
+    signed in again in another tab is storing a newer cookie: the sign-in ends the old session's streams only once its
+    answer has gone out (the response's `finish`), since ended before it, the other tabs probed with the old cookie
+    while the new one was on the way and left a browser that had just signed in. A probe's 200 is read for the person
+    first: it reloads only into the person the page was drawn for (`.who`'s `data-name` and `data-role`, `samePerson`),
+    else it goes to `/login?ended=switched`: the cookie a probe carries is whatever the browser holds now, and a
+    one-time link, anyone's, opened in another tab signs the browser in as that link's person. Only a 200 that names the
+    page's person is the stream limit or the console being back. The tab that signed out ignores its own streams' end
+    (`signingOut`). The run page's transcript stream, when the browser closes it, is asked about with the same probe,
+    saying on its own status line "reconnecting" while it asks and "not live" for the stream limit (on that line alone,
+    never on the page's pill), where it said "not live" for every refusal, a session that had ended among them.
+  - **A page acts only as the person it was drawn for.** The reload rule alone guarded one path: a page that is not
+    live (configuration, the audit log, insights) went on previewing and confirming under whatever cookie the browser
+    held while its bar named the first person, and a stream the browser reconnected by itself carried the new cookie
+    and drew the other person's panels under that bar. So every request the script makes on the session's behalf
+    says who the page was drawn for, `<name>.<role>` (a role holds no dot, so two sessions with different names or
+    roles never read the same): its event streams in the query parameter `as` (`PERSON_PARAM`; an EventSource can send
+    no header, no page's own query takes the name, and the dispatcher takes it off before that query is parsed), its
+    previews and confirms in the header `x-console-as` (`PERSON_HEADER`), both spelled once in `session-ends.mjs` for
+    the server and the script. The dispatcher holds every value given to the session's own person, byte for byte,
+    after auth and before the role, the body, any stream slot or any ticket: a stream that says another person is
+    refused 401 with `PERSON_CHANGED_STREAM` (its own sentence: a stream changes nothing either way) and `ended:
+    "switched"`, which closes it, and the probe then sends the page to `switched`; anything else 409 with
+    `PERSON_CHANGED` ("...; sign in again") and the same `ended`, and, for a write, the confirm bar's refusal (the
+    `changed` state, whose Look again goes to `/login?ended=switched`) and an audit row (`person: the page was drawn
+    for another sign-in`). Only a stream's query is read for the person: on any other route `as` is a query parameter
+    like any other. A request that says no person (the terminal chat, curl) is not checked: the cookie is all it ever
+    had. REJECTED: Look again reloading the page, this PR's earlier shape, which drew the other person's console under
+    the tab that had refused to act for them; `other` as the page's word, which is
+    already a sign-in refusal's kind (`signin.mjs` takes either kind of notice by one word, so the two lists share no
+    name); and the person checked only at the probe, the earlier shape, for the two paths above.
+  - **Stale and fresh, and every page stream told its state first.** `loadPageData` swallows a read that fails
+    (its panels say "could not be read"), so a throw alone would almost never mark a page stale. The page's primary
+    read (`snapshot`, `runsPage`, `runById`) now sets `data.readFailed`. A page cannot tell from its own stream opening
+    whether what it holds is current, so the hub tells every page stream its state before any panel: `fresh` once its
+    page's load and render succeeded, `stale` with `since` (the hub time of the view's last good render, or null when
+    it holds none) and `what` (`tokens` or `data`) once they failed and its browser holds panels (a throw, or a tokens
+    file the hub cannot read, tells every stream it was for), each said once and again only when it changes
+    (`sub.said`). A browser holds panels (`sub.holds`) once a good render was sent to its stream, when the stream came
+    with a `Last-Event-ID`, since a browser reconnecting holds the panels it was drawn with whatever the hub still has
+    (a view goes with its last stream), and once it was told `stale`, since its page then says what it shows is as
+    last seen. A FAILED LOAD NEVER TOUCHES A VIEW: a view holds good renders only, so its digests are always those of
+    what its holders were last sent, and its next good render sends each of them every panel that changed since. A
+    load whose primary read failed draws nothing over a stream that holds panels and tells it `stale`; a first stream
+    that holds none is drawn the degraded panels the load makes for itself alone (`drawDegraded`, what it was drawn
+    kept on the stream, so a lasting failure sends only what changed), which say what the page the server just drew
+    already says (the one draw with no state before it), and still needs its view whole once a good render comes; a
+    load or render that throws draws nothing for anyone and tells each of its streams `stale`. The key's failure is
+    logged once, and its recovery only after a good load and render. The page takes its dimming back on `fresh`
+    alone, never when its stream opens: a reconnect is a new stream, told `stale` first if its page still fails and
+    `fresh` first if it recovered, and a lone tab that reconnects is told `since` null, so it keeps the time it was
+    told before. At subscribe only the page's data and render are judged, not the tokens file, which the stream's own
+    request has just read. A stale page draws each card flat (`main.stale`: no ground of its own, a hairline ring, as
+    the LiveStates card draws its dimmed rows), its ink as it was; the faint ink, held to 4.5:1 only on the surfaces,
+    is the muted ink there, and each control drawn with the secondary fill (`surface-3`, 1.04:1 on the light canvas, a
+    word with no shape on a flat panel) wears a ring in `line-strong`, 3:1 on the canvas in both themes, which the
+    flat panel hands down (`--stale-ring`: `SECONDARY_BTN` in `page-css.mjs`, the legacy controls in
+    `compat-css.mjs`); an act draws its own fill and a ghost button none, so neither takes it. A transcript stream gets
+    neither event. REJECTED: `stale` for every failed read (a page opened while Valkey is down would sit marked over
+    panels that already say so); the opacity of this PR's first CSS (.55), which took the light theme's ink to 4.23:1
+    and its muted ink to 2.45:1, under AA, and drew working buttons as disabled ones; a read-failed render stored in
+    the view, an earlier shape, which a tab of the same person holding a good render shares: once the data read again
+    that tab was sent only the panels that differed from the degraded render, so a panel that changed during the
+    failure stayed as it was under Live, and a reconnect with a `Last-Event-ID` during the failure was given the
+    degraded panels; and taking the dimming back when
+    a stream opens, the earlier shape, under which a tab that reconnected while its data still failed showed Live,
+    undimmed, over panels from before the failure, then the degraded panels, and never stale.
+  - **The server draws every state; the script only switches.** Each sign-in notice (an `ended-<reason>` per
+    reason and each refusal of `SIGN_IN_NOTICES`, chosen by `NOTICE_OF_STATUS`), the link page's three states and its
+    notices (`LINK_NOTICES`), the four live notes (`LIVE_NOTES`, in `#live-note`), the slot's previewing skeleton and
+    the kept-still note (`<template id="held-note">`) are server markup, hidden but the one the server chose, and the
+    preview, no-change, refusal and bulk-result bars arrive as `html` in the JSON answer. A notice no answer can select
+    is not drawn: the link page's own refusal (the 401 of `/login/code`) is said whole by its used state, so
+    `NOTICE_OF_STATUS` maps it to no notice, and `/login`, whose 401 is a wrong token, draws no notice for a used link.
+    The sign-in pages draw what works only with the script (the token form, its lead-in, the link page's first state)
+    `hidden data-reveal`, and the script's first act there is to reveal every `[data-reveal]` (`revealScripted`), so a
+    browser without it shows the no-script notice and nothing that cannot work. The script reveals (`hidden`), sets
+    text and attributes, and moves the one slot; its markup writes are exactly three (the slot, the panel swap behind
+    `data-panel`, the transcript append). Three sentences are the script's own, each set as text (`textContent`, or
+    `createTextNode` beside a code span for a backticked command) and exported from `script.mjs`: the sign-in's stop
+    notice (`SIGN_IN_GAVE_UP`, in a copy of the server's `unreachable` notice), the sign-out that was not confirmed
+    (`SIGN_OUT_UNCONFIRMED`, a small banner built with `createElement`, its tile holding a copy of the sign-out
+    button's own icon, as every server banner has its tile) and the stale note's sentence for the tokens file
+    (`STALE_TOKENS_BODY`, its `pi-dispatch doctor` in the code face as `withCode` draws the server's, so it never breaks
+    as "pi-/dispatch" at 375 px). Every other state is an escaped server fragment; a panel golden pins each one the
+    fixture deployment cannot reach that `REQ-OPERATOR-CONSOLE-SCREENS` (i) names, the width check loads those goldens,
+    and the client-state test runs the real script over that markup and holds that it shows the right one
+    (`CLIENT_STATES`, the script's own three included). REJECTED: the script drawing its own notices and bars (a second
+    place that writes markup, and states no golden could see).
+  - **The confirm slot.** One per page, for an operator on a console that takes changes: `#confirm-slot`, an id
+    the kit refuses to write, a polite live region after the content. A submit moves it after the wrapper of the
+    section that asked, never inside a panel or a table cell, so it sits outside every `.legacy` wrapper and the
+    Pulse bar draws as designed ("The legacy layer" above). Its states: previewing (Confirm disabled); the preview,
+    ringed and filled yellow for a paid act, red for a destructive one, plain otherwise, with the button's own words,
+    the Undo line and a countdown from the duration the server wrote, so a browser whose clock is not the host's
+    counts the same; no change (Close); refused at the preview (Close); refused at the confirm (Preview again, Look
+    again, Try again, or Close for an audit log that could not be written and for a write that threw: nothing in the
+    page fixes either, and a bar with no button kept the slot open and its panel held until a reload); refused at
+    either for a page drawn for another person than the browser's sign-in (Look again, which goes to
+    `/login?ended=switched`); a write the console answers 503 for a tokens file it cannot use (Look again); stopped part
+    way (Look again, below); and the bulk results (Reload). A refusal's `error` stays the planner's sentence byte for
+    byte (the tool and the console share it); only the bar adds "Nothing was changed." where the sentence does not say
+    so, and never over a refusal that can follow part of a write: the kill switch that reached some Valkeys or
+    queues and not others, or threw before it said which, and a bulk apply that threw part-way through its jobs. That
+    bar is the `partial` state ("The change did not finish", `PARTIAL_NOTE`: some of it may have been done, so the page
+    may be out of date), and Look again reloads, so the person sees what did change before trying again. Which state a
+    refusal is, is the action's to say (an apply's `partial: true`, the bulk pipeline's catch), never a reading of its
+    text. The audit log has no outcome for a change that partly landed, and none is added: such a write's rows are `ok`
+    then `failed`, as any refused write's, the kill switch's `failed` row giving the refusal's sentence, which names
+    what it reached, as its reason. A confirm that got no answer is never sent again: a ticket is single use, and the
+    change may have been made. AN ANSWER THAT IS NOT THE WRITE'S OWN IS NEVER A SENTENCE IN THE SLOT: a preview's or a
+    confirm's 401 is the session behind the page ending, so the script asks `/api/whoami` with the probe a closed
+    stream uses and goes to sign-in with the reason, and a write's 503 for a tokens file the console cannot use
+    carries the server's own bar (`TOKENS_UNUSABLE`, Look again). REJECTED: the JSON's sentence in the slot's small
+    message line, the earlier shape, which answered a person whose session had idled out with "sign in first" beside
+    the form and no way to it.
+  - **What a write takes, and how it is undone.** `fields` per action, held to its preview's reads by a recording
+    Proxy, so a key a form sent and no planner reads is refused by name, not dropped in silence (named only when a
+    plain identifier, never a value); the trigger add's own fields are `TRIGGER_ADD_FIELDS`, derived the same way
+    from `buildTriggerEntry`, which found `reviewState` dropped though the tool's description offers it (now carried).
+    `undo` and `inverse` are decided at the preview, where the file as it was is known, and ride the ticket's `meta`;
+    an inverse is checked there to name an action whose `fields` take its body, so an Undo can never preview a
+    refusal of its own, and an old value the form cannot send back (an empty string, an object) gets no inverse and a
+    sentence to put it back by hand. An Undo is said in two places, and a rule may answer both (`{bar, after}`): the
+    bar sits beside the preview and may point at it ("copy them from this preview"), while the banner is on the next
+    page, where no preview is, so its sentence says the console kept no copy instead (`undoAfter`); a trigger delete
+    whose entry names `run.secrets` sends the person to their own copy of the file for its secret references, since
+    the diff shows a marker in their place. The line reads "Undo: <the act>", the act alone in bold, where there is an
+    inverse, and "No undo: <what to do>", muted and not bold, where there is none. Retry, re-run and retry-all have no
+    Undo in this pull request: no console action removes a waiting job, so their line says what a person can do
+    (Cancel stops the job once it runs); the inverse for a queued job is decided later, and nothing here fixes how.
+    Deletes and secret removes have none at all, so no secret reference or resolver path reaches a page through a
+    banner. The confirm answers `change`, not `done` (a bulk confirm already answers a numeric `done`). What the
+    banner says happened is each action's `done` rule, in the past tense ("Paused the fleet", "Changed maxTurns from 30
+    to 40", "Retried failed job gh-5d10"), where the banner's title was the act's own summary, which stays the
+    preview's title; a single act's is decided at the preview with its Undo, and a bulk act's at the confirm, from
+    the ticket's list and the filter its payload carries, since only the confirm knows how many jobs landed. A bulk
+    confirm where none landed leaves no banner (its results bar said so, and a banner over nothing done read as a
+    success); one where some did is in the attention tone and says how many ("2 of 3 done"). The banner counts this
+    confirm's audit rows from the first `capturingAudit` saw ("3 audit rows, from row 41", linked to row 41) and never
+    draws a range: the audit writer takes its lock per row, so another session's row can land between a bulk
+    confirm's own, and "rows 41 to 43" would name it as this write's (`auditLast` is kept on the change, not drawn);
+    the capture wraps the writer outside `auditedWrite`, which is unchanged. The flash is kept beside the session, so
+    `get`'s copies keep their shape, bounded at `FLASH_MAX_BYTES` (16 KiB) and taken by a page GET alone. Undo is a
+    form for the inverse, so pressing it previews the way back like any write. The bar's lines are the planner's words
+    (`changeText`: "maxTurns: 30 to 40", words and never an arrow; a mapping "name: path", `resolverText`) with the
+    values in bold where the action draws its own (`barLines`), every count through one rule (`plural`, in
+    `confirm-view.mjs`, which `actions.mjs` re-exports: the count and each word that agrees with it are one call, so a
+    sentence cannot pair "1" with "wait", and a count the scan stopped short of reads "at least 3 more") and no
+    capitals for stress; the planners' sentences are the pi panel's and the tools' too, which say them the same way,
+    arrows included: no planner's confirm draws one on either surface. The pi panel's own dialog when a scoped limit's
+    edit moves its scope, and its notices after a trigger add, a flow edit or a resolver declared, are built outside
+    the planners and still draw one; they reach no console bar. The banner's Undo is a sentence, so it ends with its
+    full stop, as the CardsAndBanners card's does.
+  - **Error pages.** `sendFailure` answers a page only to a GET or HEAD outside `/api/` and `/static/` whose Accept
+    names `text/html` (a browser's own navigation), JSON otherwise, so no program learns a new shape and a failed
+    stylesheet or script request is never handed a page. The kinds and their sentences are closed (`ERROR_KINDS`,
+    `ERROR_SENTENCES`): a 404 names no path, so a crafted link cannot make a console page display its words; a 400
+    says the page parser's refusal, which names a parameter and never a value. The 404 and the 405 are answered before
+    auth, so their navigation reads the session with `peek` (no `lastSeen` move: a 404 extends no session, and ends
+    none). The 421 draws no navigation (its links would hit the same refused name) and reads no session; it names the
+    refused Host, which the person needs to see, escaped and cut to 64 characters, and gives the tunnel for the
+    address and port this connection reached (`tunnelHost`, as `serve`'s own hint names its bound host: an IPv6
+    address in brackets, a dual-stack socket's `::ffff:a.b.c.d` as the IPv4 address, `localhost` when none is known),
+    which the requester already knows, and nothing else of the listen address. Its sentence cannot say "127.0.0.1
+    only" when `PI_CONSOLE_ALLOWED_HOSTS` or a unix socket is in use, and must not list the names. Its Copy button
+    works only where the page is a secure context, which a name other than localhost over plain http is not, so there
+    the command is text to select. The 500 and the 503 draw no navigation either: neither can vouch for the session
+    behind the request. A page that cannot be drawn falls back to the JSON, so a failure path never becomes a second
+    failure. REJECTED: the ErrorPage card's 421 with the navigation; and a fixed `127.0.0.1` in the tunnel command,
+    the first shape, which does not answer for a console bound to `[::1]`, to another loopback address or to a LAN
+    address.
+  - **The sign-in pages.** The SignIn and AccessStates cards' markup through the kit (`signin.mjs`), out of the legacy
+    layer, with the three ids the script finds (`#login-form`, `#token`, `#notice`) drawn by hand in the kit's classes.
+    The help names the commands that make a link (`/dispatch console --link`; the card's `/dispatch console`
+    prints no link) and a token, its `<you>` quoted by the copy box, and never a token's prefix (the leak
+    canary fails on any body holding it). A notice's command or name is in the code face, from the catalog's own
+    backticks (`withCode`; the `other` notice's body is the server's sentence, which the script sets as text and which
+    never passes through it); the used link's state leads each command for a new link in by where it runs, the host
+    and then pi; and a page without a script says first, in its card, that the console needs JavaScript to sign in
+    (`NO_SCRIPT_TEXT`, a notice inside `<noscript>`). The one-time link page is titled "One-time sign-in link"
+    (`LINK_PAGE_TITLE`), the page and not what happens on it: its first title, "Signing in", was false without a script
+    and once the link was refused. The footer follows the listen address: loopback, a unix socket, or nothing for a
+    public bind. A post that reaches nothing keeps the page and posts again every 2 s (the card's 5 s became the
+    live pill's 2 s), for at most 30 posts or 60 s, whichever comes first (`SIGN_IN_TRIES_MAX`,
+    `SIGN_IN_RETRY_FOR_MS`); then the page drops the token or the code it held for the retries, clears the field and
+    asks for another press (a link has expired by then). A link's post refused 429 is the sign-in limiter's, which
+    answers before the code is read: the link is not spent, so the page keeps its first state under the rate notice
+    (a 401, a 503 or a 500 shows the used state, the code taken or refused); and a new link pasted into the same tab,
+    which changes only the fragment and so loads no page, loads the page again (`hashchange`). REJECTED: retrying
+    until something answers, which posts a
+    token every 2 s, for ever, to whatever answers on the port when it comes back. `serve` prints a sign-in hint (the two commands, never a token), and `link --port <n>` prints the
+    link for a tunnel's local port on `localhost`, which the console cannot know (a socket has no port, and a tunnel
+    may map 4790 to any free one).
+  - **The audit page.** Pure over the worker's two readers, each asked one opt-in option (`readAuditView`,
+    `audit-view.mjs`), so their other callers and `INT-CONSOLE-AUDIT-LOG`'s format are untouched. A row's state is
+    judged by its place against the verifier's first broken place and the last row it vouches for, never by its seq,
+    which a damaged line lacks and a tampered file can repeat. A ROW IS VOUCHED FOR ONLY BY A NEXT LINE WHOSE `prev`
+    MATCHES IT: an edited outcome leaves its own line well formed and moves only its hash, so it shows only in the next
+    line's `prev`. So the verifier compares a line's `prev` with the hash of the row before it before it judges the
+    line's action, outcome and fields, and at a break whose line carries no matching `prev` (it does not parse, its
+    `prev` is not a hash, or it is another hash, whatever else is wrong with it) `withLast` reports the row before the
+    break as `suspect` and `last` one row earlier, and the page draws it "not verified" with its own sentence, its
+    verified range ending before it; only a line whose `prev` matched and that then fails another check (its seq,
+    action, outcome or fields) is damaged alone, and the row before it stays verified. The newest row has no line
+    after it, so nothing vouches for it; on an intact chain it shows its outcome all the same, and the next row the
+    console writes links to it as it then is on disk, so an edit made before that row is never seen, a limit
+    `SECURITY.md` names. `pi-dispatch-console audit verify` follows the same rule ("Row N before it (<file> line L) is not vouched for
+    either: the link between the two does not hold, so the chain cannot tell whether row N was changed.", and the rows
+    through the one before are intact), asking the verifier for `withLast` too. REJECTED: judging the line's action,
+    outcome and fields before its `prev`, the second version, under which an edited row followed by a garbled line, an
+    unknown action or a `prev` that is not a hash was shown as verified, since the break was then the line's alone. A
+    row's `count` is said by its write's kind (`countText`): a bulk write's row (`AUDIT_BULK_KINDS`, the kinds of the
+    actions with `bulk: true`) is "one of N in a bulk write", a resume's (`AUDIT_WAITING_KINDS`) "N jobs were waiting",
+    the jobs waiting to start when it was confirmed, both lists held to the action table by a test, and any other
+    "count N"; read as bulk membership, a single resume said "one of 2 in a bulk write". The damaged place is named by the line
+    the check names, "line 8 of 2026-10.jsonl", the one `audit verify` prints, in the banner's title, its sentence and
+    About, and the banner's button is "Show the damaged line": never "row 8", since the number a damaged line carries
+    is what the chain does not vouch for and a line that is no row carries none, and the first version, which said
+    "row 8" only where the page had read that line, named one place two ways. REJECTED: vouching for the row before
+    every break, the first version, which put an edited outcome on the page under a banner that vouched for it, and
+    which the CLI's sentence did too ("Rows before it are intact"). A search reads 500 rows at a time and stops at 2,000
+    examined, saying so once, as the runs page stops at 2000 records, and issues no read past that bound. A damaged
+    entry is shown under every filter, in its place, and not counted as a match: a line that is no row has no who,
+    action or outcome to judge, a damaged row's fields are what the chain does not vouch for, and a filtered view that
+    hid them would look clean. REJECTED: a damaged line matching no filter, the first version (the chain banner names
+    only the first break, so a second damaged line was then on no filtered page). `?seq=` opens the fixed 50-row chunk
+    that holds the row, so the banner's link lands on one page however many rows were written since; the row is found by
+    its number, through `withLast`'s `files` (each month file's first `seq` and the rows walked in it, so row s is at
+    line `s - first + 1`). The row ASKED FOR decides whether the index places it (`seqPlace(chain, seq)`), never its
+    chunk's top: a row the check counted is read at a place, in one read, from the newest row of its chunk the check
+    counted (the chunk's top, or the last row the check counted when the top is past it), whose `seq` and place are both
+    checked there (a file that shrank above it moves its row up a line, seq and all), so a chunk's rows past the
+    check's count (written since the check, or after a broken link) are on the newer pages, not that one. A row the
+    check did not count (newer than the check, past a broken link, or no check) and a place that no longer holds its
+    row (the files changed since the check: the row there is another, or the read from there does not find it) fall
+    back to a walk from the newest row, bounded at 2,000 as a search is; such a walk stops at the first row below the
+    chunk, and a changed file can hold the row out of its order, so one that does not find it says "Reading from the
+    newest row did not find it either." under "Row N was not found", never that the log holds no such row. The page
+    says how a walked-for row was found, or why it was not, one clause for each way (`seek.by`,
+    `AUDIT_SEEK_BY`, `walkWhy`: "The page that holds row 125, found by reading from the newest row: the last chain
+    check counted rows up to row 120."), and where it got to; a row below the log's first is reaped or removed and a
+    row past the newest does not exist yet, and neither is walked for. REJECTED: the walk alone, the first version,
+    under the search's bound, so a kept link to a row opened a page without it once 2,000 newer rows were written; and
+    the chunk placed by its top, the second, which sent every row of a chunk that runs past the check's count to that
+    walk (row 41 of a chain broken at row 46, with 2,000 rows after it, was never found, under a sentence saying the
+    check could not count to it). `seq` with a filter is refused rather than drawn unfiltered under selects that say
+    otherwise, and the filter form sends none. The log's cells are bounded, so the table's width has a ceiling
+    whatever the rows say (`AUDIT_LAYOUT`): the time two lines in 110 px (the date over the time and zone: the card
+    draws the time over the date, but the script rewrites each `<time>` to the reader's zone as one text, so it can
+    break only at a space), a name, a write's kind and a target their own width up to 100, 120 and 160 px and wrapped
+    inside it past that, and the reason never narrower than 200 px. Bounded, the table over the widest rows the console
+    can write (a seven-digit row number, a 64-character name, a 40-character kind, a 200-character target and a damaged
+    row's sentence) is about 1,052 px at its narrowest in CI's font (1,040 in the macOS system font), so the log
+    stands beside its side card only from 1600 px (`AUDIT_LAYOUT.sideMin`: the side card is 470 px and the gap and the
+    page's sides 64 more, leaving the log's card 1,066 px), the side card under it below that, and its rows are
+    stacked blocks up to 1119 px (`AUDIT_LAYOUT.stackMax`: at 1120 px the card is 1,072 px, the table and a classic
+    scrollbar's 15 px), by bundle.css's own `.tbl--stack` rules taken from its phone block (`stackRules`), so the
+    columns that say what happened never scroll out of the card. REJECTED: side by side from the desktop's 761 px,
+    this PR's first CSS, which left the log 227 to 746 px wide, and from the card's own 1440 px, the next, where the
+    log's card is 906 px and the reason column was left 55 to 70 px (a damaged row's sentence 16 lines); cells that
+    shrink below their own width by wrapping anywhere, which gave the reason its room but broke "anonymous" and a run's
+    id mid-word; and a container query on the log's card, which needs Chrome 105, Safari 16 or Firefox 110, past the
+    browser floor; the card is the viewport less fixed parts on this page, so a media query says the same. A
+    verification re-hashes every row of every month kept, so it is cached 30 s (`cachedFor`, a rejection not kept), and
+    the page says when it ran.
+  - **A page drawn once** (insights, config, audit) says when it was drawn and offers Reload to its own address,
+    a plain GET that works without the script. A read-only console says so in a banner on every screen.
+  - **Code evidence**: admin/src/console/session-ends.mjs (`ENDED_REASONS` and its `switched`, `STREAM_ENDS`,
+    `STREAM_SHUTDOWN`, `PERSON_PARAM`, `PERSON_HEADER`, `endedNotices`, `SIGN_IN_NOTICES`, `NOTICE_OF_STATUS`);
+    sessions.mjs (`verdict`, `endedOf`, `destroy`, `readSessionCookie`, `readSessionCookies`, `setFlash`,
+    `takeFlash`, `TOMBSTONE_MAX`, `FLASH_MAX_BYTES`); server.mjs (`wantsHtml`, `sendFailure`, `resolveSession`,
+    `startSession` and its `finish`, `postLogout`, the `anyHost` routes, the `stream` routes and the person check,
+    `PERSON_CHANGED`, `PERSON_CHANGED_STREAM`, `loginNoticeOf`, `TOKENS_UNUSABLE`, `SIGN_IN_FIRST`, the count row's
+    words); error-pages.mjs (`ERROR_KINDS`, `ERROR_SENTENCES`, `errorPage`, `forbiddenContent`, `tunnelHost`); live.mjs
+    (`finish`, `markStale` and its `what`, `failingNow`, `markFresh`, a stream's `holds`, `said` and `degraded`,
+    `drawDegraded`, `runTick`, `drawTick`, `subscribe`,
+    `endSession`, `close`); pages.mjs (`readFailed`, `LEGACY_PAGES`, the audit wiring); actions.mjs (`WRITE_RULES`
+    and its `done` rule, `UNDO_SENTENCES` and its `...After` twins, `unknownFieldRefusal`, `metaOf`, `capturingAudit`,
+    `changeOf`, `confirmBulk`, `atIndex`, `TRIGGER_FORM`, `UNCHANGED`, the kill switch's `partial`); confirm.mjs
+    (`issue`'s `meta` and `expiresAt`); confirm-view.mjs (`plural`, `confirmSlotHtml`, `previewBarHtml` and its Undo
+    line, `unchangedBarHtml`, `refusalHtml`, `REFUSAL_STATES`, `PARTIAL_NOTE`, `bulkResultsHtml`, `doneBannerHtml`,
+    `heldNoteHtml`, `diffHtmlOf`); shell.mjs (`LIVE_NOTES`, `READ_ONLY_TITLE`, `frameHtml`, `legacyWrap`,
+    `liveNoteHtml`, `LINK_PAGE_TITLE`); signin.mjs (`LINK_NOTICES`, `NO_SCRIPT_TEXT`); audit-view.mjs
+    (`parseAuditQuery`, `readAuditView`, `auditRowState`, `seqPlace`, `indexEnd`, `AUDIT_SEEK_BY`); panels/audit.mjs
+    (`damagedLabel`, `walkWhy`, `seqSentence`, `countText`, `AUDIT_BULK_KINDS`, `AUDIT_WAITING_KINDS`); script.mjs
+    (`RETRY_MS`, the slot, the person each request says, the probe, `samePerson`, `signedOut`, `answerBar`,
+    `streamEnded`, `revealScripted`, the link page's `hashchange`, `SIGN_IN_TRIES_MAX`, `SIGN_IN_RETRY_FOR_MS`,
+    `SIGN_IN_GAVE_UP`, `SIGN_OUT_TIMEOUT_MS`, `SIGN_OUT_UNCONFIRMED`, `STALE_TOKENS_BODY`); cli.mjs (`link --port`, the
+    sign-in hint, `AUDIT_VERIFY_CACHE_MS`, `cachedFor`, `audit verify`'s sentence); kit.mjs (`RESERVED_IDS`,
+    `withCode`, `cmd`); compat-css.mjs (`PULSE_LOOK` and its stale ring); page-css.mjs (`AUDIT_LAYOUT`, `stackRules`,
+    `SHELL_CSS`, `SECONDARY_BTN`); admin/src/write-plans.mjs (`TRIGGER_ADD_FIELDS`, `rowName`, `changeText`,
+    `resolverText`, `renderProfiles`); admin/src/read-model.mjs (`envelopeChangeLines`, `renderBundleProfiles`);
+    admin/src/words.mjs (`rowNumber`, `fieldNamed`); worker/src/console-audit.mjs (`positions`, `withLast`: `last`,
+    `suspect`, `files`); worker/src/console-client.mjs (`stream`'s `sinceShutdown`, `openedSinceRelogin`,
+    `RELOGIN_WINDOW_MS`); .github/scripts/console-width-check.mjs;
+    admin/test/console-client-states.test.mjs, admin/test/helpers/client-states.mjs, admin/test/helpers/script-dom.mjs.
 - **Rejected**:
+  - **Revert last change** (2026-10-24, #737 PR 2; #711 offered it as optional). It needs a copy of each file before
+    each change, and the console keeps none: a store of copies would be a second record of the configuration, secret
+    references included, beside the files the panel and the tools write. Declined; the Undo lines and the Undo button
+    reach the way back through the same previewed, audited writes, and say where none exists.
+  - **`done: {...}` on the confirm's answer** (2026-10-24, #737 PR 2, this PR's first shape). A bulk confirm already
+    answers `done` as the number of jobs that landed, which its tests pin and a script may read; the change is a new
+    key, `change`, and `done` keeps its meaning.
+  - **One legacy wrapper per page with the slot inside it** (2026-10-24, #737 PR 2). The legacy layer restyles a
+    button, a paragraph and a list inside its wrapper and reverts `.confirm` and `.diff`, so the Pulse bar would draw
+    wrong there unless restyled back, a second copy of its look; a wrapper per section keeps every old panel byte for
+    byte and puts the slot between wrappers.
   - **A served sprite file** (2026-10-23, #737), `/static/icons.svg` referenced as `<use href="/static/icons.svg#i-x">`.
     A pattern or a marker referenced by `url(#...)` resolves in its own document, so the hatch and the arrow would
     still have to be on the page, and the file would save nothing: every console response is `no-store`, so it would
@@ -13191,7 +13660,21 @@ a tunnel.
   shell that cannot append to the audit log is refused, so a full or unwritable `PI_LOGS_DIR` stops the TUI's and
   the tools' writes until it is fixed. Since #643: the live transcript shows what the worker published, so a secret
   the agent transformed (`DES-LIVE-TRANSCRIPT-STREAM`'s residual) reaches an operator's page, and a transcript tab
-  holds one of its token's stream slots like any live page.
+  holds one of its token's stream slots like any live page. Since #737 PR 2: a planted cookie of a session's shape is
+  told the `restart` sentence while it could be true, which is why the sentence says "may", and that answer tells a
+  client with no token that the process is younger than `PI_CONSOLE_MAX_HOURS` and has forgotten no ended session
+  (accepted, of little worth); a token holder can flush the 1024 remembered reasons with about 1024 sign-ins (about
+  three and a half hours at the sign-in limit), after which those reasons are lost and `restart` is never said again
+  until the console restarts, while nobody can plant a reason for another session ("Sessions, error pages, the write
+  flow and the live states"); the flash lives in the process like the sessions, so a console stopped between a confirm
+  and the page's reload loses the banner (the audit log keeps the row), and a page on another loopback port, which is
+  the same site, so the browser sends it the `SameSite=Strict` session cookie, can make the browser GET a console page
+  and so take the flash, which costs the person the banner and nothing else (the response is not readable to that
+  page, and the audit log keeps the row; cosmetic); a page on a rebinding name can read its own 421, which holds only
+  the name it sent and the address and port it reached, and the console's script and stylesheet, which answer on any
+  name and are the same public bytes for everyone; and a tokens file that stays unreadable keeps every open tab
+  connected and showing what it last saw, as last seen under its time, until the file is fixed or the session's own
+  limits end it at the next good read.
 - **Traces to**: `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS`,
   `INT-CONSOLE-TOKENS-FILE-CONTRACT`,
   `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT`,
@@ -13697,14 +14180,20 @@ a tunnel.
      gives up after 8 failures in a row with nothing received; a server `retry:` raises the backoff's floor (within
      the cap); a 429's `Retry-After` is honoured, clamped to 1 to 60 s; a 401 or an `end` event signs in again, after a
      backoff, at most once per 60 s over the stream's whole life (`RELOGIN_WINDOW_MS`), and a second one inside the
-     window is the end, said in a sentence; 502, 503 and 504 back off; any other 4xx is final and not retried. A plain
-     request that meets a 401 signs in once and retries once. A JSON body silent for the request timeout (15 s) is cut,
-     and a stream silent for 45 s (`STREAM_IDLE_MS`, three of the console's 15 s pings) is cut and resumed. The SSE
-     parser keeps a CR that ends a chunk (a CRLF split across two chunks is one line end), and ignores an id that is
-     not printable ASCII or is longer than 1024 characters, since the id goes back as the `Last-Event-ID` header and
-     node throws on a header with a control byte. A Set-Cookie whose Max-Age is zero or less, or whose Expires is past,
-     clears the session cookie. A console refusal sentence is folded onto one line (`oneLine`: control characters to
-     spaces, at most 1000 characters).
+     window is the end, said in a sentence. AMENDED 2026-10-24 (#737 PR 2): a restart's sign-in neither meets nor
+     starts that window, so a console restarted twice inside a minute keeps the chat: a 401 whose body says `restart`,
+     or the first 401 after a `shutdown` end no entry has followed, and only a 401 (an `end` comes from a console that
+     knows the session, whatever its data says), at most once per stream that opened since the last sign-in
+     (`openedSinceRelogin`), so a console that answers every stream 401 `restart` ends the chat after one counted
+     sign-in; a `shutdown` end is a cut connection, reconnected with the same cookie ("Sessions, error pages, the write
+     flow and the live states" in `DES-OPERATOR-CONSOLE`). 502, 503 and 504 back off; any other 4xx is final and not
+     retried. A plain request that meets a 401 signs in once and retries once. A JSON body silent for the request
+     timeout (15 s) is cut, and a stream silent for 45 s (`STREAM_IDLE_MS`, three of the console's 15 s pings) is cut
+     and resumed. The SSE parser keeps a CR that ends a chunk (a CRLF split across two chunks is one line end), and
+     ignores an id that is not printable ASCII or is longer than 1024 characters, since the id goes back as the
+     `Last-Event-ID` header and node throws on a header with a control byte. A Set-Cookie whose Max-Age is zero or less,
+     or whose Expires is past, clears the session cookie. A console refusal sentence is folded onto one line (`oneLine`:
+     control characters to spaces, at most 1000 characters).
   4. **The fork is host-local.** `chat-fork.mjs` reads `PI_SESSIONS_DIR` on the operator's host, copies the canonical
      `current.jsonl` to `~/.pi-dispatch/chat/<key>/source-<ms>.jsonl` (source `O_RDONLY | O_NOFOLLOW`, its descriptor
      re-checked for the device and inode `planFork` judged; destination `O_CREAT | O_EXCL | O_NOFOLLOW`, 0600, in 0700
@@ -14363,4 +14852,5 @@ a tunnel.
 | 2026-10-23 (#710, PR 4) | Issue #710, PR 4: a truthful overview and readable numbers. **`DES-OPERATOR-CONSOLE` AMENDED**: a "A truthful overview, readable numbers and local times" bullet: the overview's order (Active and Parked first); no worker online judged from the registry's beats within `BEAT_FRESH_MS` (a minute) with `resolveWorkerCount`'s count (rejected: BullMQ's `getWorkers`, the row's 90 s TTL, judging an unreadable registry); `refusals24h` from the same wide window, counting what both surfaces call "refused" so an operator's cancel is not one (rejected: every `policy` record); a failed job's record reason in the failed list, the free text still the operator's; money by the panel's `fmtUsd` with the exact amount in a `title` (no new dependency in the bundle, 8.0 KB of this change's own code; rejected: a second formatter); CPUs in cores; the time rule, UTC bytes in `<time datetime>` and local time by the served script on load and after each swap (rejected: a server-side zone, `Intl` zone names). UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` (the panel reads the same snapshot; its views and words are untouched, and its failed rows carry one more field it does not draw), `DES-DOCTOR-RESULTS-PUBLISHED` (the Doctor panel is untouched). |
 | 2026-10-23 (#710, PR 4, round 1) | Issue #710, PR 4, review round 1. **`DES-OPERATOR-CONSOLE` AMENDED**, the "A truthful overview, readable numbers and local times" bullet: (1) BullMQ may overrule "no worker online": a beat's age is the console's clock minus the worker's own `beatAt`, so a worker 50 s behind read offline for part of every minute; while `queue.workers > 0` (Valkey's connections, no clock) the overview neither warns nor turns the queue amber, and says "Host beats look stale (clock skew?), but the queue still sees its workers connected" when BullMQ sees more workers than beat freshly; accepted cost, a fleet whose every worker is wedged reads as the note; REJECTED for now, a beat age on Valkey's clock (`HOST_TTL_MS` minus the row's PTTL), since it belongs to the worker's shared `readLiveHosts`, doctor's skew check needs the wall-clock `staleMs`, and it costs a round trip per host each second. (2) Money is `usd2`, one `$1,234.56` form, half up for a cap and DOWN for a spend against one; the panel's `fmtUsd` REJECTED for console columns (three shapes in one column, and half-up let a window short of its cap read as the cap); the bundle-size figures went with it. (3) The time rule narrowed: the Spend page's split and capacity text instants are `<time>` (`splitAtHtml`, `capWhenHtml` in `insights-html.mjs`); chart tips (labelled "UTC"), day labels and buckets, the split's short outside-edit notice and transcript entry times stay UTC, and the count and dollar windows say they are UTC. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` (the panel draws none of this; `usd2` sits in `panel.mjs` beside `fmtUsd`, which is unchanged), `DES-HOST-REGISTRY` and the worker's `readLiveHosts` (not touched: no field, no round trip). |
 | 2026-10-23 (#737, PR 1) | Issue #737, PR 1: the Pulse foundation. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names #737 PR 1; NEW bullet "The visual system": `tokens.json` and `bundle.css` pasted verbatim, each copy pinned by its file's sha256 (`PULSE_TOKENS_SHA256`, `PULSE_CSS_SHA256`); one stylesheet in five parts, in cascade order (the tokens, the bundle, the shell's rules, each converted page's rules confined by `scopeCss`, the legacy layer); light, dark and the system from three token rules (`:root`, the `prefers-color-scheme` block on `:root:not([data-theme="light"])`, `:root[data-theme="dark"]`); the theme choice as the `pd_theme` cookie, written only by the served script, read by the server for every page and both sign-in pages as a closed set (exactly `light` or `dark`; a second copy is neither) and stamped as one of two constants, so a page is in its theme from the first byte with no flash (not `pdc_`, the prefix the leak canary fails on); one inline sprite per signed-in page (a pattern or a marker resolves only in its own document, and every response is `no-store`); the kit; the shell and its navigation (Overview, Runs, Parked, Fleet, Spend, Configuration, and More with Audit for an operator alone) with the Parked count as a shell panel (`span#p-nav-parked[data-panel]`); a panel element carries only `id` and `data-panel`, since a live swap replaces only its inner HTML; the temporary legacy layer inside `.legacy`, its collision neutraliser first, its deletion forced (an empty `LEGACY_PAGES` forces an empty `LEGACY_CSS`; Configuration converts last, in PR 7a); the WCAG AA contrast test, and the 375 px width and CSP check as a step of the required `contract-tests` job against Chrome for Testing at a pinned version and sha256; the browser floor, Chrome 88, Safari 14 and Firefox 78. "No inline style" AMENDED: still one served stylesheet under `style-src 'self'`, now those five parts, a card's page-only style joining it as a `PAGE_CSS` entry. Six options REJECTED, marked #737: a served sprite file; the theme in `localStorage` only; a no-JavaScript `GET /theme` with a side effect; `light-dark()`, CSS nesting and `@scope` (the floor); a browser test library; rewriting the old markup in the foundation. **Code pointers CORRECTED** after the split of `admin/src/console/panels.mjs` into one module per screen under `panels/` (the file is now a barrel that re-exports every renderer it exported before, `navHtml` aside): `DES-OPERATOR-CONSOLE` ("A page is a list of panels", `profileUse` in `panels/config.mjs`, `openshellRows` in `panels/run.mjs`, `steerForms` and `chatDrawsSteer` in `panels/run.mjs`, `parkedAnswerForm` in `panels/common.mjs`), `DES-OPENSHELL-VENUE` (`openshellRows`), `DES-DOCTOR-RESULTS-PUBLISHED` (`doctorReason` in `panels/config.mjs`) and `DES-ADMIN-VIA-PI-EXTENSION` (the console's panels import `words.mjs`); a pointer to a renderer the barrel re-exports still resolves and is left as written. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` otherwise (the panel's words, glyphs and tones are as they were; `words.mjs` only gains a `status` per word and `STATUS_KINDS`), `DES-LIVE-TRANSCRIPT-STREAM` (the run page's transcript section is drawn as before, inside the legacy wrapper), the live hub and the stream lifecycle (the shell's count is one more panel of a live page, by the same digest rule); and the constitution: `CONST-PI-VERSION-PINNED` governs pi and the image bases, and no pin of either moves (the browser the width check runs is pinned by exact version and sha256 in its own file), and `CONST-MERGE-NEVER-AUTOMATIC`'s grep covers the new `.github/scripts` file, which merges nothing. **Review round 1 (same PR)**: the theme cookie is `SameSite=Lax` (a preference; `Strict` withheld it on a navigation from another site, so that page was drawn in the system's theme), and the bullet now says what follows from it being readable script-side: any page on the console's host name can read, overwrite or shadow it, the browser sends it to other services there, and a second copy pins the system's theme, all cosmetic. The rejected `localStorage` option's reason CORRECTED: a non-deferred `<script src>` in the head is allowed by the CSP and runs before the first paint; the real costs are a render-blocking request on every `no-store` page and a theme that needs JavaScript, where the cookie draws it in a page whose script never runs. The contrast check holds the 56 declared pairs a theme, status marks exempt and the legacy layer unmeasured; the kit's status rule narrowed to what holds. The width check gains the shell sweep (every page by `renderPage`; an operator, a viewer, a read-only console and the longest token name on one; 375, 800, 1024, 1280 and 1440 px; `barVerdict` and `moreVerdict`), the forced themes' `color-scheme` meta read off `page()` (`themeHead`), `--check-pin` before an https-only download, and tests of its glue and of the workflow step. The browser floor names `:has()` and `overflow-wrap: anywhere` and what each refines. Round 1 review also: `GET /favicon.ico` answers an empty 204 without a session (REQ-CONSOLE-SECURITY Statement and DES-OPERATOR-CONSOLE item 2 name it), so a browser's own request is neither a 404 nor a sign-in redirect. **Review round 2 (same PR)**: `DES-OPERATOR-CONSOLE` AMENDED, the "The visual system" bullet: NEW sub-bullet "The top bar's layout": by the viewport's width and the server's `top--ro` alone, never by what the script changes; on a phone the bundle's scrolling row (a focused pill scrolled into view with its ring, the current one once on load, never re-centred); above it a grid that never scrolls, two rows (the navigation broken after its fourth pill up to 939 px) and one from 1440 px (1600 read-only), measured in DejaVu Sans so that only the name gives way; More under its button by CSS above a phone and by the script on one, closing when its button scrolls out of view there; REJECTED, the navigation scrolling at every width (round 1's fix: pills out of a mouse's reach, clipped rings, a re-centring that fought the reader, a 60 px jump). The shell: More also closes when focus leaves it, on a phone Live is a dot alone and every other state its word, the name whole in its `title`. The kit: the `dot` claim narrowed (colour, an image with a name given a `label`, drawn only beside its word); `outLink` takes only a URL written as the browser writes it back, with no user name or password; the reserved ids gain the spend topology's `n<k>`, `w<k>`, `g<k>` and `sg<k>`; a copy box quotes an argument starting with `=` and a first word holding one. The theme cookie's `Lax` reason CORRECTED: what a cross-site navigation lands on is the sign-in page or a one-time sign-in link, any other page being a redirect to sign-in for want of the `Strict` session cookie; and a planted copy for a path holds only the pages under that path to the system's theme (a `Domain` copy for the console's own host replaces the person's, measured in Chrome for Testing 155). The width check: every part of the bar against every other, every pill whole with its focus ring above 760 px, one height across the live words and the theme button, the name rule, More under its button, the window's emulation read back from the page, the page side reduced to boxes and computed styles with every rule a pure function (`shellMetrics`), and a negative control in every run that must fail with exactly its nine sentences. UNCHANGED, checked: "No inline style" (More's phone placement is still the element's style property, the CSSOM, as the insights tooltip's) and the CSP; `DES-ADMIN-VIA-PI-EXTENSION` (the panel draws none of this). **Review round 3 (same PR)**: `DES-OPERATOR-CONSOLE` AMENDED, "The visual system": the shell's live pill on a phone is one 16 px slot that never changes size, a mark whose shape says the state (`LIVE_GLYPHS`: Live the dot, Reconnecting a retry arrow, Not live the stop square, Signed out the sign-out arrow, each at 3:1 or more on the bar's ground), its word hidden from view in every state and kept in the status region, the classes the whole state; the theme button keeps its space while hidden (`visibility: hidden`), so its reveal moves nothing and without a script it is an empty gap; who is signed in carries the name and the role in the block's `title`; "The top bar's layout": the bar holds its height on a phone too, the desktop rules apply exactly where the phone's query does not (`not all and (max-width: 760px)`, so no fractional width between 760 and 761 px matches neither), and on a phone More, on every opening, first scrolls its button whole into view and closes only when a later scroll takes it wholly out (REJECTED, closing whenever the button is partly out: round 3 measured it shutting a menu in the task that opened it, so a click that moves no focus could not open a cut button at all); the kit's `dot` rule stated as the kit's, no page drawing one yet. The width check: 761, 940 and 1600 px added, held to `TOP_BAR`; the bar read also with the Parked count emptied and widened to five digits, and the page's width in every read; the height rule at every width (round 3 found it blind on a phone, where the server's Not live stood 52 px taller than Live); every live word read (`liveReadProblems`) and no two drawn alike (`liveStateProblems`); one row from 1440 px unless read-only (`oneRowProblems`); a part's shown box its own and everything drawn inside it (`inkOf`); the role word under the name rule, against the nearest `title`; More on a phone clicked with its button cut, nothing focused, never scrolled into view first (`moreSource`), and opened with its button whole; a run with page scripts off (`NO_SCRIPT`, `noScriptVerdict`); the emulation probe and More's click run against stubbed pages in the worker test; a second negative control at 375 px as a phone (`phoneControlDoc`), whose bar jumps with the last live word and with its Parked count emptied, whose page is wide only while the count is emptied, and whose own script shuts a More clicked cut, failed with exactly its four sentences; the first control's claim NARROWED to its nine named rules. Measured with Chrome for Testing 155 on macOS, each commit's whole `admin/src/console` put back into this round's tree: the PR's first CSS fails 263 of the 321 shell runs, round 1's 264, round 2's 61 (all at 320 and 375 px), this round's none. The theme cookie's `Domain` sentence CORRECTED: a planted `Domain` copy replaces the person's on `localhost` or `127.0.0.1` only; under a domain name it is a second copy on every page. UNCHANGED, checked: the CSP, "No inline style" (More's phone placement and its scroll are still the CSSOM and `scrollLeft`), `DES-ADMIN-VIA-PI-EXTENSION`. |
+| 2026-10-24 (#737, PR 2) | Issue #737, PR 2 (most of #711). **`DES-OPERATOR-CONSOLE` AMENDED**: Status names PR 2; NEW bullet "Sessions, error pages, the write flow and the live states": tombstones kept under the session's id with one closed word each (in the order idle, max, all, role, revoked; written by a failing `get`, the sweep, `destroy` as `elsewhere` for a sign-out and for a sign-in over a live cookie once that sign-in succeeded, and with no word for the session a sign-in refused for its audit row made), the `restart` possibility rule (a well-formed id the store never held, while the process is younger than `maxMs` and has evicted nothing) and why it is only a possibility, the FIFO of 1024, and no word crossing tokens or planted for another session; accepted, the `restart` answer telling a client with no token that the process is younger than `maxMs` and has evicted nothing, and a flush of the FIFO by about 1024 sign-ins, after which the dropped reasons are lost and `restart` is never said; a tokens file the console cannot read signs nobody out (a 503 with no Set-Cookie, and the hub ends no stream and draws nothing, saying `stale` with `what: "tokens"`), sign-out needing no tokens file at all and ending every session its cookies name (`auth: "none"`, `readSessionCookies`, `destroy` saying who it ended, one audit row each; the page signed out only on its 200, and otherwise, or with no answer within `SIGN_OUT_TIMEOUT_MS`, told once that it was not confirmed); the stream's end and `shutdown`, for the browser and for the terminal chat (whose once-a-minute re-login no longer counts a restart's 401, at most once per stream that opened since the last sign-in, and never an `end`); `elsewhere` asked after `RETRY_MS`, a sign-in ending the old session's streams only once its answer has gone out, and a probe's 200 read for the person first, reloading only into the person the page was drawn for, else `switched`; a page acting only as the person it was drawn for (its streams saying `as`, its previews and confirms `x-console-as`, a stream for another person 401 with `ended: "switched"`, a preview or confirm 409 and audited, a request saying no person not checked; `switched` the page's own word, in `ENDED_REASONS` but never a tombstone, a redirect or a stream's end); `stale` (with `since` and `what`) and `fresh`, every page stream told its state before any panel, a stream whose browser holds panels (a good render sent to it, a `Last-Event-ID`, or a `stale` told it) never drawn over by a read-failed load, a failed load never touching a view (a view holds good renders only; the degraded panels go to a stream that holds none, for it alone), a throw telling every stream it was for `stale`, a recovery logged only after a good load, only `fresh` taking the dimming back, at subscribe only the data and the render judged, a stale page drawn flat with its ink kept and its secondary controls ringed in `line-strong` (the first CSS's opacity rejected); the server drawing every state hidden and the script only switching, the sign-in pages' `hidden data-reveal` parts revealed first, and the script's three own sentences (`SIGN_IN_GAVE_UP`, `SIGN_OUT_UNCONFIRMED`, `STALE_TOKENS_BODY`); the confirm slot after the card that asked, and its bar states (an audit failure and a write that threw offer Close; a page drawn for another person Look again, which goes to `/login?ended=switched`; a write's 503 for the tokens file the server's own bar with Look again; a preview's or confirm's 401 never a sentence in the slot but the probe and sign-in; the `partial` state, Look again and `PARTIAL_NOTE`, never "Nothing was changed", for a kill switch that reached part of the fleet or threw and a bulk apply that threw part-way, the action saying which and the audit log keeping it as `ok` then `failed`, having no outcome for part of a change); `fields`, `undo` (said in the bar and, never pointing at the preview, in the banner; "Undo:" with the act alone in bold, or a muted "No undo:"; a trigger delete's secret references from the operator's own copy), `inverse` (checked at the preview; none for an old value the form cannot send), each action's past-tense `done` rule for the banner (a bulk act's asked at the confirm; no banner when no job landed, the attention tone when some did), `change` and not `done`, the audit rows counted from the first `capturingAudit` saw and never drawn as a range (the writer locks per row, so another session's row can land between them), the flash; retry, re-run and retry-all with no Undo in this pull request, the inverse for a queued job decided later; the bar's lines in the planners' words with a change's values in bold, never an arrow in any planner's confirm on either surface (the pi panel's own scope-change dialog and its notices after a write, built outside the planners, still draw one), every count through one `plural` in `confirm-view.mjs` with the words that agree with it, and no capitals for stress; the banner's Undo a sentence with its full stop; the error pages (HTML only for a browser's navigation, closed kinds, the 404's and 405's `peek`, the 421 with no navigation and no session, its sentence never claiming 127.0.0.1 alone, its tunnel for the address and port the connection reached and its Copy button only in a secure context); the sign-in pages (the help naming `/dispatch console --link` and the token command with its `<you>` quoted, the three ids the script finds drawn by hand in the kit's classes, the 2 s retry capped at 30 posts or 60 s, the serve hint, `link --port`, a notice's commands in the code face, the used link's commands each led in by where it runs, the no-script notice first in the card, the link page titled "One-time sign-in link", no notice drawn that no answer selects, a link's 429 keeping its first state since the link is not spent, and a new link pasted into the tab loading the page again); the audit page (rows judged by their place, through opt-in reader options that leave the format untouched; a row vouched for only by a next line whose `prev` matches it, compared before that line's other checks, so the row before a break whose line carries no matching `prev` is `withLast`'s `suspect` and only a line whose `prev` matched and fails another check is damaged alone; the newest row, which nothing vouches for yet; a row's `count` said by its write's kind; a damaged entry shown under every filter and not counted as a match; the 2,000-row cap with no read past it; the damaged place named by the line the check names, everywhere; `audit verify` following the same rule; `?seq=` placed by the row asked for through `withLast`'s `files`, read in one read from the newest row of its chunk the check counted, walked for only for a row the check did not count or a place that no longer holds it (a read from the place that does not find it included, and a walk that then does not find it never saying the row is gone), the page saying how a walked-for row was found or why not, and refused with a filter; bounded cells, the reason at least 200 px, the log beside its side card from 1600 px and its rows stacked up to 1119 px, by a media query; the 30 s cache); pages drawn once. "The stream lifecycle" AMENDED (the end's word, `elsewhere` for a sign-in over the cookie once its answer has gone out, `shutdown`, an unreadable file ending nothing); the guards' order AMENDED (the 401's `ended` and no Set-Cookie, the 303's `?ended=`, the 503, the person after the session, the `anyHost` files before the Host check, sign-out `auth: "none"` and ending every session its cookies name); the audit threat AMENDED (a sign-out with no session held among the counted rows, so the one row counts rows; a write refused for another person audited); the Host rule notes the `anyHost` files; the transcript stream's end carries the same word and never gets `stale`; "The screens" notes the reader's `positions` and the verifier's `withLast` (`last`, `suspect`, `files`); "The action table" AMENDED (the write rules, `done` among them; a preview's `barLines` and its no-change sentence; an apply's `{invalid, partial: true}`) and CORRECTED (it named an entry's diff `diffHtml`, which was the preview answer's key; the answer now carries the bar as `html`); "The generic pipeline" AMENDED (the unknown-field refusal, the ticket's `meta` with `undoAfter` and `done`, a bulk retry's or removal's filter in its payload, the bar as `html`, `change` and the flash, and no `change` when no job of a bulk act landed); "The legacy layer" AMENDED (a wrapper per section, and why; the wrapper drawing no box of its own, `display: contents`, so an empty panel leaves no gap, `:has()` rejected for the browser floor; the kept-still note's spacing said at the panel; the audit, sign-in and operators-only pages out of the layer; its dead rules deleted, and `.confirm` and `.diff` out of `NEUTRALISED`); the shell's sign-in sentence AMENDED (`frameHtml`, the hidden `h1`); "The visual system"'s kit AMENDED (a copy box writes each argument as a span of its own and wraps between them, and `withCode` draws a catalog sentence's backticks in the code face); "Two checks hold the look" AMENDED (the panel goldens and the static shots, every state a panel golden draws, the sign-in pages by their goldens, a link page held as drawn, the run without scripts proven and its read run against stubbed pages, the Parked text read back). Rejected, NEW: Revert last change (declined: the console keeps no copy of a file), `done: {...}` on the confirm's answer, and one legacy wrapper with the slot inside it; in the new bullet, a tombstone written by `peek`, the old session ended before a sign-in's audit row, ending every stream on an unreadable file, `stale` for every failed read, the script drawing its own states, the 421 with the navigation, vouching for the row before every broken link, judging a line's action, outcome and fields before its `prev`, a read-failed render stored in the view a same-person tab shares, Look again reloading into the other person's console, a write's 401 and 503 said as the slot's message line, a fixed 127.0.0.1 in the 421's tunnel, a damaged line matching no filter, a seq's chunk found by a bounded walk alone and one placed by its top, the damaged place named "row N" where the page had read it, the audit log beside its side card from 761 px and from 1440 px, cells that wrap anywhere, a container query for the audit log's layout, a sign-out by the one cookie every other route reads, `other` as the page's word for another person, the person checked only at the probe, and the dimming taken back when a stream opens. Residuals NEW: the `restart` sentence shown for a planted cookie and the process's age (and that nothing was evicted) it tells, the FIFO's flush by a token holder, the script and stylesheet readable from a rebinding name, the flash lost when the console stops, a rebinding page reading its own 421, an unreadable tokens file keeping tabs on what they last saw, and a page on another loopback port taking the session's flash (cosmetic). **`DES-TERMINAL-CHAT` AMENDED**: the stream's re-login window does not count a restart's sign-in (a 401 saying `restart`, or the first 401 after a `shutdown`), only a 401 and at most once per stream that opened since the last sign-in (`openedSinceRelogin`). UNCHANGED, checked: "No inline style" and the CSP (`headers.mjs` untouched; every new page and bar is server markup in the one stylesheet's classes, `admin/test/console-headers.test.mjs`); `DES-ADMIN-VIA-PI-EXTENSION` (its tool list and confirm rule as they were; the add tool's refusal of a field its kind does not take, and its `reviewState`, are planner rules held by `REQ-ADMIN-VIA-PI-EXTENSION`). |
 | 2026-10-25 | The maintainer notes moved from `CLAUDE.md` to `AGENTS.md` (pi loads either as a job's context file, `AGENTS.md` first), so the two sentences that point at them (why the recovery reset is mandatory, and the console tokens' pin rule) name `AGENTS.md`. Words only, no decision changes; where a sentence lists the context files pi loads, `CLAUDE.md` stays, since pi still loads it. |
