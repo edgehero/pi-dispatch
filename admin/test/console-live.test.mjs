@@ -549,6 +549,62 @@ test("stale once per failure, fresh on the first good render after it, and a sec
   assert.equal(h.logs.filter((l) => /could not be read/.test(l)).length, 1, "a read that failed inside the load is logged as a throw is, once");
 });
 
+test("stale's since is the view's LAST good render, not its first: a later one moves it, even one that changed nothing", async () => {
+  for (const kind of ["throw", "unread"]) {
+    const now = clock();
+    let fail = null;
+    const content = { fleet: new Map([["p-a", "a1"]]) };
+    const h = hubOn({
+      now,
+      content,
+      load: async (pageName) => {
+        if (fail === "throw") throw Object.assign(new Error("x"), { code: "ECONNREFUSED" });
+        return { pageName, readFailed: fail === "unread" };
+      },
+    });
+    const res = fakeRes();
+    h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "fleet", query: {} });
+    await h.hub.tick();
+    now.advance(3000);
+    content.fleet.set("p-a", "a2");
+    await h.hub.tick();
+    now.advance(4000);
+    await h.hub.tick();
+    const lastGood = now();
+    assert.deepEqual(panelsIn(res.take()).map((p) => p.html), ["a1|operator", "a2|operator"], `${kind}: the third render changed nothing and sent nothing`);
+    now.advance(5000);
+    fail = kind;
+    await h.hub.tick();
+    assert.deepEqual(eventsIn(res.take(), "stale"), [{ since: lastGood, what: "data" }], `${kind}: the page was current at the last good render`);
+  }
+});
+
+test("a view's recovery is logged after a good render only, never after a load whose read failed, though that load's render succeeded", async () => {
+  let mode = "render";
+  const h = hubOn({
+    load: async () => (mode === "unread" ? { readFailed: true } : {}),
+    pagePanels: async (pageName, ctx) => {
+      if (mode === "render") throw new TypeError("render");
+      return [{ id: "p-a", html: ctx.data.readFailed ? "could not be read" : "good" }];
+    },
+  });
+  const first = fakeRes();
+  h.hub.subscribe({ res: first, sessionId: "s1", session: OP, page: "fleet", query: {} });
+  await h.hub.tick();
+  assert.deepEqual(h.logs, ["console: live panels for page fleet failed (TypeError); its streams keep their last panels"]);
+  // The read fails now, and a second tab of the same view holds nothing, so it is drawn the degraded panels: their
+  // render succeeds, but over a read that failed, which recovers nothing.
+  mode = "unread";
+  const second = fakeRes();
+  h.hub.subscribe({ res: second, sessionId: "s2", session: OP, page: "fleet", query: {} });
+  await h.hub.tick();
+  assert.deepEqual(panelsIn(second.text()).map((p) => p.html), ["could not be read"], "drawn its degraded panels");
+  assert.deepEqual(h.logs.slice(1), ["console: live data for page fleet could not be read; its streams keep their last panels"], "and no recovery of the view");
+  mode = null;
+  await h.hub.tick();
+  assert.deepEqual(h.logs.slice(2), ["console: live data for page fleet is read again", "console: live panels for page fleet render again"], "a good load and render: both said, once");
+});
+
 test("a load whose read failed draws its degraded panels until the key has a good render, then keeps the good ones and says stale", async () => {
   const now = clock();
   let readFailed = true;

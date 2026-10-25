@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { renderHeldJobs } from "../src/render.mjs";
+import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 
 /**
  * Issue #230, the panel's held-jobs surface. The property that matters most here is what does NOT reach the
@@ -206,6 +207,123 @@ test("cancelHeldJob removes the hold FIRST, then the job, and only a lease it ow
 	assert.deepEqual(dels2, ["wait:job:gh-1"], "the sibling's lease survives");
 });
 
+test("cancelHeldJob: a removal that fails after the hold was cleared is partial, in the console's words and never the error's", async () => {
+	const { cancelHeldJob } = await import("../src/read-model.mjs");
+	const { heldClearedAnswer } = await import("../src/job-actions.mjs");
+	// A worker locked the job between removeHeldJob's state read and its remove: the hold's keys are already gone.
+	const world = (getJobState) => ({
+		url: "redis://x",
+		jobId: "gh-1",
+		redisFn: () => ({ hgetall: async () => ({ since: "1" }), get: async () => null, del: async () => 1, srem: async () => 1, disconnect() {} }),
+		queueFn: () => ({
+			getJob: async () => ({
+				getState: async () => "delayed",
+				remove: async () => {
+					throw new Error("Job gh-1 could not be removed because it is locked by another worker");
+				},
+			}),
+			getJobState,
+			close: async () => {},
+		}),
+	});
+	for (const [state, getJobState] of [["active", async () => "active"], ["delayed", async () => "delayed"], ["unknown", async () => { throw new Error("ECONNRESET"); }]]) {
+		const res = await cancelHeldJob(world(getJobState));
+		assert.deepEqual(res, heldClearedAnswer("gh-1", state), state);
+		assert.equal(res.partial, true, `${state}: the hold is gone, so never "nothing was changed"`);
+		assert.ok(!/locked by another worker|nothing was changed|ECONNRESET/i.test(res.invalid), res.invalid);
+	}
+	// Shared with the TUI's panel and the model's tool, which show no preview: the sentence names none.
+	assert.equal(heldClearedAnswer("gh-1", "active").invalid, "job gh-1 started while its hold was being cleared, so the job was not removed, though its hold's record was; look at the fleet");
+	assert.equal(heldClearedAnswer("gh-1", "completed").invalid, heldClearedAnswer("gh-1", "active").invalid);
+	for (const state of ["active", "completed", "failed", "delayed", "unknown"]) assert.ok(!/preview/.test(heldClearedAnswer("gh-1", state).invalid), state);
+	assert.match(heldClearedAnswer("gh-1", "delayed").invalid, /^the hold on job gh-1 was cleared, but the job itself could not be removed; /);
+});
+
+test("cancelHeldJob answers within its bound whatever Valkey does: a close that never settles, and a removal asked for and never answered", async () => {
+	const { cancelHeldJob } = await import("../src/read-model.mjs");
+	const alive = setInterval(() => {}, 1000); // the bound's timer is unref'd; a real client's socket would hold the loop
+	const bounded = async (promise) => {
+		const t0 = Date.now();
+		let timer;
+		const res = await Promise.race([promise, new Promise((resolve) => (timer = setTimeout(() => resolve("hung"), 5_000)))]);
+		clearTimeout(timer);
+		return { res, ms: Date.now() - t0 };
+	};
+	try {
+		const never = () => new Promise(() => {});
+		const closes = [];
+		const job = { getState: async () => "delayed", remove: async () => {} };
+		const redis = (del) => () => ({ hgetall: async () => ({ since: "1" }), get: async () => null, del, srem: async () => 1, disconnect() {} });
+		const queueFn = (getJob) => (_c, { name }) => ({ name, getJob, close: () => (closes.push(name), never()) });
+		// The removal went through and the queue's close never settles: the answer does not wait on it.
+		const done = await bounded(cancelHeldJob({ url: "redis://x", jobId: "gh-1", redisFn: redis(async () => 1), queueFn: queueFn(async () => job), timeoutMs: 300 }));
+		assert.deepEqual(done.res, { ok: true, jobId: "gh-1", attemptsMade: 0 });
+		assert.ok(done.ms < 900, `${done.ms} ms`);
+		// The removal was asked for and the hold's delete never answered: it may have landed, so partial.
+		const cut = await bounded(cancelHeldJob({ url: "redis://x", jobId: "gh-1", redisFn: redis(never), queueFn: queueFn(async () => job), timeoutMs: 300 }));
+		const unanswered = { invalid: "the cancel of held job gh-1 was asked for and not answered within the bound, so its hold, or the job, may or may not be gone; look at the fleet", partial: true };
+		assert.deepEqual(cut.res, unanswered);
+		assert.ok(cut.ms < 900, `${cut.ms} ms`);
+		// The bound fired in the removal's first read, before any delete was sent: the same words, which say it was asked
+		// for, never that it was sent.
+		const first = await bounded(cancelHeldJob({ url: "redis://x", jobId: "gh-1", redisFn: () => ({ ...redis(async () => 1)(), hgetall: never }), queueFn: queueFn(async () => job), timeoutMs: 300 }));
+		assert.deepEqual(first.res, unanswered);
+		// The job was never found because the lookup never answered: nothing was asked, nothing changed.
+		const lost = await bounded(cancelHeldJob({ url: "redis://x", jobId: "gh-1", redisFn: redis(async () => 1), queueFn: queueFn(never), timeoutMs: 300 }));
+		assert.deepEqual(lost.res, { invalid: "timed out reaching the queue" });
+		assert.ok(lost.ms < 900, `${lost.ms} ms`);
+		assert.ok(closes.length >= 3, `every queue opened was asked to close (${closes.length})`);
+	} finally {
+		clearInterval(alive);
+	}
+});
+
+test("cancelHeldJob: a lookup that outlasts the bound closes the queue it opens after the bound, once it settles", async () => {
+	const { cancelHeldJob } = await import("../src/read-model.mjs");
+	const T = 200;
+	const opened = [];
+	const closed = [];
+	const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+	// A host queue the keyspace holds, asked after the shared queue, whose lookup takes twice the bound.
+	const redisFn = () => ({ on() {}, smembers: async () => [], scan: async () => ["0", ["bull:pi-jobs@h1:meta"]], hgetall: async () => ({ since: "1" }), get: async () => null, del: async () => 1, srem: async () => 1, disconnect() {} });
+	const queueFn = (_c, { name }) => {
+		opened.push(name);
+		return { name, getJob: async () => (name === "pi-jobs" ? (await sleep(2 * T), undefined) : { getState: async () => "completed", remove: async () => {} }), close: async () => closed.push(name) };
+	};
+	const res = await cancelHeldJob({ url: "redis://127.0.0.1:1", jobId: "gh-1", redisFn, queueFn, timeoutMs: T });
+	assert.deepEqual(res, { invalid: "timed out reaching the queue" });
+	await sleep(5 * T);
+	assert.deepEqual(opened, ["pi-jobs", "pi-jobs@h1"], "the second queue was opened after the bound");
+	assert.deepEqual([...closed].sort(), [...opened].sort(), "every queue opened was closed once the lookup settled");
+});
+
+test("cancelHeldJob carries an error's own words only bounded: control bytes made spaces, at most 200 characters", async () => {
+	const { cancelHeldJob } = await import("../src/read-model.mjs");
+	const long = `Unexpected token \u001b[2J\u0007 in JSON at position ${"9".repeat(300)}`;
+	const bounded = `Unexpected token  [2J  in JSON at position ${"9".repeat(300)}`.slice(0, 200);
+	// removeHeldJob refused before its first delete, with a client's words: its read of the hold threw.
+	const refused = await cancelHeldJob({
+		url: "redis://x",
+		jobId: "gh-1",
+		redisFn: () => ({ hgetall: async () => { throw new Error(long); }, disconnect() {} }),
+		queueFn: () => ({ getJob: async () => ({ getState: async () => "delayed", remove: async () => {} }), close: async () => {} }),
+	});
+	assert.deepEqual(refused, { invalid: bounded });
+	// The sequence itself threw before it could answer: its client could not be made.
+	const thrown = await cancelHeldJob({
+		url: "redis://x",
+		jobId: "gh-1",
+		redisFn: () => {
+			throw new Error(long);
+		},
+		queueFn: () => ({ getJob: async () => undefined, close: async () => {} }),
+	});
+	assert.deepEqual(thrown, { invalid: bounded });
+	// Its own sentences pass as they are.
+	const notHeld = await cancelHeldJob({ url: "redis://x", jobId: "gh-1", redisFn: () => ({ hgetall: async () => ({}), disconnect() {} }), queueFn: () => ({ getJob: async () => ({}), close: async () => {} }) });
+	assert.deepEqual(notHeld, { invalid: "job gh-1 is not waiting on a condition" });
+});
+
 test("cancelHeldJob refuses a job that already woke, however stale the hold looks", async () => {
 	const { cancelHeldJob } = await import("../src/read-model.mjs");
 	// `release` is fail-open by design, so a redis blip leaves the hash while the job wakes and runs. bullmq
@@ -297,4 +415,55 @@ test("the tool refuses a hold the reader can see but the queue cannot", async ()
 		queueFn: () => ({ getJob: async () => undefined, close: async () => {} }),
 	});
 	assert.match(gone.invalid, /no longer in the queue/);
+});
+
+test("the fleet reader's held rows carry the checks, the after instant and each profile's last answer; the tool's listing keeps its keys (#737)", async () => {
+	const { createFleetReader } = await import("../src/read-model.mjs");
+	const { tempDir } = await import("./helpers/temp-dir.mjs");
+	const { join } = await import("node:path");
+	const hashes = {
+		"wait:job:gh-1": {
+			since: String(NOW - 60_000),
+			target: "acme/web#7",
+			label: "jira + after 2026-10-15T09:00:00Z",
+			checks: "4",
+			after: String(NOW + 3_600_000),
+			// The worker's `a:<profile>` = `<answer>:<ms>`: sorted by profile, at most four, each judged by its rule.
+			"a:jira": `hold:${NOW - 1000}`,
+			"a:deploy": `go:${NOW - 2000}`,
+			"a:bad profile": `go:${NOW}`,
+			"a:ci": "maybe:5",
+			"a:e2e": "fault:soon",
+			"a:aa": `fault:${NOW}`,
+			"a:ab": `refuse:${NOW}`,
+			"a:zz": `unclear:${NOW}`,
+		},
+		"wait:job:gh-2": { since: String(NOW - 1000), target: "acme/web#9", label: "deploy", checks: "lots", after: "tomorrow" },
+		// Counters `Number` would take and the decimal rule does not.
+		"wait:job:gh-3": { since: String(NOW - 2000), target: "acme/web#10", label: "deploy", checks: "1e3", after: "0x10" },
+		// Instants past the last one a page can draw: none, never an instant no date can show.
+		"wait:job:gh-4": { since: String(NOW - 3000), target: "acme/web#11", label: "deploy", after: String(DEFER_TIME_MAX_MS + 1), "a:jira": `hold:${DEFER_TIME_MAX_MS + 1}`, "a:ci": `go:${DEFER_TIME_MAX_MS}` },
+	};
+	const redis = Object.assign(fakeRedis(hashes), { on() {}, async mget(...keys) { return keys.map(() => null); }, async zrevrangebyscore() { return []; }, async exists() { return 0; } });
+	const queue = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return {}; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async close() {} });
+	const logsDir = tempDir("pd-737-held-rows-");
+	const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => NOW });
+	const { held } = await reader.snapshot();
+	const by = Object.fromEntries(held.rows.map((r) => [r.jobId, r]));
+	assert.deepEqual(Object.keys(by["gh-1"]).sort(), ["after", "answers", "checks", "jobId", "label", "target", "waitedMs"]);
+	assert.equal(by["gh-1"].checks, 4);
+	assert.equal(by["gh-1"].after, NOW + 3_600_000);
+	assert.deepEqual(by["gh-1"].answers, [
+		{ profile: "aa", answer: "fault", at: NOW },
+		{ profile: "ab", answer: "refuse", at: NOW },
+		{ profile: "deploy", answer: "go", at: NOW - 2000 },
+		{ profile: "jira", answer: "hold", at: NOW - 1000 },
+	]);
+	assert.deepEqual([by["gh-2"].checks, by["gh-2"].after, by["gh-2"].answers], [0, null, []], "a malformed count or instant is none, never a guess");
+	assert.deepEqual([by["gh-3"].checks, by["gh-3"].after], [0, null], "1e3 and 0x10 are no decimal count or instant");
+	assert.deepEqual([by["gh-4"].after, by["gh-4"].answers], [null, [{ profile: "ci", answer: "go", at: DEFER_TIME_MAX_MS }]], "the last drawable instant is kept, one past it is none");
+	const { readHeldJobs } = await import("../src/read-model.mjs");
+	const tool = await readHeldJobs({ url: "redis://x", redisFn: () => fakeRedis(hashes), now: () => NOW });
+	assert.deepEqual(Object.keys(tool.rows[0]).sort(), ["checks", "jobId", "label", "target", "waitedMs"], "the tool's listing is unchanged");
+	await reader.dispose();
 });

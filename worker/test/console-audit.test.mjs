@@ -702,6 +702,9 @@ test("verifyConsoleAudit with withLast: a row is vouched for only by a next line
 		"an unknown action": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4].replace('"action":"login"', '"action":"zz"')], reason: "the row's action or outcome is not one the console writes" },
 		"a prev that is not a hash": { edit: (ls) => [...edited(ls).slice(0, 4), JSON.stringify({ ...JSON.parse(ls[4]), prev: "x" })], reason: "the row has no valid seq and prev" },
 		"a prev that does not match": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4]], reason: "prev does not match the row before it (seq 4): a row was changed, removed or moved" },
+		// The fields check comes after the prev is judged too: a line whose kind, reserve or count the console never writes
+		// does not vouch for the row before it when its prev does not match that row either.
+		...Object.fromEntries(Object.entries({ kind: "BAD KIND", reserve: -5, count: 0 }).map(([k, v]) => [`a ${k} the console never writes`, { edit: (ls) => [...edited(ls).slice(0, 4), JSON.stringify({ ...JSON.parse(ls[4]), [k]: v })], reason: "the row's kind, reserve or count is not one the console writes" }])),
 	};
 	for (const [what, { edit, reason }] of Object.entries(cases)) {
 		const c = chain(5);
@@ -718,11 +721,15 @@ test("verifyConsoleAudit with withLast: a row is vouched for only by a next line
 	const c = verifyConsoleAudit({ logsDir: cut.logsDir, withLast: true });
 	assert.deepEqual([c.broken.line, c.last, c.suspect], [5, { file: "2026-10.jsonl", line: 3, seq: 3 }, { file: "2026-10.jsonl", line: 4, seq: 4 }]);
 	// A line whose prev DOES match the row before it vouches for that row, and is damaged alone whatever else it gets
-	// wrong: an action the console never writes, a seq that is not a number, a seq that does not follow.
+	// wrong: an action the console never writes, a seq that is not a number, a seq that does not follow, a kind, reserve
+	// or count the console never writes.
 	const alone = {
 		"an unknown action": (l) => l.replace('"action":"login"', '"action":"zz"'),
 		"a seq that is not a number": (l) => JSON.stringify({ ...JSON.parse(l), seq: "five" }),
 		"a seq that does not follow": (l) => JSON.stringify({ ...JSON.parse(l), seq: 9 }),
+		"a kind the console never writes": (l) => JSON.stringify({ ...JSON.parse(l), kind: "BAD KIND" }),
+		"a reserve the console never writes": (l) => JSON.stringify({ ...JSON.parse(l), reserve: -5 }),
+		"a count the console never writes": (l) => JSON.stringify({ ...JSON.parse(l), count: 0 }),
 	};
 	for (const [what, damage] of Object.entries(alone)) {
 		const d = chain(5);

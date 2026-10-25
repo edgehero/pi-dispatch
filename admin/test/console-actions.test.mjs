@@ -9,10 +9,11 @@ import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
+import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
-import { ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, reserveText, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE } from "../src/console/actions.mjs";
+import { ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
@@ -296,6 +297,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "cancel-active": "cancel-active",
     "cancel-held": "cancel-held",
     "cancel-all-held": "held-cancel-all",
+    "cancel-queued": "cancel-queued",
     "retry-failed": "failed-retry",
     "remove-failed": "failed-remove",
     "retry-all-failed": "failed-retry-all",
@@ -341,7 +343,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
 test("every action has frozen fields, a danger flag never beside paid, and its undo, inverse and confirm label", () => {
   const pause = ["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"];
   const FIELDS = {
-    "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [],
+    "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
     rerun: ["jobId"], "parked-answer": ["jobId", "text"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
     "fleet-pause": [], "fleet-resume": [], "queue-pause": ["queue"], "queue-resume": ["queue"],
@@ -353,7 +355,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "project-add": ["id", "name", "members"], "project-edit": ["id", "name", "members"], "project-delete": ["id"],
     "envelope-set": ["envelope"], "priorities-set": ["projects", "validDays"], "allocation-revert": ["index"],
   };
-  assert.equal(ACTIONS.length, 37);
+  assert.equal(ACTIONS.length, 38);
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
     assert.ok(Object.isFrozen(a.fields) && a.fields.every((f) => typeof f === "string"), `${a.name}: fields is a frozen list of names`);
@@ -361,10 +363,10 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     assert.ok(!a.fields.includes("ticket"), `${a.name}: the ticket is the confirm's, never a preview field`);
     assert.equal(typeof a.danger, "boolean", `${a.name}: danger`);
     assert.ok(!(a.danger && a.paid), `${a.name}: paid or destructive, never both`);
-    // Issue #737: every one of the 37 says what it did, for the banner after the write.
+    // Issue #737: every one of the 38 says what it did, for the banner after the write.
     for (const fn of ["undo", "inverse", "confirmLabel", "done"]) assert.equal(typeof a[fn], "function", `${a.name}: ${fn}`);
   }
-  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["cancel-active", "cancel-all-held", "cancel-held", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "secret-bundle-remove", "secret-profile-remove", "trigger-delete"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "secret-bundle-remove", "secret-profile-remove", "trigger-delete"]);
   assert.ok(Object.isFrozen(UNDO_SENTENCES));
   for (const [k, v] of Object.entries(UNDO_SENTENCES)) assert.match(v, /^[A-Z][^]*\.$/, `${k}: a sentence`);
 });
@@ -379,9 +381,12 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     deleteAfter: "Add the removed lines back by hand: the console kept no copy of them.",
     deleteSecrets: "Add the removed trigger back: copy it from this preview and its secret references from your own copy of the file, since the preview does not show them; the console keeps no copy.",
     deleteSecretsAfter: "Add the removed trigger back by hand, with its secret references, from your own copy of the file: the console kept no copy of it.",
-    queued: "The console cannot remove a waiting job; once it runs, Cancel stops it.",
+    retried: "A retried job keeps the attempts it made, so the console does not remove it from its queue; once it runs, Cancel stops it.",
+    rerunBefore: "Cancel the new run before it starts: the banner after it is queued offers it.",
+    rerunUnnamed: "The console could not name the run it queued, so this banner offers no Undo.",
     cancelled: "A cancelled run stays cancelled; re-run it from its run page (a re-run is paid).",
     held: "The job leaves its queue; a redelivery of the same event queues it again.",
+    cancelledQueued: "The job leaves its queue before it starts; a redelivery of the same event, or its trigger's next fire, queues it again.",
     removed: "The queue's copy is gone; the run records its attempts wrote stay.",
     answer: "The answer is queued, and the worker posts it once the job passes its checks.",
     withdrawn: "Send the message again if you still mean it.",
@@ -409,22 +414,23 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["cancel-all-held", bulk([null, null]), twice(U.held), null, "Cancel 2 held jobs", "Cancelled 2 held jobs", { done: 2, count: 2 }],
     ["cancel-all-held", bulk([null, null]), twice(U.held), null, "Cancel 2 held jobs", "Cancelled held jobs: 1 of 2 done", { done: 1, count: 2 }],
     ["cancel-all-held", bulk([null]), twice(U.held), null, "Cancel 1 held job", "Cancelled 1 held job", { done: 1, count: 1 }],
-    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: r(1_500_000) }, twice(U.queued), null, "Retry for up to $1.50", "Retried failed job gh-5d10"],
-    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: zero }, twice(U.queued), null, "Retry (zero-rated)", "Retried failed job gh-5d10"],
-    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: { unknown: true } }, twice(U.queued), null, "Retry (reserve unknown)", "Retried failed job gh-5d10"],
-    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: uncapped }, twice(U.queued), null, "Retry, 1 job slot", "Retried failed job gh-5d10"],
+    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: r(1_500_000) }, twice(U.retried), null, "Retry for up to $1.50", "Retried failed job gh-5d10"],
+    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: zero }, twice(U.retried), null, "Retry (zero-rated)", "Retried failed job gh-5d10"],
+    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: { unknown: true } }, twice(U.retried), null, "Retry (reserve unknown)", "Retried failed job gh-5d10"],
+    ["retry-failed", { payload: { jobId: "gh-5d10" }, reserve: uncapped }, twice(U.retried), null, "Retry, 1 job slot", "Retried failed job gh-5d10"],
+    ["cancel-queued", { payload: { jobId: "gh-q1", queue: "pi-jobs" } }, twice(U.cancelledQueued), null, "Cancel the queued job", "Cancelled queued job gh-q1"],
     ["remove-failed", { payload: { jobId: "gh-5d10" } }, twice(U.removed), null, "Remove the job", "Removed failed job gh-5d10"],
-    ["retry-all-failed", bulk([r(1_500_000), r(1_500_000)], { queue: "pi-jobs" }), twice(U.queued), null, "Retry 2 for up to $3.00", "Retried 2 failed jobs in pi-jobs", { done: 2, count: 2 }],
-    ["retry-all-failed", bulk([r(1_500_000), { unknown: true }], { repo: "acme/web" }), twice(U.queued), null, "Retry 2, at least $1.50", "Retried failed jobs for acme/web: 1 of 2 done", { done: 1, count: 2 }],
-    ["retry-all-failed", bulk([{ unknown: true }, { unknown: true }]), twice(U.queued), null, "Retry 2 (reserve unknown)", "Retried 2 failed jobs", { done: 2, count: 2 }],
+    ["retry-all-failed", bulk([r(1_500_000), r(1_500_000)], { queue: "pi-jobs" }), twice(U.retried), null, "Retry 2 for up to $3.00", "Retried 2 failed jobs in pi-jobs", { done: 2, count: 2 }],
+    ["retry-all-failed", bulk([r(1_500_000), { unknown: true }], { repo: "acme/web" }), twice(U.retried), null, "Retry 2, at least $1.50", "Retried failed jobs for acme/web: 1 of 2 done", { done: 1, count: 2 }],
+    ["retry-all-failed", bulk([{ unknown: true }, { unknown: true }]), twice(U.retried), null, "Retry 2 (reserve unknown)", "Retried 2 failed jobs", { done: 2, count: 2 }],
     // A zero-rated or uncapped list holds no dollars: words, never "$0.00", and never the count twice ("3, 3 job slots").
-    ["retry-all-failed", bulk([zero, zero, zero]), twice(U.queued), null, "Retry 3 (zero-rated)", "Retried 3 failed jobs", { done: 3, count: 3 }],
-    ["retry-all-failed", bulk([uncapped, uncapped, uncapped]), twice(U.queued), null, "Retry 3, no dollar reserve", "Retried 3 failed jobs", { done: 3, count: 3 }],
-    ["retry-all-failed", bulk([zero, uncapped, r(0)]), twice(U.queued), null, "Retry 3, no dollar reserve", "Retried 3 failed jobs", { done: 3, count: 3 }],
+    ["retry-all-failed", bulk([zero, zero, zero]), twice(U.retried), null, "Retry 3 (zero-rated)", "Retried 3 failed jobs", { done: 3, count: 3 }],
+    ["retry-all-failed", bulk([uncapped, uncapped, uncapped]), twice(U.retried), null, "Retry 3, no dollar reserve", "Retried 3 failed jobs", { done: 3, count: 3 }],
+    ["retry-all-failed", bulk([zero, uncapped, r(0)]), twice(U.retried), null, "Retry 3, no dollar reserve", "Retried 3 failed jobs", { done: 3, count: 3 }],
     ["remove-all-failed", bulk([null, null], { queue: "pi-jobs" }), twice(U.removed), null, "Remove 2 jobs", "Removed failed jobs in pi-jobs: 1 of 2 done", { done: 1, count: 2 }],
     ["remove-all-failed", bulk([null]), twice(U.removed), null, "Remove 1 job", "Removed 1 failed job", { done: 1, count: 1 }],
-    ["rerun", { target: "gh-r", reserve: r(2_000_000) }, twice(U.queued), null, "Re-run for up to $2.00", "Queued a re-run of gh-r"],
-    ["rerun", { target: "gh-r", reserve: zero }, twice(U.queued), null, "Re-run (zero-rated)", "Queued a re-run of gh-r"],
+    ["rerun", { target: "gh-r", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Re-run for up to $2.00", "Queued a re-run of gh-r"],
+    ["rerun", { target: "gh-r", reserve: zero }, twice(U.rerunBefore), null, "Re-run (zero-rated)", "Queued a re-run of gh-r"],
     ["parked-answer", { target: "gh-p", reserve: r(2_000_000) }, twice(U.answer), null, "Answer for up to $2.00", "Answered parked run gh-p"],
     ["steer", { payload: { plan: { id, jobId: "gh-s", mode: "steer" } } }, twice(`Withdraw message ${id} before the agent reads it`), { action: "steer-withdraw", body: { jobId: "gh-s", id } }, "Send", "Sent a steer to running job gh-s"],
     ["steer", { payload: { plan: { id, jobId: "gh-s", mode: "followUp" } } }, twice(`Withdraw message ${id} before the agent reads it`), { action: "steer-withdraw", body: { jobId: "gh-s", id } }, "Send follow-up", "Sent a follow-up to running job gh-s"],
@@ -481,6 +487,22 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     assert.ok(!/\$0\.00/.test(label), `${name}: no "$0.00" on a button`);
     assert.ok(!(typeof said === "string" ? said : said.after).includes("preview"), `${name}: the banner's Undo never points at a preview`);
   }
+  // A re-run's way back is the cancel of the job it queued, asked again at the confirm with the apply's answer
+  // (`atConfirm`); no other rule is, and no bulk one can be (a bulk confirm asks no rule again).
+  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["rerun"]);
+  assert.ok(ACTIONS.every((a) => typeof a.atConfirm === "boolean" && !(a.atConfirm && a.bulk)), "atConfirm is a single act's, and a boolean on every action");
+  const rerun = ACTIONS.find((a) => a.name === "rerun");
+  const landed = { ok: true, jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" };
+  assert.equal(rerun.undo({}, null, landed), "Cancel cron:t0:1760000000000 before it starts");
+  assert.deepEqual(rerun.inverse({}, null, landed), { action: "cancel-queued", body: { jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" } });
+  // An answer that does not name both offers no button, and so no sentence that reads as one.
+  for (const result of [{ ok: true }, { ok: true, jobId: "gh-n" }, { ok: true, queue: "pi-jobs" }, { ok: true, jobId: "", queue: "pi-jobs" }, { ok: true, jobId: 7, queue: "pi-jobs" }, null]) {
+    assert.equal(rerun.undo({}, null, result), U.rerunUnnamed, JSON.stringify(result));
+    assert.equal(rerun.inverse({}, null, result), null, JSON.stringify(result));
+  }
+  // The inverse is a write the table has, with only the fields it takes.
+  const cancel = ACTIONS.find((a) => a.name === "cancel-queued");
+  assert.deepEqual(Object.keys(rerun.inverse({}, null, landed).body).filter((k) => !cancel.fields.includes(k)), []);
   // The console's row words are the planners' (one rule, two modules): `atIndex` and `rowName(..., "console")`.
   for (const [what, i] of [["trigger", 0], ["pause window", 3], ["scoped limit", 12], ["history row", 1]]) assert.equal(atIndex(what, i), WP.rowName(what, i, "console"));
   assert.equal(WP.rowName("trigger", 0), "trigger #1", "the pi tools keep counting from 1");
@@ -1076,6 +1098,58 @@ test("a refusal that can follow a write never says nothing was changed: the kill
   assert.equal(c.sessions.flashes.length + r.sessions.flashes.length, 0, "no banner over a write that did not finish");
 });
 
+// Issue #737: a preview that reads the fleet snapshot answers within its bound whatever Valkey does, and says what happened.
+test("a preview that reads the fleet snapshot answers within its bound when the snapshot never settles: cancel-held, cancel-all-held, queue-resume and fleet-resume", async () => {
+  const { paths } = deployment();
+  const fleet = { snapshot: () => new Promise(() => {}) };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  const timed = async (name, body) => {
+    const t0 = Date.now();
+    let timer;
+    const res = await Promise.race([c.act(name, body), new Promise((resolve) => (timer = setTimeout(() => resolve("hung"), SNAPSHOT_TIMEOUT_MS + 3_000)))]);
+    clearTimeout(timer);
+    return { name, res, ms: Date.now() - t0 };
+  };
+  const answers = await Promise.all([timed("cancel-held", { jobId: "gh-h1" }), timed("cancel-all-held", {}), timed("queue-resume", { queue: "pi-jobs" }), timed("fleet-resume", {})]);
+  for (const { name, res, ms } of answers) {
+    assert.notEqual(res, "hung", `${name}: the preview answered`);
+    assert.ok(ms >= SNAPSHOT_TIMEOUT_MS - 50 && ms < SNAPSHOT_TIMEOUT_MS + 2_000, `${name}: ${ms} ms`);
+  }
+  const [held, allHeld, queue, resume] = answers.map((a) => a.res);
+  for (const r of [held, allHeld, queue]) assert.deepEqual([r.status, r.json().error], [503, SNAPSHOT_TIMEOUT_SENTENCE]);
+  // The fleet's resume previews without its count, and says why.
+  assert.equal(resume.status, 200, resume.text);
+  assert.ok(resume.json().summary.includes("How many jobs wait to start could not be read (the fleet did not answer); each reserves up to its own per-job dollar cap when a worker picks it up"), resume.text);
+  // Past a slow but healthy deployment's first snapshot, and said in the refusal's own words.
+  assert.equal(SNAPSHOT_TIMEOUT_MS, 10_000);
+  assert.equal(SNAPSHOT_TIMEOUT_SENTENCE, "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed");
+  // A snapshot that fails at once keeps its own sentence: the read failed, which the timeout's words do not say.
+  const failing = await start({ paths, a: { fleet: { snapshot: async () => { throw new Error("down"); } } } });
+  const failed = await failing.act("cancel-held", { jobId: "gh-h1" });
+  assert.deepEqual([failed.status, failed.json().error], [503, "the fleet could not be read (is Valkey reachable?); nothing was changed"]);
+});
+
+// Issue #737: a bulk cancel's row whose answer is partial keeps the mark, and its line says it did not finish.
+test("cancel-all-held keeps each row's partial mark: its line says it did not finish, never not done, and its audit row says why", async () => {
+  const { paths } = deployment();
+  const held = [{ jobId: "gh-h1", label: "jira" }, { jobId: "gh-h2", label: "jira" }, { jobId: "gh-h3", label: "jira" }];
+  const unanswered = "the cancel of held job gh-h2 was asked for and not answered within the bound, so its hold, or the job, may or may not be gone; look at the fleet";
+  const answers = { "gh-h1": { ok: true, jobId: "gh-h1", attemptsMade: 0 }, "gh-h2": { invalid: unanswered, partial: true }, "gh-h3": { invalid: "job gh-h3 is not waiting on a condition" } };
+  const rm = { ...RM, cancelHeldJob: async ({ jobId }) => answers[jobId] };
+  const c = await start({ paths, a: { fleet: { snapshot: async () => ({ held: { rows: held } }) }, rm } });
+  const res = (await c.both("cancel-all-held", {})).confirm;
+  assert.equal(res.status, 200, res.text);
+  const j = res.json();
+  assert.deepEqual(j.results, [
+    { jobId: "gh-h1", ok: true },
+    { jobId: "gh-h2", ok: false, partial: true, reason: unanswered },
+    { jobId: "gh-h3", ok: false, reason: "job gh-h3 is not waiting on a condition" },
+  ]);
+  assert.ok(j.html.includes(`<span class="code">gh-h2</span>: did not finish, ${esc(unanswered)}</span>`), j.html);
+  assert.ok(j.html.includes(`<span class="code">gh-h3</span>: not done, job gh-h3 is not waiting on a condition</span>`), j.html);
+  assert.deepEqual(c.audit.rows.filter((r) => r.kind === "held-cancel-all" && r.outcome === "failed").map((r) => [r.target, r.reason]), [["gh-h2", unanswered], ["gh-h3", "job gh-h3 is not waiting on a condition"]]);
+});
+
 // A preview that throws says so, once, with the console's log as where the reason is.
 test("a preview that throws answers 500 with its own sentence and nothing was changed said once", async () => {
   const { paths } = deployment();
@@ -1169,7 +1243,7 @@ test("the confirm button says what it does: a paid act's most, a destructive act
   assert.match(paid.html, /<button class="btn btn--confirm-paid" type="button" data-confirm>Retry for up to \$1\.50<\/button><button class="btn btn--ghost" type="button" data-cancel>Cancel<\/button><span class="ticket">Preview expires in <b data-expires="300000">5:00<\/b><\/span><\/div><\/div>$/, "the expiry is the time left, which the script counts down");
   assert.equal(paid.expiresAt, T0 + 300000);
   // No inverse: "No undo:" and the sentence, in one run after the icon, nothing bold.
-  assert.ok(paid.html.includes(`<p class="confirm__undo"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg><span>No undo: ${esc(UNDO_SENTENCES.queued)}</span></p>`), paid.html);
+  assert.ok(paid.html.includes(`<p class="confirm__undo"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg><span>No undo: ${esc(UNDO_SENTENCES.retried)}</span></p>`), paid.html);
   data = null;
   assert.equal((await label("retry-failed", { jobId: "gh-z" })).confirmLabel, "Retry (reserve unknown)", "never $0 for an unknown reserve");
   data = { kind: "github" };
@@ -1358,6 +1432,232 @@ test("cancel-active: an ack is 200; no ack is 409 with REQ-OPERATOR-JOB-CANCEL's
   assert.equal((await c.act("cancel-active", { jobId: "<b>" })).status, 400, "a job id outside the charset is refused");
 });
 
+// ---- cancel-queued, and the re-run's Undo it makes (issue #737) ---------------------------------------------------------
+//
+// The planner and the funnel (`planCancelQueued`, `cancelQueuedJob`, job-actions.mjs) are faked here, by the shapes
+// their contract names: these tests hold what the console does with each answer. The funnel's own rules against real
+// BullMQ are `cancel-queued.test.mjs`'s.
+
+const UNTIL = T0 + 12 * 60_000;
+/** A `readWaiting`-shaped row for job `jobId`, with `over` laid on top. */
+const waitingRow = (jobId, over = {}) => ({ jobId, queue: "pi-jobs@build3", state: "delayed", bucket: "slot", why: "host-slot", known: true, dueAt: UNTIL, queuedAt: T0 - 60_000, recordedAt: T0 - 1000, untilAt: UNTIL, project: "web", projectFrom: "record", host: "build3", holder: null, endpoint: null, budgetWhy: null, trigger: 0, attempt: null, attempts: null, attemptsMade: 0, stalled: 0, kind: "github", held: null, ...over });
+/** `planCancelQueued`'s plan for job `jobId`, its waiting row `waiting`. */
+const queuedPlan = (jobId, waiting = waitingRow(jobId), over = {}) => ({ plan: { jobId, queue: "pi-jobs@build3", state: "delayed", held: false, attemptsMade: 0, stalledCounter: 0, kind: "github", target: "acme/web#4", waiting, ...over } });
+const CANCEL_LINE = "It is removed from its queue before it starts; the run records of other jobs are not touched.";
+
+test("a waiting job's line is the worker's own sentence filled from its row: times as <time>, a missing value says the bucket, an unknown reason its token", () => {
+  const said = (over) => {
+    const line = waitingLine(waitingRow("gh-w", over));
+    return [line.text, String(html`${line.bar}`)];
+  };
+  assert.deepEqual(said({}), ["build3 has no free job slot", "build3 has no free job slot"]);
+  assert.deepEqual(said({ why: "host-budget" }), ["build3's budget has no room for it yet", "build3&#39;s budget has no room for it yet"], "escaped in the bar, as typed in the text");
+  assert.deepEqual(said({ why: "pause-window", bucket: "pause" }), ["In a pause window until 2026-10-15 12:12 UTC", 'In a pause window until <time datetime="2026-10-15T12:12:00.000Z">2026-10-15 12:12 UTC</time>']);
+  // The record's own instant first; the delayed set's due when the record holds none.
+  assert.equal(said({ why: "wait-after", bucket: "check", untilAt: UNTIL + 60_000 })[0], "Held until 2026-10-15 12:13 UTC");
+  assert.equal(said({ why: "wait-after", bucket: "check", untilAt: null })[0], "Held until 2026-10-15 12:12 UTC");
+  assert.deepEqual(said({ why: "retry", bucket: "retry", attempt: 2, attempts: 3 }), ["Attempt 2 of 3 at 2026-10-15 12:12 UTC", 'Attempt 2 of 3 at <time datetime="2026-10-15T12:12:00.000Z">2026-10-15 12:12 UTC</time>']);
+  assert.equal(said({ why: "chained", bucket: "run", holder: "gh-parent" })[0], "Chained after gh-parent; starts when its folder is free");
+  assert.equal(said({ why: "endpoint", endpoint: "local-gpu" })[0], "Every slot of model endpoint local-gpu is taken");
+  assert.equal(said({ why: "scope-folder", host: null })[0], "Its folder is busy with another run", "a sentence with no placeholder needs no value");
+  // A value the sentence needs and the row lacks: the bucket's title, which is true without it, never a hole.
+  assert.equal(said({ host: null })[0], "Waiting for a free slot");
+  assert.equal(said({ why: "chained", bucket: "run", holder: null })[0], "Waiting for another run to finish");
+  assert.equal(said({ why: "wait-hold", bucket: "check", untilAt: null, dueAt: null })[0], "Waiting on a time or a check");
+  assert.equal(said({ why: "retry", bucket: "retry", attempt: 2, attempts: null })[0], "Retry backoff");
+  // A reason a newer worker wrote that this console has no words for: its token, and that there is no explanation yet.
+  assert.deepEqual(said({ why: "frobnicate", known: false, bucket: "none" }), ["Recorded reason: frobnicate, no explanation yet", 'Recorded reason: <span class="code">frobnicate</span>, no explanation yet']);
+  // The reader puts such a row in its own bucket, `unknown`; the line is the token's all the same, never a bucket title.
+  assert.deepEqual(said({ why: "frobnicate", known: false, bucket: "unknown" }), said({ why: "frobnicate", known: false, bucket: "none" }));
+  // No reason, or none a reason's charset admits: the bucket's title, "No reason was recorded" among them.
+  assert.equal(said({ why: null, known: false, bucket: "none" })[0], "No reason was recorded");
+  assert.equal(said({ why: "<b>x</b>", known: false, bucket: "none" })[0], "No reason was recorded");
+  assert.equal(said({ why: null, known: false, bucket: "paused", state: "paused" })[0], "In a paused queue");
+  assert.equal(said({ why: null, known: false, bucket: "slot", state: "waiting" })[0], "Waiting for a free slot");
+  assert.equal(said({ why: null, known: false, bucket: "toString" })[0], "No reason was recorded", "a bucket outside the table is none");
+  // A value is escaped wherever it comes from.
+  assert.equal(said({ host: "<b>h</b>" })[1], "&lt;b&gt;h&lt;/b&gt; has no free job slot");
+  assert.equal(waitingLine(null), null);
+  // Past its due with no worker taking it: the due line, whatever the record said; without a due, the bucket's title.
+  assert.deepEqual(said({ bucket: "due" }), ["Due since 2026-10-15 12:12 UTC; no worker has taken it", 'Due since <time datetime="2026-10-15T12:12:00.000Z">2026-10-15 12:12 UTC</time>; no worker has taken it']);
+  assert.equal(said({ bucket: "due", why: null, known: false, untilAt: null })[0], "Due since 2026-10-15 12:12 UTC; no worker has taken it");
+  assert.equal(said({ bucket: "due", dueAt: null })[0], DEFER_BUCKET_WORDS.due.title);
+  // An instant no date can show is missing: never "at unknown", the record's own falls back to the due, then the title.
+  assert.equal(said({ why: "retry", bucket: "retry", attempt: 5, attempts: 6, untilAt: 9e15 })[0], "Attempt 5 of 6 at 2026-10-15 12:12 UTC");
+  assert.equal(said({ why: "retry", bucket: "retry", attempt: 5, attempts: 6, untilAt: 9e15, dueAt: -9e15 })[0], "Retry backoff");
+  assert.equal(said({ why: "pause-window", bucket: "pause", untilAt: null, dueAt: 2.44e296 })[0], "In a pause window");
+  assert.equal(said({ bucket: "due", dueAt: 8.64e15 + 1 })[0], DEFER_BUCKET_WORDS.due.title);
+  // The last instant the leaf passes on is drawn with its four-digit year; past it is missing, though a Date holds it,
+  // since the year 275760 cut to sixteen characters is a date that is not the instant's.
+  assert.equal(said({ bucket: "due", dueAt: DEFER_TIME_MAX_MS })[0], "Due since 9999-12-31 23:59 UTC; no worker has taken it");
+  assert.equal(said({ bucket: "due", dueAt: DEFER_TIME_MAX_MS + 1 })[0], DEFER_BUCKET_WORDS.due.title);
+  assert.equal(said({ bucket: "due", dueAt: 8.64e15 })[0], DEFER_BUCKET_WORDS.due.title);
+  // And before the epoch: an instant below 0 is missing too, never drawn as a date in 1969.
+  assert.equal(said({ bucket: "due", dueAt: -1 })[0], DEFER_BUCKET_WORDS.due.title);
+  assert.equal(said({ why: "pause-window", bucket: "pause", untilAt: 8.64e15, dueAt: null })[0], "In a pause window");
+  for (const odd of [9e15, -9e15, 2.44e296, 8.64e15 + 1]) assert.ok(!said({ untilAt: odd, dueAt: odd, why: "wait-after", bucket: "check" })[0].includes("unknown"), String(odd));
+  // Every reason the worker can record reads as its own sentence from a full row, with no placeholder left in it.
+  const full = { untilAt: UNTIL, host: "build3", holder: "gh-parent", endpoint: "local-gpu", attempt: 2, attempts: 3 };
+  for (const [why, { bucket, sentence }] of Object.entries(DEFER_WHYS)) {
+    const [text, bar] = said({ ...full, why, bucket });
+    assert.ok(!/[{}]/.test(text) && !/[{}]/.test(bar), `${why}: ${text}`);
+    assert.notEqual(text, DEFER_BUCKET_WORDS[bucket].title, `${why}: its own sentence`);
+    assert.equal(text.split(/build3|gh-parent|local-gpu|2026-10-15 12:12 UTC|\b[23]\b/).join("{}"), sentence.replace(/\{[a-z]+\}/g, "{}"), `${why}: the worker's words`);
+  }
+});
+
+test("cancel-queued: the preview says why the job waits, red with no undo; the confirm holds the job to the preview and writes one cancel-queued row", async () => {
+  const { paths } = deployment();
+  const plans = [];
+  const removals = [];
+  let plan = queuedPlan("gh-q1", waitingRow("gh-q1"), { target: "acme/web#4<b>" });
+  let removed = { ok: true, jobId: "gh-q1", queue: "pi-jobs@build3", held: false };
+  const rm = { ...RM, planCancelQueued: async (args) => (plans.push(args), plan), cancelQueuedJob: async (args) => (removals.push(args), removed) };
+  const c = await start({ paths, a: { rm } });
+  const p = await c.act("cancel-queued", { jobId: "gh-q1" });
+  assert.equal(p.status, 200, p.text);
+  const pj = p.json();
+  assert.deepEqual(plans, [{ url: paths.valkeyUrl, jobId: "gh-q1", queue: null }], "the planner asked by id, the queue left to it");
+  assert.deepEqual([pj.kind, pj.paid, pj.danger, pj.confirmLabel, pj.undo], ["cancel-queued", false, true, "Cancel the queued job", UNDO_SENTENCES.cancelledQueued]);
+  assert.deepEqual(pj.summary, ["Cancel queued job gh-q1 (acme/web#4<b>)", "build3 has no free job slot", CANCEL_LINE]);
+  assert.match(pj.html, /^<div class="confirm confirm--danger"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-attention"><\/use><\/svg>Cancel queued job gh-q1 \(acme\/web#4&lt;b&gt;\)<\/p>/);
+  assert.ok(pj.html.includes(`<ul class="confirm__list"><li>build3 has no free job slot</li><li>${CANCEL_LINE}</li></ul>`), pj.html);
+  assert.ok(pj.html.includes(`<span>No undo: ${esc(UNDO_SENTENCES.cancelledQueued)}</span>`), "no inverse: muted, nothing bold");
+  assert.ok(pj.html.includes('<button class="btn btn--confirm-danger" type="button" data-confirm>Cancel the queued job</button>'));
+  // A time in the reason is a <time> in the bar, and UTC text in the answer's words.
+  plan = queuedPlan("gh-q1", waitingRow("gh-q1", { why: "pause-window", bucket: "pause" }));
+  const timed = (await c.act("cancel-queued", { jobId: "gh-q1", queue: "pi-jobs@build3" })).json();
+  assert.equal(plans.at(-1).queue, "pi-jobs@build3", "a queue the form names goes to the planner");
+  assert.equal(timed.summary[1], "In a pause window until 2026-10-15 12:12 UTC");
+  assert.ok(timed.html.includes('<li>In a pause window until <time datetime="2026-10-15T12:12:00.000Z">2026-10-15 12:12 UTC</time></li>'), timed.html);
+  // A plan whose waiting row could not be read says nothing about why, rather than guess.
+  plan = queuedPlan("gh-q1", null);
+  assert.deepEqual((await c.act("cancel-queued", { jobId: "gh-q1" })).json().summary, ["Cancel queued job gh-q1 (acme/web#4)", CANCEL_LINE]);
+  // The confirm: the funnel gets the preview's expect, the job's row is written, the banner has no Undo button.
+  plan = queuedPlan("gh-q1");
+  const ok = await c.both("cancel-queued", { jobId: "gh-q1" });
+  assert.equal(ok.confirm.status, 200, ok.confirm.text);
+  assert.deepEqual(removals.at(-1), { url: paths.valkeyUrl, jobId: "gh-q1", expect: { queue: "pi-jobs@build3", attemptsMade: 0, stalledCounter: 0 } });
+  const done = ok.confirm.json();
+  assert.deepEqual([done.ok, done.jobId, done.queue, done.held], [true, "gh-q1", "pi-jobs@build3", false]);
+  assert.deepEqual([done.change.summary, done.change.undo, done.change.inverse, done.change.kind], ["Cancelled queued job gh-q1", UNDO_SENTENCES.cancelledQueued, null, "cancel-queued"]);
+  const row = lastWrite(c);
+  assert.deepEqual([row.kind, row.target, row.outcome], ["cancel-queued", "gh-q1", "ok"]);
+  // A held job's removal says so.
+  removed = { ok: true, jobId: "gh-q1", queue: "pi-jobs@build3", held: true };
+  assert.equal((await c.both("cancel-queued", { jobId: "gh-q1" })).confirm.json().held, true);
+});
+
+test("cancel-queued refusals: the planner's sentence as it is, a Valkey that did not answer in fixed words, and a job that started since the preview refused at the confirm with a failed row", async () => {
+  const { paths } = deployment();
+  let plan = { refusal: "job gh-q2 has made 1 attempt and waits to retry: a retry keeps its run's steer and held replies open for the next attempt, so the console cancels only a job that never started; once it runs, Cancel on its run page stops it; nothing was changed" };
+  let removed = { invalid: "job gh-q2 started since the preview; nothing was changed" };
+  const rm = { ...RM, planCancelQueued: async () => plan, cancelQueuedJob: async () => removed };
+  const c = await start({ paths, a: { rm } });
+  const retried = await c.act("cancel-queued", { jobId: "gh-q2" });
+  assert.equal(retried.status, 400);
+  assert.equal(retried.json().error, plan.refusal, "the planner's words, byte for byte");
+  assert.equal(retried.json().ticket, undefined, "no ticket for a refusal");
+  assert.match(retried.json().html, /The change was refused/);
+  plan = { refusal: "job gh-q2 is active, not waiting to start; nothing was changed", status: 409 };
+  assert.equal((await c.act("cancel-queued", { jobId: "gh-q2" })).status, 409, "the planner's status is kept");
+  plan = { unreachable: "connect ECONNREFUSED 10.9.8.7:6379" };
+  const down = await c.act("cancel-queued", { jobId: "gh-q2" });
+  assert.deepEqual([down.status, down.json().error], [503, "the queued job could not be read (is Valkey reachable?); nothing was changed"]);
+  assert.ok(!down.text.includes("10.9.8.7"), "the read's own error, which names a host, is not the page's");
+  assert.match(down.json().html, /data-again>Try again<\/button>/);
+  plan = { plan: { jobId: "gh-q2" } };
+  assert.equal((await c.act("cancel-queued", { jobId: "gh-q2" })).json().error, "the change could not be planned", "a plan that names no queue is none");
+  assert.equal((await c.act("cancel-queued", { jobId: "<b>" })).status, 400, "a job id outside the charset is refused");
+  // The job started between the preview and the confirm: the funnel's sentence, 409, the ok row then a failed one.
+  plan = queuedPlan("gh-q2");
+  const started = await c.both("cancel-queued", { jobId: "gh-q2" });
+  assert.equal(started.confirm.status, 409);
+  assert.equal(started.confirm.json().error, removed.invalid);
+  assert.match(started.confirm.json().html, /The change did not go through/);
+  assert.deepEqual(c.audit.rows.filter((r) => r.kind === "cancel-queued").map((r) => [r.target, r.outcome, r.reason ?? null]), [["gh-q2", "ok", null], ["gh-q2", "failed", removed.invalid]]);
+  removed = { unreachable: "connect ECONNREFUSED 10.9.8.7:6379" };
+  const lost = await c.both("cancel-queued", { jobId: "gh-q2" });
+  assert.deepEqual([lost.confirm.status, lost.confirm.json().error], [503, VALKEY_UNREACHABLE]);
+  // The removal was sent and Valkey did not answer: it may have landed, so the bar says the change did not finish and
+  // never that nothing was changed.
+  removed = { invalid: "the removal of job gh-q2 was asked for and not answered within the bound, so it may or may not have landed; look at the fleet to see whether the job is still queued", partial: true };
+  const unsure = await c.both("cancel-queued", { jobId: "gh-q2" });
+  assert.equal(unsure.confirm.status, 409);
+  assert.match(unsure.confirm.json().html, /The change did not finish/);
+  assert.ok(!unsure.confirm.json().html.includes("Nothing was changed"), unsure.confirm.json().html);
+});
+
+test("a re-run's Undo is decided at the confirm: the bar says the banner will offer it, and the banner's Undo is a cancel-queued form for the job it queued", async () => {
+  const { paths } = deployment();
+  const queued = { ok: true, jobId: "cron:t0:1760530000000", queue: "pi-jobs" };
+  const plans = [];
+  const rm = {
+    ...RM,
+    planRerun: async () => ({ plan: { kind: "cron", jobId: "cron:t0:1760520000000", queue: "pi-jobs", schedule: {}, job: { flow: "nightly" }, runFields: null, reserve: { slots: 1, dollarsMicros: 2_000_000, capMicros: 2_000_000, zeroRated: false } } }),
+    enqueueRerun: async () => queued,
+    planCancelQueued: async (args) => (plans.push(args), queuedPlan(args.jobId, waitingRow(args.jobId, { queue: "pi-jobs", why: null, known: false, bucket: "slot", state: "waiting" }), { queue: "pi-jobs", state: "waiting" })),
+  };
+  const c = await start({ paths, a: { rm } });
+  const p = (await c.act("rerun", { jobId: "cron:t0:1760520000000" })).json();
+  // Undoable at the preview although no inverse exists yet: the act in bold, never "No undo:".
+  assert.equal(p.undo, UNDO_SENTENCES.rerunBefore);
+  assert.ok(p.html.includes(`<span>Undo: <b>${esc(UNDO_SENTENCES.rerunBefore)}</b></span>`), p.html);
+  const res = await c.confirm("rerun", p.ticket);
+  assert.equal(res.status, 200, res.text);
+  const { change } = res.json();
+  assert.equal(change.undo, "Cancel cron:t0:1760530000000 before it starts");
+  assert.deepEqual(change.inverse, { action: "cancel-queued", body: { jobId: "cron:t0:1760530000000", queue: "pi-jobs" } });
+  assert.deepEqual(c.sessions.flashes.at(-1).change, change, "the banner the next page shows carries it");
+  // The banner draws it as a form for that cancel, which the script reads back to exactly that body.
+  const banner = String(doneBannerHtml(change));
+  assert.ok(banner.includes("<b>Undo:</b> Cancel cron:t0:1760530000000 before it starts.</p>"), banner);
+  const { action, form } = undoFormOf(banner);
+  const body = scriptBodyOf()(form);
+  assert.deepEqual([action, body], ["cancel-queued", change.inverse.body]);
+  // Pressing it previews that cancel like any other write: a new ticket, the new job by id and queue.
+  const undo = await c.act(action, body);
+  assert.equal(undo.status, 200, undo.text);
+  assert.deepEqual(plans, [{ url: paths.valkeyUrl, jobId: "cron:t0:1760530000000", queue: "pi-jobs" }]);
+  assert.deepEqual(undo.json().summary, ["Cancel queued job cron:t0:1760530000000 (acme/web#4)", "Waiting for a free slot", CANCEL_LINE]);
+});
+
+test("an Undo decided at the confirm that cannot be offered costs the banner its button, never the answer: 200, a sentence that says so and a log line", async () => {
+  const { paths } = deployment();
+  const logs = [];
+  const rows = [];
+  let enqueued = 0;
+  let t = T0;
+  const deps = {
+    now: () => t,
+    log: (line) => logs.push(line),
+    fs: nodeFs,
+    config: {},
+    tickets: makeConfirmTickets({ now: () => t }),
+    audit: { append: (row) => (rows.push(row), { ...row, seq: rows.length }) },
+    sessions: { setFlash: () => true },
+    hub: null,
+    actionDeps: { rm: { ...RM, planRerun: async () => ({ plan: { kind: "cron", queue: "pi-jobs", schedule: {}, job: {}, runFields: null, reserve: null } }), enqueueRerun: async () => ((enqueued += 1), { ok: true, jobId: "cron:t0:1", queue: "pi-jobs" }) }, paths, env: {} },
+  };
+  const ctxOf = (step, body) => ({ deps, session: { id: "s1", name: "alice", role: "operator" }, body, route: { path: `/api/act/rerun/${step}` }, record: () => {}, json: (status, b) => ({ status, body: b }), actor: () => ({ name: "alice", role: "operator", session: "a1b2c3d4e5f6" }) });
+  const rerun = ACTIONS.find((a) => a.name === "rerun");
+  // The rule at the confirm, broken two ways: an inverse naming no action, and an Undo sentence that throws.
+  const broken = [
+    { ...rerun, inverse: (out, body, result) => (result === undefined ? null : { action: "no-such-action", body: {} }) },
+    { ...rerun, undo: (out, body, result) => { if (result !== undefined) throw new TypeError("no words"); return UNDO_SENTENCES.rerunBefore; } },
+  ];
+  for (const action of broken) {
+    const p = await previewAction(ctxOf("preview", { jobId: "cron:t0:0" }), action);
+    assert.equal(p.status, 200, JSON.stringify(p.body));
+    const c = await confirmAction(ctxOf("confirm", { ticket: p.body.ticket }), action);
+    assert.equal(c.status, 200, JSON.stringify(c.body));
+    assert.deepEqual([c.body.ok, c.body.jobId, c.body.change.inverse, c.body.change.undo], [true, "cron:t0:1", null, UNDO_SENTENCES.rerunUnnamed]);
+    assert.equal(logs.at(-1), "console: the rerun Undo could not be decided after the write (error); its banner offers none");
+  }
+  assert.equal(enqueued, 2, "each write landed once");
+  assert.deepEqual(rows.map((r) => [r.kind, r.outcome]), [["run-rerun", "ok"], ["run-rerun", "ok"]], "one ok row each, no failed row: the write landed");
+});
+
 test("fleet-pause and fleet-resume: the kill switch's decision refuses a resume at the preview; the reader's funnel at the confirm", async () => {
   const { paths } = deployment();
   const calls = [];
@@ -1412,7 +1712,7 @@ test("retry-all-failed shows each job's reserve and the sum; a job whose data ca
   assert.deepEqual(rows.map((x) => [x.target, x.outcome, x.count, x.reserve ?? null]), [["gh-a", "ok", 2, 1_500_000], ["gh-b", "ok", 2, null], ["gh-b", "failed", 2, null]]);
   assert.equal(new Set(rows.map((x) => x.ticket)).size, 1, "one ticket digest shared by every job's rows");
   // Issue #737: the bar said what Confirm does, with a floor where a reserve is unknown; the answer links the rows.
-  assert.deepEqual([p.confirmLabel, p.danger, p.undo], ["Retry 2, at least $1.50", false, UNDO_SENTENCES.queued]);
+  assert.deepEqual([p.confirmLabel, p.danger, p.undo], ["Retry 2, at least $1.50", false, UNDO_SENTENCES.retried]);
   assert.match(p.html, /<button class="btn btn--confirm-paid" type="button" data-confirm>Retry 2, at least \$1\.50<\/button>/);
   assert.match(p.html, /^<div class="confirm confirm--paid">/);
   assert.deepEqual([r.change.auditSeq, r.change.auditLast, r.change.count, r.change.inverse], [rows[0].seq, rows[1].seq, 2, null], "the first and the last ok row, never a compensating one");

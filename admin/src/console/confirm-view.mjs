@@ -47,6 +47,14 @@ export const CONFIRM_SLOT_ID = "confirm-slot";
 export const CONFIRM_NO_ANSWER = "The console did not answer, so the change may or may not have been made. Reload to see; the audit log says which.";
 
 /**
+ * What the slot says when a write's request was answered 401 (the session ended before the change was sent, so the
+ * server refused it before any action ran): said in the slot first, as text, so it never stays on the previewing
+ * skeleton while the script asks the console where the session went, which may take a while when a stream's own
+ * question is already out. The sign-in page the answer leads to then says why. Embedded in the script as JSON.
+ */
+export const CONFIRM_SIGNED_OUT = "This session ended before the change was sent, so nothing was changed. The console is asked where it went.";
+
+/**
  * Every class this module draws for the stylesheet beyond the kit's own (`btn`, `banner`, `tile`, `ic`, `tone-*`,
  * `chip`, `link`, `code`): the Actions card's `.confirm` with its paid and danger rings, the ConfirmStates card's busy,
  * no-change and results states (renamed from the card's demo `cs-` names), the held note and the diff's. Each has a
@@ -169,7 +177,10 @@ export function unchangedBarHtml({ summary, sentenceHtml = null }) {
  *   - failed: the write threw at the confirm; the console's log has the reason; Close, for the same reason.
  *   - refused: the preview refused the change (a field rule, a planner's sentence, a value the funnel's parser refuses);
  *     Close, and the form is still there to fix.
- *   - setup: the console was started without what the action needs; Close.
+ *   - setup: the console cannot take the action as it runs: it was started without what the action needs (a
+ *     preview's 503, `actions.mjs`), or its tokens file cannot be used right now, so no session can be judged (a
+ *     write's 503, preview or confirm, `server.mjs` `tokensUnusableBar`, which says to run `pi-dispatch doctor`);
+ *     nothing in the page fixes either, so Close.
  *   - preview-failed: the preview threw; Close.
  *   - partial: the write stopped after doing part of its work (the kill switch reached some queues and not others, a
  *     bulk apply threw part-way through its jobs). It is the one state that never says "Nothing was changed"
@@ -274,15 +285,17 @@ const BULK_DONE_WORD = Object.freeze({ "failed-retry-all": "retried", "failed-re
 
 /**
  * A bulk confirm's results (the ConfirmStates card's section 3): "2 of 3 retried" in the attention tone when any job
- * was refused (else ok), one line per job ("done", or "not done, <its reason>") with the done or failed icon, the audit
- * rows the confirm wrote (its `count` `ok` rows, from `auditSeq`, never as a range: `auditRowsHtml`), and Reload as the
- * one step forward, since the page's lists are what moved.
+ * was refused (else ok), one line per job ("done", "not done, <its reason>", or "did not finish, <its reason>" for a
+ * job whose answer is `partial`, part of whose change may have been made: issue #737) with the done or failed icon, the
+ * audit rows the confirm wrote (its `count` `ok` rows, from `auditSeq`, never as a range: `auditRowsHtml`), and Reload
+ * as the one step forward, since the page's lists are what moved.
  */
 export function bulkResultsHtml({ kind, results = [], count, done, auditSeq = null }) {
   const rows = Array.isArray(results) ? results : [];
   const status = rows.some((r) => !r?.ok) ? "attention" : "ok";
   const word = BULK_DONE_WORD[kind] ?? "done";
-  const list = html`<ul class="confirm__results">${rows.map((r) => html`<li>${ui.icon(r?.ok ? "done" : "failed", { size: "sm" })}<span><span class="code">${String(r?.jobId ?? "-")}</span>: ${r?.ok ? "done" : html`not done, ${String(r?.reason ?? "refused")}`}</span></li>`)}</ul>`;
+  const said = (r) => (r?.ok ? "done" : html`${r?.partial === true ? "did not finish" : "not done"}, ${String(r?.reason ?? "refused")}`);
+  const list = html`<ul class="confirm__results">${rows.map((r) => html`<li>${ui.icon(r?.ok ? "done" : "failed", { size: "sm" })}<span><span class="code">${String(r?.jobId ?? "-")}</span>: ${said(r)}</span></li>`)}</ul>`;
   // `ui.banner`'s markup with a list between its title and its sentence (the ConfirmStates card's section 3): the kit's
   // banner puts its body in a `<p>`, which cannot hold a list (a parser closes the paragraph at the `<ul>`), so this
   // one banner is drawn here, in the kit's classes, its tone and icon from the kit's `STATUS`.

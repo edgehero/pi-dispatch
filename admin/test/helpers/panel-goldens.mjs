@@ -120,6 +120,19 @@ const JOB_DATA = new Map([
   ["gh-7c21", { provider: "anthropic", model: "claude-sonnet-5-5" }],
 ]);
 
+/** `planCancelQueued`'s plan for a job that never started, waiting behind build3's busy slot. */
+const QUEUED_PLAN = (jobId) => ({
+  jobId,
+  queue: "pi-jobs@build3",
+  state: "delayed",
+  held: false,
+  attemptsMade: 0,
+  stalledCounter: 0,
+  kind: "github",
+  target: "acme/web#4",
+  waiting: { jobId, queue: "pi-jobs@build3", state: "delayed", bucket: "slot", why: "host-slot", known: true, dueAt: NOW + 4 * MIN, untilAt: NOW + 4 * MIN, project: "web", host: "build3", holder: null, endpoint: null, budgetWhy: null, trigger: 0, attempt: null, attempts: null, attemptsMade: 0, stalled: 0, kind: "github", held: null },
+});
+
 /** A deterministic ticket source: the ticket never reaches a bar, but a golden must not depend on chance. */
 function counter() {
   let n = 0;
@@ -134,9 +147,12 @@ function counter() {
  * console's routes answer (`{ status, body }`, the body the JSON the browser gets), with the real ticket store, the
  * real action table and, for the settings, the real planners over a settings file in a temp directory. `advance(ms)`
  * moves the clock. Audit rows are numbered from 44, so a banner links rows the way a used console's would. `fleet` is
- * laid over the fleet reader's fakes (a kill switch that reaches one Valkey and not the other, say).
+ * laid over the fleet reader's fakes (a kill switch that reaches one Valkey and not the other, say). `rm` is laid the
+ * same way over the read model the actions call (the real module, with the failed-job bulk planner, its retry and the
+ * held job's cancel canned here): each key it names replaces that function, the real one or the canned one (a queued
+ * job's plan and its removal's answer, a re-run's plan and its enqueue).
  */
-function actionWorld({ fleet: fleetOver = {} } = {}) {
+function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {} } = {}) {
   let t = NOW;
   const now = () => t;
   const dir = tempDir("panel-goldens-");
@@ -149,6 +165,7 @@ function actionWorld({ fleet: fleetOver = {} } = {}) {
     planFailedBulk: async () => ({ jobs: FAILED_JOBS.map((j) => ({ ...j })), more: 2, examinedAll: true }),
     retryFailedJobs: async ({ jobs }) => ({ results: jobs.map((j) => (j.jobId === "gh-7c21" ? { jobId: j.jobId, invalid: "it is no longer failed (it was retried elsewhere)" } : { ok: true, jobId: j.jobId, queue: "pi-jobs" })) }),
     cancelHeldJob: async () => ({ ok: true }),
+    ...rmOver,
   };
   const fleet = {
     snapshot: async () => SNAPSHOT,
@@ -428,11 +445,40 @@ const DRAW = {
     const bar = String(refusalHtml({ where: "preview", sentence: PERSON_CHANGED, status: 409, state: "changed" }));
     return openSlotAfter(await fleetLive(), "p-queues", { inner: bar });
   },
+  // A job that never started, held behind a busy host slot: its cancel, with the worker's own reason for the wait.
+  "confirm-preview-cancel-queued.operator": async () => {
+    const answer = await actionWorld({ rm: { planCancelQueued: async ({ jobId }) => ({ plan: QUEUED_PLAN(jobId) }) } }).preview("cancel-queued", { jobId: "gh-q9a1", queue: "pi-jobs@build3" });
+    return openSlotAfter(await fleetLive(), "p-queues", { inner: answerHtml(answer, 200, "cancel-queued") });
+  },
+  // The same cancel, confirmed after the job started: refused, nothing changed, and a way to look again.
+  "confirm-refused-started.operator": async () => {
+    const world = actionWorld({
+      rm: {
+        planCancelQueued: async ({ jobId }) => ({ plan: QUEUED_PLAN(jobId) }),
+        cancelQueuedJob: async ({ jobId }) => ({ invalid: `job ${jobId} started since the preview; nothing was changed` }),
+      },
+    });
+    const answer = await world.both("cancel-queued", { jobId: "gh-q9a1", queue: "pi-jobs@build3" });
+    return openSlotAfter(await fleetLive(), "p-queues", { inner: answerHtml(answer, 409, "cancel-queued, started") });
+  },
   // The page after a write: the session's flash, drawn once as the done banner, with its Undo where the write has one.
   "confirm-done.operator": async () => {
     const answer = await actionWorld().both("fleet-pause");
     assert.equal(answer.status, 200);
     assert.equal(answer.body.change.inverse?.action, "fleet-resume", "a pause's way back is a resume");
+    return fleetLive({ flash: answer.body.change });
+  },
+  // A re-run's Undo is decided at the confirm: the banner offers the cancel of the job it queued.
+  "confirm-done-rerun.operator": async () => {
+    const world = actionWorld({
+      rm: {
+        planRerun: async () => ({ plan: { kind: "cron", jobId: "cron:nightly:1760000000000", queue: "pi-jobs", schedule: {}, job: { flow: "nightly" }, runFields: null, reserve: { slots: 1, dollarsMicros: 2_000_000, capMicros: 2_000_000, zeroRated: false } } }),
+        enqueueRerun: async () => ({ ok: true, jobId: "cron:nightly:1760010000000", queue: "pi-jobs" }),
+      },
+    });
+    const answer = await world.both("rerun", { jobId: "cron:nightly:1760000000000" });
+    assert.equal(answer.status, 200);
+    assert.deepEqual(answer.body.change.inverse, { action: "cancel-queued", body: { jobId: "cron:nightly:1760010000000", queue: "pi-jobs" } }, "the way back is the cancel of the queued run");
     return fleetLive({ flash: answer.body.change });
   },
   "confirm-done-no-undo.operator": async () => {

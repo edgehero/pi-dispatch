@@ -3101,7 +3101,8 @@ export async function collectChecks(shellVars, seams) {
 			? credentialAbsent({ subject: `Provider key (${provider}: ${keyAbsent.join(" or ")}) not set`, names: keyNames, readers: ["worker"], refusal: "jobs cannot authenticate to the provider", fix: keyShown.fix })
 			: { ...keyShown, fix: `${keyShown.fix}${notSupplied(keyNames, ["worker"])}` };
 	// Not for a malformed PI_PROVIDER: its shape row below is the one line (issue #673, review round 1).
-	if (envShapeProblem.PI_PROVIDER === null) checks.push({ ...keyLine, label: `${keyLine.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
+	// Issue #737: the console reads whether the key is found by this id (`NAMED_CHECK_IDS`).
+	if (envShapeProblem.PI_PROVIDER === null) checks.push({ ...keyLine, id: "provider.key", label: `${keyLine.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
 
 
 	section("overlay");
@@ -7046,6 +7047,8 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// `--live` reads, so the output never reads healthy right before saying the proxy is not this deployment's.
 	const staleRunning = up && !custom && judged.drift.length > 0;
 	const proxyCheck = {
+		// Issue #737: the console reads whether the proxy runs by this id (`NAMED_CHECK_IDS`).
+		id: "egress.proxy",
 		ok: up,
 		...(retried ? { warn: true } : {}),
 		label: up
@@ -7077,6 +7080,8 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	if (!custom) {
 		if (judged.drift.length > 0) {
 			checks.push({
+				// This line stands in for the proxy's own (not pushed while `staleRunning`), so it carries that line's id.
+				id: proxyCheck.id,
 				ok: false,
 				label: judged.outOfDate ? `Egress proxy is this deployment's proxy but out of date (${proxy}): ${judged.drift.join("; ")}` : `Egress proxy is running but is not this deployment's (${proxy}): ${judged.drift.join("; ")}`,
 				fix: `${replaceFix}; until then every job's egress runs through a policy this deployment did not ship`,
@@ -9684,6 +9689,8 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		const crashLoop = status === "stopped" || status === "restarting";
 		const retried = state.code === 0 && !proxyRunning && /^[a-z]{1,20}$/.test(status ?? "") && !STOPPED_PROXY_STATES.has(status) && !crashLoop;
 		checks.push({
+			// Issue #737: docker's proxy line's id, for this venue's proxy (`REPEATED_CHECK_IDS`).
+			id: "egress.proxy",
 			ok: proxyRunning,
 			...(retried ? { warn: true } : {}),
 			label: proxyRunning ? `podman: egress proxy running under this account's Podman (${proxy})` : state.code === 0 ? `podman: egress proxy is ${/^[a-z]{1,20}$/.test(status ?? "") ? status : "in a state it did not report"} under this account's Podman (${proxy})` : `podman: egress proxy is not under this account's Podman (${proxy})`,

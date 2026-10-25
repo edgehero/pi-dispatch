@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { makeInFlight } from "../src/scoped-limits.mjs";
 import { makeCheckWaitSkew } from "../src/triggers-file.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS } from "../src/wait-for.mjs";
-import { makeWaitState } from "../src/wait-state.mjs";
+import { WAIT_ANSWERS, WAIT_ANSWER_PREFIX, WAIT_PROFILE_FIELD_RE, answerOf, makeWaitState } from "../src/wait-state.mjs";
+import { deferRecordOf, withDeferRecords } from "./helpers/defer-redis.mjs";
 
 // index.mjs imports bullmq; skip below the node floor / without deps, hard-fail in CI (mirrors pause-gate).
 let mod;
@@ -311,7 +312,8 @@ test("the wait state fails OPEN: a dead redis costs a panel row, never a refusal
 	// risk two paid runs for one intent, refusing would risk dropping a delivery no webhook resends.
 	assert.deepEqual(await state.claim("gh-1", { dedupId: "x", untilMs: NOW + 1000 }), { retry: true, holder: null });
 	assert.equal(await state.heldForMs("gh-1"), null);
-	await state.hold("gh-1", { dedupId: "x", untilMs: NOW + 1000 });
+	await state.hold("gh-1", { dedupId: "x", untilMs: NOW + 1000, afterMs: NOW + 1000 });
+	await state.noteAnswer("gh-1", { profile: "jira", answer: "hold" });
 	await state.release("gh-1", { dedupId: "x" });
 
 	// The gate turns that into a short re-defer: nothing held, nothing refused, nothing run.
@@ -523,7 +525,7 @@ const CANNOT_TELL = { verdict: "hold", fault: true };
 const NEVER = { verdict: "refuse", fault: false };
 
 function tier2(overrides = {}) {
-	const redis = fakeRedis();
+	const redis = overrides.redis ?? fakeRedis();
 	const state = makeWaitState({ redis, now: () => NOW });
 	const seen = { containerCalls: 0, records: [], logs: [], comments: [], asked: [] };
 	const processor = mod.makeProcessor({
@@ -974,9 +976,10 @@ test("a sibling held through an outage does not run a second time on the same in
 });
 
 test("the throttle floor stays distinguishable from the scope re-check by wake instant", { skip }, async () => {
-	// Nothing records WHY a job sits in the delayed set, so the instants are the only evidence there is --
-	// which is the second load-bearing job INT-WAIT-PROFILES-CONTRACT gives the interval floor. A throttle or
-	// abort re-ask landing on exactly SCOPE_BUSY_RECHECK_MS would make the two indistinguishable.
+	// The defer record says why a job sits in the delayed set (issue #737), but a reader older than it, and a job
+	// whose record could not be written, have only the instants -- the second load-bearing job
+	// INT-WAIT-PROFILES-CONTRACT gives the interval floor. A throttle or abort re-ask landing on exactly
+	// SCOPE_BUSY_RECHECK_MS would make the two indistinguishable.
 	assert.notEqual(mod.SCOPE_BUSY_RECHECK_MS, 11_000);
 	const { processor } = tier2({ deps: { checkWait: async () => ({ verdict: "hold", fault: false, aborted: true }) } });
 	const { job, moves } = spyJob(forge([{ profile: "jira" }]));
@@ -1025,4 +1028,202 @@ test("two `after` conditions are unreadable, not silently resolved to one of the
 	assert.equal(result.reason, "wait-unreadable");
 	assert.equal(seen.containerCalls, 0, "never the earlier instant silently winning");
 	assert.equal(moves.length, 0);
+});
+
+// --- why a held job waits, and what its checks answered (issue #737) ----------------------------------------------
+
+/** The reason a deferral recorded for `job`, as the console's reader parses it. */
+const reasonOf = (redis, job) => {
+	const r = deferRecordOf(redis, job.id);
+	return r && { why: r.why, bucket: r.bucket, until: r.until, holder: r.holder, trigger: r.trigger };
+};
+
+test("each wait deferral records its own reason, until the instant it moved the job to", { skip }, async () => {
+	// The `after` hold.
+	const holdUntil = NOW + 3 * 3600 * 1000;
+	const after = spyJob(forge([{ after: iso(holdUntil) }]), { id: "gh-after" });
+	const a = harness({ redis: withDeferRecords(fakeRedis()) });
+	await assert.rejects(() => a.processor(after.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(a.redis, after.job), { why: "wait-after", bucket: "check", until: holdUntil, holder: null, trigger: 0 });
+	assert.equal(after.moves[0].ts, holdUntil);
+
+	// An unverifiable holder on the `after` path: the re-ask names the delivery it could not check.
+	const r1 = withDeferRecords(fakeRedis());
+	const blocked = { ...makeWaitState({ redis: r1, now: () => NOW }), claim: async () => ({ retry: true, holder: "gh-holder" }) };
+	const sup = spyJob(forge([{ after: iso(holdUntil) }]), { id: "gh-sup" });
+	await assert.rejects(() => harness({ redis: r1, waitState: blocked }).processor(sup.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(r1, sup.job), { why: "wait-supersede", bucket: "check", until: NOW + mod.SUPERSEDE_RECHECK_MS, holder: "gh-holder", trigger: 0 });
+
+	// The same on the polled path, with a holder whose id fails the rule: the reason is kept, the holder is not.
+	const r2 = withDeferRecords(fakeRedis());
+	const t = tier2({ redis: r2, waitState: { ...makeWaitState({ redis: r2, now: () => NOW }), claim: async () => ({ retry: true, holder: "not an id" }) } });
+	const polled = spyJob(forge([{ profile: "jira" }]), { id: "gh-polled" });
+	await assert.rejects(() => t.processor(polled.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(r2, polled.job), { why: "wait-supersede", bucket: "check", until: NOW + mod.SUPERSEDE_RECHECK_MS, holder: null, trigger: 0 });
+
+	// A check that said not yet, one that was aborted, one that answered nonsense.
+	for (const [verdict, why, until] of [
+		[NOT_YET, "wait-hold", NOW + 60_000],
+		[{ verdict: "hold", fault: false, aborted: true }, "wait-aborted", NOW + 11_000],
+		[{ verdict: "GO" }, "wait-unclear", NOW + 60_000],
+	]) {
+		const redis = withDeferRecords(fakeRedis());
+		const h = tier2({ redis, deps: { checkWait: async () => verdict } });
+		const j = spyJob(forge([{ profile: "jira" }]), { id: `gh-${why}` });
+		await assert.rejects(() => h.processor(j.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+		assert.deepEqual(reasonOf(redis, j.job), { why, bucket: "check", until, holder: null, trigger: 0 }, why);
+		assert.equal(j.moves[0].ts, until, `${why}: the record's until is the move's instant`);
+	}
+});
+
+test("a throttled check records wait-throttled, on the local lease and on the fleet's", { skip }, async () => {
+	const busy = makeInFlight();
+	busy.tryAcquire("wait-check", 1);
+	const local = withDeferRecords(fakeRedis());
+	const h = tier2({ redis: local, checkSlots: busy });
+	const j = spyJob(forge([{ profile: "jira" }]), { id: "gh-local" });
+	await assert.rejects(() => h.processor(j.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(local, j.job), { why: "wait-throttled", bucket: "check", until: NOW + 15_000, holder: null, trigger: 0 });
+
+	const fleet = withDeferRecords(fakeRedis());
+	const f = tier2({ redis: fleet, checkLease: { acquire: async () => null } });
+	const fj = spyJob(forge([{ profile: "jira" }]), { id: "gh-fleet" });
+	await assert.rejects(() => f.processor(fj.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(fleet, fj.job), { why: "wait-throttled", bucket: "check", until: NOW + 15_000, holder: null, trigger: 0 });
+});
+
+test("every wait deferral names the project its pickup resolved, and a polled re-ask names a holder that passes the rule", { skip }, async () => {
+	// A project whose row holds the job's repository: each record says it, as the pause window's does, so a console can
+	// group a held job under its project. A wiring with no projects (every case above) cannot tell a dropped one.
+	const shop = [{ id: "shop", members: ["github:acme/web"] }];
+	const busy = makeInFlight();
+	busy.tryAcquire("wait-check", 1);
+	const holderSaid = (redis) => ({ ...makeWaitState({ redis, now: () => NOW }), claim: async () => ({ retry: true, holder: "gh-holder" }) });
+	const cases = [
+		["wait-after", null, [{ after: iso(NOW + 3 * 3600 * 1000) }], () => ({})],
+		["wait-hold", null, [{ profile: "jira" }], () => ({ deps: { checkWait: async () => NOT_YET } })],
+		["wait-aborted", null, [{ profile: "jira" }], () => ({ deps: { checkWait: async () => ({ verdict: "hold", fault: false, aborted: true }) } })],
+		["wait-unclear", null, [{ profile: "jira" }], () => ({ deps: { checkWait: async () => ({ verdict: "GO" }) } })],
+		["wait-throttled", null, [{ profile: "jira" }], () => ({ checkSlots: busy })],
+		["wait-throttled", null, [{ profile: "jira" }], () => ({ checkLease: { acquire: async () => null } })],
+		// The supersede re-ask, on the `after` path and on the polled one: the holder the claim named, which passes the rule.
+		["wait-supersede", "gh-holder", [{ after: iso(NOW + 3 * 3600 * 1000) }], (redis) => ({ waitState: holderSaid(redis) })],
+		["wait-supersede", "gh-holder", [{ profile: "jira" }], (redis) => ({ waitState: holderSaid(redis) })],
+	];
+	for (const [i, [why, holder, waitFor, wiring]] of cases.entries()) {
+		const redis = withDeferRecords(fakeRedis());
+		const t = tier2({ redis, projects: () => shop, ...wiring(redis) });
+		const j = spyJob(forge(waitFor), { id: `gh-project-${i}` });
+		await assert.rejects(() => t.processor(j.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError", why);
+		const r = deferRecordOf(redis, j.job.id);
+		assert.deepEqual([r?.why, r?.project, r?.holder], [why, "shop", holder], `case ${i}: ${why} records the pickup's project${holder ? " and its holder" : ""}`);
+	}
+});
+
+test("answerOf: the gate's words for what a check said, and nothing for a check that said nothing about the condition", () => {
+	assert.equal(answerOf(GO), "go");
+	assert.equal(answerOf(NOT_YET), "hold");
+	assert.equal(answerOf(CANNOT_TELL), "fault");
+	assert.equal(answerOf(NEVER), "refuse");
+	for (const said of [{ verdict: "hold", fault: false, aborted: true }, { profileUnknown: "jira" }, { verdict: "hold", fault: true, unusableTarget: true }]) assert.equal(answerOf(said), null, JSON.stringify(said));
+	for (const bad of [undefined, null, {}, { verdict: "GO" }, "hold", { verdict: "go " }, 0]) assert.equal(answerOf(bad), "unclear", JSON.stringify(bad));
+	// In the gate's own order: a refusal that also says aborted is refused there, and recorded as refused.
+	assert.equal(answerOf({ verdict: "refuse", aborted: true }), "refuse");
+	assert.equal(answerOf({ verdict: "go", aborted: true }), null, "an aborted check re-defers, whatever else it says");
+	assert.equal(answerOf({ verdict: "hold", fault: "yes" }), "hold", "a fault is only `true`, as the gate reads it");
+	for (const a of ["go", "hold", "fault", "refuse", "unclear"]) assert.ok(WAIT_ANSWERS.includes(a));
+	assert.equal(WAIT_ANSWER_PREFIX, "a:");
+});
+
+test("each check's last answer is kept on the hold, per profile, in the operator's order, with the instant it was given", { skip }, async () => {
+	const answers = { jira: GO, deploy: NOT_YET };
+	const { processor, redis } = tier2({ deps: { checkWait: async (profile) => answers[profile] } });
+	const { job } = spyJob(forge([{ profile: "jira" }, { profile: "deploy" }, { profile: "never-asked" }]));
+	await assert.rejects(() => processor(job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	const h = redis.hashes.get(`wait:job:${job.id}`);
+	assert.equal(h.get("a:jira"), `go:${NOW}`);
+	assert.equal(h.get("a:deploy"), `hold:${NOW}`);
+	assert.equal(h.has("a:never-asked"), false, "a conjunction stops at its first no, and an unasked check has no answer");
+
+	// Each answer the gate can be given, on a fresh hold: what the hold says it was told.
+	for (const [verdict, answer] of [
+		[CANNOT_TELL, "fault"],
+		[{ verdict: "GO" }, "unclear"],
+		[NEVER, null], // refused: the hold ends, and with it the hash
+		[{ verdict: "hold", aborted: true }, null],
+		[{ profileUnknown: "jira" }, null],
+	]) {
+		const t = tier2({ deps: { checkWait: async () => verdict } });
+		const j = spyJob(forge([{ profile: "jira" }]), { id: `gh-${answer}-${JSON.stringify(verdict)}` });
+		await t.processor(j.job, "tok", new AbortController().signal).catch(() => {});
+		const field = t.redis.hashes.get(`wait:job:${j.job.id}`)?.get("a:jira") ?? null;
+		assert.equal(field, answer === null ? null : `${answer}:${NOW}`, JSON.stringify(verdict));
+	}
+
+	// A later answer replaces the earlier one: one field per profile, never one per wake.
+	let said = CANNOT_TELL;
+	const again = tier2({ deps: { checkWait: async () => said } });
+	const k = spyJob(forge([{ profile: "jira" }]), { id: "gh-again" });
+	await assert.rejects(() => again.processor(k.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	said = NOT_YET;
+	await assert.rejects(() => again.processor(k.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	const fields = [...again.redis.hashes.get(`wait:job:${k.job.id}`).keys()].filter((f) => f.startsWith("a:"));
+	assert.deepEqual(fields, ["a:jira"]);
+	assert.equal(again.redis.hashes.get(`wait:job:${k.job.id}`).get("a:jira"), `hold:${NOW}`);
+});
+
+test("noteAnswer writes only a profile and an answer within their rules, and gives the hash the counters' TTL", { skip }, async () => {
+	const redis = fakeRedis();
+	const state = makeWaitState({ redis, now: () => NOW, counterTtlMs: 1234 });
+	await state.noteAnswer("gh-1", { profile: "jira.v2_x-y", answer: "go" });
+	assert.equal(await redis.hget("wait:job:gh-1", "a:jira.v2_x-y"), `go:${NOW}`);
+	assert.deepEqual(redis.pexpires.at(-1), { key: "wait:job:gh-1", ms: 1234 }, "it may create the hash, so it expires it");
+	for (const [profile, answer] of [["a".repeat(65), "go"], ["has space", "go"], ["a:b", "go"], ["", "go"], [7, "go"], ["jira", "maybe"], ["jira", "GO"], ["jira", undefined]]) {
+		await state.noteAnswer("gh-2", { profile, answer });
+	}
+	assert.equal(redis.hashes.has("wait:job:gh-2"), false, "nothing outside the rules");
+	assert.match("a".repeat(64), WAIT_PROFILE_FIELD_RE);
+	await state.noteAnswer("gh-3");
+	assert.equal(redis.hashes.has("wait:job:gh-3"), false);
+});
+
+test("a hold records the job's own `after` instant, never the lease horizon, on every hold path", { skip }, async () => {
+	// The `after` hold itself.
+	const until = NOW + 3 * 3600 * 1000;
+	const first = harness();
+	const a = spyJob(forge([{ after: iso(until) }]), { id: "gh-a" });
+	await assert.rejects(() => first.processor(a.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(await first.redis.hget("wait:job:gh-a", "after"), String(until));
+
+	// A polled hold whose `after` has passed: still the job's instant, while the hold's lease runs to the next check.
+	const past = NOW - 60_000;
+	const held = tier2({ deps: { checkWait: async () => NOT_YET } });
+	const b = spyJob(forge([{ after: iso(past) }, { profile: "jira" }]), { id: "gh-b" });
+	await assert.rejects(() => held.processor(b.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(await held.redis.hget("wait:job:gh-b", "after"), String(past));
+
+	// A throttled wake, where the lease horizon is the maximum wait.
+	const busy = makeInFlight();
+	busy.tryAcquire("wait-check", 1);
+	const throttled = tier2({ checkSlots: busy });
+	const c = spyJob(forge([{ after: iso(past) }, { profile: "jira" }]), { id: "gh-c" });
+	await assert.rejects(() => throttled.processor(c.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(await throttled.redis.hget("wait:job:gh-c", "after"), String(past));
+	const fleet = tier2({ checkLease: { acquire: async () => null } });
+	const d = spyJob(forge([{ after: iso(past) }, { profile: "jira" }]), { id: "gh-d" });
+	await assert.rejects(() => fleet.processor(d.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(await fleet.redis.hget("wait:job:gh-d", "after"), String(past));
+
+	// No `after` condition: no field.
+	const plain = tier2({ deps: { checkWait: async () => NOT_YET } });
+	const e = spyJob(forge([{ profile: "jira" }]), { id: "gh-e" });
+	await assert.rejects(() => plain.processor(e.job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	assert.equal(await plain.redis.hget("wait:job:gh-e", "after"), null);
+	// And `hold` itself refuses anything but whole milliseconds.
+	const redis = fakeRedis();
+	const state = makeWaitState({ redis, now: () => NOW });
+	for (const [id, afterMs] of [["x1", 1.5], ["x2", "123"], ["x3", Number.NaN], ["x4", undefined]]) {
+		await state.hold(id, { dedupId: "d", untilMs: NOW, afterMs });
+		assert.equal(await redis.hget(`wait:job:${id}`, "after"), null, String(afterMs));
+	}
 });

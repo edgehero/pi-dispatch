@@ -12,6 +12,7 @@ import {
   enqueueSteer,
   estimateReserve,
   planFailedBulk,
+  planCancelQueued,
   planParkedAnswer,
   planRerun,
   rerunRefusalOf,
@@ -1149,4 +1150,23 @@ test("steerAuditTarget: the job and the 32-hex message id, split on the last #; 
   const t = steerAuditTarget(long, id);
   assert.equal(t, `${"j".repeat(166)}#${id}`);
   assert.equal(t.length, 199, "inside the audit row's 200-character cap");
+});
+
+test("a client's or a registry's error reaches no refusal unbounded: the planners' catch-alls scrub and cut it, and a registry that could not be read is named, never quoted", async () => {
+  const words = `connect ECONNREFUSED 10.9.8.7:6379 \u001b]52;c;${"A".repeat(300)}\u0007`;
+  const bounded = `connect ECONNREFUSED 10.9.8.7:6379  ]52;c;${"A".repeat(300)} `.slice(0, 200);
+  const boom = () => {
+    throw new Error(words);
+  };
+  const fakes = { url: "redis://x", parseConnectionFn: () => ({}), timeoutMs: 200 };
+  const logsDir = tempDir("pd-737-bounded-words-");
+  assert.deepEqual(await planRerun({ ...fakes, logsDir, jobId: "gh-1", redisFn: boom, queueFn: boom }), { refusal: `could not read the run or its job (${bounded}); nothing was queued` });
+  assert.deepEqual(await planParkedAnswer({ ...fakes, logsDir, jobId: "gh-1", text: "yes", by: "alice", triggersPath: join(logsDir, "triggers.json"), redisFn: boom, queueFn: boom }), { refusal: `could not read the parked run or its job (${bounded}); nothing was queued` });
+  assert.deepEqual(await planSteer({ ...fakes, jobId: "gh-1", text: "x", by: "alice", redisFn: boom, queueFn: boom }), { refusal: `could not read the job or its inbox (${bounded}); nothing was sent` });
+  assert.deepEqual(await planSteerWithdraw({ ...fakes, jobId: "gh-1", id: "a".repeat(32), redisFn: boom, queueFn: boom }), { refusal: `could not read the job or its inbox (${bounded}); nothing was changed` });
+  // The registry's read failed with a client's words: the sentence says so, without them.
+  const blind = () => ({ on() {}, smembers: async () => { throw new Error(words); }, scan: async () => ["0", []], disconnect() {} });
+  const empty = (_c, { name }) => ({ name, getJob: async () => undefined, close: async () => {} });
+  assert.deepEqual(await planCancelQueued({ ...fakes, jobId: "gh-1", redisFn: blind, queueFn: empty }), { refusal: "no job gh-1 in 1 queue (the host registry could not be read; a host that is not registered may still hold it); nothing was changed", status: 404 });
+  assert.deepEqual(await setQueuePausedOne({ url: "redis://x", queue: "pi-jobs@gone", paused: true, redisFn: blind, makeQueueFn: empty, parseConnectionFn: () => ({}) }), { invalid: "\"pi-jobs@gone\" is not a queue this deployment drains (pi-jobs); the host registry could not be read, so a host's queue may be missing from that list. Nothing was changed" });
 });

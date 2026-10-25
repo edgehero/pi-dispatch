@@ -108,7 +108,7 @@ test("an append failure refuses the write: fn never runs, nothing is written, an
 // it is (audited-write.mjs UNCHANGED, checked). This holds the composition: the first row is the ok row, before the write.
 test("a capturing writer around auditedWrite sees the ok row first, before the write, and a compensating row after it", async () => {
   const { capturingAudit } = await import("../src/console/actions.mjs");
-  const logsDir = tempDir("pd-737-capture-");
+  const logsDir = tempDir("pd-capture-audit-");
   const real = makeConsoleAudit({ logsDir });
   real.append({ actor: ACTOR, action: "write", kind: "setting-set", target: "/s", outcome: "ok", ticket: "aaaaaaaaaaaa" });
   const audit = capturingAudit(real);

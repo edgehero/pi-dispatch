@@ -986,6 +986,85 @@ test("createFleetReader: a readOnly snapshot issues no Valkey write, where the T
   }
 });
 
+// --- the overview's day and the registry's clock fields (issue #737) ---------------------------------------------------
+
+test("createFleetReader: the day's runs, today's settled spend per UTC hour and today's soft-hold refusals, off the wide window, each value re-checked (#737)", async () => {
+  const logsDir = tempDir("pd-737-day-");
+  const HOUR = 60 * MIN;
+  const dollars = (settledMicros) => ({ reservedMicros: settledMicros, settledMicros, basis: "metered", modelBasis: null });
+  writeLocal(logsDir, rec("gh-r1", AT - 30 * MIN, { project: "shop", dollars: dollars(1_500_000) }));
+  writeLocal(logsDir, rec("gh-r2", AT - 90 * MIN, { outcome: "failed", reason: "container-lost", dollars: dollars(250_000), parentJobId: "gh-r0" }));
+  writeLocal(logsDir, rec("gh-r3", AT - 10 * MIN, { outcome: "policy", reason: "soft-hold", dollars: null }));
+  writeLocal(logsDir, rec("gh-r4", AT - 13 * HOUR, { dollars: dollars(9_999) })); // yesterday 23:00 UTC: in the last 24 h, not today
+  writeLocal(logsDir, rec("gh-r5", AT - 25 * HOUR, { dollars: dollars(7) })); // outside the day
+  writeLocal(logsDir, rec("gh-r6", AT + 5 * MIN, { dollars: dollars(5) })); // dated ahead of the clock
+  writeLocal(logsDir, rec("gh-r7", AT - 13 * HOUR, { outcome: "policy", reason: "soft-hold" })); // yesterday's soft hold
+  writeLocal(logsDir, rec("gh-r8", AT - 2 * HOUR, { kind: "<b>", target: "acme/web#1\u001b[2J", project: "Shop", host: "bad host", outcome: "weird", reason: "NOT A TOKEN", parentJobId: "a b" }));
+  writeLocal(logsDir, rec("gh-r9", AT - 3 * HOUR, { dollars: { reservedMicros: 1, settledMicros: -5, basis: "metered" } }));
+  writeLocal(logsDir, rec("gh-r10", AT + 6 * MIN, { outcome: "policy", reason: "soft-hold", dollars: null })); // a soft hold dated ahead of the clock
+  const snap = await fleetOf(logsDir, emptyRedis()).snapshot();
+  assert.deepEqual(snap.runsDay.runs.map((r) => r.jobId), ["gh-r3", "gh-r1", "gh-r2", "gh-r8", "gh-r9", "gh-r4", "gh-r7"], "the last 24 hours, newest first");
+  assert.deepEqual(snap.runsDay.runs.find((r) => r.jobId === "gh-r2"), { jobId: "gh-r2", kind: "github", target: "acme/web#1", project: null, host: "hosta", outcome: "failed", reason: "container-lost", startedAt: AT - 91 * MIN, endedAt: AT - 90 * MIN, parentJobId: "gh-r0" });
+  assert.equal(snap.runsDay.runs.find((r) => r.jobId === "gh-r1").project, "shop");
+  const bad = snap.runsDay.runs.find((r) => r.jobId === "gh-r8");
+  assert.deepEqual([bad.kind, bad.target, bad.project, bad.host, bad.outcome, bad.reason, bad.parentJobId], [null, null, null, null, null, null, null], "another host's text is judged on the way out");
+  assert.deepEqual([snap.runsDay.floor, snap.runsDay.partial], [false, false]);
+  const hours = Array.from({ length: 24 }, (_, i) => (i > 12 ? null : 0));
+  hours[11] = 1_500_000;
+  hours[10] = 250_000;
+  assert.deepEqual(snap.spendByHour, { hours, unpriced: 3, floor: false, partial: false }, "hour 12 is now (0 so far), the hours after it null; three of today's runs carry no settled amount");
+  assert.deepEqual(snap.softHoldToday, { count: 1, floor: false, partial: false }, "today's soft hold up to now, not yesterday's, nor one dated ahead of the clock");
+  // A wide window that cannot be read is not an empty day.
+  const fs = { ...nodeFs, readdirSync: (p, ...rest) => (p === logsDir ? { [Symbol.iterator]() { throw new Error("index walk failed"); } } : nodeFs.readdirSync(p, ...rest)) };
+  const down = await fleetOf(logsDir, emptyRedis(), { seams: { fs } }).snapshot();
+  assert.deepEqual([down.runsDay, down.spendByHour, down.softHoldToday], [null, null, null]);
+  const blind = await fleetOf(logsDir, emptyRedis({ mirrorDown: true })).snapshot();
+  assert.deepEqual([blind.runsDay.partial, blind.spendByHour.partial, blind.softHoldToday.partial], [true, true, true], "the mirror unread: partial");
+});
+
+test("createFleetReader: a full wide window that ends inside a span makes that span's fold a floor (#737)", async () => {
+  // 1000 runs a minute apart up to the clock: they reach back about 16.7 hours, inside the last 24 hours (a floor) but
+  // past today's 00:00 UTC (12 hours back), so today's folds are whole.
+  const logsDir = tempDir("pd-737-day-floor-");
+  for (let i = 0; i < 1000; i += 1) writeLocal(logsDir, rec(`r${i}`, AT - i * MIN));
+  const snap = await fleetOf(logsDir, emptyRedis()).snapshot();
+  assert.equal(snap.runsDay.runs.length, 1000);
+  assert.deepEqual([snap.runsDay.floor, snap.spendByHour.floor, snap.softHoldToday.floor], [true, false, false]);
+  const today = tempDir("pd-737-day-floor-today-");
+  for (let i = 0; i < 1000; i += 1) writeLocal(today, rec(`t${i}`, AT - i * 30_000));
+  const full = await fleetOf(today, emptyRedis()).snapshot();
+  assert.deepEqual([full.runsDay.floor, full.spendByHour.floor, full.softHoldToday.floor], [true, true, true], "all 1000 inside today: every fold a floor");
+});
+
+test("createFleetReader: each host row carries the registry's ttlAgeMs, skewMs and noExpiry, re-checked; hostsReadAt is the last good read (#737)", async () => {
+  const logsDir = tempDir("pd-737-hosts-clock-");
+  let t = AT;
+  let hosts = [
+    { name: "mini1", routes: "true", ttlAgeMs: 1200, skewMs: -5000, noExpiry: false },
+    { name: "mini2", routes: "true", ttlAgeMs: -1, skewMs: 1.5, noExpiry: "yes" },
+    { name: "mini3", routes: "true", ttlAgeMs: null, skewMs: 108_000, noExpiry: true },
+    { name: "mini4", routes: "true" },
+  ];
+  let up = false;
+  const reader = fleetOf(logsDir, emptyRedis(), { seams: { nowFn: () => t, readLiveHostsFn: async () => (up ? { hosts } : { unreachable: "ECONNREFUSED" }) } });
+  const before = await reader.snapshot();
+  assert.equal(before.hostsReadAt, null, "no registry read yet");
+  up = true;
+  const snap = await reader.snapshot();
+  assert.deepEqual(snap.hostBudgets.map((h) => [h.name, h.ttlAgeMs, h.skewMs, h.noExpiry]), [
+    ["mini1", 1200, -5000, false],
+    ["mini2", null, null, null],
+    ["mini3", null, 108_000, true],
+    ["mini4", null, null, null],
+  ]);
+  assert.equal(snap.hostsReadAt, AT);
+  up = false;
+  t += 30_000;
+  const later = await reader.snapshot();
+  assert.equal(later.hostsReadAt, AT, "the rows kept from the last good read say when that was");
+  assert.deepEqual(later.hostBudgets.map((h) => h.name), ["mini1", "mini2", "mini3", "mini4"]);
+});
+
 // --- git reads keep git's words to themselves ------------------------------------------------------------------------
 
 test("every git read captures stderr: stdin closed, stdout and stderr piped, never inherited", () => {
@@ -1009,4 +1088,31 @@ test("a folder that is not a repository prints nothing on the caller's stderr", 
   assert.equal(child.status, 0, child.stderr);
   assert.deepEqual(JSON.parse(child.stdout), [null, "not-a-git-repo"]);
   assert.equal(child.stderr, "", "git's fatal line stayed with the read");
+});
+
+test("writeEnvelope carries a Valkey client's words only bounded: control bytes made spaces, at most 200 characters", async () => {
+  const { writeEnvelope } = await import("../src/read-model.mjs");
+  const dir = tempDir("pd-737-envelope-words-");
+  const projectsPath = join(dir, "projects.json");
+  const envelopeFile = join(dir, "envelope.json");
+  writeFileSync(projectsPath, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  writeFileSync(envelopeFile, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+  const words = `connect ECONNREFUSED 10.9.8.7:6379 \u001b]52;c;${"A".repeat(300)}\u0007`;
+  const bounded = `connect ECONNREFUSED 10.9.8.7:6379  ]52;c;${"A".repeat(300)} `.slice(0, 200);
+  const write = (over) => writeEnvelope({ envelopeFile, projectsPath, maxCostMicros: 2_000_000, change: { totalUsd: "90" }, url: "redis://127.0.0.1:1", ...over });
+  const fails = () => {
+    throw new Error(words);
+  };
+  const client = (over) => () => ({ on() {}, status: "ready", set: async () => null, eval: async () => 1, disconnect() {}, ...over });
+  // The client could not be made, its SET failed, and, once the file could not be replaced, its put-back failed.
+  const unmade = await write({ redisFn: fails });
+  const unset = await write({ redisFn: client({ set: async () => fails() }) });
+  const unput = await write({ redisFn: client({ eval: async () => fails() }), fs: { ...nodeFs, writeFileSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } } });
+  for (const [what, res] of [["unmade", unmade], ["unset", unset], ["unput", unput]]) {
+    assert.ok(typeof res.invalid === "string" && res.invalid.includes(`(${bounded})`), `${what}: ${res.invalid}`);
+    assert.ok(!res.invalid.includes(words.slice(0, 40)) && !/[\u0000-\u001f]/.test(res.invalid), `${what}: no control byte, and cut`);
+  }
+  assert.match(unmade.invalid, /^could not reach Valkey to record the new envelope's digest in /);
+  assert.match(unset.invalid, /^could not record the new envelope's digest in /);
+  assert.match(unput.invalid, /could not be put back to absent \(/);
 });

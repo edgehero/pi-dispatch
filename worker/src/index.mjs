@@ -22,7 +22,8 @@ import { resolveJobSize } from "./job-size.mjs";
 import { BUDGET_RECHECK_MS, HOST_BUDGET_TICK_MS, NEVER_FITS_RECHECK_MS, makeHostBudget } from "./host-budget.mjs";
 import { governedDollars } from "./allocation.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
-import { makeWaitState } from "./wait-state.mjs";
+import { answerOf, makeWaitState } from "./wait-state.mjs";
+import { makeDeferTo } from "./defer-write.mjs";
 import { releaseSemanticWindow } from "./queue.mjs";
 import { runIdOf } from "./recovery-queue.mjs";
 import { isFinalOutcome, settleInbox } from "./inbox-settle.mjs";
@@ -55,9 +56,10 @@ export const SCOPE_BUSY_RECHECK_MS = 5_000;
 
 // The endpoint-busy re-check (issue #503): a job whose model server has every slot held re-tests on a fixed
 // cadence, for the scope re-check's reason (a held slot has no natural "until"). Its own value rather than a
-// borrow of 5s, because nothing records WHY a job sits in the delayed set and the wake instant is the only
-// evidence an operator has: 7s is distinct from the scope re-check, the wait throttle floor and the supersede
-// re-ask, and a test keeps all four apart. Short, because a local model run is often short too.
+// borrow of 5s: 7s is distinct from the scope re-check, the wait throttle floor and the supersede re-ask, and a
+// test keeps all four apart. Since issue #737 every deferral records its reason (`defer-write.mjs`), and the
+// distinct instants stay the evidence for a reader older than that record, and for a job whose record could not
+// be written. Short, because a local model run is often short too.
 export const ENDPOINT_BUSY_RECHECK_MS = 7_000;
 
 // How long a job waits before re-asking whether a target's holder is still alive (issue #230). Reached only
@@ -77,9 +79,10 @@ const THROTTLE_ALARM = 5;
 
 // The floor under a throttled or aborted re-ask. Its own constant rather than a borrow of
 // SUPERSEDE_RECHECK_MS, which documents an unrelated concern. Deliberately NOT 5s: that is
-// SCOPE_BUSY_RECHECK_MS, and INT-WAIT-PROFILES-CONTRACT rests on wait deferrals being distinguishable from
-// scope deferrals by wake instant -- nothing records WHY a job sits in the delayed set, so the instants are
-// the only evidence there is. A test pins the two apart.
+// SCOPE_BUSY_RECHECK_MS, and INT-WAIT-PROFILES-CONTRACT has wait deferrals distinguishable from scope
+// deferrals by wake instant. The defer record (`defer-write.mjs`, issue #737) now says why a job sits in the
+// delayed set; the instants remain the evidence for a reader older than it and for a record that could not be
+// written. A test pins the two apart.
 const THROTTLE_FLOOR_MS = 11_000;
 
 /**
@@ -258,6 +261,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	// is about 360 of them. The verdict cannot change between them (same record, same attempt), so one line says it.
 	// Bounded, oldest out first, so a long-lived worker holds at most REJECTED_SEEN_MAX keys.
 	const rejectedSeen = new Set();
+	// THE ONE DEFERRAL (issue #737, `defer-write.mjs`): every gate below that puts the job back on the delayed set goes
+	// through `deferTo`, which records the gate's reason in `defer:job:<id>` (bounded, fail-open) and then makes the move
+	// and the `DelayedError` throw the gates always made; `noteRetry` records an infrastructure retry's backoff before its
+	// throw. Built once per processor, so its log episode (one line per outage, not per wake) spans every job it defers.
+	const { deferTo, noteRetry } = makeDeferTo({ redis, DelayedError, now, hostName, log: (event, fields) => deps?.log?.(event, fields) });
 	const firstRejection = (key) => {
 		if (rejectedSeen.has(key)) return false;
 		rejectedSeen.add(key);
@@ -377,31 +385,29 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
-		// auto-resumes when re-picked. This is FIRST, before the kill timer, the settings read, and the budget
-		// reservation, so a deferred job arms no timer, reserves no slot, and spends nothing
-		// (CONST-BUDGET-BEFORE-TOKENS). `moveToDelayed` needs the worker's `token`; the `> now + 1s` guard keeps
-		// a boundary tick from busy-deferring. A thrown `DelayedError` is how BullMQ learns the job was deferred
-		// (worker.js recognises it) rather than completed or failed.
+		// auto-resumes when re-picked. This is FIRST of the deferral gates, before the kill timer, the settings read, and
+		// the budget reservation, so a deferred job arms no timer, reserves no slot, and spends nothing
+		// (CONST-BUDGET-BEFORE-TOKENS). `deferTo` records the reason, then moves the job with the worker's `token` and
+		// throws the `DelayedError` by which BullMQ learns the job was deferred (worker.js recognises it) rather than
+		// completed or failed; the `> now + 1s` guard keeps a boundary tick from busy-deferring.
 		// One clock snapshot for both the window lookup and the guard, so they cannot disagree across the
 		// call (and a test can inject a fixed clock). `now` defaults to the real wall clock in production.
 		const nowMs = now();
-		const until = pauseUntil(job.data, nowMs);
-		if (until && until > nowMs + 1000) {
-			await job.moveToDelayed(until, token);
-			throw new DelayedError();
-		}
-
-		// The limits snapshot, the project and the size, read here, right after the pause gate and ABOVE the wait gate, so
-		// the never-fits check below can refuse a size before a job waits (issue #596, gate round 1 of phase 2).
-		const limits = scopedLimits();
-		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT), resolved ONCE here from one read of the projects ref,
-		// beside the limits snapshot and for its reason: the gate, the ledger and the record agree for this attempt,
-		// whatever an operator does to projects.json mid-run. A retry or a deferral is a new pickup and resolves again.
-		// Every record from the never-fits check on carries it (the refusal there by hand, every one past the wait gate
-		// through `recordAfterGate`); the wait gate's refusals carry none and are resolved from the live ref (start.mjs).
-		// An id or null, never a name.
+		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT), resolved ONCE here from one read of the projects ref
+		// (an in-memory ref, so the read is free), and for the limits snapshot's reason below: the gate, the ledger and the
+		// record agree for this attempt, whatever an operator does to projects.json mid-run. A retry or a deferral is a new
+		// pickup and resolves again. Above the pause gate since issue #737, so every deferral's record names it, the pause
+		// window's included. Every record from the never-fits check on carries it (the refusal there by hand, every one
+		// past the wait gate through `recordAfterGate`); the wait gate's refusals carry none and are resolved from the live
+		// ref (start.mjs). An id or null, never a name.
 		const pickupProjects = projects();
 		const project = projectOf(job.data, pickupProjects);
+		const until = pauseUntil(job.data, nowMs);
+		if (until && until > nowMs + 1000) await deferTo(job, token, until, "pause-window", { project });
+
+		// The limits snapshot and the size, read here, right after the pause gate and ABOVE the wait gate, so the
+		// never-fits check below can refuse a size before a job waits (issue #596, gate round 1 of phase 2).
+		const limits = scopedLimits();
 		// THE JOB'S SIZE (issue #596, `job-size.mjs`), resolved ONCE here from the same limits snapshot and pickup project
 		// every gate below reads: the project row's memory and CPUs, else the deployment's PI_JOB_MEMORY and PI_JOB_CPUS
 		// (`jobSizeEnv`, validated at boot), else 4g and 2. It reaches the container as an ARGUMENT (runJob's `jobSize`,
@@ -449,8 +455,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					return result;
 				}
 				deps?.log?.("job_size_never_fits_here_deferred", { jobId: job.id, project, misfit, delayMs: NEVER_FITS_RECHECK_MS, ...sizeFields });
-				await job.moveToDelayed(nowMs + NEVER_FITS_RECHECK_MS, token);
-				throw new DelayedError();
+				await deferTo(job, token, nowMs + NEVER_FITS_RECHECK_MS, "size-never-fits", { project });
 			}
 		}
 
@@ -557,14 +562,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// for both; refusing would drop a delivery over a holder that may be gone. So decide
 					// nothing: re-defer briefly and ask again once the probe can answer.
 					deps?.log?.("wait_supersede_unverified", { jobId: job.id, heldBy: claim.holder ?? null, delayMs: SUPERSEDE_RECHECK_MS });
-					await job.moveToDelayed(nowMs + SUPERSEDE_RECHECK_MS, token);
-					throw new DelayedError();
+					await deferTo(job, token, nowMs + SUPERSEDE_RECHECK_MS, "wait-supersede", { project, holder: claim.holder });
 				}
 				if (claim.tookOverFrom) deps?.log?.("wait_lease_taken_over", { jobId: job.id, from: claim.tookOverFrom });
-				await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: holdUntil });
+				await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: holdUntil, afterMs: holdUntil });
 				deps?.log?.("wait_deferred", { jobId: job.id, until: new Date(holdUntil).toISOString(), label: waitLabel(job.data) });
-				await job.moveToDelayed(holdUntil, token);
-				throw new DelayedError();
+				await deferTo(job, token, holdUntil, "wait-after", { project });
 			}
 
 			// TIER 2: the polled conditions. Last, because it is the only part of this gate that spawns a
@@ -590,7 +593,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// the lease, so a job that never wins one has no `since`, never reaches the maximum, and
 					// re-wakes forever with no record and no bound. There is no deciding check to run first
 					// here -- that is the whole condition -- so the bound applies directly.
-					await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + maxWaitMs() });
+					await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + maxWaitMs(), afterMs: holdUntil });
 					if (held >= maxWaitMs()) {
 						return await refuseWait("wait-expired", "wait_expired", { reason: "max-wait-unchecked", denials, heldForMs: held }, `Gave up waiting: this deployment could not run the check often enough to answer within the maximum wait. Not run.`);
 					}
@@ -600,8 +603,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					const wait = Math.max(THROTTLE_FLOOR_MS, Math.floor(waitBackoffMs(intervalMs(), held) / 4));
 					const delay = wait + Math.floor(wait * 0.1 * random());
 					deps?.log?.("wait_check_throttled", { jobId: job.id, delayMs: delay, slots });
-					await job.moveToDelayed(nowMs + delay, token);
-					throw new DelayedError();
+					await deferTo(job, token, nowMs + delay, "wait-throttled", { project });
 				}
 
 				// Declared outside the try below because the branches AFTER it read both.
@@ -630,12 +632,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						checkSlots.release(WAIT_CHECK_KEY);
 						const denials = await waitState.noteThrottle(job.id, { denied: true });
 						if (denials === THROTTLE_ALARM) deps?.log?.("wait_capacity_exceeded", { jobId: job.id, denials, slots: checkSlotCount(), where: "fleet", hint: "raise PI_WAIT_CHECK_SLOTS or PI_CONCURRENCY, lengthen PI_WAIT_INTERVAL_MS, or hold fewer jobs" });
-						await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + maxWaitMs() });
+						await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + maxWaitMs(), afterMs: holdUntil });
 						const wait = Math.max(THROTTLE_FLOOR_MS, Math.floor(waitBackoffMs(intervalMs(), held) / 4));
 						const delay = wait + Math.floor(wait * 0.1 * random());
 						deps?.log?.("wait_check_throttled", { jobId: job.id, delayMs: delay, slots: checkSlotCount(), where: "fleet" });
-						await job.moveToDelayed(nowMs + delay, token);
-						throw new DelayedError();
+						await deferTo(job, token, nowMs + delay, "wait-throttled", { project });
 					}
 				}
 				// THE LEASE IS HELD FROM THE `tryAcquire` ABOVE, so every exit from here down must release it.
@@ -656,8 +657,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					}
 					if (claim.retry) {
 						deps?.log?.("wait_supersede_unverified", { jobId: job.id, heldBy: claim.holder ?? null, delayMs: SUPERSEDE_RECHECK_MS });
-						await job.moveToDelayed(nowMs + SUPERSEDE_RECHECK_MS, token);
-						throw new DelayedError();
+						await deferTo(job, token, nowMs + SUPERSEDE_RECHECK_MS, "wait-supersede", { project, holder: claim.holder });
 					}
 
 					await waitState.noteThrottle(job.id, { denied: false }); // granted: the run of denials ends here
@@ -667,6 +667,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					for (const profile of profiles) {
 						checked = profile;
 						verdict = await deps.checkWait(profile, targetFor(job.data?.kind, job.data), { signal });
+						// What this check said, for a console to show beside the hold (issue #737), in the gate's own words;
+						// nothing for a check that said nothing about the condition. Fail-open. Optional-called: an injected
+						// wait state written before the answers existed records none.
+						const answer = answerOf(verdict);
+						if (answer !== null) await waitState.noteAnswer?.(job.id, { profile, answer });
 						if (verdict?.profileUnknown || verdict?.verdict !== "go") break;
 					}
 				} finally {
@@ -695,8 +700,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// fault, or a rolling deploy would spend a job's whole budget on its own restarts and then
 					// blame the operator's script for it.
 					deps?.log?.("wait_check_aborted", { jobId: job.id, profile: checked });
-					await job.moveToDelayed(nowMs + THROTTLE_FLOOR_MS, token);
-					throw new DelayedError();
+					await deferTo(job, token, nowMs + THROTTLE_FLOOR_MS, "wait-aborted", { project });
 				}
 
 				if (verdict?.verdict === "hold") {
@@ -737,10 +741,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					const jittered = base + Math.floor(base * 0.1 * random());
 					const remaining = Math.max(0, maxWaitMs() - held);
 					const delay = Math.max(1000, Math.min(jittered, remaining));
-					await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + delay });
+					await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + delay, afterMs: holdUntil });
 					deps?.log?.("wait_deferred", { jobId: job.id, profile: checked, fault, heldForMs: held, delayMs: delay });
-					await job.moveToDelayed(nowMs + delay, token);
-					throw new DelayedError();
+					await deferTo(job, token, nowMs + delay, "wait-hold", { project });
 				}
 
 				// FAIL CLOSED on anything that is not literally go. Everything above tests for a specific
@@ -754,8 +757,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					deps?.log?.("wait_check_unintelligible", { jobId: job.id, profile: checked });
 					await waitState.noteCheck(job.id, { fault: true });
 					const base = waitBackoffMs(intervalMs(), held);
-					await job.moveToDelayed(nowMs + base + Math.floor(base * 0.1 * random()), token);
-					throw new DelayedError();
+					await deferTo(job, token, nowMs + base + Math.floor(base * 0.1 * random()), "wait-unclear", { project });
 				}
 
 				// Every profile answered go. Record the last check so the count bound sees it.
@@ -777,9 +779,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// not burn re-check wakes) and after the wait gate (a job holding until tomorrow must not sit on a
 		// folder while it does), and STRICTLY above the `try` below, like the pause gate and for the same two
 		// reasons: a DelayedError thrown inside the try would be converted to UnrecoverableError by the
-		// catch, and a moveToDelayed rejection here must escape RAW into BullMQ's normal failed-attempt
-		// handling exactly as the pause gate's does (inside the try it would become a permanent failure
-		// plus a failure record for what was a transient blip). The limits snapshot is read ONCE here and
+		// catch, and a move rejection here must escape RAW into BullMQ's normal failed-attempt handling
+		// exactly as the pause gate's does (inside the try it would become a permanent failure plus a failure
+		// record for what was a transient blip). `deferTo` rethrows a move's rejection unchanged after
+		// removing the reason it wrote for it, so that holds through it. The limits snapshot is read ONCE here and
 		// shared with `scopedLedgers` below, so the gate and the money ledger cannot disagree mid-job.
 		// tryAcquire is a synchronous check-and-increment -- no await between read and take, so Node's
 		// single thread makes it atomic at any concurrency -- and the local-folder limit is a structural 1
@@ -865,8 +868,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		if (hostBound && !hostBudget) {
 			if (!hostBound.slots.tryAcquire(HOST_SLOT_KEY, hostBound.limit())) {
 				deps?.log?.("host_busy_deferred", { jobId: job.id, delayMs: SCOPE_BUSY_RECHECK_MS });
-				await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
-				throw new DelayedError();
+				await deferTo(job, token, nowMs + SCOPE_BUSY_RECHECK_MS, "host-slot", { project });
 			}
 			hostHeld = true;
 		}
@@ -902,22 +904,25 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// GitHub jobs only, a bare `acme/web` row holds every forge's under the key it always had. With no row it is the
 		// job's canonical scope, so the folder mutex is keyed exactly as before.
 		const scope = rowScopeFor(job.data, limits);
-		// Give every hold back (scope and host), then defer. Every scope-gate deferral goes through here.
-		const deferScope = async (fields) => {
+		// Give every hold back (scope and host), then defer. Every scope-gate deferral goes through here, with the reason
+		// its caller names (issue #737); `chained` names the parent as its holder, the run whose scope it waits for.
+		const deferScope = async (why, fields) => {
 			// Every hold goes back before we defer, the host slot too: `makeInFlight().release` is not idempotent, so a
 			// slot held across a deferral would be a slot this machine never gets back.
 			await releaseAllHolds();
 			deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS, ...fields.extra });
-			await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
-			throw new DelayedError();
+			await deferTo(job, token, nowMs + SCOPE_BUSY_RECHECK_MS, why, { project, ...(why === "chained" ? { holder: job.data.parentJobId } : {}) });
 		};
+		// The repo or folder slot's reason. A chained child (its parent enqueued it before the parent's finally gave the
+		// folder back) waits on that parent's run; any other job on the scope's own limit, by its kind.
+		const scopeWhy = typeof job.data?.parentJobId === "string" ? "chained" : job.data?.kind === "local" ? "scope-folder" : "scope-repo";
 		if (scope) {
 			const ceiling = concurrencyFor(job.data, limits);
 			if (!inFlight.tryAcquire(scope, ceiling)) {
 				// Optional-chained: makeProcessor gives `deps` no default and bare wirings pass deps: {}.
 				// The scope itself stays out of the log line (no-pii-in-logs -- a local scope is a full
 				// host path); the delayed count and the job id are what an operator needs to see it.
-				await deferScope({ event: "scope_busy_deferred" });
+				await deferScope(scopeWhy, { event: "scope_busy_deferred" });
 			}
 			const repoHold = { key: scope, fleet: null };
 			scopeHolds.push(repoHold);
@@ -938,7 +943,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// matching row, so a deployment with no scoped-limits file issues no command at all.
 			if (scopeLease && job.data?.kind !== "local" && Number.isFinite(ceiling)) {
 				repoHold.fleet = await scopeLease.acquire(job.id, { slots: ceiling, keyArgs: [hash16(scope)] });
-				if (!repoHold.fleet) await deferScope({ event: "scope_busy_deferred", extra: { where: "fleet" } });
+				if (!repoHold.fleet) await deferScope(scopeWhy, { event: "scope_busy_deferred", extra: { where: "fleet" } });
 			}
 		}
 
@@ -952,13 +957,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const projectRow = projectRowFor(limits, project);
 		if (projectRow && Number.isSafeInteger(projectRow.concurrent)) {
 			if (!inFlight.tryAcquire(projectRow.scope, projectRow.concurrent)) {
-				await deferScope({ event: "scope_busy_deferred", extra: { ledger: "project" } });
+				await deferScope("scope-project", { event: "scope_busy_deferred", extra: { ledger: "project" } });
 			}
 			const projectHold = { key: projectRow.scope, fleet: null };
 			scopeHolds.push(projectHold);
 			if (scopeLease) {
 				projectHold.fleet = await scopeLease.acquire(job.id, { slots: projectRow.concurrent, keyArgs: [hash16(projectRow.scope)] });
-				if (!projectHold.fleet) await deferScope({ event: "scope_busy_deferred", extra: { ledger: "project", where: "fleet" } });
+				if (!projectHold.fleet) await deferScope("scope-project", { event: "scope_busy_deferred", extra: { ledger: "project", where: "fleet" } });
 			}
 		}
 
@@ -1066,8 +1071,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (where !== null) {
 					await releaseAllHolds();
 					deps?.log?.("endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS });
-					await job.moveToDelayed(nowMs + ENDPOINT_BUSY_RECHECK_MS, token);
-					throw new DelayedError();
+					await deferTo(job, token, nowMs + ENDPOINT_BUSY_RECHECK_MS, "endpoint", { project, endpoint: endpoint.id });
 				}
 				endpointHolds.push({ id: endpoint.id, fleet });
 			}
@@ -1100,8 +1104,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				await releaseAllHolds();
 				budgetState.budgetDeferred = true;
 				deps?.log?.("host_budget_deferred", { jobId: job.id, project, why: verdict.why, rank: verdict.rank, memMiB: size.memMiB, cpuCenti: size.cpuCenti, delayMs: BUDGET_RECHECK_MS });
-				await job.moveToDelayed(nowMs + BUDGET_RECHECK_MS, token);
-				throw new DelayedError();
+				await deferTo(job, token, nowMs + BUDGET_RECHECK_MS, "host-budget", { project, budgetWhy: verdict.why });
 			}
 			budgetHeld = true;
 		}
@@ -1529,8 +1532,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// delayed set WITHOUT spending an attempt, the pause gate's move, since a service held up past one retry backoff
 			// failed a job that heals by itself (measured). Bounded by the hold's own start, stored on the job because a
 			// deferral leaves `attemptsMade` alone and a worker restart must not reset it; past the bound it fails for good
-			// with its own reason token, whose comment names the restart. Nothing is recorded per deferral: the job never
-			// started, and one record a minute for an hour would bury the run history.
+			// with its own reason token, whose comment names the restart. No run record is written per deferral (its defer
+			// record says why it waits, and is replaced by the next): the job never started, and one run record a minute
+			// for an hour would bury the run history.
 			//
 			// Gate round 3: the hour counts only while the worker kept checking. A check that comes more than two recheck
 			// periods after the last one (the queue was paused, `pi-dispatch pause`, or no worker ran) starts the hold
@@ -1606,8 +1610,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (heldAt - since < PODMAN_RESTART_HOLD_MAX_MS) {
 					await job.updateData({ ...job.data, podmanRestartHoldSinceMs: since, podmanRestartHoldLastMs: heldAt });
 					deps?.log?.("podman_restart_hold", { jobId: job.id, heldForMs: heldAt - since, delayMs: PODMAN_RESTART_HOLD_RECHECK_MS, reason: String(error.message).slice(0, 300) });
-					await job.moveToDelayed(heldAt + PODMAN_RESTART_HOLD_RECHECK_MS, token);
-					throw new DelayedError();
+					await deferTo(job, token, heldAt + PODMAN_RESTART_HOLD_RECHECK_MS, "podman-restart", { project });
 				}
 				const expired = Object.assign(new UnrecoverableError(`held ${Math.round((heldAt - since) / 60_000)} min for rootful Podman's service to restart, and it did not: ${error.message}`), { reason: PODMAN_RESTART_HOLD_EXPIRED, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
 				await settleSteer({ error: expired });
@@ -1634,13 +1637,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// preflights re-run), all free reads, once a minute per held job.
 			if (error?.bundleProfileHold === true) {
 				deps?.log?.("secret_bundle_profile_hold", { jobId: job.id, delayMs: NEVER_FITS_RECHECK_MS, reason: typeof error.reason === "string" ? error.reason : null });
-				await job.moveToDelayed(now() + NEVER_FITS_RECHECK_MS, token);
-				throw new DelayedError();
+				await deferTo(job, token, now() + NEVER_FITS_RECHECK_MS, "bundle-profile", { project });
 			}
 			if (Number.isFinite(error?.recoveryWaitMs) && error.recoveryWaitMs > 0) {
 				deps?.log?.("recovery_wait_hold", { jobId: job.id, delayMs: error.recoveryWaitMs });
-				await job.moveToDelayed(now() + error.recoveryWaitMs, token);
-				throw new DelayedError();
+				await deferTo(job, token, now() + error.recoveryWaitMs, "recovery-wait", { project, holder: job.data?.recoveryOf });
 			}
 			// Issue #476: a job whose egress preflight found the rootless network keeper running on its own bridge but younger
 			// than the minimum age is HELD until it is old enough (one `moveToDelayed`, no attempt), the move the hold above
@@ -1658,14 +1659,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (!restarted && heldMs < NETNS_KEEPER_YOUNG_HOLD_MAX_MS) {
 					await job.updateData({ ...job.data, netnsKeeperHoldSinceMs: keeperHold.since, netnsKeeperHoldLastMs: keeperHold.at, netnsKeeperHoldStartedMs: young.startedMs });
 					deps?.log?.("netns_keeper_young_hold", { jobId: job.id, keeperAgeMs: young.ageMs, heldForMs: heldMs, delayMs: young.waitMs });
-					await job.moveToDelayed(keeperHold.at + young.waitMs, token);
-					throw new DelayedError();
+					await deferTo(job, token, keeperHold.at + young.waitMs, "netns-keeper", { project });
 				}
 				const was = keeperHold.startedMs ?? young.startedMs;
 				await markKeeperLoop(job, was === young.startedMs ? [was] : [was, young.startedMs]);
 				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
 				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				await noteRetry(job, { project });
 				throw loop;
 			}
 			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && keeperHold.startedMs !== null) {
@@ -1674,6 +1675,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs, now: null, problem: error.keeperProblem ?? null, heldMs: keeperHold.at - keeperHold.since, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
 				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				await noteRetry(job, { project });
 				throw loop;
 			}
 			// A LATER ATTEMPT OF A JOB THAT SAW THE LOOP (gate of PR #479). The loop's retry comes after the queue's 60 s
@@ -1686,11 +1688,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const loop = new InfraRetry(netnsKeeperLoopAgainSentence({ seen: loopSeen, problem: error.keeperProblem ?? null, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
 				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				await noteRetry(job, { project });
 				throw loop;
 			}
 			await settleSteer({ error });
 			recordAfterGate({ job, error, startedAt, endedAt: new Date().toISOString() });
-			if (error instanceof InfraRetry) throw error; // retryable: BullMQ retries per attempts
+			if (error instanceof InfraRetry) {
+				// Retryable: BullMQ retries per attempts, after its backoff. The retry's reason is recorded first (issue #737),
+				// since BullMQ delays the job itself after this throw, where no gate of ours can say why.
+				await noteRetry(job, { project });
+				throw error;
+			}
 			// A non-retryable, non-infra error (our bug) must not retry forever. UnrecoverableError
 			// records it as failed-and-distinct in the queue's failed set without a retry.
 			throw new UnrecoverableError(error.message);

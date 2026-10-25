@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { test } from "node:test";
-import { runCancel } from "../src/cancel-cli.mjs";
+import { boundedText, runCancel } from "../src/cancel-cli.mjs";
 import { ranBefore } from "../src/cancel-state.mjs";
 
 // runCancel lazily imports connection/queue/host-registry even when every seam is injected (the pause
@@ -17,7 +18,7 @@ const needsDeps = depsOk ? false : `queue deps not installed (node ${process.ver
  * A whole fake deployment behind runCancel's seams. One shared `ops` array records redis and job calls in
  * order, because the held path's contract IS an order (hold keys before remove).
  */
-function world({ hash = {}, state = "delayed", jobKnown = true, removeThrows = 0, ack, registryDown = false, queueNames = ["pi-jobs"], attemptsMade = 0, attemptsStarted = 0 } = {}) {
+function world({ hash = {}, state = "delayed", jobKnown = true, removeThrows = 0, removeError = "could not be removed because it is locked by another worker", ack, registryDown = false, queueNames = ["pi-jobs"], attemptsMade = 0, attemptsStarted = 0 } = {}) {
 	const ops = [];
 	const out = [];
 	const err = [];
@@ -33,7 +34,7 @@ function world({ hash = {}, state = "delayed", jobKnown = true, removeThrows = 0
 		async remove() {
 			ops.push(["remove"]);
 			removeAttempts += 1;
-			if (removeAttempts <= removeThrows) throw new Error("could not be removed because it is locked by another worker");
+			if (removeAttempts <= removeThrows) throw new Error(removeError);
 		},
 	};
 	const probe = {
@@ -77,7 +78,7 @@ function world({ hash = {}, state = "delayed", jobKnown = true, removeThrows = 0
 				closed.push(name);
 			},
 		}),
-		readLiveHostsFn: async () => (registryDown ? { unreachable: "registry boom" } : { hosts: {} }),
+		readLiveHostsFn: async () => (registryDown ? { unreachable: registryDown === true ? "registry boom" : registryDown } : { hosts: {} }),
 		discoverHostQueuesFn: async () => [],
 		fleetQueueNamesFn: () => [],
 		unionQueueNamesFn: () => queueNames,
@@ -125,6 +126,80 @@ test("a held job goes through the shared removeHeldJob sequence: hold keys first
 	assert.ok(delIdx !== -1 && removeIdx !== -1 && delIdx < removeIdx, `hold keys must go before the job (${names.join(" -> ")})`);
 });
 
+test("a held job whose remove fails after its hold was cleared says the hold is gone and how to finish, exit 1", { skip: needsDeps }, async () => {
+	// A worker locked the job between the state read and the remove: the hold's keys are already deleted, so the line
+	// must not read as a refusal that changed nothing.
+	const { ops, err, seams } = world({ hash: { since: "123" }, state: "delayed", removeThrows: 1 });
+	assert.equal(await runCancel("j1", "redis://x", seams), 1);
+	assert.equal(err.join(""), "error: could not cancel held job j1: its hold was cleared, but the job itself could not be removed (could not be removed because it is locked by another worker); it may still be queued, now without its hold. Run `pi-dispatch cancel j1` again to remove or stop it\n");
+	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "wait:job:j1"), "the hold really was cleared (this test would be vacuous otherwise)");
+	// A held job refused before anything was deleted keeps the plain words.
+	const done = world({ hash: { since: "123" }, state: "completed" });
+	assert.equal(await runCancel("j1", "redis://x", done.seams), 1);
+	assert.equal(done.err.join(""), "error: could not cancel held job j1: job j1 is completed, not waiting -- it has already left the hold\n");
+});
+
+test("the cleared line carries the remove's error with each terminal control a space and at most 200 characters of it", { skip: needsDeps }, async () => {
+	// The error is another module's words: a clipboard write (OSC 52, ended by a bell), a CSI with no ESC, and 10,000 more.
+	const hostile = `\u001b]52;c;cHduZWQ=\u0007locked \u009b2J\r\n${"x".repeat(10_000)}`;
+	const { err, seams } = world({ hash: { since: "123" }, state: "delayed", removeThrows: 1, removeError: hostile });
+	assert.equal(await runCancel("j1", "redis://x", seams), 1);
+	const shown = ` ]52;c;cHduZWQ= locked  2J  ${"x".repeat(172)}`;
+	assert.equal(shown.length, 200);
+	assert.equal(err.join(""), `error: could not cancel held job j1: its hold was cleared, but the job itself could not be removed (${shown}); it may still be queued, now without its hold. Run \`pi-dispatch cancel j1\` again to remove or stop it\n`);
+	assert.doesNotMatch(err.join("").slice(0, -1), /[\u0000-\u001f\u007f-\u009f]/, "one line, and nothing in it a terminal acts on");
+});
+
+test("every other module's words a line carries reach stderr bounded: a registry's, a remove's, a lookup's", { skip: needsDeps }, async () => {
+	// What a job's data, a Valkey reply or a client can hold: a terminal's clipboard write, a screen clear, a long tail.
+	const planted = `\u001b]52;c;aGk=\u0007\u001b[2J${"x".repeat(300)}`;
+	const clean = (text) => !/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text);
+	const blind = world({ jobKnown: false, registryDown: planted });
+	assert.equal(await runCancel("j1", "redis://x", blind.seams), 1);
+	assert.ok(clean(blind.err.join("")) && blind.err.join("").includes(`registry unreadable: ${boundedText(planted)} — a host`), "the registry's words");
+	const raced = world({ hash: {}, state: ["delayed", "delayed"], removeThrows: 1, removeError: planted });
+	assert.equal(await runCancel("j3", "redis://x", raced.seams), 1);
+	assert.equal(raced.err.join(""), `error: could not remove j3 — it is now delayed; the remove failed with: ${boundedText(planted)}\n`);
+	const lookup = world();
+	const queueFn = lookup.seams.queueFn;
+	lookup.seams.queueFn = (conn, opts) => ({ ...queueFn(conn, opts), getJob: async () => { throw new Error(planted); } });
+	assert.equal(await runCancel("j4", "redis://x", lookup.seams), 1);
+	assert.ok(clean(lookup.err.join("")), "the lookup's own error, under the could-not-reach line");
+	assert.ok(lookup.err.join("").endsWith(`\n  ${boundedText(planted)}\n`));
+	// A held job whose first delete failed with its hold read back in place: the refusal's own words, bounded.
+	const held = world({ hash: { since: "1" } });
+	const heldProbe = held.seams.redisFn();
+	heldProbe.del = async () => {
+		throw new Error(planted);
+	};
+	heldProbe.hexists = async () => 1;
+	held.seams.redisFn = () => heldProbe;
+	assert.equal(await runCancel("j1", "redis://x", held.seams), 1);
+	assert.equal(held.err.join(""), `error: could not cancel held job j1: ${boundedText(planted)}\n`);
+});
+
+test("boundedText substitutes and cuts as the console's boundedText does, on every character a terminal acts on", async () => {
+	assert.equal(boundedText("plain words"), "plain words");
+	assert.equal(boundedText(undefined), "no reason given");
+	assert.equal(boundedText("a\u001b[31mb\u009bc\u007fd\te\nf"), "a [31mb c d e f");
+	assert.equal(boundedText("y".repeat(201)), "y".repeat(200));
+	// The worker cannot import the admin, so the CLI keeps its own copy; this holds it to the console's own function,
+	// input by input, where the admin is beside it.
+	const actionsPath = new URL("../../admin/src/job-actions.mjs", import.meta.url);
+	if (!existsSync(actionsPath)) return;
+	const { boundedText: theirs } = await import(actionsPath.href);
+	// C0, printable ASCII, DEL and C1: the class a terminal executes, where the two must agree character for character.
+	// Past U+009F the console substitutes more (a bidi control, a zero-width or a no-break space, for a reader of a page)
+	// and the CLI does not: no relation is claimed there.
+	for (let cp = 0; cp <= 0x9f; cp++) {
+		const s = `a${String.fromCodePoint(cp)}b`;
+		assert.equal(boundedText(s), theirs(s), `U+${cp.toString(16).padStart(4, "0")}`);
+	}
+	for (const s of [null, undefined, "", "x".repeat(10_000), `\u001b[2J${"y".repeat(500)}`, "\u00e9".repeat(300), `a${"\u{1f600}".repeat(150)}`, 42]) {
+		assert.equal(boundedText(s), theirs(s), JSON.stringify(s)?.slice(0, 40));
+	}
+});
+
 test("a plain delayed job is removed: it never ran, no record, exit 0", { skip: needsDeps }, async () => {
 	const { ops, out, seams } = world({ hash: {}, state: "delayed" });
 	const code = await runCancel("j2", "redis://x", seams);
@@ -169,11 +244,21 @@ test("the queued-to-active race falls through to the cancel channel instead of f
 	assert.match(out.join(""), /cancel accepted by hostB/);
 });
 
+test("a remove that throws while the job still waits says the state read after and the throw, labelled apart, exit 1", { skip: needsDeps }, async () => {
+	const { err, seams } = world({ hash: {}, state: ["delayed", "delayed"], removeThrows: 1 });
+	assert.equal(await runCancel("j3", "redis://x", seams), 1);
+	assert.equal(err.join(""), "error: could not remove j3 — it is now delayed; the remove failed with: could not be removed because it is locked by another worker\n");
+});
+
 test("an active job's ack names the host, and an empty-string ack still reads as a worker", { skip: needsDeps }, async () => {
 	const named = world({ hash: {}, state: "active", ack: "hostA" });
 	assert.equal(await runCancel("j4", "redis://x", named.seams), 0);
 	assert.match(named.out.join(""), /cancel accepted by hostA/);
 	assert.match(named.out.join(""), /operator-cancel/);
+	// The ack is a value read from Valkey, so it reaches the terminal bounded like any other module's words.
+	const planted = world({ hash: {}, state: "active", ack: "\u001b]52;c;aGk=\u0007\u001b[2J" });
+	assert.equal(await runCancel("j4", "redis://x", planted.seams), 0);
+	assert.ok(planted.out.join("").startsWith("cancel accepted by  ]52;c;aGk=  [2J — stopping"), JSON.stringify(planted.out.join("")));
 	const anon = world({ hash: {}, state: "active", ack: "" });
 	assert.equal(await runCancel("j4", "redis://x", anon.seams), 0);
 	assert.match(anon.out.join(""), /cancel accepted by the worker/);

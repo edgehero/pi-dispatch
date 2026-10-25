@@ -37,6 +37,11 @@ test("formatting: ages, UTC instants, dollars and paths, never the host's zone o
   for (const bad of [-1, Number.NaN, null, "5"]) assert.equal(ageText(bad), "unknown");
   assert.equal(utcText(NOW), "2026-10-08 15:39 UTC");
   assert.equal(utcText(Number.NaN), "unknown");
+  // Only an instant whose year has four digits: the year 9999's last is drawn, past it and before 1970 are unknown, never
+  // a date cut from a six-digit year.
+  assert.equal(utcText(253402300799999), "9999-12-31 23:59 UTC");
+  for (const out of [253402300800000, 8e15, 8.64e15, -1, -1e15]) assert.equal(utcText(out), "unknown", String(out));
+  assert.equal(utcText(0), "1970-01-01 00:00 UTC");
   assert.equal(usdText(2_000_000), "$2.00");
   assert.equal(usdText(-1), "-");
   assert.equal(usdText(1.5), "-");
@@ -654,12 +659,23 @@ test("the audit panels: a seq page whose place holds the right row but not the o
   const q = parseAuditQuery("seq=60").query;
   const v = await readAuditView({ read: log.read, verify: () => cached, query: q });
   assert.deepEqual([v.seek.by, v.found], ["misplaced", false]);
+  // The walk met row 100 at the top of row 60's chunk, then row 10 out of its place, and stopped there: that one row is
+  // no page of row 60's, so the page draws no row, only the empty state, which says why under a title that does not
+  // claim the row is gone. Older goes on below the place the walk got to.
+  assert.deepEqual([v.rows, v.next], [[], "2026-10:100"]);
   const p = auditPanels(v, q);
-  assert.ok(p.log.includes('<div class="tbl-foot">Row 60 is not where the chain check counted it (the files changed since it ran). Reading from the newest row did not find it either.<span class="pager">'), p.log);
-  assert.ok(!p.log.includes("holds no row"), p.log);
-  // With nothing on the page, the empty state says the same, under a title that does not claim the row is gone.
-  const empty = auditPanels({ ...v, rows: [] }, q);
-  assert.ok(empty.log.includes("<b>Row 60 was not found</b><span>Row 60 is not where the chain check counted it (the files changed since it ran). Reading from the newest row did not find it either.</span>"), empty.log);
+  assert.ok(!p.log.includes("<tr"), p.log);
+  assert.ok(p.log.includes("<b>Row 60 was not found</b><span>Row 60 is not where the chain check counted it (the files changed since it ran). Reading from the newest row did not find it either.</span>"), p.log);
+  assert.ok(!p.log.includes("holds no row") && p.log.includes('href="/audit?before=2026-10%3A100">Older</a>'), p.log);
+  // Every seq page whose row was not found is drawn so, whatever the walk met of the chunk: a row the log has no line
+  // for, among rows it has (a walk that read the whole chunk), shows no row either.
+  const gap = auditLogDir(130);
+  gap.write(gap.lines().filter((_, i) => i !== 94));
+  const g = await readAuditView({ read: gap.read, verify: () => null, query: parseAuditQuery("seq=95").query });
+  assert.deepEqual([g.seek.by, g.found, g.rows.length], ["unplaced", false, 0]);
+  // A row found keeps its whole chunk.
+  const found = await readAuditView({ read: gap.read, verify: () => null, query: parseAuditQuery("seq=96").query });
+  assert.deepEqual([found.found, found.rows.length, found.rows[0].entry.seq, found.rows.at(-1).entry.seq], [true, 49, 100, 51]);
 });
 
 test("the audit log says a row's count by its kind: one of a bulk write's rows, or the jobs a resume found waiting", async () => {

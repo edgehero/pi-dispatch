@@ -402,3 +402,35 @@ test("review round 1, H2: the bundle gate is told every host the job's own crede
 		assert.deepEqual(ask.capabilities, ["bundleEnvFile"]);
 	}
 });
+
+test("a bundle profile hand-back records why the job waits: for a host that serves its profile (#737)", { skip: indexMod ? false : "bullmq not installed" }, async () => {
+	const { NEVER_FITS_RECHECK_MS } = await import("../src/host-budget.mjs");
+	const { QUEUE } = await import("../src/queue.mjs");
+	const { withDeferRecords, deferRecordOf } = await import("./helpers/defer-redis.mjs");
+	const NOW = Date.UTC(2026, 9, 19, 12, 0);
+	const redis = withDeferRecords({ incr: async () => 1, decr: async () => 0, expire: async () => {} });
+	const processor = indexMod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		now: () => NOW,
+		multiHost: true,
+		hostName: "mini1",
+		projects: () => [{ id: "shop", members: ["/srv/shop"] }],
+		recordRun: () => {},
+		timeoutMs: 100000,
+		deps: {
+			findSecretBundle: () => ({ id: "shop", bundle: { profile: "shop-env", ref: "shop", project: "shop" }, optedOut: false, entry: "cron" }),
+			secretBundles: { lookup: (profile) => ({ profileUnknown: profile }), resolve: async () => assert.fail("never read") },
+			prepareWorkspace: async () => assert.fail("never prepared"),
+			runContainer: async () => assert.fail("never run"),
+			cleanup: async () => {},
+			comment: async () => {},
+		},
+	});
+	const job = { id: "cron-1", name: "local", queueName: QUEUE, attemptsMade: 0, data: { kind: "local", folder: "/srv/shop", flow: "f", task: "t", trigger: { id: "nightly" } }, moveToDelayed: async () => {}, updateData: async () => {} };
+	await assert.rejects(() => processor(job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	const r = deferRecordOf(redis, "cron-1");
+	assert.deepEqual([r.why, r.bucket, r.until, r.project, r.host], ["bundle-profile", "slot", NOW + NEVER_FITS_RECHECK_MS, "shop", "mini1"]);
+});

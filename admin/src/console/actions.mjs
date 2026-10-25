@@ -4,8 +4,8 @@
  * `POST /api/act/<name>/preview` and `POST /api/act/<name>/confirm` from it (`auth: "operator"`, `write: true`), so a
  * write cannot exist without the dispatcher's guards and the route tests derive their lists from the same table.
  *
- * AN ENTRY: `{ name, kind, paid, bulk, needs, fields, danger, preview(body, ctx), apply(entry, ctx), undo(out, body),
- * inverse(out, body), confirmLabel(out), done(out, body, result) }`.
+ * AN ENTRY: `{ name, kind, paid, bulk, needs, fields, danger, atConfirm, preview(body, ctx), apply(entry, ctx),
+ * undo(out, body, result), inverse(out, body, result), confirmLabel(out), done(out, body, result) }`.
  *   - `name` is the route segment and the ticket's action; `kind` is the audit row's `kind` (INT-CONSOLE-AUDIT-LOG),
  *     the panel's own word for the same write where one exists, so the TUI's rows and the console's read alike.
  *   - `fields` (issue #737) is every body key the preview reads, frozen; a body carrying any other key is refused by
@@ -21,12 +21,16 @@
  *     `{ invalid, partial: true }` (refused after part of it was done: the kill switch reached some queues), or
  *     `{ unreachable }` (Valkey).
  *   - `danger` (a destructive act: a cancel, a removal, a pause, a delete) draws the red bar and button; never together
- *     with `paid`, which draws the yellow ones. `undo(out, body)` is the bar's and the banner's Undo sentence (one, or
- *     `{ bar, after }` when the bar's points at the preview); `inverse(out, body)` the write that undoes it, `{ action,
- *     body }` with a body that action's `fields` take, or null when none can (`UNDO_SENTENCES` then says what to do
- *     instead, after "No undo:"); `confirmLabel(out)` the confirm button's words; `done(out, body, result)` what the
- *     banner after the write says happened. All but a bulk act's `done` are decided at the preview, where the file as
- *     it was is known, and ride the ticket (`meta`).
+ *     with `paid`, which draws the yellow ones. `undo(out, body, result)` is the bar's and the banner's Undo sentence
+ *     (one, or `{ bar, after }` when the bar's points at the preview); `inverse(out, body, result)` the write that undoes
+ *     it, `{ action, body }` with a body that action's `fields` take, or null when none can (`UNDO_SENTENCES` then says
+ *     what to do instead, after "No undo:"); `confirmLabel(out)` the confirm button's words; `done(out, body, result)`
+ *     what the banner after the write says happened. All but a bulk act's `done` are decided at the preview, where the
+ *     file as it was is known, and ride the ticket (`meta`); `result` is then undefined.
+ *   - `atConfirm` (a single act only) says the write's way back names something only the write itself makes: a re-run's
+ *     is a cancel of the NEW job, whose id the enqueue mints. Its `undo` and `inverse` are asked twice: at the preview
+ *     with `result` undefined (the bar then says the banner will offer it, and counts as undoable), and again at the
+ *     confirm with the apply's answer as `result`, which the banner's Undo uses.
  *
  * THE PIPELINE (lifted from #640's pause-windows reference write, now shared by every entry):
  *   1. preview: plan, compute the digests and the diff, and store EVERYTHING the write needs in a single-use ticket
@@ -58,13 +62,15 @@
  * the kill switch's decision itself. This module imports none of them, so the server's tests run on small fakes.
  */
 import { createHash } from "node:crypto";
+import { DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_WHY_RE, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
-import { fieldNamed, UNNAMED_FIELD } from "../words.mjs";
+import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { html } from "./html.mjs";
+import { timeHtml, utcText } from "./panels/common.mjs";
 import { FLASH_MAX_BYTES } from "./sessions.mjs";
 
 /** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
@@ -390,13 +396,34 @@ function planned(result) {
   return { plan: result.plan };
 }
 
-/** The fleet snapshot, or the refusal when it cannot be read. */
+/**
+ * How long a preview waits for the fleet snapshot (issue #737). The snapshot's reads have no overall bound of their own,
+ * and a Valkey that stops answering on an open socket would otherwise hold the preview, buttons disabled, for as long.
+ * Not the cancel funnels' 2.5 s: the snapshot is a long chain (every registry row, every queue, the run records' walk),
+ * which a slow but healthy deployment takes seconds over on its first read, so a short bound would refuse a fleet that
+ * answers. Ten seconds is past that, and the refusal says what happened rather than guess why.
+ */
+export const SNAPSHOT_TIMEOUT_MS = 10_000;
+
+/** The refusal when the snapshot did not answer within `SNAPSHOT_TIMEOUT_MS`: what happened, nothing more. */
+export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed";
+
+/** The fleet snapshot, or the refusal when it fails or does not answer within `SNAPSHOT_TIMEOUT_MS`. */
 async function snapshotOf(ctx) {
+  let timer;
   try {
-    const s = await ctx.a.fleet.snapshot();
+    const late = new Promise((resolve) => {
+      timer = setTimeout(resolve, SNAPSHOT_TIMEOUT_MS, null);
+      timer.unref?.();
+    });
+    // A snapshot that settles after the bound settles into the race, which has handled it: never an unhandled rejection.
+    const s = await Promise.race([Promise.resolve().then(() => ctx.a.fleet.snapshot()), late]);
     if (s) return { snapshot: s };
+    if (s === null) return { refusal: SNAPSHOT_TIMEOUT_SENTENCE, status: 503 };
   } catch {
     // answered below
+  } finally {
+    clearTimeout(timer);
   }
   return { refusal: "the fleet could not be read (is Valkey reachable?); nothing was changed", status: 503 };
 }
@@ -404,7 +431,8 @@ async function snapshotOf(ctx) {
 /** A funnel's answer in the pipeline's three shapes. */
 function funnelResult(res, okFields = {}) {
   if (res?.ok) return { ok: true, ...okFields };
-  if (typeof res?.invalid === "string") return { invalid: res.invalid };
+  // A refusal that came after the write was sent (`partial`) keeps that mark, so the confirm never says nothing changed.
+  if (typeof res?.invalid === "string") return res.partial === true ? { invalid: res.invalid, partial: true } : { invalid: res.invalid };
   if (typeof res?.refusal === "string") return { invalid: res.refusal };
   if (typeof res?.refused === "string") return { invalid: res.refused };
   if (res?.unreachable !== undefined) return { unreachable: true };
@@ -959,10 +987,67 @@ function failedAll({ name, kind, verb, fn }) {
   };
 }
 
-/** One job's bulk result as the response and the audit carry it: the id, ok, and the refusal's sentence. */
+/** An instant a line can draw: a whole number of ms that `utcText` draws (0 to the leaf's `DEFER_TIME_MAX_MS`). */
+const drawable = (ms) => Number.isSafeInteger(ms) && utcText(ms) !== "unknown";
+
+/** A waiting row's placeholder named `key` as `{ text, bar }`, or null when the row does not hold it as its rule says. */
+function waitingValue(row, key) {
+  if (key === "until" || key === "due") {
+    // `until`: the record's own instant, else the delayed set's due (the worker writes the one it moves the job to).
+    // `due`: the delayed set's alone. An instant no date can show is missing, so the line says its bucket's title
+    // rather than "at unknown".
+    const at = key === "until" && drawable(row.untilAt) ? row.untilAt : drawable(row.dueAt) ? row.dueAt : null;
+    return at === null ? null : { text: utcText(at), bar: timeHtml(at) };
+  }
+  if (key === "attempt" || key === "attempts") return Number.isSafeInteger(row[key]) && row[key] > 0 ? { text: String(row[key]), bar: String(row[key]) } : null;
+  if (key === "host" || key === "holder" || key === "endpoint") return typeof row[key] === "string" && row[key] !== "" ? { text: row[key], bar: row[key] } : null;
+  return null;
+}
+
+/** `sentence` with each `{placeholder}` filled from `row` (`waitingValue`), as `{ text, bar }`, or null when one is missing. */
+function filledLine(sentence, row) {
+  const parts = sentence.split(/\{([a-z]+)\}/);
+  const values = parts.map((p, i) => (i % 2 === 1 ? waitingValue(row, p) : { text: p, bar: p }));
+  return values.every((v) => v !== null) ? { text: values.map((v) => v.text).join(""), bar: html`${values.map((v) => v.bar)}` } : null;
+}
+
+/**
+ * Why a queued job waits, as a preview line (`{ text, bar }`: the answer's summary and the bar's markup, every time a
+ * `<time>` in the bar), from a `readWaiting`-shaped row: the worker's own sentence for the reason it recorded
+ * (`DEFER_WHYS`, from the worker's leaf, so the two cannot drift), each `{placeholder}` filled from the row. A job the
+ * reader found past its due (`due`) says so (`DEFER_DUE_SENTENCE`), whatever it recorded. A sentence whose placeholder
+ * the row lacks (or holds an instant no date can show) says the bucket's title instead, which is true without it
+ * ("Waiting for a free slot"), never a sentence with a hole. A reason this console has no words for (a newer worker's)
+ * is said by its token with `NO_EXPLANATION`; a row with no reason at all says its bucket's title, "No reason was
+ * recorded" among them. Null for no row: the preview then says nothing about why rather than guess.
+ */
+export function waitingLine(row) {
+  if (row === null || typeof row !== "object") return null;
+  const why = typeof row.why === "string" && DEFER_WHY_RE.test(row.why) ? row.why : null;
+  if (row.bucket === "due") {
+    const line = filledLine(DEFER_DUE_SENTENCE, row);
+    if (line !== null) return line;
+  } else if (why !== null && row.known === true && Object.hasOwn(DEFER_WHYS, why)) {
+    const line = filledLine(DEFER_WHYS[why].sentence, row);
+    if (line !== null) return line;
+  } else if (why !== null && row.known === false) {
+    return { text: `Recorded reason: ${why}, ${NO_EXPLANATION}`, bar: html`Recorded reason: <span class="code">${why}</span>, ${NO_EXPLANATION}` };
+  }
+  const title = DEFER_BUCKET_WORDS[Object.hasOwn(DEFER_BUCKET_WORDS, row.bucket) ? row.bucket : "none"].title;
+  return { text: title, bar: title };
+}
+
+/** What a queued job's cancel does, the preview's last line. */
+const CANCEL_QUEUED_LINE = "It is removed from its queue before it starts; the run records of other jobs are not touched.";
+
+/**
+ * One job's bulk result as the response and the audit carry it: the id, ok, and the refusal's sentence, with `partial`
+ * kept where the funnel's answer had it (part of that job's change may have been made), so the bar never says "not
+ * done" of a job whose hold may be gone.
+ */
 function resultRow(r) {
   if (r?.ok) return { jobId: String(r.jobId), ok: true, ...(r.queue ? { queue: String(r.queue) } : {}) };
-  return { jobId: r?.jobId === null || r?.jobId === undefined ? null : String(r.jobId), ok: false, reason: r?.unreachable !== undefined ? "Valkey could not be reached for this job" : String(r?.invalid ?? "refused") };
+  return { jobId: r?.jobId === null || r?.jobId === undefined ? null : String(r.jobId), ok: false, ...(r?.partial === true ? { partial: true } : {}), reason: r?.unreachable !== undefined ? "Valkey could not be reached for this job" : String(r?.invalid ?? "refused") };
 }
 
 const jobActions = [
@@ -1030,9 +1115,43 @@ const jobActions = [
       const results = [];
       for (const t of entry.targets) {
         const res = await ctx.a.rm.cancelHeldJob({ url: ctx.a.paths.valkeyUrl, jobId: t.jobId });
-        results.push(resultRow(res?.ok ? { ...res, jobId: t.jobId } : { jobId: t.jobId, invalid: res?.invalid ?? "refused" }));
+        results.push(resultRow(res?.ok ? { ...res, jobId: t.jobId } : { jobId: t.jobId, invalid: res?.invalid ?? "refused", partial: res?.partial === true }));
       }
       return { ok: true, results };
+    },
+  },
+  {
+    // Issue #737: take a job that never started out of its queue (waiting, delayed, prioritized or paused, held or not),
+    // by the planner's rules (`job-actions.mjs` `planCancelQueued`: no attempt made, never stalled back, no recovery it
+    // owes a record, not a scheduler's next run). The preview says why the job waits, in the worker's words; the confirm
+    // re-finds the job and refuses one that changed or started since (`cancelQueuedJob`, against `expect`).
+    name: "cancel-queued",
+    kind: "cancel-queued",
+    paid: false,
+    bulk: false,
+    needs: JOB_NEEDS,
+    async preview(body, ctx) {
+      const jobId = jobIdOf(body);
+      const queue = str(body, "queue", { max: 200 });
+      const res = await ctx.a.rm.planCancelQueued({ url: ctx.a.paths.valkeyUrl, jobId, queue: queue ?? null });
+      // The read's own error can name a host, so the answer says Valkey in fixed words (the log is not this preview's).
+      if (res?.unreachable !== undefined) return { refusal: "the queued job could not be read (is Valkey reachable?); nothing was changed", status: 503 };
+      if (typeof res?.refusal === "string") return { refusal: res.refusal, ...(Number.isSafeInteger(res.status) ? { status: res.status } : {}) };
+      const p = res?.plan;
+      if (!p || typeof p.queue !== "string") return { refusal: "the change could not be planned" };
+      const why = waitingLine(p.waiting);
+      return {
+        target: jobId,
+        payload: { jobId, queue: p.queue },
+        // What the confirm holds the job to: where it was found, and that it has still made no attempt and never stalled.
+        expect: { queue: p.queue, attemptsMade: p.attemptsMade, stalledCounter: p.stalledCounter },
+        summary: [`Cancel queued job ${jobId}${p.target ? ` (${p.target})` : ""}`, ...(why ? [why.text] : []), CANCEL_QUEUED_LINE],
+        barLines: [...(why ? [why.bar] : []), CANCEL_QUEUED_LINE],
+      };
+    },
+    async apply(entry, ctx) {
+      const res = await ctx.a.rm.cancelQueuedJob({ url: ctx.a.paths.valkeyUrl, jobId: entry.payload.jobId, expect: entry.expect });
+      return funnelResult(res, { jobId: entry.payload.jobId, queue: typeof res?.queue === "string" ? res.queue : entry.payload.queue, held: res?.held === true });
     },
   },
   failedOne({ name: "retry-failed", kind: "failed-retry", verb: "Retry", fn: "retryFailedJob" }),
@@ -1276,9 +1395,14 @@ const fleetActions = [
 
 /**
  * The Undo sentences of the writes the console cannot undo with another write (issue #737). Each is a ledger's
- * `absent` source (the design's "Undo: Cancel the new run" needs a cancel of a queued job, which no console action
- * makes yet) or a `new` one, and each says what a person CAN do, never only that they cannot. The bar and the banner
- * draw one as "No undo: <sentence>", so none opens with "Cannot be undone" of its own.
+ * `absent` source or a `new` one, and each says what a person CAN do, never only that they cannot. The bar and the
+ * banner draw one as "No undo: <sentence>", so none opens with "Cannot be undone" of its own.
+ *
+ * A RETRY HAS NO UNDO, A RE-RUN HAS ONE. The design's "Undo: Cancel the new run" is `cancel-queued`, which takes only a
+ * job that never started. BullMQ's retry of a failed job keeps the attempts it made (`reprocessJob` drops `atm` only
+ * when asked to reset them, and the console's retry does not), so a retried job is never one `cancel-queued` takes:
+ * `retried` says so. A re-run queues a NEW job, which has made no attempt, so its Undo is that job's cancel, decided at
+ * the confirm where its id is known (`atConfirm`); the bar says so beforehand (`rerunBefore`).
  *
  * TWO PLACES. The bar is drawn beside the preview, so its sentence may point at it ("copy them from this preview"). The
  * banner after the write is on the next page, where no preview is, so each sentence that points at one has a twin for
@@ -1290,9 +1414,12 @@ export const UNDO_SENTENCES = Object.freeze({
   deleteAfter: "Add the removed lines back by hand: the console kept no copy of them.",
   deleteSecrets: "Add the removed trigger back: copy it from this preview and its secret references from your own copy of the file, since the preview does not show them; the console keeps no copy.",
   deleteSecretsAfter: "Add the removed trigger back by hand, with its secret references, from your own copy of the file: the console kept no copy of it.",
-  queued: "The console cannot remove a waiting job; once it runs, Cancel stops it.",
+  retried: "A retried job keeps the attempts it made, so the console does not remove it from its queue; once it runs, Cancel stops it.",
+  rerunBefore: "Cancel the new run before it starts: the banner after it is queued offers it.",
+  rerunUnnamed: "The console could not name the run it queued, so this banner offers no Undo.",
   cancelled: "A cancelled run stays cancelled; re-run it from its run page (a re-run is paid).",
   held: "The job leaves its queue; a redelivery of the same event queues it again.",
+  cancelledQueued: "The job leaves its queue before it starts; a redelivery of the same event, or its trigger's next fire, queues it again.",
   removed: "The queue's copy is gone; the run records its attempts wrote stay.",
   answer: "The answer is queued, and the worker posts it once the job passes its checks.",
   withdrawn: "Send the message again if you still mean it.",
@@ -1354,6 +1481,9 @@ function bulkPaidLabel(verb, out) {
 const say = (sentence) => () => sentence;
 const none = () => null;
 const confirmWord = () => "Confirm";
+
+/** Whether a re-run's answer names the job it queued, and where: what its cancel needs (`WRITE_RULES` `rerun`). */
+const rerunCancel = (result) => typeof result?.jobId === "string" && result.jobId !== "" && typeof result?.queue === "string" && result.queue !== "";
 
 /**
  * A setting's way back: set it to the value it had, or unset it when it had none. A value this form cannot send back
@@ -1460,7 +1590,9 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
  * WHEN `done` IS ASKED. A single act's at the preview, `done(out, body)`, where the file as it was is known (a
  * setting's old value), and it rides the ticket with the Undo. A bulk act's at the confirm, `done(out, body, result)`
  * with the ticket's entry as `out` (its `targets` and `payload`) and `result` `{ done, count }`, since only the confirm
- * knows how many jobs landed.
+ * knows how many jobs landed. The Undo of a rule with `atConfirm: true` (optional, a single act's) is asked at both:
+ * `undo(out, body)` and `inverse(out, body)` at the preview for the bar, then `undo(entry, null, result)` and
+ * `inverse(entry, null, result)` at the confirm, with the apply's answer, for the banner.
  *
  * Indexes stay the 0-based values the forms send, and every sentence says them as the Configuration page does, "trigger
  * at index 2" (`atIndex`), until that page converts (PR 7a). An inverse never carries a secret reference or a
@@ -1471,11 +1603,24 @@ const WRITE_RULES = {
   "cancel-active": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.cancelled), inverse: none, confirmLabel: () => "Cancel the run", done: (out) => `Cancelled running job ${out.payload.jobId}` },
   "cancel-held": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: () => "Cancel the held job", done: (out) => `Cancelled held job ${out.payload.jobId}` },
   "cancel-all-held": { fields: [], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: (out) => `Cancel ${plural(out.targets?.length ?? 0, "held job")}`, done: bulkDone("Cancelled", "held job") },
-  "retry-failed": { fields: ["jobId", "queue"], danger: false, undo: say(UNDO_SENTENCES.queued), inverse: none, confirmLabel: (out) => paidLabel("Retry", out.reserve), done: (out) => `Retried failed job ${out.payload.jobId}` },
+  "cancel-queued": { fields: ["jobId", "queue"], danger: true, undo: say(UNDO_SENTENCES.cancelledQueued), inverse: none, confirmLabel: () => "Cancel the queued job", done: (out) => `Cancelled queued job ${out.payload.jobId}` },
+  "retry-failed": { fields: ["jobId", "queue"], danger: false, undo: say(UNDO_SENTENCES.retried), inverse: none, confirmLabel: (out) => paidLabel("Retry", out.reserve), done: (out) => `Retried failed job ${out.payload.jobId}` },
   "remove-failed": { fields: ["jobId", "queue"], danger: true, undo: say(UNDO_SENTENCES.removed), inverse: none, confirmLabel: () => "Remove the job", done: (out) => `Removed failed job ${out.payload.jobId}` },
-  "retry-all-failed": { fields: ["queue", "repo"], danger: false, undo: say(UNDO_SENTENCES.queued), inverse: none, confirmLabel: (out) => bulkPaidLabel("Retry", out), done: bulkDone("Retried", "failed job") },
+  "retry-all-failed": { fields: ["queue", "repo"], danger: false, undo: say(UNDO_SENTENCES.retried), inverse: none, confirmLabel: (out) => bulkPaidLabel("Retry", out), done: bulkDone("Retried", "failed job") },
   "remove-all-failed": { fields: ["queue", "repo"], danger: true, undo: say(UNDO_SENTENCES.removed), inverse: none, confirmLabel: (out) => `Remove ${plural(out.targets?.length ?? 0, "job")}`, done: bulkDone("Removed", "failed job") },
-  rerun: { fields: ["jobId"], danger: false, undo: say(UNDO_SENTENCES.queued), inverse: none, confirmLabel: (out) => paidLabel("Re-run", out.reserve), done: (out) => `Queued a re-run of ${out.target}` },
+  rerun: {
+    fields: ["jobId"],
+    danger: false,
+    // The new job's cancel, decided at the confirm (`atConfirm`): the enqueue mints its id. At the preview (`result`
+    // undefined) the bar says the banner will offer it. An answer without the job's id or queue (`enqueueRerun` answers
+    // both whenever a job was queued) offers no cancel it could not name, and says so (`rerunUnnamed`).
+    atConfirm: true,
+    // The sentence and the button are judged alike, so a banner never says "No undo: Cancel <id> before it starts".
+    undo: (out, body, result) => (result === undefined ? UNDO_SENTENCES.rerunBefore : rerunCancel(result) ? `Cancel ${result.jobId} before it starts` : UNDO_SENTENCES.rerunUnnamed),
+    inverse: (out, body, result) => (rerunCancel(result) ? { action: "cancel-queued", body: { jobId: result.jobId, queue: result.queue } } : null),
+    confirmLabel: (out) => paidLabel("Re-run", out.reserve),
+    done: (out) => `Queued a re-run of ${out.target}`,
+  },
   "parked-answer": { fields: ["jobId", "text"], danger: false, undo: say(UNDO_SENTENCES.answer), inverse: none, confirmLabel: (out) => paidLabel("Answer", out.reserve), done: (out) => `Answered parked run ${out.target}` },
   steer: {
     fields: ["jobId", "mode", "text"],
@@ -1544,7 +1689,9 @@ function withRules(a) {
   if (r === null) throw new Error(`console action ${a.name} has no write rules (WRITE_RULES)`);
   if (!Array.isArray(r.fields) || typeof r.danger !== "boolean" || RULE_FNS.some((k) => typeof r[k] !== "function")) throw new Error(`console action ${a.name}'s write rules need fields, danger, ${RULE_FNS.join(", ")}`);
   if (r.danger && a.paid) throw new Error(`console action ${a.name} is paid and destructive; it is one or the other`);
-  return Object.freeze({ ...a, fields: Object.freeze([...r.fields]), danger: r.danger, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done });
+  // `atConfirm` is carried as the rule says it, false when absent: the action test holds it a boolean and never on a
+  // bulk act (a bulk confirm asks no rule for its Undo again, `confirmBulk`, so one would keep its preview's in silence).
+  return Object.freeze({ ...a, fields: Object.freeze([...r.fields]), danger: r.danger, atConfirm: r.atConfirm ?? false, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done });
 }
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
@@ -1606,25 +1753,35 @@ function unknownFieldRefusal(action, body) {
 }
 
 /**
+ * An inverse write as the Undo form will send it, or a throw: one that names an action the table does not have, or
+ * carries a key that action does not take, is a programming error, so an Undo button can never preview a refusal of
+ * its own. Null (no inverse) passes.
+ */
+function checkInverse(action, inverse) {
+  if (inverse === null) return;
+  const target = actionNamed(inverse.action);
+  if (!target) throw new Error(`the ${action.name} inverse names no action (${inverse.action})`);
+  const extra = Object.keys(inverse.body ?? {}).find((k) => !target.fields.includes(k));
+  if (extra !== undefined) throw new Error(`the ${action.name} inverse sends ${target.name} a field it does not take (${extra})`);
+}
+
+/** A rule's `undo` answer as the two places say it: one sentence twice, or `{ bar, after }`. */
+const undoSaid = (undo) => (undo !== null && typeof undo === "object" ? { bar: String(undo.bar), after: String(undo.after) } : { bar: String(undo), after: String(undo) });
+
+/**
  * What the banner after the write will say, decided now, where the file as it was is known: the title (the summary's
  * first line), the Undo sentence for the bar (`undo`) and for the banner (`undoAfter`, which never points at the
- * preview), the inverse write, whether the act is destructive, and what the banner says happened (`done`; a
- * bulk act's is asked at the confirm instead, `WRITE_RULES`). An inverse that names an action the table does not have,
- * or carries a key that action does not take, is a programming error and throws (the preview then fails loudly with
- * the console's log line), so an Undo button can never preview a refusal of its own.
+ * preview), the inverse write, whether the bar draws the Undo as an act (`undoable`: an inverse now, or one the confirm
+ * decides, `atConfirm`), whether the act is destructive, and what the banner says happened (`done`; a bulk act's is
+ * asked at the confirm instead, `WRITE_RULES`). A bad inverse throws (`checkInverse`): the preview then fails loudly
+ * with the console's log line.
  */
 function metaOf(action, out, body) {
   const summary = Array.isArray(out.summary) ? out.summary : [];
   const inverse = action.inverse(out, body) ?? null;
-  if (inverse !== null) {
-    const target = actionNamed(inverse.action);
-    if (!target) throw new Error(`the ${action.name} inverse names no action (${inverse.action})`);
-    const extra = Object.keys(inverse.body ?? {}).find((k) => !target.fields.includes(k));
-    if (extra !== undefined) throw new Error(`the ${action.name} inverse sends ${target.name} a field it does not take (${extra})`);
-  }
-  const undo = action.undo(out, body);
-  const said = undo !== null && typeof undo === "object" ? { bar: String(undo.bar), after: String(undo.after) } : { bar: String(undo), after: String(undo) };
-  return { title: String(summary[0] ?? action.name), undo: said.bar, undoAfter: said.after, inverse, danger: Boolean(action.danger), done: action.bulk ? null : String(action.done(out, body)) };
+  checkInverse(action, inverse);
+  const said = undoSaid(action.undo(out, body));
+  return { title: String(summary[0] ?? action.name), undo: said.bar, undoAfter: said.after, inverse, undoable: inverse !== null || action.atConfirm === true, danger: Boolean(action.danger), done: action.bulk ? null : String(action.done(out, body)) };
 }
 
 /**
@@ -1691,7 +1848,7 @@ export async function previewAction(ctx, action) {
     danger: meta.danger,
     confirmLabel,
     undo: meta.undo,
-    html: String(previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: out.diff ?? null, undo: meta.undo, undoable: meta.inverse !== null, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })),
+    html: String(previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: out.diff ?? null, undo: meta.undo, undoable: meta.undoable, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })),
   });
 }
 
@@ -1725,10 +1882,29 @@ export function capturingAudit(audit) {
  * and the banner's Undo (`undo`, the `undoAfter` sentence, and its `inverse`). Past the flash's bound (`FLASH_MAX_BYTES`,
  * a whole pause-windows list as an inverse can pass it) the inverse is dropped and the Undo says to put the list back by
  * hand: a banner without its Undo is honest, a flash the store refused says nothing.
+ *
+ * AN UNDO DECIDED AT THE CONFIRM (`atConfirm`, a re-run's cancel of the job it queued): its rule is asked again here,
+ * with the apply's answer (`result`), in place of the ticket's. The write has landed and its row is in the log by now,
+ * so a rule that throws, or an inverse `checkInverse` refuses, costs the banner its Undo button, never the answer: the
+ * console logs it, and the banner says it could not name the run it queued (`rerunUnnamed`).
  */
-function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done = count, summary = null }) {
+function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done = count, summary = null, result = undefined }) {
   const meta = entry.meta ?? {};
-  const change = { summary: summary ?? String(meta.done ?? meta.title ?? action.name), by: String(ctx.session?.name ?? ""), auditSeq, auditLast, count, done, undo: String(meta.undoAfter ?? meta.undo ?? ""), inverse: meta.inverse ?? null, kind: action.kind, at: clockOf(ctx.deps) };
+  let undo = String(meta.undoAfter ?? meta.undo ?? "");
+  let inverse = meta.inverse ?? null;
+  if (action.atConfirm === true && result !== undefined) {
+    try {
+      const decided = action.inverse(entry, null, result) ?? null;
+      checkInverse(action, decided);
+      undo = undoSaid(action.undo(entry, null, result)).after;
+      inverse = decided;
+    } catch (e) {
+      ctx.deps.log(`console: the ${action.name} Undo could not be decided after the write (${codeOf(e)}); its banner offers none`);
+      undo = UNDO_SENTENCES.rerunUnnamed;
+      inverse = null;
+    }
+  }
+  const change = { summary: summary ?? String(meta.done ?? meta.title ?? action.name), by: String(ctx.session?.name ?? ""), auditSeq, auditLast, count, done, undo, inverse, kind: action.kind, at: clockOf(ctx.deps) };
   if (Buffer.byteLength(JSON.stringify(change), "utf8") > FLASH_MAX_BYTES) {
     change.inverse = null;
     change.undo = UNDO_SENTENCES.tooBigAfter;
@@ -1781,7 +1957,7 @@ export async function confirmAction(ctx, action) {
   // its bar says what may have changed and offers Look again; any other was refused before anything was written.
   if (typeof result?.invalid === "string") return refuse(ctx, "confirm", 409, result.invalid, result.partial === true ? "partial" : "changed");
   if (result?.unreachable || !result?.ok) return refuse(ctx, "confirm", 503, VALKEY_UNREACHABLE, "valkey");
-  const change = changeOf(ctx, entry, action, { auditSeq: audit.first(), count: 1 });
+  const change = changeOf(ctx, entry, action, { auditSeq: audit.first(), count: 1, result });
   tickHub(deps);
   return ctx.json(200, { ...result, ok: true, action: action.name, kind: action.kind, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, change });
 }

@@ -193,3 +193,23 @@ test("the size is resolved at pickup from the project row, then the deployment's
 	assert.deepEqual(ran[1], { memMiB: 2048, cpuCenti: 200, source: "env" }, "no project: the deployment's settings");
 	assert.deepEqual(seen.records[1].size, { memMiB: 2048, cpuCenti: 200, source: "env" });
 });
+
+test("BY SHAPE: the pickup project is resolved right above the pause gate, so every deferral's reason can name it (issue #737)", () => {
+	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	const body = src.slice(src.indexOf("export function makeProcessor("), src.indexOf("export function createWorker("));
+	const at = (needle) => {
+		const i = body.indexOf(needle);
+		assert.notEqual(i, -1, needle);
+		return i;
+	};
+	// After the lost-lock gate and the earlier attempts' read, which stay first; before the first deferral gate.
+	assert.ok(at("await settledRecord(job.id,") < at("const nowMs = now();"));
+	assert.ok(at("earlierFrom(await previousRecord(job.id))") < at("const nowMs = now();"));
+	assert.ok(at("const nowMs = now();") < at("const pickupProjects = projects();"));
+	assert.ok(at("const project = projectOf(job.data, pickupProjects);") < at("const until = pauseUntil(job.data, nowMs);"));
+	assert.match(body, /if \(until && until > nowMs \+ 1000\) await deferTo\(job, token, until, "pause-window", \{ project \}\);/);
+	// The limits snapshot and the size stay below the pause gate, where a paused job never reads them.
+	assert.ok(at("const until = pauseUntil(job.data, nowMs);") < at("const limits = scopedLimits();"));
+	assert.ok(at("const limits = scopedLimits();") < at("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"));
+	assert.equal(body.replace(/\/\/[^\n]*/g, "").split("projects()").length - 1, 1, "still one read of the projects ref per pickup");
+});

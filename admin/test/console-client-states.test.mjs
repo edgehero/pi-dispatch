@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
-import { CONFIRM_NO_ANSWER, CONFIRM_SLOT_ID, bulkResultsHtml, previewBarHtml, refusalHtml, unchangedBarHtml } from "../src/console/confirm-view.mjs";
+import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID, bulkResultsHtml, previewBarHtml, refusalHtml, unchangedBarHtml } from "../src/console/confirm-view.mjs";
 import { html, page } from "../src/console/html.mjs";
 import { actForm, area, editor, field } from "../src/console/panels/common.mjs";
 import { CONSOLE_SCRIPT, RETRY_MS, SIGN_IN_GAVE_UP, SIGN_IN_RETRY_FOR_MS, SIGN_IN_TRIES_MAX, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_TOKENS_BODY } from "../src/console/script.mjs";
@@ -60,6 +60,8 @@ const pill = (w) => {
 };
 const notes = (w) => w.document.querySelectorAll("#live-note [data-live-note]").filter((n) => !n.hidden).map((n) => n.getAttribute("data-live-note"));
 const notices = (w) => w.document.querySelectorAll("#notice [data-notice]").filter((n) => !n.hidden).map((n) => n.getAttribute("data-notice"));
+/** The run page's transcript line, as a reader sees it. */
+const tstatus = (w) => text(w.document.querySelector("[data-transcript-status]"));
 const linkStates = (w) => w.document.querySelectorAll("[data-link-state]").filter((n) => !n.hidden).map((n) => n.getAttribute("data-link-state"));
 const calls = (w, url) => w.fetch.calls.filter((c) => c.url === url);
 const bar = (opts = {}) => String(previewBarHtml({ title: "Retry gh-1", lines: ["queue jobs"], undo: UNDO, expiresAt: NOW + 300_000, now: NOW, ...opts }));
@@ -106,6 +108,17 @@ stateTest(T.previewing, async () => {
   assert.equal(text(slot.querySelector("[data-slot-title]")), "Previewing: Retry");
   assert.equal(slot.querySelector("[data-confirm]").disabled, true);
   assert.ok(skeleton.includes("data-slot-title"), "the skeleton was read as the server drew it");
+});
+
+test("a bar's times are shown as the page's are: each <time> the answer drew gets the reader's zone and the UTC title", async () => {
+  const w = boot(fleetPage());
+  const slot = slotOf(w);
+  w.submit(formOf(w, "fleet-pause"));
+  const at = '<time datetime="2026-10-08T15:39:08.000Z">2026-10-08 15:39 UTC</time>';
+  await w.fetch.open("/api/act/fleet-pause/preview").answer(200, { ok: true, ticket: "tk-1", html: `${bar({ title: "Pause the fleet" })}<p>In a pause window until ${at}</p>` });
+  const time = slot.querySelector("time[datetime]");
+  assert.ok(time, "the answer's time is in the slot");
+  assert.equal(time.getAttribute("title"), "2026-10-08 15:39 UTC", "rewritten as the page's own times are");
 });
 
 stateTest(T.unchanged, async () => {
@@ -404,6 +417,17 @@ stateTest(T.pill, async () => {
   out.streams[0].emit("end", { ended: "idle" });
   assert.deepEqual(pill(out), { cls: LIVE_STATES.out.cls, word: "Signed out" });
   assert.deepEqual(notes(out), ["out"]);
+  // The transcript's line the same way: a stream the browser reconnects by itself (CONNECTING, 0) is "reconnecting",
+  // never "live", and nothing is asked; it is live again when it opens.
+  const run = boot(runPage(), { url: "/run?id=gh-1" });
+  const transcript = run.streams[1];
+  transcript.emit("open");
+  assert.equal(tstatus(run), "live");
+  transcript.readyState = 0;
+  transcript.emit("error");
+  assert.deepEqual([tstatus(run), calls(run, "/api/whoami").length], ["reconnecting", 0], "the browser is already retrying");
+  transcript.emit("open");
+  assert.equal(tstatus(run), "live");
 });
 
 stateTest(T.unreachable, async () => {
@@ -435,12 +459,31 @@ stateTest(T.unreachable, async () => {
   mute.streams[0].readyState = 2;
   mute.streams[0].emit("error");
   assert.deepEqual([pill(mute).word, notes(mute)], ["Not live", []]);
+  // Nothing waits or queues where nothing can be asked: a stream's end, which waits before it asks where fetch exists,
+  // says what is known as it comes, with no timer left behind it.
   const muteEnd = boot(fleetPage(), { fetch: null });
   muteEnd.streams[0].emit("end", { ended: "elsewhere" });
-  muteEnd.tick(RETRY_MS);
-  assert.deepEqual([pill(muteEnd).word, notes(muteEnd), muteEnd.location.reloads, muteEnd.location.assigned], ["Reconnecting", ["retry"], 0, []]);
+  assert.deepEqual([pill(muteEnd).word, notes(muteEnd), muteEnd.location.reloads, muteEnd.location.assigned, muteEnd.timers.pending()], ["Reconnecting", ["retry"], 0, [], 0]);
   muteEnd.tick(10 * RETRY_MS);
-  assert.equal(muteEnd.timers.pending(), 0, "no timer left asking nothing");
+  assert.deepEqual([pill(muteEnd).word, notes(muteEnd), muteEnd.location.reloads, muteEnd.location.assigned, muteEnd.timers.pending()], ["Reconnecting", ["retry"], 0, [], 0], "and nothing later");
+  // The console stopping, on a run page: the page under the retry note and the transcript's line reconnecting, at once.
+  const muteStop = boot(runPage(), { url: "/run?id=gh-1", fetch: null });
+  muteStop.streams[0].emit("open");
+  muteStop.streams[1].emit("open");
+  muteStop.streams[1].emit("end", { ended: STREAM_SHUTDOWN });
+  assert.ok(muteStop.streams[0].closed && muteStop.streams[1].closed, "both streams closed by the script");
+  assert.deepEqual([pill(muteStop).word, notes(muteStop), tstatus(muteStop), muteStop.timers.pending()], ["Reconnecting", ["retry"], "reconnecting", 0]);
+  // On a run page with no fetch, a transcript the browser closed says so on its own line and leaves the page's pill as
+  // it was: what it knows is said by the stream that asked. The page's stream closed after it says its own, not dropped.
+  const muteRun = boot(runPage(), { url: "/run?id=gh-1", fetch: null });
+  muteRun.streams[0].emit("open");
+  muteRun.streams[1].emit("open");
+  muteRun.streams[1].readyState = 2;
+  muteRun.streams[1].emit("error");
+  assert.deepEqual([pill(muteRun).word, notes(muteRun), tstatus(muteRun)], ["Live", [], "not live: reload after closing another console tab"]);
+  muteRun.streams[0].readyState = 2;
+  muteRun.streams[0].emit("error");
+  assert.deepEqual([pill(muteRun).word, notes(muteRun), tstatus(muteRun), muteRun.timers.pending()], ["Not live", [], "not live: reload after closing another console tab", 0]);
 });
 
 stateTest(T.shutdown, async () => {
@@ -601,7 +644,6 @@ stateTest(T.ended, async () => {
   // A transcript stream the browser closed (a 401, a 429 or a 503: it cannot tell) is asked about as the page's own is,
   // saying "reconnecting" on its line meanwhile and leaving the page's pill alone: a session that ended goes to sign-in
   // with its reason, another person to sign-in as switched, and only a 200 for the page's person is the stream limit.
-  const tstatus = (w) => text(w.document.querySelector("[data-transcript-status]"));
   for (const [answer, to] of [[[401, { error: "sign in first", ended: "idle" }], "/login?ended=idle"], [[200, { name: "mallory", role: "operator" }], "/login?ended=switched"]]) {
     const w = boot(runPage(), { url: "/run?id=gh-1" });
     w.streams[0].emit("open");
@@ -618,8 +660,9 @@ stateTest(T.ended, async () => {
   limited.streams[1].emit("error");
   await limited.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
   assert.deepEqual([tstatus(limited), pill(limited).word, notes(limited), limited.location.assigned], ["not live: reload after closing another console tab", "Live", [], []], "the stream limit, on the transcript's line alone");
-  // A preview or a confirm answered 401 is the session behind the page ending, not the write's refusal: asked about, then
-  // sign-in with the reason (the console's answer's, else the write's), never a sentence in the slot.
+  // A preview or a confirm answered 401 is the session behind the page ending, not the write's refusal: the slot says
+  // nothing was changed and the console is being asked (never the 401's own text), then sign-in with the reason (the
+  // console's answer's, else the write's).
   for (const [where, answer, to] of [["preview", { error: "sign in first", ended: "idle" }, "/login?ended=idle"], ["confirm", { error: "sign in first", ended: "max" }, "/login?ended=max"], ["preview", { error: "sign in first", ended: null }, "/login"]]) {
     const w = where === "preview" ? boot(fleetPage()) : await previewed();
     const slot = slotOf(w);
@@ -627,7 +670,7 @@ stateTest(T.ended, async () => {
     else slot.querySelector("[data-confirm]").click();
     await w.fetch.open(where === "preview" ? "/api/act/fleet-pause/preview" : "/api/act/retry-failed/confirm").answer(401, answer);
     const line = slot.querySelector("[data-slot-message]");
-    assert.ok(line === null || !shown(line), `${where}: no sentence of the 401 in the slot`);
+    assert.deepEqual([shown(line), text(line), slot.querySelector("[data-confirm]").disabled], [true, CONFIRM_SIGNED_OUT, true], `${where}: the slot says so, and nothing can be confirmed`);
     assert.ok(!text(slot).includes("sign in first"), where);
     await w.fetch.open("/api/whoami").answer(401, { error: "sign in first" });
     assert.deepEqual([w.location.assigned, pill(w).word, notes(w)], [[to], "Signed out", ["out"]], `${where} ${JSON.stringify(answer)}`);
@@ -713,6 +756,77 @@ stateTest(T.stale, async () => {
   drawn.streams[0].emit("open");
   drawn.streams[0].emit("fresh", {});
   assert.equal(drawn.document.getElementById("main").classList.contains("stale"), true);
+});
+
+stateTest(T.bothClosed, async () => {
+  // The browser closes both of a run page's streams together (a 429 over the stream limit refuses each), in either
+  // order, whether they had opened or were refused at their first connect. Each says "asking" on its own line, one
+  // question goes out, and its answer is said by both: the stream limit on the pill (with its note) AND on the
+  // transcript's line. A guard that dropped the second asker left it as it was: the pill Live over a closed page stream,
+  // or the line "reconnecting" for good.
+  const run = () => boot(runPage(), { url: "/run?id=gh-1" });
+  const closeBoth = (w, order) => {
+    const streams = { page: w.streams[0], transcript: w.streams[1] };
+    for (const name of order) {
+      streams[name].readyState = 2;
+      streams[name].emit("error");
+    }
+  };
+  for (const order of [["transcript", "page"], ["page", "transcript"]]) {
+    for (const opened of [true, false]) {
+      const label = `${order.join(" then ")}${opened ? ", both open first" : ""}`;
+      const w = run();
+      if (opened) for (const s of w.streams) s.emit("open");
+      closeBoth(w, order);
+      assert.deepEqual([pill(w).word, tstatus(w), calls(w, "/api/whoami").length], ["Reconnecting", "reconnecting", 1], `${label}: both asking, one question`);
+      await w.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
+      assert.deepEqual([pill(w), notes(w), tstatus(w)], [{ cls: LIVE_STATES.off.cls, word: "Not live" }, ["limit"], "not live: reload after closing another console tab"], label);
+      assert.deepEqual([w.location.reloads, w.location.assigned, calls(w, "/api/whoami").length], [0, [], 1], `${label}: nothing more`);
+    }
+  }
+  // One after the other: an answer that settled the transcript's question frees the queue, so the page's stream the
+  // browser closes later asks a question of its own and is said the stream limit, never left Reconnecting.
+  const apart = run();
+  for (const s of apart.streams) s.emit("open");
+  apart.streams[1].readyState = 2;
+  apart.streams[1].emit("error");
+  await apart.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
+  assert.deepEqual([tstatus(apart), pill(apart).word], ["not live: reload after closing another console tab", "Live"], "the transcript's line alone");
+  apart.streams[0].readyState = 2;
+  apart.streams[0].emit("error");
+  assert.equal(calls(apart, "/api/whoami").length, 2, "the page's stream asks again");
+  await apart.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
+  assert.deepEqual([pill(apart), notes(apart), apart.location.reloads], [{ cls: LIVE_STATES.off.cls, word: "Not live" }, ["limit"], 0], "and is said the stream limit");
+  // Every other answer settles both at once, once: a sign-in that ended, another person, and the console back after a
+  // failed question (a reload, one).
+  for (const [answers, reloads, assigned] of [[[[401, { error: "sign in first", ended: "idle" }]], 0, ["/login?ended=idle"]], [[[200, { name: "mallory", role: "operator" }]], 0, ["/login?ended=switched"]], [[null, [200, { name: "ops", role: "operator" }]], 1, []]]) {
+    const w = run();
+    closeBoth(w, ["transcript", "page"]);
+    for (const a of answers) {
+      if (a === null) {
+        await w.fetch.open("/api/whoami").fail();
+        w.tick(RETRY_MS);
+      } else await w.fetch.open("/api/whoami").answer(...a);
+    }
+    assert.deepEqual([w.location.reloads, w.location.assigned, calls(w, "/api/whoami").length], [reloads, assigned, answers.length], JSON.stringify(answers));
+  }
+  // A write's 401 while a stream's question is out joins it: the slot says at once that the session ended before the
+  // change was sent (never left on its previewing skeleton), and the page goes where that one answer says, with the
+  // write's reason when the answer names none.
+  for (const [answer, reloads, assigned] of [[[401, { error: "sign in first" }], 0, ["/login?ended=idle"]], [[200, { name: "ops", role: "operator" }], 1, []]]) {
+    const w = boot(fleetPage());
+    w.streams[0].emit("open");
+    w.streams[0].readyState = 2;
+    w.streams[0].emit("error");
+    w.submit(formOf(w, "fleet-pause"));
+    await w.fetch.open("/api/act/fleet-pause/preview").answer(401, { error: "sign in first", ended: "idle" });
+    const slot = slotOf(w);
+    const line = slot.querySelector("[data-slot-message]");
+    assert.deepEqual([shown(slot), shown(line), text(line), text(slot.querySelector("[data-slot-title]")), slot.querySelector("[data-confirm]").disabled], [true, true, CONFIRM_SIGNED_OUT, "Pause the fleet", true]);
+    assert.equal(calls(w, "/api/whoami").length, 1, "the write joins the question already out");
+    await w.fetch.open("/api/whoami").answer(...answer);
+    assert.deepEqual([w.location.reloads, w.location.assigned], [reloads, assigned], `${JSON.stringify(answer)}: the write asked for a reload, so the stream limit is not the answer`);
+  }
 });
 
 // ---- the sign-in pages (SignIn, AccessStates) ----------------------------------------------------------------------
@@ -934,7 +1048,7 @@ stateTest(T.link, async () => {
 // ---- what the script is made of ------------------------------------------------------------------------------------
 
 test("the script's closed lists are written in from their one source each, never copied", () => {
-  for (const [name, value] of Object.entries({ ENDED_REASONS, STREAM_ENDS, STREAM_SHUTDOWN, PERSON_PARAM, PERSON_HEADER, NOTICE_OF_STATUS, CONFIRM_SLOT_ID, CONFIRM_NO_ANSWER, RETRY_MS, SIGN_IN_TRIES_MAX, SIGN_IN_RETRY_FOR_MS, SIGN_IN_GAVE_UP, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_TOKENS_BODY })) {
+  for (const [name, value] of Object.entries({ ENDED_REASONS, STREAM_ENDS, STREAM_SHUTDOWN, PERSON_PARAM, PERSON_HEADER, NOTICE_OF_STATUS, CONFIRM_SLOT_ID, CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, RETRY_MS, SIGN_IN_TRIES_MAX, SIGN_IN_RETRY_FOR_MS, SIGN_IN_GAVE_UP, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_TOKENS_BODY })) {
     assert.ok(CONSOLE_SCRIPT.includes(`var ${name} = ${JSON.stringify(value)};`), name);
   }
   assert.ok(CONSOLE_SCRIPT.includes(`var LIVE_NOTE_KEYS = ${JSON.stringify(Object.keys(LIVE_NOTES))};`));
@@ -947,6 +1061,8 @@ test("the script's closed lists are written in from their one source each, never
   // Sign-out's only one is its 200's (issue #737): an unconfirmed sign-out stays on the page.
   assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(isReason(r) ? "/login?ended=" + r : "/login");', 'location.assign("/");', 'location.assign("/login");']);
   assert.match(CONSOLE_SCRIPT, /if \(r\.status === 200\) location\.assign\("\/login"\);\n\s+else unconfirmed\(\);\n\s+\}, unconfirmed\);/);
+  // The signed-out sentence is said as text, in the slot's message line (slotSays), never as markup.
+  assert.match(CONSOLE_SCRIPT, /function signedOut\(r\) \{[^]*?slotSays\(CONFIRM_SIGNED_OUT\);/);
   // The three sentences the script owns are set as text, in their elements, never as markup.
   for (const name of ["SIGN_IN_GAVE_UP.title", "SIGN_IN_GAVE_UP[kind]", "SIGN_OUT_UNCONFIRMED.title", "SIGN_OUT_UNCONFIRMED.body"]) assert.ok(CONSOLE_SCRIPT.includes(`.textContent = ${name};`), name);
   assert.ok(CONSOLE_SCRIPT.includes("sayWithCode(staleBody, tokens ? STALE_TOKENS_BODY : staleData);"));
@@ -964,7 +1080,7 @@ test("the 2 s the script waits is the stream's own retry and what the sentences 
 test("the script writes markup in exactly three places: the slot's answer or skeleton, the panel swap, and the transcript append", () => {
   const writes = CONSOLE_SCRIPT.match(/[\w.]+\.(?:innerHTML|outerHTML)\s*=(?!=)|[\w.]*insertAdjacentHTML|document\.write/g) ?? [];
   assert.deepEqual(writes.map((x) => x.replace(/\s+/g, "")), ["slot.innerHTML=", "el.innerHTML=", "tbox.insertAdjacentHTML"]);
-  assert.match(CONSOLE_SCRIPT, /function fillSlot\(markup\) \{\n\s+slot\.innerHTML = markup;\n\s+\}/, "the slot's one write, in one function");
+  assert.match(CONSOLE_SCRIPT, /function fillSlot\(markup\) \{\n\s+slot\.innerHTML = markup;\n\s+try \{ localTimes\(slot\); \} catch \(e\) \{ \/\* the times stay UTC \*\/ \}\n\s+\}/, "the slot's one write, in one function, its times shown as the page's");
   assert.match(CONSOLE_SCRIPT, /var slot = document\.getElementById\(CONFIRM_SLOT_ID\);/);
   assert.deepEqual(CONSOLE_SCRIPT.match(/\bslot\s*=(?!=)/g), ["slot ="], "bound once, to the server's slot");
   assert.match(CONSOLE_SCRIPT, /function swapPanel\(el, markup\) \{\n[^]*?el\.innerHTML = markup;/, "the panel's one write, in one function");
