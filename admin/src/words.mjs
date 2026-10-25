@@ -85,6 +85,33 @@ export const SPEND_TITLE = "Spend";
 export const HELD_LABEL = "Held";
 
 /**
+ * A list position as a person reads it (issue #737): the 0-based index a file, a tool and a form's `index` field
+ * carry, as the 1-based number a row is called by ("trigger #1" is the first trigger). The pi panel and tools name
+ * rows this way, as the planners' confirm titles already did (`#${index + 1}`). The console's Configuration page does
+ * not yet: until its row buttons arrive its table, its "Row #" forms and its write sentences all use the page's own
+ * 0-based index ("index N", `actions.mjs` `atIndex`), so that page never shows two numberings for one row. Anything that is not a safe integer of 0 or more is
+ * "?", never a number it is not (a NaN, a negative, a string that looks like a number): the machine value stays the
+ * index, and only its display goes through here.
+ */
+export function rowNumber(index) {
+  return Number.isSafeInteger(index) && index >= 0 ? String(index + 1) : "?";
+}
+
+/** What a refusal calls a field whose name it will not print (`fieldNamed`). */
+export const UNNAMED_FIELD = "a field it was sent";
+
+/**
+ * A field name as a refusal may print it (issue #737): a plain identifier of at most 40 characters is named, so the
+ * sentence says which field to drop; anything else (a key with a space, a quote, a control, a homoglyph, 200
+ * characters of it) is `UNNAMED_FIELD`, so a caller's bytes never travel into a sentence a page or a model reads. A
+ * field's VALUE is never printed at all. The console's action table (`console/actions.mjs`) and the trigger add
+ * (`write-plans.mjs` `planTriggerAdd`) both name a field through here, so the two refusals spell a key alike.
+ */
+export function fieldNamed(key) {
+  return typeof key === "string" && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ? key : UNNAMED_FIELD;
+}
+
+/**
  * Where a catalog anchor (`docs/reasons.md#<token>`, a path from the repository root) is read (issue #710): the
  * repository's docs on its forge, on `main`. The console serves no docs of its own (its other docs mentions are plain
  * `docs/console.md` text), and an operator reading a run page is on a browser, not in a checkout. `main` and not the

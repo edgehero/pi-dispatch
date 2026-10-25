@@ -1,0 +1,25 @@
+{
+  "card": "Shell",
+  "pr": 1,
+  "panels": [],
+  "elements": [
+    {"el":"shell(active, inner, title, sub, end) from the kit","kind":"readme","status":"real","as":"shellHtml","source":"admin/src/console/shell.mjs#shellHtml","reason":"the repo's frame is shellHtml(name, ctx, inner): the page table names the active pill, the title and the sub, and the page draws its own end"},
+    {"el":"Top bar with the pi-dispatch pill","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#shellHtml","holds":"signedInBar(","golden":["overview.operator","overview.viewer"],"shows":"class=\"brandpill\""},
+    {"el":"Pill navigation: Overview, Runs, Parked, Fleet, Spend, Configuration, in that order","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#NAV","golden":["overview.operator"],"shows":"class=\"pillnav\""},
+    {"el":"Watch in the navigation","kind":"readme","status":"illustrative","reason":"not built: the Watch screen is #735's (WatchScreen, a planned card), and the navigation leaves it out until it lands"},
+    {"el":"More holds Models","kind":"readme","status":"illustrative","reason":"not built: Models is #716's and #717's (ModelsScreen, a planned card); More holds the audit log alone until then"},
+    {"el":"More holds Audit for operators","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#NAV_MORE","golden":["overview.operator"],"shows":"href=\"/audit\""},
+    {"el":"A viewer sees no Audit","kind":"readme","status":"real","source":"admin/src/console/pages.mjs#PAGES","holds":"\"auth\":\"operator\"","reason":"the audit page is an operator page, so the shell offers it to an operator only and the route refuses a viewer"},
+    {"el":"A viewer sees no action buttons","kind":"readme","status":"real","source":"admin/src/console/panels/common.mjs#canAct"},
+    {"el":"The Parked count, violet","kind":"readme","status":"real","panel":"p-nav-parked","source":"admin/src/console/shell.mjs#navParkedHtml","holds":"\"parked\"","golden":["overview.operator","overview.viewer"]},
+    {"el":"The Parked count counts approvals too","kind":"readme","status":"illustrative","reason":"approvals are #649's (ApprovalRequest, a planned card); the count is the unanswered parked runs the Parked inbox lists"},
+    {"el":"The live pill says Live, Reconnecting or Not live","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#LIVE_STATES","golden":["overview.operator","overview.viewer"],"shows":"id=\"live-status\""},
+    {"el":"The signed-in person: name, role and avatar","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#shellHtml","golden":["overview.operator","overview.viewer"],"shows":"class=\"avatar\""},
+    {"el":"The theme button","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#shellHtml","golden":["overview.operator"],"shows":"data-theme-toggle"},
+    {"el":"At 390 px the nav is a pill row that scrolls inside itself","kind":"readme","status":"real","source":"admin/src/console/pulse-css.mjs#PULSE_CSS","holds":"overflow-x: auto"},
+    {"el":"A title bar under the top bar","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#shellHtml","holds":"class=\"titlebar\"","golden":["overview.operator"],"shows":"class=\"titlebar\""},
+    {"el":"The title bar's page filters","kind":"readme","status":"illustrative","reason":"no page's filters sit in the title bar yet: Runs keeps its filter panel (p-filter) until PR 4 (RunsScreen), and each page's pull request brings its own"},
+    {"el":"The Search round button","kind":"readme","status":"illustrative","reason":"search arrives with PR 4 (RunsScreen and RunViewer), a deviation recorded in PR 1"},
+    {"el":"Project counts in the filters (All 31, web 13, api 4, billing 12, ops 2)","kind":"sample","status":"illustrative","reason":"sample counts"}
+  ]
+}

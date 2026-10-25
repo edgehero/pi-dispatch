@@ -1063,6 +1063,38 @@ test("dispatch_trigger_add can actually SEND every field buildTriggerEntry reads
   assert.ok(keys.includes("forge"), "and the forge that makes it required");
 });
 
+// Issue #737: the add tool's fields are its arms' (write-plans.mjs TRIGGER_ADD_FIELDS, derived from buildTriggerEntry).
+test("dispatch_trigger_add's schema offers only fields some kind takes, every one but `any`, and reviewState as a list", async () => {
+  const { TRIGGER_ADD_FIELDS } = await import("../src/write-plans.mjs");
+  const { calls } = await loadRegistered();
+  const props = toolByName(calls, "dispatch_trigger_add").parameters.properties ?? {};
+  const keys = Object.keys(props);
+  const taken = new Set(Object.values(TRIGGER_ADD_FIELDS).flat());
+  assert.deepEqual(keys.filter((k) => !taken.has(k)), [], "no schema field is one no kind takes (it would be refused on every call)");
+  // `any` is the triggers file's own spelling of `labels`, which the arms read as a fallback; the schema offers the
+  // model one name for the field, `labels`, so this one difference is by design.
+  assert.deepEqual([...taken].filter((k) => !keys.includes(k)), ["any"]);
+  assert.deepEqual(props.reviewState, { type: "array", items: { type: "string" } }, "a list of verdicts, judged by the loader at the write");
+});
+
+test("dispatch_trigger_add refuses a field its kind does not take before the operator is asked, and carries reviewState into the confirm", async () => {
+  const { calls } = await loadRegistered();
+  const tool = toolByName(calls, "dispatch_trigger_add");
+  // A triggers file of this test's own, so the plan reads no deployment's real one.
+  const triggers = join(tempDir("admin-trigger-add-"), "triggers.json");
+  writeFileSync(triggers, JSON.stringify({ triggers: [] }));
+  process.env.PI_TRIGGERS_FILE = triggers;
+  const asked = [];
+  const ctx = { hasUI: true, ui: { confirm: async (title, message) => (asked.push({ title, message }), false), notify() {} } };
+  await assert.rejects(() => tool.execute("id", { kind: "pull_request", flow: "fix", action: ["opened"], repository: "web" }, undefined, undefined, ctx), /^Error: dispatch_trigger_add does not take repository for a pull_request trigger; it takes kind, action, reviewState, /);
+  await assert.rejects(() => tool.execute("id", { kind: "label", flow: "fix", labels: ["bug"], "colour name": "red" }, undefined, undefined, ctx), /does not take a field it was sent for a label trigger/);
+  assert.deepEqual(asked, [], "no confirm was shown for a refused call");
+  await tool.execute("id", { kind: "pull_request", flow: "fix", action: ["review_submitted"], reviewState: ["approved"] }, undefined, undefined, ctx);
+  assert.equal(asked.length, 1);
+  assert.match(asked[0].message, /"reviewState":\["approved"\]/, "the operator approves the narrowing they were asked for");
+  assert.deepEqual(JSON.parse(readFileSync(triggers, "utf8")), { triggers: [] }, "a declined confirm writes nothing");
+});
+
 test("NO tool exposes a secrets parameter, and none can reach the overlay key either (#225)", async () => {
   // Two doors, and both have to stay shut.
   //

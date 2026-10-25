@@ -78,6 +78,13 @@ function triggerNotes(t, bundles = null) {
   ].filter(Boolean).join("; ");
 }
 
+/**
+ * A trigger as this page names it elsewhere (a profile's users, a bundle's opt-outs): "index 2", the 0-based index the
+ * Triggers table's "#" column and the forms' "Row #" fields show (issue #737). One wording and one count on the
+ * page until it converts to row buttons (PR 7a); the pi panel's lists keep their 1-based "#3".
+ */
+const triggerAt = (i) => `index ${i}`;
+
 /** The triggers editor: a JSON entry to add (the add tool's fields), the edit tool's fields, and a delete by row. */
 function triggersEditor(view) {
   if (!canAct(view)) return null;
@@ -237,7 +244,8 @@ function profileUse(v) {
     "Secret profiles in use",
     ["Profile", "Source", "Resolver roots", "Triggers", "Projects", "Last resolve", "Served by"],
     rows.map((row) => {
-      const trig = row.triggers.length > 0 ? `${row.triggers.map((i) => `#${i}`).join(", ")}${row.triggersMore > 0 ? ` and ${row.triggersMore} more` : ""}` : "none";
+      // A trigger by the index the Triggers table above shows (issue #737: "index 0", one wording on the page).
+      const trig = row.triggers.length > 0 ? `${row.triggers.map(triggerAt).join(", ")}${row.triggersMore > 0 ? ` and ${row.triggersMore} more` : ""}` : "none";
       const proj = [...row.projects, ...(row.projectsMore > 0 ? [`${row.projectsMore} more`] : []), ...(row.anyRepo ? ["any (a webhook trigger)"] : [])].join(", ") || "-";
       const last = row.last ? html`${profileLastText(row.last).replace(/^last resolve: /, "")}${row.last.jobId ? html` (${runLink(row.last.jobId)})` : null}` : "no run in view";
       const warnSource = row.source === "ambiguous" || row.source === "undeclared";
@@ -274,7 +282,7 @@ export const configSecretBundles = fromSnapshot("Secret bundles", (s, view) => {
       const profile = `${b.profile ?? "-"} (${bundleDeclaredText(b)})`;
       const fork = b.forkReviews ? "yes" : "no";
       const ends = Array.isArray(b.endpoints) && b.endpoints.length > 0 ? bundleEndpointsText(b) : "none";
-      const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map((i) => `#${i}`).join(", ") : "none";
+      const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map(triggerAt).join(", ") : "none";
       const last = b.last ? html`${b.last.variables.length > 0 ? b.last.variables.join(", ") : "none"} (${b.last.jobId ? runLink(b.last.jobId) : "-"})` : "no run in view";
       return html`<tr><td class="mono">${cell(b.id)}</td><td>${project}</td><td${b.declared === "env" || b.declared === "overlay" ? null : html` class="warn"`}>${profile}</td><td>${fork}</td><td class="mono">${ends}</td><td>${opted}</td><td class="mono">${last}</td></tr>`;
     }),

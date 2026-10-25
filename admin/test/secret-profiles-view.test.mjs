@@ -208,7 +208,8 @@ test("the console's configuration: each profile's use in a table, words and name
   const one = panels.find((p) => p.id === "p-secret-profiles")?.html ?? "";
   assert.match(one, /aria-label="Secret profiles in use"/);
   assert.match(one, /<td class="mono">prod<\/td><td>declared in the settings overlay<\/td><td class="warn">its resolver&#39;s real path on this host is OUTSIDE PI_SECRET_RESOLVER_ROOTS/);
-  assert.match(one, /<td>#0<\/td><td class="mono">shop<\/td><td class="warn">refused \(secret-unresolved\) at 2026-10-21T10:00:00\.000Z \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)<\/td><td class="mono">mini&lt;1&gt;<\/td>/);
+  // Issue #737: a trigger by the index the Triggers table shows, in the page's one wording.
+  assert.match(one, /<td>index 0<\/td><td class="mono">shop<\/td><td class="warn">refused \(secret-unresolved\) at 2026-10-21T10:00:00\.000Z \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)<\/td><td class="mono">mini&lt;1&gt;<\/td>/);
   assert.match(one, /<td class="mono">default<\/td><td class="warn">named by a trigger/);
   const html = panels.map((p) => p.html).join("");
   assert.ok(!html.includes("/opt/secret-resolvers") && !html.includes("/tmp/elsewhere"), "no resolver path, not even its real one");

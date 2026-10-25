@@ -4,7 +4,7 @@ import { request } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { cachedPerWindow, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, readSideOf, RESERVE_ENV_KEYS, runCli, USAGE } from "../src/console/cli.mjs";
+import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, readSideOf, RESERVE_ENV_KEYS, runCli, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -84,7 +84,9 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
       verifyConsoleAudit: () => verify,
     },
     sessions: {
-      makeSessionStore: () => ({ create: () => ({ id: "s".repeat(43) }), get: () => null, destroy() {} }),
+      // The store's whole surface as the server and the hub call it (issue #737 adds the verdict, the reason a session
+      // ended, and the one-shot flash), each a no-op: these tests pin the command, not the store.
+      makeSessionStore: () => ({ create: () => ({ id: "s".repeat(43) }), get: () => null, peek: () => null, verdict: () => ({ ended: null }), endedOf: () => null, destroy(id, reason = null) {}, setFlash() {}, takeFlash: () => null }),
       sessionCookie: () => "pdc_session=x",
       clearSessionCookie: () => "pdc_session=; Max-Age=0",
       readSessionCookie: () => null,
@@ -95,7 +97,7 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
       mintLoginCode: (args) => (calls.push(["mint", args]), { code: CODE }),
       consumeLoginCode: () => ({ refusal: "unknown" }),
     },
-    confirm: { makeConfirmTickets: () => ({ issue: () => ({ ticket: "t" }), redeem: () => ({ refusal: "no" }) }) },
+    confirm: { makeConfirmTickets: () => ({ issue: () => ({ ticket: "t", expiresAt: T0 + 300_000 }), redeem: () => ({ refusal: "no" }) }) },
     readModel: {
       writePauseWindows: () => ({ ok: true }),
       panelEnv: ({ env }) => ({ env: { ...env }, dir: null, notice: undefined }),
@@ -185,13 +187,90 @@ test("link prints a one-time URL with the code in the fragment, for a known name
   assert.match(unix.out[0], /^http:\/\/localhost:<the local port of your ssh -L tunnel>\/login\/code#/);
 });
 
+test("link --port prints the link for the tunnel's local port on localhost, over tcp or a unix socket; a bad port mints nothing", async () => {
+  for (const listen of ["127.0.0.1:4790", "unix:/tmp/pd.sock"]) {
+    const r = await cli(["link", "--name", "alice", "--port", "8080"], { env: deployment({ PI_CONSOLE_LISTEN: listen }).env });
+    assert.equal(r.code, 0, listen);
+    assert.deepEqual(r.out, [`http://localhost:8080/login/code#${CODE}`], listen);
+  }
+  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "1"])).out, [`http://localhost:1/login/code#${CODE}`]);
+  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "65535"])).out, [`http://localhost:65535/login/code#${CODE}`]);
+  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "0080"])).out, [`http://localhost:80/login/code#${CODE}`], "the number, not the digits typed");
+  for (const bad of ["0", "65536", "99999", "123456", "abc", "80a", " 80", "-1", "8.0", "", "0x50"]) {
+    // `--port=<v>`, so a value that starts with a dash reaches the rule rather than the parser's own refusal.
+    const r = await cli(["link", "--name", "alice", `--port=${bad}`]);
+    assert.equal(r.code, 2, JSON.stringify(bad));
+    assert.deepEqual(r.out, [], JSON.stringify(bad));
+    assert.ok(r.err.includes("pi-dispatch-console: --port must be a port number (1 to 65535): the local port of your ssh -L tunnel"), `${JSON.stringify(bad)}: ${r.err.join(" | ")}`);
+    assert.equal(r.modules.calls.filter((c) => c[0] === "mint").length, 0, `${JSON.stringify(bad)}: no code minted`);
+    assert.deepEqual(r.modules.rows, [], `${JSON.stringify(bad)}: nothing audited`);
+  }
+  // --port with no value is the parser's refusal.
+  assert.equal((await cli(["link", "--name", "alice", "--port"])).code, 2);
+});
+
+test("--port on any command but link is refused before anything runs: it would be ignored, so it is said", async () => {
+  for (const argv of [["serve"], ["token", "add", "--name", "a", "--role", "viewer"], ["token", "list"], ["token", "revoke", "--name", "alice"], ["token", "rotate", "--name", "alice"], ["sessions", "end-all"], ["audit", "verify"]]) {
+    const r = await cli([...argv, "--port", "8080"], { until: Promise.resolve() });
+    assert.equal(r.code, 2, argv.join(" "));
+    assert.deepEqual(r.err, ["pi-dispatch-console: --port is for link only"], argv.join(" "));
+    assert.deepEqual([r.out, r.modules.calls, r.modules.rows], [[], [], []], `${argv.join(" ")}: nothing ran`);
+  }
+  assert.match(USAGE, /^  link --name <name> \[--port <n>\] {10}a one-time sign-in link, valid 60 seconds$/m);
+});
+
 test("audit verify: intact is 0, a broken chain is 2 naming where", async () => {
   const ok = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: true, rows: 3, startsAt: { file: "2026-09.jsonl", seq: 40 } } }) });
   assert.equal(ok.code, 0);
   assert.match(ok.out[0], /3 rows.*intact.*starts at 2026-09.jsonl row 40/);
-  const broken = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: false, rows: 7, broken: { file: "2026-10.jsonl", line: 8, reason: "prev does not match" } } }) });
+  // A line whose prev matched the row before it and whose seq does not follow: the line is damaged alone.
+  const broken = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: false, rows: 7, broken: { file: "2026-10.jsonl", line: 8, reason: "seq 9 follows seq 7" }, last: { file: "2026-10.jsonl", line: 7, seq: 7 }, suspect: null, files: [] } }) });
   assert.equal(broken.code, 2);
-  assert.match(broken.err.join("\n"), /2026-10.jsonl line 8: prev does not match/);
+  assert.deepEqual(broken.err, ["pi-dispatch-console: the console audit log's chain breaks at 2026-10.jsonl line 8: seq 9 follows seq 7. Rows through row 7 are intact; keep the file for inspection"]);
+});
+
+test("audit verify on a broken prev vouches for neither end of the link: the rows before the row before it are intact", async () => {
+  // A real log, row 5's outcome edited: row 6's prev no longer matches. Row 5 was read before the break, but the chain
+  // cannot tell whether it or line 6 changed, so the sentence vouches for rows through 4 and names both ends. The first
+  // version said "Rows before it (5) are intact", vouching for the edited row.
+  const { makeConsoleAudit, verifyConsoleAudit } = await import("@edgehero/pi-dispatch/console-audit");
+  const dep = deployment();
+  const logsDir = join(dep.dir, "logs");
+  for (let i = 1; i <= 7; i++) makeConsoleAudit({ logsDir, now: () => T0 + i * 60_000, alive: () => true }).append({ actor: { name: "ops", role: "operator", session: null }, action: "login", outcome: "ok" });
+  const file = join(logsDir, "console-audit", "2026-10.jsonl");
+  writeFileSync(file, readFileSync(file, "utf8").replace(/^(.*"seq":5,.*)"outcome":"ok"/m, '$1"outcome":"refused"'));
+  const seen = [];
+  const modules = fakeModules();
+  modules.audit.verifyConsoleAudit = (args) => (seen.push(args.withLast), verifyConsoleAudit(args));
+  const r = await cli(["audit", "verify"], { modules, dir: dep.dir, env: { ...dep.env, PI_LOGS_DIR: logsDir } });
+  assert.equal(r.code, 2);
+  assert.deepEqual(seen, [true], "asks the verifier for the ends of the link");
+  assert.deepEqual(r.err, ["pi-dispatch-console: the console audit log's chain breaks at 2026-10.jsonl line 6: prev does not match the row before it (seq 5): a row was changed, removed or moved. Row 5 before it (2026-10.jsonl line 5) is not vouched for either: the link between the two does not hold, so the chain cannot tell whether row 5 was changed. Rows through row 4 are intact; keep the file for inspection"]);
+  assert.deepEqual(verifyConsoleAudit({ logsDir }), { ok: false, rows: 5, broken: { file: "2026-10.jsonl", line: 6, reason: "prev does not match the row before it (seq 5): a row was changed, removed or moved" } }, "the verifier's own result, without withLast, is as it was");
+  // The link's other end is the first row: nothing is vouched for. A directory that cannot be read is no line.
+  const first = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: false, rows: 1, broken: { file: "2026-10.jsonl", line: 2, reason: "prev does not match the row before it (seq 1): a row was changed, removed or moved" }, last: null, suspect: { file: "2026-10.jsonl", line: 1, seq: 1 }, files: [] } }) });
+  assert.match(first.err.join("\n"), /Row 1 before it \(2026-10\.jsonl line 1\) is not vouched for either: the link between the two does not hold, so the chain cannot tell whether row 1 was changed\. No row before it is vouched for; keep the file for inspection$/);
+  const dir = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: false, rows: 0, broken: { file: null, line: 0, reason: "the audit directory /x/console-audit cannot be read (EACCES)" }, last: null, suspect: null, files: [] } }) });
+  assert.deepEqual(dir.err, ["pi-dispatch-console: the console audit log cannot be checked: the audit directory /x/console-audit cannot be read (EACCES)"]);
+});
+
+test("audit verify: an edited row followed by a garbled line is not vouched for, whatever the garbled line says", async () => {
+  // A real log, row 5's outcome edited and line 6 cut short. Line 6 shows no prev at all, so nothing vouches for row 5:
+  // the sentence names it and counts only rows through 4 as intact.
+  const { makeConsoleAudit, verifyConsoleAudit } = await import("@edgehero/pi-dispatch/console-audit");
+  const dep = deployment();
+  const logsDir = join(dep.dir, "logs");
+  for (let i = 1; i <= 7; i++) makeConsoleAudit({ logsDir, now: () => T0 + i * 60_000, alive: () => true }).append({ actor: { name: "ops", role: "operator", session: null }, action: "login", outcome: "ok" });
+  const file = join(logsDir, "console-audit", "2026-10.jsonl");
+  const modules = fakeModules();
+  modules.audit.verifyConsoleAudit = verifyConsoleAudit;
+  const lines = readFileSync(file, "utf8").split("\n");
+  lines[4] = lines[4].replace('"outcome":"ok"', '"outcome":"refused"');
+  lines[5] = lines[5].slice(0, 30);
+  writeFileSync(file, lines.join("\n"));
+  const r = await cli(["audit", "verify"], { modules, dir: dep.dir, env: { ...dep.env, PI_LOGS_DIR: logsDir } });
+  assert.equal(r.code, 2);
+  assert.deepEqual(r.err, ["pi-dispatch-console: the console audit log's chain breaks at 2026-10.jsonl line 6: the line is not a JSON row (damaged, or written by something else). Row 5 before it (2026-10.jsonl line 5) is not vouched for either: the link between the two does not hold, so the chain cannot tell whether row 5 was changed. Rows through row 4 are intact; keep the file for inspection"]);
 });
 
 test("serve refuses to start, exit 2: a public bind, a hostname bind, a bad tokens file, no operator token", async () => {
@@ -248,7 +327,8 @@ test("serve prints the URL and an ssh -L hint (never a token), answers, holds th
   const port = server.address().port;
   assert.match(out[0], new RegExp(`^pi-dispatch console on http://127\\.0\\.0\\.1:${port}/$`));
   assert.match(out[1], new RegExp(`ssh -L ${port}:127\\.0\\.0\\.1:${port} <this host>`));
-  assert.equal(out.length, 2);
+  assert.equal(out[2], "sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you>", "how to get in, never a token");
+  assert.equal(out.length, 3);
   assert.ok(![...out, ...err].join("\n").includes("pdc_"));
   assert.equal(modules.rows.at(-1).action, "serve-started");
   assert.equal((await get(port, "/healthz")).text, "ok");
@@ -359,6 +439,8 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
   const auditReads = [];
   modules.audit.readConsoleAudit = (args) => (auditReads.push(args), { rows: [], next: null });
+  const verifies = [];
+  modules.audit.verifyConsoleAudit = (args) => (verifies.push(args), { ok: true, rows: 0, startsAt: null, last: null });
   const err = [];
   let clock = T0;
   const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => clock, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
@@ -419,7 +501,19 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   await deps.whatIf({ model: "acme/m-1", flow: "tidy" });
   assert.equal(modules.calls.filter((c) => c[0] === "scan").length, 2, "past it on the injected clock, a new scan");
   await deps.audit({ limit: 5, before: null });
-  assert.deepEqual(auditReads.map((a) => [a.logsDir, a.limit]), [[join(dep.dir, "logs"), 5]]);
+  await deps.audit({ limit: 50, before: "2026-10:7", positions: true });
+  assert.deepEqual(auditReads.map((a) => [a.logsDir, a.limit, a.before, a.positions]), [[join(dep.dir, "logs"), 5, null, false], [join(dep.dir, "logs"), 50, "2026-10:7", true]], "positions only when the page asks");
+  // The chain verification (issue #737): one walk per 30 s on serve's clock, asking for its last good row, and stamped
+  // with when it ran (`checkedAt`, serve's clock), which the audit page's About card shows: a cached answer is that old.
+  const walked = clock;
+  assert.deepEqual(await deps.auditVerify(), { ok: true, rows: 0, startsAt: null, last: null, checkedAt: walked });
+  clock += 1000;
+  assert.equal((await deps.auditVerify()).checkedAt, walked, "a cached answer keeps the time of its walk");
+  assert.equal(verifies.length, 1, "inside the cache: one walk");
+  assert.deepEqual([verifies[0].logsDir, verifies[0].withLast], [join(dep.dir, "logs"), true]);
+  clock += AUDIT_VERIFY_CACHE_MS;
+  assert.equal((await deps.auditVerify()).checkedAt, clock, "a new walk, a new time");
+  assert.equal(verifies.length, 2, "past it on the injected clock, a new walk");
   assert.deepEqual(deps.subscriptions(), { version: 1, subscriptions: [] });
   assert.deepEqual(modules.calls.find((c) => c[0] === "subscriptions"), ["subscriptions", join(dep.dir, "subscriptions.json")]);
 
@@ -440,10 +534,68 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   });
   const text = await streamEnded;
   assert.match(text, /event: panel\ndata: \{"id":"p-main","html":"<p>overview operator<\/p>"\}/);
-  assert.match(text, /event: end/, "the hub said goodbye on stop");
+  assert.match(text, /event: end\ndata: \{"ended":"shutdown"\}\n\n$/, "the hub said goodbye on stop: the console stopping, not a sign-out");
   assert.equal(await running, 0);
   assert.equal(modules.fleet.disposed, 1, "the reader is disposed on stop");
   assert.deepEqual(modules.calls.filter((c) => c[0] === "valkey-context").at(-1).slice(0, 2), ["valkey-context", "object"], "the context is put back");
+});
+
+test("serve wires the hub's endedReason to the store's pure verdict, and a unix socket's sign-in hint asks for the tunnel's port", { skip: process.platform === "win32" ? "unix sockets" : false }, async (t) => {
+  const dep = deployment();
+  const sockDir = join(tempDir("pdc-"), "s");
+  mkdirSync(sockDir);
+  chmodSync(sockDir, 0o700);
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  let hubOpts = null;
+  modules.live = { ...live, makeLiveHub: (opts) => ((hubOpts = opts), live.makeLiveHub(opts)) };
+  const verdicts = [];
+  const answers = { a: { ended: "revoked" }, b: { session: { id: "b" } }, c: { unjudged: true }, d: { ended: null } };
+  modules.sessions = { ...modules.sessions, makeSessionStore: () => ({ ...fakeModules().sessions.makeSessionStore(), verdict: (id, file) => (verdicts.push([id, file]), answers[id]), get: () => assert.fail("the hub never calls get"), destroy: () => assert.fail("nor destroy") }) };
+  const out = [];
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: { ...dep.env, PI_CONSOLE_LISTEN: `unix:${join(sockDir, "c.sock")}` }, modules, now: () => T0, uid: process.geteuid?.(), out: (l) => out.push(l), err: (l) => err.push(l), until, onListening: listening });
+  await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  const file = { version: 1, generation: 0, tokens: [] };
+  assert.deepEqual(["a", "b", "c", "d"].map((id) => hubOpts.endedReason(id, file)), ["revoked", null, null, null]);
+  assert.deepEqual(verdicts.map(([id, f]) => [id, f === file]), [["a", true], ["b", true], ["c", true], ["d", true]]);
+  assert.equal(out[2], "sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you> --port <your tunnel's local port>");
+  assert.equal(out.length, 3);
+  stop();
+  assert.equal(await running, 0);
+});
+
+test("cachedFor: one call within the TTL on the injected clock, a new one after, a rejection not kept, a clock gone backwards a miss", async () => {
+  assert.equal(AUDIT_VERIFY_CACHE_MS, 30_000);
+  let t = T0;
+  let calls = 0;
+  let fail = false;
+  const cached = cachedFor(async () => {
+    calls += 1;
+    if (fail) throw new Error("EACCES");
+    return calls;
+  }, { now: () => t, ttlMs: 1000 });
+  assert.equal(await cached(), 1);
+  t += 999;
+  assert.equal(await cached(), 1);
+  t += 1;
+  assert.equal(await cached(), 2);
+  t -= 5000;
+  assert.equal(await cached(), 3, "an entry from the future is not trusted");
+  fail = true;
+  t += 10_000;
+  await assert.rejects(cached(), /EACCES/);
+  fail = false;
+  assert.equal(await cached(), 5, "a failure is tried again at once, not served for the TTL");
+  // A synchronous throw is a rejection too, not a throw at the caller.
+  const sync = cachedFor(() => {
+    throw new Error("sync");
+  }, { now: () => t, ttlMs: 1000 });
+  await assert.rejects(sync(), /sync/);
 });
 
 test("cachedPerWindow: one call per window within the TTL on the injected clock, a new one after, and a rejection is not kept", async () => {

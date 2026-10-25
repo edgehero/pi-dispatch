@@ -168,6 +168,8 @@ function hubOn({ streams = fakeStreams(), alive = new Set(["s1", "s2", "s3", "s4
     loadPageData: async () => ({}),
     pagePanels: async () => [],
     peekSession: (id, file) => (file === FILE && alive.has(id) ? { id } : null),
+    // The store's verdict, faked: a session that left `alive` was revoked.
+    endedReason: (id, file) => (file === FILE && !alive.has(id) ? "revoked" : null),
     readTokens: () => ({ file: FILE }),
     transcriptSince: transcriptSince ?? streams.since,
     now: clock(),
@@ -316,7 +318,7 @@ test("hub: ids past a digit boundary (a 12-digit ms then a 13-digit one, <ms>-9 
   assert.ok(!entriesIn(ahead.take()).some((e) => e.id === `${ms}-10` || e.id === `${ms}-9`), "the stream at -10 gets nothing it has");
 });
 
-test("hub: a transcript stream whose session fails peek gets event: end; one whose buffer passes 2 MiB is cut; an unreachable read is logged once, without text", async () => {
+test("hub: a transcript stream whose session fails peek gets event: end with its reason; one whose buffer passes 2 MiB is cut; an unreachable read is logged once, without text", async () => {
   const h = hubOn();
   h.streams.add("job-a", { text: "x" });
   const dead = fakeRes();
@@ -329,7 +331,7 @@ test("hub: a transcript stream whose session fails peek gets event: end; one who
   h.alive.delete("s1");
   full.writableLength = 2 * 1024 * 1024 + 1;
   await h.hub.tick();
-  assert.match(dead.take(), /event: end\ndata: \{\}\n\n$/);
+  assert.match(dead.take(), /event: end\ndata: \{"ended":"revoked"\}\n\n$/);
   assert.equal(dead.ended, true);
   assert.equal(full.destroyed, true, "cut, not ended");
   assert.equal(h.hub.size().streams, 1);
@@ -349,6 +351,33 @@ test("hub: a transcript stream whose session fails peek gets event: end; one who
   await u.hub.tick();
   assert.equal(entriesIn(res.take()).length, 1);
   assert.equal(u.logs.filter((l) => /read again/.test(l)).length, 1);
+});
+
+test("hub: a transcript stream is never told stale or fresh (its entries are a log, not a picture), on a failed read or an unreadable tokens file; close says shutdown", async () => {
+  let read = () => ({ file: FILE });
+  let unreachable = false;
+  const s = fakeStreams();
+  const h = hubOn({ streams: s, readTokens: () => read(), transcriptSince: async (...a) => (unreachable ? { unreachable: "down" } : s.since(...a)) });
+  s.add("job-a", { text: "one" });
+  const res = fakeRes();
+  h.hub.subscribeTranscript({ res, sessionId: "s1", session: OP, jobId: "job-a" });
+  await h.hub.tick();
+  unreachable = true;
+  await h.hub.tick();
+  read = () => ({ refusal: "the tokens file is readable by others" });
+  s.add("job-a", { text: "two" });
+  h.alive.delete("s1");
+  await h.hub.tick();
+  assert.equal(res.ended, false, "an unreadable tokens file ends no transcript stream either");
+  unreachable = false;
+  read = () => ({ file: FILE });
+  h.alive.add("s1");
+  await h.hub.tick();
+  const text = res.take();
+  assert.doesNotMatch(text, /event: (stale|fresh)\n/);
+  assert.deepEqual(entriesIn(text).map((e) => JSON.stringify(e.html).includes("two")), [false, true], "the entry held back is sent once the file reads again");
+  h.hub.close();
+  assert.match(res.take(), /^event: end\ndata: \{"ended":"shutdown"\}\n\n$/);
 });
 
 // ---- over HTTP ---------------------------------------------------------------------------------------------------------
@@ -387,6 +416,8 @@ async function transcriptConsole({ fleet, maxStreams = 4, readOnly = false } = {
     pagePanels: realPages.pagePanels,
     queryKeyOf: realPages.pageQueryString,
     peekSession: (id, file) => sessions.peek(id, file),
+    // Wired as cli.mjs wires it: the reason a stream ends is the store's pure verdict.
+    endedReason: (id, file) => sessions.verdict(id, file).ended ?? null,
     readTokens,
     transcriptSince: (jobId, after, opts) => fleet.transcriptSince(jobId, after, opts),
     readOnly,
@@ -399,7 +430,7 @@ async function transcriptConsole({ fleet, maxStreams = 4, readOnly = false } = {
     audit: { append: (row) => row },
     sessions,
     cookies: sessionsModule,
-    tickets: { issue: () => ({ ticket: "t" }), redeem: () => ({ refusal: "no" }) },
+    tickets: { issue: () => ({ ticket: "t", expiresAt: now() + 5 * MIN }), redeem: () => ({ refusal: "no" }) },
     readTokens,
     findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null,
     consumeLoginCode: () => ({ refusal: "unknown" }),
@@ -560,21 +591,23 @@ test("over HTTP: Last-Event-ID resumes in the stream's own shape; a panel-shaped
   await resumed.done;
 });
 
-test("over HTTP: a session that ends mid-stream (logout, revoke) gets event: end on its transcript stream", { timeout: 20_000 }, async () => {
+test("over HTTP: a session that ends mid-stream (logout, revoke) gets event: end on its transcript stream, saying why", { timeout: 20_000 }, async () => {
   const c = await transcriptConsole({ fleet: fakeFleet() });
   const op = await c.login();
   const s = await c.stream(op, "/api/transcript?id=job-1");
   await s.waitFor(/^retry: 2000\n\n/);
   await c.send({ method: "POST", path: "/logout", headers: { ...c.writeHeaders, cookie: op } });
-  await s.waitFor(/event: end\ndata: \{\}\n\n/);
+  await s.waitFor(/event: end\ndata: /);
   await s.done;
+  assert.match(s.text, /event: end\ndata: \{"ended":"elsewhere"\}\n\n$/, "this browser signed out in another tab");
   const op2 = await c.login();
   const s2 = await c.stream(op2, "/api/transcript?id=job-1");
   await s2.waitFor(/^retry: 2000\n\n/);
   c.tokens.file = { ...c.tokens.file, tokens: c.tokens.file.tokens.filter((t) => t.name !== "alice") };
   await c.hub.tick();
-  await s2.waitFor(/event: end\ndata: \{\}\n\n/);
+  await s2.waitFor(/event: end\ndata: /);
   await s2.done;
+  assert.match(s2.text, /event: end\ndata: \{"ended":"revoked"\}\n\n$/);
   await c.settle(0);
   assert.equal(c.hub.size().streams, 0);
 });

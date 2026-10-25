@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -15,9 +15,14 @@ import {
 	FIXTURES,
 	FOCUS_RING,
 	FORCED_DOC,
+	GOLDEN_ROLES,
+	LINK_CODE_FRAGMENT,
 	MORE_ALIGN,
+	MORE_AT,
+	MORE_READ,
 	MORE_GAP,
 	NO_SCRIPT,
+	NO_SCRIPT_SUFFIX,
 	ONE_ROW_WIDTH,
 	PARKED_SHOWN,
 	PARKED_WIDE,
@@ -31,10 +36,13 @@ import {
 	Refusal,
 	SHELL_WIDTHS,
 	SIGN_IN,
+	THEME_HIDDEN_READ,
 	VIEWPORT,
 	WIDTH_PENDING,
+	barSource,
 	barVerdict,
 	cftUrl,
+	checkNoScript,
 	chromeChoice,
 	clipsOf,
 	controlCss,
@@ -46,6 +54,7 @@ import {
 	findChrome,
 	goldenName,
 	goldenProblems,
+	goldenUrl,
 	heightProblems,
 	hostPlatform,
 	injectTheme,
@@ -62,6 +71,7 @@ import {
 	moreVerdict,
 	nameProblems,
 	navCut,
+	noScriptRun,
 	noScriptVerdict,
 	oneRowProblems,
 	parkedCounts,
@@ -76,6 +86,7 @@ import {
 	planRuns,
 	planShellRuns,
 	ratchetVerdict,
+	readGoldens,
 	readWidthProblems,
 	readsNote,
 	runCheck,
@@ -87,7 +98,7 @@ import {
 	shellRunVerdict,
 	shellVerdict,
 	shownBox,
-	signInDocs,
+	signInProblems,
 	summarize,
 	themeHead,
 	versionCheck,
@@ -364,11 +375,12 @@ test("the metrics: the navigation's and the end's own children are the parts, re
 	const a = measure(tree(48, "live", shut));
 	const b = measure(tree(108, "live live--retry", shut));
 	const name = { text: "ops", title: "ops, Operator", scrollWidth: 80, clientWidth: 80, textOverflow: "ellipsis", overflowX: "hidden" };
-	const bar = { nodes: a.nodes, roles: a.roles, reads: [{ live: "Live", theme: "shown", parked: "128", scrollWidth: 800, snap: a.snap }, { live: "Reconnecting", theme: "shown", parked: "", scrollWidth: 812, snap: b.snap }], name, roleWord: null, parkedWidened: true, width: 800, height: 900 };
+	const bar = { nodes: a.nodes, roles: a.roles, reads: [{ live: "Live", theme: "shown", parked: "128", parkedText: "128 unanswered", scrollWidth: 800, snap: a.snap }, { live: "Reconnecting", theme: "shown", parked: "", parkedText: "", scrollWidth: 812, snap: b.snap }], name, roleWord: null, parkedWidened: true, width: 800, height: 900 };
 	const open = measure(tree(48, "live", box(-6, 174, 126, 166)));
 	const m = shellMetrics({ bar, more: { opened: true, cutFirst: true, nodes: open.nodes, roles: open.roles, snap: open.snap, width: 800, height: 900 } });
 	assert.deepEqual(m.bars.map((r) => [r.live, r.theme, r.parked, r.scrollWidth, r.height]), [["Live", "shown", "128", 800, 48], ["Reconnecting", "shown", "", 812, 108]], "the bar's own height and the page's width, read by read, with what the read varied");
 	assert.equal(m.widened, true);
+	assert.deepEqual(m.bars.map((r) => r.parkedText), ["128 unanswered", ""], "the Parked panel's text as each read found it");
 	assert.deepEqual(m.bars[0].nav.map((p) => p.label), ["Overview", "More"], "the navigation's own children: not the count inside a pill, not the summary inside More");
 	assert.deepEqual(m.bars[0].end.map((p) => p.label), ["Live", "ops"], "the end cluster's own children");
 	assert.deepEqual([m.bars[0].end[0].cls, m.bars[1].end[0].cls], ["live", "live live--retry"], "each read is its own");
@@ -381,7 +393,7 @@ test("the metrics: the navigation's and the end's own children are the parts, re
 	assert.deepEqual(shellMetrics({ bar: { nodes: withRole.nodes, roles: withRole.roles, reads: [{ live: null, theme: null, snap: withRole.snap }], name: null, roleWord: role } }).roleWord, { ...role, part: partOf(withRole.nodes, withRole.snap, withRole.roles.roleWord) }, "the role word's measure, with its part");
 	const bare = measure(["header", { cls: "top", rect: box(0, 800, 0, 48), role: "top" }]);
 	const lone = shellMetrics({ bar: { nodes: bare.nodes, roles: bare.roles, reads: [{ live: null, theme: null, snap: bare.snap }], name: null } });
-	assert.deepEqual([lone.bars[0].nav, lone.bars[0].end, lone.bars[0].brand, lone.bars[0].parked, lone.bars[0].scrollWidth, lone.name, lone.widened, lone.more], [null, null, null, null, null, null, null, null], "a bar without a navigation, an end or a count has none, which barVerdict names");
+	assert.deepEqual([lone.bars[0].nav, lone.bars[0].end, lone.bars[0].brand, lone.bars[0].parked, lone.bars[0].parkedText, lone.bars[0].scrollWidth, lone.name, lone.widened, lone.more], [null, null, null, null, null, null, null, null, null], "a bar without a navigation, an end or a count has none, which barVerdict names");
 	assert.deepEqual(shellMetrics({}), { bars: null, name: null, roleWord: null, widened: null, more: null }, "a page with no bar");
 	assert.deepEqual(shellMetrics({ more: { opened: false, nodes: null, width: 375, height: 812 } }).more, { opened: false, cutFirst: null, summary: null, menu: null, width: 375, height: 812 });
 });
@@ -489,6 +501,18 @@ test("every read of the bar: the page's width in each, every live word read, no 
 	assert.deepEqual(parkedReadProblems(counted.slice(0, 2)), ["the bar was never read with the Parked count at 12,345, so no rule was held there"], "a read that never widened the count");
 	assert.deepEqual(parkedReadProblems([counted[0]]), ["the bar was never read with no Parked count, the Parked count at 12,345, so no rule was held there"]);
 	assert.deepEqual(parkedReadProblems([{ live: "Live", theme: "shown", parked: null }]), [], "a page with no count panel has no count to vary");
+	// What the panel showed decides (a swap that wrote the drawn count back passed every run before).
+	const seen = (parked, parkedText) => ({ live: "Live", theme: "shown", parked, parkedText });
+	assert.deepEqual(parkedReadProblems([seen("128", "128 unanswered"), seen("", ""), seen("12,345", "12,345 unanswered")]), [], "each read's panel showed its count");
+	assert.deepEqual(parkedReadProblems([seen("128", "128"), seen("", ""), seen("12,345", "128"), seen("12,345", "128")]), [
+		'the bar was read as the Parked count at 12,345 while its Parked panel read "128" (and 1 more reads like it), so no rule was held at that count',
+		"the bar was never read with the Parked count at 12,345, so no rule was held there",
+	], "a wide read whose panel still showed the drawn count is no wide read");
+	assert.deepEqual(parkedReadProblems([seen("128", "128"), seen("", "128"), seen("12,345", "12,345")]), [
+		'the bar was read as no Parked count while its Parked panel read "128", so no rule was held at that count',
+		"the bar was never read with no Parked count, so no rule was held there",
+	], "an emptied read whose panel kept its count");
+	assert.deepEqual(parkedReadProblems([seen("128", "  "), seen("", " "), seen("12,345", null)]), ['the bar was read as the Parked count at 128 while its Parked panel read "  ", so no rule was held at that count', "the bar was never read with the Parked count at 128, so no rule was held there"], "white space is no count; a read with no text recorded is taken at its label");
 	const table = [{ cls: "live live--off", word: "Not live" }, { cls: "live", word: "Live" }, { cls: "live live--off", word: "Signed out" }];
 	assert.deepEqual(liveStateProblems(table), ["the live pill draws Not live and Signed out with the same classes (live live--off), so a phone, which shows the state's glyph alone, cannot tell them apart"], "the first commit's table, which drew Signed out with Not live's classes");
 	// One row: every part that shows meets the pi-dispatch pill's row.
@@ -683,12 +707,18 @@ test("the run without page scripts: More opened by a real click, placed under it
 				["div", { rect: box(568, 748, 118, 170), position: "absolute", label: "Audit", role: "menu" }]]]]);
 	const more = { opened: true, cutFirst: null, nodes: at.nodes, roles: at.roles, snap: at.snap, width: 1024, height: 900 };
 	const measured = { scrollWidth: 1024, clientWidth: 1024, elements: [] };
-	assert.deepEqual(noScriptVerdict({ width: 1024, measured, more, emulation: desk(1024) }), { failures: [], notes: [] });
+	const off = { width: 1024, measured, more, emulation: desk(1024), themeHidden: true };
+	assert.deepEqual(noScriptVerdict(off), { failures: [], notes: [] });
 	const placedByScript = { ...more, snap: at.snap.map((s, i) => (i === at.roles.menu ? { ...s, rect: box(844, 1024, 118, 170) } : s)) };
-	assert.deepEqual(noScriptVerdict({ width: 1024, measured, more: placedByScript, emulation: desk(1024) }).failures, ["the open More menu's right edge is 276.0 px right of its button's (it opens under its button, right edges aligned)"], "a list the script would have moved, left where the bar's own box puts it");
-	assert.deepEqual(noScriptVerdict({ width: 1024, measured, more: { ...more, opened: false }, emulation: desk(1024) }).failures, ["a click on More did not open its menu"]);
-	assert.deepEqual(noScriptVerdict({ width: 1024, measured, more: null, emulation: desk(1024) }).failures, ["the page has no More menu to open without its script"]);
-	assert.deepEqual(noScriptVerdict({ width: 1024, measured, more, emulation: PHONE }).failures, emulationProblems(PHONE, false), "a desktop's window");
+	assert.deepEqual(noScriptVerdict({ ...off, more: placedByScript }).failures, ["the open More menu's right edge is 276.0 px right of its button's (it opens under its button, right edges aligned)"], "a list the script would have moved, left where the bar's own box puts it");
+	assert.deepEqual(noScriptVerdict({ ...off, more: { ...more, opened: false } }).failures, ["a click on More did not open its menu"]);
+	assert.deepEqual(noScriptVerdict({ ...off, more: null }).failures, ["the page has no More menu to open without its script"]);
+	assert.deepEqual(noScriptVerdict({ ...off, emulation: PHONE }).failures, emulationProblems(PHONE, false), "a desktop's window");
+	// The proof the run was made with scripts off (the same run with scripts on passed before): the
+	// script reveals the theme button on load, so a button still hidden is a page whose script never ran.
+	assert.deepEqual(noScriptVerdict({ ...off, themeHidden: false }).failures, ["the theme button was shown, so the page's script ran: this run must be made with page scripts off (Emulation.setScriptExecutionDisabled)"], "a page whose script ran, however well its More was placed");
+	assert.deepEqual(noScriptVerdict({ ...off, themeHidden: null }).failures, ["the page has no theme button ([data-theme-toggle]), so nothing shows its script stayed off"]);
+	assert.deepEqual(noScriptVerdict({ ...off, themeHidden: undefined }).failures, noScriptVerdict({ ...off, themeHidden: null }).failures, "a read never made proves nothing either");
 });
 
 test("the ratchet: a pending page may overflow, a pending page that fits fails, and an entry must name a page", () => {
@@ -712,24 +742,49 @@ test("goldens: named <shot>.<role>.html, and a page with none for a role is a pr
 	assert.equal(goldenName("runs.admin.html"), null);
 	assert.equal(goldenName("Runs.viewer.html"), null);
 	assert.equal(goldenName("runs.viewer.htm"), null);
+	// A page nobody is signed in to (a sign-in page, an error page drawn without a session) is the anonymous role's.
+	assert.deepEqual(GOLDEN_ROLES, ["operator", "viewer", "anonymous"]);
+	assert.deepEqual(goldenName("login.anonymous.html"), { shot: "login", role: "anonymous" });
+	assert.deepEqual(goldenName("error-421.anonymous.html"), { shot: "error-421", role: "anonymous" });
+	assert.deepEqual(goldenName("login-ended-idle.anonymous.html"), { shot: "login-ended-idle", role: "anonymous" }, "a panel golden's name too");
+	for (const bad of ["login.anon.html", "login.signed-out.html", "login.anonymous.operator.html", "login.Anonymous.html"]) assert.equal(goldenName(bad), null, bad);
 	const files = ["overview.operator.html", "overview.viewer.html", "audit.operator.html", "runs-filtered.viewer.html"];
 	assert.deepEqual(missingGoldens(files, ["overview", "audit", "runs"]), ["no golden audit.viewer.html for the page audit", "no golden runs.operator.html for the page runs", "no golden runs.viewer.html for the page runs"]);
 	assert.deepEqual(missingGoldens(files, ["overview"]), []);
 	const top = { docs: files.map((file) => ({ file })), problems: ["x.html is not named <shot>.<role>.html"] };
-	assert.deepEqual(goldenProblems({ top, panels: { docs: [], problems: ["panels/y.html has no <body data-page>"] }, pageNames: ["overview", "audit"] }), ["x.html is not named <shot>.<role>.html", "panels/y.html has no <body data-page>", "no golden audit.viewer.html for the page audit"]);
+	assert.deepEqual(goldenProblems({ top, panels: { docs: [], problems: ["panels/y.html has no <body data-page>"] }, pageNames: ["overview", "audit"] }), [
+		"x.html is not named <shot>.<role>.html",
+		"panels/y.html has no <body data-page>",
+		"no golden audit.viewer.html for the page audit",
+		"no golden login.anonymous.html for the sign-in page /login (one of the pages harness's static shots)",
+		"no golden login-code.anonymous.html for the sign-in page /login/code (one of the pages harness's static shots)",
+	]);
+	// The sign-in pages are required by name: each its own golden, of its own page.
+	const signIn = [{ file: "login.anonymous.html", page: "login" }, { file: "login-code.anonymous.html", page: "login-code" }];
+	assert.deepEqual(signInProblems(signIn), []);
+	assert.deepEqual(signInProblems([signIn[0], { file: "login-code.anonymous.html", page: "login" }]), ['login-code.anonymous.html draws the page login, not the sign-in page /login/code (data-page="login-code")']);
+	assert.deepEqual(signInProblems([{ file: "panels/login.anonymous.html", page: "login" }, signIn[1]]), ["no golden login.anonymous.html for the sign-in page /login (one of the pages harness's static shots)"], "a panel golden is not the page's golden");
+	// The one-time link page is loaded with a code, so it stays in the state its golden drew; every other page as it is.
+	assert.match(LINK_CODE_FRAGMENT, /^#[A-Za-z0-9_-]{20,}$/);
+	assert.equal(goldenUrl({ page: "login-code", path: "/fixtures/login-code.anonymous.html" }), `/fixtures/login-code.anonymous.html${LINK_CODE_FRAGMENT}`);
+	assert.equal(goldenUrl({ page: "login-code", path: "/fixtures/panels/login-code-used.anonymous.html" }), `/fixtures/panels/login-code-used.anonymous.html${LINK_CODE_FRAGMENT}`);
+	assert.equal(goldenUrl({ page: "login", path: "/fixtures/login.anonymous.html" }), "/fixtures/login.anonymous.html");
+	assert.equal(goldenUrl({ page: "login-code", path: "/fixtures/x.html" }, "/forced/dark/x.html"), `/forced/dark/x.html${LINK_CODE_FRAGMENT}`, "a forced run's path, fragment and all");
 });
 
-test("the sign-in pages measured are every sign-in page the console serves", async () => {
+test("the sign-in pages measured are every sign-in page the console serves, each by its anonymous golden", async () => {
 	const shell = await at("admin/src/console/shell.mjs");
 	const { ROUTES } = await at("admin/src/console/server.mjs");
-	const pageFns = Object.keys(shell).filter((k) => /Page$/.test(k) && typeof shell[k] === "function").sort();
-	assert.deepEqual(SIGN_IN.map(([, , fn]) => fn).sort(), pageFns, "every page shell.mjs draws outside PAGES");
 	const signInRoutes = ROUTES.filter((r) => r.method === "GET" && r.auth === "none" && /^\/login(?:\/|$)/.test(r.path)).map((r) => r.path).sort();
-	assert.deepEqual(SIGN_IN.map(([, path]) => path).sort(), signInRoutes, "every GET /login route, at its real path");
-	const docs = signInDocs(shell);
-	assert.deepEqual(docs.map((d) => [d.id, d.path]), [["login", "/login"], ["login-code", "/login/code"]]);
-	for (const d of docs) assert.match(d.html, new RegExp(`<body data-page="${d.id}"`), `${d.path} is the page it says`);
-	assert.throws(() => signInDocs({}), (err) => err instanceof Refusal && /shell\.mjs has no loginPage\(\) to draw \/login/.test(err.message));
+	assert.deepEqual(SIGN_IN.map(([, path]) => path).sort(), signInRoutes, "every GET /login route");
+	// Every page shell.mjs draws outside PAGES is one of them, and draws the data-page its golden is held to.
+	const pageFns = Object.keys(shell).filter((k) => /Page$/.test(k) && typeof shell[k] === "function").sort();
+	const drawn = pageFns.map((fn) => /<body\b[^>]*\sdata-page="([^"]*)"/.exec(String(shell[fn]({})))?.[1] ?? null).sort();
+	assert.deepEqual(SIGN_IN.map(([page]) => page).sort(), drawn, `the pages ${pageFns.join(" and ")} draw`);
+	for (const [page, , file] of SIGN_IN) assert.equal(file, `${page}.anonymous.html`, "named as the harness names a static shot");
+	// And the goldens hold them, as the run reads them.
+	const top = readGoldens(FIXTURES, "");
+	assert.deepEqual(signInProblems(top.docs), [], "the pages harness's static shots are in the goldens");
 });
 
 test("forced themes carry exactly the head page() draws for the theme: data-theme and the color-scheme meta", async () => {
@@ -1011,6 +1066,205 @@ test("the negative control's verdict: every sentence it was built for, nothing e
 	assert.deepEqual(controlVerdict({ name: "the phone's negative control", what: "a phone's bar", got: null, want }).problems, ["the phone's negative control (a phone's bar) never ran, so a measure blind to what it breaks would pass every page"]);
 });
 
+/**
+ * A page for `barSource` to read, as small as its collector allows: the bar's elements with fixed boxes, the live pill
+ * with its word, the theme button, who is signed in, and the Parked count panel holding `<span class="count">128</span>`.
+ * Elements answer only the selectors the collector asks (an unknown one throws, so a collector that starts asking for
+ * more says so here). `scrollWidth` is the page's: 375, or 400 while the Parked panel is empty.
+ */
+function barPage() {
+	class Text {
+		constructor(value) {
+			this.nodeType = 3;
+			this.nodeValue = value;
+			this.parentElement = null;
+		}
+		get textContent() {
+			return this.nodeValue;
+		}
+		cloneNode() {
+			return new Text(this.nodeValue);
+		}
+	}
+	class El {
+		constructor(tag, attrs = {}, kids = []) {
+			this.nodeType = 1;
+			this.tagName = tag.toUpperCase();
+			this.attrs = { ...attrs };
+			this.childNodes = [];
+			this.parentElement = null;
+			this.rect = { left: 0, top: 0, right: 0, bottom: 0 };
+			this.scrollWidth = 0;
+			this.clientWidth = 0;
+			this.append(...kids);
+		}
+		get id() {
+			return this.attrs.id ?? "";
+		}
+		getAttribute(n) {
+			return Object.hasOwn(this.attrs, n) ? this.attrs[n] : null;
+		}
+		hasAttribute(n) {
+			return Object.hasOwn(this.attrs, n);
+		}
+		get className() {
+			return this.attrs.class ?? "";
+		}
+		set className(v) {
+			this.attrs.class = String(v);
+		}
+		get hidden() {
+			return Object.hasOwn(this.attrs, "hidden");
+		}
+		set hidden(v) {
+			if (v) this.attrs.hidden = "";
+			else delete this.attrs.hidden;
+		}
+		get textContent() {
+			return this.childNodes.map((n) => n.textContent).join("");
+		}
+		set textContent(v) {
+			this.replaceChildren(new Text(String(v)));
+		}
+		get innerText() {
+			return this.textContent;
+		}
+		append(...nodes) {
+			for (const n of nodes) {
+				const moved = n instanceof Fragment ? [...n.childNodes] : [n];
+				if (n instanceof Fragment) n.childNodes = [];
+				for (const m of moved) {
+					m.parentElement?.childNodes.splice(m.parentElement.childNodes.indexOf(m), 1);
+					m.parentElement = this;
+					this.childNodes.push(m);
+				}
+			}
+		}
+		replaceChildren(...nodes) {
+			for (const n of this.childNodes) n.parentElement = null;
+			this.childNodes = [];
+			this.append(...nodes);
+		}
+		cloneNode(deep) {
+			const c = new El(this.tagName.toLowerCase(), this.attrs);
+			if (deep) c.append(...this.childNodes.map((n) => n.cloneNode(true)));
+			return c;
+		}
+		*all() {
+			for (const n of this.childNodes) {
+				if (n.nodeType !== 1) continue;
+				yield n;
+				yield* n.all();
+			}
+		}
+		contains(n) {
+			for (let a = n; a; a = a.parentElement) if (a === this) return true;
+			return false;
+		}
+		closest(sel) {
+			for (let a = this; a; a = a.parentElement) if (sel === ".who" && a.className.split(" ").includes("who")) return a;
+			return null;
+		}
+		querySelectorAll(sel) {
+			if (sel !== "*") throw new Error(`the stub answers querySelectorAll("*") only, not ${sel}`);
+			return [...this.all()];
+		}
+		querySelector(sel) {
+			const pick = picks.get(this)?.[sel];
+			if (pick === undefined) throw new Error(`the stub does not answer ${sel} on <${this.tagName.toLowerCase()}>`);
+			return pick;
+		}
+		getBoundingClientRect() {
+			return this.rect;
+		}
+	}
+	class Fragment extends El {
+		constructor() {
+			super("#fragment");
+		}
+	}
+	const word = new El("span", { "data-live-word": "" }, [new Text("Not live")]);
+	const pill = new El("span", { id: "live-status", class: "live live--off", role: "status" }, [word]);
+	const theme = new El("button", { class: "roundbtn", "data-theme-toggle": "", hidden: "" });
+	const nameB = new El("b", {}, [new Text("ops")]);
+	const roleWord = new El("small", {}, [new Text("Operator")]);
+	const who = new El("span", { class: "who", title: "ops, Operator" }, [new El("span", {}, [nameB, roleWord])]);
+	const end = new El("div", { class: "top__end" }, [pill, theme, who]);
+	const panel = new El("span", { id: "p-nav-parked", "data-panel": "" }, [new El("span", { class: "count" }, [new Text("128")])]);
+	const nav = new El("nav", { class: "pillnav" }, [new El("a", { href: "/" }, [new Text("Overview")]), new El("a", { href: "/parked" }, [new Text("Parked"), panel])]);
+	const brand = new El("a", { class: "brandpill", href: "/" }, [new Text("pi-dispatch")]);
+	const top = new El("header", { class: "top" }, [brand, nav, end]);
+	const body = new El("body", {}, [new El("div", { class: "page" }, [top])]);
+	const picks = new Map([
+		[top, { ".pillnav": nav, ".top__end": end, ".brandpill": brand, "[data-theme-toggle]": theme, ".who b": nameB, ".who small": roleWord, "details.more": null, "details.more > summary": null, "details.more > :not(summary)": null, "#p-nav-parked": panel }],
+		[pill, { "[data-live-word]": word }],
+	]);
+	[...top.all()].forEach((el, i) => (el.rect = { left: i * 10, top: 0, right: i * 10 + 8, bottom: 48 }));
+	top.rect = { left: 0, top: 0, right: 375, bottom: 120 };
+	const html = new El("html", {}, [body]);
+	Object.defineProperty(html, "clientWidth", { value: 375 });
+	Object.defineProperty(html, "clientHeight", { value: 812 });
+	const scrolling = { get scrollWidth() { return panel.textContent === "" ? 400 : 375; } };
+	const document = {
+		body,
+		documentElement: html,
+		scrollingElement: scrolling,
+		querySelector: (sel) => (sel === "header.top" ? top : null),
+		getElementById: (id) => ({ "live-status": pill })[id] ?? null,
+		createDocumentFragment: () => new Fragment(),
+		createTreeWalker: (root, what) => {
+			assert.equal(what, 4, "text nodes only");
+			const texts = [];
+			const walk = (n) => (n.nodeType === 3 ? texts.push(n) : n.childNodes.forEach(walk));
+			walk(root);
+			let i = 0;
+			return { nextNode: () => texts[i++] ?? null };
+		},
+	};
+	const getComputedStyle = () => ({ position: "static", overflowX: "visible", overflowY: "visible", textOverflow: "ellipsis" });
+	return { ctx: { document, getComputedStyle, NodeFilter: { SHOW_TEXT: 4 } }, pill, word, theme, panel };
+}
+
+test("the bar's reads, run against a stubbed page: every live word, theme state and Parked count, each read's real panel text, and the page put back", () => {
+	const states = [{ cls: "live live--off", word: "Not live" }, { cls: "live", word: "Live" }, { cls: "live live--retry", word: "Reconnecting" }, { cls: "live live--off live--out", word: "Signed out" }];
+	const page = barPage();
+	const kids = [...page.panel.childNodes];
+	const got = JSON.parse(JSON.stringify(runInNewContext(barSource(states, parkedCounts()), page.ctx)));
+	assert.equal(got.reads.length, 3 * 2 * 4, "each Parked count, then each theme state, then each live word");
+	assert.deepEqual([...new Set(got.reads.map((r) => r.parked))], ["128", "", "12,345"], "the count as drawn, emptied, and five digits long (the wide one is read)");
+	assert.deepEqual([...new Set(got.reads.map((r) => r.theme))], ["shown", "hidden"], "the theme button shown, then hidden");
+	assert.deepEqual([...new Set(got.reads.map((r) => r.live))], states.map((s) => s.word));
+	for (const r of got.reads) assert.equal(r.parkedText, r.parked, `the panel's own text in the read with ${JSON.stringify(r.parked)}: what it showed, read back`);
+	assert.equal(got.parkedWidened, true, "set from the panel's text after the swap");
+	assert.deepEqual([...new Set(got.reads.map((r) => r.scrollWidth))], [375, 400], "the page's width read in each read: wider only while the count is emptied");
+	const at = (id) => got.nodes.findIndex((n) => n.id === id);
+	assert.deepEqual(got.nodes.slice(0, 3).map((n) => [n.tag, n.cls, n.parent]), [["div", "page", -1], ["header", "top", 0], ["a", "brandpill", 1]], "the bar's ancestors below <body>, then the bar and all it holds");
+	for (const r of got.reads) assert.equal(r.snap[at("live-status")].label, r.live, "each read's snapshot taken with its own live word in");
+	assert.equal(got.reads[0].snap[at("live-status")].cls, "live live--off");
+	// Everything put back: the page is as the server drew it, the panel's own nodes included.
+	assert.deepEqual([page.pill.className, page.word.textContent, page.theme.hidden], ["live live--off", "Not live", true]);
+	assert.ok(page.panel.childNodes.length === kids.length && page.panel.childNodes.every((n, i) => n === kids[i]), "the drawn count's own nodes, not copies");
+	// Through the verdicts: nothing to say about a bar read in every state.
+	const m = shellMetrics({ bar: got });
+	assert.equal(m.widened, true);
+	assert.deepEqual(parkedReadProblems(m.bars), []);
+	// A swap that writes the drawn count back. The widened flag and the reads both come from the panel's text, so
+	// both say it.
+	const blind = barSource(states, parkedCounts()).replace("t.nodeValue.split(DRAWN).join(WIDE)", "t.nodeValue.split(DRAWN).join(DRAWN)");
+	assert.notEqual(blind, barSource(states, parkedCounts()), "the broken copy is made");
+	const f07 = JSON.parse(JSON.stringify(runInNewContext(blind, barPage().ctx)));
+	assert.equal(f07.parkedWidened, false);
+	assert.deepEqual(parkedReadProblems(shellMetrics({ bar: f07 }).bars), [
+		'the bar was read as the Parked count at 12,345 while its Parked panel read "128" (and 7 more reads like it), so no rule was held at that count',
+		"the bar was never read with the Parked count at 12,345, so no rule was held there",
+	]);
+	// The wide count never read.
+	const short = barSource(states, parkedCounts()).replace('const parkeds = panel ? [DRAWN, "", WIDE] : [null];', 'const parkeds = panel ? [DRAWN, ""] : [null];');
+	assert.notEqual(short, barSource(states, parkedCounts()));
+	const g05b = JSON.parse(JSON.stringify(runInNewContext(short, barPage().ctx)));
+	assert.deepEqual(parkedReadProblems(shellMetrics({ bar: g05b }).bars), ["the bar was never read with the Parked count at 12,345, so no rule was held there"]);
+});
+
 test("More's click, run against a stubbed page: on a phone the button is cut in half at the row's edge, nothing holds focus, and it is never scrolled into view", async () => {
 	// A phone's row (12 to 363) scrolling 624 px of pills, More's 48 px button last; it has no scrollIntoView, so a check
 	// that called one would throw here.
@@ -1057,19 +1311,41 @@ test("the emulation probe, run against a stubbed page each way: a phone's window
 	assert.deepEqual(emulationProblems(page({ width: 375, dpr: 1, honours: false }).got, true), ["the window was meant to be a phone's, but DevTools did not emulate a phone (a viewport meta asking for 1234 px laid the page out 375 px wide)", "the device scale is 1, not 2"], "round 3's WC09: a phone run drawn as a desktop's, caught by what the page reports");
 });
 
+test("the theme button's read, run against stubbed pages: hidden is true, shown is false, a page with none is null (the no-script run's proof)", () => {
+	// The page's own `hidden`, read from the one element the selector names: `noScriptVerdict` takes a true as the sign
+	// that the page's script never ran. A read that answered true for any button (which
+	// once survived every test) would call a run made with scripts on a run without them.
+	const read = (button) => runInNewContext(THEME_HIDDEN_READ, { document: { querySelector: (s) => (s === "[data-theme-toggle]" ? button : null) } });
+	assert.equal(read({ hidden: true }), true, "drawn hidden and still hidden after load: the script did not run");
+	assert.equal(read({ hidden: false }), false, "revealed: the script ran");
+	assert.equal(read(null), null, "a page that draws no theme button says nothing either way");
+	// `hidden` is the page's property, a boolean: a value that is merely truthy is not a hidden button.
+	assert.equal(read({ hidden: "hidden" }), false);
+});
+
 // A golden run's result and a shell run's, as the browser half returns them.
 const goldenResult = (page, extra = {}) => ({ run: { key: `${page}.operator light`, label: "light", doc: { id: `${page}.operator`, file: `${page}.operator.html`, path: `/fixtures/${page}.operator.html`, page, role: "operator" } }, failures: [], notes: [], width: { ok: true }, ...extra });
 const shellResult = (page, width, failures = []) => ({ run: { key: `shell.operator.${page} ${width}`, width, doc: { id: `shell.operator.${page}`, path: `/shell/operator/${page}`, page, role: "operator" } }, failures, notes: [] });
+// The run without page scripts' result, as `checkPages` adds it last.
+const noScriptResult = (failures = []) => ({ run: { key: `shell.operator.overview ${NO_SCRIPT.width} no script`, width: NO_SCRIPT.width, doc: { id: `shell.operator.overview${NO_SCRIPT_SUFFIX}`, path: "/shell/operator/overview", page: "overview", role: "operator, no JavaScript" } }, failures, notes: [] });
 
 test("the summary: any failed run, a setup problem or the wrong Chrome in CI makes the exit code 1", () => {
 	const pin = { version: "155.0.8059.39" };
 	const product = "HeadlessChrome/155.0.8059.39";
 	const control = { name: "the negative control", what: "a bar", width: 1024, got: ["a 60 px overlap"], want: ["a 60 px overlap"], notes: [] };
 	const phone = { name: "the phone's negative control", what: "a phone's bar", width: 375, got: ["a jump", "a shut More"], want: ["a jump", "a shut More"], notes: [] };
-	const base = { product, pin, ci: true, results: [goldenResult("overview")], shell: SHELL_WIDTHS.map((w) => shellResult("overview", w)), controls: [control, phone], pages: ["overview"], seconds: "1.0" };
+	const sweep = SHELL_WIDTHS.map((w) => shellResult("overview", w));
+	const base = { product, pin, ci: true, results: [goldenResult("overview")], shell: [...sweep, noScriptResult()], controls: [control, phone], pages: ["overview"], seconds: "1.0" };
 	const clean = summarize(base);
 	assert.equal(clean.code, 0);
-	assert.deepEqual(clean.lines, ["ok    the negative control at 1024 px failed as it was built to (1 problem)", "ok    the phone's negative control at 375 px failed as it was built to (2 problems)", "ok    overview.operator.html (page overview, operator, light)", "ok    shell /shell/operator/overview (page overview, operator) at 320, 375, 761, 800, 940, 1024, 1180, 1280, 1440, 1600 px", "1 runs over 1 pages and 10 shell runs over 1 pages, 0 failed, 0 other problems, in 1.0 s"]);
+	assert.deepEqual(clean.lines, ["ok    the negative control at 1024 px failed as it was built to (1 problem)", "ok    the phone's negative control at 375 px failed as it was built to (2 problems)", "ok    overview.operator.html (page overview, operator, light)", "ok    shell /shell/operator/overview (page overview, operator) at 320, 375, 761, 800, 940, 1024, 1180, 1280, 1440, 1600 px", "ok    shell /shell/operator/overview (page overview, operator, no JavaScript) at 1024 px", "1 runs over 1 pages and 11 shell runs over 2 pages, 0 failed, 0 other problems, in 1.0 s"]);
+	// A check that never made the run without page scripts held the CSS-alone rule nowhere.
+	const noBare = summarize({ ...base, shell: sweep });
+	assert.equal(noBare.code, 1, "every page passing is no proof without it");
+	assert.ok(noBare.lines.includes("::error::the run without page scripts never ran, so nothing held More's list under its button by CSS alone"));
+	assert.deepEqual(noBare.failures, ["the run without page scripts never ran, so nothing held More's list under its button by CSS alone"]);
+	const failedBare = summarize({ ...base, shell: [...sweep, noScriptResult(["the theme button was shown, so the page's script ran: this run must be made with page scripts off (Emulation.setScriptExecutionDisabled)"])] });
+	assert.deepEqual([failedBare.code, failedBare.failedRuns, failedBare.failures], [1, 1, []], "a run made with scripts on is a failed run, not a missing one");
 	const blind = summarize({ ...base, controls: [{ ...control, got: [] }, phone] });
 	assert.equal(blind.code, 1, "a control that passed means the measure is blind: every page's pass is worthless");
 	assert.ok(blind.lines.includes("::error::the negative control was not failed with: a 60 px overlap"));
@@ -1113,11 +1389,12 @@ let loaded = null;
 const repoModules = () => (loaded ??= loadModules());
 
 /**
- * `runCheck` with the browser faked: every golden and shell run passes (the run without scripts too, as `checkPages`
- * adds it) and each control fails exactly as built, unless `controlFailures` (by control id) says what it failed with,
- * or null for one that never ran, so what fails is the glue's own.
+ * `runCheck` with the browser faked: every golden and shell run passes (the run without scripts too, planned by
+ * `noScriptRun` as `checkPages` plans it) and each control fails exactly as built, unless `controlFailures` (by control
+ * id) says what it failed with, or null for one that never ran, and `noScript` says what the run without scripts
+ * failed with (null: it never ran), so what fails is the glue's own.
  */
-async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }), fixtures = FIXTURES, product = null, ci = true, controlFailures = {}, edit = (m) => m } = {}) {
+async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }), fixtures = FIXTURES, product = null, ci = true, controlFailures = {}, noScript = [], edit = (m) => m } = {}) {
 	const modules = edit(await repoModules());
 	product ??= `HeadlessChrome/${modules.pin.version}`;
 	const lines = [];
@@ -1126,8 +1403,8 @@ async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }),
 		handed = args;
 		const results = planRuns(args.docs).map((run) => ({ run, failures: [], notes: [], width: { ok: true } }));
 		const shell = planShellRuns(args.shellDocs).map((run) => ({ run, failures: [], notes: [] }));
-		const bare = args.shellDocs.find((d) => d.id === NO_SCRIPT.doc);
-		shell.push({ run: { key: `${bare.id} ${NO_SCRIPT.width} no script`, doc: { ...bare, id: `${bare.id}.no-script`, role: `${bare.role}, no JavaScript` }, width: NO_SCRIPT.width }, failures: [], notes: [] });
+		const bare = noScriptRun(args.shellDocs);
+		if (bare && noScript !== null) shell.push({ run: bare, failures: noScript, notes: [] });
 		const controls = args.controls.flatMap((c) => {
 			const failures = controlFailures[c.id] === undefined ? c.expected : controlFailures[c.id];
 			return failures === null ? [] : [{ run: { key: c.id }, failures, notes: [] }];
@@ -1145,12 +1422,14 @@ test("the glue: no Chrome refuses under --require and skips without it, before a
 	assert.deepEqual([skipped.code, skipped.lines, skipped.handed], [0, ["console-width-check: skipped, no Chrome found (set CHROME to run it)"], null]);
 });
 
-test("the glue: every golden, both sign-in pages and the whole shell sweep reach the browser, and a clean run exits 0", async () => {
+test("the glue: every golden (the sign-in pages' and the panel goldens among them) and the whole shell sweep reach the browser, and a clean run exits 0", async () => {
 	const { code, lines, handed } = await fakeRun();
 	assert.equal(code, 0, lines.filter((l) => l.startsWith("::error::")).join("\n"));
-	const goldens = readdirSync(FIXTURES).filter((f) => f.endsWith(".html")).sort();
-	assert.deepEqual(handed.docs.filter((d) => d.file).map((d) => d.file), goldens);
-	assert.deepEqual(handed.docs.filter((d) => !d.file).map((d) => d.path), ["/login", "/login/code"]);
+	const listed = (dir, prefix = "") => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".html")).sort().map((f) => `${prefix}${f}`) : []);
+	const goldens = [...listed(FIXTURES), ...listed(join(FIXTURES, "panels"), "panels/")];
+	assert.deepEqual(handed.docs.map((d) => d.file), goldens, "every golden, top level then panels, and nothing the check drew itself");
+	for (const [page, path, file] of SIGN_IN) assert.equal(handed.docs.find((d) => d.file === file)?.page, page, `${path} is measured by its golden`);
+	assert.ok(handed.docs.every((d) => d.path === `/fixtures/${d.file}`), "each served under its own name");
 	const pageNames = Object.keys((await repoModules()).pages.PAGES);
 	assert.equal(handed.shellDocs.length, pageNames.length * 4, "every page for each of the four sign-ins");
 	assert.deepEqual([...new Set(handed.shellDocs.map((d) => d.role))], ["operator", "viewer", "read-only", "longest-name"]);
@@ -1167,6 +1446,7 @@ test("the glue: every golden, both sign-in pages and the whole shell sweep reach
 	assert.deepEqual(handed.controls, [controlDoc(states, retry), phoneControlDoc(states)], "both negative controls, keyed to the shell's live states, reach the browser");
 	assert.deepEqual(lines.slice(0, 2), ["ok    the negative control at 1024 px failed as it was built to (9 problems)", "ok    the phone's negative control at 375 px failed as it was built to (4 problems)"]);
 	assert.ok(lines.includes("ok    shell /shell/operator/overview (page overview, operator, no JavaScript) at 1024 px"), "the run without scripts has its own line");
+	assert.deepEqual(noScriptRun(handed.shellDocs), { key: `shell.operator.overview ${NO_SCRIPT.width} no script`, doc: { ...handed.shellDocs.find((d) => d.id === NO_SCRIPT.doc), id: `shell.operator.overview${NO_SCRIPT_SUFFIX}`, role: "operator, no JavaScript" }, width: NO_SCRIPT.width, mobile: false }, "the operator's overview at 1024 px, as a desktop, under an id of its own");
 	assert.equal(lines.at(-1).replace(/in [\d.]+ s$/, "in s"), `${planRuns(handed.docs).length} runs over ${handed.docs.length} pages and ${handed.shellDocs.length * SHELL_WIDTHS.length + 1} shell runs over ${handed.shellDocs.length + 1} pages, 0 failed, 0 other problems, in s`);
 });
 
@@ -1204,6 +1484,78 @@ test("the glue: a negative control not failed exactly as it was built, or not ru
 	assert.ok(easy.lines.includes("::error::the phone's negative control was not failed with: a click on More did not open its menu"));
 	const phoneNever = await fakeRun({ controlFailures: { "control-phone": null } });
 	assert.ok(phoneNever.lines.includes(`::error::the phone's negative control (${phone.what}) never ran, so a measure blind to what it breaks would pass every page`));
+});
+
+test("the glue: the run without page scripts never made, or made with its scripts on, fails a run whose every page passed", async () => {
+	const never = await fakeRun({ noScript: null });
+	assert.equal(never.code, 1);
+	assert.ok(never.lines.includes("::error::the run without page scripts never ran, so nothing held More's list under its button by CSS alone"));
+	assert.match(never.lines.at(-1), /, 0 failed, 1 other problems, in [\d.]+ s$/);
+	const on = noScriptVerdict({ width: NO_SCRIPT.width, measured: { scrollWidth: NO_SCRIPT.width, clientWidth: NO_SCRIPT.width, elements: [] }, more: null, emulation: desk(NO_SCRIPT.width), themeHidden: false }).failures;
+	const scripted = await fakeRun({ noScript: on });
+	assert.equal(scripted.code, 1);
+	assert.ok(scripted.lines.includes("FAIL  shell /shell/operator/overview (page overview, operator, no JavaScript) at 1024 px"));
+	assert.ok(scripted.lines.includes(`::error::shell /shell/operator/overview (page overview, operator, no JavaScript) at 1024 px: ${on[0]}`));
+	// A sweep with no operator overview has no run to make: a setup problem before anything is measured.
+	const bare = await fakeRun({ edit: (m) => ({ ...m, pages: { ...m.pages, renderPage: (name, ctx) => m.pages.renderPage(name, ctx), PAGES: Object.fromEntries(Object.entries(m.pages.PAGES).filter(([k]) => k !== "overview")) } }) });
+	assert.ok(bare.lines.includes(`::error::the shell sweep has no ${NO_SCRIPT.doc} to load without its script`));
+});
+
+/**
+ * `checkNoScript` against a stubbed browser, which plays the page: its script reveals the theme button on load unless
+ * `Emulation.setScriptExecutionDisabled` came first, and a real click on More's centre opens it. What it was sent, in
+ * order, is `sent`.
+ */
+function noScriptBrowser() {
+	const sent = [];
+	let scriptsOff = false;
+	let loaded = false;
+	let opened = false;
+	const at = measure(["header", { cls: "top", rect: box(0, 1024, 0, 120), position: "relative", role: "top" },
+		["nav", { cls: "pillnav", rect: box(16, 1008, 64, 112), role: "nav" },
+			["details", { cls: "more", rect: box(700, 748, 64, 112), position: "relative", role: "more" },
+				["summary", { rect: box(700, 748, 64, 112), label: "More: Audit", role: "summary" }],
+				["div", { rect: box(568, 748, 118, 170), position: "absolute", label: "Audit", role: "menu" }]]]]);
+	const evaluate = (expression) => {
+		if (expression === THEME_HIDDEN_READ) return !loaded || scriptsOff;
+		if (expression === MORE_AT) return { x: 724, y: 88 };
+		if (expression === MORE_READ) return { opened, cutFirst: null, nodes: at.nodes, roles: at.roles, snap: at.snap, width: 1024, height: 900 };
+		if (expression === EMULATION_PROBE) return desk(1024);
+		if (expression.includes("__pdWidthKeep")) return { scrollWidth: 1024, clientWidth: 1024, elements: [] };
+		throw new Error(`the stub cannot evaluate ${expression.slice(0, 60)}`);
+	};
+	const t = {
+		sessionId: "s1",
+		send: async (method, params = {}) => {
+			sent.push(method === "Runtime.evaluate" ? `evaluate ${params.expression === THEME_HIDDEN_READ ? "theme" : params.expression === MORE_AT ? "more-at" : params.expression === MORE_READ ? "more-read" : params.expression === EMULATION_PROBE ? "emulation" : "measure"}` : method);
+			if (method === "Emulation.setScriptExecutionDisabled") scriptsOff = params.value === true;
+			if (method === "Page.navigate") {
+				loaded = true;
+				return {};
+			}
+			if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased" && params.x === 724 && params.y === 88) opened = true;
+			if (method === "Runtime.evaluate") return { result: { value: evaluate(params.expression) } };
+			return {};
+		},
+		close: async () => {},
+	};
+	return { sent, browser: { openTarget: async () => t, event: () => Promise.resolve({}) } };
+}
+
+test("the run without page scripts, against a stubbed browser: scripts off before the page loads, the theme button read, then More clicked", async () => {
+	const run = { key: "shell.operator.overview 1024 no script", doc: { id: `shell.operator.overview${NO_SCRIPT_SUFFIX}` }, width: NO_SCRIPT.width, mobile: false };
+	const { sent, browser } = noScriptBrowser();
+	const got = await checkNoScript({ browser, run, url: "http://127.0.0.1:1/shell/operator/overview", clockMs: 0 });
+	assert.deepEqual([got.failures, got.notes], [[], []], "a page whose script never ran, its More placed by CSS alone");
+	assert.ok(sent.indexOf("Emulation.setScriptExecutionDisabled") >= 0 && sent.indexOf("Emulation.setScriptExecutionDisabled") < sent.indexOf("Page.navigate"), "scripts are off before the page is loaded");
+	assert.deepEqual(sent.filter((m) => m.startsWith("evaluate") || m === "Input.dispatchMouseEvent"), ["evaluate theme", "evaluate measure", "evaluate more-at", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "evaluate more-read", "evaluate emulation"], "the theme button read before anything is clicked");
+	// The same run with the scripts left on: the stub's page script reveals the button, and the run says so.
+	const { browser: scripted } = noScriptBrowser();
+	const on = await checkNoScript({ browser: { ...scripted, openTarget: async () => {
+		const t = await scripted.openTarget();
+		return { ...t, send: (method, params) => (method === "Emulation.setScriptExecutionDisabled" ? Promise.resolve({}) : t.send(method, params)) };
+	} }, run, url: "http://127.0.0.1:1/shell/operator/overview", clockMs: 0 });
+	assert.deepEqual(on.failures, ["the theme button was shown, so the page's script ran: this run must be made with page scripts off (Emulation.setScriptExecutionDisabled)"]);
 });
 
 test("--check-pin through the real entry point: a pin that does not hold exits 1 with nothing on stdout, so the step downloads nothing", () => {

@@ -1,0 +1,21 @@
+{
+  "card": "Status",
+  "pr": 1,
+  "panels": [],
+  "elements": [
+    {"el":"badge(kind) for outcomes and states","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#badge"},
+    {"el":"Outcome badges in the repo's words: Completed, Failed, Refused, Awaiting input, Cancelled","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#outcomeBadge"},
+    {"el":"Never colour alone: one glyph, one word and one tone per state","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#STATUS"},
+    {"el":"The Awaiting approval badge","kind":"readme","status":"illustrative","reason":"approvals are #649's (ApprovalRequest, a planned card); the console has no approval state to badge"},
+    {"el":"State badges in the kit's statuses (Running, Held, Parked, Attention)","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#STATUS","holds":"running"},
+    {"el":"Held, Delayed, Healthy and Needs a look badges","kind":"sample","status":"illustrative","reason":"sample words: badge(status, word) draws any state in its status's glyph and tone, and each page's ledger names the words that page draws"},
+    {"el":"Project tags: the project's name on a neutral pill","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#ptag"},
+    {"el":"Venue tags, outlined","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#vtag"},
+    {"el":"Chips","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#chip"},
+    {"el":"Counts","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#count"},
+    {"el":"Status dots, beside the word they mark","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#dot"},
+    {"el":"Icon tiles","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#tile"},
+    {"el":"Slot dots: filled blue for running, yellow ring for held, empty ring for free","kind":"readme","status":"illustrative","reason":"the slot-dot helper is PR 3's (TimelineAndWaitlists; Status is in its card list too); kit.dot is a status dot beside a word, not a slot"},
+    {"el":"Tags and chips with sample values (web, api, billing, ops; local, podman, openshell, openshell-bind; 60% of cap; longest 2h 14m)","kind":"sample","status":"illustrative","reason":"sample values"}
+  ]
+}

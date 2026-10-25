@@ -38,14 +38,16 @@ const ICONS = new Set(ICON_NAMES);
 
 /**
  * The ids the page frame draws and the browser script finds by name, which no kit helper may write: the shell's
- * (`shell.mjs`: `#main`, `#logout`, `#live-status`, the Parked count `#p-nav-parked`), the sign-in pages' (`#login-form`,
- * `#token`, `#notice`), and the spend screen's chart hooks the script reads (`#tip`, `#wrap`, `#graph`, `#root`,
- * `#insights-tips`, `#graph-nodes`). Hand-listed because the kit cannot import the shell (the shell imports the kit),
- * so the kit test pins it both ways: every id the frame draws outside a page's content and every id the script names
- * in a `getElementById("...")` is refused (listed here, the sprite's, or one of the families below), and each one
- * listed here is still one of those.
+ * (`shell.mjs`: `#main`, `#logout`, `#live-status`, the Parked count `#p-nav-parked`, and since PR 2 of issue #737 the
+ * live notes `#live-note`, the write flow's one `#confirm-slot` and the `#held-note` template the script clones into a
+ * panel it keeps still), the sign-in pages' (`#login-form`, `#token`, `#notice`, which `signin.mjs` draws by hand with
+ * the kit's class names, since a kit helper may not write them), and the spend screen's chart hooks the script reads
+ * (`#tip`, `#wrap`, `#graph`, `#root`, `#insights-tips`, `#graph-nodes`). Hand-listed because the kit cannot import the
+ * shell (the shell imports the kit), so the kit test pins it both ways: every id the frame draws outside a page's
+ * panels and every id the script names in a `getElementById("...")` is refused (listed here, the sprite's, or one of
+ * the families below), and each one listed here is still one of those.
  */
-export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes"]);
+export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes"]);
 
 /**
  * The ordinal id families the spend topology mints (`graph-html.mjs`: `n<k>` for a chip, `w<k>` for a wire, `sg<k>`
@@ -99,6 +101,7 @@ const BUTTON_TYPES = new Set(["button", "submit"]);
 const CELL_FLAGS = Object.freeze({ id: "id", when: "when", tgt: "tgt", num: "num", act: "act", wide: "wide", hidePhone: "hide-phone" });
 const CELL_KEYS = new Set([...Object.keys(CELL_FLAGS), "html"]);
 const HEAD_KEYS = new Set(["label", "num", "hidePhone", "l"]);
+const ROW_KEYS = new Set(["cells", "mark", "id"]);
 const CONTROL_KEYS = new Set(["required", "disabled", "invalid", "describedBy"]);
 /**
  * A console link: a path (one `/`, never `//host`, then printable ASCII with no backslash, which a browser reads as a
@@ -362,10 +365,11 @@ function cellOf(c, col, stack) {
 /**
  * A data table in its scrolling box. It is named by a `caption` (visually hidden; a card's title is what the eye
  * reads) or an `aria-label`, and one of them is required; every head is `<th scope="col">`. `rows` are lists of cells,
- * or `{ cells, mark }` where `mark` (attention, failed) tints the row. A cell is a value or `{ html, id, num, wide,
- * hidePhone, when, tgt, act }`; an `id` cell's text never breaks. `stack` turns the rows into stacked blocks on a
- * phone, each cell labelled from its column's head (`data-l`). With no rows, `empty` is drawn instead: a fragment as it
- * is, text as a note.
+ * or `{ cells, mark, id }` where `mark` (attention, failed) tints the row and `id` names it, so a link elsewhere can
+ * open the page at it (the audit log's `#seq-41`); a row id is held to the kit's id rule like any other (`idOf`). A
+ * cell is a value or `{ html, id, num, wide, hidePhone, when, tgt, act }`; an `id` cell's text never breaks. `stack`
+ * turns the rows into stacked blocks on a phone, each cell labelled from its column's head (`data-l`). With no rows,
+ * `empty` is drawn instead: a fragment as it is, text as a note.
  */
 export function tbl({ label = null, caption = null, heads, rows, stack = false, empty = null }) {
   if (!given(label) && !given(caption)) throw new TypeError("kit.tbl: a table is named by a caption or an aria-label");
@@ -373,10 +377,12 @@ export function tbl({ label = null, caption = null, heads, rows, stack = false, 
   const cols = heads.map(headOf);
   const head = html`<thead><tr>${cols.map((c) => html`<th scope="col"${c.num ? html` class="num"` : null}>${c.label}</th>`)}</tr></thead>`;
   const body = rows.map((r) => {
-    const row = Array.isArray(r) ? { cells: r, mark: null } : r;
+    const row = Array.isArray(r) ? { cells: r, mark: null, id: null } : r;
+    for (const k of Object.keys(row)) if (!ROW_KEYS.has(k)) throw new RangeError(`kit.tbl: unknown row option ${JSON.stringify(k)}`);
     const mark = row.mark === null || row.mark === undefined ? null : pick(ROW_CLASS, row.mark, "row mark", "tbl");
+    const id = row.id === null || row.id === undefined ? null : idOf(row.id, "tbl");
     if (row.cells.length !== cols.length) throw new RangeError(`kit.tbl: a row has ${row.cells.length} cells for ${cols.length} columns`);
-    return html`<tr${mark ? html` class="${mark}"` : null}>${row.cells.map((c, i) => cellOf(c, cols[i], stack))}</tr>`;
+    return html`<tr${id ? html` id="${id}"` : null}${mark ? html` class="${mark}"` : null}>${row.cells.map((c, i) => cellOf(c, cols[i], stack))}</tr>`;
   });
   return html`<div class="tbl-wrap"><table class="${classes("tbl", stack && "tbl--stack")}"${given(label) ? html` aria-label="${label}"` : null}>${given(caption) ? html`<caption class="sr">${caption}</caption>` : null}${head}<tbody>${body}</tbody></table></div>`;
 }
@@ -445,6 +451,19 @@ export function banner({ status, title, body = null, actions = null, icon: glyph
   return html`<div class="${classes("banner", sm && "banner--sm", `tone-${s.tone}`)}" role="status"><span class="tile">${icon(glyph ?? s.icon)}</span><div><p class="banner__t">${title}</p>${given(body) ? html`<p class="banner__s">${body}</p>` : null}</div>${given(actions) ? html`<div class="banner__act">${actions}</div>` : null}</div>`;
 }
 
+/**
+ * A catalog sentence with each `backticked` run in the code face (`<span class="code">`), the way the console's own
+ * sentences mark a command or a name (the reason catalog writes its backticks for Markdown the same way): "An operator
+ * should run `pi-dispatch doctor` on the host." Every run is escaped like any text. A sentence with an odd number of
+ * backticks throws: the catalogs are code, and a stray backtick would otherwise put the rest of a sentence in the code
+ * face. A sentence with none is itself.
+ */
+export function withCode(text) {
+  const parts = String(text).split("`");
+  if (parts.length % 2 === 0) throw new RangeError(`kit.withCode: an unclosed backtick in ${JSON.stringify(String(text))}`);
+  return html`${parts.map((p, i) => (i % 2 === 1 ? html`<span class="code">${p}</span>` : p))}`;
+}
+
 /** An empty state: a status tile, the one-line verdict in bold, and the sentence under it. */
 export function empty({ status, icon: glyph = null, title, body = null }) {
   return html`<div class="empty">${tile(status, { icon: glyph })}<b>${title}</b>${given(body) ? html`<span>${body}</span>` : null}</div>`;
@@ -506,10 +525,15 @@ export function textarea({ id, name = null, value = "", placeholder = null, rows
  * The Copy button is drawn `hidden` with `data-copy`: the browser script reveals it only where it can copy
  * (`navigator.clipboard` in a secure context), and copies the box's `<code>` text, so a page without the script never
  * shows a button that does nothing.
+ * Each argument is a `<span>` of its own, the spaces between them text, so the `<code>`'s text is still exactly the
+ * line (the card draws the line as one text): the console's copy box wraps (`page-css.mjs` `SHELL_CSS`), and as one
+ * text a line broke after any hyphen, so `--name` was cut into `--` and `name` on a phone; as boxes of their own, a line
+ * breaks between arguments, and inside one only when it is wider than the box.
  */
 export function cmd(argv, { host = null } = {}) {
   if (!Array.isArray(argv) || argv.length === 0) throw new TypeError("kit.cmd: a command is a non-empty argument list");
-  const line = argv.map((a, i) => shellWord(a, i === 0, "cmd")).join(" ");
+  const words = argv.map((a, i) => shellWord(a, i === 0, "cmd"));
+  const line = words.map((w, i) => html`${i === 0 ? null : " "}<span>${w}</span>`);
   const box = html`<div class="cmd"><code>${line}</code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>`;
   return given(host) ? html`${box}<p class="card__sub">${host}</p>` : box;
 }

@@ -222,7 +222,7 @@ test("retryFailedJob and removeFailedJob act only on a job still failed as previ
     const f2 = await host.getJob("gh-f2");
     assert.deepEqual(await removeFailedJob({ url: URL12, jobId: "gh-f2", expect: { attemptsMade: f2.attemptsMade, finishedOn: f2.finishedOn } }), { ok: true, jobId: "gh-f2", queue: "pi-jobs@mini1" });
     assert.equal(await host.getJob("gh-f2"), undefined);
-    assert.match((await removeFailedJob({ url: URL12, jobId: "gh-f2", expect: { attemptsMade: 1, finishedOn: 1 } })).invalid, /no job gh-f2 in 2 queue\(s\)/);
+    assert.match((await removeFailedJob({ url: URL12, jobId: "gh-f2", expect: { attemptsMade: 1, finishedOn: 1 } })).invalid, /no job gh-f2 in 2 queues/);
   } finally {
     await v.done();
   }
@@ -848,7 +848,7 @@ test("planSteer refuses by name before anything is written: source, sender, mode
     assert.match((await plan({ mode: "later" })).refusal, /the mode is not one of steer, followUp/);
     assert.match((await plan({ text: " \u0007\u200b " })).refusal, /the message is empty/);
     assert.match((await plan({ text: "x".repeat(8193) })).refusal, /8193 bytes, above the 8192-byte limit; shorten it\. Nothing was sent/);
-    assert.match((await plan({ jobId: "gh-none" })).refusal, /no job gh-none in 2 queue\(s\); nothing was sent/);
+    assert.match((await plan({ jobId: "gh-none" })).refusal, /no job gh-none in 2 queues; nothing was sent/);
     assert.match((await plan({ jobId: "gh-s3" })).refusal, /job gh-s3 is waiting: only a running job takes messages\. Nothing was sent/);
     assert.match((await plan({ jobId: "gh-s2" })).refusal, /job gh-s2 is not steer-armed \(its trigger does not set run\.steer\)/);
     // Armed and active, but the relay has not opened the run (no `run:steer:open:` key): one sentence for all three causes.
@@ -1038,7 +1038,7 @@ test("enqueueSteer and the withdraw funnels, every branch: gone, full, an entry 
     assert.match((await withdrawSteerMessage({ ...w4, id: "nope" }, { url: URL12 })).refusal, /32 lowercase hex/);
     assert.deepEqual(await withdrawSteerMessage(w4, { url: URL12, redisFn: down }), { unreachable: "Valkey said ECONNREFUSED" });
     assert.equal((await withdrawSteerMessage({ ...w4, kind: "steer" }, { url: URL12 })).refusal, "not a steer-withdraw plan");
-    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-none", id: p4.id })).refusal, /^no job gh-none in \d+ queue\(s\); nothing was changed$/);
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-none", id: p4.id })).refusal, /^no job gh-none in \d+ queues?; nothing was changed$/);
     const badHget = (url) => {
       const c = makeRedisClient(url);
       return new Proxy(c, { get: (t, k) => (k === "hget" ? async () => { throw Object.assign(new Error("z"), { code: "ETIMEDOUT" }); } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });

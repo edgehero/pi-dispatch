@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PAGES, returnPathOf } from "../src/console/pages.mjs";
-import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
+import { CONSOLE_SCRIPT, RETRY_MS } from "../src/console/script.mjs";
+import { loginCodePage } from "../src/console/shell.mjs";
+import { runConsoleScript, trapGlobalFetch } from "./helpers/script-dom.mjs";
 
 // Issue #708: a sign-in link may name the page to land on (`login/code#<code>&next=/runs`). The value comes from a link
 // anyone could have written, so it must never send the browser anywhere but this console's own pages.
@@ -60,6 +62,23 @@ test("the script posts the code and next, and lands only where both the server a
     assert.deepEqual(r.replaced, ["/"], JSON.stringify(evil));
   }
 });
+
+test("a link that is refused never navigates, and one that reaches nothing posts the same code and next again and still lands only on the console's own pages", () => trapGlobalFetch(async () => {
+  const code = "k".repeat(43);
+  // The server's own link page, with the script's states (issue #737): refused, the used state, and no navigation.
+  const refused = runConsoleScript(CONSOLE_SCRIPT, String(loginCodePage()), { url: `/login/code#${code}&next=/runs` });
+  await refused.fetch.open("/login/code").answer(401, { error: "this sign-in link is used, expired or unknown" });
+  assert.deepEqual([refused.location.replaced, refused.location.assigned], [[], []]);
+  assert.deepEqual(refused.document.querySelectorAll("[data-link-state]").filter((n) => !n.hidden).map((n) => n.getAttribute("data-link-state")), ["used"]);
+  // No answer: the same code and next, 2 s later, and whatever the answer names, only one of PAGES' paths.
+  const far = runConsoleScript(CONSOLE_SCRIPT, String(loginCodePage()), { url: `/login/code#${code}&next=//evil.example` });
+  await far.fetch.open("/login/code").fail();
+  assert.deepEqual(far.location.replaced, [], "no answer is no navigation");
+  far.tick(RETRY_MS);
+  assert.deepEqual(far.fetch.calls.map((c) => c.body), [{ code, next: "//evil.example" }, { code, next: "//evil.example" }]);
+  await far.fetch.open("/login/code").answer(200, { ok: true, next: "//evil.example" });
+  assert.deepEqual(far.location.replaced, ["/"]);
+}));
 
 test("the script's page list is PAGES' paths, so the two checks name the same pages", () => {
   assert.ok(CONSOLE_SCRIPT.includes(`var PAGE_PATHS = ${JSON.stringify(Object.values(PAGES).map((p) => p.path))};`));

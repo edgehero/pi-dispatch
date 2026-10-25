@@ -10,6 +10,7 @@ import { PAGES, renderPage } from "../src/console/pages.mjs";
 import { ICON_NAMES, SPRITE } from "../src/console/pulse-icons.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
+import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { loginCodePage, loginPage } from "../src/console/shell.mjs";
 import { forgeLinkOf } from "../src/read-model.mjs";
 import { DOCS_ROOT, OUTCOME_WORDS, REASON_WORDS, STATUS_KINDS, docsHref, outcomeWord } from "../src/words.mjs";
@@ -258,6 +259,16 @@ test("banner, empty and collapsed: CardsAndBanners' notices", () => {
   assert.equal([ui.collapsed({ icon: "runs", title: "Chain", body: "no parent, no children" }), ui.collapsed({ icon: "queue", title: "Run record, tokens and resources", body: "are written when the run ends" })].map(out).join(""), fromCard(lines));
 });
 
+test("withCode: a catalog sentence's backticked runs in the code face, every run escaped, an unclosed backtick refused", () => {
+  assert.equal(out(ui.withCode("An operator should run `pi-dispatch doctor` on the host.")), 'An operator should run <span class="code">pi-dispatch doctor</span> on the host.');
+  assert.equal(out(ui.withCode("`a` and `b`")), '<span class="code">a</span> and <span class="code">b</span>');
+  assert.equal(out(ui.withCode("no code here")), "no code here", "a sentence with none is itself");
+  assert.equal(out(ui.withCode("")), "");
+  // Each run, in the code face or not, is text: escaped and scrubbed, so a catalog cannot carry markup this way.
+  assert.equal(out(ui.withCode(`${HOSTILE} \`${HOSTILE}\``)), `${ESCAPED} <span class="code">${ESCAPED}</span>`);
+  for (const bad of ["one ` alone", "`a` and `b", "```"]) assert.throws(() => ui.withCode(bad), RangeError, bad);
+});
+
 // ---- tables -------------------------------------------------------------------------------------------------------------------
 
 const RUN_HEADS = [{ label: "When", l: "" }, "Job", "Target", "Project", "Flow", "Host", "Venue", "Outcome", { label: "Tokens", num: true }, { label: "Cost", num: true }];
@@ -287,6 +298,16 @@ test("tbl: a caption instead of a label, a marked row, a cell hidden on a phone,
   // one (review mutant K5).
   const marked = out(ui.tbl({ label: "t", heads: [html`<span class="sr">Actions</span>`, { label: html`<b>Job</b>`, l: "Job" }], rows: [["x", "y"]], stack: true }));
   assert.equal(marked, `<div class="tbl-wrap"><table class="tbl tbl--stack" aria-label="t"><thead><tr><th scope="col"><span class="sr">Actions</span></th><th scope="col"><b>Job</b></th></tr></thead><tbody><tr><td data-l="">x</td><td data-l="Job">y</td></tr></tbody></table></div>`);
+});
+
+test("tbl: a row id, held to the kit's id rule, so a link can open the page at a row (the audit log's #seq-41)", () => {
+  const t = out(ui.tbl({ caption: "Audit log", heads: ["Seq", "Who"], rows: [{ cells: [41, "ops"], id: "seq-41" }, { cells: [40, "x"], mark: "failed", id: "line-2026-10-5" }, { cells: [39, "y"], id: null }] }));
+  assert.ok(t.includes(`<tbody><tr id="seq-41"><td>41</td><td>ops</td></tr><tr id="line-2026-10-5" class="row--failed"><td>40</td><td>x</td></tr><tr><td>39</td><td>y</td></tr></tbody>`), t);
+  // Reserved, family, malformed: each refused like any kit id; and a row option the kit does not know throws.
+  for (const id of ["main", "confirm-slot", "live-note", "held-note", "p-audit", "i-runs", "n3", "Seq-1", "a b", "", 7]) {
+    assert.throws(() => ui.tbl({ label: "t", heads: ["a"], rows: [{ cells: ["x"], id }] }), RangeError, String(id));
+  }
+  assert.throws(() => ui.tbl({ label: "t", heads: ["a"], rows: [{ cells: ["x"], klass: "x" }] }), /unknown row option "klass"/);
 });
 
 test("tblFoot and pager: the DataTable card's foot, and a pager at the first page", () => {
@@ -400,16 +421,27 @@ test("field, input, select and textarea: the FieldsDiffCommand card's fields, th
 });
 
 test("cmd: the FieldsDiffCommand card's copy box, its Copy button hidden until the script can copy, and the host line under it", () => {
-  // The card's button, with `data-copy` (the script's hook) and `hidden` (shown only where copying works) added.
+  // The card's button, with `data-copy` (the script's hook) and `hidden` (shown only where copying works) added; and
+  // each argument in a span of its own (`words`), the spaces between them text, so the code's text is the card's line
+  // and a wrapped line breaks between arguments, never after the dashes of `--name`.
+  const words = (line) => line.split(" ").map((w) => `<span>${w}</span>`).join(" ");
   const card = `<div class="cmd"><code>pi-dispatch chat gh-b3d7</code><button class="btn btn--sm" type="button">Copy</button></div><p class="card__sub">Run this on a host that holds the session store.</p>`;
-  assert.equal(out(ui.cmd(["pi-dispatch", "chat", "gh-b3d7"], { host: "Run this on a host that holds the session store." })), card.replace(`type="button">Copy`, `type="button" data-copy hidden>Copy`));
-  assert.equal(out(ui.cmd(["pi-dispatch", "sandbox", "gh-e9a0"])), `<div class="cmd"><code>pi-dispatch sandbox gh-e9a0</code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>`);
+  assert.equal(out(ui.cmd(["pi-dispatch", "chat", "gh-b3d7"], { host: "Run this on a host that holds the session store." })), card.replace(`type="button">Copy`, `type="button" data-copy hidden>Copy`).replace("pi-dispatch chat gh-b3d7", words("pi-dispatch chat gh-b3d7")));
+  assert.equal(out(ui.cmd(["pi-dispatch", "sandbox", "gh-e9a0"])), `<div class="cmd"><code><span>pi-dispatch</span> <span>sandbox</span> <span>gh-e9a0</span></code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>`);
   // The run-id charset, a recovery's id and a URL are plain words; nothing else is.
-  assert.equal(out(ui.cmd(["pi-dispatch", "chat", "repeat:nightly-tidy:1760000000000", "gh-1.r1", "https://github.com/acme/web/issues/7", "--model=a/b@c+1%"])), `<div class="cmd"><code>pi-dispatch chat repeat:nightly-tidy:1760000000000 gh-1.r1 https://github.com/acme/web/issues/7 --model=a/b@c+1%</code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>`);
+  assert.equal(out(ui.cmd(["pi-dispatch", "chat", "repeat:nightly-tidy:1760000000000", "gh-1.r1", "https://github.com/acme/web/issues/7", "--model=a/b@c+1%"])), `<div class="cmd"><code>${words("pi-dispatch chat repeat:nightly-tidy:1760000000000 gh-1.r1 https://github.com/acme/web/issues/7 --model=a/b@c+1%")}</code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>`);
+  // A quoted argument holding spaces is one span: the box is the argument, whatever it holds.
+  assert.ok(out(ui.cmd(["pi-dispatch", "two words"])).includes("<code><span>pi-dispatch</span> <span>&#39;two words&#39;</span></code>"));
 });
 
-/** The text a `<code>` element holds, as the browser decodes it (what the Copy button copies). */
-const codeText = (frag) => /<code>([^<]*)<\/code>/.exec(String(frag))[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+/**
+ * The text a `<code>` element holds, as the browser decodes it (what the Copy button copies): its argument spans'
+ * text and the spaces between them. Every `<` inside is one of those spans' tags (an argument's own is `&lt;`).
+ */
+const codeText = (frag) => {
+  const inner = /<code>((?:<span>[^<]*<\/span> ?)+)<\/code>/.exec(String(frag))[1];
+  return inner.replace(/<\/?span>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+};
 
 /**
  * A command line split back into its arguments by the rules a POSIX shell applies to what `cmd` writes: words split on
@@ -455,8 +487,9 @@ test("cmd: an argument list, each argument a plain word or POSIX single-quoted, 
   assert.equal(line, `pi-dispatch chat 'gh-1; rm -rf ~' 'a|b' '$(id)' '\`id\`' 'it'\\''s' '"dq"' 'two words' '' '~root' '#c' 'a\\b' '*' '&&' 'x>y' ''\\'''`);
   // What `sh -c 'printf "%s\n" <line>'` would print, one argument per line: the list given.
   assert.deepEqual(shellArgs(line), argv);
-  // In the page the quotes are entities and the markup is text: nothing of an argument is a tag.
-  assert.match(String(frag), /<code>pi-dispatch chat &#39;gh-1; rm -rf ~&#39; [^<]*&#39;x&gt;y&#39; &#39;&#39;\\&#39;&#39;&#39;<\/code>/);
+  // In the page the quotes are entities and the markup is text: nothing of an argument is a tag, each one span.
+  assert.match(String(frag), /<code><span>pi-dispatch<\/span> <span>chat<\/span> <span>&#39;gh-1; rm -rf ~&#39;<\/span> (?:<span>[^<]*<\/span> )*<span>&#39;x&gt;y&#39;<\/span> <span>&#39;&#39;\\&#39;&#39;&#39;<\/span><\/code>/);
+  assert.equal(String(frag).match(/<span>/g).length, argv.length, "a span per argument");
   // A control byte is scrubbed like any text's, and stays inside its argument's quotes.
   assert.deepEqual(shellArgs(codeText(ui.cmd(["pi-dispatch", `gh-1${String.fromCharCode(10)}id`]))), ["pi-dispatch", "gh-1 id"]);
   // `=` is a letter, except at an argument's start (zsh's `=name` is the path of the command name) and anywhere in the
@@ -737,19 +770,42 @@ test("every link form the kit writes passes the page reference rule (assertOwnRe
   for (const href of ["?x=1", "https://evil.example/", "#nowhere-but-ok-shape-x y", "//evil.example/"]) assert.throws(() => ui.btn({ label: "x", href }), RangeError, href);
 });
 
-/** A page's markup with its content taken out: what the frame alone draws (the content is the one `.legacy` box). */
+/**
+ * A page's markup with its content taken out: what the frame alone draws. The content is every `.legacy` box (one per
+ * old section since PR 2) and the INSIDE of every panel (an element carrying `data-panel`: a converted page's panels
+ * sit outside any box, and the ids they hold, a table row's `seq-41`, are the page's own, not the frame's). The panel
+ * element itself stays: its `p-` id is a frame-level name the kit refuses by family.
+ */
 function frameOf(page) {
-  const at = page.indexOf('<div class="legacy">');
-  if (at === -1) return page;
-  let depth = 0;
-  const tags = /<div\b|<\/div>/g;
-  tags.lastIndex = at;
-  for (let m = tags.exec(page); m !== null; m = tags.exec(page)) {
-    depth += m[0] === "</div>" ? -1 : 1;
-    if (depth === 0) return page.slice(0, at) + page.slice(m.index + m[0].length);
+  const cut = (text, at, open, close) => {
+    const tags = new RegExp(`<${open}\\b|</${close}>`, "g");
+    tags.lastIndex = at;
+    let depth = 0;
+    for (let m = tags.exec(text); m !== null; m = tags.exec(text)) {
+      depth += m[0].startsWith("</") ? -1 : 1;
+      if (depth === 0) return m.index;
+    }
+    throw new Error(`an unclosed <${open}> at ${at}`);
+  };
+  let out = page;
+  for (let at = out.indexOf('<div class="legacy">'); at !== -1; at = out.indexOf('<div class="legacy">')) {
+    const end = cut(out, at, "div", "div");
+    out = out.slice(0, at) + out.slice(end + "</div>".length);
   }
-  throw new Error("an unclosed .legacy box");
+  const panel = /<(section|span|div)\b[^>]*\sdata-panel(?=[\s>])[^>]*>/g;
+  for (let m = panel.exec(out); m !== null; m = panel.exec(out)) {
+    const inner = m.index + m[0].length;
+    const end = cut(out, m.index, m[1], m[1]);
+    out = out.slice(0, inner) + out.slice(end);
+    panel.lastIndex = inner;
+  }
+  return out;
 }
+
+test("frameOf strips the legacy boxes and every panel's inside, and keeps the frame and the panel elements", () => {
+  const page = `<main id="main"><div class="legacy"><section id="p-a" data-panel><p id="x1"></p><div><i id="x2"></i></div></section></div><section id="p-b" data-panel><div class="card"><table><tr id="seq-4"></tr></table><section id="x3"></section></div></section><span id="p-nav-parked" data-panel><span id="x4"></span></span><div id="confirm-slot"><div id="x5"></div></div></main>`;
+  assert.equal(frameOf(page), `<main id="main"><section id="p-b" data-panel></section><span id="p-nav-parked" data-panel></span><div id="confirm-slot"><div id="x5"></div></div></main>`);
+});
 
 test("RESERVED_IDS is every id the page frame draws and the script finds by name, and nothing else: none can be a kit id", async () => {
   assert.ok(Object.isFrozen(ui.RESERVED_IDS));
@@ -760,19 +816,24 @@ test("RESERVED_IDS is every id the page frame draws and the script finds by name
   // The ids the script looks up by a literal name.
   const scriptIds = new Set(Array.from(CONSOLE_SCRIPT.matchAll(/getElementById\("([^"]+)"\)/g), (m) => m[1]));
   assert.ok(scriptIds.has("logout") && scriptIds.has("login-form") && scriptIds.has("graph-nodes"), [...scriptIds].join(", "));
-  // The ids the frame draws on every screen, both roles, live and not, read-only and not, and on the sign-in pages.
+  // The ids the frame draws on every screen, both roles, live and not, read-only and not, with a write's banner and
+  // without, on the sign-in pages and on every error page.
   const frameIds = new Set();
-  const pages = [String(loginPage()), String(loginCodePage())];
+  const pages = [String(loginPage({ notice: "idle" })), String(loginCodePage())];
+  const flash = { summary: "Paused the fleet", by: "ops", auditSeq: 41, count: 1, undo: "Resume it.", inverse: { action: "fleet-resume", body: {} }, kind: "fleet-pause", at: 0 };
   for (const name of Object.keys(PAGES)) {
     for (const role of ["viewer", "operator"]) {
       for (const readOnly of [false, true]) {
         const query = name === "run" ? { id: "gh-1" } : {};
-        pages.push(String((await renderPage(name, { query, session: { name: "ops", role }, data: { now: 0, env: {}, parkedCount: 3 }, readOnly })).html));
+        pages.push(String((await renderPage(name, { query, session: { name: "ops", role }, data: { now: 0, env: {}, parkedCount: 3 }, readOnly, flash, maxStreams: 4 })).html));
       }
     }
   }
+  for (const kind of ERROR_KINDS) pages.push(String(errorPage({ kind, session: { name: "ops", role: "operator" } }).html));
   for (const page of pages) for (const m of frameOf(page).matchAll(/\sid="([^"]+)"/g)) frameIds.add(m[1]);
   assert.ok(frameIds.has("main") && frameIds.has("p-nav-parked") && frameIds.has("i-runs"), [...frameIds].slice(0, 12).join(", "));
+  // PR 2's: the live notes' region, the one confirm slot and the held note's template, found by the script by id.
+  for (const id of ["live-note", "confirm-slot", "held-note"]) assert.ok(frameIds.has(id), `the frame draws #${id}`);
   for (const id of [...scriptIds, ...frameIds]) assert.ok(reserved(id), id);
   // And the list holds nothing else: each entry is still drawn by the frame or found by the script.
   for (const id of ui.RESERVED_IDS) assert.ok(frameIds.has(id) || scriptIds.has(id), `RESERVED_IDS lists #${id}, which neither the frame draws nor the script finds: drop it`);

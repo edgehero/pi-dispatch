@@ -25,13 +25,26 @@
  * Parked pill, and the live stream swaps its inner HTML like any panel's (`pages.mjs` `pagePanels` sends it on a live
  * page). It is drawn only from a count that is known: an unreadable or partial parked list draws no bubble, never a 0
  * that reads as "nobody is waiting".
+ *
+ * EVERY STATE THE SCRIPT CAN SWITCH TO IS DRAWN HERE, HIDDEN (PR 2 of issue #737). The live notes (`LIVE_NOTES`: the
+ * console out of reach, the stream refused, the session over, the data shown as last seen) are all in `#live-note`,
+ * each hidden; the write flow's one slot (`#confirm-slot`) and the note a panel kept still carries (`<template
+ * id="held-note">`) are drawn for an operator who can write. The script reveals, fills in text and moves the slot; it
+ * never writes their markup, so each can be pinned by a golden. A page drawn once (not live) says when, beside a
+ * Reload, in its title bar: nothing on it moves, and the reader should know how old it is.
+ *
+ * `frameHtml` is the same frame for a page that is not a screen: the sign-in pages (`signin.mjs`'s content) and the
+ * error pages (`error-pages.mjs`), with the signed-in bar when there is a session to show and the sign-in bar (the pill
+ * and the theme button) otherwise.
  */
+import { confirmSlotHtml, doneBannerHtml, heldNoteHtml } from "./confirm-view.mjs";
 import { html, page } from "./html.mjs";
 import * as ui from "./kit.mjs";
 // A cycle by design: `pages.mjs` draws through `shellHtml`, and this module reads the page table. Neither touches the
 // other's exports while it loads, only when a page is drawn, which ES modules allow.
-import { LEGACY_PAGES, PAGES } from "./pages.mjs";
+import { LEGACY_PAGES, PAGES, pageQueryString } from "./pages.mjs";
 import { ICON_NAMES, SPRITE } from "./pulse-icons.mjs";
+import { linkContent, signInContent } from "./signin.mjs";
 import { themeLabel } from "./theme.mjs";
 
 /**
@@ -111,9 +124,74 @@ export function navParkedHtml(data) {
   return n === null || n === 0 ? html`` : ui.count(n, "parked", { label: `${n} unanswered` });
 }
 
+/** The read-only banner's title (the AccessStates card), shown on every page of a console started read-only. */
+export const READ_ONLY_TITLE = "This console is read-only";
+
+/** The read-only banner's sentence: why, what it means, and what operators keep. */
+const READ_ONLY_BODY = html`It was started with <span class="code">PI_CONSOLE_READ_ONLY=1</span>, so every change is refused and no page shows a form. Operators still see reasons, transcripts and the audit log.`;
+
+/**
+ * The most live streams the whole console holds, every token together (`server.mjs` `STREAMS_TOTAL_MAX`). Written here
+ * rather than imported, because the server imports this module and the notes are built as it loads; the shell test
+ * pins the two equal.
+ */
+export const LIVE_STREAMS_TOTAL = 32;
+
+/**
+ * The notes a live page can show under its title bar (the LiveStates card), one at a time, each a small banner the
+ * server draws hidden and the script reveals (`script.mjs`, which embeds these keys): the console out of reach (the
+ * pill says Reconnecting; the page stays as it was), the stream refused (the pill says Not live: one token may hold
+ * `maxStreams` streams), the session over (the pill says Signed out, and the page goes to sign-in, which says why), and
+ * the data shown as last seen (the hub could not read the deployment and kept the panels; the time is the last good
+ * render's, which the script writes into the title's `<time data-since>`). `{maxStreams}` in the limit note's body is
+ * the console's own `PI_CONSOLE_MAX_STREAMS`, written in when the page is drawn.
+ */
+export const LIVE_NOTES = Object.freeze({
+  retry: Object.freeze({ status: "attention", icon: "beat", title: "Console not reachable, retrying", body: "The page stays as it was. Live panels resume when the console answers." }),
+  limit: Object.freeze({ status: "attention", icon: "slot", title: "Not live: this tab's live updates were refused", body: `One token may hold {maxStreams} live tabs, and the console ${LIVE_STREAMS_TOTAL} in all. This tab stays as it is; close another console tab, then reload. A run page with its transcript open counts as two.` }),
+  out: Object.freeze({ status: "idle", icon: "logout", title: "Signed out", body: "Your session ended, so the live panels stopped. Going to sign-in, which says why." }),
+  stale: Object.freeze({ status: "attention", icon: "clock", title: "Shown as last seen", body: "The console could not read the deployment's data; this is the page as it was last seen. The next refresh tries again." }),
+});
+
+/** A page's own address with its query: what Reload opens (a GET of the same page, so it works without the script). */
+function selfHref(name, query) {
+  return ui.pageHref(PAGES, name, new URLSearchParams(pageQueryString(name, query)));
+}
+
+/**
+ * `#live-note`: a polite live region, always drawn on a live page, holding each of `LIVE_NOTES` hidden in its
+ * `[data-live-note]` box. `maxStreams` is the token's stream limit; a value that is not one leaves the number out
+ * rather than state a wrong one. `reload` is the page's own address, for the limit note's Reload.
+ */
+export function liveNoteHtml({ maxStreams = null, reload = null } = {}) {
+  const limit = Number.isSafeInteger(maxStreams) && maxStreams >= 1 ? String(maxStreams) : null;
+  const notes = Object.entries(LIVE_NOTES).map(([state, n]) => {
+    let body = n.body;
+    if (state === "limit") body = limit === null ? body.replace("One token may hold {maxStreams} live tabs, and the console", "One token may hold only a few live tabs, and the console") : body.replace("{maxStreams}", limit);
+    // The stale note's time, written by the script; "at" shows only once there is one (`SHELL_CSS`).
+    const title = state === "stale" ? html`${n.title}<span class="live-note__at"> at <time data-since></time></span>` : n.title;
+    const actions = state === "limit" && reload !== null ? ui.btn({ kind: ["sm", "primary"], label: "Reload", href: reload }) : null;
+    return html`<div data-live-note="${state}" hidden>${ui.banner({ status: n.status, icon: n.icon, sm: true, title, body, actions })}</div>`;
+  });
+  return html`<div id="live-note" class="live-note" aria-live="polite">${notes}</div>`;
+}
+
+/**
+ * The title bar's end on a page drawn once (the LiveStates card: "Spend, Configuration and Audit are drawn once per
+ * load and say when"): when it was drawn, as a `<time>` the script shows in the reader's own time, "not live", and
+ * Reload. `now` is the page data's clock; a page with none says only that it is not live.
+ */
+function drawnHtml(now, reload) {
+  const at = Number.isFinite(now) && Math.abs(now) <= 8.64e15 ? new Date(now) : null;
+  const when = at === null ? html`Drawn once` : html`Drawn at <time datetime="${at.toISOString()}">${at.toISOString().slice(11, 16)} UTC</time>`;
+  return html`<div class="titlebar__end"><span class="drawn">${ui.icon("clock", { size: "sm" })}<span>${when} \u00b7 not live</span></span>${ui.btn({ kind: ["sm", "ghost"], icon: "rerun", label: "Reload", href: reload })}</div>`;
+}
+
 /**
  * `content` in the compatibility wrapper when page `name` is still drawn in the old markup (`LEGACY_PAGES`), so the
- * legacy stylesheet applies inside it and nowhere else; as it is once the page has converted.
+ * legacy stylesheet applies inside it and nowhere else; as it is once the page has converted. Called once per section
+ * (PR 2 of issue #737): each old panel in a wrapper of its own, so the confirm slot the script puts after a section
+ * that asked lands between two wrappers, never inside one, where the legacy layer would restyle its buttons and list.
  */
 export function legacyWrap(name, content) {
   return LEGACY_PAGES.includes(name) ? html`<div class="legacy">${content}</div>` : content;
@@ -154,15 +232,39 @@ function navHtml(here, role, parked) {
   return html`<nav class="pillnav" aria-label="Console screens">${NAV.filter((n) => mayOpen(n, role)).map((n) => navLink(n, here, parked))}${menu}</nav>`;
 }
 
+/** The signed-in top bar: the pill, the navigation (`here` the current screen, or none), the end, by the session. */
+function signedInBar({ here, role, parked, live, theme, readOnly, session }) {
+  const s = session ?? {};
+  // Name and role share one column, so the longer of the two is cut first with an ellipsis where the bar is short of
+  // room (for "ops, Operator", the role; SHELL_CSS), and a phone shows the avatar alone, so the block carries both whole
+  // in its title ("ops, Operator").
+  const whoName = s.name ?? "-";
+  const roleWord = role === null ? "-" : ROLE_WORDS[role];
+  // `data-name` and `data-role` are the session's own, for the script (issue #737): a probe's 200 reloads the page only
+  // into this same person, never into whoever this browser's cookie names by then. Absent when there is none to name.
+  const whoData = typeof s.name === "string" && role !== null ? html` data-name="${s.name}" data-role="${role}"` : null;
+  const who = html`<span class="who"${whoData} title="${role === null ? whoName : `${whoName}, ${roleWord}`}"><span><b>${whoName}</b><small>${roleWord}</small></span><span class="avatar">${initialsOf(s.name)}</span></span>`;
+  return html`<header class="${readOnly ? "top top--ro" : "top"}">${brandPill()}${navHtml(here, role, parked)}<div class="top__end">${live}${themeButton(theme)}${readOnly ? ui.chip("Read-only console", { status: "attention", icon: "shield" }) : null}${who}<button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out">${ui.icon("logout")}</button></div></header>`;
+}
+
+/** A session's role as the bar knows it, or null for one it does not (which opens no operator page). */
+const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(ROLE_WORDS, session.role) ? session.role : null);
+
 /**
- * Page `name`'s frame around `inner`. `ctx` is `renderPage`'s (`session`, `readOnly`, `data`, `query`, `theme`). The
- * run detail counts as Runs in the navigation and links back to it; its heading names the run.
+ * Page `name`'s frame around `inner`. `ctx` is `renderPage`'s: `session`, `readOnly`, `data`, `query`, `theme`, and since
+ * PR 2 of issue #737 `flash` (the session's last write, shown once as the done banner), `maxStreams` (the token's
+ * stream limit, for the limit note) and `slot` (false keeps the confirm slot off a page that must not have one). The run
+ * detail counts as Runs in the navigation and links back to it; its heading names the run.
+ *
+ * In order inside `<main>`: the title bar (on a page drawn once, when it was drawn and Reload, where the role may open
+ * it: a viewer refused the audit log is not offered its address), the read-only banner on a read-only console, the done
+ * banner, the live notes on a live page, `inner`, and for an operator on a console that takes changes the confirm slot
+ * and the held note's template.
  */
 export function shellHtml(name, ctx, inner) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const meta = PAGES[name];
-  const s = ctx?.session ?? {};
-  const role = typeof s.role === "string" && Object.hasOwn(ROLE_WORDS, s.role) ? s.role : null;
+  const role = roleOf(ctx?.session);
   const here = name === "run" ? "runs" : name;
   // Drawn on a live page always, so the stream has a panel to fill; elsewhere only when there is a count to show.
   const count = navParkedHtml(ctx?.data);
@@ -170,69 +272,78 @@ export function shellHtml(name, ctx, inner) {
   const start = LIVE_STATES.start;
   const glyphs = Object.entries(LIVE_GLYPHS).map(([state, glyph]) => liveGlyph(state, glyph));
   const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
-  // Name and role share one column, so the longer of the two is cut first with an ellipsis where the bar is short of
-  // room (for "ops, Operator", the role; SHELL_CSS), and a phone shows the avatar alone, so the block carries both whole
-  // in its title ("ops, Operator").
-  const whoName = s.name ?? "-";
-  const roleWord = role === null ? "-" : ROLE_WORDS[role];
-  const who = html`<span class="who" title="${role === null ? whoName : `${whoName}, ${roleWord}`}"><span><b>${whoName}</b><small>${roleWord}</small></span><span class="avatar">${initialsOf(s.name)}</span></span>`;
   const back = name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : null;
   const heading = name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${meta.title} ${ctx.query.id}` : meta.title;
+  const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;
+  const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload) : null;
+  const readOnly = Boolean(ctx?.readOnly);
+  const ro = readOnly ? ui.banner({ status: "attention", icon: "shield", sm: true, title: READ_ONLY_TITLE, body: READ_ONLY_BODY }) : null;
+  const flash = ctx?.flash !== null && typeof ctx?.flash === "object" ? doneBannerHtml(ctx.flash) : null;
+  const notes = meta.live ? liveNoteHtml({ maxStreams: ctx?.maxStreams, reload }) : null;
+  const writes = role === "operator" && !readOnly && ctx?.slot !== false ? html`${confirmSlotHtml()}<template id="held-note">${heldNoteHtml()}</template>` : null;
   return html`<a class="skip" href="#main">Skip to content</a>
 ${SPRITE}
 <div class="page">
-<header class="${ctx?.readOnly ? "top top--ro" : "top"}">${brandPill()}${navHtml(here, role, parked)}<div class="top__end">${liveHtml}${themeButton(ctx?.theme)}${ctx?.readOnly ? ui.chip("Read-only console", { status: "attention", icon: "shield" }) : null}${who}<button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out">${ui.icon("logout")}</button></div></header>
+${signedInBar({ here, role, parked, live: liveHtml, theme: ctx?.theme, readOnly, session: ctx?.session })}
 <main id="main" tabindex="-1">
-<div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1></div></div>
+<div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1></div>${drawn}</div>
+${ro}${flash}${notes}${inner}${writes}
+</main>
+</div>`;
+}
+
+/**
+ * A whole page in the console's frame for a page that is not a screen (the sign-in pages, the error pages): the skip
+ * link (`skip` names it: "Skip to sign-in" on a sign-in page) and the sprite, the top bar, the title bar's `<h1>`, then
+ * `inner`. With `nav` and a `session` the bar is the signed-in one: the pills (none marked current: this page is none of
+ * them), More by the role, the theme button, the read-only chip, who is signed in and sign-out, and no live pill (the
+ * page has no stream). Otherwise it is the sign-in bar: the pi-dispatch pill and the theme button only. `titleShown`
+ * false keeps the `<h1>` for a screen reader and draws no title bar (the SignIn card's page is its card alone, whose
+ * own heading leads it). `sub` is the title bar's line under the title (the ErrorPage card's "The console could not find
+ * what this address points to."), drawn only with a title bar. `name` is the body's `data-page`, which the script and
+ * the page's stylesheet read.
+ */
+export function frameHtml({ name, title, sub = null, theme = null, session = null, readOnly = false, nav = false, skip = "Skip to content", titleShown = true }, inner) {
+  const signedIn = nav && session !== null && typeof session === "object";
+  const bar = signedIn
+    ? signedInBar({ here: null, role: roleOf(session), parked: null, live: null, theme, readOnly: Boolean(readOnly), session })
+    : html`<header class="top">${brandPill()}<div class="top__end">${themeButton(theme)}</div></header>`;
+  const subLine = typeof sub === "string" && sub !== "" ? html`<p class="titlebar__sub">${sub}</p>` : null;
+  const head = titleShown ? html`<div class="titlebar"><div class="titlebar__lead"><h1>${title}</h1>${subLine}</div></div>` : html`<h1 class="sr">${title}</h1>`;
+  const body = html`<a class="skip" href="#main">${skip}</a>
+${SPRITE}
+<div class="page">
+${bar}
+<main id="main" tabindex="-1">
+${head}
 ${inner}
 </main>
 </div>`;
+  return page({ title: `pi-dispatch console: ${title}`, name, body, theme });
 }
 
 /**
- * A sign-in page's frame (the SignIn card's): the skip link and the sprite, then the page wrapper with a top bar of the
- * pi-dispatch pill and the theme button only (nobody is signed in: no navigation, no live pill, no sign-out), a title
- * bar, and `inner` as legacy. The theme button works here as on every page: the script only sets `<html data-theme>`
- * and writes the cookie, and the next page is drawn from it.
+ * The sign-in page (the SignIn card): `signin.mjs`'s card, in the sign-in frame, posted by the script as JSON (a plain
+ * form POST would be form-encoded and is refused). `theme` is the request's theme choice (`themeOf`), so the page is
+ * drawn in the theme the console was left in; `notice` the reason a session ended (`session-ends.mjs`
+ * `endedReasonOf`'s, never the query's own bytes); `limits` the console's `{ idleMinutes, maxHours }`; `listen` the
+ * config's listen address, for the footer.
  */
-function signInFrame(name, theme, inner) {
-  return html`<a class="skip" href="#main">Skip to content</a>
-${SPRITE}
-<div class="page">
-<header class="top">${brandPill()}<div class="top__end">${themeButton(theme)}</div></header>
-<main id="main" tabindex="-1">
-<div class="titlebar"><div class="titlebar__lead"><h1>pi-dispatch console</h1></div></div>
-${legacyWrap(name, inner)}
-</main>
-</div>`;
+export function loginPage({ theme = null, notice = null, limits = {}, listen = null } = {}) {
+  return frameHtml({ name: "login", title: "Sign in", theme, skip: "Skip to sign-in", titleShown: false }, signInContent({ notice, limits, listen }));
 }
 
 /**
- * The sign-in form. Submitted by the script as JSON; a plain form POST would be form-encoded and is refused. `theme`
- * is the request's theme choice (`themeOf`), so the page is drawn in the theme the console was left in.
+ * The link page's title (the tab's, and the `<h1>` a screen reader reads first): it names the page, never what happens
+ * on it. "Signing in", its first title, was false without a script and once the link was refused.
  */
-export function loginPage({ theme = null } = {}) {
-  return page({
-    title: "pi-dispatch console: sign in",
-    name: "login",
-    theme,
-    body: signInFrame("login", theme, html`<form id="login-form" autocomplete="off">
-<label for="token">Console token</label>
-<input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required>
-<button type="submit">Sign in</button>
-</form>
-<p id="notice" role="status"></p>
-<noscript><p>The console needs JavaScript to sign in.</p></noscript>`),
-  });
-}
+export const LINK_PAGE_TITLE = "One-time sign-in link";
 
-/** The one-time link landing page: the script reads the code from the fragment, drops it from history and posts it. */
-export function loginCodePage({ theme = null } = {}) {
-  return page({
-    title: "pi-dispatch console: signing in",
-    name: "login-code",
-    theme,
-    body: signInFrame("login-code", theme, html`<p id="notice" role="status">Signing in with a one-time link...</p>
-<p><a href="/login">Sign in with a token instead</a></p>`),
-  });
+/**
+ * The one-time link's landing page (the AccessStates card): the script reads the code from the fragment, drops it from
+ * history and posts it, switching the card to `used` or `nocode` as the answer says. `state` is the card's first state;
+ * `notice` a notice to draw shown, for a panel golden (`signin.mjs` `linkContent`; the server passes neither).
+ */
+export function loginCodePage({ theme = null, state = "wait", notice = null } = {}) {
+  return frameHtml({ name: "login-code", title: LINK_PAGE_TITLE, theme, skip: "Skip to sign-in", titleShown: false }, linkContent({ state, notice }));
 }

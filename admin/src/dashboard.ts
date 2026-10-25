@@ -42,7 +42,7 @@ import { LIVE_MAX_ENTRIES } from "@edgehero/pi-dispatch/live-transcript";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
-import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords } from "./words.mjs";
+import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords, rowNumber } from "./words.mjs";
 import { doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -2039,7 +2039,8 @@ function bundlesSection(view: any, inner: number, styler: any): any[] {
   for (const b of rows) {
     const ok = b.declared === "env" || b.declared === "overlay";
     const ends = Array.isArray(b.endpoints) ? b.endpoints.length : 0;
-    const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map((i: number) => `#${i}`).join(" ") : "none";
+    // The triggers that opt out, by the number a person calls them (`#1` is the first), never the raw 0-based index.
+    const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map((i: number) => `#${rowNumber(i)}`).join(" ") : "none";
     const facts = [
       `project ${b.project ?? "-"}${b.projectKnown === false ? " (not in projects.json)" : ""}`,
       `profile ${b.profile ?? "-"} (${DECLARED[b.declared] ?? "NOT DECLARED"}${b.format ? `, ${b.format}` : ""})`,

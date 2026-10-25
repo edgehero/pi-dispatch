@@ -119,6 +119,11 @@ test("each trigger plan says what its tool says: every refusal and the confirm, 
       { kind: "label", flow: "fix", labels: ["bug"], steer: true },
       { kind: "cron", flow: "fix", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", steer: true },
       { kind: "label", flow: "fix", labels: ["bug"], steer: "yes" },
+      // Issue #737: a field the kind does not take is refused by name, a field the pull_request arm used to drop
+      // (`repository`) among them, and reviewState is carried into the confirm's entry.
+      { kind: "label", flow: "fix", labels: ["bug"], colour: "red" },
+      { kind: "pull_request", flow: "fix", action: ["opened"], repository: "web" },
+      { kind: "pull_request", flow: "fix", action: ["review_submitted"], reviewState: ["approved"] },
     ];
     for (const params of addCases) {
       assert.deepEqual(planSays(plans.planTriggerAdd({ params, paths, env })), await toolSays(t.dispatch_trigger_add, params), JSON.stringify(params));
@@ -135,6 +140,91 @@ test("each trigger plan says what its tool says: every refusal and the confirm, 
   }
 });
 
+/** The keys `buildTriggerEntry`'s arm for `kind` reads from its field bag, through a recording Proxy that answers `value(key)`. */
+function armReads(kind, value) {
+  const reads = new Set();
+  const f = new Proxy({}, { get: (_t, k) => (typeof k === "string" ? (reads.add(k), value(k)) : undefined) });
+  plans.buildTriggerEntry(kind, f);
+  return reads;
+}
+
+// Issue #737: the add takes exactly what each arm reads, so a field it would drop in silence is refused instead.
+test("TRIGGER_ADD_FIELDS is each buildTriggerEntry arm's own reads plus kind, derived through a Proxy, both ways", () => {
+  assert.deepEqual(Object.keys(plans.TRIGGER_ADD_FIELDS).sort(), ["comment", "cron", "issue", "label", "pull_request"], "one list per kind the arms build");
+  for (const [kind, takes] of Object.entries(plans.TRIGGER_ADD_FIELDS)) {
+    assert.ok(Object.isFrozen(takes), `${kind}: frozen`);
+    // Every key unset (a `??` reads its right side), then every key set (a branch taken only on a value): the union is
+    // every key the arm can read.
+    const reads = new Set([...armReads(kind, () => undefined), ...armReads(kind, () => "x"), ...armReads(kind, () => ["x"])]);
+    assert.deepEqual([...reads, "kind"].sort(), [...takes].sort(), `${kind}: the table is what the arm reads`);
+  }
+  // The finding the derivation made visible: a pull request names its own repository, so its arm never read one.
+  assert.ok(!plans.TRIGGER_ADD_FIELDS.pull_request.includes("repository") && !plans.TRIGGER_ADD_FIELDS.issue.includes("repository"));
+  assert.ok(plans.TRIGGER_ADD_FIELDS.pull_request.includes("reviewState"), "reviewState is carried");
+});
+
+test("the trigger add judges, in order, the tool-proof fields, the kind, then any field the kind does not take, by name and never its value", () => {
+  const { paths, restore } = deployment({ PI_BACKENDS: "local" });
+  try {
+    const env = process.env;
+    const say = (params) => plans.planTriggerAdd({ params, paths, env }).refusal ?? null;
+    const label = { kind: "label", flow: "fix", labels: ["bug"] };
+    // The widening sweep stays first: a near miss of a cap is refused as the widening it is.
+    assert.match(say({ ...label, run: { maxCostUsd: "9" }, colour: "red" }), /^dispatch_trigger_add cannot set run\.maxCostUsd/);
+    // The kind before its fields (the fields depend on it).
+    // The kinds it takes are named; the kind it was sent never is (issue #737: a caller's bytes stay out of the sentence).
+    const kinds = "unknown trigger kind: kind must be one of cron, label, comment, pull_request, issue";
+    assert.equal(say({ kind: "telepathy", flow: "fix", colour: "red" }), kinds);
+    assert.equal(say({ flow: "fix" }), kinds);
+    assert.equal(say({ kind: "__proto__", flow: "fix" }), kinds);
+    assert.equal(say({ kind: "<img src=x>kind-canary", flow: "fix" }), kinds);
+    // A field before every other judgement (here, a backend this deployment does not bless).
+    assert.match(say({ ...label, backend: "vapour", colour: "red" }), /^dispatch_trigger_add does not take colour for a label trigger; it takes kind, flow, /);
+    // A nested object that is not tool-proof is not taken either: the add writes no `run` or `on` of the caller's.
+    assert.match(say({ ...label, run: { flow: "x" } }), /^dispatch_trigger_add does not take run for a label trigger/);
+    // A key that is not a plain identifier is never printed, nor is any value.
+    for (const key of ["a b", "x".repeat(41), "__proto__", "c\u202eolour", "<img>"]) {
+      const got = say(JSON.parse(JSON.stringify({ ...label, [key]: "value-canary" })));
+      assert.ok(got.startsWith("dispatch_trigger_add does not take a field it was sent for a label trigger; it takes "), `${JSON.stringify(key)}: ${got}`);
+      assert.ok(!got.includes("value-canary") && !got.includes(key), `${JSON.stringify(key)} is not echoed`);
+    }
+    // Each kind's own list: a cron field on a comment trigger, a comment field on a cron trigger.
+    assert.match(say({ kind: "comment", flow: "fix", phrase: "@pi", task: "t" }), /^dispatch_trigger_add does not take task for a comment trigger; it takes kind, phrase, flow, forge, repository, backend, model, provider, maxTurns, progress, statusComment, recover, steer\. Nothing was changed$/);
+    assert.match(say({ kind: "cron", flow: "fix", id: "n", pattern: "0 3 * * *", folder: "/srv", task: "t", phrase: "@pi" }), /does not take phrase for a cron trigger/);
+    // A caller names itself (`tool`): the console's trigger form passes "this form" (console-actions.test.mjs holds that
+    // it does), so a person there is never told a pi tool's name. And a key with no value was not sent.
+    assert.match(plans.planTriggerAdd({ params: { ...label, colour: 1 }, paths, env, tool: "this form" }).refusal, /^this form does not take colour/);
+    assert.equal(say({ ...label, colour: undefined }), null, "an undefined value is a field not sent");
+  } finally {
+    restore();
+  }
+});
+
+// Issue #737: the description has offered reviewState since #66; the arm dropped it until now.
+test("reviewState rides a pull_request add as sent, after action, and the loader judges it at the write", () => {
+  const { paths, restore } = deployment();
+  try {
+    const env = {};
+    const pr = { kind: "pull_request", flow: "fix", action: ["review_submitted"] };
+    const entry = plans.planTriggerAdd({ params: { ...pr, reviewState: ["approved", "commented"] }, paths, env }).plan.entry;
+    assert.deepEqual(Object.keys(entry.on), ["type", "action", "reviewState"], "the loader's own key order");
+    assert.deepEqual(entry.on.reviewState, ["approved", "commented"]);
+    assert.ok(!("reviewState" in plans.planTriggerAdd({ params: pr, paths, env }).plan.entry.on), "absent, no key: an entry that names none is byte-identical");
+    const write = (params) => writeTriggers({ triggersPath: paths.triggersPath, mutate: plans.planTriggerAdd({ params, paths, env }).plan.mutate, expect: null });
+    const before = readFileSync(paths.triggersPath, "utf8");
+    // The loader's own refusals, by name: another forge, an action it cannot narrow, a verdict it does not know, a non-list.
+    assert.match(write({ ...pr, forge: "gitlab", action: ["approved"], reviewState: ["approved"] }).invalid, /on\.reviewState is github-only/);
+    assert.match(write({ ...pr, action: ["opened"], reviewState: ["approved"] }).invalid, /on\.reviewState requires on\.action to include "review_submitted"/);
+    assert.match(write({ ...pr, reviewState: ["lgtm"] }).invalid, /on\.reviewState has an unsupported review state "lgtm"/);
+    assert.match(write({ ...pr, reviewState: "approved" }).invalid, /on\.reviewState must be a non-empty array/, "a value that is not a list is passed through to be refused, never dropped");
+    assert.equal(readFileSync(paths.triggersPath, "utf8"), before, "no refused write touched the file");
+    assert.ok(write({ ...pr, reviewState: ["changes_requested"] }).ok);
+    assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].on.reviewState, ["changes_requested"]);
+  } finally {
+    restore();
+  }
+});
+
 test("a trigger plan's mutate and expect drive the read-model funnel to the entry the confirm showed", () => {
   const { paths, restore } = deployment();
   try {
@@ -146,9 +236,24 @@ test("a trigger plan's mutate and expect drive the read-model funnel to the entr
     assert.ok(res.ok, JSON.stringify(res));
     assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1], add.entry);
     const edit = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {} }).plan;
-    assert.equal(edit.message, "trigger #2 (comment) flow: fix -> review");
+    // The change in words (issue #737): "to", never an arrow; the console draws the same pairs in bold.
+    assert.equal(edit.message, "trigger #2 (comment) flow: fix to review");
+    assert.deepEqual([edit.row, edit.type, edit.changes], ["trigger #2", "comment", [["flow", "fix", "review"]]]);
+    assert.equal(plans.changeText(edit.changes), "flow: fix to review");
+    // The console's surface names the row by its index; the tool's counts from 1.
+    const consoleEdit = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {}, surface: "console" }).plan;
+    assert.deepEqual([consoleEdit.title, consoleEdit.message], ["Edit trigger at index 1", "trigger at index 1 (comment) flow: fix to review"]);
+    assert.deepEqual([plans.planTriggerDelete({ index: 1, paths }).plan.title, plans.planTriggerDelete({ index: 1, paths, surface: "console" }).plan.title], ["Delete trigger #2", "Delete trigger at index 1"]);
+    // A venue the edit sets is a pair of its own, after the flow: the pi panel's confirm and the console's
+    // bar both say it, and the write sets it.
+    const venue = plans.planTriggerEdit({ params: { index: 0, flow: "review", backend: "local" }, paths, env: { PI_BACKENDS: "local" } }).plan;
+    assert.deepEqual([venue.message, venue.changes], ["trigger #1 (label) flow: fix to review, backend: - to local", [["flow", "fix", "review"], ["backend", "-", "local"]]]);
+    // A delete names its row as the edit does, in words.
+    assert.equal(plans.planTriggerDelete({ index: 1, paths }).plan.message, "Remove trigger #2 (comment) flow: fix");
     writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate });
     assert.equal(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run.flow, "review");
+    assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: venue.mutate }).ok);
+    assert.equal(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[0].run.backend, "local");
   } finally {
     restore();
   }
@@ -175,7 +280,7 @@ test("run.progress and run.statusComment (issue #644): carried only as booleans,
     assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: add.mutate }).ok);
     // The edit: merged only when sent, the before and after on the confirm, and refused on cron by the entry's own type.
     const edit = plans.planTriggerEdit({ params: { index: 0, flow: "fix", statusComment: true }, paths, env: {} }).plan;
-    assert.equal(edit.message, "trigger #1 (label) flow: fix -> fix, statusComment: - -> true");
+    assert.equal(edit.message, "trigger #1 (label) flow: fix to fix, statusComment: - to true");
     assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate }).ok);
     const after = JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers;
     assert.deepEqual(after[0].run, { kind: "github", flow: "fix", statusComment: true });
@@ -185,7 +290,7 @@ test("run.progress and run.statusComment (issue #644): carried only as booleans,
     assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[1].run, { kind: "github", flow: "review", progress: true, statusComment: true, secretBundle: false }, "an edit that sends neither keeps both (and the add tool's bundle opt-out, #704)");
     writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv", flow: "f", task: "t" } }] }));
     assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "f", statusComment: true }, paths, env: {} }).refusal, /run\.statusComment is only available on a forge trigger/);
-    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", progress: true }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f -> f, progress: - -> true");
+    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", progress: true }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f to f, progress: - to true");
   } finally {
     restore();
   }
@@ -206,7 +311,7 @@ test("run.recover (issue #645): carried only as a boolean, refused on cron and b
     assert.match(add.message, /"recover":true/, "the confirm shows what is armed");
     assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: add.mutate }).ok);
     const edit = plans.planTriggerEdit({ params: { index: 0, flow: "fix", recover: true }, paths, env: {} }).plan;
-    assert.equal(edit.message, "trigger #1 (label) flow: fix -> fix, recover: - -> true");
+    assert.equal(edit.message, "trigger #1 (label) flow: fix to fix, recover: - to true");
     assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate }).ok);
     assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[0].run, { kind: "github", flow: "fix", recover: true });
     const flowOnly = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {} }).plan;
@@ -219,7 +324,7 @@ test("run.recover (issue #645): carried only as a boolean, refused on cron and b
     ] }));
     assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "f", recover: true }, paths, env: {} }).refusal, /run\.recover is only available on a forge trigger/);
     assert.match(plans.planTriggerEdit({ params: { index: 1, flow: "f", recover: true }, paths, env: {} }).refusal, /run\.recover cannot be set beside run\.command/);
-    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", recover: false }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f -> f, recover: - -> false");
+    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", recover: false }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f to f, recover: - to false");
   } finally {
     restore();
   }
@@ -243,7 +348,7 @@ test("run.steer (issue #646): carried only as a boolean, allowed on cron, refuse
     assert.match(add.message, /"steer":true/, "the confirm shows what is armed");
     assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: add.mutate }).ok);
     const edit = plans.planTriggerEdit({ params: { index: 0, flow: "fix", steer: true }, paths, env: {} }).plan;
-    assert.equal(edit.message, "trigger #1 (label) flow: fix -> fix, steer: - -> true");
+    assert.equal(edit.message, "trigger #1 (label) flow: fix to fix, steer: - to true");
     assert.ok(writeTriggers({ triggersPath: paths.triggersPath, mutate: edit.mutate }).ok);
     assert.deepEqual(JSON.parse(readFileSync(paths.triggersPath, "utf8")).triggers[0].run, { kind: "github", flow: "fix", steer: true });
     const flowOnly = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {} }).plan;
@@ -254,7 +359,7 @@ test("run.steer (issue #646): carried only as a boolean, allowed on cron, refuse
       { on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv", flow: "f", task: "t" } },
       { on: { type: "label", any: ["go"] }, run: { kind: "github", command: "wf run" } },
     ] }));
-    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", steer: true }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f -> f, steer: - -> true");
+    assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "f", steer: true }, paths, env: {} }).plan.message, "trigger #1 (cron) flow: f to f, steer: - to true");
     assert.match(plans.planTriggerEdit({ params: { index: 1, flow: "f", steer: true }, paths, env: {} }).refusal, /run\.steer cannot be set beside run\.command/);
   } finally {
     restore();
@@ -275,6 +380,8 @@ test("the settings plans: the tool surface says what dispatch_set says, the comm
     assert.equal(plans.planSettingSet({ key: "model", valueTokens: ["a", "b"], paths, env, surface: "command" }).refusal, "set: model takes exactly one value");
     const set = plans.planSettingSet({ key: "dailyCap", value: "7", paths, env }).plan;
     assert.deepEqual(set.mutate({ model: "m" }), { model: "m", dailyCap: 7 });
+    // The change in words, before and after (issue #737), and as the pair the console draws in bold.
+    assert.deepEqual([set.message, set.changes], ["dailyCap: (unset) to 7", [["dailyCap", "(unset)", "7"]]]);
     assert.equal(set.unset, false);
     const unset = plans.planSettingUnset({ key: "model", paths, env }).plan;
     assert.deepEqual(unset.mutate({ model: "m", dailyCap: 7 }), { dailyCap: 7 });
@@ -306,6 +413,11 @@ test("the pause-window and scoped-limit plans say what their tools say", async (
       assert.deepEqual(planSays(plans.planLimitEdit({ params: p, paths, env })), await toolSays(t.dispatch_limit_edit, p), JSON.stringify(p));
     }
     for (const index of [0, 5]) assert.deepEqual(planSays(plans.planLimitDelete({ index, paths, env })), await toolSays(t.dispatch_limit_delete, { index }));
+    // An edit says its row before and after in words, never an arrow (issue #737); the console's surface by index.
+    assert.equal(plans.planLimitEdit({ params: { index: 0, week: 9 }, paths, env }).plan.message, 'scoped limit #1:\n{"scope":"acme/web","day":5}\nto {"scope":"acme/web","day":5,"week":9}');
+    assert.equal(plans.planLimitEdit({ params: { index: 0, week: 9 }, paths, env, surface: "console" }).plan.title, "Edit scoped limit at index 0");
+    assert.equal(plans.planPauseWindowEdit({ index: 0, fields: { to: "07:00" }, paths }).plan.message, 'pause window #1:\n{"scope":"acme/web","from":"22:00","to":"06:00","tz":"UTC"}\nto {"scope":"acme/web","from":"22:00","to":"07:00","tz":"UTC"}');
+    assert.match(plans.planLimitEdit({ params: { index: 0, scope: "github:acme/web" }, paths, env }).plan.message, /starts a new count under a new key/);
     // The plan's writeArgs ARE the funnel's arguments, expect included: a concurrent change after the plan refuses.
     const add = plans.planLimitAdd({ params: { scope: "acme/api", day: 3 }, paths, env }).plan;
     writeFileSync(paths.scopedLimitsPath, JSON.stringify({ version: 1, limits: [] }));
@@ -332,7 +444,7 @@ test("the project, envelope, secret-profile and priorities plans", async () => {
     assert.deepEqual(planSays(plans.planEnvelope({ params: {}, paths, env })), await toolSays(t.dispatch_envelope_set, {}));
     // Secret profiles: the command's own sentences.
     assert.match(plans.planSecretProfileAdd({ name: "pro,d", path: "/x", profiles: {}, settingsFile: "/s" }).refusal, /^a profile name may use letters, digits, dot, dash and underscore only \u2014 PI_SECRET_PROFILES/);
-    assert.equal(plans.planSecretProfileAdd({ name: "prod", path: "rel/x", profiles: {}, settingsFile: "/s" }).refusal, "the resolver needs an ABSOLUTE path: a service manager's working directory is not your shell's");
+    assert.equal(plans.planSecretProfileAdd({ name: "prod", path: "rel/x", profiles: {}, settingsFile: "/s" }).refusal, "the resolver needs an absolute path: a service manager's working directory is not your shell's");
     const add = plans.planSecretProfileAdd({ name: "prod", path: "/opt/r.sh", profiles: { dev: "/opt/d.sh" }, settingsFile: "/s/settings.json" }).plan;
     assert.equal(add.title, "Declare a secret resolver");
     assert.match(add.message, /^\/s\/settings\.json gets:\n\{\n {2}"secretProfiles": \{\n {4}"dev": "\/opt\/d\.sh",\n {4}"prod": "\/opt\/r\.sh"/);
@@ -343,10 +455,15 @@ test("the project, envelope, secret-profile and priorities plans", async () => {
     const badd = plans.planSecretBundleAdd({ name: "op-shop", path: "/opt/b2.mjs", format: "dotenv", bundles: { "op-shop": { path: "/opt/b.mjs", format: "json" } }, settingsFile: "/s/settings.json" }).plan;
     assert.equal(badd.title, "Declare a secret bundle resolver");
     assert.deepEqual(badd.mutate({ secretProfiles: { a: "/a" } }), { secretProfiles: { a: "/a" }, secretBundles: { "op-shop": { path: "/opt/b2.mjs", format: "dotenv" } } });
-    assert.match(badd.message, /This REPLACES the current op-shop -> \/opt\/b\.mjs \(json\)/);
+    // Sentence case, no all-caps (issue #737): the console's bar shows this text too.
+    assert.match(badd.message, /\n\nThis replaces the current resolver, op-shop: \/opt\/b\.mjs \(json\)\n\nThe worker executes/);
+    assert.match(badd.message, /The worker executes this script, as the account it runs as, once per job start of every project a bundle in triggers\.json binds to it, and hands that job every variable it prints \(dotenv\)/);
+    assert.match(plans.planSecretProfileAdd({ name: "dev", path: "/opt/d2.sh", profiles: { dev: "/opt/d.sh" }, settingsFile: "/s" }).plan.message, /\n\nThis replaces the current resolver, dev: \/opt\/d\.sh\n\nThe worker executes this script/);
+    assert.equal(plans.planSecretProfileRemove({ name: "dev", profiles: { dev: "/d" }, settingsFile: "/s" }).plan.message, "dev: /d\n\nEvery trigger naming it refuses pre-spend after this, rather than running without its secrets.");
+    for (const plan of [badd, add]) assert.doesNotMatch(plan.message, /\b(?:REPLACES|EXECUTES|EVERY|PRE-SPEND|AMBIGUOUS|ABSOLUTE)\b/);
     const brm = plans.planSecretBundleRemove({ name: "op-shop", bundles: { "op-shop": { path: "/opt/b.mjs", format: "json" } }, bound: ["shop", "web"], settingsFile: "/s" }).plan;
     assert.deepEqual(brm.mutate({}), { secretBundles: {} });
-    assert.match(brm.message, /The jobs of bundles shop, web are refused PRE-SPEND .*, or on a multi-host worker's shared queue held for a host that declares it/);
+    assert.match(brm.message, /The jobs of bundles shop, web are refused pre-spend .*, or on a multi-host worker's shared queue held for a host that declares it/);
     const one = { "op-shop": { path: "/b", format: "json" } };
     assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: null, settingsFile: "/s" }).plan.message, /The triggers file could not be read, so the jobs of any bundle naming it are refused/);
     assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: [], settingsFile: "/s" }).plan.message, /No bundle in triggers\.json names it, so no project's jobs depend on it\.$/);
@@ -356,6 +473,11 @@ test("the project, envelope, secret-profile and priorities plans", async () => {
     const env2 = { "op-shop": { path: "/e", format: "json" }, "op-web": { path: "/f", format: "json" } };
     assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: two, bound: [], envBundles: env2, settingsFile: "/s" }).plan.message, /so this removes one collision\. Still ambiguous after this: op-web also collides with PI_SECRET_BUNDLES/);
     assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: two, bound: [], envBundles: { "op-web": { path: "/f", format: "json" } }, settingsFile: "/s" }).plan.message, /removing op-shop does not change that\. Still ambiguous after this: op-web also collides/);
+    // A bundle resolver the overlay holds with no format is named so, in the removal's first line and in the add that
+    // replaces it, never with an empty bracket or as a profile (which declares none).
+    const formatless = { "op-shop": { path: "/opt/b.mjs" } };
+    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: formatless, bound: [], settingsFile: "/s" }).plan.message, /^op-shop: \/opt\/b\.mjs \(no format\)\n\n/);
+    assert.match(plans.planSecretBundleAdd({ name: "op-shop", path: "/opt/b2.mjs", format: "json", bundles: formatless, settingsFile: "/s" }).plan.message, /\n\nThis replaces the current resolver, op-shop: \/opt\/b\.mjs \(no format\)\n\nThe worker executes/);
     // Priorities: the plan applyPriorities takes, validUntil from the injected clock.
     const now = new Date(Date.UTC(2026, 9, 15, 0, 0, 0));
     assert.deepEqual(plans.planPriorities({ projects: [{ id: "web", weight: 3, reason: "r" }], validDays: 2, now }).plan.plan, { validUntil: "2026-10-17T00:00:00.000Z", projects: [{ id: "web", weight: 3, reason: "r" }] });
@@ -458,7 +580,8 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
     // [what, the sentence the planner returned, the sentence it must be (a string is exact; { prefix } where the rest
     // is another module's words, already pinned there)].
     const rows = [
-      ["unknown trigger kind", plans.planTriggerAdd({ params: { kind: "telepathy", flow: "fix" }, paths, env }).refusal, "unknown trigger kind 'telepathy' (cron|label|comment|pull_request|issue)"],
+      ["unknown trigger kind", plans.planTriggerAdd({ params: { kind: "telepathy", flow: "fix" }, paths, env }).refusal, "unknown trigger kind: kind must be one of cron, label, comment, pull_request, issue"],
+      ["unknown trigger field", plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["bug"], colour: "red" }, paths, env }).refusal, "dispatch_trigger_add does not take colour for a label trigger; it takes kind, flow, forge, repository, labels, any, backend, model, provider, maxTurns, progress, statusComment, recover, steer. Nothing was changed"],
       ["trigger edit index", plans.planTriggerEdit({ params: { index: 3, flow: "x" }, paths, env }).refusal, "no trigger at index 3 (have 1)"],
       ["blank flow", plans.planTriggerEdit({ params: { index: 0, flow: "  " }, paths, env }).refusal, "flow must be non-empty"],
       ["trigger delete index", plans.planTriggerDelete({ index: 9, paths }).refusal, "no trigger at index 9 (have 1)"],
@@ -482,9 +605,9 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["envelope refused", plans.planEnvelope({ params: { totalUsd: "x" }, paths: alloc, env: {} }).refusal, { prefix: "rejected: " }],
       ["envelope unchanged", plans.planEnvelope({ params: { totalUsd: "100" }, paths: alloc, env: {} }).unchanged, "no change: the envelope already says this"],
       ["no such profile", plans.planSecretProfileRemove({ name: "gone", profiles: {}, settingsFile: "/s" }).refusal, "no such profile. No resolver profiles are declared in the settings overlay."],
-      ["no such profile, with some", plans.planSecretProfileRemove({ name: "gone", profiles: { dev: "/d" }, settingsFile: "/s" }).refusal, "no such profile. Resolver profiles (settings overlay):\n  dev -> /d"],
+      ["no such profile, with some", plans.planSecretProfileRemove({ name: "gone", profiles: { dev: "/d" }, settingsFile: "/s" }).refusal, "no such profile. Resolver profiles (settings overlay):\n  dev: /d"],
       ["profile name", plans.planSecretProfileAdd({ name: "pro d", path: "/x", profiles: {}, settingsFile: "/s" }).refusal, "a profile name may use letters, digits, dot, dash and underscore only \u2014 PI_SECRET_PROFILES is a comma-separated list of name:path pairs"],
-      ["resolver path", plans.planSecretProfileAdd({ name: "prod", path: "rel/x", profiles: {}, settingsFile: "/s" }).refusal, "the resolver needs an ABSOLUTE path: a service manager's working directory is not your shell's"],
+      ["resolver path", plans.planSecretProfileAdd({ name: "prod", path: "rel/x", profiles: {}, settingsFile: "/s" }).refusal, "the resolver needs an absolute path: a service manager's working directory is not your shell's"],
       // Issue #704: the bundle resolvers' own sentences.
       ["bundle profile name", plans.planSecretBundleAdd({ name: "op shop", path: "/x", format: "json", bundles: {}, settingsFile: "/s" }).refusal, "a bundle profile name may use letters, digits, dot, dash and underscore only \u2014 PI_SECRET_BUNDLES is a comma-separated list of name:path:format entries"],
       ["bundle format", plans.planSecretBundleAdd({ name: "op-shop", path: "/x", format: "yaml", bundles: {}, settingsFile: "/s" }).refusal, "the format is dotenv or json: what the resolver prints, declared, because the worker never guesses it from the output"],
@@ -554,6 +677,8 @@ test("the project tools refuse to change a bundled project's members, before the
     assert.match(plans.planProjectEdit({ params: { id: "shop", members: ["github:acme/shop", "github:acme/web"] }, paths, env: {} }).refusal, why);
     assert.match(plans.planProjectDelete({ id: "shop", paths, env: {} }).refusal, why);
     assert.ok(plans.planProjectEdit({ params: { id: "shop", name: "Shop" }, paths, env: {} }).plan, "a rename leaves membership, and the grant, as it is");
+    // Before and after in words, never an arrow (issue #737).
+    assert.equal(plans.planProjectEdit({ params: { id: "shop", name: "Shop" }, paths, env: {} }).plan.message, 'project shop:\n{"id":"shop","name":null,"members":["github:acme/shop"]}\nto {"id":"shop","name":"Shop","members":["github:acme/shop"]}');
     assert.ok(plans.planProjectEdit({ params: { id: "tools", members: ["github:acme/tools", "github:acme/web"] }, paths, env: {} }).plan, "an unbundled project is edited as before");
     // A project created under a bundled id would start the bundle applying to its members.
     writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [], secretBundles: { env: { profile: "p", ref: "r", project: "ghost" } } }));
@@ -600,9 +725,9 @@ test("the profile list names PI_SECRET_PROFILES' profiles beside the overlay's, 
   assert.deepEqual(envSecretProfiles(undefined), { profiles: {}, malformed: false, seen: false });
   assert.deepEqual(envSecretProfiles("prod:/opt/pi/p.sh"), { profiles: { prod: "/opt/pi/p.sh" }, malformed: false, seen: true });
   assert.deepEqual(envSecretProfiles("prod:relative"), { profiles: {}, malformed: true, seen: true }, "the worker's parser refuses it, so nothing half-parsed is shown");
-  assert.equal(plans.renderProfiles({ dev: "/d" }, envSecretProfiles(undefined)), "Resolver profiles (settings overlay):\n  dev -> /d", "not visible: the overlay's own list, as before");
-  assert.equal(plans.renderProfiles({}, envSecretProfiles("prod:/opt/pi/p.sh")), "No resolver profiles are declared in the settings overlay.\nResolver profiles (PI_SECRET_PROFILES):\n  prod -> /opt/pi/p.sh");
-  assert.match(plans.renderProfiles({ prod: "/o" }, envSecretProfiles("prod:/opt/pi/p.sh")), /prod -> \/opt\/pi\/p\.sh \(AMBIGUOUS: also in the settings overlay, so the worker refuses every secrets job\)/);
+  assert.equal(plans.renderProfiles({ dev: "/d" }, envSecretProfiles(undefined)), "Resolver profiles (settings overlay):\n  dev: /d", "not visible: the overlay's own list, as before");
+  assert.equal(plans.renderProfiles({}, envSecretProfiles("prod:/opt/pi/p.sh")), "No resolver profiles are declared in the settings overlay.\nResolver profiles (PI_SECRET_PROFILES):\n  prod: /opt/pi/p.sh");
+  assert.match(plans.renderProfiles({ prod: "/o" }, envSecretProfiles("prod:/opt/pi/p.sh")), /prod: \/opt\/pi\/p\.sh \(ambiguous: also in the settings overlay, so the worker refuses every secrets job\)/);
   assert.match(plans.renderProfiles({}, envSecretProfiles("x:rel")), /PI_SECRET_PROFILES does not parse/);
   // The roots: judged only where visible, on this host's realpath, fail-closed on an empty value (the realpath cases
   // are the next test).
@@ -643,4 +768,76 @@ test("the resolver roots are judged on this host's realpath, as the worker judge
   assert.ok(missing.plan, "a path this host cannot resolve is not refused");
   assert.match(missing.plan.message, /Note: .*nowhere\/r\.sh cannot be resolved on this host, so whether its real path sits inside PI_SECRET_RESOLVER_ROOTS .* is checked only by the worker, where it runs/);
   assert.ok(!add(join(roots, "real.sh")).plan.message.includes("Note:"), "a resolved path adds no note");
+});
+
+/**
+ * An arrow, ASCII or Unicode (issue #737): the Arrows block, the dingbat arrows, Supplemental Arrows A and B and
+ * the arrows of Miscellaneous Symbols and Arrows, and `->`, `<-`, `=>` typed.
+ */
+const ARROW_RE = /->|<-|=>|[\u2190-\u21ff\u2794-\u27bf\u27f0-\u27ff\u2900-\u297f\u2b00-\u2bff]/;
+
+/**
+ * The planners whose confirm still draws an arrow, and why, a ratchet that only shrinks: each must still hold one (so
+ * the entry goes once it is fixed), and every other planner must hold none.
+ */
+const ARROW_PENDING = Object.freeze({});
+
+// Issue #737: requirements say a confirm's lines are words, never an arrow, and every plan's title, message and
+// summary is what the pi panel's confirm dialog and the console's bar show. Every planner this module exports is in the
+// table (derived from the exports, both ways), each with cases that reach every sentence an arrow stood in, on both
+// surfaces where it has two.
+test("no confirm a planner builds says a change or a mapping with an arrow, on the pi panel's surface or the console's", () => {
+  const { paths, restore } = deployment({ PI_BACKENDS: "local" });
+  try {
+    const env = process.env;
+    const dir = paths.triggersPath.replace(/\/triggers\.json$/, "");
+    paths.envelopeFile = join(dir, "envelope.json");
+    writeFileSync(paths.settingsFile, JSON.stringify({ maxTurns: 30, maxCostUsd: "2" }));
+    writeFileSync(paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }, { id: "spare", members: ["github:acme/spare"] }] }));
+    writeFileSync(paths.envelopeFile, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+    const profiles = { dev: "/opt/d.sh" };
+    const bundles = { "op-shop": { path: "/opt/b.mjs", format: "json" } };
+    const both = (fn) => ["tool", "console"].map((surface) => fn(surface));
+    const CASES = {
+      planTriggerAdd: () => [plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["bug"], backend: "local" }, paths, env })],
+      planTriggerEdit: () => both((surface) => plans.planTriggerEdit({ params: { index: 0, flow: "review", backend: "local", model: "m1", progress: true }, paths, env, surface })),
+      planTriggerDelete: () => both((surface) => plans.planTriggerDelete({ index: 0, paths, surface })),
+      planSettingSet: () => [plans.planSettingSet({ key: "maxTurns", value: "40", paths, env }), plans.planSettingSet({ key: "dailyCostUsd", value: "5", paths, env: {} }), plans.planSettingSet({ key: "maxTurns", valueTokens: ["40"], paths, env, surface: "command" })],
+      planSettingUnset: () => [plans.planSettingUnset({ key: "maxTurns", paths, env }), plans.planSettingUnset({ key: "maxTurns", paths, env, surface: "command" })],
+      planSettingChange: () => [plans.planSettingChange({ key: "maxTurns", value: "40", paths, env })],
+      planPauseWindowAdd: () => [plans.planPauseWindowAdd({ fields: { scope: "*", from: "01:00", to: "02:00" }, paths })],
+      planPauseWindowEdit: () => both((surface) => plans.planPauseWindowEdit({ index: 0, fields: { to: "07:00" }, paths, surface })),
+      planPauseWindowDelete: () => both((surface) => plans.planPauseWindowDelete({ index: 0, paths, surface })),
+      planLimitAdd: () => [plans.planLimitAdd({ params: { scope: "acme/api", day: 3 }, paths, env })],
+      planLimitEdit: () => both((surface) => plans.planLimitEdit({ params: { index: 0, week: 9, scope: "github:acme/web" }, paths, env, surface })),
+      planLimitDelete: () => both((surface) => plans.planLimitDelete({ index: 0, paths, env, surface })),
+      planProjectAdd: () => [plans.planProjectAdd({ params: { id: "web", members: ["github:acme/api"] }, paths, env })],
+      planProjectEdit: () => [plans.planProjectEdit({ params: { id: "shop", name: "Shop" }, paths, env })],
+      planProjectDelete: () => [plans.planProjectDelete({ id: "spare", paths, env })],
+      planEnvelope: () => [plans.planEnvelope({ params: { minIntervalHours: 0, totalUsd: "120" }, paths, env })],
+      // A priorities plan has no confirm: the worker applies it with no keypress (REQ-DELEGATED-ALLOCATION).
+      planPriorities: () => [plans.planPriorities({ projects: [{ id: "shop", weight: 2 }], validDays: 1, now: new Date(Date.UTC(2026, 9, 15)) })],
+      planSecretProfileAdd: () => [plans.planSecretProfileAdd({ name: "dev", path: "/opt/d2.sh", profiles, settingsFile: "/s" }), plans.planSecretProfileAdd({ name: "prod", path: "/opt/p.sh", profiles, settingsFile: "/s" })],
+      planSecretProfileRemove: () => [plans.planSecretProfileRemove({ name: "dev", profiles, settingsFile: "/s" })],
+      planSecretBundleAdd: () => [plans.planSecretBundleAdd({ name: "op-shop", path: "/opt/b2.mjs", format: "dotenv", bundles, settingsFile: "/s" }), plans.planSecretBundleAdd({ name: "op-web", path: "/opt/w.mjs", format: "json", bundles, settingsFile: "/s" })],
+      planSecretBundleRemove: () => [plans.planSecretBundleRemove({ name: "op-shop", bundles, bound: ["shop"], settingsFile: "/s" }), plans.planSecretBundleRemove({ name: "op-shop", bundles: { "op-shop": { path: "/b" } }, bound: [], settingsFile: "/s" })],
+    };
+    const exported = Object.keys(plans).filter((k) => /^plan[A-Z]/.test(k) && typeof plans[k] === "function").sort();
+    assert.deepEqual(Object.keys(CASES).sort(), exported, "every exported planner has its cases, and no case names a planner that is gone");
+    for (const [name, cases] of Object.entries(CASES)) {
+      const said = cases().flatMap((res) => {
+        assert.ok(res.plan, `${name}: a case that plans, not ${res.refusal ?? JSON.stringify(res)}`);
+        return [res.plan.title, res.plan.message, ...(Array.isArray(res.plan.summary) ? res.plan.summary : [])].filter((x) => typeof x === "string");
+      });
+      if (Object.hasOwn(ARROW_PENDING, name)) {
+        assert.ok(said.some((t) => ARROW_RE.test(t)), `${name} draws no arrow any more: take it out of ARROW_PENDING`);
+        continue;
+      }
+      for (const text of said) assert.doesNotMatch(text, ARROW_RE, `${name}: words, never an arrow`);
+    }
+    // The control: the pattern sees each spelling an arrow had here, so a clean sweep is not a blind one.
+    for (const arrow of ["dev -> /d", "a \u2192 b", "x => y", "\u27f6"]) assert.match(arrow, ARROW_RE);
+  } finally {
+    restore();
+  }
 });

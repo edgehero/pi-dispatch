@@ -1,0 +1,21 @@
+{
+  "card": "CardsAndBanners",
+  "pr": 2,
+  "panels": [],
+  "elements": [
+    {"el":"p-needs","kind":"panel","status":"illustrative","reason":"Overview's Needs you panel is PR 3's (the OverviewScreen ledger)"},
+    {"el":"p-waiting","kind":"panel","status":"illustrative","reason":"Overview's In line panel is PR 3's (the OverviewScreen and TimelineAndWaitlists ledgers)"},
+    {"el":"p-spend","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewSpend","golden":["overview.operator","overview.viewer"]},
+    {"el":"p-outcome","kind":"panel","status":"real","source":"admin/src/console/panels/run.mjs#runOutcome","golden":["run.operator","run.viewer"]},
+    {"el":"Cards are the one container","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#card"},
+    {"el":"KPI cards lead with one big number","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#kpi"},
+    {"el":"The outcome banner leads every ended run page: the outcome word, the reason sentence and the next step","kind":"readme","status":"real","source":"admin/src/console/panels/run.mjs#runOutcome"},
+    {"el":"After-write success banner, with Undo","kind":"readme","status":"new","source":"admin/src/console/confirm-view.mjs#doneBannerHtml","golden":["panels/confirm-done.operator"],"shows":"Undo"},
+    {"el":"Changed maxTurns from 30 to 40: the banner says what happened","kind":"readme","status":"new","source":"admin/src/console/confirm-view.mjs#doneBannerHtml","holds":"c.summary","golden":["panels/confirm-done.operator"],"shows":"<p class=\"banner__t\">Paused the fleet</p>","reason":"each action's done rule says it in the past tense (actions.mjs WRITE_RULES); the golden's write is a pause, the card's sample a setting"},
+    {"el":"Reconnecting banner","kind":"readme","status":"new","source":"admin/src/console/shell.mjs#LIVE_NOTES","sentence":"admin/src/console/shell.mjs#LIVE_NOTES.retry.title","golden":["panels/live-reconnecting.operator"],"shows":"data-live-note=\"retry\">"},
+    {"el":"No worker online banner","kind":"readme","status":"real","source":"admin/src/console/panels/overview.mjs#overviewState","sentence":"admin/src/console/panels/overview.mjs#NO_WORKER_TEXT","reason":"the fixture deployment has a worker online, so no golden draws it"},
+    {"el":"Sections with nothing to show collapse to one line","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#collapsed"},
+    {"el":"Empty state","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#empty"},
+    {"el":"Spend today $15.04 of $25.00, gh ids, the egress proxy on build3","kind":"sample","status":"illustrative","reason":"sample values"}
+  ]
+}

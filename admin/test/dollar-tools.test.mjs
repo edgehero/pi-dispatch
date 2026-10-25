@@ -171,7 +171,7 @@ test("dispatch_limit_edit replaces a sent dollar field, carries the others, and 
   const { ctx, shown } = toolCtx({ answer: true });
   textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, dayUsd: "4.25", weekUsd: "20" }, undefined, undefined, ctx));
   assert.deepEqual(read(path).limits[0], { scope: "acme/web", day: 3, dayUsd: "4.25", weekUsd: "20.00", monthUsd: "60.00" });
-  assert.match(shown[0].message, /"dayUsd":"5\.00".*\n→ .*"dayUsd":"4\.25"/s);
+  assert.match(shown[0].message, /"dayUsd":"5\.00".*\nto .*"dayUsd":"4\.25"/s);
 });
 
 test("dispatch_limits gives each row its summary and, for a dollar row, its windows with the counter", async () => {

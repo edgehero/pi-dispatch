@@ -113,7 +113,7 @@ async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }
 
 /** The words for a job no fleet queue knows, naming a blind registry when there is one. */
 function notInFleet(jobId, fleet) {
-  return `no job ${jobId} in ${fleet.names.length} queue(s)${fleet.blind ? ` (the host registry could not be read: ${fleet.blind}; a host that is not registered may still hold it)` : ""}`;
+  return `no job ${jobId} in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${fleet.blind ? ` (the host registry could not be read: ${fleet.blind}; a host that is not registered may still hold it)` : ""}`;
 }
 
 /** A failed job's identity for a preview and a re-check: the attempts made and the finish instant. */

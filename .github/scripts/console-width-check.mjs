@@ -7,14 +7,18 @@
  *   node .github/scripts/console-width-check.mjs --verify-zip <file> [--platform linux64|mac-arm64]
  *   node .github/scripts/console-width-check.mjs --check-pin [--platform linux64|mac-arm64]
  *
- * WHAT IT LOADS. Every golden page (`admin/test/fixtures/console/<shot>.<role>.html`, and `fixtures/console/panels/`
- * when that exists), the two sign-in pages (rendered here by `shell.mjs`, `SIGN_IN`), the shell sweep's pages and
- * the two negative controls (both below), served over plain http on 127.0.0.1 by a small server of its own with
- * `applySecurityHeaders` on EVERY response, so a page that needs an inline script, an inline style or a resource from
- * elsewhere is refused by the browser exactly as the console would refuse it. The stylesheet and the script are the
- * modules' own (`CONSOLE_CSS`, `CONSOLE_SCRIPT`), and the script RUNS: its event streams (`/api/events`,
- * `/api/transcript`) are held open and send nothing, and `/api/whoami` answers `{}`. Any other request is a failure,
- * because a page asking for something this server does not serve is a page measured without it.
+ * WHAT IT LOADS. Every golden page (`admin/test/fixtures/console/<shot>.<role>.html`, the role `operator`, `viewer`
+ * or `anonymous` for a page nobody is signed in to: the sign-in pages and the error pages, the pages harness's
+ * `STATIC_SHOTS`, the two sign-in pages required by name, `SIGN_IN`), every panel golden
+ * (`fixtures/console/panels/<state>.<role>.html`: the states the fixture deployment cannot reach, drawn from canned
+ * views), the shell sweep's pages and the two negative controls (both below), served over plain http on 127.0.0.1 by
+ * a small server of its own with `applySecurityHeaders` on EVERY response, so a page that needs an inline script, an
+ * inline style or a resource from elsewhere is refused by the browser exactly as the console would refuse it. The
+ * stylesheet and the script are the modules' own (`CONSOLE_CSS`, `CONSOLE_SCRIPT`), and the script RUNS: its event
+ * streams (`/api/events`, `/api/transcript`) and a one-time link page's post (`POST /login/code`, the page loaded with
+ * a code, `LINK_CODE_FRAGMENT`) are held open and answer nothing, so every page stays in the state its golden drew,
+ * and `/api/whoami` answers `{}`. Any other request is a failure, because a page asking for something this server
+ * does not serve is a page measured without it.
  *
  * WHAT IT CHECKS ON THE GOLDENS, per page, role and theme (light and dark through `prefers-color-scheme`, plus one page
  * forced each way against the opposite system theme, with `data-theme` on `<html>` and the `color-scheme` meta exactly
@@ -64,7 +68,10 @@
  *     edge, nothing holds focus, and the button gets a bare `click()` (an assistive technology's activation, or
  *     Safari's), never scrolled into view by the check first (`moreSource`).
  * One more run loads `NO_SCRIPT` (the operator's overview at 1024 px) with page scripts off, opens More with a real
- * mouse click, and fails unless the list opens under its button by CSS alone (`noScriptVerdict`).
+ * mouse click, and fails unless the list opens under its button by CSS alone (`noScriptVerdict`). It proves its
+ * scripts WERE off: the theme button, which the script reveals as the page loads, must still be `hidden` (a run whose
+ * script ran would measure the script's placement and call it the CSS's); and a check that never made the run fails
+ * ("the run without page scripts never ran", `summarize`).
  * The page reports only boxes, computed `position` and `overflow`, and which element is which part (`COLLECT`);
  * what clips what and every rule is decided in `shellMetrics` and the verdicts, which the worker test drives on
  * constructed input. Chrome runs with `--hide-scrollbars` (chrome-pipe.mjs), so a width here is the page's whole
@@ -187,16 +194,37 @@ export const EDGE_SLACK = 0.5;
  * a listed page that fits fails the run, so an entry is removed the day it is no longer needed. Empty is the goal.
  */
 export const WIDTH_PENDING = Object.freeze([]);
+/** The roles every `PAGES` page has a golden for. */
 export const ROLES = Object.freeze(["operator", "viewer"]);
+/**
+ * The roles a golden may be drawn for: those, and `anonymous` for a page nobody is signed in to (a sign-in page, an
+ * error page drawn without a session), as the pages harness names its static shots.
+ */
+export const GOLDEN_ROLES = Object.freeze([...ROLES, "anonymous"]);
 export const THEMES = Object.freeze(["light", "dark"]);
 /** The golden each forced theme is tried on (a theme cookie's page, against the opposite system theme). */
 export const FORCED_DOC = "overview.operator";
 /**
- * The sign-in pages, which have no golden: `[id, path, shell.mjs function]`, rendered here and served at their real
- * paths. The console test holds this to `server.mjs`'s `ROUTES` and to `shell.mjs`'s exports, so a new sign-in page
- * cannot go unmeasured.
+ * The sign-in pages and the golden each is measured by: `[data-page, path, golden file]`, two of the pages harness's
+ * static shots, drawn by `shell.mjs` with nobody signed in. Both were measured from the first width check on (drawn
+ * here, then), so a golden missing for one is a setup problem, never a page quietly left out. The worker test holds
+ * this to `server.mjs`'s `ROUTES` (every GET sign-in route) and to the shell's page functions, so a new sign-in page
+ * cannot go unmeasured either.
  */
-export const SIGN_IN = Object.freeze([Object.freeze(["login", "/login", "loginPage"]), Object.freeze(["login-code", "/login/code", "loginCodePage"])]);
+export const SIGN_IN = Object.freeze([Object.freeze(["login", "/login", "login.anonymous.html"]), Object.freeze(["login-code", "/login/code", "login-code.anonymous.html"])]);
+/**
+ * The fragment a one-time link page (`data-page="login-code"`) is loaded with: a code, so the script takes it out of
+ * the history and posts it, which this check's server holds open, unanswered, as it holds the event streams. The page
+ * then stays in the state the server drew (signing in, a used link, no code), the state its golden pins. Loaded with
+ * no fragment, every link page would be measured as the script's "no code" state, whatever its golden drew.
+ */
+export const LINK_CODE_FRAGMENT = `#${"k".repeat(43)}`;
+
+/** The url a golden run loads its doc at: its path, and for a one-time link page the code fragment (`LINK_CODE_FRAGMENT`). */
+export function goldenUrl(doc, path = doc.path) {
+	return doc.page === "login-code" ? `${path}${LINK_CODE_FRAGMENT}` : path;
+}
+
 /** Chrome for Testing's platforms this repository pins: linux64 for CI, mac-arm64 for a maintainer's machine. */
 export const CFT_PLATFORMS = Object.freeze(["linux64", "mac-arm64"]);
 /** The longest one navigation (the request, the page's load event) may take. */
@@ -343,9 +371,12 @@ export function versionCheck({ product, pin, ci }) {
 	return ci ? { failure: `${said}: CI must measure with the pinned build` } : { note: `${said}; CI is the authority on width` };
 }
 
-/** A golden's file name as `{ shot, role }`, or null when it is not `<shot>.<role>.html`. */
+/** How a golden is named: `<shot>.<role>.html`, its role one of `GOLDEN_ROLES`. */
+const GOLDEN_NAME_RE = new RegExp(`^([a-z0-9][a-z0-9-]*)\\.(${GOLDEN_ROLES.join("|")})\\.html$`);
+
+/** A golden's file name as `{ shot, role }`, or null when it is not `<shot>.<role>.html` for one of `GOLDEN_ROLES`. */
 export function goldenName(file) {
-	const m = /^([a-z0-9][a-z0-9-]*)\.(operator|viewer)\.html$/.exec(file);
+	const m = GOLDEN_NAME_RE.exec(file);
 	return m ? { shot: m[1], role: m[2] } : null;
 }
 
@@ -357,17 +388,26 @@ export function missingGoldens(files, pageNames, roles = ROLES) {
 	return out;
 }
 
-/** Everything wrong with the goldens before a browser is opened: what reading them found, and a page with none. */
-export function goldenProblems({ top, panels, pageNames }) {
-	return [...top.problems, ...panels.problems, ...missingGoldens(top.docs.map((d) => d.file), pageNames)];
+/**
+ * The sign-in pages (`SIGN_IN`) the top-level goldens (`docs`, `readGoldens`') hold no golden for, or a golden of
+ * another page for, as sentences.
+ */
+export function signInProblems(docs) {
+	const out = [];
+	for (const [page, path, file] of SIGN_IN) {
+		const doc = docs.find((d) => d.file === file);
+		if (!doc) out.push(`no golden ${file} for the sign-in page ${path} (one of the pages harness's static shots)`);
+		else if (doc.page !== page) out.push(`${file} draws the page ${doc.page}, not the sign-in page ${path} (data-page="${page}")`);
+	}
+	return out;
 }
 
-/** The sign-in pages as docs, drawn by `shell` (the module), one per `SIGN_IN` entry; a missing function throws. */
-export function signInDocs(shell) {
-	return SIGN_IN.map(([id, path, fn]) => {
-		if (typeof shell[fn] !== "function") throw new Refusal(`shell.mjs has no ${fn}() to draw ${path}`);
-		return { id, file: null, path, page: id, role: "signed out", html: String(shell[fn]()) };
-	});
+/**
+ * Everything wrong with the goldens before a browser is opened: what reading them found, a page with none for a role,
+ * and a sign-in page with none.
+ */
+export function goldenProblems({ top, panels, pageNames }) {
+	return [...top.problems, ...panels.problems, ...missingGoldens(top.docs.map((d) => d.file), pageNames), ...signInProblems(top.docs)];
 }
 
 /**
@@ -496,6 +536,20 @@ export function planShellRuns(docs, widths = SHELL_WIDTHS) {
 	return runs;
 }
 
+/** What the run without page scripts' doc id ends with: `summarize` looks for a result under it. */
+export const NO_SCRIPT_SUFFIX = ".no-script";
+
+/**
+ * The run made with page scripts off (`NO_SCRIPT`, `checkNoScript`), from the shell sweep's docs: its doc at
+ * `NO_SCRIPT.width` as a desktop, under an id of its own (`NO_SCRIPT_SUFFIX`), or null when the sweep holds no such
+ * doc (a setup problem `runCheck` reports). `checkPages` and the worker test's faked browser both plan it here.
+ */
+export function noScriptRun(sweep) {
+	const bare = sweep.find((d) => d.id === NO_SCRIPT.doc);
+	if (!bare) return null;
+	return { key: `${bare.id} ${NO_SCRIPT.width} no script`, doc: { ...bare, id: `${bare.id}${NO_SCRIPT_SUFFIX}`, role: `${bare.role}, no JavaScript` }, width: NO_SCRIPT.width, mobile: false };
+}
+
 /**
  * The width rule over what the page measured: `scrollWidth` (the scrolling element's) and `elements`, every element
  * whose box ends past `width` in document order, each `{ tag, id, cls, inside, rect, up, text, font, scrollers }`:
@@ -619,8 +673,9 @@ export function inkOf(nodes, snap, i) {
  * or no More) as the verdicts read them. Here, not in the page, so every rule over what was measured is tested on
  * constructed input: the page only reports each element of the bar and its ancestors (its box, `position` and
  * `overflow`), and which element is which part. Returns `{ bars, name, roleWord, widened, more }`: `bars`, one per read
- * (null without a bar), each `{ live, theme, parked, scrollWidth, height, nav, end, brand }` (the read's live word,
- * theme button state and Parked count, null where the page has no such thing; the page's `scrollWidth` in that read;
+ * (null without a bar), each `{ live, theme, parked, parkedText, scrollWidth, height, nav, end, brand }` (the read's
+ * live word, theme button state and Parked count, null where the page has no such thing, and the Parked panel's text
+ * as the read found it, null where none was recorded; the page's `scrollWidth` in that read;
  * the navigation's children and the end cluster's children as parts, null when the bar has no such group, and the
  * brand pill); `name` and `roleWord`, the signed-in name's and role word's measures with their parts (null when the bar
  * draws none); `widened`, whether the read could put the wide Parked count in (null where it had none to widen);
@@ -642,7 +697,7 @@ export function shellMetrics({ bar = null, more = null } = {}) {
 				return p && { ...p, ink: inkOf(nodes, r.snap, i) };
 			};
 			const parts = (list) => (list === null ? null : list.map(part));
-			return { live: r.live, theme: r.theme, parked: r.parked ?? null, scrollWidth: r.scrollWidth ?? null, height: t.bottom - t.top, nav: parts(navKids), end: parts(endKids), brand: part(roles.brand) };
+			return { live: r.live, theme: r.theme, parked: r.parked ?? null, parkedText: r.parkedText ?? null, scrollWidth: r.scrollWidth ?? null, height: t.bottom - t.top, nav: parts(navKids), end: parts(endKids), brand: part(roles.brand) };
 		});
 		if (bar.name && bar.reads.length > 0) name = { ...bar.name, part: partOf(nodes, bar.reads[0].snap, roles.name) };
 		if (bar.roleWord && bar.reads.length > 0) roleWord = { ...bar.roleWord, part: partOf(nodes, bar.reads[0].snap, roles.roleWord) };
@@ -781,13 +836,22 @@ export function liveReadProblems(bars, states) {
 
 /**
  * Whether a bar with a Parked count was read with each of `counts`' (`parkedCounts`): as drawn, emptied and wide. A
- * page with no count panel is read with none, which is no failure.
+ * page with no count panel is read with none, which is no failure. A read counts for the count its panel SHOWED
+ * (`parkedText`, `barSource`'s read-back: the count in its text, or no text for none), not the one it was labelled
+ * with: a read whose panel showed something else is told apart, and is no read with its label's count. A read with no
+ * text recorded (a constructed one) is taken at its label.
  */
 export function parkedReadProblems(bars, counts = parkedCounts()) {
-	const read = new Set(bars.map((b) => b.parked).filter((p) => p !== null && p !== undefined));
-	if (read.size === 0) return [];
+	const labelled = bars.filter((b) => b.parked !== null && b.parked !== undefined);
+	if (labelled.length === 0) return [];
+	const showed = (b) => b.parkedText === null || b.parkedText === undefined || (b.parked === "" ? b.parkedText.trim() === "" : b.parkedText.includes(b.parked));
+	const out = [];
+	const wrong = labelled.filter((b) => !showed(b));
+	if (wrong.length > 0) out.push(`the bar was read as ${parkedSaid(wrong[0].parked)} while its Parked panel read ${JSON.stringify(wrong[0].parkedText)}${wrong.length > 1 ? ` (and ${wrong.length - 1} more reads like it)` : ""}, so no rule was held at that count`);
+	const read = new Set(labelled.filter(showed).map((b) => b.parked));
 	const missing = [counts.drawn, "", counts.wide].filter((p) => !read.has(p));
-	return missing.length === 0 ? [] : [`the bar was never read with ${missing.map(parkedSaid).join(", ")}, so no rule was held there`];
+	if (missing.length > 0) out.push(`the bar was never read with ${missing.map(parkedSaid).join(", ")}, so no rule was held there`);
+	return out;
 }
 
 /**
@@ -1026,10 +1090,15 @@ export function shellRunVerdict(run, got, liveStates = []) {
 /**
  * The run with page scripts off (`NO_SCRIPT`): the window's emulation, the width rule, and More opened by a real
  * mouse click, which the CSS alone must place under its button (`moreVerdict`). No CSP read: the probe is a script, and
- * the same page is held to the CSP with its script in the sweep. Returns `{ failures, notes }`.
+ * the same page is held to the CSP with its script in the sweep. `themeHidden` is the theme button's `hidden` as the
+ * page held it after load (`THEME_HIDDEN_READ`): the script reveals it on every page that can be re-themed, so only a
+ * page whose script never ran still holds it hidden, and anything else means this run proved nothing about the CSS.
+ * Returns `{ failures, notes }`.
  */
-export function noScriptVerdict({ width, measured, more, emulation }) {
+export function noScriptVerdict({ width, measured, more, emulation, themeHidden }) {
 	const failures = [...emulationProblems(emulation, false)];
+	if (themeHidden === null || themeHidden === undefined) failures.push("the page has no theme button ([data-theme-toggle]), so nothing shows its script stayed off");
+	else if (themeHidden !== true) failures.push("the theme button was shown, so the page's script ran: this run must be made with page scripts off (Emulation.setScriptExecutionDisabled)");
 	const notes = [];
 	if (measured.clientWidth !== width) notes.push(`the layout viewport is ${measured.clientWidth} px, not ${width}`);
 	const w = widthVerdict(measured, width);
@@ -1269,13 +1338,15 @@ export function controlVerdict(control) {
 /**
  * Everything the run says and its exit code, from what was checked: `setup` (problems found before the browser ran),
  * `product` and `pin` (`versionCheck`, `ci` whether this is GitHub Actions), `results` (the golden runs), `shell` (the
- * shell sweep's runs and the run without scripts), `controls` (each negative control's `{ name, what, width, got,
+ * shell sweep's runs and the run without scripts, whose absence is a problem of its own: a check that skipped it would
+ * pass every page with the CSS-alone rule never held), `controls` (each negative control's `{ name, what, width, got,
  * want, notes }`, `got` null when it did not run; an empty list is a problem too), `pending` (the ratchet), `pages`
  * (every page name loaded). Returns `{ lines, failedRuns, failures, code }`; nothing here prints.
  */
 export function summarize({ setup = [], product, pin, ci, results, shell = [], controls = [], pending = WIDTH_PENDING, pages, seconds = "?" }) {
 	const lines = [];
 	const failures = [...setup];
+	if (!shell.some((r) => String(r?.run?.doc?.id ?? "").endsWith(NO_SCRIPT_SUFFIX))) failures.push("the run without page scripts never ran, so nothing held More's list under its button by CSS alone");
 	for (const control of controls.length === 0 ? [null] : controls) {
 		const checked = controlVerdict(control);
 		if (checked.ok) lines.push(`ok    ${control.name} at ${control.width} px failed as it was built to (${control.want.length} problem${control.want.length === 1 ? "" : "s"})`);
@@ -1429,8 +1500,15 @@ const COLLECT = `
  * (`nameProblems`), each with the tooltip a reader gets there: the nearest `title` from the word up through `.who`.
  * Returns `{ nodes, roles, reads, name, roleWord, parkedWidened, width, height }` for `shellMetrics`, or null when the
  * page has no bar.
+ *
+ * WHAT THE PANEL SHOWED IS READ BACK, never assumed from what was asked of it: each read keeps the panel's text as it
+ * stood (`parkedText`, null where the bar has no Parked panel), and `parkedWidened` is whether the panel's text held the
+ * wide count after the swap. A swap that wrote the drawn count back (which passed
+ * every run before, the flag set by the find alone) leaves the wide reads labelled with a count the panel never showed, and
+ * `parkedReadProblems` and the widened rule both say so. Exported for the worker test, which runs it against a stubbed
+ * page.
  */
-function barSource(states, counts) {
+export function barSource(states, counts) {
 	return `(() => {
 	${COLLECT}
 	if (!top) return null;
@@ -1454,14 +1532,10 @@ function barSource(states, counts) {
 			const copy = document.createDocumentFragment();
 			copy.append(...kids.map((k) => k.cloneNode(true)));
 			const walk = document.createTreeWalker(copy, NodeFilter.SHOW_TEXT);
-			parkedWidened = false;
-			for (let t = walk.nextNode(); t; t = walk.nextNode()) {
-				if (t.nodeValue.includes(DRAWN)) {
-					t.nodeValue = t.nodeValue.split(DRAWN).join(WIDE);
-					parkedWidened = true;
-				}
-			}
+			for (let t = walk.nextNode(); t; t = walk.nextNode()) if (t.nodeValue.includes(DRAWN)) t.nodeValue = t.nodeValue.split(DRAWN).join(WIDE);
 			panel.replaceChildren(copy);
+			// From the page, after the swap: what the panel now shows, not whether the swap found something to change.
+			parkedWidened = panel.textContent.includes(WIDE);
 		}
 	};
 	const reads = [];
@@ -1474,7 +1548,7 @@ function barSource(states, counts) {
 					pill.className = s.cls;
 					word.textContent = s.word;
 				}
-				reads.push({ live: s ? s.word : null, theme: hidden === null ? null : hidden ? "hidden" : "shown", parked, scrollWidth: se.scrollWidth, snap: snap() });
+				reads.push({ live: s ? s.word : null, theme: hidden === null ? null : hidden ? "hidden" : "shown", parked, parkedText: panel ? panel.textContent : null, scrollWidth: se.scrollWidth, snap: snap() });
 			}
 		}
 	}
@@ -1540,8 +1614,9 @@ export function moreSource(phone) {
 /**
  * The More menu's measure on a page whose scripts are off, after a real mouse click on its button (`checkNoScript`):
  * synchronous, as no frame callback of the page's runs. Returns what `moreSource` does (`cutFirst` null), or null.
+ * Exported, with `MORE_AT` and `THEME_HIDDEN_READ`, for the worker test's stubbed browser.
  */
-const MORE_READ = `(() => {
+export const MORE_READ = `(() => {
 	const details = document.querySelector("header.top details.more");
 	if (!details) return null;
 	${COLLECT}
@@ -1549,11 +1624,20 @@ const MORE_READ = `(() => {
 })()`;
 
 /** The centre of More's button in the window, for a real click (`checkNoScript`), or null when the bar has none. */
-const MORE_AT = `(() => {
+export const MORE_AT = `(() => {
 	const b = document.querySelector("header.top details.more > summary");
 	if (!b) return null;
 	const r = b.getBoundingClientRect();
 	return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+})()`;
+
+/**
+ * The theme button's `hidden` as the page holds it (`noScriptVerdict`), or null when it draws none. The server draws it
+ * hidden and the script reveals it on load, so after load it is the one sign the page's script did or did not run.
+ */
+export const THEME_HIDDEN_READ = `(() => {
+	const b = document.querySelector("[data-theme-toggle]");
+	return b ? b.hidden === true : null;
 })()`;
 
 /**
@@ -1597,7 +1681,12 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		applyHeaders(res);
 		const path = new URL(req.url, "http://127.0.0.1").pathname;
 		const doc = byPath.get(path);
-		if (req.method !== "GET") {
+		if (req.method === "POST" && path === "/login/code") {
+			// A one-time link page's post (`LINK_CODE_FRAGMENT`), held open like a stream: the page stays as drawn.
+			held.add(res);
+			req.on("close", () => held.delete(res));
+			req.resume();
+		} else if (req.method !== "GET") {
 			strays.push({ run: current, what: `${req.method} ${path}` });
 			res.writeHead(405).end();
 		} else if (doc) {
@@ -1654,7 +1743,7 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		for (const run of planRuns(docs)) {
 			current = run.key;
 			const path = run.forced ? forcedPath(run.doc, run.forced) : run.doc.path;
-			results.push(await checkOne({ browser, run, url: origin + path, canvasOf, clockMs, shots }));
+			results.push(await checkOne({ browser, run, url: origin + goldenUrl(run.doc, path), canvasOf, clockMs, shots }));
 			after();
 		}
 		for (const run of planShellRuns(sweep)) {
@@ -1662,11 +1751,10 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 			shell.push(await checkShell({ browser, run, url: origin + run.doc.path, clockMs, shots, liveStates }));
 			after();
 		}
-		const bare = sweep.find((d) => d.id === NO_SCRIPT.doc);
-		if (bare) {
-			const run = { key: `${bare.id} ${NO_SCRIPT.width} no script`, doc: { ...bare, id: `${bare.id}.no-script`, role: `${bare.role}, no JavaScript` }, width: NO_SCRIPT.width, mobile: false };
+		const run = noScriptRun(sweep);
+		if (run) {
 			current = run.key;
-			shell.push(await checkNoScript({ browser, run, url: origin + bare.path, clockMs, shots }));
+			shell.push(await checkNoScript({ browser, run, url: origin + run.doc.path, clockMs, shots }));
 			after();
 		}
 		for (const s of strays) {
@@ -1774,11 +1862,16 @@ async function checkShell({ browser, run, url, clockMs, shots, liveStates }) {
 	}
 }
 
-/** The run without page scripts (`NO_SCRIPT`, `noScriptVerdict`): More opened by a real mouse click on its button's centre. */
-async function checkNoScript({ browser, run, url, clockMs, shots }) {
+/**
+ * The run without page scripts (`NO_SCRIPT`, `noScriptVerdict`): the theme button's state read first (proof the script
+ * never ran), then More opened by a real mouse click on its button's centre. `browser` is `openChrome`'s; exported for
+ * the worker test, which drives it with a stubbed one.
+ */
+export async function checkNoScript({ browser, run, url, clockMs, shots = null }) {
 	const metrics = { width: run.width, height: DESKTOP.height, deviceScaleFactor: DESKTOP.scale, mobile: false };
 	const { t, evaluate } = await openPage({ browser, key: run.key, url, metrics, emulated: "light", clockMs, noScript: true });
 	try {
+		const themeHidden = await evaluate(THEME_HIDDEN_READ);
 		const measured = await evaluate(measureSource(run.width, EDGE_SLACK));
 		const at = await evaluate(MORE_AT);
 		let more = null;
@@ -1792,7 +1885,7 @@ async function checkNoScript({ browser, run, url, clockMs, shots }) {
 			writeFileSync(join(shots, `${run.doc.id}.${run.width}.png`), Buffer.from(data, "base64"));
 		}
 		const emulation = await evaluate(EMULATION_PROBE);
-		return { run, ...noScriptVerdict({ width: run.width, measured, more, emulation }) };
+		return { run, ...noScriptVerdict({ width: run.width, measured, more, emulation, themeHidden }) };
 	} finally {
 		await t.close().catch(() => {});
 	}
@@ -1903,7 +1996,7 @@ export async function runCheck(opts, { find, modules, fixtures = FIXTURES, check
 	const top = readGoldens(fixtures, "");
 	const panels = existsSync(join(fixtures, "panels")) ? readGoldens(join(fixtures, "panels"), "panels/") : { docs: [], problems: [] };
 	const setup = goldenProblems({ top, panels, pageNames });
-	const docs = [...top.docs, ...panels.docs, ...signInDocs(m.shell)];
+	const docs = [...top.docs, ...panels.docs];
 	const headOf = (theme) => themeHead(String(m.htmlModule.page({ title: "theme", name: "theme", body: m.htmlModule.html``, theme })));
 	const heads = { system: headOf(null), light: headOf("light"), dark: headOf("dark") };
 	const runId = longRunId((id) => m.pages.parsePageQuery("run", new URLSearchParams({ id })).query?.id === id);
@@ -1911,7 +2004,7 @@ export async function runCheck(opts, { find, modules, fixtures = FIXTURES, check
 	const liveStates = liveStatesOf(m.shell.LIVE_STATES);
 	const controls = [controlDoc(liveStates, m.shell.LIVE_STATES.retry), phoneControlDoc(liveStates)];
 	setup.push(...liveStateProblems(liveStates));
-	if (!sweep.some((d) => d.id === NO_SCRIPT.doc)) setup.push(`the shell sweep has no ${NO_SCRIPT.doc} to load without its script`);
+	if (noScriptRun(sweep) === null) setup.push(`the shell sweep has no ${NO_SCRIPT.doc} to load without its script`);
 	const outcome = await check({
 		docs,
 		shellDocs: sweep,
