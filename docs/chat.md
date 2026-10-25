@@ -70,6 +70,13 @@ If the console drops the connection, `chat` reconnects on its own, waiting 500 m
 gives up after 8 failures in a row. A stream that sends nothing for 45 seconds (three of the console's pings) is
 treated as dropped and resumed. A console that ends the sign-in (an expired session, a revoked or rotated token) is
 signed in to again, at most once a minute; a second end within a minute of a fresh sign-in is the end of the command.
+A console restart does not count toward that minute. When the console says it is stopping, `chat` treats it as a
+dropped connection and reconnects with the same cookie once the console answers; the console that comes back no
+longer knows that sign-in and says so (`restart` in its 401), and that sign-in, like the first one after the console
+said it was stopping, is not counted. So two restarts inside a minute do not end the command; a revoked token still
+does. Only a refusal of the connection counts as a restart, never an end the console sends, and only once for each
+connection the console opened since the last sign-in: a console that refuses every connection that way gets one counted
+sign-in, and then the command ends.
 A refusal or status the console sends is always printed on one line, and refusals go to standard error.
 
 ## Live: watch and steer a running job

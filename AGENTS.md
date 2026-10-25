@@ -142,7 +142,7 @@ Two consequences worth internalising before you design anything:
 - **A hand-written table that restates a derivable source is either derived or pinned, never trusted.**
   Every instance found so far had drifted, and every one was load-bearing. Current bolts: the
   model-callable tool list in `REQ-`/`DES-ADMIN-VIA-PI-EXTENSION` against the registrations, and
-  `INT-TRIGGERS-FILE-CONTRACT`'s forge vocabularies against `PR_ACTIONS` (the two tests that read a spec
+  `INT-TRIGGERS-FILE-CONTRACT`'s forge vocabularies against `PR_ACTIONS` (two of the tests that read a spec
   file); the admin's forge, action and settings vocabularies against `worker/src/triggers.mjs` and
   `runtime-settings.mjs`; `EXIT_POLICY`'s copies in the runner and the `deploy/` units; the receiver
   filters' action sets as the loader's set minus their own named exclusions; the git hardening flags,
@@ -152,7 +152,11 @@ Two consequences worth internalising before you design anything:
   `CANARY_LINES` by a test and required to match between markers (the count-the-source test it replaced
   could not see four spellings and could go false red on a comment); and every spec revision row, which
   must split into exactly two cells on unescaped pipes, because such a row is CUT on the rendered page
-  while looking whole in the diff, and four had silently lost between 1,100 and 2,800 characters each.
+  while looking whole in the diff, and four had silently lost between 1,100 and 2,800 characters each; and the
+  console's four hand-written lists in `admin/test/console-doc-tables.test.mjs`: `docs/console.md`'s `ended` table
+  against `ENDED_REASONS` and the sign-in page's titles, its error-page table against `ERROR_KINDS` and their statuses,
+  the requirements' destructive actions against the actions whose write rules set `danger`, and `docs/triggers.md`'s
+  `pull_request` fields against the trigger add's `TRIGGER_ADD_FIELDS.pull_request`.
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.

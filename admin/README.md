@@ -239,8 +239,11 @@ whole fleet as it changes: an overview, every run with filters and paging, the r
 insights by range, queues, hosts and schedules, the configuration and its own audit log, plus `/api/state` as JSON for
 scripts. It reads through the same code as the panel, so the two never disagree; the panel shows the waiting runs too.
 It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
-and edit the configuration, each previewed, confirmed and recorded in one audit log that holds the panel's own writes
-too. Every running job's progress shows in its row and on its run page, and its transcript, redacted, streams live
+and edit the configuration, each previewed (with how to undo it), confirmed and recorded in one audit log that holds
+the panel's own writes too, and after each change the page names it, who made it and its audit row, with an Undo
+where there is a way back. When `serve` starts it prints how to sign in (the commands that make a token or a one time
+link, never a token), and `pi-dispatch-console link --name <you> --port <n>` prints the link for an SSH tunnel's local
+port. The sign-in page says why a session ended. Every running job's progress shows in its row and on its run page, and its transcript, redacted, streams live
 on its run page for operators, and the panel's live tail
 (`l`) reads the same transcript for a run on any host. Nothing listens unless you start it. In pi,
 `/dispatch console [page] [--link]` prints a page's address, says whether the console is running, makes a one time

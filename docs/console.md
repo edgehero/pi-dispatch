@@ -61,6 +61,19 @@ pi-dispatch-console serve
 Only one `serve` runs per deployment: a second one refuses, naming the first one's lock, because two of them would
 fork the audit log's chain.
 
+As it starts, it prints where it listens, the tunnel for another machine, and how to sign in. It never prints a
+token, only the commands that make one or a one-time link:
+
+```text
+pi-dispatch console on http://127.0.0.1:4790/
+from another machine: ssh -L 4790:127.0.0.1:4790 <this host>, then open http://localhost:4790/
+sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you>
+```
+
+On a unix socket the last line ends with `--port <your tunnel's local port>`: a link through a tunnel needs the port
+you forward, which only you know ([From another machine](#from-another-machine)). The sign-in page gives the same
+help, with the commands in boxes to copy.
+
 To listen somewhere else, set `PI_CONSOLE_LISTEN`:
 
 | Value | What it does |
@@ -133,11 +146,29 @@ ssh -L 4790:/home/pi/.pi-dispatch/console/console.sock host
 
 Then open `http://localhost:4790/` on your own machine. The local port can be anything: the console checks the
 hostname your browser sends (`127.0.0.1`, `localhost` or `[::1]`), not the port, so `ssh -L 8080:...` works too.
-Any other hostname is refused with 421, which is what defeats DNS rebinding. If you reach the console through a name
-of your own, list it in `PI_CONSOLE_ALLOWED_HOSTS`. The container gateway names (`host.docker.internal`,
+Any other hostname is refused with 421, which is what defeats DNS rebinding. Three files answer on any name: the
+console's script, its stylesheet and its empty favicon, which hold nothing a session or a rebound name could use, and
+which the 421 page itself loads to draw. If you reach the console through a name of your own, list it in
+`PI_CONSOLE_ALLOWED_HOSTS`. The container gateway names (`host.docker.internal`,
 `host.containers.internal`, `gateway.docker.internal`) can never be listed: the console refuses to start if you try.
 
 Whoever can use the forwarded port on your machine can reach the console's sign-in page. They still need a token.
+
+To sign in through the tunnel without pasting the token, make the link for your tunnel's local port:
+
+```bash
+pi-dispatch-console link --name rob --port 4790
+```
+
+It prints `http://localhost:4790/login/code#<code>`, ready to open on your own machine. The console cannot know that
+port (a unix socket has none, and a tunnel can forward any free one), so you name it: `--port` takes a number from 1
+to 65535, a bad one is refused before any link is made, and it is refused on every command but `link`. Without
+`--port`, a console on a unix socket prints its link with `<the local port of your ssh -L tunnel>` where the port
+goes.
+
+A page opened by a name the console does not answer to (a hostname of your own that is not in
+`PI_CONSOLE_ALLOWED_HOSTS`, say) says so and gives the `ssh -L` command for the address and port you came in on
+([Error pages](#error-pages)).
 
 ## Sign in without pasting the token
 
@@ -147,13 +178,35 @@ On the host, as the deployment's account:
 pi-dispatch-console link --name rob
 ```
 
-It prints a link like `http://127.0.0.1:4790/login/code#<code>`. Open it within 60 seconds (through a tunnel, keep
-the path and the part after `#`, and use your tunnel's host and port). The code is not your token: it signs in `rob`
-once and is then gone, and it sits after the `#`, which your browser never sends to a server, so it does not land in
-a request log or a `Referer`. A small script on the page posts it. The codes are files in `console-login-codes/`
-beside the tokens file, a folder only the deployment's account can open. If that folder is ever open to other
-accounts, the console refuses it: remove the folder (what it holds cannot be trusted) and make a new link, which
-creates it again.
+It prints a link like `http://127.0.0.1:4790/login/code#<code>`. Open it within 60 seconds (through a tunnel, add
+`--port <your tunnel's local port>` and the link is printed for it, [above](#from-another-machine)). The code is not
+your token: it signs in `rob` once and is then gone, and it sits after the `#`, which your browser never sends to a
+server, so it does not land in a request log or a `Referer`. A small script on the page posts it. The codes are files
+in `console-login-codes/` beside the tokens file, a folder only the deployment's account can open. If that folder is
+ever open to other accounts, the console refuses it: remove the folder (what it holds cannot be trusted) and make a
+new link, which creates it again.
+
+The link's page says "Signing in with a one-time link" while it works. A link that was used, has expired or is
+unknown says so and gives both commands for a new one (`pi-dispatch-console link --name <you>` on the host, and
+`/dispatch console --link` in pi); a link that lost the part after `#` says it carries no code. Each state offers the
+token form instead. If the console does not answer, the page stays, says "Console not reachable, retrying" and posts
+the same code again every 2 seconds, for at most 30 tries or 60 seconds, whichever comes first. Then it stops, says the
+link has expired (a link lasts 60 seconds), and asks you for a new one once the console is back. Too many sign-in
+attempts at once (the console's sign-in limit) do not use the link up: the console turns the post away before it
+reads the code, so the page keeps saying it is signing in, tells you to wait a minute, and the same link still works
+within its 60 seconds; open it again. A new link pasted into a tab that shows this page loads the page again for it.
+
+The sign-in page itself says why a sign-in was refused, one notice at a time above the field: a token that is not
+valid for this console, too many attempts (wait a minute), a tokens file the console cannot use right now (an
+operator should run `pi-dispatch doctor` on the host), or an audit log it could not write, which refuses the sign-in.
+(A used or expired link is said on the link's own page, above.) A sign-in that reaches nothing keeps the page and is
+sent again every 2 seconds until the console answers, for at most 30 tries or 60 seconds: then nothing more is sent,
+the page no longer holds the token, and it asks you to paste it and press Sign in again once the console is back.
+The field is cleared as soon as you press Sign in. Under it, "No token yet?" gives the pi command
+for a link (`/dispatch console --link`) and the host command for a token, each in a box to copy, and a line says where
+the console answers: on this host's loopback address only, on its unix socket only, or nothing about it on a public
+bind. Signing in needs JavaScript. A page without it says so first, and shows only what still holds: the token form,
+its lead-in and the link page's "Signing in" state are drawn hidden, and the page's script shows them as it loads.
 
 ### From pi: `/dispatch console`
 
@@ -205,6 +258,57 @@ session ends:
 - for everyone, when you run `pi-dispatch-console sessions end-all`;
 - for everyone, when `serve` restarts, because sessions live in the process.
 
+Signing in again in the same browser ends the session it held before. Its other open live tabs wait a moment, ask
+the console who this browser is now, and reload on the new session only if it is the same person (the same name and
+role); otherwise they go to the sign-in page, which says this browser is now signed in as someone else, so a
+one-time link someone else sent you, opened in another tab, never puts their console into a tab you were using.
+
+**A page acts only as the person it was drawn for.** Every page says who it was drawn for when it opens its live
+updates and when it previews or confirms a change, and the console refuses the request when this browser is now
+signed in as someone else. An open page then cannot change anything as the other person, even a page that is not
+live: its preview or confirm is refused with "this browser is now signed in as someone else, so nothing was
+changed; sign in again", with Look again, which goes to the sign-in page saying this browser is now signed in as
+someone else (it never reloads the page into the other person's console), and its live updates stop and send it to
+the same sign-in page. The terminal chat and scripts do not
+say a person and are not checked.
+
+**Sign out** goes to the sign-in page only once the console confirms it. If the console does not answer within 10
+seconds, or answers anything else, the page stays and says "Sign-out not confirmed" (once, however often you press
+it): this browser may still be signed in, so press Sign out again. An answer that comes later still takes you to
+the sign-in page. A sign-out ends every session the browser presents, so a second cookie another program on this
+machine planted beside yours cannot turn it into a sign-out that ends nothing. Signing out needs no tokens file, so
+it works while the console cannot read one (below).
+
+**The sign-in page says why.** The next page you open after your session ended goes to the sign-in page, which says
+in one line what happened:
+
+| `ended` | What ended it | The sign-in page says |
+|---|---|---|
+| `idle` | no request for `PI_CONSOLE_IDLE_MINUTES` | You were signed out after 60 minutes without a request (your console's own limit; an open live tab does not count) |
+| `max` | `PI_CONSOLE_MAX_HOURS` since sign-in | You were signed out after 12 hours (the longest a session lasts) |
+| `revoked` | the token was revoked or rotated | Your token was revoked or rotated |
+| `role` | the token's role changed | Your role changed, so you were signed out |
+| `all` | `sessions end-all` | An operator ended every session (your token still works) |
+| `elsewhere` | you signed out in another tab | This browser signed out in another tab |
+| `restart` | the console restarted, perhaps | This console no longer knows this sign-in; it may have restarted |
+| `switched` | nothing ended: another tab signed this browser in as someone else, and this page stopped rather than act for them | This browser is now signed in as someone else |
+
+The console remembers why each session ended for that session alone, under its own random id, so the line says nothing
+about any other token or session. It remembers the last 1024. The `restart` line is a guess, and says so: sessions live
+in memory, so after a restart the console cannot tell your old cookie from one it never issued. It says it only while
+the console has been running for less than `PI_CONSOLE_MAX_HOURS` (after that, a session from before would have ended
+anyway) and has not yet forgotten an ended session; otherwise the sign-in page says nothing. The page takes the reason
+only from its own list: a link to `/login?ended=` with anything else shows no notice, and nothing from the address is
+ever repeated on the page. A script gets the same reason as `ended` in a 401's JSON
+([The state API](#the-state-api)).
+
+**A tokens file the console cannot read signs nobody out.** If the file stops being readable while the console runs
+(a wrong mode or owner after an edit, say), every page or API request from a signed-in browser is answered "The
+console's tokens file cannot be used right now" (503, with `pi-dispatch doctor` to run on the host), your browser
+keeps its session, and open live pages stay connected and show their data as last seen, under a note that says the
+console could not read its tokens file. Signing out still works. Once the file reads again everything carries on,
+and a session that ended in the meantime (its idle limit, say) ends then, with its reason.
+
 ## Managing tokens
 
 | Command | What it does |
@@ -229,6 +333,69 @@ ticket the preview handed out, which works once, for your session, for 5 minutes
 file changed after the preview (the panel, another browser, a hand edit), or a job is no longer as the preview showed
 it, the confirm is refused and nothing is written. Preview again. [Actions](#actions) lists every write.
 
+**The preview bar.** A preview opens in one bar right after the card whose button you pressed, never inside a table.
+While the console answers it says "Previewing" with Confirm greyed. Then it lists what will happen (a setting's
+change reads "maxTurns: **30** to **40**"), the diff for a file, what a paid action will reserve, and a line saying how
+the change can be undone. Where a write puts it back it reads **Undo:** and that write (deleting the trigger you add,
+setting a setting back to the value it had, resuming the queue you pause, withdrawing the message you send). Where
+there is none it reads "No undo:" and what you can do instead: for a deleted line, copy it from this preview, since
+the console keeps no copy (for a deleted trigger that names secrets, its secret references come from your own copy
+of the file, since the preview does not show them); for a retry or a re-run, the console cannot remove a waiting job,
+but Cancel stops it once it runs; for a setting whose old value the form cannot send back (an empty one, say), set it
+back by hand. The Confirm button says what it does ("Pause the fleet", "Delete trigger at index 1", "Retry for up to
+$2.00", "Retry (zero-rated)" for a job that cannot spend), yellow for an action that spends and red for one the
+console counts as destructive: a pause of the fleet or a queue (which Resume undoes, but which stops work), a cancel,
+a removal and a delete. The bar counts down the preview's 5 minutes, and at 0:00 Confirm stops working: preview
+again.
+
+The bar's other states:
+
+- **No change**, with Close, when the change would write what is already there ("The file already says this:
+  maxTurns is 40.").
+- **Refused at the preview**, with Close: the console's reason, and that nothing was changed. Fix the form and try
+  again.
+- **Refused at the confirm**: Preview again (the confirmation expired, was used, or belongs to another sign-in), Look
+  again (the file or the job changed since the preview; it reloads the page), Try again (Valkey could not be
+  reached), or Close (the audit log could not be written, so nothing was; or the write failed, and the console's log
+  has the reason). Each of these came before anything was written, and says that nothing was changed.
+- **Refused for another person**, at the preview or the confirm, with Look again: this browser is now signed in as
+  someone else (in another tab), so the page you are on may not act for them ([Sessions](#sessions)). Nothing was
+  changed. Look again goes to the sign-in page, which says so.
+- **The tokens file cannot be used**, with Look again: the console cannot read its tokens file right now, so it
+  changed nothing; an operator should run `pi-dispatch doctor` on the host ([Sessions](#sessions)).
+- A preview or a confirm whose session has ended (it was idle too long, say) shows no refusal: the page goes to the
+  sign-in page, which says why, as a live page does when its updates stop.
+- **Did not finish**, with Look again: the change stopped after doing part of its work. The kill switch can reach
+  some queues and not others (a Valkey that did not answer, a loop that stopped part-way) or fail before it says which,
+  and a bulk action can fail part-way through its jobs. The bar never says nothing was changed here: it says some of
+  it may have been done, and Look again reloads the page so you see what did. The audit log has no outcome for a
+  change that partly landed, so such a write's line reads `failed` (for the kill switch, its reason says what it
+  reached).
+- **No answer at all**: the bar says the change may or may not have been made. Reload to see; the audit log says
+  which. The same confirmation is never sent twice.
+
+**After a write** the page reloads and a banner at its top says what happened ("Paused the fleet", "Changed
+maxTurns from 30 to 40"), who did it and its audit row, linked to that row on the audit page ("3 audit rows, from row
+41" for a bulk action, linked to the first), with the Undo line again. Where the change has a way back, the banner's
+**Undo** button opens that write's own preview with the old values filled in, so nothing is undone without you
+seeing it first; where it has none, the line says what to do by hand (after a delete, that the console kept no copy
+of the removed lines). The banner shows once. A bulk action with a job that did not go through shows each job's
+result in the bar instead, with its audit rows and Reload; its banner on the next page is amber and says how many
+were done ("2 of 3 done"), and a bulk action where no job went through leaves no banner at all.
+
+**A field an action does not take is refused.** Every action takes only the fields its form sends; any other is
+refused by name with the fields it does take, and nothing is changed. A field whose name is not a plain word is
+called "a field it was sent", and a value you sent is never repeated. The AI tool that adds a trigger refuses a field
+its trigger type does not take the same way, before you are asked to confirm ([`triggers.md`](triggers.md)); the
+console's own trigger form says "this form does not take ..." in the same words.
+
+**Row numbers.** The pages drawn in the new design count their rows from 1 (the audit page's "row 41" is the 41st
+row the log ever held). The Configuration page still draws its tables and forms by the 0-based index its files use (the
+Triggers table's "#" column, the "Row #" fields, "History row # (newest is 0)"), so until its row buttons arrive
+everything the console says about one of its rows uses that same index, worded "index N": "Delete trigger at index
+1", "pause window at index 0", the opted-out triggers of a secret bundle. In pi, the `/dispatch` panel and the tools
+count from 1 ("Delete trigger #2" for index 1).
+
 Writes are refused (403) when:
 
 - the console is read-only (`PI_CONSOLE_READ_ONLY=1`), which turns every write off and leaves reads and sign-in on;
@@ -236,9 +403,11 @@ Writes are refused (403) when:
 - the request did not come from the console's own page (another site, or another app on another `localhost` port);
 - the content type is not JSON.
 
-Each such refusal is a line in the audit log. A refused request that carried no session is written one line each up
-to 60 a minute; past that, refusals are counted and the count is written as one line, so whoever can reach the port
-cannot grow the log without bound. A signed-in write whose body is too large (413) or not valid JSON (400) is a line
+Each such refusal is a line in the audit log, and so is a preview or confirm refused for another person. A refused
+request that carried no session, and a sign-out that found no session to end, is written one line each up to 60 a
+minute; past that, such lines are counted and the count is written as one line ("3 more rows without a session
+(refusals and sign-outs) went unwritten one by one"), so whoever can reach the port cannot grow the log without
+bound. A signed-in write whose body is too large (413) or not valid JSON (400) is a line
 too, with a fixed reason and nothing of the body; a change the preview refuses as invalid is answered and not
 audited, since nothing reached a write.
 
@@ -265,11 +434,63 @@ Each line carries the sha256 of the line before it, so an edit shows:
 pi-dispatch-console audit verify
 ```
 
-It names the first file and line where the chain breaks. The worker's retention sweep (`PI_LOG_RETENTION_DAYS`)
+It names the first file and line where the chain breaks. A row is vouched for only by the next line's link to it (its
+`prev`, the row's sha256), so when that line does not carry a link that matches (it is not a row at all, its link is
+missing or malformed, or it is another row's), whatever else is wrong with it, it says the row before it is not
+vouched for either ("Row 7 before it (2026-10.jsonl line 7) is not vouched for either: the link between the two does
+not hold, so the chain cannot tell whether row 7 was changed.") and that the rows through the one before that are
+intact. When the line's link matched and it fails another check,
+the row before it is intact. The worker's retention sweep (`PI_LOG_RETENTION_DAYS`)
 removes month files past the retention, never the newest one; when it has removed older months, it says where the chain now starts rather than calling that a break. The chain shows an edit;
 it does not prevent one, since whoever can write the file can rewrite every line after the one they changed. The rows
 `serve` writes are also copied to the Valkey list `console:audit` (the newest 500), best effort; the file is the
 record.
+
+**The audit page** (`/audit`, operators only, under More) shows the log newest first, 50 rows a page, with Newest and
+Older to move through it. Above the rows a banner says how far the chain is verified: "Chain verified through row
+1204", or, when an older month was reaped by the retention sweep, from which row (a reaped start and a removed one
+look alike, and the banner says so). When a row is damaged it says "Chain verified through row 6. Line 8 of
+2026-10.jsonl is damaged.", the check's reason, and what to do: keep the file as it is and compare it with your last
+backup; `pi-dispatch-console audit verify` names the same line. The damaged place is always named by its line in its
+file, as `audit verify` names it, never by the row number it carries: that number is part of what may have been
+changed. Its "Show the damaged line" button opens the page at that line. When line 8 does not carry a link that
+matches row 7 (it is not a row, its link is missing or malformed, or it is another row's, whatever else is wrong
+with it), the banner also says that row 7 cannot be trusted either: an edit to row 7 leaves its own line well formed
+and shows only in row 8's link, so nothing says whether row 7 was changed, and the verified range ends at row 6.
+Only a line whose link matched and that is damaged in another way (a seq out of order, an action, outcome or field the
+console never writes) leaves the row before it verified. The newest row has no line after it, so nothing vouches for
+it, and the next row the console writes links to it as it then is on disk: an edit made to the newest row before
+another row is written is never seen ([`SECURITY.md`](../SECURITY.md)).
+
+Each row shows who (name and role), the action and which write, the target, the outcome as a badge with a mark and a
+word, and the reason, with a bulk action's line saying it is one of how many in a bulk write and a resume's how many
+jobs were waiting to start. A row's outcome is shown only where the chain vouches for it. The damaged row is tinted,
+with the check's sentence beside it; every row after it reads **not verified** (it may say anything about itself; the
+outcome it was written with is in a note), and so does the row before it when the damaged line carries no link that
+matches it, with a note saying the link to the row after it does not hold; a row written after the last check reads **unchecked** until
+the next one;
+and a line that is not a row at all is shown as damaged in its place, never skipped. The check re-reads the whole log,
+so the page reuses it for 30 seconds, and **About this log** says when it last ran, the verified range, the damaged
+line and what is not verified.
+
+The filters are a search over targets and reasons (at most 64 characters) and three lists: who, the action and the
+outcome; the search matches in any case. A filtered view is a plain link. It searches 500 rows at a time and stops
+after 2,000, saying once how many rows matched among how many it searched ("20 rows match among the 2,000 rows
+searched", "from here" on an Older page); its Older link searches on from there, so a search never claims "no match"
+for rows it did not read. A damaged line or row is shown under every filter, in its place, and is not counted as a
+match: the chain does not vouch for what it says, and a filtered view that hid it would look clean. A filter value
+outside its list or its characters is refused by the parameter's name, never repeated back.
+
+`/audit?seq=<n>` opens the page that holds row n, at the row (`/audit?seq=41#seq-41`), however many rows were written
+since: the banner after a write links its row this way. The page finds the row by its number, from where the last check
+counted each month file to start, and reads it there in one go. A page whose rows run past what the last check counted
+(rows written since, or after a damaged one) starts at the last row the check counted, and the newer rows are on the
+pages above it. Where the check did not count the row itself (a row newer than the check, a row past a damaged one, or
+no check at all) or the files have changed since, the page searches for it from the newest row instead, up to 2,000
+rows, and says how it found the row, or why it did not ("The page that holds row 125, found by reading from the newest
+row: the last chain check counted rows up to row 120."). A row older than the log's first says it was reaped by
+retention or removed, and a row past the newest says it does not exist yet. `seq` takes no filter: `?seq=` with `who`,
+`action`, `outcome` or `q` is refused, since the page it opens is the row's own, unfiltered.
 
 ## What doctor checks
 
@@ -299,7 +520,8 @@ the live pill on the pages that update themselves ([Live updates](#live-updates)
 in, and Sign out. Spend is the `/insights` page. Parked shows how many parked runs are waiting for an answer, kept
 current on the pages that update themselves; it shows no number when none is waiting or the count could not be
 read. An operator also gets **More**, which holds the audit log; a viewer has no More. The first thing the keyboard
-reaches is a "Skip to content" link, which jumps past the bar.
+reaches is a "Skip to content" link, which jumps past the bar. A read-only console also says so in a banner under
+every screen's title ("This console is read-only"): every change is refused and no page shows a form.
 
 The bar's layout depends only on the window's width and on whether the console is read-only, never on what the bar
 shows, so it does not move, on a phone or a desktop, when the live pill's state changes, when the theme button
@@ -331,7 +553,7 @@ readers ([Live updates](#live-updates)).
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
-| `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. A line that is not a valid row is shown as broken in its place, never skipped. |
+| `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. How far its hash chain is verified, which rows it does not vouch for, filters and a search ([The audit log](#the-audit-log)). A line that is not a valid row is shown as damaged in its place, never skipped. |
 
 ### Look and theme
 
@@ -376,7 +598,13 @@ kept for screen readers. Until a page is redrawn in the new design its panels ar
 combinations are not measured.
 
 Every page is checked in CI at a phone's width, 375 pixels, where it must not scroll sideways: wide tables, the
-navigation and the charts scroll inside their own box. The top bar is checked too, at 320 and 375 pixels as a phone and
+navigation and the charts scroll inside their own box. So are the sign-in pages, the 404, 400, 403, 421 and 503
+error pages, and each of these states as the server draws it: the preview bar previewing, a plain, a paid and a
+destructive preview, a preview with a line that has no space to break at, no change, a bulk preview and its results,
+one refusal at the preview and one at the confirm, the refusal for another person, a change that did not finish,
+and the banner after a write with an Undo and without one; each live note, a page shown as last seen and a panel
+kept still; the read-only banner; the audit page's damaged and not verified rows; every notice of the sign-in page
+and every state and notice of the one-time link's page. The top bar is checked too, at 320 and 375 pixels as a phone and
 at 761, 800, 940, 1024, 1180, 1280, 1440 and 1600, for an operator, a viewer, a read-only console and the longest name a
 token can have, with the bar read in every combination of the live pill's states, the theme button shown and hidden,
 and the Parked count as drawn, emptied and five digits long. In each of those reads no two of its parts overlap and
@@ -386,7 +614,8 @@ bar of a console that is not read-only is one row, as the design draws it; a nam
 its tooltip holds it whole, and the longest name is always cut where the bar shows it; and More, opened by a click
 (on a phone with its button left half scrolled out of the navigation and nothing focused, as a screen reader's
 activation is), opens inside the window right under its button, its button whole. One more run opens More with the
-page's script switched off and fails unless it opens under its button all the same. Each run first checks two top
+page's script switched off and fails unless it opens under its button all the same (and unless the script really was
+off, and the run was made at all). Each run first checks two top
 bars built to fail, one built to break nine of its rules and a phone's bar built to break four (a jump with the last
 live word and one with its Parked count emptied, a page that scrolls sideways only while the count is emptied, and a
 More that shuts itself when opened with its button cut), and fails unless each fails with exactly those, so a check
@@ -692,12 +921,12 @@ refused and the file is left as it is.
 
 ### Bulk actions
 
-Retry all failed jobs, remove all failed jobs (optionally only one queue or one repository), and cancel all held
-jobs. The preview lists every job the action will touch, at most 100; when more match, it says how many more, and
-you run it again for the rest. The confirm acts on exactly that list and re-checks each job: a job that was retried,
-removed or failed again since the preview is skipped and reported, and the others go ahead. The answer lists what
-happened to each job, and the audit log has one line per job. A bulk retry can start up to 100 paid jobs from one
-confirm, each still held to every cap.
+Retry all failed jobs, remove all failed jobs (optionally only one queue or one repository), and cancel all held jobs.
+The preview lists every job the action will touch, at most 100; when more match, it says how many more (or, for a
+repository filter whose scan stopped before the end, at least how many), and you run it again for the rest. The confirm
+acts on exactly that list and re-checks each job: a job that was retried, removed or failed again since the preview is
+skipped and reported, and the others go ahead. The answer lists what happened to each job, and the audit log has one
+line per job. A bulk retry can start up to 100 paid jobs from one confirm, each still held to every cap.
 
 ### Answering a parked run
 
@@ -814,20 +1043,45 @@ would put an interactive shell one stolen session away from anyone.
 
 The overview, runs, parked, fleet and run pages update themselves while open; the run page reads its data about
 every 2 seconds, for its progress ([Run progress](#run-progress)), and its live transcript streams on its own
-([The live transcript](#the-live-transcript)). Insights, configuration and the audit log are drawn once per load;
-reload them to refresh. The live pill in the top bar says:
+([The live transcript](#the-live-transcript)). Insights, configuration and the audit log are drawn once per load:
+their title bar says when ("Drawn at" and the time, in your own time zone once the page's script has run) and that
+they are not live, beside **Reload**, which opens the same page again. The live pill in the top bar says:
 
 - **Live** while updates arrive.
 - **Reconnecting** while the connection is down (the console was killed or crashed, or the network dropped): the page
-  stays as it is and the browser tries again every 2 seconds, back to Live if the console is still there.
-- **Not live** until the page's script has connected (so a page without JavaScript always says so), when the console
-  refused the stream because the page was past a stream limit (below), and also once a killed console is running
-  again: it keeps sessions in memory, so the new process does not know yours and refuses the reconnect. The pill's
-  tooltip then still says to reload after closing another console tab; after a restart, reload the page and sign in
-  again.
-- **Signed out** when your session ends, and also when the console is stopped or restarted the ordinary way, since it
-  ends every open page's updates as it stops. The page then goes to the sign-in page, which loads once the console is
-  running again.
+  stays as it is and the browser tries again every 2 seconds, back to Live if the console is still there. It also
+  says Reconnecting when the console is stopped the ordinary way (it tells every open page as it stops) and when the
+  browser has given up on the stream and the console does not answer: then a note under the title says "Console not
+  reachable, retrying", and the page keeps itself, asks the console again every 2 seconds and reloads once it answers,
+  if this browser is still signed in as the person the page was drawn for (signed in as someone else, it goes to the
+  sign-in page, which says so; signed out, to the sign-in page, which says why).
+- **Not live** until the page's script has connected (so a page without JavaScript always says so), and when the
+  console refused the stream because the page was past a stream limit (below); a note then says how many live tabs
+  one token may hold, with Reload.
+- **Signed out** when your session ends: a note says so and the page goes to the sign-in page, which says why
+  ([Sessions](#sessions)). A console that was restarted, whether stopped or killed, no longer knows your session, so
+  once it answers again an open page goes to the sign-in page too, which says the console may have restarted.
+
+When you sign out in one tab, that tab goes to the sign-in page once the console confirms it ([Sessions](#sessions)).
+Every other open live tab of the same session waits 2 seconds and asks the console whether this browser is signed in
+again (in another tab, say): if it is, as the same person, the tab reloads; as someone else, it goes to the sign-in
+page, which says this browser is now signed in as someone else; and if it is not signed in, to the sign-in page,
+which says you signed out in another tab.
+
+**Data shown as last seen.** If the console cannot read the deployment's data for an open page (Valkey went away, for
+one), the page keeps what it showed rather than fill with "could not be read": its panels are drawn flat, with no
+ground of their own and a thin ring, their words as they were and each plain button given a ring of its own so it
+still looks like one (each still works), under "Shown as last seen at" and the time, in your own time zone. Only the
+next good read takes both back. A page whose connection drops and comes back while the data still cannot be read
+stays marked, showing nothing newer than the last good read, because the console tells every connection first
+whether the page is current, before it sends anything else. A page opened while the data cannot be read shows those
+"could not be read" panels as before, since there is nothing older to keep. The same look shows while the console cannot
+read its tokens file, and then the note says so: the console could not read its tokens file, and an operator should run
+`pi-dispatch doctor` ([Sessions](#sessions)).
+
+**A panel you are using is kept still.** While a preview is open for a panel, or you have typed into or focused one of
+its fields, or its editor is open, updates to that panel wait: it says "Updates paused while you edit" and "Newer data
+is waiting. It shows when you close the preview or leave the field.", and the newest update lands when you do.
 
 Each state is a word as well as a colour, and only Live pulses; Signed out shows the sign-out mark in place of the
 dot. On a phone the pill never changes size: it is one small mark whose shape says the state, a dot for Live, a retry
@@ -839,18 +1093,58 @@ refreshes every 5 seconds. Only the parts of the page that changed are sent.
 
 A live page holds one connection open. Each token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all
 its sign-ins, and the console 32 in all, of which 8 are kept for operators. A page opened past either limit still loads, but stays still until you reload it after closing
-another tab; its pill then says Not live.
+another tab; its pill then says Not live, and its note says how many live tabs one token may hold, with Reload. A
+run page with its transcript open counts as two.
 
 **An open page does not keep you signed in.** Only a page load or a request counts as activity. A page left open
 signs out after `PI_CONSOLE_IDLE_MINUTES`, and its updates stop and send you to the sign-in page when:
 
-- you sign out, in this tab or another (at once);
+- you sign out, in this tab or another (its updates stop at once; another tab first asks the console whether this
+  browser signed in again, above);
 - your token is revoked or rotated, or its role changes;
 - someone runs `pi-dispatch-console sessions end-all`;
 - the session passes the idle limit or `PI_CONSOLE_MAX_HOURS`.
 
 All but sign-out take effect within a second, with no request needed. A browser that falls far behind (2 MiB of
 updates it has not read) is cut off and reconnects to a fresh copy of the page.
+
+## Error pages
+
+When the console refuses or fails a page your browser opens, it answers with a page of its own instead of a line of
+JSON: the same top bar, the same theme, a status, a sentence, and a way back. A script, the live streams, every write
+and the terminal chat still get the JSON they always got, and so does anything under `/api/` or `/static/`: the page
+is only for a browser's own navigation (a GET whose `Accept` asks for HTML). Every error page carries the same
+security headers as every other response, and says only fixed sentences: it never repeats the address you asked for
+or a value you sent.
+
+| Status | When | What it offers |
+|---|---|---|
+| 404 | no page at that address | Go to Runs, Go to Overview |
+| 405 | an address that takes requests from the console's own buttons, not a page | Go to Overview |
+| 400 | a page refused its address (a filter or a cursor it cannot use); the sentence names the parameter and its rule | that page without its query (Runs, for a run page), and Overview |
+| 403 | the audit log, for a viewer | Go to Overview |
+| 421 | the console does not answer to the name in the address | the `ssh -L` command for the address and port you came in on |
+| 503 | the console cannot use its tokens file right now ([Sessions](#sessions)) | `pi-dispatch doctor` to run on the host, then reload |
+| 500 | the console failed on the request | reload; its log has the reason |
+
+The 404, 405, 400 and 403 keep the navigation when you are signed in; a 404 or a 405 does not count as activity, so it
+neither keeps a session alive nor ends one. The 421, 503 and 500 have no navigation: a 421's links would go to the
+same name it refused, and the other two cannot vouch for the session behind the request.
+
+The 421 shows no session data at all. It names the hostname your browser asked for (cut to 64 characters), says the
+console "answers only to the names it was started with (127.0.0.1, localhost and [::1] unless more were added)",
+never which names were added, and gives the tunnel to open instead, for the address and port your request reached
+(`127.0.0.1` below; `[::1]` for a console listening there, or the address it listens on):
+
+```text
+ssh -L 4790:127.0.0.1:4790 '<this host>'
+```
+
+Its Copy button works only where the browser counts the page as secure, which a name other than `localhost` over
+plain http never is, so there you select the command instead.
+
+On a unix socket, which has no port, it gives `ssh -L '4790:<console socket>' '<this host>'`: put in your socket's
+path, which the page does not show.
 
 ## The state API
 
@@ -910,9 +1204,12 @@ number, among the newest 2000 runs it searches. Both roles may read it: it carri
 words, times and numbers only, never a record's free text, a job's data, transcript text or a session key. This is what
 `pi-dispatch chat` asks. The fields are `INT-CONSOLE-STATE-API`'s.
 
-Without a session, `/api/state` answers 401 with a JSON error, never a redirect to the sign-in page. Give a script
-its own token, named after the script, with the `viewer` role, so the audit log names it and a revoke ends only its
-access.
+Without a session, `/api/state` answers 401 with a JSON error, never a redirect to the sign-in page:
+`{"error": "sign in first", "ended": "idle"}`, where `ended` says why the session behind your cookie ended (one of the
+reasons in [Sessions](#sessions), or null), so a script can tell an expired session from a revoked token. The 401
+does not clear your cookie, so asking again still says why. While the console cannot use its tokens file it answers
+503 instead and leaves your cookie as it is too: wait and ask again rather than signing in. Give a script its own token, named after the script, with the `viewer` role, so the audit log names
+it and a revoke ends only its access.
 
 ## Parked runs in pi
 
