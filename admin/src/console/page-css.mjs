@@ -501,10 +501,14 @@ export function stackRules(bundle = PULSE_CSS) {
  * not a field's full one, their caret centred in the 48 px pill (bundle.css places it 19 px down, the middle of its
  * 42 px field), on a phone each as wide as its longest choice and the row at most, so the choice it shows is never
  * cut (two to a row at 40% each cut "Outcome: refused" at 375 px), and its search shows the focus ring the bare input
- * inside it gives up; the row a link opened (`#seq-41`) is marked. The command a banner names in its sentence (the
- * chain banner's `pi-dispatch-console audit verify`, in the code face, which the bundle keeps on one line) wraps with
- * the sentence, so it cannot widen a 320 px phone's page, and only between its words: each word is a box of its own
- * (`panels/audit.mjs`), so no line ends after the dash of "pi-".
+ * inside it gives up; the row a link opened (`#seq-41`) is marked, and where the rows are stacked the mark is the row's
+ * own background, one block (each cell's, as the table draws it, left the stacked grid's gaps between them unmarked, a
+ * patchwork at 375 px), and a time or a target that wraps keeps its label by its first line: the bundle draws a stacked
+ * cell's label inline before its value, and an inline box's baseline is its LAST line, so a nine-line target had its
+ * label beside the ninth. The command a banner names in its sentence (the chain banner's `pi-dispatch-console audit
+ * verify`, in the code face, which the bundle keeps on one line) wraps with the sentence, so it cannot widen a 320 px
+ * phone's page, and only between its words: each word is a box of its own (`panels/audit.mjs`), so no line ends after
+ * the dash of "pi-".
  */
 const AUDIT_CSS = `
 @media (min-width: ${AUDIT_LAYOUT.sideMin}px){main{grid-template-columns:minmax(0,1fr) var(--side-w);align-items:start}main>*{grid-column:1/-1}main>#p-audit{grid-column:1}main>#p-audit-about{grid-column:2}}
@@ -524,7 +528,10 @@ const AUDIT_CSS = `
 .banner__s .code{white-space:normal;overflow-wrap:anywhere}
 .banner__s .code>span{display:inline-block;max-width:100%}
 @media (max-width: ${AUDIT_LAYOUT.stackMax}px){${stackRules()}
-.tbl--stack tr{padding-left:var(--space-5);padding-right:var(--space-5)}}
+.tbl--stack tr{padding-left:var(--space-5);padding-right:var(--space-5)}
+.tbl--stack tbody tr:target{background:var(--running-tint)}
+.tbl--stack tbody tr:target td{background:transparent}
+.tbl--stack .au-at,.tbl--stack .au-tgt{vertical-align:top}}
 @media ${PHONE}{.filterbar .select{flex:1 1 auto;min-width:0}.filterbar .btn{flex:1 1 auto}.tbl--stack tr{padding-left:var(--space-4);padding-right:var(--space-4)}}
 `;
 

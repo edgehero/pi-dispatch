@@ -10,6 +10,7 @@ import {
 	DOCTOR_RESULTS_TTL_MS,
 	DOCTOR_SECTIONS,
 	NAMED_CHECK_IDS,
+	REPEATED_CHECK_IDS,
 	assignCheckIds,
 	buildDoctorRecord,
 	checkLevel,
@@ -92,12 +93,21 @@ test("the sections are pinned, and every section doctor.mjs opens is one of them
 	assert.deepEqual([...opened].sort(), [...DOCTOR_SECTIONS].sort(), "a section opened in doctor.mjs and not listed, or listed and never opened");
 });
 
-test("the named ids are pinned against the source: each literal id once, each boot file's two, and nothing else", async () => {
+test("the named ids are pinned against the source: each literal id once (REPEATED_CHECK_IDS as counted), each boot file's two, and nothing else", async () => {
 	const { BOOT_FILES, bootFileId } = await import("../src/doctor.mjs");
 	const literal = [...DOCTOR_SRC.matchAll(/\bid: "([a-z0-9.-]+)"/g)].map((m) => m[1]);
-	assert.equal(new Set(literal).size, literal.length, `a named id is written at two sites: ${literal.join(", ")}`);
+	const sites = new Map();
+	for (const id of literal) sites.set(id, (sites.get(id) ?? 0) + 1);
+	for (const [id, n] of sites) assert.equal(n, REPEATED_CHECK_IDS[id] ?? 1, `${id} is written at ${n} sites`);
+	for (const [id, n] of Object.entries(REPEATED_CHECK_IDS)) {
+		assert.equal(sites.get(id), n, `${id} is listed as written at ${n} sites`);
+		assert.ok(n > 1, `${id}: a repeat is two sites or more`);
+		assert.ok(NAMED_CHECK_IDS.includes(id), `${id} is a named id`);
+	}
+	assert.deepEqual(Object.keys(REPEATED_CHECK_IDS), ["egress.proxy"]);
+	assert.ok(Object.isFrozen(REPEATED_CHECK_IDS));
 	const derived = BOOT_FILES.flatMap((spec) => [bootFileId(spec), bootFileId(spec, "shell")]);
-	const all = [...literal, ...derived];
+	const all = [...sites.keys(), ...derived];
 	assert.equal(new Set(all).size, all.length, "a literal id collides with a boot file's");
 	assert.deepEqual([...all].sort(), [...NAMED_CHECK_IDS].sort());
 	for (const id of NAMED_CHECK_IDS) {
@@ -105,6 +115,75 @@ test("the named ids are pinned against the source: each literal id once, each bo
 		assert.doesNotMatch(id, /\.\d+$/, `${id} would collide with a derived id`);
 	}
 	assert.deepEqual(derived.slice(0, 2), ["pause-windows.file", "pause-windows.file-shell"]);
+});
+
+// Issue #737: the two named ids on the lines doctor really prints, through the real collection. A docker CLI that answers
+// each argv by the first plan key it starts with, on the microtask queue (doctor.test.mjs's fake, cut to what this needs).
+function planSpawn(plan) {
+	return (cmd, args) => {
+		const line = [cmd, ...args].join(" ");
+		const outcome = plan[Object.keys(plan).find((k) => line.startsWith(k))];
+		const stream = () => ({ handlers: {}, on(ev, cb) { this.handlers[ev] = cb; return this; } });
+		const handlers = {};
+		const child = { stdout: stream(), stderr: stream(), stdin: { on() { return this; }, end() {} }, kill() {}, on(ev, cb) { handlers[ev] = cb; return this; } };
+		queueMicrotask(() => {
+			const { code, output } = typeof outcome === "object" && outcome !== null ? outcome : { code: outcome, output: "" };
+			if (output) child.stdout.handlers.data?.(output);
+			handlers.close?.(code);
+		});
+		return child;
+	};
+}
+
+async function proxyIdRun({ image }) {
+	const { collectChecks } = await import("./helpers/doctor.mjs");
+	const { EGRESS_PROXY_CMD, EGRESS_PROXY_ENTRYPOINT } = await import("../src/egress-proxy-state.mjs");
+	const { tempDir } = await import("./helpers/temp-dir.mjs");
+	const { existsSync } = await import("node:fs");
+	const proxy = { status: "running", health: "healthy", image, entrypoint: EGRESS_PROXY_ENTRYPOINT, cmd: EGRESS_PROXY_CMD, mounts: [], networks: { "pi-dispatch-egress-out": {} } };
+	const plan = {
+		"docker context inspect": { code: 0, output: '"desktop-linux"|"unix:///Users/x/.docker/run/docker.sock"\n' },
+		'docker inspect --format={"status":': { code: 0, output: `${JSON.stringify(proxy)}\n` },
+		"docker network": 0,
+		"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
+		"docker run --rm --name pi-dispatch-egress-probe-unlisted": 3,
+		"docker run --rm --name pi-dispatch-egress-probe-plainhttp": 3,
+		"docker info --format={{json .}}": { code: 0, output: `${JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true })}\n` },
+		"docker info": 0,
+		"docker image": 0,
+	};
+	return collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, { cwd: tempDir("pi-doctor-ids-"), home: tempDir("pi-doctor-ids-home-"), out: () => {}, spawn: planSpawn(plan), probeValkey: async () => true, readHosts: async () => ({ hosts: [] }), dollarKeysExist: async () => false, fileExists: existsSync, nodeVersion: "22.19.0" });
+}
+
+test("egress.proxy is on docker's proxy line, or on the line that stands in for it, and provider.key on the key line (#737)", async () => {
+	const { EGRESS_PROXY_IMAGE } = await import("../src/egress-proxy-state.mjs");
+	const current = await proxyIdRun({ image: EGRESS_PROXY_IMAGE });
+	const proxy = current.filter((c) => c.id === "egress.proxy");
+	assert.deepEqual(proxy.map((c) => [c.ok, c.label]), [[true, "Egress proxy running (pi-dispatch-egress-proxy)"]]);
+	const key = current.filter((c) => c.id === "provider.key");
+	assert.equal(key.length, 1);
+	assert.match(key[0].label, /ANTHROPIC_API_KEY/);
+	// Published under those ids: a named id is kept whatever section the check was added in.
+	const ids = assignCheckIds(current);
+	assert.ok(ids.includes("egress.proxy") && ids.includes("provider.key"), ids.join(", "));
+	// A RUNNING proxy that is not this deployment's: doctor prints no "running" line, and the line it prints instead
+	// carries the id, so a reader still finds the proxy's verdict, and finds it failing.
+	const stale = await proxyIdRun({ image: "ubuntu/squid:old" });
+	const stood = stale.filter((c) => c.id === "egress.proxy");
+	assert.equal(stood.length, 1);
+	assert.equal(stood[0].ok, false);
+	assert.match(stood[0].label, /^Egress proxy is (?:running but is not this deployment's|this deployment's proxy but out of date) \(pi-dispatch-egress-proxy\)/);
+	assert.ok(!stale.some((c) => /^Egress proxy running/.test(c.label ?? "")));
+});
+
+test("podman's proxy line carries egress.proxy too, and nothing else in doctor.mjs does (#737)", () => {
+	// podmanChecks needs a Linux host's whole `podman info` to reach its proxy line, so this one is pinned on the source:
+	// each literal site sits in the check whose label is a proxy's running line.
+	const sites = [...DOCTOR_SRC.matchAll(/\bid: "egress\.proxy"/g)].map((m) => DOCTOR_SRC.slice(m.index, m.index + 600));
+	assert.equal(sites.length, 2);
+	assert.match(sites[0], /label: up\s*\?\s*`Egress proxy running \(\$\{proxy\}\)`/);
+	assert.match(sites[1], /label: proxyRunning \? `podman: egress proxy running under this account's Podman \(\$\{proxy\}\)`/);
+	assert.equal([...DOCTOR_SRC.matchAll(/\bid: proxyCheck\.id\b/g)].length, 1, "the stand-in line takes the id from its check");
 });
 
 test("ids: a named id is kept, the rest are <section>.<n> in order, an unknown section is env, a repeat gets -2", () => {

@@ -1165,15 +1165,19 @@ test("an unreadable tokens file: a request with a cookie is 503 everywhere but s
   }
   assert.deepEqual(cases[0][1].json(), { error: TOKENS_UNUSABLE }, "JSON to a request that did not ask for a page");
   assert.deepEqual(cases[3][1].json(), { error: TOKENS_UNUSABLE }, "an API answers JSON whatever its Accept");
-  // A write's 503 carries the confirm bar's refusal for it: the fixed sentence and Look again, never a raw sentence for
-  // the slot to show as text.
+  // A write's 503 carries the confirm bar's refusal for it, never a raw sentence for the slot to show as text: the fixed
+  // sentence word for word, its command in the code face, in the setup state, whose one step is Close (nothing on the
+  // page fixes the file, and a reload would meet the same 503).
   for (const [label, res] of cases.slice(4)) {
     const body = res.json();
     assert.deepEqual(Object.keys(body), ["error", "html"], label);
     assert.equal(body.error, TOKENS_UNUSABLE, label);
-    assert.match(body.html, /<p class="banner__t">The change did not go through<\/p>/, label);
-    assert.ok(body.html.includes("<p class=\"banner__s\">The console&#39;s tokens file cannot be used right now; the operator should run pi-dispatch doctor. Nothing was changed.</p>"), label);
-    assert.match(body.html, /<button[^>]*data-reload[^>]*>Look again<\/button>/, label);
+    assert.match(body.html, /<p class="banner__t">This console cannot take this action<\/p>/, label);
+    assert.ok(body.html.includes("<p class=\"banner__s\">The console&#39;s tokens file cannot be used right now; the operator should run <span class=\"code\">pi-dispatch doctor</span>. Nothing was changed.</p>"), label);
+    const said = /<p class="banner__s">(.*?)<\/p>/.exec(body.html)[1].replace(/<[^>]+>/g, "").replace(/&#39;/g, "'");
+    assert.equal(said, `${TOKENS_UNUSABLE.charAt(0).toUpperCase()}${TOKENS_UNUSABLE.slice(1)}. Nothing was changed.`, `${label}: the words are TOKENS_UNUSABLE's, byte for byte`);
+    assert.match(body.html, /<button[^>]*data-close[^>]*>Close<\/button>/, label);
+    assert.doesNotMatch(body.html, /data-reload|data-again/, label);
   }
   assert.match(cases[1][1].headers["content-type"], /^text\/html/);
   assert.equal(cases[2][1].text, "", "HEAD: no body");

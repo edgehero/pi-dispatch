@@ -6,6 +6,7 @@
  * action controls and the PATHS rule) are stated once, in `../panels.mjs`'s header. The names exported at the end of
  * this module are shared between the screens' modules only; `../panels.mjs` does not re-export them.
  */
+import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { classifyRow } from "../../costs.mjs";
 import { fmtCost, usd2 } from "../../panel.mjs";
@@ -35,9 +36,13 @@ export function ageText(ms) {
   return `${Math.floor(ms / DAY)}d ${Math.floor((ms % DAY) / HOUR)}h`;
 }
 
-/** An instant as `YYYY-MM-DD HH:MM UTC` (never the reader's zone, so a page is the same bytes everywhere). */
+/**
+ * An instant as `YYYY-MM-DD HH:MM UTC` (never the reader's zone, so a page is the same bytes everywhere). Only from 0 to
+ * the defer leaf's `DEFER_TIME_MAX_MS`, the year 9999's last instant: outside it the ISO string's year is not four
+ * digits, and its first sixteen characters are a date that is not the instant's, so it is "unknown".
+ */
 export function utcText(ms) {
-  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return "unknown";
+  if (!Number.isFinite(ms) || ms < 0 || ms > DEFER_TIME_MAX_MS) return "unknown";
   return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 

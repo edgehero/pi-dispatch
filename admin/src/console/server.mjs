@@ -52,7 +52,8 @@
  * longer honours is sent to `/login?ended=<reason>` (only a member of `ENDED_REASONS`, which the sign-in page maps to its
  * own sentence), and an API or write refusal's 401 body carries `ended`. An unreadable tokens file is 503 everywhere,
  * with no Set-Cookie and nothing ended: it judges no session, so it ends none (a write's 503 also carries the confirm
- * bar's refusal, `TOKENS_UNUSABLE` with Look again). Signing out is the exception that needs no tokens file at all
+ * bar's refusal, `TOKENS_UNUSABLE` in the setup state with Close: `tokensUnusableBar`). Signing out is the exception
+ * that needs no tokens file at all
  * (`postLogout`): it ends the session the browser holds, and judges nothing.
  *
  * A PAGE ACTS ONLY AS THE PERSON IT WAS DRAWN FOR (issue #737). The browser's cookie is whoever
@@ -85,6 +86,7 @@ import { refusalHtml } from "./confirm-view.mjs";
 import { errorPage as realErrorPage } from "./error-pages.mjs";
 import { contentTypeRefusal, hostnameOf, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
+import * as ui from "./kit.mjs";
 import { isLoopbackAddress } from "./listen.mjs";
 import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
@@ -136,6 +138,18 @@ const CODE_RE = /^[A-Za-z0-9_-]{16,128}$/;
  * session cookie): 503 with this sentence, no Set-Cookie and no session ended, so a chmod mistake signs nobody out.
  */
 export const TOKENS_UNUSABLE = "the console's tokens file cannot be used right now; the operator should run pi-dispatch doctor";
+
+/**
+ * The confirm bar a write's 503 carries for that tokens file (issue #737): `TOKENS_UNUSABLE`'s words exactly, its command
+ * in the code face (`kit.mjs` `withCode`, whose code span the bundle keeps on one line, so it never breaks after the dash
+ * of "pi-"), in the setup state: nothing on the page can fix the file, and a reload would only meet the same 503, so the
+ * bar's one step is Close (it was Look again). The `error` beside it stays the sentence as it always was.
+ */
+function tokensUnusableBar(route) {
+  const sentence = `${TOKENS_UNUSABLE.charAt(0).toUpperCase()}${TOKENS_UNUSABLE.slice(1).replace(/pi-dispatch doctor$/, "`pi-dispatch doctor`")}.`;
+  const where = route.path.endsWith("/confirm") ? "confirm" : "preview";
+  return String(refusalHtml({ where, status: 503, state: "setup", sentence: TOKENS_UNUSABLE, sentenceHtml: ui.withCode(sentence) }));
+}
 
 /** The 401 sentence of an API or write request with no session behind it (the body also carries `ended`). */
 export const SIGN_IN_FIRST = "sign in first";
@@ -774,10 +788,11 @@ async function dispatch(req, res, deps) {
     if (resolved.unavailable) {
       // Nothing was judged, so nothing ends: no Set-Cookie (the browser keeps its cookie for when the file reads
       // again), no tombstone, the session untouched. The script reads this 503 on a stream or a probe as "not reachable,
-      // retrying"; a write's carries the confirm bar's refusal (fixed, with Look again), so the slot says why.
+      // retrying"; a write's carries the confirm bar's refusal (fixed, with Close: `tokensUnusableBar`), so the slot says
+      // why.
       if (route.write) record({ actor: ANONYMOUS, action: "refused", target: route.path, outcome: "refused", reason: "auth: the tokens file cannot be used" });
       deps.log("console: the tokens file cannot be used; run pi-dispatch doctor");
-      if (route.write) return sendJson(res, 503, { error: TOKENS_UNUSABLE, html: String(refusalHtml({ sentence: TOKENS_UNUSABLE, status: 503, state: "changed" })) });
+      if (route.write) return sendJson(res, 503, { error: TOKENS_UNUSABLE, html: tokensUnusableBar(route) });
       return sendFailure(ctx, 503, TOKENS_UNUSABLE, { page: { kind: "unavailable" } });
     }
     ctx.session = resolved.session;

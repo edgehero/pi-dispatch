@@ -207,14 +207,22 @@ test("the bar's Undo line: one inline run, the act alone in bold, or a muted No 
   assert.equal(note(v.unchangedBarHtml({ summary: ["x"], sentenceHtml: html`The file already says this: <span class="code">maxTurns</span> is 40.` })), 'The file already says this: <span class="code">maxTurns</span> is 40.');
 });
 
+// Issue #737: what the slot says while a write's 401 is asked about: the script embeds it, so it is held word for word.
+test("the signed-out slot sentence says nothing was changed and that the console is being asked", async () => {
+  const v = await import("../src/console/confirm-view.mjs");
+  assert.equal(v.CONFIRM_SIGNED_OUT, "This session ended before the change was sent, so nothing was changed. The console is asked where it went.");
+});
+
 // Issue #737: the banner after a write and the bulk results bar.
 test("the done banner: attention while fewer jobs landed than it listed, a muted No undo without an inverse, and its rows counted from the first, never a range", async () => {
   const v = await import("../src/console/confirm-view.mjs");
   const body = (h) => /<p class="banner__s">([^]*?)<\/p>/.exec(String(h))[1];
-  const base = { summary: "Retried 3 failed jobs", by: "alice", auditSeq: 41, auditLast: 45, count: 3, done: 3, undo: "The console cannot remove a waiting job; once it runs, Cancel stops it.", inverse: null };
+  const { UNDO_SENTENCES } = await import("../src/console/actions.mjs");
+  const base = { summary: "Retried 3 failed jobs", by: "alice", auditSeq: 41, auditLast: 45, count: 3, done: 3, undo: UNDO_SENTENCES.retried, inverse: null };
   const all = String(v.doneBannerHtml(base));
   assert.match(all, /^<div class="banner tone-ok" role="status">/);
-  assert.equal(body(all), 'Changed by alice. <a class="link" href="/audit?seq=41#seq-41">3 audit rows, from row 41</a>. No undo: The console cannot remove a waiting job; once it runs, Cancel stops it.');
+  // A retry's Undo: the job it retried keeps its attempts, so it is no job `cancel-queued` takes (issue #737).
+  assert.equal(body(all), 'Changed by alice. <a class="link" href="/audit?seq=41#seq-41">3 audit rows, from row 41</a>. No undo: A retried job keeps the attempts it made, so the console does not remove it from its queue; once it runs, Cancel stops it.');
   assert.ok(!all.includes("41 to 45") && !all.includes("<b>Undo"), "never a range another writer's row can sit inside");
   assert.match(String(v.doneBannerHtml({ ...base, summary: "Retried failed jobs: 2 of 3 done", done: 2 })), /^<div class="banner tone-attention" role="status">/);
   const one = String(v.doneBannerHtml({ ...base, count: 1, done: 1, auditLast: 41, undo: "Resume the fleet", inverse: { action: "fleet-resume", body: {} } }));
@@ -224,6 +232,10 @@ test("the done banner: attention while fewer jobs landed than it listed, a muted
   assert.match(one, /^<div class="banner tone-ok"/);
   assert.ok(body(v.doneBannerHtml({ ...base, undo: "Put it back.", inverse: { action: "fleet-resume", body: {} } })).endsWith("<b>Undo:</b> Put it back."), "never two");
   assert.ok(body(v.doneBannerHtml({ ...base, undo: "Do it by hand" })).endsWith(" No undo: Do it by hand."), "No undo's sentence too");
+  // A re-run's Undo, decided at the confirm: a form for the queued job's cancel, by its id and queue, which previews it.
+  const rerun = String(v.doneBannerHtml({ summary: "Queued a re-run of cron:t0:1", by: "alice", auditSeq: 44, count: 1, done: 1, undo: "Cancel cron:t0:2 before it starts", inverse: { action: "cancel-queued", body: { jobId: "cron:t0:2", queue: "pi-jobs@build3" } } }));
+  assert.equal(body(rerun), 'Changed by alice. <a class="link" href="/audit?seq=44#seq-44">Audit row 44</a>. <b>Undo:</b> Cancel cron:t0:2 before it starts.');
+  assert.ok(rerun.includes('<form data-action="cancel-queued" class="undo" autocomplete="off"><input type="hidden" name="jobId" value="cron:t0:2"><input type="hidden" name="queue" value="pi-jobs@build3"><button class="btn btn--sm btn--ghost" type="submit">Undo</button></form>'), rerun);
   const results = (count, done) => String(v.bulkResultsHtml({ kind: "failed-retry-all", results: Array.from({ length: count }, (_, i) => ({ jobId: `j${i}`, ok: i < done })), count, done, auditSeq: 5 }));
   assert.ok(results(3, 3).includes('>3 audit rows, from row 5</a>.</p>') && results(1, 1).includes(">Audit row 5</a>.</p>"), results(1, 1));
   assert.ok(!results(1, 1).includes("5 to 5"));

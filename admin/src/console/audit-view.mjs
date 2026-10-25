@@ -309,8 +309,10 @@ function matches(entry, q) {
  *   - `query` is `parseAuditQuery`'s; `perPage` the rows a page shows.
  *
  * `rows` are `{ entry, pos, state }`, newest first, at most `perPage` (under a filter, the damaged entries the search
- * met are among them whatever the filters say; see the header). `next` is the place the next page starts below (the
- * pager's `before`), or null when nothing older remains. `examined` counts the entries the search or the walk read,
+ * met are among them whatever the filters say; see the header), and none on a `seq` page whose row was not found: what
+ * its walk kept is whatever it met of the row's chunk before it stopped (one row above a row moved out of its place,
+ * say), which, above a foot saying the row was not found, read as that row's page. `next` is the place the next page
+ * starts below (the pager's `before`), or null when nothing older remains. `examined` counts the entries the search or the walk read,
  * `stopped` is true when it reached `AUDIT_EXAMINE_MAX` with more to read (`next` then continues it), and `found` says
  * whether a `seq` query's row was among them (null without one). `seek` is null without a `seq`, else `{ by, newest,
  * first }`: `by` how its chunk was found (`AUDIT_SEEK_BY`): read at the `place` the index gives; walked for from the
@@ -456,8 +458,10 @@ export async function readAuditView({ read, verify = null, query = {}, perPage =
   else if (s.stopped) next = s.lastPos;
   else if (s.older && shown.length > 0) next = shown[shown.length - 1].pos;
   if (typeof q.who === "string" && AUDIT_WHO_RE.test(q.who)) names.add(q.who);
+  // Not found: no rows (see above), and Older still goes on from where the walk got to.
+  const drawn = seq !== null && s.found !== true ? [] : shown;
   return {
-    rows: shown.map(({ entry, pos }) => ({ entry, pos, state: auditRowState(entry, pos, chain) })),
+    rows: drawn.map(({ entry, pos }) => ({ entry, pos, state: auditRowState(entry, pos, chain) })),
     next,
     examined: s.examined,
     stopped: s.stopped,

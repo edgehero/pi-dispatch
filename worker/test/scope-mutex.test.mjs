@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RELEASE_IF_MINE, endpointSlotKey, hash16, makeFleetLease, scopeSlotKey } from "../src/fleet-lease.mjs";
 import { makeInFlight, parseScopedLimits, scopeClaimRows } from "../src/scoped-limits.mjs";
+import { deferRecordOf, withDeferRecords } from "./helpers/defer-redis.mjs";
 
 // index.mjs imports bullmq; skip below the node floor / without deps, hard-fail in CI (mirrors pause-gate).
 let mod;
@@ -456,8 +457,9 @@ function endpointWiring({ endpoints = [OLLAMA], models = OVERLAY, redis = leaseR
 }
 
 test("the endpoint re-check has a wake instant of its own, distinct from every other deferral", { skip }, async () => {
-	// Nothing records WHY a job sits in the delayed set, so the instant is the only evidence; 11s is the wait
-	// throttle floor, which index.mjs does not export.
+	// The defer record says why a job sits in the delayed set (issue #737); for a reader older than it, and a record
+	// that could not be written, the instant is the only evidence. 11s is the wait throttle floor, which index.mjs
+	// does not export.
 	// Issue #596, phase 2: the host budget's re-check and the never-fits deferral are two more.
 	const { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS } = await import("../src/host-budget.mjs");
 	const instants = [mod.SCOPE_BUSY_RECHECK_MS, mod.SUPERSEDE_RECHECK_MS, 11_000, mod.ENDPOINT_BUSY_RECHECK_MS, BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS];
@@ -1132,4 +1134,97 @@ test("a job in no project, or in a project with no row, takes no project slot; t
 	assert.equal(reads, 1, "one read of the projects ref per pickup");
 	h.releaseNext();
 	await a;
+});
+
+// --- why a slot gate deferred a job (issue #737) ------------------------------------------------------------------
+
+/** The reason a deferral recorded for `job`, in the reader's terms. */
+const reasonOf = (redis, job) => {
+	const r = deferRecordOf(redis, job.id);
+	return r && { why: r.why, bucket: r.bucket, until: r.until, project: r.project, holder: r.holder, endpoint: r.endpoint };
+};
+const busyAt = (why, more = {}) => ({ why, bucket: why === "chained" ? "run" : "slot", until: NOW + mod.SCOPE_BUSY_RECHECK_MS, project: null, holder: null, endpoint: null, ...more });
+const nobody = { acquire: async () => null };
+
+test("each slot gate records its own reason: the host slot, the folder, the repository, the project, a chain, an endpoint", { skip }, async () => {
+	// The host slot.
+	const hostSlots = makeInFlight();
+	hostSlots.tryAcquire(mod.HOST_SLOT_KEY, 1);
+	const host = harness({ redis: withDeferRecords(fakeRedis()), hostBound: { slots: hostSlots, limit: () => 1 }, extra: { hostName: "mini1" } });
+	const h1 = ghJob("gh-host", "o/a");
+	await assert.rejects(() => host.processor(h1.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(host.redis, h1.job), busyAt("host-slot"));
+	assert.equal(deferRecordOf(host.redis, h1.job.id).host, "mini1", "the host it waits on, the worker's own name");
+
+	// A local folder, then a chained child of the run that holds it: the chain names its parent.
+	const folder = harness({ redis: withDeferRecords(fakeRedis()) });
+	const run = folder.processor(localJob("l-1", "/srv/site").job, "tok", new AbortController().signal);
+	await folder.untilStarted(1);
+	const l2 = localJob("l-2", "/srv/site");
+	await assert.rejects(() => folder.processor(l2.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(folder.redis, l2.job), busyAt("scope-folder"));
+	const child = spyJob("l-3", { kind: "local", folder: "/srv/site", flow: "tidy", task: "t", parentJobId: "l-1", chainDepth: 1 });
+	await assert.rejects(() => folder.processor(child.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(folder.redis, child.job), busyAt("chained", { holder: "l-1" }));
+	folder.releaseNext();
+	await run;
+
+	// A repository's row, in process and across the fleet.
+	const repo = harness({ redis: withDeferRecords(fakeRedis()), limits: limitsOf([{ scope: "acme/web", concurrent: 1 }]) });
+	const held = repo.processor(ghJob("g-1", "acme/web").job, "tok", new AbortController().signal);
+	await repo.untilStarted(1);
+	const g2 = ghJob("g-2", "acme/web");
+	await assert.rejects(() => repo.processor(g2.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(repo.redis, g2.job), busyAt("scope-repo"));
+	repo.releaseNext();
+	await held;
+	const fleetRepo = harness({ redis: withDeferRecords(fakeRedis()), limits: limitsOf([{ scope: "acme/web", concurrent: 1 }]), extra: { scopeLease: nobody } });
+	const g3 = ghJob("g-3", "acme/web");
+	await assert.rejects(() => fleetRepo.processor(g3.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(fleetRepo.redis, g3.job), busyAt("scope-repo"));
+
+	// A project's row, in process and across the fleet, with the pickup project named.
+	const project = harness({ redis: withDeferRecords(fakeRedis()), limits: limitsOf2([{ scope: "project:shop", concurrent: 1 }]), extra: { projects: () => SHOP } });
+	const p1 = project.processor(localJob("p-1", "/srv/shop-a").job, "tok", new AbortController().signal);
+	await project.untilStarted(1);
+	const p2 = localJob("p-2", "/srv/shop-b");
+	await assert.rejects(() => project.processor(p2.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(project.redis, p2.job), busyAt("scope-project", { project: "shop" }));
+	// A chained child held at its PROJECT's row waits on the project's limit, not on its parent.
+	const pc = spyJob("p-3", { kind: "local", folder: "/srv/shop-b", flow: "tidy", task: "t", parentJobId: "p-1", chainDepth: 1 });
+	await assert.rejects(() => project.processor(pc.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(project.redis, pc.job), busyAt("scope-project", { project: "shop" }));
+	project.releaseNext();
+	await p1;
+	const fleetProject = harness({ redis: withDeferRecords(fakeRedis()), limits: limitsOf2([{ scope: "project:shop", concurrent: 1 }]), extra: { projects: () => SHOP, scopeLease: nobody } });
+	const p4 = localJob("p-4", "/srv/shop-a");
+	await assert.rejects(() => fleetProject.processor(p4.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(fleetProject.redis, p4.job), busyAt("scope-project", { project: "shop" }));
+
+	// A model endpoint with every slot taken names the endpoint.
+	const endpointSlots = makeInFlight();
+	endpointSlots.tryAcquire(OLLAMA.id, OLLAMA.slots);
+	const w = endpointWiring({ endpointSlots, lease: false });
+	const ep = harness({ redis: withDeferRecords(fakeRedis()), getSettings: LOCAL_MODEL, extra: w.extra });
+	const e1 = localJob("e-1", "/srv/a");
+	await assert.rejects(() => ep.processor(e1.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(ep.redis, e1.job), { why: "endpoint", bucket: "slot", until: NOW + mod.ENDPOINT_BUSY_RECHECK_MS, project: null, holder: null, endpoint: "lan-ollama" });
+});
+
+test("the host slot's and an endpoint's deferral name the project the pickup resolved, beside their own fields", { skip }, async () => {
+	// The cases above run with no projects, so a record that dropped its project read the same; here the job is a member.
+	const hostSlots = makeInFlight();
+	hostSlots.tryAcquire(mod.HOST_SLOT_KEY, 1);
+	const host = harness({ redis: withDeferRecords(fakeRedis()), hostBound: { slots: hostSlots, limit: () => 1 }, extra: { hostName: "mini1", projects: () => SHOP } });
+	const h1 = ghJob("gh-host-shop", "acme/web");
+	await assert.rejects(() => host.processor(h1.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(host.redis, h1.job), busyAt("host-slot", { project: "shop" }));
+
+	const endpointSlots = makeInFlight();
+	endpointSlots.tryAcquire(OLLAMA.id, OLLAMA.slots);
+	const w = endpointWiring({ endpointSlots, lease: false });
+	const ep = harness({ redis: withDeferRecords(fakeRedis()), getSettings: LOCAL_MODEL, extra: { ...w.extra, projects: () => SHOP } });
+	const e1 = localJob("e-shop", "/srv/shop-a");
+	await assert.rejects(() => ep.processor(e1.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(reasonOf(ep.redis, e1.job), { why: "endpoint", bucket: "slot", until: NOW + mod.ENDPOINT_BUSY_RECHECK_MS, project: "shop", holder: null, endpoint: "lan-ollama" });
 });

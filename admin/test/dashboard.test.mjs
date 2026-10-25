@@ -3082,8 +3082,9 @@ test("issue #596, phase 3: the snapshot carries each live host's budget and use,
   const deps = createDashboardDeps(panelPaths, v.deps);
   const snap = await deps.fetchSnapshot();
   // Issue #599 phase 3 added the HOSTS view's live fields (hosts-view.test.mjs pins them); `fpUsd` and every other field a
-  // row carries still stay out.
-  assert.deepEqual(snap.hostBudgets, [{ name: "mini1", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200", concurrency: undefined, budgetRunning: undefined, waiters: undefined, jobs: null, jobsMore: null, jobsUnreadable: false, staleMs: null, routes: "true", caps: [], backends: null, capsSeen: false }], "the budget fields, the live fields and the name, nothing else");
+  // row carries still stay out. Issue #737 added the three the registry reads off Valkey's clock, null here: this fake
+  // registry reader publishes none of them, so none is known.
+  assert.deepEqual(snap.hostBudgets, [{ name: "mini1", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200", concurrency: undefined, budgetRunning: undefined, waiters: undefined, jobs: null, jobsMore: null, jobsUnreadable: false, staleMs: null, ttlAgeMs: null, skewMs: null, noExpiry: null, routes: "true", caps: [], backends: null, capsSeen: false }], "the budget fields, the live fields and the name, nothing else");
   await deps.dispose();
 });
 

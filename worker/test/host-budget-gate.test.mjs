@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
 import { parseProjects } from "../src/projects.mjs";
 import { makeInFlight, parseScopedLimits } from "../src/scoped-limits.mjs";
+import { deferRecordOf, withDeferRecords } from "./helpers/defer-redis.mjs";
 
 // The host budget's gates inside the processor (issue #596, phase 2, DES-HOST-BUDGET). index.mjs imports bullmq: skip
 // below the node floor or without deps, and hard-fail where CI requires the worker tests (the scope-mutex posture).
@@ -606,4 +607,30 @@ test("stop_did_not_take: the running entry goes with the pickup, and the orphan 
 	assert.equal(runningJobs.size(), 0, "the processor is done with it");
 	const { jobs } = liveJobsOf({ running: runningJobs.list(), budgetEntries: b.entries() });
 	assert.deepEqual(jobs.map((j) => [j.id, j.o]), [["o", 1]], "listed as an orphan while the budget keeps watching its container");
+});
+
+test("the budget's two deferrals record their reasons: the budget's verdict, and a size that fits no slot here (issue #737)", { skip }, async () => {
+	const { b } = await budgetOf();
+	const redis = withDeferRecords(fakeRedis());
+	const h = harness({ hostBudget: b, jobSizeEnv: { PI_JOB_MEMORY: "20g", PI_JOB_CPUS: "4" }, extra: { redis } });
+	const first = h.processor(ghJob("a", "acme/one").job, "tok", signal());
+	await h.untilStarted(1);
+	const c = ghJob("c", "acme/web");
+	await assert.rejects(() => h.processor(c.job, "tok-c", signal()), (e) => e.name === "DelayedError");
+	const r = deferRecordOf(redis, "c");
+	// The verdict's own word, never a dimension it does not report; the host is the worker's name, the project the pickup's.
+	assert.deepEqual([r.why, r.bucket, r.until, r.budgetWhy, r.host, r.project], ["host-budget", "slot", NOW + BUDGET_RECHECK_MS, "budget", "mini1", "shop"]);
+	h.releaseNext();
+	await first;
+
+	const { b: small } = await budgetOf();
+	const big = withDeferRecords(fakeRedis());
+	const nf = harness({ hostBudget: small, jobSizeEnv: { PI_JOB_MEMORY: "40g", PI_JOB_CPUS: "2" }, extra: { multiHost: true, redis: big } });
+	const shared = ghJob("big-shared");
+	await assert.rejects(() => nf.processor(shared.job, "tok", signal()), (e) => e.name === "DelayedError");
+	const n = deferRecordOf(big, "big-shared");
+	assert.deepEqual([n.why, n.bucket, n.until, n.host, n.project], ["size-never-fits", "slot", NOW + NEVER_FITS_RECHECK_MS, "mini1", "shop"]);
+	// The refusal on the host's own queue is no deferral, and records no reason.
+	await nf.processor(localJob("big-own", "/srv/shop", HOST_QUEUE).job, "tok", signal());
+	assert.equal(deferRecordOf(big, "big-own"), null);
 });

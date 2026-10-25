@@ -33,7 +33,8 @@ export const T = Object.freeze({
   pill: "the live pill through every state: Live, Reconnecting, Not live and Signed out, each with its note where it has one",
   unreachable: "a closed stream the console cannot be asked about keeps the page under the retry note, asking every 2 s, and reloads once it answers",
   shutdown: "the console stopping keeps the page and asks after a wait; a 401 then is a sign-in it no longer knows, and a 200 reloads only into the same person",
-  ended: "a session that ended: Signed out, the out note and sign-in with its reason; elsewhere asks first, after a wait, reloads only into the same person and goes to sign-in as switched for anyone else; a closed transcript stream and a write's 401 are asked about the same way; the tab signing out ignores its own end, and a sign-out not confirmed (or not answered within 10 s) keeps the page and says so once, whichever press it was",
+  ended: "a session that ended: Signed out, the out note and sign-in with its reason; elsewhere asks first, after a wait, reloads only into the same person and goes to sign-in as switched for anyone else; a closed transcript stream is asked about the same way, and so is a write's 401, which first says in the slot that nothing was changed; the tab signing out ignores its own end, and a sign-out not confirmed (or not answered within 10 s) keeps the page and says so once, whichever press it was",
+  bothClosed: "one question at a time answers every caller: a run page's two streams closed together each say what the answer means, whichever closed first, and a write's 401 while a stream's question is out says so in the slot and leaves with that answer",
   stale: "stale: the page dims under the time it was last seen, says whether the tokens file or the data failed, keeps its time through a reconnect, and fresh alone takes it back",
   signIn: "sign-in: what needs the script is revealed, a refusal shows its one notice, the ended notice gives way, an older attempt's answer does nothing, and a post that reaches nothing keeps the page and retries every 2 s",
   signInStops: "a sign-in or a link that reaches nothing stops after 30 posts or 60 s, judged before each post goes out: nothing more is sent, the token or code is dropped, and the stop notice says so",
@@ -67,6 +68,7 @@ export const CLIENT_STATES = Object.freeze([
   row("LiveStates", "\"Newer data is waiting\"", T.held),
   row("LiveStates", "Older data dimmed under its time", T.stale),
   row("LiveStates", "The console stopping (shutdown)", T.shutdown),
+  row("LiveStates", "One token may hold 4 live tabs, a run with its transcript counts as two; past that the tab stays still and says why", T.bothClosed),
   // SignIn
   row("SignIn", "\"Console not reachable, retrying\" keeps the page", T.signIn),
   row("SignIn", "One notice at a time above the field", T.signIn),

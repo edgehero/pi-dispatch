@@ -27,10 +27,13 @@
  * answer names anyone else goes to `/login?ended=switched`, as the 409 bar's Look again does. A page that does not say
  * who it is sends no person, and is never reloaded into one.
  *
- * AN ANSWER THAT IS NOT A WRITE'S OWN IS NEVER A SENTENCE IN THE SLOT. A 401 from a preview or a confirm, or a stream
+ * AN ANSWER THAT IS NOT A WRITE'S OWN IS NEVER ITS SENTENCE IN THE SLOT. A 401 from a preview or a confirm, or a stream
  * the browser closed (the page's or the transcript's), is a session that ended or a browser that is someone else's
- * now, whatever the request was: each goes through the one probe (below) and its `toLogin`. A write's 503 for a tokens
- * file the console cannot use comes with the bar the server draws for it, as every refusal of a write does.
+ * now, whatever the request was: each goes through the one probe (below) and its `toLogin`. A write's 401 first puts
+ * `CONFIRM_SIGNED_OUT` (`confirm-view.mjs`: nothing was changed, and the console is being asked) in the slot that asked,
+ * never the answer's own text, so a slot whose probe waits on a stream's question never stays on its skeleton. A write's
+ * 503 for a tokens file the console cannot use comes with the bar the server draws for it, as every refusal of a write
+ * does.
  *
  * What it does, per page (`data-page` on the body):
  *   - both sign-in pages, first: every `[data-reveal]` element loses `hidden` (issue #737). The server draws what works
@@ -93,8 +96,10 @@
  *     (`/login?ended=switched`: the server refuses this page's stream as its own, see above), a 200 that names the page's
  *     is the stream limit (Not live, the limit note), a 401 is a session that ended (sign-in, with the answer's `ended`
  *     reason), and a 503 or no answer keeps the page and asks again every `RETRY_MS` (the retry note), reloading once
- *     the console answers. `event: end` carries `{ended}` (`STREAM_ENDS`), read by one handler for the
- *     page and the transcript streams: `shutdown` (the console stopped) keeps the page and probes after a wait, a 401
+ *     the console answers. One question is out at a time, and its answer settles every caller that asked meanwhile (the
+ *     page's stream, the transcript's, a write's 401): a 200 for the page's person that is the stream limit is said on
+ *     every stream the browser has closed, so two streams closed together both say it, whichever asked first.
+ *     `event: end` carries `{ended}` (`STREAM_ENDS`), read by one handler for the page and the transcript streams: `shutdown` (the console stopped) keeps the page and probes after a wait, a 401
  *     then meaning the console no longer knows the sign-in (`restart`); `elsewhere` (this browser signed out, or signed
  *     in again, in another tab) probes too after the same wait, since the browser may be storing a newer cookie; any
  *     other reason, or none, goes to `/login?ended=<reason>` (`toLogin`, a member of `ENDED_REASONS` only, else plain
@@ -130,10 +135,10 @@
  *     `ended` (the person refusal's `switched`), where it goes to `/login?ended=<it>`. `[data-expires]` counts down the
  *     ticket's life (its value in ms, from when the bar arrived), and at 0 Confirm is disabled. An answer with no `html`
  *     (a proxy's error page, no answer at all) shows a sentence in the skeleton's `[data-slot-message]` through
- *     `textContent`, except a 401, which is asked about (see above); a confirm that got no answer says
- *     `CONFIRM_NO_ANSWER` and is never sent again, since a ticket is single use and the change may have been made. A
- *     confirm with jobs refused shows the bulk results bar; any other success reloads the page, whose banner then names
- *     the change.
+ *     `textContent`, and so does a 401, with `CONFIRM_SIGNED_OUT` as it is asked about (see above); a confirm that got
+ *     no answer says `CONFIRM_NO_ANSWER` and is never sent again, since a ticket is single use and the change may have
+ *     been made. A confirm with jobs refused shows the bulk results bar; any other success reloads the page, whose
+ *     banner then names the change.
  *   - while a form is in use (the slot open for its panel, a field typed into or focused, its editor open), a live panel
  *     holding it is NOT swapped, so an update cannot wipe a half-made change. The newest html waits (`pending`), the
  *     panel gets the server's kept-still note once (a copy of `<template id="held-note">`, as its first child), and the
@@ -161,7 +166,7 @@
  * would be Node's own (its `fetch` reaches the network).
  */
 import { FIT_JS } from "../graph-html.mjs";
-import { CONFIRM_NO_ANSWER, CONFIRM_SLOT_ID } from "./confirm-view.mjs";
+import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID } from "./confirm-view.mjs";
 import { PAGES } from "./pages.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, STREAM_ENDS, STREAM_SHUTDOWN } from "./session-ends.mjs";
 import { LIVE_NOTES, LIVE_STATES } from "./shell.mjs";
@@ -229,8 +234,8 @@ export const CONSOLE_SCRIPT = `"use strict";
   var OUTCOME_WORD = ${JSON.stringify(OUTCOME_WORD_OF)};
   // The closed lists this script switches on, written in from their one source each (issue #737): why a session ended
   // (session-ends.mjs; the only reasons /login?ended= is ever given), what a stream's end may carry, which sign-in notice
-  // a status selects, the confirm slot's id and its no-answer sentence (confirm-view.mjs), and the live notes the
-  // server draws (shell.mjs LIVE_NOTES).
+  // a status selects, the confirm slot's id and its no-answer and signed-out sentences (confirm-view.mjs), and the live
+  // notes the server draws (shell.mjs LIVE_NOTES).
   var ENDED_REASONS = ${JSON.stringify(ENDED_REASONS)};
   var STREAM_ENDS = ${JSON.stringify(STREAM_ENDS)};
   var STREAM_SHUTDOWN = ${JSON.stringify(STREAM_SHUTDOWN)};
@@ -239,6 +244,7 @@ export const CONSOLE_SCRIPT = `"use strict";
   var NOTICE_OF_STATUS = ${JSON.stringify(NOTICE_OF_STATUS)};
   var CONFIRM_SLOT_ID = ${JSON.stringify(CONFIRM_SLOT_ID)};
   var CONFIRM_NO_ANSWER = ${JSON.stringify(CONFIRM_NO_ANSWER)};
+  var CONFIRM_SIGNED_OUT = ${JSON.stringify(CONFIRM_SIGNED_OUT)};
   var LIVE_NOTE_KEYS = ${JSON.stringify(Object.keys(LIVE_NOTES))};
   var RETRY_MS = ${JSON.stringify(RETRY_MS)};
   var SIGN_IN_TRIES_MAX = ${JSON.stringify(SIGN_IN_TRIES_MAX)};
@@ -977,8 +983,10 @@ ${FIT_JS}
   var pending = Object.create(null);
   var heldNoted = Object.create(null);
   // The ONE write of markup into the slot: an answer's server-rendered html, or the skeleton put back.
+  // Every markup the script writes shows its times as the page's own are: a bar can carry a time (a waiting job's).
   function fillSlot(markup) {
     slot.innerHTML = markup;
+    try { localTimes(slot); } catch (e) { /* the times stay UTC */ }
   }
   // An answer's bar into the slot, and whether its Look again leads to sign-in (slotEnded, above).
   function answerBar(b) {
@@ -987,10 +995,13 @@ ${FIT_JS}
   }
   // A write answered 401 was not refused by its action: the session behind the page ended. It is asked about as a closed
   // stream is (probe): sign-in with the reason (the console's answer's, else this one's), another person's sign-in as
-  // switched, a reload only into the page's own person; never a sentence in the slot.
+  // switched, a reload only into the page's own person; never the answer's text in the slot. The slot says first that
+  // nothing was changed and the console is being asked (CONFIRM_SIGNED_OUT): the question may already be out for a
+  // stream the browser closed, and its answer may be a while; a slot left on its skeleton meanwhile said "Previewing".
   function signedOut(r) {
     if (r.status !== 401) return false;
     var b = r.body || {};
+    slotSays(CONFIRM_SIGNED_OUT);
     probe({ ok: "reload", ended: own(b, "ended") && isReason(b.ended) ? b.ended : null }, false);
     return true;
   }
@@ -1276,10 +1287,18 @@ ${FIT_JS}
     if (tes) tes.close();
   }
   // ---- asking the console what a closed stream meant (probe) ----
-  // on.ok is what a 200 means on the first ask: "limit" (a stream the browser closed, refused while the session holds:
-  // the stream limit) or "reload" (the console is there and this browser is signed in). on.ended is the reason a 401
-  // goes to sign-in with when its answer names none of the console's own. A 503 or no answer keeps the page and asks
-  // again every RETRY_MS, and once that has happened a 200 reloads (the console is back).
+  // A caller's on.ok is what a 200 means to it on the first ask: "limit" (a stream the browser closed, refused while the
+  // session holds: the stream limit) or "reload" (the console is there and this browser is signed in). on.ended is the
+  // reason a 401 goes to sign-in with when its answer names none of the console's own. A 503 or no answer keeps the
+  // page and asks again every RETRY_MS, and once that has happened a 200 reloads (the console is back).
+  //
+  // ONE QUESTION, EVERY CALLER ANSWERED (issue #737). The browser closes a run page's two streams together (a 429 over
+  // the stream limit refuses both), and a write's 401 can come while a stream's question is out. So each probe (in a
+  // browser that can ask at all) joins the callers waiting (asks) and says its own "asking", a question goes out only
+  // when none is, and its answer settles every caller waiting: the limit is said on every stream the browser has closed
+  // and by each caller in its own words, a reload or a sign-in once for all. A guard that dropped the second caller (the
+  // first version) left it saying what it said while it asked: the pill Live over a closed page stream, or the
+  // transcript's line "reconnecting" for good.
   //
   // A 200 is read for the person first (issue #737): the answer must name the page's own (pageName, pageRole, from the
   // top bar's .who). The cookie the probe carries is whatever this browser holds NOW: a one-time link opened in another
@@ -1303,23 +1322,16 @@ ${FIT_JS}
       mark("retry");
     }
   }
+  // The callers waiting for the answer, oldest first, and whether a question is under way (waiting to go, out, or
+  // between a failed one and the next). The queue is emptied only by an answer that settles it: a 200 or a 401.
+  var asks = [];
   var probing = false;
   function probe(on, wait) {
-    if (probing) return;
-    probing = true;
-    // The stream is closed and nothing is known yet: not Live while the question is out (a fetch can hang for minutes).
-    (on.say || pageSays)("asking");
-    if (wait) later(function () { ask(on, false); }, RETRY_MS);
-    else ask(on, false);
-  }
-  function ask(on, failed) {
-    var again = function () {
-      mark("retry");
-      note("retry");
-      later(function () { ask(on, true); }, RETRY_MS);
-    };
     if (typeof fetch !== "function") {
-      // A browser that cannot ask: say what is known, and stop (a loop that asks nothing would only spin).
+      // A browser that cannot ask: nothing is asked, so this caller neither waits nor joins the callers waiting, and
+      // says what is known as it comes. A stream the browser closed is Not live (the stream limit is a guess it cannot
+      // check); any other caller keeps the page under the retry note. Nothing loops (a loop that asks nothing would
+      // only spin), and every caller is answered on its own, so none is left saying what it said while it asked.
       if (on.ok === "limit") {
         (on.say || pageSays)("guess");
       } else {
@@ -1328,25 +1340,56 @@ ${FIT_JS}
       }
       return;
     }
+    asks.push(on);
+    // This caller's stream is closed (or its write refused) and nothing is known yet: not Live while the question is out
+    // (a fetch can hang for minutes).
+    (on.say || pageSays)("asking");
+    if (probing) return;
+    probing = true;
+    if (wait) later(function () { ask(false); }, RETRY_MS);
+    else ask(false);
+  }
+  function settled() {
+    var callers = asks;
+    asks = [];
+    return callers;
+  }
+  // Reached only where the browser has fetch: probe answers a browser without it before anything is queued.
+  function ask(failed) {
+    var again = function () {
+      mark("retry");
+      note("retry");
+      later(function () { ask(true); }, RETRY_MS);
+    };
     fetch("/api/whoami", { credentials: "same-origin", cache: "no-store" }).then(function (res) {
       var read = typeof res.json === "function" ? res.json().catch(function () { return null; }) : Promise.resolve(null);
       return read.then(function (body) { return { status: res.status, body: body }; });
     }).then(function (r) {
       if (r.status === 200) {
+        var callers = settled();
         probing = false;
+        var reload = failed;
+        for (var i = 0; i < callers.length; i++) if (callers[i].ok === "reload") reload = true;
         if (!samePerson(r.body)) {
           mark("out");
           note("out");
           toLogin("switched");
-        } else if (on.ok === "limit" && !failed) {
-          (on.say || pageSays)("limit");
-        } else {
+        } else if (reload) {
           location.reload();
+        } else {
+          // The stream limit, said by every caller in its own words: each stream the browser closed asked for itself,
+          // so each says it, whichever asked first. Not "every stream at readyState 2": the transcript's after its run
+          // is over is closed too (by this script, on done), and its "ended" line is not the limit's to overwrite.
+          for (var j = 0; j < callers.length; j++) (callers[j].say || pageSays)("limit");
         }
       } else if (r.status === 401) {
+        // The reason the console's answer gives, else the first one a caller brought (a write's 401 says why).
+        var why = null;
+        var gone = settled();
+        for (var k = 0; k < gone.length && why === null; k++) if (isReason(gone[k].ended)) why = gone[k].ended;
         mark("out");
         note("out");
-        toLogin(own(r.body, "ended") && isReason(r.body.ended) ? r.body.ended : on.ended);
+        toLogin(own(r.body, "ended") && isReason(r.body.ended) ? r.body.ended : why);
       } else {
         again();
       }

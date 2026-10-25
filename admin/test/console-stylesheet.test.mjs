@@ -738,7 +738,21 @@ test("the audit log: the side card beside the log from 1600 px and under it belo
   const bundleStack = phone.split("\n").filter((l) => /^\s+\.tbl--stack/.test(l)).map((l) => /^\s+(.*?) \{ (.*) \}$/.exec(l).slice(1));
   assert.equal(bundleStack.length, 11);
   assert.equal(stackRules(), bundleStack.map(([sel, body]) => `${sel}{${body}}`).join("\n"));
-  assert.ok(PAGE_CSS.audit.includes(`\n${STACK}{${stackRules()}\n.tbl--stack tr{padding-left:var(--space-5);padding-right:var(--space-5)}}\n`));
+  assert.ok(PAGE_CSS.audit.includes(`\n${STACK}{${stackRules()}\n.tbl--stack tr{padding-left:var(--space-5);padding-right:var(--space-5)}\n`));
+  // The row a link opened (`#seq-41`): its cells are tinted in the table, and a stacked row is tinted whole, its cells
+  // left clear, so the mark is one block and not one per cell with the grid's gaps between (the patchwork at 375 px).
+  // The cells' rule outweighs the table's by its place: the same weight, later in the sheet.
+  assert.deepEqual(A.top[".tbl tbody tr:target td"], { background: "var(--running-tint)" });
+  assert.deepEqual(A.media[STACK][".tbl--stack tbody tr:target"], { background: "var(--running-tint)" });
+  assert.deepEqual(A.media[STACK][".tbl--stack tbody tr:target td"], { background: "transparent" });
+  assert.ok(specificity(".tbl--stack tbody tr:target td") >= specificity(".tbl tbody tr:target td"));
+  assert.ok(PAGE_CSS.audit.indexOf(".tbl--stack tbody tr:target td{") > PAGE_CSS.audit.indexOf(".tbl tbody tr:target td{"));
+  // A stacked cell's label is inline before its value (bundle.css's `td[data-l]::before`), and an inline box's baseline
+  // is its last line, so a time or a target that wraps is set by its first line instead: the label stays at its top,
+  // not beside the ninth line of a long target.
+  assert.match(stackRules(), /\.tbl--stack td\[data-l\]::before\{content: attr\(data-l\) " ";/);
+  assert.deepEqual(A.media[STACK][".tbl--stack .au-at,.tbl--stack .au-tgt"], { "vertical-align": "top" });
+  for (const box of [".au-at", ".au-tgt"]) assert.equal(A.top[box].display, "inline-block", `${box}: an inline box, whose baseline is its last line`);
   // A damaged row's sentence is as wide as its reason cell, so a file name in it breaks only where the cell ends (a cap
   // of its own broke "2026-10.jsonl" after "2026-" in a wide cell).
   assert.deepEqual(A.top[".au-dmg"], { display: "block", "font-size": "12px", "line-height": "17px", color: "var(--ink)", "white-space": "normal" });

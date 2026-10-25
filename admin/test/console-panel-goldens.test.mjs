@@ -26,7 +26,7 @@ const update = process.env.UPDATE_CONSOLE_FIXTURES === "1";
 const rendered = renderPanelStates();
 
 test("the panel goldens are the states the cards name, by name: the ledgers and the width check read them so", () => {
-  const confirm = ["previewing", "preview", "preview-paid", "preview-danger", "unchanged", "bulk-preview", "bulk-results", "refused-preview", "refused-confirm", "preview-long-line", "refused-partial", "refused-person", "done", "done-no-undo"].map((s) => `confirm-${s}.operator`);
+  const confirm = ["previewing", "preview", "preview-paid", "preview-danger", "unchanged", "bulk-preview", "bulk-results", "refused-preview", "refused-confirm", "preview-long-line", "refused-partial", "refused-person", "preview-cancel-queued", "refused-started", "done", "done-rerun", "done-no-undo"].map((s) => `confirm-${s}.operator`);
   const live = ["reconnecting", "not-live", "signed-out", "stale", "kept-still"].map((s) => `live-${s}.operator`);
   const signIn = [...ENDED_REASONS.map((r) => `login-ended-${r}.anonymous`), ...["wrong", "rate", "tokens", "audit", "other"].map((k) => `login-refused-${k}.anonymous`), "login-unreachable.anonymous"];
   // The link page: its two states the script switches to, then each notice it can show (signin.mjs LINK_NOTICES).
@@ -82,6 +82,8 @@ test("the confirm states: the slot open right after the wrapper of the card that
     "confirm-preview-long-line": ["p-pause-windows", '<ul class="confirm__list">'],
     "confirm-refused-partial": ["p-queues", "The change did not finish"],
     "confirm-refused-person": ["p-queues", "This browser is now signed in as someone else"],
+    "confirm-preview-cancel-queued": ["p-queues", "build3 has no free job slot"],
+    "confirm-refused-started": ["p-queues", "started since the preview; nothing was changed"],
   };
   for (const [state, [panel, shows]] of Object.entries(want)) {
     const page = pages[`${state}.operator`];
@@ -92,11 +94,12 @@ test("the confirm states: the slot open right after the wrapper of the card that
     assert.equal(page.split(`id="${CONFIRM_SLOT_ID}"`).length, 2, `${state}: one slot`);
     assert.ok(slot.body.slice(0, slot.body.indexOf("<template")).includes(shows), `${state}: the slot holds ${shows}`);
   }
-  // What the bars say, from the real action table: the paid retry's reserve and its Undo, which the ConfirmStates
-  // ledger names as the design's "Cancel the new run" that no console action can do yet.
+  // What the bars say, from the real action table: the paid retry's reserve and its Undo. A retry keeps the job's
+  // attempts, so the cancel of a queued job never takes it back: the ConfirmStates ledger names the design's "Cancel
+  // the new run" as absent for a retry, and a re-run's banner offers it.
   const paid = pages["confirm-preview-paid.operator"];
   assert.ok(paid.includes(">Retry for up to $2.00</button>") && paid.includes("It holds 1 job slot and $2.00 (the per-job cap)"), "the paid label and the reserve");
-  assert.ok(paid.includes(`<span>No undo: ${UNDO_SENTENCES.queued}</span>`), "retry's Undo is the queued sentence, muted after No undo");
+  assert.ok(paid.includes(`<span>No undo: ${UNDO_SENTENCES.retried}</span>`), "retry's Undo is the retried sentence, muted after No undo");
   assert.ok(pages["confirm-preview-danger.operator"].includes(">Pause the fleet</button>"), "the danger label");
   assert.ok(pages["confirm-bulk-preview.operator"].includes(">Retry 3, at least $4.00</button>") && pages["confirm-bulk-preview.operator"].includes("2 more match and are <b>not in this action</b>"), "the bulk label, each reserve, how many more");
   assert.ok(pages["confirm-bulk-results.operator"].includes(">3 audit rows, from row 44</a>") && pages["confirm-bulk-results.operator"].includes("data-reload>Reload</button>"), "the rows the confirm wrote, and Reload");
@@ -115,6 +118,10 @@ test("the confirm states: the slot open right after the wrapper of the card that
     assert.equal(page.includes('<form data-action="fleet-resume" class="undo" autocomplete="off">'), undo, `${state}: the Undo form`);
   }
   assert.ok(pages["confirm-done-no-undo.operator"].includes(` No undo: ${UNDO_SENTENCES.held}</p>`), "a cancelled hold says why there is no way back");
+  // A re-run's Undo, decided at the confirm: the cancel of the job it queued, offered while that job has not started.
+  const rerun = pages["confirm-done-rerun.operator"];
+  assert.equal(slotOf(rerun).open, false, "confirm-done-rerun: the slot closed");
+  assert.ok(rerun.includes('<form data-action="cancel-queued" class="undo" autocomplete="off">') && rerun.includes('value="cron:nightly:1760010000000"'), "the Undo form cancels the new job");
   // What happened, in the past tense, the act's own summary staying the preview's.
   assert.ok(pages["confirm-done.operator"].includes('<p class="banner__t">Paused the fleet</p>') && pages["confirm-done-no-undo.operator"].includes('<p class="banner__t">Cancelled held job gh-h41c</p>'));
 });
