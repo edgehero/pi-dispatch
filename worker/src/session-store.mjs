@@ -665,7 +665,7 @@ export function makeSessionStore({
 				// (issue #390). Measured with a deterministic probe before this existed: `{"promoted":true,
 				// "reason":"promoted"}` with the transcript in the attacker's directory and the real key holding
 				// only `pi-version`, `resume-chain` and `venue` -- the next job on that key cold-starts as
-				// `absent` while the record says the work was promoted, which is the silent no-op `CLAUDE.md`
+				// `absent` while the record says the work was promoted, which is the silent no-op `AGENTS.md`
 				// calls the worst outcome available. A 45 second unsynchronised live race did not hit the exact
 				// ordering (16,591 promotions, 3 refusals, 0 lies), so this is a deterministic-window finding
 				// rather than a frequent one, and its precondition is the one the whole store concedes: write

@@ -7123,7 +7123,7 @@ const CANARY_PLANS = [
 // because the block-comment regex treated the `/*` inside `mv ${legacy}/logs/*` as an opener and deleted 88
 // lines of live code before counting.
 //
-// A doc test that PARSES a page or a source file is an arms race the page wins (CLAUDE.md's own rule). So
+// A doc test that PARSES a page or a source file is an arms race the page wins (AGENTS.md's own rule). So
 // the page's first column is GENERATED from `CANARY_LINES`, and the sweep is driven over the real scenarios
 // to check that every line it prints came from that table. Neither half reads source text.
 test("every canary line doctor prints comes from the table it is generated from (#379)", async () => {

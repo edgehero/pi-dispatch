@@ -13,7 +13,7 @@ import { PINNED_PI_NEEDLES } from "../src/host-pi.mjs";
  * the grammar and `import-pi` silently starts staging something the operator turned off, which is exactly
  * the silent-failure class this project exists to refuse. So the mirror is pinned.
  *
- * Assert the ARTIFACT, not HEAD (CLAUDE.md, and the constitution behind it): these read the bundle the
+ * Assert the ARTIFACT, not HEAD (AGENTS.md, and the constitution behind it): these read the bundle the
  * lockfile actually resolved. `.github/scripts/host-pi-canary.mjs` runs the same needle list against
  * pi@latest for advance warning; both import PINNED_PI_NEEDLES from the source so the gate and the canary
  * cannot drift apart. This test is a BUILD GATE, the canary is a heads-up -- do not confuse the two.

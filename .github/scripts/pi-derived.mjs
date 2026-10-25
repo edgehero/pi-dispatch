@@ -1,7 +1,7 @@
 /**
  * The pi data this repository copies and can DERIVE, regenerated from the installed pin (issue #587).
  *
- * CLAUDE.md's rule is that a hand-written table restating a derivable source is either derived or pinned. Each table
+ * AGENTS.md's rule is that a hand-written table restating a derivable source is either derived or pinned. Each table
  * below was pinned: a test compared it with the pinned pi and went red on a bump, and the fix was always the same
  * mechanical copy, by hand, in four places. So these four are now generated from pi itself, and
  * worker/test/pi-derived.test.mjs holds the checked-in copy to the generated one. The automated bump

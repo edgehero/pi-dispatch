@@ -691,7 +691,7 @@ test("the write path goes through the shared selection, and never lands on an OA
 	// variable the credential lands under is one pi actually reads and is never a subscription login.
 	// It does NOT pin agreement with doctor: it computes the expectation with the same function the code
 	// uses, so a doctor that stopped calling `apiKeyVariable` leaves this green. `doctor.test.mjs` carries
-	// that bolt, where doctor's real output is available to compare against. CLAUDE.md's rule is to say so
+	// that bolt, where doctor's real output is available to compare against. AGENTS.md's rule is to say so
 	// rather than manufacture the relation.
 	//
 	// The loop's real content is `anthropic`, the only id in pi's table with more than one candidate; for

@@ -429,7 +429,7 @@ test("the pinned pi-ai still exposes the api-provider registry the meter's compa
 });
 
 test("STOP_REASONS is exactly the pinned pi-ai's StopReason union, in order", { skip }, () => {
-	// The bolt outcome.test.mjs's literal list owes (CLAUDE.md: a table restating a derivable source is derived
+	// The bolt outcome.test.mjs's literal list owes (AGENTS.md: a table restating a derivable source is derived
 	// or pinned). Read from the NESTED copy, the one whose providers produce the terminal message.
 	const types = readFileSync(new URL("./types.d.ts", resolvePiAiCompat()[0].url), "utf8");
 	const union = types.match(/export type StopReason = ([^;]+);/)?.[1].match(/"([^"]+)"/g)?.map((name) => name.slice(1, -1));
@@ -863,7 +863,7 @@ test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPT
 	assert.match(iface[1], /\n {4}tools\?: string\[\];/, "tools?: string[] moved -- the loader refuses run.tools on the claim this option exists upstream");
 	assert.match(iface[1], /\n {4}noTools\?: "all" \| "builtin";/, "noTools's union moved -- the loader refuses run.noTools on this shape");
 	// The bolt INT-SDK-SESSION-OPTIONS' hand-written "complete option set at <pin>" sentence has owed
-	// since it was written (CLAUDE.md: a table restating a derivable source is derived or pinned, never
+	// since it was written (AGENTS.md: a table restating a derivable source is derived or pinned, never
 	// trusted). Top-level members only -- the 4-space indent excludes scopedModels' nested fields.
 	const names = [...iface[1].matchAll(/^ {4}(\w+)\?:/gm)].map((m) => m[1]);
 	assert.deepEqual(
@@ -1569,7 +1569,7 @@ test("google-vertex ADC, external_account: the family's own stream() turns a tok
 // ── Issue #501: every pi-ai fact the cost bound rests on, pinned at the copy pi uses ─────────────────────────
 //
 // callCostBound (image/runner/src/usage-meter.mjs) restates pi-ai's pricing rules as a worst case. A restated
-// rule is pinned or it drifts (CLAUDE.md), and here a drift is not a wrong number in a report: it is a cap that
+// rule is pinned or it drifts (AGENTS.md), and here a drift is not a wrong number in a report: it is a cap that
 // lets a call past it. So each rule the bound encodes is read out of the NESTED pi-ai copy (the one pi calls)
 // and held here. A pin bump that changes any of them fails this file, and the fix is the bound, never the needle.
 

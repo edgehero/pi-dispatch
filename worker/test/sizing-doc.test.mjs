@@ -12,7 +12,7 @@ import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS, SUGGEST_WINDOW_RUNS, suggestS
 
 // `docs/sizing.md` (issue #596) carries a worked example: a limits file, a projects file and an `.env`, the doctor
 // lines they produce, an out-of-memory suggestion, and what the host budget does under two floods. Every one of
-// those restates a derivable source (doctor's own labels, the budget's admission), so it is BOLTED here (CLAUDE.md:
+// those restates a derivable source (doctor's own labels, the budget's admission), so it is BOLTED here (AGENTS.md:
 // a hand-written table is derived or pinned, never trusted).
 //
 // THE PAGE'S OWN FILES ARE THE INPUT. The JSON and `.env` blocks are read out of the page and fed to the worker's own

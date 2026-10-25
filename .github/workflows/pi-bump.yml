@@ -21,7 +21,7 @@
 #
 # A PERSON'S FIXES ARE KEPT. The branch is rebuilt on the base only while it holds nothing but the workflow's own bump
 # commit (one commit on its merge base, subject `chore(pi): run on pi X`, by Rob Boerman, committed as
-# robboerman+pi-bump@live.nl, changing only the pin files and the lockfile), or when a closed pull request keeps its tip. Once a person pushed anything else, a newer pi waits:
+# 6673123+edgehero@users.noreply.github.com, changing only the pin files and the lockfile), or when a closed pull request keeps its tip. Once a person pushed anything else, a newer pi waits:
 # the open pull request gets one comment per version, and the job stays green. There is no input to override that; a
 # person merges or closes the pull request, or deletes the branch. Without fixes, a branch whose base changed a pin
 # file or the lockfile is rebuilt on it even for the same version, so the pull request does not sit on a conflict.
@@ -64,7 +64,7 @@ jobs:
           PI_BUMP_TOKEN: ${{ secrets.PI_BUMP_TOKEN }}
         run: |
           if [ -z "$PI_BUMP_TOKEN" ]; then
-            echo "::warning::PI_BUMP_TOKEN is not set, so no pi bump can be pushed. CLAUDE.md, section \"pi bumps\", says how to create it."
+            echo "::warning::PI_BUMP_TOKEN is not set, so no pi bump can be pushed. AGENTS.md, section \"pi bumps\", says how to create it."
             echo "present=false" >> "$GITHUB_OUTPUT"
           else
             echo "present=true" >> "$GITHUB_OUTPUT"
@@ -158,11 +158,11 @@ jobs:
           # The committer only this workflow uses (BUMP_COMMITTER in pi-bump.mjs). An amend, rebase or squash by a person
           # rewrites it, so the next run sees that commit as a fix.
           GIT_COMMITTER_NAME: "Rob Boerman"
-          GIT_COMMITTER_EMAIL: "robboerman+pi-bump@live.nl"
+          GIT_COMMITTER_EMAIL: "6673123+edgehero@users.noreply.github.com"
         run: |
           mapfile -t paths < <(node .github/scripts/pi-bump.mjs paths)
           git config user.name "Rob Boerman"
-          git config user.email "robboerman@live.nl"
+          git config user.email "edgehero@users.noreply.github.com"
           git checkout -B chore/pi-bump
           git add -- "${paths[@]}"
           git commit -s -F "$RUNNER_TEMP/pr/commit.txt"

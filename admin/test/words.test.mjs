@@ -14,7 +14,7 @@ import { recordOutcomeEnum } from "../../worker/test/helpers/spec-enum.mjs";
 import { loadVisibleWidth } from "./helpers/renderer.mjs";
 
 // Issue #710, PR 2: the console and the `/dispatch` panel say one vocabulary, read from admin/src/words.mjs. Each table
-// there is bolted to its source here (CLAUDE.md, "derived or pinned"), both surfaces are held to importing it, and the
+// there is bolted to its source here (AGENTS.md, "derived or pinned"), both surfaces are held to importing it, and the
 // panel's run detail is rendered with the catalog's sentence and next step.
 
 /** The endings a cut may not have: a dangling word (a negation, a modal and an auxiliary among them), a comma, a pronoun after a conjunction. */

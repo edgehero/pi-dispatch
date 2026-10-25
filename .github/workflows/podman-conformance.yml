@@ -10,7 +10,7 @@
 # (issue #458) started from its shipped Quadlet unit.
 #
 # REQUIRED on main since issue #432, the sixth required context and the only one outside pi-upgrade-check.yml
-# (CLAUDE.md lists all six). It ran advisory first, because Ubuntu 24.04 ships Podman 4.9, one major behind the 5.8.1
+# (AGENTS.md lists all six). It ran advisory first, because Ubuntu 24.04 ships Podman 4.9, one major behind the 5.8.1
 # the venue was measured on, and was promoted after it had passed on every PR and main push of the podman follow-up
 # round (#428 to #437): 38 of 39 runs green, the one red a real defect on the branch that built the venue. A red run
 # here is still a finding to read before it is a defect to fix, but it now blocks the merge. The pull_request

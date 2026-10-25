@@ -66,7 +66,7 @@ export const IDENTITY_ATTEMPT_TIMEOUT_MS = 10_000;
  * same-tick; on exhaustion rethrows the LAST untagged error, so the entry still exits 1 and the
  * supervisor restarts into a fresh window.
  *
- * `now` and `sleep` are seams (CLAUDE.md: a window takes an injected clock, always; issue #284);
+ * `now` and `sleep` are seams (AGENTS.md: a window takes an injected clock, always; issue #284);
  * `setTimeoutFn`/`clearTimeoutFn` are the FUSE's own pair, separately injectable so a test can prove
  * the clearing rather than trust it.
  */
