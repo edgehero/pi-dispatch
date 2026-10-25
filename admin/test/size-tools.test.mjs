@@ -89,7 +89,7 @@ test("dispatch_limit_edit replaces a sent size field, CARRIES the others, and an
   const { ctx, shown } = toolCtx();
   await toolByName("dispatch_limit_edit").execute("id", { index: 0, cpus: 0.25 }, undefined, undefined, ctx);
   assert.deepEqual(read(path).limits[0], { scope: "project:shop", concurrent: 2, memory: "2g", cpus: 0.25, hostShare: 40, minJobs: 1 });
-  assert.match(shown[0].message, /"cpus":1,.*\n→ .*"cpus":0\.25/s);
+  assert.match(shown[0].message, /"cpus":1,.*\nto .*"cpus":0\.25/s);
   await toolByName("dispatch_limit_edit").execute("id", { index: 0, concurrent: 3 }, undefined, undefined, ctx);
   assert.deepEqual(read(path).limits[0], { scope: "project:shop", concurrent: 3, memory: "2g", cpus: 0.25, hostShare: 40, minJobs: 1 });
   assert.equal(read(path).version, 3);

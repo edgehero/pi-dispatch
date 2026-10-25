@@ -8,7 +8,18 @@
  *   1. the tokens file is read ONCE, and every stream's session is re-judged with `peekSession` (every check `get`
  *      makes, without moving `lastSeen`: an open tab must not keep an idle session alive, only a request does). A dead
  *      session gets `event: end` and its stream is closed, so logout elsewhere, revoke, rotate, end-all and expiry all
- *      end a stream within one tick;
+ *      end a stream within one tick. The end's data says why (`{"ended": <reason>}`, issue #737): the reason comes
+ *      from the injected `endedReason` (the store's pure `verdict`, never `get`, which would delete the session under
+ *      the request that should end it the ordinary way), held to `STREAM_ENDS` by `streamEndOf`, so a stream never
+ *      ends with `restart` (this process opened it) nor with a word the page does not know; anything else is `null`,
+ *      which the page reads as "signed out, reason unknown". `close()` ends every stream with `shutdown`, the console
+ *      stopping, which the page and the terminal chat treat as a connection to wait for, not a sign-out.
+ *
+ *      A TOKENS FILE THAT CANNOT BE READ JUDGES NOBODY. Ending every stream then would sign every tab out over a
+ *      chmod mistake, and drawing panels would send data to sessions nobody judged. So for that tick nothing is ended
+ *      and nothing is written but the keep-alive: each page stream is told `stale` once, the line is logged once, and
+ *      the first tick that reads the file again judges every session and draws as usual (a session that died in
+ *      between ends then, with its reason);
  *   2. a stream whose socket buffer holds more than `maxBufferBytes` (a reader that stopped reading) is cut, so one
  *      stalled browser cannot grow this process's memory; it reconnects to a fresh snapshot;
  *   3. `loadPageData` runs ONCE per distinct page + query, however many streams show it, and for a page with a
@@ -17,13 +28,42 @@
  *      differ from an operator's), and only the panels whose digest changed are written, each as
  *      `id: <seq>`, `event: panel`, `data: {"id","html"}`.
  *
- * A NEW STREAM gets every panel of its view first, unless its `Last-Event-ID` is the view's current seq (it already
- * holds exactly this). The seq carries a per-process epoch, so an id from before a restart never matches by accident.
+ * A NEW STREAM gets every panel of its view after its state (below), unless its `Last-Event-ID` is the view's current
+ * seq (it already holds exactly this). The seq carries a per-process epoch, so an id from before a restart never
+ * matches by accident.
  *
  * A FAILURE IS ONE KEY'S. A `loadPageData` or `pagePanels` that throws skips that key this tick (its streams keep what
  * they last got) and logs the page name and an error code, never a message or data; the other keys and the loop go on.
  * The line is written when a key starts failing, not every second it stays failed (a down Valkey would otherwise write
- * one a second per open page), and once more when it recovers.
+ * one a second per open page), and once more when it recovers, which only a GOOD load (and render) is. A load whose
+ * primary read failed (`data.readFailed`, which `loadPageData` sets where it swallowed the throw) is a failure too.
+ *
+ * A FAILED LOAD NEVER TOUCHES A VIEW. A view holds good renders only, so its digests are always those of what its
+ * holders were last sent, and its next good render sends each of them every panel that changed since. A stream whose
+ * browser HOLDS PANELS (`sub.holds`) is never sent a panel from a failed load: it is told `stale` once and keeps what it
+ * shows. A stream holds panels once this hub sent it a good render, once it came with a `Last-Event-ID` (a browser
+ * reconnecting holds the panels it was drawn with, whatever this hub still has; the view it was drawn from goes when its
+ * last stream leaves), and once it was told `stale` (its page then says what it shows is as last seen). A stream that
+ * holds none (a first stream, with no Last-Event-ID and nothing good or stale said to it yet) is drawn the degraded
+ * panels the read-failed load makes, for it alone (`drawDegraded`, never into the view another stream of the same
+ * person may hold a good render in): the page the server just drew already says "could not be read", and there is
+ * nothing older to keep. It still needs its view whole once a good render comes. A load or a render that throws draws
+ * nothing for anyone and tells each of its streams `stale`, so each then holds.
+ *
+ * EVERY PAGE STREAM IS TOLD ITS STATE, FIRST (issue #737). Kept panels would otherwise look current, and a page cannot
+ * tell from its own stream opening whether what it holds is current. So before any panel a tick sends it, a page stream
+ * is told: `event: fresh` once its page's load and render succeeded, `event: stale` with `{"since", "what"}` once they
+ * failed and its browser holds panels, or (a throw, or the tokens file) once they failed at all. `since` is the hub
+ * clock of its view's last good render, or null when the hub has none (a view goes with its last stream, so a lone tab
+ * that reconnects is told null: the page keeps the time it was told before); `what` is `tokens` (the console's tokens
+ * file, which judges nobody) or `data` (the page's load or render), so the page never blames the deployment's data
+ * for a tokens file. Each is said once, and again only when it changes (`sub.said`), so a page stream's first message is
+ * its state (a degraded draw, which says what the page already says, is the one draw with none), and the page takes its
+ * dimming back on `fresh` alone. A reconnect is a new stream: one that comes back while its page still fails is told
+ * `stale` before anything else, and one that comes back after it recovered is told `fresh`. At subscribe only the page's
+ * data and render are judged: the stream's own request has just read the tokens file, so a tokens failure the last tick
+ * saw is the next tick's to say again, if it still holds. Transcript streams never get either: their entries are a log,
+ * not a picture that can go out of date.
  *
  * A SECOND SUBSCRIPTION TYPE, THE LIVE TRANSCRIPT (issue #643, `subscribeTranscript`): one run's transcript stream for
  * an operator. It shares everything above that is not a page: the slots (the server takes them for both kinds alike),
@@ -49,6 +89,7 @@ import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
 import { compareTranscriptIds, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
+import { STREAM_SHUTDOWN, streamEndOf } from "./session-ends.mjs";
 import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
 
 /**
@@ -78,10 +119,15 @@ function codeOf(e) {
   return typeof c === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(c) ? c : "error";
 }
 
+/** The line a tokens file that cannot be read logs once, and the one its return logs. */
+export const TOKENS_HELD_LINE = "console: the tokens file cannot be read; live streams are held, sent nothing, until it can";
+export const TOKENS_BACK_LINE = "console: the tokens file is read again; live streams are judged and drawn again";
+
 /**
  * The hub. `loadPageData(page, query)` resolves the page's data (the CLI binds its deps); `pagePanels(page, ctx)`
  * resolves `[{id, html}]` with `ctx = {query, session: {name, role}, data, readOnly}`; `peekSession(id, file)` and
- * `readTokens()` are the session store's `peek` and the server's token reader.
+ * `readTokens()` are the session store's `peek` and the server's token reader. `endedReason(id, file)` says why a
+ * session that failed `peekSession` ended (the CLI binds the store's `verdict`); without it every end says null.
  *
  * THE ROLE IS PART OF EVERY VIEW KEY. A viewer's panels and an operator's differ (the operator's carry BullMQ's free
  * text), so a render is never shared across roles, nor across names: no stream is ever written a panel drawn for
@@ -98,6 +144,7 @@ export function makeLiveHub({
   pagePanels,
   peekSession,
   readTokens,
+  endedReason = null,
   readOnly = false,
   transcriptSince = null,
   transcriptPagesPerTick = LIVE_DEFAULTS.transcriptPagesPerTick,
@@ -116,7 +163,11 @@ export function makeLiveHub({
   const epoch = random(4).toString("hex");
   /** Every open stream. */
   const subs = new Set();
-  /** viewKey -> {seq, panels: Map(id -> {digest, html})}; dropped when its last stream leaves. */
+  /**
+   * viewKey -> {seq, at, panels: Map(id -> {digest, html})}, made and changed by GOOD renders alone (see the header);
+   * dropped when its last stream leaves. `at` is the hub clock of the view's last render: what `stale` says the kept
+   * panels date from.
+   */
   const views = new Map();
   let counter = 0;
   let timer = null;
@@ -190,15 +241,71 @@ export function makeLiveHub({
     }
   }
 
-  /** Tell a stream its session is over, then close it; the browser goes to /login on `end`. */
-  function finish(sub) {
+  /**
+   * Tell a stream it is over and why, then close it. The data is never empty (a browser drops a data-less event) and
+   * the reason is always one of `STREAM_ENDS` or null: `streamEndOf` is the one gate, so a caller that passes
+   * `restart`, a typo or anything a store returned cannot put another word on the wire.
+   */
+  function finish(sub, ended = null) {
     remove(sub);
     try {
-      sub.res.write("event: end\ndata: {}\n\n");
+      sub.res.write(`event: end\ndata: ${JSON.stringify({ ended: streamEndOf(ended) })}\n\n`);
       sub.res.end();
     } catch {
       // already gone
     }
+  }
+
+  /** Why the session `id` ended, from the injected verdict; null when there is none or it threw. */
+  function reasonFor(id, file) {
+    if (typeof endedReason !== "function") return null;
+    try {
+      return endedReason(id, file) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The tokens file as this tick judges with it, or null when it cannot be read: a throw, a refusal (no `file`), or a
+   * file with no token list, which the store would read as "nobody holds a token" and so end every session over it.
+   */
+  function tokensFile() {
+    try {
+      const file = readTokens()?.file ?? null;
+      return file !== null && typeof file === "object" && Array.isArray(file.tokens) ? file : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether `sub`'s page data or its view's render failed at their last attempt: the subscribe's judgment (see the
+   * header). Never the tokens file: the stream's own request has just read it.
+   */
+  const failingNow = (sub) => failing.has(`data\n${sub.page}\n${sub.qkey}`) || failing.has(`view\n${viewKeyOf(sub)}`);
+
+  /**
+   * `stale` to a page stream, saying `what` failed (issue #737: the page words the two apart, since a tokens file it
+   * cannot read is not the deployment's data); a transcript stream, or one already told exactly that, gets nothing. A
+   * stream told `data` and then failing on the tokens file (or the reverse) is told again, so the page's note never names
+   * the wrong one. A page stream told it holds panels from then on: its page says what it shows is as last seen, so no
+   * degraded draw may go over it.
+   */
+  function markStale(sub, since, what) {
+    const kind = what === "tokens" ? "tokens" : "data";
+    if (!isPage(sub) || !subs.has(sub)) return;
+    sub.holds = true;
+    if (sub.said === kind) return;
+    sub.said = kind;
+    send(sub, `event: stale\ndata: ${JSON.stringify({ since: typeof since === "number" ? since : null, what: kind })}\n\n`);
+  }
+
+  /** `fresh` to a page stream not told it already: its first message, or the first after a `stale`. */
+  function markFresh(sub) {
+    if (!isPage(sub) || sub.said === "fresh" || !subs.has(sub)) return;
+    sub.said = "fresh";
+    send(sub, "event: fresh\ndata: {}\n\n");
   }
 
   const panelEvent = (seq, id, html) => `id: ${seq}\nevent: panel\ndata: ${JSON.stringify({ id, html })}\n\n`;
@@ -208,26 +315,66 @@ export function makeLiveHub({
     sub.needsFull = false;
   }
 
+  /**
+   * The degraded panels of a load whose read failed, to a stream that holds none (see the header), and to it alone:
+   * nothing goes into a view, and the stream still needs its view whole (`needsFull`) once a good render comes. What it
+   * was last drawn so is kept on the stream (`sub.degraded`, id -> digest), so a lasting outage sends it only the panels
+   * that changed, not the whole page every tick.
+   */
+  function drawDegraded(sub, rendered) {
+    const was = sub.degraded ?? new Map();
+    const drawn = new Map();
+    let seq = null;
+    for (const p of Array.isArray(rendered) ? rendered : []) {
+      if (typeof p?.id !== "string") continue;
+      const html = String(p.html ?? "");
+      const digest = digestOf(html);
+      drawn.set(p.id, digest);
+      if (was.get(p.id) === digest) continue;
+      seq ??= nextSeq();
+      if (!send(sub, panelEvent(seq, p.id, html))) return;
+    }
+    sub.degraded = drawn;
+  }
+
   async function runTick() {
     const t = now();
-    // 1. sessions, with ONE read of the tokens file for every stream.
-    let file = null;
-    try {
-      file = readTokens()?.file ?? null;
-    } catch {
-      file = null;
-    }
-    for (const sub of [...subs]) {
-      let alive = null;
-      try {
-        alive = peekSession(sub.sessionId, file);
-      } catch {
-        alive = null;
+    // 1. sessions, with ONE read of the tokens file for every stream. An unreadable file judges nobody: no stream is
+    // ended and none is written a panel or an entry this tick (steps 3 to 5 are skipped), only `stale` and the ping.
+    const file = tokensFile();
+    if (file === null) {
+      failed("tokens", TOKENS_HELD_LINE);
+      // Every stream is offered `stale`; `markStale` is the one place that keeps transcript streams out of it.
+      for (const sub of [...subs]) markStale(sub, views.get(viewKeyOf(sub))?.at ?? null, "tokens");
+    } else {
+      recovered("tokens", TOKENS_BACK_LINE);
+      for (const sub of [...subs]) {
+        let alive = null;
+        try {
+          alive = peekSession(sub.sessionId, file);
+        } catch {
+          alive = null;
+        }
+        if (!alive) finish(sub, reasonFor(sub.sessionId, file));
       }
-      if (!alive) finish(sub);
     }
     // 2. stalled readers.
     for (const sub of [...subs]) if ((sub.res.writableLength ?? 0) > maxBufferBytes) cut(sub);
+    if (file !== null) await drawTick(t);
+    // A key nobody shows any more is forgotten, failing or not, so a long-running console holds only what is open. The
+    // tokens file's failure is the console's, not a key's: it is kept until the file reads again, so it is said once.
+    const shown = new Set(["tokens", ...[...subs].flatMap((sub) => (isPage(sub) ? [`data\n${sub.page}\n${sub.qkey}`, `view\n${viewKeyOf(sub)}`] : [`transcript\n${sub.jobId}`]))]);
+    for (const key of [...failing]) if (!shown.has(key)) failing.delete(key);
+    for (const dk of [...loaded.keys()]) if (!shown.has(`data\n${dk}`)) loaded.delete(dk);
+    // The keep-alive, so a proxy or the browser does not take a quiet stream for a dead one.
+    if (t - lastPing >= pingMs) {
+      lastPing = t;
+      for (const sub of [...subs]) send(sub, ": ping\n\n");
+    }
+  }
+
+  /** Steps 3 to 5, on a tick whose tokens file was read: every page view drawn, every transcript fanned out. */
+  async function drawTick(t) {
     // 3 and 4. one load per data key, one render per view.
     const byData = new Map();
     for (const sub of pageSubs()) {
@@ -247,11 +394,22 @@ export function makeLiveHub({
         }
       } catch (e) {
         failed(`data\n${dk}`, `console: live data for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);
+        for (const sub of group) markStale(sub, views.get(viewKeyOf(sub))?.at ?? null, "data");
         continue;
       }
-      recovered(`data\n${dk}`, `console: live data for page ${page} is read again`);
+      // A read that failed inside the load is a failed load (see the header): logged once, never a recovery, never
+      // into a view. Each stream that holds panels is told stale and sent nothing; the others are drawn its degraded
+      // panels, each for itself.
+      const readFailed = data?.readFailed === true;
+      let drawn = group;
+      if (readFailed) {
+        failed(`data\n${dk}`, `console: live data for page ${page} could not be read; its streams keep their last panels`);
+        for (const sub of group) if (sub.holds) markStale(sub, views.get(viewKeyOf(sub))?.at ?? null, "data");
+        drawn = group.filter((sub) => !sub.holds);
+        if (drawn.length === 0) continue;
+      } else recovered(`data\n${dk}`, `console: live data for page ${page} is read again`);
       const byView = new Map();
-      for (const sub of group) {
+      for (const sub of drawn) {
         const vk = viewKeyOf(sub);
         if (!byView.has(vk)) byView.set(vk, []);
         byView.get(vk).push(sub);
@@ -264,10 +422,16 @@ export function makeLiveHub({
           rendered = await pagePanels(page, { query, session: { name: live[0].session.name, role: live[0].session.role }, data, readOnly });
         } catch (e) {
           failed(`view\n${vk}`, `console: live panels for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);
+          // A render is one view's (a role's, a name's): only its streams were not drawn, so only they are told.
+          for (const sub of live) markStale(sub, views.get(vk)?.at ?? null, "data");
+          continue;
+        }
+        if (readFailed) {
+          for (const sub of live) if (subs.has(sub)) drawDegraded(sub, rendered);
           continue;
         }
         recovered(`view\n${vk}`, `console: live panels for page ${page} render again`);
-        const view = views.get(vk) ?? { seq: null, panels: new Map() };
+        const view = views.get(vk) ?? { seq: null, at: null, panels: new Map() };
         const changed = [];
         for (const p of Array.isArray(rendered) ? rendered : []) {
           if (typeof p?.id !== "string") continue;
@@ -277,30 +441,22 @@ export function makeLiveHub({
           view.panels.set(p.id, { digest, html });
         }
         if (changed.length > 0 || view.seq === null) view.seq = nextSeq();
+        view.at = t;
         // A stream may have left during the awaits above; only a view someone still shows is kept.
         if (!live.some((s) => subs.has(s))) continue;
         views.set(vk, view);
         for (const sub of live) {
+          // The state before the panels (see the header).
+          markFresh(sub);
           if (!subs.has(sub)) continue;
-          if (sub.needsFull) {
-            sendFull(sub, view);
-            continue;
-          }
-          for (const id of changed) if (!send(sub, panelEvent(view.seq, id, view.panels.get(id).html))) break;
+          if (sub.needsFull) sendFull(sub, view);
+          else for (const id of changed) if (!send(sub, panelEvent(view.seq, id, view.panels.get(id).html))) break;
+          if (subs.has(sub)) sub.holds = true;
         }
       }
     }
     // 5. the live transcripts: one read per job, fanned out.
     await transcriptTick();
-    // A key nobody shows any more is forgotten, failing or not, so a long-running console holds only what is open.
-    const shown = new Set([...subs].flatMap((sub) => (isPage(sub) ? [`data\n${sub.page}\n${sub.qkey}`, `view\n${viewKeyOf(sub)}`] : [`transcript\n${sub.jobId}`])));
-    for (const key of [...failing]) if (!shown.has(key)) failing.delete(key);
-    for (const dk of [...loaded.keys()]) if (!shown.has(`data\n${dk}`)) loaded.delete(dk);
-    // The keep-alive, so a proxy or the browser does not take a quiet stream for a dead one.
-    if (t - lastPing >= pingMs) {
-      lastPing = t;
-      for (const sub of [...subs]) send(sub, ": ping\n\n");
-    }
   }
 
   // The `data` per format (issue #647): `{"html"}` for the run page, the structured entry for the terminal chat. Both
@@ -401,15 +557,24 @@ export function makeLiveHub({
         }
         return () => {};
       }
-      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), needsFull: true };
+      // `holds`: this stream's browser holds panels a failed load must not draw over (a Last-Event-ID says it does; a good
+      // render sent to it, or a stale told it, makes it so); `said`: the state it was last told, null before its first;
+      // `degraded`: what it was last drawn from a failed load, while it holds nothing (see the header).
+      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), needsFull: true, holds: typeof lastEventId === "string", said: null, degraded: null };
       subs.add(sub);
       startTimer();
       const view = views.get(viewKeyOf(sub));
-      if (view && view.seq !== null) {
+      if (view) {
+        // A view is a good render (see the header): the newest this browser can be given, so it is sent, after the state
+        // that says whether it is current (the data's and the render's to say, not the tokens file's: see the header).
+        if (failingNow(sub)) markStale(sub, view.at, "data");
+        else markFresh(sub);
         if (typeof lastEventId === "string" && lastEventId === view.seq) sub.needsFull = false;
         else sendFull(sub, view);
+        sub.holds = true;
       } else {
-        // Nothing rendered for this view yet: render it now rather than leave the page blank for a tick.
+        // No view yet: the tick draws it now (the panels; for a failed load, the degraded panels, or stale for a stream
+        // that holds panels), rather than leave the page blank for a tick.
         void tick();
       }
       return () => remove(sub);
@@ -436,15 +601,21 @@ export function makeLiveHub({
       return () => remove(sub);
     },
 
-    /** End every stream of a session at once (logout). */
-    endSession(sessionId) {
-      for (const sub of [...subs]) if (sub.sessionId === sessionId) finish(sub);
+    /**
+     * End every stream of a session at once (logout, a sign-in that replaced this browser's), saying `reason`: the
+     * server passes `elsewhere`, and the end carries only a `STREAM_ENDS` word or null whatever is passed.
+     */
+    endSession(sessionId, reason = null) {
+      for (const sub of [...subs]) if (sub.sessionId === sessionId) finish(sub, reason);
     },
 
-    /** End every stream and stop the timer; later subscribes are closed at once. */
+    /**
+     * End every stream with `shutdown` and stop the timer; later subscribes are closed at once. Not a sign-out: the
+     * sessions die with this process, but the page learns that from its next request, not from this goodbye.
+     */
     close() {
       closed = true;
-      for (const sub of [...subs]) finish(sub);
+      for (const sub of [...subs]) finish(sub, STREAM_SHUTDOWN);
       views.clear();
       loaded.clear();
       if (timer !== null) {

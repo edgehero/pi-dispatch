@@ -21,8 +21,24 @@
  * server ended the session: expiry, a revoke, a rotate) signs in again, at most once per `RELOGIN_WINDOW_MS`: a second
  * refusal within that window of a fresh sign-in is the end, said in a sentence. The window holds over the stream's whole
  * life, so a server that delivers one entry and then `end`, forever, cannot make the client sign in more than once a
- * minute (an entry between the two used to clear the rule, which was exactly that loop). A body that stops moving is
- * cut: `STREAM_IDLE_MS` on a stream (the console pings every 15 s), `timeoutMs` on any other response.
+ * minute (an entry between the two used to clear the rule, which was exactly that loop). A restart's re-login neither
+ * meets nor starts the window (issue #737), so a second console restart inside a minute does not end the chat: a 401
+ * whose body says `restart` (the console no longer knows this sign-in), or the first 401 after a `shutdown` end that no
+ * entry has followed. Only a 401 is ever a restart: an `end` event comes from a console that knows the session, whatever
+ * its data says. And AT MOST ONE such free re-login per stream that opened (200) since the last re-login: a console
+ * that answers every stream 401 `restart`, or a hostile one, would otherwise have the chat sign in again without bound
+ * (8,182 sign-ins in 51 simulated hours). A restarted console opens the stream it is asked for, so a real restart is
+ * counted only when it comes between a re-login and the stream that re-login reopens, and ends the chat only on two
+ * counted re-logins inside the window. Every re-login is still paced by a growing pause. A body that stops moving
+ * is cut: `STREAM_IDLE_MS` on a stream (the console pings every 15 s), `timeoutMs` on any other response.
+ *
+ * AN END THAT SAYS `shutdown` IS NOT A SIGN-OUT (issue #737). The console's `end` carries `{"ended": <reason>}`;
+ * `shutdown` (`STREAM_SHUTDOWN`) is the console stopping, so the stream is treated as a dropped connection: back off and
+ * reconnect with the same cookie. A restarted console no longer knows that session and answers 401, which takes the
+ * re-login path above; the sign-in runs inside the retry loop, so a console still coming up refuses it as it refuses
+ * the stream (backed off, counted) rather than ending the chat. Treating `shutdown` as an end was the old behaviour:
+ * it signed in again at once, to a console that was going away, so a console restart ended the chat's stream with
+ * "could not be reached", and the terminal said the sign-in had ended when only the connection had.
  *
  * THE TOKEN LEAVES THIS MACHINE ONLY WHEN THE OPERATOR SAID SO. The console speaks plain HTTP, so a non-loopback
  * address sends the token readable to everything on the path. `consoleAddressOf` therefore refuses a non-loopback
@@ -70,6 +86,15 @@ export const STREAM_IDLE_MS = 45_000;
  * enough that a server ending every connection cannot drive a sign-in loop, short against a real session's life.
  */
 export const RELOGIN_WINDOW_MS = 60_000;
+
+/**
+ * The word a console's stream `end` carries when the console itself is stopping (`admin/src/console/session-ends.mjs`,
+ * pinned equal to it by an admin test). Written out here, not imported: the worker never imports the admin package.
+ */
+export const STREAM_SHUTDOWN = "shutdown";
+
+/** A stream end's reason as the client keeps it: a short lowercase word, else null. Never printed. */
+const ENDED_RE = /^[a-z]{1,20}$/;
 
 /** The longest refusal sentence passed through from the console, as one line. */
 const REFUSAL_MAX_CHARS = 1000;
@@ -417,6 +442,19 @@ export function makeSseParser({ onEvent, onRetry = () => {}, onOversize = () => 
 	};
 }
 
+/**
+ * The reason an `end` event's data names (`{"ended": "revoked"}`), or null: data that is not JSON, an older console's
+ * `{}`, or a value outside `ENDED_RE`. Only `STREAM_SHUTDOWN` changes what the client does; the rest ride along.
+ */
+export function endedOf(data) {
+	try {
+		const ended = JSON.parse(data)?.ended;
+		return typeof ended === "string" && ENDED_RE.test(ended) ? ended : null;
+	} catch {
+		return null;
+	}
+}
+
 /** The money a preview reserves, as one line, or null. A worker-side reading of the console's `reserve` object. */
 export function reserveLine(r) {
 	if (!r || typeof r !== "object") return null;
@@ -455,8 +493,10 @@ function defaultSleep(ms, signal) {
  *     then `confirm(preview)` (a y/n the caller asks; no `confirm` is a no), then the confirm with the preview's ticket.
  *     Returns `{ok, result}`, `{declined}`, `{unchanged}` or `{refusal, status}` with the console's sentence as it was
  *     sent, on one line (`oneLine`).
- *   - `stream(path, {onEvent, signal, lastEventId})`: follow an event stream until `done` (`{done: outcome}`) or the
- *     signal aborts (`{detached: true}`); reconnects as the module comment says. Throws ConsoleError when it gives up.
+ *   - `stream(path, {onEvent, signal, lastEventId, onState})`: follow an event stream until `done` (`{done: outcome}`)
+ *     or the signal aborts (`{detached: true}`); reconnects as the module comment says, telling `onState` each step
+ *     (`{shutdown: true}` when the console said it is stopping, `{waiting: ms}` before a wait, `{relogin: true}`).
+ *     Throws ConsoleError when it gives up.
  */
 export function makeConsoleClient({ address, token, request = nodeHttp.request, sleep = defaultSleep, random = Math.random, now = Date.now, timeoutMs = REQUEST_TIMEOUT_MS, streamIdleMs = STREAM_IDLE_MS, backoff = BACKOFF } = {}) {
 	if (!address || (address.kind !== "tcp" && address.kind !== "unix")) throw new TypeError("makeConsoleClient: address must come from parseConsoleAddress");
@@ -620,7 +660,8 @@ export function makeConsoleClient({ address, token, request = nodeHttp.request, 
 
 	/**
 	 * One connection of a stream: `{status, retryAfter, error}` for a refused open, or how it ended once open:
-	 * `{done, outcome}`, `{end: true}` (the server ended the session), `{closed: true, received}` or `{aborted: true}`.
+	 * `{done, outcome}`, `{end: true, ended}` (the server ended the session, `ended` its reason or null),
+	 * `{closed: true, received}` (with `shutdown: true` when the console said it is stopping) or `{aborted: true}`.
 	 */
 	async function connectOnce(path, lastEventId, signal, onEvent, onRetry) {
 		const extra = lastEventId !== null ? { "last-event-id": lastEventId } : {};
@@ -629,7 +670,9 @@ export function makeConsoleClient({ address, token, request = nodeHttp.request, 
 		const { res, req } = opened;
 		if (res.statusCode !== 200) {
 			const { json } = await readJson(res, `GET ${path.split("?")[0]}`);
-			return { status: res.statusCode, retryAfter: retryAfterMs(res.headers["retry-after"]), error: errorOf(res.statusCode, json) };
+			// A 401's `ended` (issue #737) is kept as the end event's is: a short word or null, never printed.
+			const ended = typeof json?.ended === "string" && ENDED_RE.test(json.ended) ? json.ended : null;
+			return { status: res.statusCode, retryAfter: retryAfterMs(res.headers["retry-after"]), error: errorOf(res.statusCode, json), ended };
 		}
 		return new Promise((resolve) => {
 			let finished = false;
@@ -658,7 +701,11 @@ export function makeConsoleClient({ address, token, request = nodeHttp.request, 
 				onEvent: (ev) => {
 					if (finished) return;
 					if (ev.id !== null) lastId = ev.id;
-					if (ev.event === "end") return finish({ end: true });
+					if (ev.event === "end") {
+						const ended = endedOf(ev.data);
+						// The console stopping is a cut connection, not a session that ended: the caller backs off and reconnects.
+						return ended === STREAM_SHUTDOWN ? finish({ closed: true, shutdown: true }) : finish({ end: true, ended });
+					}
 					if (ev.event === "done") {
 						let outcome = "unknown";
 						try {
@@ -689,6 +736,11 @@ export function makeConsoleClient({ address, token, request = nodeHttp.request, 
 		let failures = 0;
 		let lastRelogin = null;
 		let relogins = 0;
+		// Set by a `shutdown` end: the console said it was stopping, so the next re-login is the restart's, not a session
+		// that ended again (issue #737).
+		let sinceShutdown = false;
+		// Whether a stream opened (200) since the last re-login (or the first sign-in): what one free re-login needs.
+		let openedSinceRelogin = false;
 		let baseMs = backoff.baseMs;
 		const onRetry = (ms) => {
 			baseMs = Math.min(backoff.capMs, Math.max(backoff.baseMs, ms));
@@ -699,23 +751,42 @@ export function makeConsoleClient({ address, token, request = nodeHttp.request, 
 		};
 		for (;;) {
 			if (signal?.aborted) return { detached: true };
-			if (cookie === null) await login();
 			let got;
 			try {
+				// Inside the retry, so a console that is restarting refuses the sign-in's connection as it refuses the
+				// stream's: backed off and counted, not the end of the chat.
+				if (cookie === null) await login();
 				got = await connectOnce(path, last, signal, onEvent, onRetry);
 			} catch (e) {
 				if (!(e instanceof ConsoleError)) throw e;
+				// A sign-in the console ANSWERED (a refused token, a bad request) is determinate: no wait changes it. Only no
+				// answer, a busy console or one failing on its side is waited out.
+				if (e.status !== null && e.status !== 429 && e.status < 500) throw e;
 				failures += 1;
 				if (failures >= backoff.maxFailures) throw new ConsoleError(`${e.message} (gave up after ${failures} tries)`);
 				if (!(await wait(backoffMs(failures, { baseMs, capMs: backoff.capMs, random })))) return { detached: true };
 				continue;
 			}
 			if (got.aborted) return { detached: true };
+			// No status is a connection that opened: it ended, closed or was done, but the console served it.
+			if (got.status === undefined) openedSinceRelogin = true;
 			if (got.lastEventId !== undefined && got.lastEventId !== null) last = got.lastEventId;
 			if (got.done) return { done: got.outcome };
+			// A connection that streamed entries again: the console is back as it was, so a stop it announced is over.
+			if (got.received > 0) sinceShutdown = false;
 			if (got.end || got.status === 401) {
+				// A console that restarted (its 401 says `restart`: it no longer knows this sign-in), and the first 401 after it
+				// said it was stopping, are not the session ending again: they neither meet nor start the window (issue
+				// #737), so a second restart inside a minute no longer ends the chat. Never an `end` (the console that sends
+				// one knows the session), and at most once per stream that opened since the last re-login (see the header):
+				// a console that only ever answers 401 `restart` gets its one counted re-login and then ends the chat. A real
+				// end (revoked, ended everywhere, a hostile server's endless ends) is held to the window as before; the pause
+				// below still paces every re-login, these included.
+				const restarted = got.status === 401 && (got.ended === "restart" || sinceShutdown) && openedSinceRelogin;
+				sinceShutdown = false;
+				openedSinceRelogin = false;
 				// Once per window over the stream's whole life: entries in between do not reset it (that was a sign-in loop).
-				if (lastRelogin !== null && now() - lastRelogin < RELOGIN_WINDOW_MS) {
+				if (!restarted && lastRelogin !== null && now() - lastRelogin < RELOGIN_WINDOW_MS) {
 					throw new ConsoleError(`the console at ${where} ended this sign-in again within ${Math.round(RELOGIN_WINDOW_MS / 1000)} s of a fresh one; the token may have been revoked or rotated`, { status: 401 });
 				}
 				relogins += 1;
@@ -723,7 +794,7 @@ export function makeConsoleClient({ address, token, request = nodeHttp.request, 
 				onState({ relogin: true });
 				// A short pause before signing in again, growing with each re-login, so even the allowed ones are paced.
 				if (!(await sleep(backoffMs(relogins, { baseMs: backoff.baseMs, capMs: backoff.capMs, random }), signal))) return { detached: true };
-				lastRelogin = now();
+				if (!restarted) lastRelogin = now();
 				continue;
 			}
 			if (got.status === 429) {
@@ -739,9 +810,14 @@ export function makeConsoleClient({ address, token, request = nodeHttp.request, 
 				continue;
 			}
 			if (got.status !== undefined) throw new ConsoleError(got.error, { status: got.status });
-			// Open, then closed without `done`: a cut stream (a slow reader, a restart). Reconnect from `last`.
+			// Open, then closed without `done`: a cut stream (a slow reader, a restart, or the console saying it is stopping).
+			// Reconnect from `last`, with the same cookie: a restarted console's 401 is what signs in again.
 			failures = got.received > 0 ? 1 : failures + 1;
 			if (failures >= backoff.maxFailures) throw new ConsoleError(`the console at ${where} kept closing the stream before it ended (gave up after ${failures} tries)`);
+			if (got.shutdown) {
+				sinceShutdown = true;
+				onState({ shutdown: true });
+			}
 			if (!(await wait(backoffMs(failures, { baseMs, capMs: backoff.capMs, random })))) return { detached: true };
 		}
 	}

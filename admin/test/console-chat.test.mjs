@@ -4,6 +4,7 @@ import { request } from "node:http";
 import { after, test } from "node:test";
 import { CHAT_REFUSALS } from "@edgehero/pi-dispatch/chat-mode";
 import { makeConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
+import { makeConsoleClient, parseConsoleAddress } from "@edgehero/pi-dispatch/console-client";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { makeLiveHub, stateOf } from "../src/console/live.mjs";
@@ -238,6 +239,8 @@ async function chatConsole() {
     pagePanels: realPages.pagePanels,
     queryKeyOf: realPages.pageQueryString,
     peekSession: (id, f) => sessions.peek(id, f),
+    // Wired as cli.mjs wires it: the reason a stream ends is the store's pure verdict.
+    endedReason: (id, f) => sessions.verdict(id, f).ended ?? null,
     readTokens,
     transcriptSince: (jobId, a, opts) => fleet.transcriptSince(jobId, a, opts),
     now,
@@ -316,7 +319,7 @@ async function chatConsole() {
   const settle = async (k) => {
     for (let i = 0; i < 200 && hub.size().streams !== k; i += 1) await new Promise((r) => setTimeout(r, 5));
   };
-  return { fleet, hub, rows, logs, planned, pushed, send, post, stream, settle, host, advance: (ms) => (t += ms) };
+  return { fleet, hub, file, rows, logs, planned, pushed, send, post, stream, settle, host, advance: (ms) => (t += ms) };
 }
 
 const entriesIn = (text) => [...text.matchAll(/id: (\S+)\nevent: entry\ndata: (.+)\n\n/g)].map(([, id, data]) => ({ sse: id, ...JSON.parse(data) }));
@@ -360,7 +363,7 @@ test("end to end: token sign-in, /api/run, the JSON transcript with a Last-Event
 
   // The steer: preview (summary, no reserve), then confirm with the ticket; one audit row with the digest, never the text.
   const preview = await c.post("/api/act/steer/preview", { jobId: "gh-live", text: STEER_TEXT, mode: "steer" }, cookie);
-  assert.equal(preview.status, 200, preview.text);
+  assert.equal(preview.status, 200, `${preview.text} (log: ${c.logs.join(" | ")})`);
   const p = preview.json();
   assert.equal(typeof p.ticket, "string");
   assert.ok(p.summary.some((line) => /Send a steer to running job gh-live, as alice/.test(line)), p.summary.join(" | "));
@@ -401,4 +404,41 @@ test("end to end: token sign-in, /api/run, the JSON transcript with a Last-Event
   const vPage = await c.send({ path: "/run?id=gh-live", headers: { cookie: vcookie } });
   assert.match(vPage.text, /a viewer sees the run's status only/);
   assert.ok(!vPage.text.includes('data-action="steer"'));
+});
+
+test("the terminal client on the real console: the console stopping is waited out with the sign-in kept; a session that ended is signed in again (issue #737)", { timeout: 30_000 }, async () => {
+  // `pi-dispatch chat`'s own client (worker/src/console-client.mjs) against this console's hub, so the word the hub
+  // writes on close and the word the client waits on are the same one, end to end.
+  const follow = async (c, onFirstEntry) => {
+    const states = [];
+    const waits = [];
+    // Each wait is refused (false), so the stream detaches at the first one and the test reads what led to it.
+    const client = makeConsoleClient({ address: parseConsoleAddress(c.host), token: OP_TOKEN, sleep: async (ms) => (waits.push(ms), false), random: () => 1 });
+    let fired = false;
+    const end = await client.stream("/api/transcript?id=gh-live&format=json", {
+      onState: (st) => states.push(st),
+      onEvent: (ev) => {
+        if (ev.event !== "entry" || fired) return;
+        fired = true;
+        void onFirstEntry();
+      },
+    });
+    return { end, states, waits, logins: c.rows.filter((r) => r.action === "login").length };
+  };
+
+  const stopping = await chatConsole();
+  stopping.fleet.add({ text: "working" });
+  const shut = await follow(stopping, () => stopping.hub.close());
+  assert.deepEqual(shut.end, { detached: true });
+  assert.deepEqual(shut.states.map((st) => Object.keys(st)[0]), ["shutdown", "waiting"], "a dropped connection: said, then backed off");
+  assert.equal(shut.logins, 1, "and the sign-in kept, not spent on a re-login");
+
+  const ended = await chatConsole();
+  ended.fleet.add({ text: "working" });
+  const out = await follow(ended, async () => {
+    ended.file.generation = 1;
+    await ended.hub.tick();
+  });
+  assert.deepEqual(out.end, { detached: true });
+  assert.deepEqual(out.states, [{ relogin: true }], "an operator ended every session: the client signs in again, it does not wait it out");
 });

@@ -94,7 +94,7 @@ import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindow
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT } from "@edgehero/pi-dispatch/reason-catalog";
 // Issue #710: what counts as a refusal on the overview is what both surfaces call one.
-import { OUTCOME_WORDS, outcomeWord } from "./words.mjs";
+import { OUTCOME_WORDS, outcomeWord, rowNumber } from "./words.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -1486,7 +1486,7 @@ export function envelopeChangeLines(before, after) {
   const usd = (m) => (Number.isSafeInteger(m) ? `$${formatMicros(m)}` : "-");
   const lines = [];
   const say = (label, a, b) => {
-    if (a !== b) lines.push(`${label}: ${a} -> ${b}`);
+    if (a !== b) lines.push(`${label}: ${a} to ${b}`);
   };
   say("window", before?.window ?? "-", after.window);
   say("total", before ? usd(before.totalMicros) : "-", usd(after.totalMicros));
@@ -5252,7 +5252,7 @@ export function renderBundleProfiles(bundles) {
   const names = Object.keys(bundles ?? {}).sort();
   if (names.length === 0) return "No bundle resolvers are declared in the settings overlay.";
   // The path through `scrubControls`: the overlay's validator holds it to a non-empty string, not to a charset.
-  return ["Bundle resolvers (settings overlay):", ...names.map((n) => scrubControls(`  ${n} -> ${bundles[n].path} (${bundles[n].format ?? "no format"})`))].join("\n");
+  return ["Bundle resolvers (settings overlay):", ...names.map((n) => scrubControls(`  ${n}: ${bundles[n].path} (${bundles[n].format ?? "no format"})`))].join("\n");
 }
 
 /**
@@ -5366,7 +5366,7 @@ export function bundleFacts(row) {
     `profile ${row?.profile ?? "-"} (${bundleDeclaredText(row)})`,
     row?.forkReviews ? "fork reviews get it" : "fork reviews do not",
     ends.length === 0 ? "no endpoints" : `${plural(ends.length, "endpoint", "endpoints")}: ${bundleEndpointsText(row)}`,
-    Array.isArray(row?.optedOut) && row.optedOut.length > 0 ? `${plural(row.optedOut.length, "trigger opts", "triggers opt")} out: ${row.optedOut.map((i) => `#${i}`).join(", ")}` : "no trigger opts out",
+    Array.isArray(row?.optedOut) && row.optedOut.length > 0 ? `${plural(row.optedOut.length, "trigger opts", "triggers opt")} out: ${row.optedOut.map((i) => `#${rowNumber(i)}`).join(", ")}` : "no trigger opts out",
   ];
 }
 

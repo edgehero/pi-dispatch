@@ -36,3 +36,25 @@ test("applySecurityHeaders sets every header in the set", () => {
   applySecurityHeaders({ setHeader: (k, v) => (set[k] = v) });
   assert.deepEqual(set, { ...SECURITY_HEADERS });
 });
+
+// Issue #737: the error pages are served under this same header set (the dispatcher sets it before any route or
+// refusal), so they must work under its CSP: no inline script, no inline style, no handler attribute, and the one
+// script by URL. Drawn here directly for every kind, with hostile values where a kind takes one.
+test("every error page holds to the CSP: one script by URL, no inline script or style, no on*= or style=", async () => {
+  const { ERROR_KINDS, errorPage } = await import("../src/console/error-pages.mjs");
+  const hostile = `"><script>alert(1)</script><style>*{}</style><img onerror=1 style=x>`;
+  for (const kind of ERROR_KINDS) {
+    for (const session of [null, { name: hostile, role: "operator" }]) {
+      const text = String(errorPage({ kind, session, readOnly: true, sentence: hostile, host: hostile, port: 7788, page: "runs", theme: "dark" }).html);
+      const label = `${kind}${session ? " signed in" : ""}`;
+      assert.deepEqual(text.match(/<script\b[^>]*>/g), ['<script src="/static/console.js" defer>'], label);
+      assert.ok(!/<style\b/i.test(text), `${label}: no style element`);
+      // Attribute values emptied first: \`html\` escapes every quote inside one, so a value never holds a \`"\`, and an escaped
+      // hostile name inside a title (" onerror=1") is text there, not an attribute.
+      const tags = text.replace(/"[^"]*"/g, '""');
+      assert.ok(!/<[^>]*\s(?:on[a-z]+|style)\s*=/i.test(tags), `${label}: no handler or style attribute`);
+      assert.ok(!/<[^>]*\s(?:href|src|action|formaction)\s*=\s*"\s*javascript:/i.test(text), label);
+      assert.ok(!text.includes("<script>alert") && !text.includes("<img onerror"), `${label}: the hostile value is escaped`);
+    }
+  }
+});

@@ -26,6 +26,11 @@ import { tempDir } from "./temp-dir.mjs";
  * VALKEY: `VALKEY_TEST_URL`, database 8. Not render-images' 7: without a server binary on PATH that test seeds
  * database 7 of the same server, and the two files run concurrently. The database must be empty and is emptied again
  * when done. Without `VALKEY_TEST_URL` the render tests are skipped.
+ *
+ * THE PAGES THAT ARE NOT SCREENS (issue #737) are listed here too, in `STATIC_SHOTS`, and drawn in this process
+ * with no deployment at all (`renderStatic`): the sign-in pages and the error pages, goldens beside the screens' in
+ * `fixtures/console/`. The states of a page no deployment reaches (a preview open, a live note, a sign-in notice) are
+ * `helpers/panel-goldens.mjs`'s, under `fixtures/console/panels/`.
  */
 
 const SELF = fileURLToPath(import.meta.url);
@@ -53,6 +58,56 @@ export const SHOTS = Object.freeze([
   ["audit", "audit", ""],
 ]);
 export const ROLES = Object.freeze(["viewer", "operator"]);
+
+/**
+ * The pages that are not screens (issue #737), each a golden of its own beside the screens': the two sign-in pages
+ * and the error pages, `<shot>.<role>`, the role `anonymous` where nobody is signed in (the sign-in pages, and the 421,
+ * 503 and 500 pages, which never draw a session). A closed list, so every page the server can answer is held to the
+ * page rules, a golden and the width check (which requires the two sign-in goldens by name). Drawn by the real modules
+ * with no deployment at all (`renderStatic`), so `console-static-pages.test.mjs` needs no Valkey.
+ */
+export const STATIC_SHOTS = Object.freeze(["login.anonymous", "login-code.anonymous", "error-404.operator", "error-404.viewer", "error-400.operator", "error-403.viewer", "error-421.anonymous", "error-503.anonymous"]);
+
+/** The people the static shots are drawn for: the screens' own (`renderInChild` signs them in by these names). */
+const STATIC_SESSIONS = Object.freeze({ operator: Object.freeze({ name: "ops", role: "operator" }), viewer: Object.freeze({ name: "watcher", role: "viewer" }) });
+
+/**
+ * Every `STATIC_SHOTS` page, `{ [shot]: { status, html } }`, drawn as `server.mjs` draws it: the sign-in page with the
+ * limits and the listen word a console started with no settings has (`consoleConfig`'s defaults, read the way
+ * `getLogin` reads them: 60 idle minutes, 12 hours, a loopback TCP listener), the one-time link page in its first
+ * state, and each error page through `errorPage` with the kind, status and session `sendFailure` gives it. A kind says
+ * its own catalog sentence, so only the 400 is handed one: the page parser's refusal of a query it refuses. The 421
+ * asks for the ErrorPage card's sample host and port (`myhost.lan`, 7788; the page prints the request's, whatever they
+ * are). The project modules are imported here, never at the top of this file, which the child also runs: there they
+ * must load after its clock is frozen.
+ */
+export async function renderStatic() {
+  const { parsePageQuery } = await import("../../src/console/pages.mjs");
+  const { loginCodePage, loginPage } = await import("../../src/console/shell.mjs");
+  const { errorPage } = await import("../../src/console/error-pages.mjs");
+  const { consoleConfig } = await import("../../src/console/config.mjs");
+  const config = consoleConfig({ env: {}, dir: "/deployment" });
+  assert.equal(config.listen.kind, "tcp", "the default console listens on loopback TCP");
+  const limits = { idleMinutes: Math.floor(config.idleMs / 60000), maxHours: Math.floor(config.maxMs / 3600000) };
+  const refusal = parsePageQuery("runs", "before=xyzzy").refusal;
+  assert.equal(typeof refusal, "string", "the runs page refuses a cursor that is not a number");
+  const err = (opts) => errorPage({ theme: null, readOnly: false, ...opts });
+  const draws = {
+    "login.anonymous": () => ({ status: 200, html: loginPage({ theme: null, notice: null, limits, listen: "tcp" }) }),
+    "login-code.anonymous": () => ({ status: 200, html: loginCodePage({ theme: null }) }),
+    "error-404.operator": () => err({ kind: "no-page", status: 404, session: STATIC_SESSIONS.operator }),
+    "error-404.viewer": () => err({ kind: "no-page", status: 404, session: STATIC_SESSIONS.viewer }),
+    "error-400.operator": () => err({ kind: "bad-query", status: 400, sentence: refusal, page: "runs", session: STATIC_SESSIONS.operator }),
+    "error-403.viewer": () => err({ kind: "operators-only", status: 403, session: STATIC_SESSIONS.viewer }),
+    "error-421.anonymous": () => err({ kind: "host", status: 421, host: "myhost.lan", port: 7788 }),
+    "error-503.anonymous": () => err({ kind: "unavailable", status: 503 }),
+  };
+  assert.deepEqual(Object.keys(draws), [...STATIC_SHOTS], "a drawing for every static shot, in its order");
+  return Object.fromEntries(STATIC_SHOTS.map((shot) => {
+    const { status, html } = draws[shot]();
+    return [shot, { status, html: String(html) }];
+  }));
+}
 
 // Control bytes are built, never typed.
 export const ESC = String.fromCharCode(27);
@@ -146,7 +201,7 @@ async function renderInChild() {
   const { assembleInsights } = await import("../../src/insights-assembly.mjs");
   const { makeWhatIfReader } = await import("../../src/console/whatif.mjs");
   const pricing = await import("../../../worker/src/pricing.mjs");
-  const { makeConsoleAudit, readConsoleAudit } = await import("../../../worker/src/console-audit.mjs");
+  const { makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } = await import("../../../worker/src/console-audit.mjs");
   const { sessionKeyFor } = await import("../../../worker/src/session-key.mjs");
   const P = await import("../../src/console/pages.mjs");
   const version = JSON.parse(readFileSync(fileURLToPath(new URL("../../../worker/package.json", import.meta.url)), "utf8")).version;
@@ -249,16 +304,23 @@ async function renderInChild() {
         now: () => NOW,
       }),
       pricedModels: () => ["acme/model-1", "acme/model-2"],
-      audit: ({ limit, before }) => readConsoleAudit({ logsDir: paths.logs, limit, before }),
+      // The audit page as serve wires it (`cli.mjs` `pageDeps`, issue #737): the reader asked for each row's place, and
+      // the chain's walk asked for its last good row, stamped with when it ran (serve caches it for 30 s, so the page
+      // says how old it is). The fixture's four rows and the damaged line after them are what both read.
+      audit: ({ limit, before, positions }) => readConsoleAudit({ logsDir: paths.logs, limit, before, positions }),
+      auditVerify: () => ({ ...verifyConsoleAudit({ logsDir: paths.logs, withLast: true }), checkedAt: NOW }),
       subscriptions: () => RM.readSubscriptions({ subscriptionsPath: paths.subs }),
       env: { ...env, GITLAB_URL: "https://gitlab.example.com" },
       now: () => NOW,
     };
     const pages = {};
     const readOnly = {};
+    // As serve draws a page (`server.mjs` `pageHandler`): with the token's live-stream limit a console started with no
+    // settings has (PI_CONSOLE_MAX_STREAMS, 4), which a live page's limit note states, and no flash.
     const draw = async (name, ctx) => {
-      const rendered = await P.renderPage(name, ctx);
-      return { status: rendered.status, html: String(rendered.html), panels: await P.pagePanels(name, ctx) };
+      const full = { ...ctx, theme: null, flash: null, maxStreams: 4 };
+      const rendered = await P.renderPage(name, full);
+      return { status: rendered.status, html: String(rendered.html), panels: await P.pagePanels(name, full) };
     };
     for (const [shot, name, qs] of SHOTS) {
       const parsed = P.parsePageQuery(name, new URLSearchParams(qs));

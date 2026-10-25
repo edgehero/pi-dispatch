@@ -22,11 +22,13 @@
  * whose panels are still the old markup is in `LEGACY_PAGES`, and its panels are drawn inside `<div class="legacy">`
  * (`legacyWrap`), byte for byte as before, until that page's own pull request converts it.
  */
-import { CONSOLE_AUDIT_CURSOR_RE } from "@edgehero/pi-dispatch/console-audit";
 import { FORGES } from "@edgehero/pi-dispatch/forges";
 import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
 import { html, page } from "./html.mjs";
 import { legacyWrap, NAV_PARKED_ID, navParkedHtml, shellHtml } from "./shell.mjs";
+import { auditAbout, auditChain, auditFilter } from "./panels/audit.mjs";
+import { AUDIT_PARAMS, auditQueryString, parseAuditQuery, readAuditView } from "./audit-view.mjs";
+import { forbiddenContent } from "./error-pages.mjs";
 import {
   auditLog,
   configMcp,
@@ -112,7 +114,7 @@ export const PAGES = Object.freeze({
  * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
  * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
  */
-export const LEGACY_PAGES = Object.freeze(["overview", "runs", "run", "parked", "insights", "fleet", "config", "audit", "login", "login-code", "forbidden"]);
+export const LEGACY_PAGES = Object.freeze(["overview", "runs", "run", "parked", "insights", "fleet", "config"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
@@ -124,7 +126,7 @@ const PAGE_PANELS = Object.freeze({
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
   config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles], ["p-secret-bundles", configSecretBundles]],
-  audit: [["p-audit", auditLog]],
+  audit: [["p-audit-chain", auditChain], ["p-audit-filter", auditFilter], ["p-audit", auditLog], ["p-audit-about", auditAbout]],
 });
 
 /**
@@ -148,7 +150,7 @@ const PAGE_PARAMS = Object.freeze({
   insights: ["range", "whatif", "flow", "paths"],
   fleet: [],
   config: [],
-  audit: ["before"],
+  audit: [...AUDIT_PARAMS],
 });
 
 /** The most parameters, and the longest value, a query may carry before anything looks at what they say. */
@@ -181,7 +183,9 @@ function asParams(searchParams) {
  *   - insights: `range`, one of 7d, 30d, mtd, default 30d; `whatif` (`<provider>/<model>`, `WHATIF_MODEL_RE`) and `flow`
  *     (the skill-name charset), together or not at all; `paths`, only `full`; `{ range, whatif, flow, paths }`, each
  *     absent one null. `paths=full` is ACCEPTED from anyone, and honoured for an operator alone (`insightsFullPaths`).
- *   - audit: `before` (an audit position, `YYYY-MM:<line>`, `readConsoleAudit`'s cursor); `{ before }`.
+ *   - audit: `before` (an audit position, `YYYY-MM:<line>`, `readConsoleAudit`'s cursor), `who`, `action`, `outcome`,
+ *     `q` and `seq` (not with `before`), each judged by `audit-view.mjs` `parseAuditQuery`; `{ before, who, action,
+ *     outcome, q, seq }`, each absent one null.
  *   - every other screen: no parameter at all; `{}`.
  *
  * Bounded first: at most `QUERY_LIMITS.params` parameters, each value at most `QUERY_LIMITS.valueLength` characters,
@@ -237,14 +241,10 @@ export function parsePageQuery(name, searchParams) {
       if (paths !== null && paths !== "full") return { refusal: "paths must be full (or left out for folder names)" };
       return { query: Object.freeze({ range, whatif, flow, paths }) };
     }
-    case "audit": {
-      const raw = one("before");
-      if (raw === null) return { query: Object.freeze({ before: null }) };
-      // Exactly `readConsoleAudit`'s cursor (`YYYY-MM:<line>`, its own regex), so a refused cursor never reaches a read.
-      const m = CONSOLE_AUDIT_CURSOR_RE.exec(raw);
-      if (m === null || !Number.isSafeInteger(Number(m[2]))) return { refusal: "before must be an audit position (YYYY-MM:line, as the Older rows link gives it)" };
-      return { query: Object.freeze({ before: raw }) };
-    }
+    case "audit":
+      // Issue #737: the audit page's own parser (audit-view.mjs) judges every parameter, the cursor exactly as
+      // `readConsoleAudit` takes it, so a refused cursor or filter never reaches a read.
+      return parseAuditQuery(params);
     default:
       return { query: Object.freeze({}) };
   }
@@ -264,7 +264,7 @@ export function pageQueryString(name, query) {
   else if (name === "insights") {
     for (const k of ["range", "whatif", "flow", "paths"]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
   }
-  else if (name === "audit" && q.before !== null && q.before !== undefined) p.set("before", String(q.before));
+  else if (name === "audit") return auditQueryString(q);
   return p.toString();
 }
 
@@ -418,6 +418,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.snapshot = await deps.fleet.snapshot();
     } catch {
       data.snapshot = null;
+      // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
+      data.readFailed = true;
     }
   }
   if (reads.includes("subscriptions")) data.subscriptions = await subscriptionsOf(deps);
@@ -426,6 +428,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.runsPage = await deps.fleet.runsPage({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
     } catch {
       data.runsPage = null;
+      data.readFailed = true;
     }
   }
   if (reads.includes("run")) {
@@ -433,6 +436,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.run = await deps.fleet.runById(q.id);
     } catch {
       data.run = { missing: true };
+      data.readFailed = true;
     }
     if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record).then(({ children, searched }) => ({ children, childrenSearched: searched })));
   }
@@ -528,7 +532,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   if (reads.includes("audit")) {
     try {
-      data.audit = await deps.audit({ limit: AUDIT_PER_PAGE, before: q.before ?? null });
+      data.audit = await readAuditView({ read: (a) => deps.audit({ ...a, positions: true }), verify: deps.auditVerify, query: q, perPage: AUDIT_PER_PAGE });
     } catch {
       data.audit = null;
     }
@@ -594,7 +598,7 @@ export async function renderPage(name, ctx) {
   const query = pageQueryString(name, ctx?.query);
   const theme = ctx?.theme ?? null;
   if (meta.auth === "operator" && role !== "operator") {
-    const body = shellHtml(name, ctx, legacyWrap("forbidden", html`<p class="warn">This page is for operators only.</p>`));
+    const body = shellHtml(name, ctx, forbiddenContent());
     return { status: 403, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, theme }) };
   }
   const panels = panelFragments(name, ctx);
@@ -603,7 +607,7 @@ export async function renderPage(name, ctx) {
   // Issue #710: none for a run that never had one to show: refused before it started, or no record of a run that is not
   // running (not a run id, queued, or unknown), which the outcome banner says once.
   const extra = name === "run" && runHasTranscript(ctx?.data) ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
-  const body = shellHtml(name, ctx, legacyWrap(name, html`${panels.map(({ id, fragment }) => html`<section id="${id}" data-panel>${fragment}</section>`)}${extra}`));
+  const body = shellHtml(name, ctx, html`${panels.map(({ id, fragment }) => legacyWrap(name, html`<section id="${id}" data-panel>${fragment}</section>`))}${extra === null ? null : legacyWrap(name, extra)}`);
   // A run with no record yet but a live transcript or progress snapshot is a running job (its record is written at its
   // end): 200, not 404.
   const progressing = ctx?.data?.progress !== null && typeof ctx?.data?.progress === "object" && ctx.data.progress.v === 1;

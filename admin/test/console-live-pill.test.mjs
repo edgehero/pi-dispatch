@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
+import { CONSOLE_SCRIPT, RETRY_MS } from "../src/console/script.mjs";
 import { LIVE_STATES } from "../src/console/shell.mjs";
+import { fakeFetch } from "./helpers/script-dom.mjs";
 
 // The browser script on a live page (issue #737): the live pill through every state of the stream, the panel swap and
 // what it reveals, the end of a session, and the shell behaviours around them (the More menu's Escape, focus leaving it,
@@ -9,6 +10,13 @@ import { LIVE_STATES } from "../src/console/shell.mjs";
 // once a scroll takes the button wholly out; a failed copy; a phone's navigation scrolled to the current pill once and
 // to a focused pill with its ring, and never re-centred). The real `CONSOLE_SCRIPT` runs over a hand-made DOM stub and an
 // `EventSource` stub, as console-panels.test.mjs and console-login-next.test.mjs run it; nothing here is a browser.
+// Every run passes `fetch` too: a closed stream makes the script ask `/api/whoami`, and a `fetch` left out would be
+// Node's own, which reaches the network (`noFetch` fails the test instead).
+
+/** A `fetch` for a page that must never ask anything. */
+const noFetch = (url) => {
+  throw new Error(`this page asked ${url}, and nothing here should`);
+};
 
 /** A stub element: attributes, `hidden`, listeners, and whatever `extra` adds. */
 function element(attrs = {}, extra = {}) {
@@ -54,10 +62,12 @@ function liveDom({ copyOk = true } = {}) {
   const inMenu = element();
   const more = element({}, { open: false, contains: (n) => n === more || n === summary || n === inMenu, querySelector: (s) => (s === "summary" ? summary : null) });
   const docListeners = new Map();
+  // The top bar's person, as the shell draws it (issue #737): a probe's 200 reloads only into this one.
+  const who = element({ "data-name": "ops", "data-role": "operator" });
   const document = {
     body: element({ "data-page": "fleet", "data-live": "fleet", "data-query": "repo=acme%2Fweb" }),
     getElementById: (id) => ({ "live-status": status, "p-x": panel })[id] ?? null,
-    querySelector: (s) => ({ "details.more": more })[s] ?? null,
+    querySelector: (s) => ({ "details.more": more, ".who": who })[s] ?? null,
     querySelectorAll: () => [],
     addEventListener: (type, fn) => docListeners.set(type, fn),
     activeElement: null,
@@ -75,12 +85,14 @@ function liveDom({ copyOk = true } = {}) {
   }
   const assigned = [];
   const timers = [];
+  const location = { hash: "", pathname: "/fleet", assign: (u) => assigned.push(u), reloads: 0, reload() { this.reloads += 1; } };
+  const fetch = fakeFetch();
   const clipboard = { writeText: (t) => (copyOk ? Promise.resolve(t) : Promise.reject(new Error("denied"))) };
-  const fn = new Function("document", "location", "history", "EventSource", "navigator", "isSecureContext", "setTimeout", CONSOLE_SCRIPT);
-  fn(document, { hash: "", pathname: "/fleet", assign: (u) => assigned.push(u) }, { replaceState() {} }, EventSource, { clipboard }, true, (f) => timers.push(f));
+  const fn = new Function("document", "location", "history", "EventSource", "navigator", "isSecureContext", "setTimeout", "fetch", CONSOLE_SCRIPT);
+  fn(document, location, { replaceState() {} }, EventSource, { clipboard }, true, (f, ms) => timers.push(Object.assign(f, { ms })), fetch);
   // Each element `swap` will have put in the panel is shown by `panel` events from here on.
   const swap = () => { swapped = true; };
-  return { status, word, panel, copy, more, summary, inMenu, document, docListeners, streams, assigned, timers, swap };
+  return { status, word, panel, copy, more, summary, inMenu, document, docListeners, streams, assigned, timers, swap, fetch, location };
 }
 
 /** The pill as a reader and assistive technology meet it: its classes, its word, its tooltip. */
@@ -100,7 +112,7 @@ test("the script drives the pill through the stream: open, a drop, a refusal, a 
   const d = liveDom();
   assert.equal(d.streams.length, 1);
   const es = d.streams[0];
-  assert.equal(es.url, "/api/events?page=fleet&repo=acme%2Fweb", "the page's own stream, with its query");
+  assert.equal(es.url, "/api/events?page=fleet&repo=acme%2Fweb&as=ops.operator", "the page's own stream, with its query and its person (issue #737)");
   assert.deepEqual(pill(d), { cls: "live live--off", word: "Not live", title: LIVE_STATES.start.title }, "drawn not live until the stream opens");
 
   es.readyState = 1;
@@ -117,9 +129,13 @@ test("the script drives the pill through the stream: open, a drop, a refusal, a 
   es.emit("open");
   assert.deepEqual(pill(d), { cls: "live", word: "Live", title: null });
 
-  // A refused stream (429 over the limit, 401): the browser has CLOSED it (readyState 2) and will not retry.
+  // A refused stream (a 429 over the limit, a 401, a 503): the browser has CLOSED it (readyState 2) and will not retry,
+  // and only the console can say which it was. A 200 from /api/whoami is a session that holds: the stream limit.
   es.readyState = 2;
   es.emit("error");
+  assert.deepEqual(d.fetch.calls.map((c) => [c.method, c.url]), [["GET", "/api/whoami"]], "the closed stream is asked about, once");
+  assert.equal(pill(d).word, "Reconnecting", "not Live while the question is out, and nothing more until the console answers");
+  await d.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator", readOnly: false });
   assert.deepEqual(pill(d), { cls: "live live--off", word: "Not live", title: "Not live: reload after closing another console tab." });
 
   // A panel arriving is the stream at work: Live, with the refusal's tooltip removed.
@@ -135,11 +151,57 @@ test("the script drives the pill through the stream: open, a drop, a refusal, a 
   assert.deepEqual(pill(d), { cls: "live live--retry", word: "Reconnecting", title: LIVE_STATES.retry.title });
 
   // The session ended: the stream is closed, the pill says Signed out with the sign-out glyph (live--out), and the page
-  // goes to sign-in.
-  es.emit("end");
+  // goes to sign-in, saying why only with one of the console's own reasons.
+  es.emit("end", { data: JSON.stringify({ ended: "idle" }) });
   assert.equal(es.closed, true);
   assert.deepEqual(pill(d), { cls: "live live--off live--out", word: "Signed out", title: null });
-  assert.deepEqual(d.assigned, ["/login"]);
+  assert.deepEqual(d.assigned, ["/login?ended=idle"]);
+});
+
+test("a closed stream the console cannot be asked about keeps the page Reconnecting and asks again every 2 s; a 401 is Signed out", async () => {
+  const d = liveDom();
+  const es = d.streams[0];
+  es.readyState = 2;
+  es.emit("error");
+  await d.fetch.open("/api/whoami").fail();
+  assert.deepEqual(pill(d), { cls: "live live--retry", word: "Reconnecting", title: LIVE_STATES.retry.title }, "no answer: the page stays as it is");
+  assert.deepEqual(d.timers.map((t) => t.ms), [RETRY_MS], "and asks again in 2 s");
+  d.timers.shift()();
+  await d.fetch.open("/api/whoami").answer(503, { error: "the console's tokens file cannot be used right now" });
+  assert.equal(pill(d).word, "Reconnecting", "a 503 is the console unable to say: the same");
+  d.timers.shift()();
+  await d.fetch.open("/api/whoami").answer(401, { error: "sign in first", ended: "revoked" });
+  assert.deepEqual(pill(d), { cls: "live live--off live--out", word: "Signed out", title: null });
+  assert.deepEqual(d.assigned, ["/login?ended=revoked"], "sign-in, with the answer's reason");
+  // A reason the console does not have is never put in the address.
+  const odd = liveDom();
+  odd.streams[0].readyState = 2;
+  odd.streams[0].emit("error");
+  await odd.fetch.open("/api/whoami").answer(401, { ended: "<script>" });
+  assert.deepEqual(odd.assigned, ["/login"]);
+  // After a failed ask, a 200 is the console back: the page reloads to reopen its stream.
+  const back = liveDom();
+  back.streams[0].readyState = 2;
+  back.streams[0].emit("error");
+  await back.fetch.open("/api/whoami").fail();
+  back.timers.shift()();
+  await back.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
+  assert.equal(back.location.reloads, 1);
+  assert.equal(pill(back).word, "Reconnecting", "not Not live: the console answered, so the page reloads");
+  // A 200 that names nobody, or someone else, is a browser now signed in as another: sign-in saying so, never a reload
+  // (#737), and never the stream limit, at the first ask or after one that failed (the server refuses this page's
+  // stream 401 when the cookie is another person's, which closes it as a 429 would).
+  for (const [failFirst, body] of [[true, {}], [false, { name: "bob", role: "operator" }], [false, { name: "ops", role: "viewer" }]]) {
+    const other = liveDom();
+    other.streams[0].readyState = 2;
+    other.streams[0].emit("error");
+    if (failFirst) {
+      await other.fetch.open("/api/whoami").fail();
+      other.timers.shift()();
+    }
+    await other.fetch.open("/api/whoami").answer(200, body);
+    assert.deepEqual([other.location.reloads, other.assigned, pill(other).word], [0, ["/login?ended=switched"], "Signed out"], JSON.stringify(body));
+  }
 });
 
 test("a panel the stream swaps in has its Copy buttons revealed (a clipboard in a secure context), and a failed copy never says Copied", async () => {
@@ -231,7 +293,7 @@ function navDom({ pills, navWidth = 300, rowWidth = 1000, scrollLeft = 0, moreCu
     querySelectorAll: () => [],
     addEventListener() {},
   };
-  new Function("document", "location", "history", "EventSource", "ResizeObserver", CONSOLE_SCRIPT)(document, { hash: "", pathname: "/fleet" }, { replaceState() {} }, undefined, ResizeObserver);
+  new Function("document", "location", "history", "EventSource", "ResizeObserver", "fetch", CONSOLE_SCRIPT)(document, { hash: "", pathname: "/fleet" }, { replaceState() {} }, undefined, ResizeObserver, noFetch);
   const focus = (el) => listeners.get("focusin")({ target: el });
   return { nav, els, summary, menuLink, observed, listeners, focus };
 }
@@ -327,7 +389,7 @@ function moreDom({ bar = { left: 16, top: 20, width: 343, height: 44 }, navBox =
     addEventListener() {},
   };
   const getComputedStyle = computed ? (el) => (el === more ? style : {}) : undefined;
-  new Function("document", "location", "history", "EventSource", "ResizeObserver", "requestAnimationFrame", "getComputedStyle", CONSOLE_SCRIPT)(document, { hash: "", pathname: "/fleet" }, { replaceState() {} }, undefined, ResizeObserver, (f) => frames.push(f), getComputedStyle);
+  new Function("document", "location", "history", "EventSource", "ResizeObserver", "requestAnimationFrame", "getComputedStyle", "fetch", CONSOLE_SCRIPT)(document, { hash: "", pathname: "/fleet" }, { replaceState() {} }, undefined, ResizeObserver, (f) => frames.push(f), getComputedStyle, noFetch);
   /**
    * A click on the button as the browser runs it: the click's listeners, then the details toggles, then its toggle event
    * and the next frame, in either order (the event is queued as a task, the frame comes at the next paint); `steps`
@@ -380,7 +442,7 @@ test("on a phone the script opens More's list under its own button: right edges 
 });
 
 test("More opens on a click that moves no focus with its button cut by the row: the row brings the button in whole, ring and all, then the list is placed, and the menu stays open", () => {
-  // The third review's case at every phone width: element.click() on a button the row cuts, 355..395 in a 375-wide row.
+  // At every phone width: element.click() on a button the row cuts, 355..395 in a 375-wide row.
   const end = moreDom({ button: { left: 355, width: 40, top: 80, height: 40 } });
   end.click();
   assert.equal(end.more.open, true, "open");
@@ -481,7 +543,7 @@ test("above a phone the CSS places More's list and the script does not: it only 
   assert.equal(wide.more.open, true);
   assert.equal(wide.nav.scrollLeft, 0);
   // A browser that cannot say where the CSS put the list (no getComputedStyle) leaves it to the CSS: nothing is placed,
-  // scrolled or closed, however its button sits (review mutant S20).
+  // scrolled or closed, however its button sits.
   const bare = moreDom({ computed: false, button: { left: 355, width: 40, top: 80, height: 40 } });
   bare.click();
   assert.deepEqual([bare.more.open, bare.nav.scrollLeft, bare.list.style], [true, 0, { left: "", right: "", top: "" }]);

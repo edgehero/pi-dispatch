@@ -104,6 +104,31 @@ test("an append failure refuses the write: fn never runs, nothing is written, an
   assert.match(said[0], /last row for ticket abcdefabcdef says ok and is wrong/);
 });
 
+// Issue #737: the console links a write's banner to its rows by wrapping the writer OUTSIDE auditedWrite, which stays as
+// it is (audited-write.mjs UNCHANGED, checked). This holds the composition: the first row is the ok row, before the write.
+test("a capturing writer around auditedWrite sees the ok row first, before the write, and a compensating row after it", async () => {
+  const { capturingAudit } = await import("../src/console/actions.mjs");
+  const logsDir = tempDir("pd-737-capture-");
+  const real = makeConsoleAudit({ logsDir });
+  real.append({ actor: ACTOR, action: "write", kind: "setting-set", target: "/s", outcome: "ok", ticket: "aaaaaaaaaaaa" });
+  const audit = capturingAudit(real);
+  let firstWhenWritten;
+  const res = auditedWrite({ audit, actor: ACTOR, kind: "setting-set", target: "/s" }, () => {
+    firstWhenWritten = audit.first();
+    return { invalid: "the file changed" };
+  });
+  assert.equal(res.invalid, "the file changed");
+  const rows = rowsOf(logsDir);
+  assert.deepEqual(rows.map((r) => [r.seq, r.outcome]), [[1, "ok"], [2, "ok"], [3, "failed"]]);
+  assert.equal(firstWhenWritten, 2, "the ok row is appended, and its seq known, before the write runs");
+  assert.deepEqual([audit.first(), audit.last()], [2, 3], "the compensating row moves the latest, never the first");
+  // A refused first append: no row, so no seq, and the write never runs.
+  const none = capturingAudit(brokenAudit());
+  let ran = false;
+  auditedWrite({ audit: none, actor: ACTOR, kind: "setting-set", target: "/s" }, () => (ran = true));
+  assert.deepEqual([ran, none.first(), none.last()], [false, null, null]);
+});
+
 test("the chain verifies after a mix of panel rows and CLI rows appended to one directory", () => {
   const logsDir = tempDir("pd-642-mixed-");
   const cli = makeConsoleAudit({ logsDir });

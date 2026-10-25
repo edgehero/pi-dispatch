@@ -3,8 +3,18 @@ import { test } from "node:test";
 import { LEGACY_PAGES, PAGES, panelIds, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { ICON_NAMES, SPRITE } from "../src/console/pulse-icons.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
-import { LIVE_GLYPHS, LIVE_STATES, NAV, NAV_MORE, NAV_PARKED_ID, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
+import { confirmSlotHtml, doneBannerHtml, heldNoteHtml } from "../src/console/confirm-view.mjs";
+import { forbiddenContent } from "../src/console/error-pages.mjs";
+import { html } from "../src/console/html.mjs";
+import { STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
+import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "../src/console/session-ends.mjs";
+import { LINK_NOTICES, LINK_STATES, LISTEN_FOOTERS, NO_SCRIPT_TEXT, linkContent, signInContent } from "../src/console/signin.mjs";
+import { LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, frameHtml, legacyWrap, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "../src/console/theme.mjs";
+import { assertClean } from "./helpers/console-pages-harness.mjs";
+
+/** What both sign-in pages say first without a script: the sentence, as one of the card's notices. */
+const NO_SCRIPT = `<noscript><div class="banner banner--sm tone-attention" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></span><div><p class="banner__t">${NO_SCRIPT_TEXT}</p></div></div></noscript>`;
 
 // The Pulse shell (issue #737, `shell.mjs`): the top bar, the navigation, the live pill, the theme button and the title
 // bar every page is drawn in, and the browser script's side of them. Pure renders over hand-made page data; the goldens
@@ -16,10 +26,28 @@ const HOSTILE = `<img src=x onerror=alert(1)>"'${ESC}`;
 const ROLES = ["viewer", "operator"];
 
 /** Page `name` drawn for `role` over `data` (empty by default: every panel says what it could not read). */
-async function draw(name, { role = "operator", data = {}, readOnly = false, theme = null, sessionName = role === "operator" ? "ops" : "watcher" } = {}) {
-  const query = parsePageQuery(name, name === "run" ? "id=gh-1" : "").query;
-  const out = await renderPage(name, { query, session: { name: sessionName, role }, data: { now: 0, env: {}, ...data }, readOnly, theme });
+async function draw(name, { role = "operator", data = {}, readOnly = false, theme = null, sessionName = role === "operator" ? "ops" : "watcher", flash = null, maxStreams = 4, slot = undefined, query = null } = {}) {
+  const q = query ?? parsePageQuery(name, name === "run" ? "id=gh-1" : "").query;
+  const out = await renderPage(name, { query: q, session: { name: sessionName, role }, data: { now: 0, env: {}, ...data }, readOnly, theme, flash, maxStreams, slot });
   return { status: out.status, html: String(out.html) };
+}
+
+/** The `[start, end)` of each `.legacy` box in a page, its nested divs balanced. */
+function boxSpans(html) {
+  const spans = [];
+  for (let at = html.indexOf('<div class="legacy">'); at !== -1; at = html.indexOf('<div class="legacy">', at + 1)) {
+    const tags = /<div\b|<\/div>/g;
+    tags.lastIndex = at;
+    let depth = 0;
+    for (let m = tags.exec(html); m !== null; m = tags.exec(html)) {
+      depth += m[0] === "</div>" ? -1 : 1;
+      if (depth === 0) {
+        spans.push([at, m.index + m[0].length]);
+        break;
+      }
+    }
+  }
+  return spans;
 }
 
 const count = (text, needle) => text.split(needle).length - 1;
@@ -82,7 +110,11 @@ test("every page, both roles: one h1, one sprite, a skip link to the focusable m
 
 test("the title bar: the page's title, and the run detail's back link to Runs with the run named", async () => {
   assert.match((await draw("overview")).html, /<div class="titlebar"><div class="titlebar__lead"><h1>Overview<\/h1><\/div><\/div>/);
-  assert.match((await draw("audit", { role: "viewer" })).html, /<h1>Audit log<\/h1><\/div><\/div>\n<div class="legacy"><p class="warn">This page is for operators only\.<\/p><\/div>/);
+  // A viewer refused the audit log: its title, the operators-only card, no wrapper, no audit panel, and no Reload to it.
+  const refused = (await draw("audit", { role: "viewer" })).html;
+  assert.match(refused, /<h1>Audit log<\/h1><\/div><\/div>\n/);
+  assert.ok(refused.includes(String(forbiddenContent())), "the operators-only card");
+  for (const absent of ['class="legacy"', 'id="p-audit', 'class="titlebar__end"', "Drawn at"]) assert.ok(!refused.includes(absent), absent);
   const run = (await draw("run")).html;
   assert.match(run, /<div class="titlebar__lead"><a class="back" href="\/runs"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"><\/use><\/svg>Runs<\/a><h1>Run gh-1<\/h1><\/div>/);
   for (const name of Object.keys(PAGES).filter((n) => n !== "run")) assert.ok(!(await draw(name)).html.includes('class="back"'), `${name} has no back link`);
@@ -132,12 +164,13 @@ test("the theme button: hidden until the script shows it, named for the choice t
 
 test("who is signed in: the name and role, escaped, with two letters for the avatar; a hostile name is text", async () => {
   // The block's title holds both (an ellipsis cuts the longer of name and role first, and a phone shows the avatar alone).
-  assert.match((await draw("overview", { role: "viewer" })).html, /<span class="who" title="watcher, Viewer"><span><b>watcher<\/b><small>Viewer<\/small><\/span><span class="avatar">wa<\/span><\/span>/);
-  assert.match((await draw("overview")).html, /<span class="who" title="ops, Operator"><span><b>ops<\/b><small>Operator<\/small><\/span><span class="avatar">op<\/span><\/span>/);
+  // data-name and data-role (issue #737): the session's own, for the script's same-person check before a reload.
+  assert.match((await draw("overview", { role: "viewer" })).html, /<span class="who" data-name="watcher" data-role="viewer" title="watcher, Viewer"><span><b>watcher<\/b><small>Viewer<\/small><\/span><span class="avatar">wa<\/span><\/span>/);
+  assert.match((await draw("overview")).html, /<span class="who" data-name="ops" data-role="operator" title="ops, Operator"><span><b>ops<\/b><small>Operator<\/small><\/span><span class="avatar">op<\/span><\/span>/);
   const { html } = await draw("overview", { sessionName: HOSTILE });
   assert.ok(!html.includes("<img src=x") && !html.includes(ESC), "no live markup and no control byte from the name");
   // The full name rides in the block's `title` too, escaped the same way, with the role after it.
-  assert.match(html, /<span class="who" title="&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39; ?, Operator"><span><b>&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39; ?<\/b>/);
+  assert.match(html, /<span class="who" data-name="&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39; ?" data-role="operator" title="&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39; ?, Operator"><span><b>&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39; ?<\/b>/);
   assert.match(html, /<span class="avatar">im<\/span>/, "the avatar takes letters only");
   // Lower case, as the Shell card's "op" and "wa" (review mutant H8): a name's case says nothing about who it is.
   assert.match((await draw("overview", { sessionName: "Rob Boerman" })).html, /<span class="avatar">ro<\/span>/);
@@ -196,42 +229,61 @@ test("the Parked count: from the snapshot or the reader's count, drawn only when
 });
 
 test("LEGACY_PAGES is a written-out frozen list: a page added to PAGES later is not legacy by default", () => {
-  // The list as written (review D1): a copy derived from PAGES would make every new page start in the old markup.
-  assert.deepEqual(LEGACY_PAGES, ["overview", "runs", "run", "parked", "insights", "fleet", "config", "audit", "login", "login-code", "forbidden"]);
+  // The list as written: a copy derived from PAGES would make every new page start in the old markup. PR 2
+  // converted the audit log, the two sign-in pages and the operators-only refusal.
+  assert.deepEqual(LEGACY_PAGES, ["overview", "runs", "run", "parked", "insights", "fleet", "config"]);
   assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "an array, frozen: a frozen Set still takes .add()");
   assert.throws(() => LEGACY_PAGES.push("models"), TypeError);
-  // Every name is a screen or one of the three pages that are not screens, each once.
-  const notScreens = ["login", "login-code", "forbidden"];
   assert.equal(new Set(LEGACY_PAGES).size, LEGACY_PAGES.length);
-  for (const name of LEGACY_PAGES) assert.ok(Object.hasOwn(PAGES, name) || notScreens.includes(name), `${name} is a screen or a sign-in or refusal page`);
-  for (const name of notScreens) assert.ok(!Object.hasOwn(PAGES, name), `${name} is not a screen`);
-  // A page PAGES does not hold is not legacy (the three static ones aside), however it is spelled.
-  for (const name of ["models", "watch", "secrets", "connections", "project", "host", "Overview", "", "__proto__", "constructor"]) assert.equal(LEGACY_PAGES.includes(name), false, name);
+  for (const name of LEGACY_PAGES) assert.ok(Object.hasOwn(PAGES, name), `${name} is a screen`);
+  // A page PAGES does not hold is not legacy, however it is spelled; nor are the pages PR 2 converted.
+  for (const name of ["audit", "login", "login-code", "forbidden", "error", "models", "watch", "secrets", "connections", "project", "host", "Overview", "", "__proto__", "constructor"]) assert.equal(LEGACY_PAGES.includes(name), false, name);
+  assert.equal(String(legacyWrap("audit", html`<p>x</p>`)), "<p>x</p>", "a converted page's content is as it is");
+  assert.equal(String(legacyWrap("fleet", html`<p>x</p>`)), '<div class="legacy"><p>x</p></div>');
 });
 
-test("the legacy wrapper: every legacy page's content, the sign-in pages' and the refusal's, inside one .legacy", async () => {
+test("the legacy wrapper: each section of a legacy page in a .legacy of its own, the frame and the slot outside every one", async () => {
   for (const name of Object.keys(PAGES)) {
-    const { html } = await draw(name);
-    assert.equal(count(html, '<div class="legacy">'), 1, name);
-    const legacy = html.slice(html.indexOf('<div class="legacy">'));
-    const sections = [...html.matchAll(/<section id="(p-[a-z-]+)" data-panel>/g)];
-    assert.ok(sections.length > 0, `${name} has panels`);
-    for (const m of sections) assert.ok(legacy.includes(m[0]), `${name}: ${m[1]} is inside the wrapper`);
-    assert.ok(html.indexOf("<h1") < html.indexOf('<div class="legacy">'), `${name}: the title bar is the shell's, outside it`);
+    for (const role of ROLES) {
+      const { html } = await draw(name, { role });
+      const key = `${name}.${role}`;
+      const spans = boxSpans(html);
+      const sections = [...html.matchAll(/<section id="(p-[a-z0-9-]+|transcript)"(?: data-panel| class="transcript-section")>/g)];
+      if (!LEGACY_PAGES.includes(name)) {
+        assert.deepEqual(spans, [], `${key}: converted, no wrapper`);
+        continue;
+      }
+      assert.ok(sections.length > 0, `${key} has sections`);
+      assert.equal(spans.length, sections.length, `${key}: one wrapper per section`);
+      for (const [i, m] of sections.entries()) {
+        const [a, b] = spans[i];
+        assert.equal(m.index, a + '<div class="legacy">'.length, `${key}: ${m[1]} opens its own wrapper`);
+        assert.equal(html.slice(b - "</section></div>".length, b), "</section></div>", `${key}: and closes it`);
+      }
+      assert.ok(html.indexOf("<h1") < spans[0][0], `${key}: the title bar is the shell's, outside them`);
+      for (const needle of ['id="confirm-slot"', 'id="live-note"', '<template id="held-note">']) {
+        const at = html.indexOf(needle);
+        if (at !== -1) assert.ok(!spans.some(([a, b]) => at > a && at < b), `${key}: ${needle} is outside every wrapper`);
+      }
+    }
   }
 });
 
-test("the sign-in pages: the skip link, the sprite, a top bar of the pill and the theme button alone, a title bar, the old form inside .legacy, the request's theme", () => {
-  for (const [fn, name] of [[loginPage, "login"], [loginCodePage, "login-code"]]) {
+test("the sign-in pages: the skip link to sign-in, the sprite, a top bar of the pill and the theme button alone, their card, the request's theme", () => {
+  for (const [fn, name, title, panel] of [[loginPage, "login", "Sign in", "p-signin"], [loginCodePage, "login-code", LINK_PAGE_TITLE, "p-link"]]) {
     const plain = String(fn());
     const pill = `<a class="brandpill" href="/"><span class="brandpill__m" aria-hidden="true">pi</span>pi-dispatch</a>`;
     const toggle = (label) => `<button class="roundbtn" type="button" data-theme-toggle hidden aria-label="${label}" title="${label}"><svg class="ic" aria-hidden="true"><use href="#i-theme"></use></svg></button>`;
-    assert.ok(plain.includes(`<body data-page="${name}">\n<a class="skip" href="#main">Skip to content</a>\n${String(SPRITE)}\n<div class="page">\n<header class="top">${pill}<div class="top__end">${toggle(THEME_LABELS.system)}</div></header>\n<main id="main" tabindex="-1">\n<div class="titlebar"><div class="titlebar__lead"><h1>pi-dispatch console</h1></div></div>\n<div class="legacy">`), name);
+    // No title bar: the card's own heading leads the page, and the page's h1 is there for a screen reader.
+    // The card opens with what a page without a script says (signin.mjs: the noscript is its first child).
+    assert.ok(plain.includes(`<body data-page="${name}">\n<a class="skip" href="#main">Skip to sign-in</a>\n${String(SPRITE)}\n<div class="page">\n<header class="top">${pill}<div class="top__end">${toggle(THEME_LABELS.system)}</div></header>\n<main id="main" tabindex="-1">\n<h1 class="sr">${title}</h1>\n<section id="${panel}" data-panel><div class="card signin">\n${NO_SCRIPT}\n`), name);
+    assert.ok(plain.includes(`<title>pi-dispatch console: ${title}</title>`), name);
     assert.match(plain, /<html lang="en">\n[^]*<meta name="color-scheme" content="light dark">/);
-    // Nobody is signed in: no navigation, no live pill, no who, no sign-out.
-    for (const absent of ["pillnav", 'id="live-status"', 'class="who"', 'id="logout"']) assert.ok(!plain.includes(absent), `${name}: no ${absent}`);
+    // Nobody is signed in: no navigation, no live pill, no who, no sign-out, no wrapper, no slot.
+    for (const absent of ["pillnav", 'id="live-status"', 'class="who"', 'id="logout"', 'class="legacy"', 'id="confirm-slot"', 'class="titlebar"']) assert.ok(!plain.includes(absent), `${name}: no ${absent}`);
     assert.equal(count(plain, "<h1"), 1);
     assert.equal(count(plain, '<svg class="sprite"'), 1);
+    assertClean(name, plain);
     for (const theme of THEMES) {
       const themed = String(fn({ theme }));
       assert.match(themed, new RegExp(`<html lang="en" data-theme="${theme}">\n[^]*<meta name="color-scheme" content="${theme}">`), `${name} ${theme}`);
@@ -243,8 +295,202 @@ test("the sign-in pages: the skip link, the sprite, a top bar of the pill and th
       assert.doesNotMatch(page, /native code|\[object Object\]/, `${String(odd)}: nothing of the prototype on the page`);
     }
   }
-  assert.match(String(loginPage()), /<div class="legacy"><form id="login-form" autocomplete="off">\n<label for="token">Console token<\/label>/);
-  assert.match(String(loginCodePage()), /<div class="legacy"><p id="notice" role="status">Signing in with a one-time link\.\.\.<\/p>\n<p><a href="\/login">Sign in with a token instead<\/a><\/p><\/div>/);
+  // What each page's script finds, by id, drawn by hand with the kit's classes (the kit refuses those ids).
+  const login = String(loginPage());
+  assert.ok(login.includes(`<form id="login-form" class="signin__form" autocomplete="off" hidden data-reveal><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>`));
+  assert.equal(count(login, 'id="notice"'), 1);
+  assert.equal(count(String(loginCodePage()), 'id="notice"'), 1);
+});
+
+test("the sign-in card: one notice region holding every notice, hidden but the server's choice; the help with --link; the footer by the bind", () => {
+  // The two lists share no name, so a value can only select one of them.
+  assert.deepEqual(ENDED_REASONS.filter((r) => Object.hasOwn(SIGN_IN_NOTICES, r)), []);
+  const keys = [...ENDED_REASONS.map((r) => `ended-${r}`), ...Object.keys(SIGN_IN_NOTICES)];
+  const shown = (text) => [...text.matchAll(/<div data-notice="([a-z-]+)">/g)].map((m) => m[1]);
+  const all = (text) => [...text.matchAll(/<div data-notice="([a-z-]+)"(?: hidden)?>/g)].map((m) => m[1]);
+  for (const notice of [null, ...ENDED_REASONS, ...Object.keys(SIGN_IN_NOTICES)]) {
+    const text = String(signInContent({ notice }));
+    assert.deepEqual(all(text), keys, `${notice}: every notice, once, in order`);
+    assert.deepEqual(shown(text), notice === null ? [] : [ENDED_REASONS.includes(notice) ? `ended-${notice}` : notice], `${notice}: only the chosen one shows`);
+  }
+  // A value that is no reason and no kind shows none, and its bytes are nowhere on the page.
+  for (const odd of [HOSTILE, "IDLE", " idle", "ended-idle", "__proto__", "constructor", 7, {}]) {
+    const text = String(signInContent({ notice: odd }));
+    assert.deepEqual(shown(text), [], String(odd));
+    assert.ok(!text.includes("<img src=x") && !text.includes(ESC));
+  }
+  // Each notice is the session-ends table's, the console's own limits in the ended ones.
+  const n = endedNotices({ idleMinutes: 15, maxHours: 4 });
+  const text = String(signInContent({ notice: "idle", limits: { idleMinutes: 15, maxHours: 4 } }));
+  assert.ok(text.includes(`<div data-notice="ended-idle"><div class="banner banner--sm tone-idle" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg></span><div><p class="banner__t">${n.idle.title}</p><p class="banner__s">${n.idle.body}</p></div></div></div>`), text);
+  assert.ok(text.includes("You were signed out after 15 minutes without a request") && text.includes("You were signed out after 4 hours"));
+  for (const bad of [{ idleMinutes: 0 }, { idleMinutes: -1, maxHours: 1.5 }, { idleMinutes: "15" }, null]) {
+    const t = String(signInContent({ limits: bad }));
+    assert.ok(t.includes("after 60 minutes without a request") && t.includes("after 12 hours"), `${JSON.stringify(bad)}: the defaults, never a wrong limit`);
+  }
+  // The refusal the server words itself: its text is set by the script, into an empty element.
+  assert.ok(text.includes('<div data-notice="other" hidden><div class="banner banner--sm tone-failed" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-failed"></use></svg></span><div><p class="banner__t">The console refused the sign-in</p><p class="banner__s"><span data-notice-text></span></p></div></div></div>'));
+  // The help (the command that prints a link is --link; the name placeholder is quoted, as a shell reads it).
+  assert.ok(text.includes(`<p class="muted">Make a link from pi. It works once, for 60 seconds:</p><div class="cmd"><code><span>/dispatch</span> <span>console</span> <span>--link</span></code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div><p class="muted">Or make a token on the host:</p><div class="cmd"><code><span>pi-dispatch-console</span> <span>token</span> <span>add</span> <span>--name</span> <span>&#39;&lt;you&gt;&#39;</span> <span>--role</span> <span>operator</span></code>`));
+  // Without a script the form and its lead-in are not drawn (signin.mjs); the script reveals the two of them.
+  assert.ok(text.includes('<p class="muted" hidden data-reveal>Paste a console token, or open a one-time link from pi.</p>'));
+  assert.equal(count(text, "data-reveal"), 2);
+  // A command in a notice is in the code face; the other notice's text stays the script's, set as text.
+  assert.ok(text.includes('<p class="banner__s">An operator should run <span class="code">pi-dispatch doctor</span> on the host.</p>'));
+  assert.ok(!Object.values(SIGN_IN_NOTICES).some((n) => /`/.test(n.title)), "no title carries a code mark");
+  // No token's prefix anywhere, so the leak canary holds on the sign-in page too; no placeholder at all.
+  assert.ok(!/pdc_/.test(text) && !/placeholder=/.test(text));
+  // The footer follows the bind: loopback, a unix socket, or nothing for a bind that may not be loopback.
+  const foot = (listen) => /<p class="signin__foot faint">([^<]*)<\/p>/.exec(String(signInContent({ listen })))?.[1] ?? null;
+  for (const host of ["127.0.0.1", "127.1.2.3", "::1"]) assert.equal(foot({ kind: "tcp", host, port: 4790 }), LISTEN_FOOTERS.loopback.replace("'", "&#39;"), host);
+  assert.equal(foot({ kind: "unix", path: "/run/x.sock" }), LISTEN_FOOTERS.unix.replace("'", "&#39;"));
+  for (const listen of [{ kind: "tcp", host: "0.0.0.0", port: 4790 }, { kind: "tcp", host: "192.168.1.2" }, { kind: "tcp" }, "public", null, undefined, {}, "nope", "TCP"]) assert.equal(foot(listen), null, JSON.stringify(listen));
+  // The server's own words: "tcp" is a loopback TCP listener (it sends "public" for any other), "unix" a socket.
+  for (const word of ["tcp", "loopback"]) assert.equal(foot(word), LISTEN_FOOTERS.loopback.replace("'", "&#39;"), word);
+  assert.equal(foot("unix"), LISTEN_FOOTERS.unix.replace("'", "&#39;"));
+  assert.ok(!String(signInContent({ listen: { kind: "unix", path: "/run/secret/x.sock" } })).includes("/run/secret"), "never the socket's path");
+  // The page as the server draws it carries the reason it was given and the footer of its bind.
+  const page = String(loginPage({ notice: "revoked", listen: { kind: "tcp", host: "127.0.0.1" } }));
+  assert.deepEqual(shown(page), ["ended-revoked"]);
+  assert.ok(page.includes(LISTEN_FOOTERS.loopback.replace("'", "&#39;")));
+  assertClean("login.revoked", page);
+});
+
+test("the one-time link's card: each state drawn, only the chosen one for the script to reveal, its own notices, the commands for a new link", () => {
+  assert.deepEqual(LINK_STATES, ["wait", "used", "nocode"]);
+  // `*` the state the page opens in: drawn `hidden data-reveal`, so a page without a script shows no state.
+  const states = (text) => [...text.matchAll(/<div class="signin__state" data-link-state="([a-z]+)"( hidden data-reveal| hidden)>/g)].map((m) => `${m[1]}${m[2] === " hidden" ? "" : "*"}`);
+  for (const state of LINK_STATES) assert.deepEqual(states(String(linkContent({ state }))), LINK_STATES.map((s) => (s === state ? `${s}*` : s)), state);
+  for (const odd of [HOSTILE, "USED", null, "__proto__"]) assert.deepEqual(states(String(linkContent({ state: odd }))), ["wait*", "used", "nocode"], String(odd));
+  const text = String(linkContent());
+  assert.equal(count(text, '<a class="link signin__alt" href="/login">Sign in with a token instead</a>'), 3, "every state offers the token form");
+  assert.ok(text.includes("<h2>Signing in with a one-time link</h2><p class=\"muted\">This takes a moment. The link is taken out of your browser history first, so it cannot be used again from there.</p>"));
+  // The used state's two ways to a new link, each led in by where it runs.
+  assert.ok(text.includes('<p class="muted">A link works once, for 60 seconds. Ask for a new one on the host:</p><div class="cmd"><code><span>pi-dispatch-console</span> <span>link</span> <span>--name</span> <span>&#39;&lt;you&gt;&#39;</span></code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div><p class="muted">Or in pi:</p><div class="cmd"><code><span>/dispatch</span> <span>console</span> <span>--link</span></code>'));
+  assert.deepEqual([...text.matchAll(/<div data-notice="([a-z-]+)" hidden>/g)].map((m) => m[1]), [...LINK_NOTICES]);
+  for (const k of LINK_NOTICES) assert.ok(Object.hasOwn(SIGN_IN_NOTICES, k), k);
+  assert.ok(text.startsWith(`<section id="p-link" data-panel><div class="card signin">\n${NO_SCRIPT}\n`), "what a page without a script says, first");
+  // A golden's notice (the server draws none): one of the link page's own, shown; anything else, none.
+  const shownNotices = (t) => [...t.matchAll(/<div data-notice="([a-z-]+)">/g)].map((m) => m[1]);
+  for (const k of LINK_NOTICES) assert.deepEqual(shownNotices(String(linkContent({ state: "used", notice: k }))), [k], k);
+  for (const odd of ["wrong", "ended-idle", HOSTILE, "__proto__"]) assert.deepEqual(shownNotices(String(linkContent({ notice: odd }))), [], String(odd));
+  assert.deepEqual(shownNotices(String(loginCodePage({ notice: "rate" }))), ["rate"]);
+  assert.ok(!/pdc_/.test(text));
+  assertClean("login-code", String(loginCodePage()));
+  assert.deepEqual(states(String(loginCodePage({ state: "used" }))), ["wait", "used*", "nocode"]);
+});
+
+test("frameHtml: a page that is not a screen, with the sign-in bar, or the signed-in bar with no current pill and no live pill", () => {
+  const inner = html`<section id="p-x" data-panel><p>body</p></section>`;
+  const out = String(frameHtml({ name: "error", title: "Page not found" }, inner));
+  assert.ok(out.includes('<body data-page="error">\n<a class="skip" href="#main">Skip to content</a>'));
+  assert.ok(out.includes(`<main id="main" tabindex="-1">\n<div class="titlebar"><div class="titlebar__lead"><h1>Page not found</h1></div></div>\n<section id="p-x" data-panel>`));
+  // The title bar's line under the title, escaped, and only where there is a title bar.
+  assert.ok(String(frameHtml({ name: "error", title: "Page not found", sub: "Not <here>." }, inner)).includes('<h1>Page not found</h1><p class="titlebar__sub">Not &lt;here&gt;.</p></div></div>'));
+  assert.ok(!String(frameHtml({ name: "error", title: "T", sub: "S", titleShown: false }, inner)).includes("titlebar__sub"));
+  for (const none of [null, "", 7]) assert.ok(!String(frameHtml({ name: "error", title: "T", sub: none }, inner)).includes("titlebar__sub"), String(none));
+  assert.ok(out.includes("<title>pi-dispatch console: Page not found</title>"));
+  for (const absent of ["pillnav", 'id="logout"', 'class="who"', 'id="live-status"']) assert.ok(!out.includes(absent), absent);
+  // nav without a session, or a session without nav: still the sign-in bar.
+  assert.ok(!String(frameHtml({ name: "error", title: "t", nav: true }, inner)).includes("pillnav"));
+  assert.ok(!String(frameHtml({ name: "error", title: "t", session: { name: "ops", role: "operator" } }, inner)).includes("pillnav"));
+  for (const role of ROLES) {
+    const signed = String(frameHtml({ name: "error", title: "Page not found", nav: true, session: { name: "ops", role }, readOnly: true, theme: "dark" }, inner));
+    const nav = navOf(signed);
+    assert.deepEqual([...nav.matchAll(/<a href="([^"]*)"/g)].map((m) => m[1]), [...NAV, ...(role === "operator" ? NAV_MORE : [])].map((n) => PAGES[n].path), role);
+    assert.ok(!nav.includes("aria-current"), `${role}: this page is no screen, so no pill is current`);
+    assert.ok(signed.includes('<header class="top top--ro">') && signed.includes("Read-only console") && signed.includes('id="logout"'));
+    assert.ok(!signed.includes('id="live-status"') && !signed.includes('id="p-nav-parked"'), "no stream, no live pill, no count panel");
+    assert.ok(signed.includes(`<span class="who" data-name="ops" data-role="${role}" title="ops, ${role === "operator" ? "Operator" : "Viewer"}">`));
+    assert.match(signed, /<html lang="en" data-theme="dark">/);
+  }
+  // titleShown false: the h1 is for a screen reader, with no title bar; the skip link says where it goes.
+  const bare = String(frameHtml({ name: "login", title: "Sign in", skip: "Skip to sign-in", titleShown: false }, inner));
+  assert.ok(bare.includes('<a class="skip" href="#main">Skip to sign-in</a>') && bare.includes('<main id="main" tabindex="-1">\n<h1 class="sr">Sign in</h1>\n'));
+  // Every value escaped.
+  const hostile = String(frameHtml({ name: "error", title: HOSTILE, nav: true, session: { name: HOSTILE, role: "operator" } }, inner));
+  assert.ok(!hostile.includes("<img src=x") && !hostile.includes(ESC));
+});
+
+test("a page drawn once says when, beside Reload to its own address; a live page has the live notes instead", async () => {
+  const NOW = Date.UTC(2026, 9, 8, 15, 39, 8);
+  for (const name of Object.keys(PAGES)) {
+    const { html } = await draw(name, { data: { now: NOW } });
+    const live = PAGES[name].live;
+    assert.equal(html.includes('<div class="titlebar__end">'), !live, `${name}: drawn once says when`);
+    assert.equal(count(html, 'id="live-note"'), live ? 1 : 0, `${name}: the notes on a live page`);
+  }
+  const reload = (q) => `<a class="btn btn--sm btn--ghost" href="${q}"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a>`;
+  const drawn = `<div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> \u00b7 not live</span></span>`;
+  assert.ok((await draw("config", { data: { now: NOW } })).html.includes(`<h1>Configuration</h1></div>${drawn}${reload("/config")}</div></div>`));
+  // Reload is the page's own address, with its query as the page parser writes it back.
+  const insights = (await draw("insights", { data: { now: NOW }, query: parsePageQuery("insights", "range=7d").query })).html;
+  assert.ok(insights.includes(reload("/insights?range=7d")), "the query kept");
+  // No clock in the data: it says only that it is not live.
+  assert.ok((await draw("audit", { data: { now: Number.NaN } })).html.includes('<span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn once \u00b7 not live</span></span>'));
+  // A viewer refused the audit log is not offered its address.
+  assert.ok(!(await draw("audit", { role: "viewer", data: { now: NOW } })).html.includes('href="/audit"'));
+});
+
+test("the live notes: four, each hidden in its box, the limit's from the console's own numbers, the stale time the script's", () => {
+  assert.deepEqual(Object.keys(LIVE_NOTES), ["retry", "limit", "out", "stale"]);
+  assert.ok(Object.isFrozen(LIVE_NOTES) && Object.values(LIVE_NOTES).every(Object.isFrozen));
+  assert.equal(LIVE_STREAMS_TOTAL, STREAMS_TOTAL_MAX, "the console's own stream limit, which the server imports this module before defining");
+  const notes = String(liveNoteHtml({ maxStreams: 6, reload: "/runs?project=web" }));
+  assert.ok(notes.startsWith('<div id="live-note" class="live-note" aria-live="polite"><div data-live-note="retry" hidden><div class="banner banner--sm tone-attention" role="status">'));
+  assert.deepEqual([...notes.matchAll(/<div data-live-note="([a-z]+)" hidden>/g)].map((m) => m[1]), Object.keys(LIVE_NOTES), "each drawn hidden, in order");
+  for (const [state, n] of Object.entries(LIVE_NOTES)) {
+    assert.ok(notes.includes(`<use href="#i-${n.icon}"></use>`), `${state}: its icon`);
+    if (state !== "limit") assert.ok(notes.includes(`<p class="banner__s">${n.body.replace(/'/g, "&#39;")}</p>`), `${state}: its sentence`);
+  }
+  assert.ok(notes.includes("One token may hold 6 live tabs, and the console 32 in all."), "the token's limit, as the console runs");
+  assert.ok(notes.includes('<a class="btn btn--sm btn--primary" href="/runs?project=web">Reload</a>'), "the limit note's Reload, the page's own address");
+  assert.ok(notes.includes('<p class="banner__t">Shown as last seen<span class="live-note__at"> at <time data-since></time></span></p>'), "the time is the script's to write");
+  for (const bad of [null, 0, -1, 1.5, "4", Number.NaN]) {
+    const t = String(liveNoteHtml({ maxStreams: bad }));
+    assert.ok(t.includes("One token may hold only a few live tabs, and the console 32 in all.") && !t.includes("{maxStreams}"), `${String(bad)}: no wrong number`);
+    assert.ok(!t.includes(">Reload<"), "no Reload without an address");
+  }
+});
+
+test("the read-only banner on every page of a read-only console; the done banner once from the session's flash", async () => {
+  const banner = `<div class="banner banner--sm tone-attention" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-shield"></use></svg></span><div><p class="banner__t">${READ_ONLY_TITLE}</p><p class="banner__s">It was started with <span class="code">PI_CONSOLE_READ_ONLY=1</span>, so every change is refused and no page shows a form. Operators still see reasons, transcripts and the audit log.</p></div></div>`;
+  assert.equal(READ_ONLY_TITLE, "This console is read-only");
+  const flash = { summary: "Paused the fleet", by: "ops", auditSeq: 41, count: 1, undo: "Resume it.", inverse: { action: "fleet-resume", body: {} }, kind: "fleet-pause", at: 0 };
+  for (const name of Object.keys(PAGES)) {
+    for (const role of ROLES) {
+      for (const readOnly of [false, true]) {
+        const { html } = await draw(name, { role, readOnly });
+        assert.equal(count(html, banner), readOnly ? 1 : 0, `${name}.${role}.${readOnly}`);
+        if (readOnly) assert.ok(html.indexOf(banner) > html.indexOf("<h1") && html.indexOf(banner) < html.indexOf('<section id="p-'), `${name}: under the title bar, above the panels`);
+      }
+    }
+    const done = String(doneBannerHtml(flash));
+    const { html } = await draw(name, { flash });
+    assert.equal(count(html, done), 1, `${name}: the done banner, once`);
+    assert.ok(html.indexOf(done) < html.indexOf('<section id="p-'), `${name}: above the panels`);
+    assert.ok(!(await draw(name)).html.includes("Changed by"), `${name}: none without a flash`);
+  }
+  // The order: the read-only banner, then the done banner, then the live notes, then the panels.
+  const both = (await draw("fleet", { readOnly: true, flash })).html;
+  assert.ok(both.indexOf(banner) < both.indexOf(String(doneBannerHtml(flash))) && both.indexOf(String(doneBannerHtml(flash))) < both.indexOf('id="live-note"'));
+});
+
+test("the confirm slot and the held note's template: once, after the content, for an operator on a console that takes changes", async () => {
+  const slot = String(confirmSlotHtml());
+  const tpl = `<template id="held-note">${heldNoteHtml()}</template>`;
+  for (const name of Object.keys(PAGES)) {
+    for (const role of ROLES) {
+      for (const readOnly of [false, true]) {
+        const { html } = await draw(name, { role, readOnly });
+        const writes = role === "operator" && !readOnly && !(PAGES[name].auth === "operator" && role !== "operator");
+        assert.equal(count(html, slot), writes ? 1 : 0, `${name}.${role}.${readOnly}: the slot`);
+        assert.equal(count(html, tpl), writes ? 1 : 0, `${name}.${role}.${readOnly}: the template`);
+        if (writes) assert.ok(html.endsWith(`${slot}${tpl}\n</main>\n</div>\n</body>\n</html>\n`), `${name}: last in main`);
+      }
+    }
+    assert.ok(!(await draw(name, { slot: false })).html.includes('id="confirm-slot"'), `${name}: slot false keeps it off`);
+  }
 });
 
 // ---- the script's side of the shell ---------------------------------------------------------------------------------

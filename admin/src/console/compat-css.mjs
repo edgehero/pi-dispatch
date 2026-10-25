@@ -3,7 +3,9 @@
  * page; nothing else is meant to outlive it.
  *
  * WHY IT EXISTS. PR 1 gives every page the Pulse shell, but each page's panels convert in their own PR, and until then
- * their markup stays byte-identical inside `<div class="legacy">` (the goldens prove it). That markup was styled by
+ * their markup stays byte-identical inside `<div class="legacy">` (the goldens prove it), one wrapper per panel since
+ * PR 2 (the write flow's slot is placed between two wrappers, never inside one, so it keeps the Pulse look: inside one,
+ * this layer's `button` and `ul` rules would outrank the bar's own). That markup was styled by
  * the insights CSS and the old layout, on a dark palette of literal colours. Served beside `bundle.css` unchanged, it
  * would break three ways: the old rules would reach the shell and the converted cards (they style bare `button`,
  * `section`, `h2`); bundle.css styles a dozen class names the old markup also uses for something else (`.kpi`,
@@ -33,9 +35,10 @@
  * removed), the neutraliser must cover exactly the selectors that can still collide, a converted page's golden may not
  * carry `.legacy` or a class only this layer styles, and once `LEGACY_PAGES` is empty `LEGACY_CSS` must be `""`. The
  * dead-rule check has a blind spot it cannot close: it reads some files whatever is legacy (`html.mjs`, `pages.mjs`,
- * the transcript, the action previews, the insights renderers), so a class only those emit always counts as emitted,
- * and its rule can never fail as dead. The empty-set rule is the backstop: the last converted page deletes this whole
- * file, dead rules and all.
+ * the transcript, the insights renderers), so a class only those emit always counts as emitted, and its rule can never
+ * fail as dead. The empty-set rule is the backstop: the last converted page deletes this whole file, dead rules and
+ * all. (The action previews left that list in PR 2: their bars are `confirm-view.mjs`'s Pulse markup, outside every
+ * wrapper, and the rules that drew the old ones went with them.)
  */
 import { PAGE_THEME } from "../graph-html.mjs";
 import { INSIGHTS_CSS } from "../insights-html.mjs";
@@ -51,8 +54,6 @@ export const NEUTRALISED = Object.freeze([
   ".banner",
   ".big",
   ".cap",
-  ".confirm",
-  ".diff",
   ".facts",
   ".kpi",
   ".kpi b",
@@ -175,13 +176,7 @@ td.acts form.act{margin:0 4px 0 0}
 details.editor{margin:10px 0}
 details.editor>summary{font-size:13px;color:var(--pd-accent)}
 .preview-area{flex-basis:100%;margin-top:6px;padding:8px;border:1px solid var(--pd-border);border-radius:6px;background:var(--pd-canvas);font-size:12px}
-.preview-area .summary{margin:0 0 6px 16px}
-.preview-area .reserve{color:var(--pd-amber)}
-.preview-area .confirm{display:flex;gap:8px;margin-top:8px}
-pre.diff,pre.answer{margin:6px 0;overflow-x:auto;font-size:12px;line-height:1.4}
-pre.diff ins{text-decoration:none;color:var(--pd-green)}
-pre.diff del{text-decoration:none;color:var(--pd-danger)}
-pre.diff .gap{color:var(--pd-dim)}
+pre.answer{margin:6px 0;overflow-x:auto;font-size:12px;line-height:1.4}
 code.mono{padding:1px 4px;border:1px solid var(--pd-border);border-radius:4px;background:var(--pd-canvas)}
 section.transcript-section{margin:0 0 16px;padding:12px 14px;background:var(--pd-panel);border:1px solid var(--pd-border);border-radius:6px}
 section.transcript-section h2{font-size:14px;margin:0 0 8px}
@@ -215,14 +210,28 @@ export function insightsFont(css = INSIGHTS_CSS) {
  * The old panels' text takes the console's font (`font:inherit`), but the charts and the topology keep the insights
  * font (`svg`): their renderers size every box and cut every label by a column estimate made for that font, and the
  * label fitter (`.github/scripts/label-fit-check.mjs`) measured needless cuts and a label on a wire once they were drawn
- * in the console's (another family, and tabular figures). The sign-in form (`#login-form`) is a card with the primary
- * pill as its submit, as the SignIn card draws it: on the bare canvas its grey button read as disabled.
+ * in the console's (another family, and tabular figures).
+ *
+ * Each old panel is a card with no margin of its own: since PR 2 every panel is in a wrapper of its own, and the grid's
+ * gap spaces the cards (16 px, 12 px on a phone, the margin they had in one wrapper).
+ *
+ * THE WRAPPER DRAWS NO BOX (`display: contents`): its one section (`console-compat.test.mjs` holds each wrapper to
+ * exactly one) is the grid's cell itself. A panel with nothing to say is empty and not drawn (`SHELL_CSS`'s
+ * `section[data-panel]:empty`), and with no box around it it takes no cell and no gap; as a block, every wrapper of an
+ * empty panel was a cell of no height with the grid's 16 px gap after it (the run page drew a 112 px hole). `:has()` could hide such a wrapper instead, but needs Chrome 105, Safari 15.4 and Firefox 121, past the
+ * console's floor; `display: contents` is in all three of the floor's versions. The wrapper only carried what its
+ * children inherit (the `--pd-*` properties, the ink and the font, which a box-less element still passes down) and a
+ * ground of its own that drew nothing, so there is no box to lose.
+ *
+ * A CONTROL DRAWN WITH THE SECONDARY FILL WEARS THE STALE RING: a button, the editor's summary and a pager or range
+ * link are pills of `surface-3` and nothing else, which on a page shown as last seen (its panels flat on the canvas,
+ * `page-css.mjs` `SHELL_CSS`) left a word with no shape. The flat panel hands down `--stale-ring`; anywhere else it is
+ * unset, and the control draws no ring.
  */
 const PULSE_LOOK = `
-body{display:block;min-width:0;background:transparent;color:var(--ink);font:inherit}
+body{display:contents;color:var(--ink);font:inherit}
 svg{font:${insightsFont()}}
-body>section[data-panel],body>section.transcript-section{max-width:none;min-width:0;margin:0 0 var(--space-4);padding:var(--space-5);border:0;border-radius:var(--radius-lg);background:var(--surface)}
-body>:last-child{margin-bottom:0}
+body>section[data-panel],body>section.transcript-section{max-width:none;min-width:0;margin:0;padding:var(--space-5);border:0;border-radius:var(--radius-lg);background:var(--surface)}
 section[data-panel] h2,section.transcript-section h2{margin:0 0 var(--space-3);font-size:17px;line-height:24px;font-weight:650;color:var(--ink)}
 section[data-panel] section{margin:var(--space-5) 0 0;padding-top:var(--space-4);border-top:1px solid var(--line)}
 section[data-panel] section:first-of-type{margin-top:var(--space-3);padding-top:0;border-top:0}
@@ -250,10 +259,10 @@ table.grid th:first-child,table.grid td:first-child{padding-left:0}
 table.grid th:last-child,table.grid td:last-child{padding-right:0}
 table.grid th{font-size:12px;font-weight:650;color:var(--ink-muted);white-space:nowrap}
 table.grid tbody tr:last-child td{border-bottom:0}
-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:38px;padding:0 18px;border:0;border-radius:var(--radius-pill);background:var(--surface-3);color:var(--ink);font-size:14px;font-weight:650;white-space:nowrap;cursor:pointer}
+button{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:38px;padding:0 18px;border:0;border-radius:var(--radius-pill);background:var(--surface-3);box-shadow:var(--stale-ring,none);color:var(--ink);font-size:14px;font-weight:650;white-space:nowrap;cursor:pointer}
 button[disabled]{opacity:.45;cursor:not-allowed}
 td button,.preview-area button{height:30px;padding:0 13px;font-size:13px}
-form.filters button[type="submit"],.preview-area .confirm button:first-child{background:var(--primary);color:var(--on-primary)}
+form.filters button[type="submit"]{background:var(--primary);color:var(--on-primary)}
 input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),select,textarea{min-width:0;height:42px;padding:0 14px;border:0;border-radius:var(--radius-md);background:var(--surface-2);box-shadow:inset 0 0 0 1.5px var(--line-strong);color:var(--ink);font-size:14px;font-weight:400}
 textarea,form.act textarea{height:auto;min-height:92px;padding:12px 14px;border:0;border-radius:var(--radius-md);background:var(--surface-2);font-size:13px;font-weight:400;line-height:20px;resize:vertical}
 select{appearance:none;padding-right:36px;background-image:linear-gradient(45deg,transparent 50%,var(--ink-muted) 50%),linear-gradient(135deg,var(--ink-muted) 50%,transparent 50%);background-position:right 18px top 19px,right 13px top 19px;background-size:5px 5px;background-repeat:no-repeat}
@@ -262,16 +271,15 @@ form.filters{gap:var(--space-3)}
 form.filters label,form.act label{gap:6px;font-size:12px;font-weight:650;color:var(--ink-muted)}
 .forms form.act{gap:var(--space-3);margin:var(--space-3) 0 0;padding:var(--space-3) 0 0;border-top:1px solid var(--line)}
 details.editor{margin:var(--space-3) 0 0}
-details.editor>summary{display:inline-flex;align-items:center;height:30px;padding:0 13px;border-radius:var(--radius-pill);background:var(--surface-3);color:var(--ink);font-size:13px;font-weight:650;list-style:none}
+details.editor>summary{display:inline-flex;align-items:center;height:30px;padding:0 13px;border-radius:var(--radius-pill);background:var(--surface-3);box-shadow:var(--stale-ring,none);color:var(--ink);font-size:13px;font-weight:650;list-style:none}
 details.editor>summary::-webkit-details-marker{display:none}
 details.editor[open]>summary{background:var(--primary);color:var(--on-primary)}
 .pager{gap:var(--space-2);margin-top:var(--space-3)}
-.pager a,.range a{display:inline-flex;align-items:center;height:30px;padding:0 13px;border:0;border-radius:var(--radius-pill);background:var(--surface-3);color:var(--ink);font-size:13px;font-weight:650;text-decoration:none;white-space:nowrap}
+.pager a,.range a{display:inline-flex;align-items:center;height:30px;padding:0 13px;border:0;border-radius:var(--radius-pill);background:var(--surface-3);box-shadow:var(--stale-ring,none);color:var(--ink);font-size:13px;font-weight:650;text-decoration:none;white-space:nowrap}
 .range{flex-wrap:wrap;gap:6px}
 .range a[aria-current="page"]{background:var(--primary);color:var(--on-primary)}
 .preview-area{margin-top:var(--space-2);padding:var(--space-3) var(--space-4);border:0;border-radius:var(--radius-md);background:var(--surface);box-shadow:inset 0 0 0 2px var(--primary);font-size:13px}
-.preview-area .summary{margin:0 0 6px}
-pre.diff,pre.answer{padding:8px 14px;border-radius:var(--radius-md);background:var(--surface-2);font-family:var(--font-mono);font-size:12.5px;line-height:20px}
+pre.answer{padding:8px 14px;border-radius:var(--radius-md);background:var(--surface-2);font-family:var(--font-mono);font-size:12.5px;line-height:20px}
 .transcript{padding:4px 14px;border:0;border-radius:var(--radius-md);background:var(--surface-2)}
 .t-entry{border-bottom-color:var(--line)}
 .t-entry:last-child{border-bottom:0}
@@ -297,10 +305,6 @@ progress::-webkit-progress-value{border-radius:var(--radius-pill);background:var
 progress::-moz-progress-bar{border-radius:var(--radius-pill);background:var(--running)}
 #wrap{border:0;border-radius:var(--radius-md);background:var(--surface-2)}
 #tip{border:0;border-radius:var(--radius-md);background:var(--surface);box-shadow:inset 0 0 0 1px var(--line),0 8px 24px rgba(0,0,0,.14)}
-#login-form{display:grid;gap:var(--space-3);max-width:480px;padding:var(--space-8);border-radius:var(--radius-xl);background:var(--surface)}
-#login-form label{font-size:13px;font-weight:650;color:var(--ink-muted)}
-#login-form input{height:var(--control-h);border-radius:var(--radius-pill);padding:0 20px;font-family:var(--font-mono)}
-#login-form button[type="submit"]{width:100%;height:var(--control-h);background:var(--primary);color:var(--on-primary);font-size:15px}
 `;
 
 /** Text in a colour that is a ground elsewhere: drawn in ink, so a label never takes a chip's pale fill. */
@@ -348,11 +352,11 @@ function svgPaint() {
  * broke at its hyphens into two lines that read as two values. A cell of prose (a sentence, then a `<br>` and its note)
  * and a row-wide note (`colspan`) still wrap, as does code in prose outside a table. (The scoped limits table, a long
  * scope beside its limits, so takes the width at which its limits read on one line, and scrolls.) The cards stand
- * 12px apart, as bundle.css spaces them there.
+ * 12px apart, as bundle.css spaces them there: `<main>`'s gap on a phone, between the wrappers.
  */
 const PHONE_CSS = `
 @media (max-width: 760px){
-body>section[data-panel],body>section.transcript-section{margin-bottom:12px;padding:var(--space-4);border-radius:22px}
+body>section[data-panel],body>section.transcript-section{padding:var(--space-4);border-radius:22px}
 #grid,#flows,#sizes{grid-template-columns:minmax(0,1fr)}
 section[data-panel] section{overflow-x:auto}
 svg[viewBox]{max-width:100%;height:auto}
@@ -371,7 +375,6 @@ table.grid:has(thead th:nth-child(4)){min-width:520px}
 table.grid:has(thead th:nth-child(6)){min-width:720px}
 table.grid:has(thead th:nth-child(9)){min-width:960px}
 table.grid td:not([colspan]):not(:has(br)){white-space:nowrap}
-#login-form{padding:var(--space-5)}
 }
 `;
 

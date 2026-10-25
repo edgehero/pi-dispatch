@@ -1,0 +1,17 @@
+{
+  "card": "FieldsDiffCommand",
+  "pr": 2,
+  "panels": [],
+  "elements": [
+    {"el":"Fields refuse unknown input by name and list what is valid","kind":"readme","status":"new","source":"admin/src/console/actions.mjs#previewAction","holds":"unknownFieldRefusal(action, body)","reason":"a key is named when it is a plain identifier, else \"a field it was sent\"; the valid fields are always listed and a value is never echoed; the bar names the action and the fields as code"},
+    {"el":"A key that is not a plain name is said as \"a field it was sent\"","kind":"readme","status":"new","source":"admin/src/words.mjs#UNNAMED_FIELD"},
+    {"el":"Unknown key colour, with the valid keys","kind":"readme","status":"real","source":"admin/src/write-plans.mjs#planSettingSet","reason":"the settings planner's own refusal: unknown key '<key>'. valid keys: ..."},
+    {"el":"The pi add tool refuses a field its trigger kind does not take","kind":"readme","status":"new","source":"admin/src/write-plans.mjs#TRIGGER_ADD_FIELDS","reason":"the console's trigger form runs the same planner and says \"this form does not take ...\" (actions.mjs TRIGGER_FORM)"},
+    {"el":"Closed lists are selects","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#select","golden":["audit.operator"],"shows":"<select","reason":"the kit's select is PR 1's; the audit filters are its first use (PR 2)"},
+    {"el":"The settings key as a select","kind":"readme","status":"illustrative","reason":"the settings form's key select comes with Configuration's converted forms (PR 7a, ConfigScreen)"},
+    {"el":"Every configuration edit previews as a diff with - and + lines before Confirm","kind":"readme","status":"new","source":"admin/src/console/confirm-view.mjs#diffHtmlOf","golden":["panels/confirm-preview.operator"],"shows":"class=\"d-add\"","reason":"the line diff is PR 1's (actions.mjs lineDiff); its markup is new (d-del and d-add)"},
+    {"el":"Commands in a copy box, with the host they must run on in a line below","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#cmd","holds":"card__sub"},
+    {"el":"The answer textarea","kind":"readme","status":"real","source":"admin/src/console/panels/common.mjs#parkedAnswerForm"},
+    {"el":"maxTurns 30 to 40, claude-sonnet-5-5, the key colour, gh-b3d7, gh-e9a0 and the valid key list","kind":"sample","status":"illustrative","reason":"sample values; the refusal lists the console's own keys"}
+  ]
+}

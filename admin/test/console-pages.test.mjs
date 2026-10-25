@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { ESC, FIXTURES, ROLES, SHOTS, assertClean, assertPanelsMatch, renderAll, skip } from "./helpers/console-pages-harness.mjs";
+import { confirmSlotHtml, heldNoteHtml } from "../src/console/confirm-view.mjs";
+import { ESC, FIXTURES, ROLES, SHOTS, STATIC_SHOTS, assertClean, assertPanelsMatch, renderAll, skip } from "./helpers/console-pages-harness.mjs";
 
 /**
  * The console's screens rendered over the canned deployment (issue #641), in `render-images.test.mjs`'s style: the
@@ -89,8 +90,10 @@ test("the page rules bite: a duplicate id, a second main, h1 or sprite, a dresse
 test("the committed goldens hold every page rule (references, structure, no control byte), with or without a Valkey to render them", () => {
   // The render test below checks the same on a fresh render, which equals these bytes; this one runs where it is
   // skipped too, so a hand-edited golden or a merge that left one stale still answers to the rules.
-  const want = SHOTS.flatMap(([shot]) => ROLES.map((role) => `${shot}.${role}.html`)).sort();
-  assert.deepEqual(readdirSync(FIXTURES).filter((f) => f.endsWith(".html")).sort(), want, "a golden per shot and role, and no other");
+  // Issue #737: the pages that are not screens (sign-in, errors) are goldens here too, from `STATIC_SHOTS`, which
+  // `console-static-pages.test.mjs` draws and pins; the states no deployment reaches are under `panels/`, its own test's.
+  const want = [...SHOTS.flatMap(([shot]) => ROLES.map((role) => `${shot}.${role}.html`)), ...STATIC_SHOTS.map((shot) => `${shot}.html`)].sort();
+  assert.deepEqual(readdirSync(FIXTURES).filter((f) => f.endsWith(".html")).sort(), want, "a golden per shot and role, one per static shot, and no other");
   for (const f of want) assertClean(`fixtures/console/${f}`, readFileSync(join(FIXTURES, f), "utf8"));
 });
 
@@ -176,7 +179,10 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["run.viewer"].html, /awaiting-input/);
   // Issue #643: the live transcript section, outside every panel. The fixture's run has ended and Valkey holds no
   // stream for it, so the operator reads why and nothing is opened; a viewer reads that transcripts are operators'.
-  assert.match(first["run.operator"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">No live transcript: not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet\. Reload to check again\.<\/p><\/section><\/div>\n<\/main>/);
+  // Since issue #737 each section is in a .legacy wrapper of its own, and an operator's page ends with the confirm slot
+  // and the held note's template, outside every wrapper, where a viewer's ends with the section's wrapper.
+  const writes = `${confirmSlotHtml()}<template id="held-note">${heldNoteHtml()}</template>`;
+  assert.ok(first["run.operator"].html.includes(`<div class="legacy"><section id="transcript" class="transcript-section"><h2>Live transcript</h2><p class="note">No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired, or not started yet. Reload to check again.</p></section></div>${writes}\n</main>`), "the operator's transcript section, then the slot");
   // Issue #712: a local run's page shows the command that reopens its sandbox.
   assert.match(first["run.operator"].html, /<code class="mono">pi-dispatch sandbox gh-2f6a<\/code>/);
   assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/div>\n<\/main>/);
@@ -338,12 +344,22 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
     assert.match(r.refusal ?? "", re, qs);
     assert.ok(!r.refusal.includes("<script") && !r.refusal.includes(ESC), "a refusal never echoes the value");
   }
-  // audit: readConsoleAudit's cursor exactly, `YYYY-MM:<line>`, kept as the string the reader takes.
-  assert.deepEqual(q("audit", "before=2026-10:12").query, { before: "2026-10:12" });
-  assert.deepEqual(q("audit", "before=2026-10%3A1").query, { before: "2026-10:1" }, "the link's encoded colon");
-  assert.deepEqual(q("audit", `before=2026-10:${"9".repeat(15)}`).query, { before: `2026-10:${"9".repeat(15)}` });
+  // audit: readConsoleAudit's cursor exactly, `YYYY-MM:<line>`, kept as the string the reader takes. Since issue #737 the
+  // audit page's own parser (audit-view.mjs `parseAuditQuery`) judges it, with the filters and `seq` beside it: six keys,
+  // each null when not given (its own test holds the filters' rules).
+  const auditQ = (over) => ({ before: null, who: null, action: null, outcome: null, q: null, seq: null, ...over });
+  assert.deepEqual(q("audit", "").query, auditQ({}));
+  assert.deepEqual(q("audit", "before=2026-10:12").query, auditQ({ before: "2026-10:12" }));
+  assert.deepEqual(q("audit", "before=2026-10%3A1").query, auditQ({ before: "2026-10:1" }), "the link's encoded colon");
+  assert.deepEqual(q("audit", `before=2026-10:${"9".repeat(15)}`).query, auditQ({ before: `2026-10:${"9".repeat(15)}` }));
   assert.equal(pageQueryString("audit", { before: "2026-10:12" }), "before=2026-10%3A12");
-  assert.deepEqual(q("audit", pageQueryString("audit", { before: "2026-10:12" })).query, { before: "2026-10:12" }, "the string round-trips");
+  assert.deepEqual(q("audit", pageQueryString("audit", { before: "2026-10:12" })).query, auditQ({ before: "2026-10:12" }), "the string round-trips");
+  const filtered = q("audit", "who=ops&action=write&outcome=ok&q=pause");
+  assert.deepEqual(filtered.query, auditQ({ who: "ops", action: "write", outcome: "ok", q: "pause" }));
+  assert.equal(pageQueryString("audit", filtered.query), "who=ops&action=write&outcome=ok&q=pause", "in the parser's order, the empty ones left out");
+  assert.deepEqual(q("audit", "seq=41").query, auditQ({ seq: 41 }), "a row number, as a number");
+  assert.match(q("audit", "seq=41&before=2026-10:12").refusal, /seq and before do not go together/);
+  assert.match(q("audit", `outcome=${encodeURIComponent(hostile)}`).refusal, /^outcome must be one of ok, refused, failed$/, "named, never echoed");
   for (const b of ["12", "12.5", "2026-10:0", "2026-10:012", "2026-1:5", "2026-10:-1", "2026-10:1e3", "2026-10:12 ", " 2026-10:12", "2026-10:1:2", "2026-10", `2026-10:${"9".repeat(16)}`, "abc"]) {
     assert.match(q("audit", `before=${encodeURIComponent(b)}`).refusal, /before must be an audit position \(YYYY-MM:line/, b);
   }
@@ -391,7 +407,11 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
   assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).run, { missing: true });
   assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).transcript, { unreachable: true, exists: false }, "a transcript read that throws is a stated absence");
   assert.match((await loadPageData("insights", { range: "7d" }, broken)).insightsError, /could not be assembled/);
-  assert.equal((await loadPageData("audit", { before: null }, broken)).audit, null);
+  // The audit page's read is a view either way (audit-view.mjs `readAuditView`): a reader that throws is a view with the
+  // reader's sentence in `unreadable` and no rows, which the log's panel says, never a thrown page or a null to guess at.
+  const unreadAudit = (await loadPageData("audit", { before: null }, broken)).audit;
+  assert.deepEqual([unreadAudit.unreadable, unreadAudit.rows, unreadAudit.next], ["the audit log could not be read", [], null]);
+  assert.equal(unreadAudit.chain.state, "unreadable", "and the chain, with no verifier wired, is not claimed checked");
   // The Parked count: a reader without it, one that throws and one that answers something that is not a count are all
   // "unknown", never 0.
   assert.equal((await loadPageData("audit", { before: null }, broken)).parkedCount, null, "no parkedCount on the reader");
@@ -472,17 +492,24 @@ test("the audit page's Older rows link carries readConsoleAudit's own cursor, wh
   const NOW = Date.UTC(2026, 9, 14, 12, 0, 0);
   const total = AUDIT_PER_PAGE + 2;
   for (let i = 0; i < total; i++) makeConsoleAudit({ logsDir, now: () => NOW + i, alive: () => true }).append({ actor: { name: "ops", role: "operator", session: null }, action: "login", target: `row-${i}`, outcome: "ok" });
-  const deps = { audit: ({ limit, before }) => readConsoleAudit({ logsDir, limit, before }), now: () => NOW };
+  // As serve wires it (`cli.mjs` `pageDeps.audit`): the page asks for each row's place, which the view needs.
+  const deps = { audit: ({ limit, before, positions }) => readConsoleAudit({ logsDir, limit, before, positions }), now: () => NOW };
   const session = { name: "ops", role: "operator" };
   const first = parsePageQuery("audit", "").query;
   const page1 = await renderPage("audit", { query: first, session, data: await loadPageData("audit", first, deps), readOnly: false });
-  const href = /href="\/audit\?([^"]+)">Older rows<\/a>/.exec(String(page1.html))?.[1];
+  // The Older link is the kit's pager (issue #737): a small button that is a link while an older page exists.
+  const href = /<a class="btn btn--sm" href="\/audit\?([^"]+)">Older<\/a><\/span>/.exec(String(page1.html))?.[1];
   assert.ok(href, "the first page links to older rows");
   const parsed = parsePageQuery("audit", href.replaceAll("&amp;", "&"));
   assert.equal(parsed.refusal, undefined, String(parsed.refusal));
   const data2 = await loadPageData("audit", parsed.query, deps);
-  assert.equal(data2.audit.unreadable, undefined, String(data2.audit.unreadable));
-  assert.deepEqual(data2.audit.rows.map((r) => r.target), ["row-1", "row-0"], "the next page is the two oldest rows");
+  assert.equal(data2.audit.unreadable, null, String(data2.audit.unreadable));
+  // A view's rows are `{ entry, pos, state }`: the row as stored, its place in the files, and what the chain says of it.
+  assert.deepEqual(data2.audit.rows.map((r) => r.entry.target), ["row-1", "row-0"], "the next page is the two oldest rows");
+  assert.deepEqual(data2.audit.rows.map((r) => r.pos), ["2026-10:2", "2026-10:1"], "each at its place");
+  // The last page has no older one: its Older is drawn disabled, never a link to an empty page.
+  const page2 = String((await renderPage("audit", { query: parsed.query, session, data: data2, readOnly: false })).html);
+  assert.doesNotMatch(page2, /href="\/audit\?[^"]*">Older</);
 });
 
 test("renderPage answers 404 for a run that does not exist, and the stream's panels are the page's sections", async () => {

@@ -97,13 +97,23 @@ const TONE_RULES = Object.freeze(toneRulesOf(PULSE_CSS));
  * What the design states outside the usage sentences: `focus` as the 2px keyboard ring on every page and card ground
  * (3:1) and as link text on a card or an inset (4.5:1), and the two body inks on every pastel ground, because a tinted
  * card, banner or diff line still carries ordinary text (`.banner__t`, `.banner__s`, `.d-del`, `.d-add`).
+ *
+ * And what the console adds: a page shown as last seen draws each panel's card flat (`page-css.mjs` `SHELL_CSS`), so
+ * the words a card writes on its own ground sit on the canvas: the two body inks, the link
+ * colour and every status ink (each tone's ink, as `TONE_RULES` reads them), at 4.5:1. The faint ink is re-pointed to
+ * the muted one there, so it adds no pair. A secondary button's fill (`surface-3`) has no edge on the canvas (1.04:1 in
+ * light), so such a panel rings its secondary controls in `line-strong`, held at 3:1 there (WCAG 1.4.11's for a
+ * control's boundary).
  */
 function extraPairs() {
   const tints = NAMES.filter((name) => name.endsWith("-tint"));
+  const staleInks = [...new Set(["ink", "ink-muted", "focus", ...Object.values(TONE_RULES).map((rule) => rule.ink)])];
   return [
     ...["canvas", "surface", "surface-2", "surface-3"].map((bg) => ["focus", bg, 3, "focus ring"]),
     ...["surface", "surface-2"].map((bg) => ["focus", bg, 4.5, "link text"]),
     ...["ink", "ink-muted"].flatMap((fg) => tints.map((bg) => [fg, bg, 4.5, "text on a tint"])),
+    ...staleInks.map((fg) => [fg, "canvas", 4.5, "a stale page's flat panel"]),
+    ["line-strong", "canvas", 3, "a stale page's secondary button ring"],
   ];
 }
 
@@ -135,12 +145,14 @@ function derivedPairs() {
 /** The derived set, pinned: `<foreground> on <ground> <ratio>`, sorted. */
 const PAIRS = Object.freeze([
   "attention-ink on attention-tint 4.5",
+  "attention-ink on canvas 4.5",
   "attention-ink on surface 4.5",
   "attention-ink on surface-2 4.5",
+  "failed-ink on canvas 4.5",
   "failed-ink on failed-tint 4.5",
   "failed-ink on surface 4.5",
   "failed-ink on surface-2 4.5",
-  "focus on canvas 3",
+  "focus on canvas 4.5",
   "focus on surface 4.5",
   "focus on surface-2 4.5",
   "focus on surface-3 3",
@@ -169,8 +181,10 @@ const PAIRS = Object.freeze([
   "ink-muted on surface 4.5",
   "ink-muted on surface-2 4.5",
   "ink-muted on surface-3 4.5",
+  "line-strong on canvas 3",
   "line-strong on surface 3",
   "line-strong on surface-2 3",
+  "ok-ink on canvas 4.5",
   "ok-ink on ok-tint 4.5",
   "ok-ink on surface 4.5",
   "ok-ink on surface-2 4.5",
@@ -181,12 +195,15 @@ const PAIRS = Object.freeze([
   "on-primary on primary 4.5",
   "on-refused on refused 4.5",
   "on-running on running 4.5",
+  "parked-ink on canvas 4.5",
   "parked-ink on parked-tint 4.5",
   "parked-ink on surface 4.5",
   "parked-ink on surface-2 4.5",
+  "refused-ink on canvas 4.5",
   "refused-ink on refused-tint 4.5",
   "refused-ink on surface 4.5",
   "refused-ink on surface-2 4.5",
+  "running-ink on canvas 4.5",
   "running-ink on running-tint 4.5",
   "running-ink on surface 4.5",
   "running-ink on surface-2 4.5",

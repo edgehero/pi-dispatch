@@ -4,26 +4,43 @@
  * `POST /api/act/<name>/preview` and `POST /api/act/<name>/confirm` from it (`auth: "operator"`, `write: true`), so a
  * write cannot exist without the dispatcher's guards and the route tests derive their lists from the same table.
  *
- * AN ENTRY: `{ name, kind, paid, bulk, needs, preview(body, ctx), apply(entry, ctx) }`.
+ * AN ENTRY: `{ name, kind, paid, bulk, needs, fields, danger, preview(body, ctx), apply(entry, ctx), undo(out, body),
+ * inverse(out, body), confirmLabel(out), done(out, body, result) }`.
  *   - `name` is the route segment and the ticket's action; `kind` is the audit row's `kind` (INT-CONSOLE-AUDIT-LOG),
  *     the panel's own word for the same write where one exists, so the TUI's rows and the console's read alike.
+ *   - `fields` (issue #737) is every body key the preview reads, frozen; a body carrying any other key is refused by
+ *     name before the preview runs (a key a form sent and no planner reads would be dropped in silence, the posture
+ *     this repository refuses). `ticket` is never one: it belongs to the confirm.
  *   - `preview` builds the change through the SAME planner the tool or the TUI uses (`write-plans.mjs`, or
  *     `job-actions.mjs` through the read model), so a refusal is the tool's sentence, and returns `{ refusal }`,
- *     `{ unchanged }`, or `{ summary, diff, expect, payload, target, targets, reserve, beforeDigest, afterDigest }`.
+ *     `{ unchanged }`, or `{ summary, diff, expect, payload, target, targets, reserve, beforeDigest, afterDigest }`,
+ *     which may also carry `plan` and `beforeText` (the planner's plan, the file as it was) for the three below; those
+ *     two are never sent to the browser.
  *   - `apply` runs the read model's funnel with the ticket's stored `payload` and `expect`, and answers `{ ok, ... }`,
- *     `{ invalid }` (refused, nothing done: the file or the job changed since the preview, a dedup window, ...) or
+ *     `{ invalid }` (refused, nothing done: the file or the job changed since the preview, a dedup window, ...),
+ *     `{ invalid, partial: true }` (refused after part of it was done: the kill switch reached some queues), or
  *     `{ unreachable }` (Valkey).
+ *   - `danger` (a destructive act: a cancel, a removal, a pause, a delete) draws the red bar and button; never together
+ *     with `paid`, which draws the yellow ones. `undo(out, body)` is the bar's and the banner's Undo sentence (one, or
+ *     `{ bar, after }` when the bar's points at the preview); `inverse(out, body)` the write that undoes it, `{ action,
+ *     body }` with a body that action's `fields` take, or null when none can (`UNDO_SENTENCES` then says what to do
+ *     instead, after "No undo:"); `confirmLabel(out)` the confirm button's words; `done(out, body, result)` what the
+ *     banner after the write says happened. All but a bulk act's `done` are decided at the preview, where the file as
+ *     it was is known, and ride the ticket (`meta`).
  *
  * THE PIPELINE (lifted from #640's pause-windows reference write, now shared by every entry):
  *   1. preview: plan, compute the digests and the diff, and store EVERYTHING the write needs in a single-use ticket
- *      bound to the session and the action (`confirm.mjs`). The browser gets the ticket and an escaped, server-rendered
- *      `diffHtml`, never the payload, so it cannot swap what is written between the two requests.
+ *      bound to the session and the action (`confirm.mjs`). The browser gets the ticket and the escaped,
+ *      server-rendered confirm bar (`html`, `confirm-view.mjs`), never the payload, so it cannot swap what is written
+ *      between the two requests. Every refusal carries its bar too, and keeps its `error` sentence byte for byte.
  *   2. confirm: redeem the ticket, then AUDIT, THEN WRITE (`auditedWrite`): the `ok` row first, with `kind`, the
  *      digests, `reserve` and the ticket's digest; a write whose row cannot be appended does not happen (500); a write
  *      that is refused or throws gets a compensating `failed` row with the same ticket. A bulk action writes one row
  *      per job (`count` = the list's size, all sharing the ticket digest), and a job refused at the apply gets its own
  *      `failed` row.
- *   3. after a write that landed: `hub.tick()`, so every open live tab redraws now rather than at the next tick.
+ *   3. after a write that landed: the session's flash (`setFlash`: what changed, its audit row, the Undo), which the
+ *      next page the session draws shows once as a banner, and `hub.tick()`, so every open live tab redraws now
+ *      rather than at the next tick.
  *
  * FILE WRITES ARE DRY-RUN AT THE PREVIEW. The planners judge a change; the funnel's own parser decides. So the preview
  * runs the funnel itself against `dryRunFs`, a file system that reads through to the real one and keeps every write in
@@ -31,9 +48,9 @@
  * confirm writes, and a change the funnel would refuse is refused at the preview with the funnel's words, before the
  * operator is asked. Nothing the dry run does reaches the disk (`dryRunFs` has no write path to the real one).
  *
- * WHAT A DIFF SHOWS. The file before and after, in a line diff, with every `secrets` map's values replaced by a marker
- * (a trigger's secret references are not a page's business, the configuration panel's rule) and every line escaped by
- * the `html` template. The answer to a parked run, and a message into a running job (issue #646), is shown to the
+ * WHAT A DIFF SHOWS (`confirm-view.mjs` `diffHtmlOf`). The file before and after, in a line diff, with every `secrets`
+ * map's values replaced by a marker (a trigger's secret references are not a page's business, the configuration
+ * panel's rule), every line escaped by the `html` template, and the file named by its basename alone. The answer to a parked run, and a message into a running job (issue #646), is shown to the
  * operator who typed it, and only there: its audit row carries the sha256 of the text (`afterDigest`), never the text.
  *
  * Valkey-backed reads and writes go through `ctx.a` (`actionDeps`, wired by `cli.mjs`): the read model (`rm`), the
@@ -44,8 +61,14 @@ import { createHash } from "node:crypto";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
+import { fieldNamed, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
+import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { html } from "./html.mjs";
+import { FLASH_MAX_BYTES } from "./sessions.mjs";
+
+/** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
+export { DIFF_LINES_MAX, diffHtmlOf, lineDiff, textHtml } from "./confirm-view.mjs";
 
 /** The most jobs a bulk action names (`job-actions.mjs`' `BULK_MAX`, pinned equal by a test). */
 export const BULK_MAX = 100;
@@ -80,6 +103,25 @@ const PAUSE_WINDOW_KEYS = Object.freeze(["scope", "from", "to", "tz", "days", "d
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 const digestOf = (text) => (text === null || text === undefined ? null : sha256(text));
 const codeOf = (e) => (typeof e?.code === "string" && /^[A-Z0-9_]{1,40}$/.test(e.code) ? e.code : "error");
+
+/** The count rule every sentence here follows (`confirm-view.mjs` `plural`), re-exported where it always was. */
+export { plural };
+
+/**
+ * A row of a Configuration list as the console names it until that page converts (issue #737): by the 0-based
+ * index its table and its forms show, "trigger at index 2", never "#3". The planners name the console's rows by the same
+ * words (`write-plans.mjs` `rowName(what, index, "console")`, which a test holds equal to this); the pi panel keeps its
+ * 1-based "#3".
+ */
+export const atIndex = (what, index) => `${what} at index ${Number.isSafeInteger(index) && index >= 0 ? index : "?"}`;
+
+/**
+ * A planner's `[key, before, after]` pairs as the bar draws them: "maxTurns: <b>30</b> to <b>40</b>" (issue #737, the
+ * Actions card), joined by commas. The words are `write-plans.mjs` `changeText`'s; only the bold is the bar's.
+ */
+function changesHtml(changes) {
+  return (Array.isArray(changes) ? changes : []).map(([key, before, after], i) => html`${i > 0 ? ", " : null}${key}: <b>${before}</b> to <b>${after}</b>`);
+}
 
 /** A refusal raised while reading a body: answered 400 with its sentence. */
 class BadRequest extends Error {}
@@ -214,6 +256,9 @@ export function dryRunFs(real) {
   };
 }
 
+/** What a preview says when the change would write what the file already holds (the no-change bar's sentence). */
+export const UNCHANGED = "the file already says this";
+
 /** A file's text now: `{ text }` (null when absent) or `{ refusal }`. */
 function readNow(fs, path) {
   try {
@@ -224,120 +269,16 @@ function readNow(fs, path) {
   }
 }
 
-// ---- the diff ----------------------------------------------------------------------------------------------------------
-
-/** A JSON value with every `secrets` map's values replaced by a marker: the diff shows that one changed, not what. */
-function redacted(value, keyName = null) {
-  if (Array.isArray(value)) return value.map((v) => redacted(v));
-  if (value === null || typeof value !== "object") return value;
-  if (keyName === "secrets") return Object.fromEntries(Object.keys(value).map((k) => [k, "(a secret reference, not shown)"]));
-  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redacted(v, k)]));
-}
-
-/** A file's text as the diff shows it: parsed, redacted and re-indented when it is JSON, else its lines as they are. */
-function displayLines(text) {
-  if (text === null || text === undefined) return [];
-  try {
-    return JSON.stringify(redacted(JSON.parse(text)), null, 2).split("\n");
-  } catch {
-    return String(text).replace(/\n$/, "").split("\n");
-  }
-}
-
-/**
- * The largest diff table the preview computes (changed lines before times changed lines after, once the common prefix
- * and suffix are cut); past it, the changed middle is shown as removed then added.
- */
-const DIFF_CELLS_MAX = 4_000_000;
-/** Unchanged lines kept around each change. */
-const DIFF_CONTEXT = 2;
-/** The most diff lines a preview renders; past it, the count of the lines left out. */
-export const DIFF_LINES_MAX = 2000;
-
-/**
- * A line diff of `a` to `b`: `[{ t: " " | "-" | "+" | "gap", line }]`, unchanged runs cut to `DIFF_CONTEXT` lines.
- *
- * The common prefix and suffix are cut FIRST (linear, and the usual edit touches one entry of a long file), so only the
- * changed middle meets the quadratic table: a one-entry change to a 150-trigger file is a small table and a small
- * preview, where diffing the whole file passed `DIFF_CELLS_MAX` and showed both files whole (159 KB).
- */
-export function lineDiff(a, b) {
-  let pre = 0;
-  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre += 1;
-  let suf = 0;
-  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf += 1;
-  const midA = a.slice(pre, a.length - suf);
-  const midB = b.slice(pre, b.length - suf);
-  const same = (line) => ({ t: " ", line });
-  const ops = [...a.slice(0, pre).map(same), ...middleDiff(midA, midB), ...a.slice(a.length - suf).map(same)];
-  const changed = ops.map((op) => op.t !== " ");
-  const out = [];
-  let last = -Infinity;
-  // The index of the next change at or after k, so "near a change" is one look each way rather than a slice per line.
-  const nextChange = new Array(ops.length + 1).fill(Infinity);
-  for (let k = ops.length - 1; k >= 0; k -= 1) nextChange[k] = changed[k] ? k : nextChange[k + 1];
-  for (let k = 0; k < ops.length; k += 1) {
-    if (changed[k]) last = k;
-    if (changed[k] || k - last <= DIFF_CONTEXT || nextChange[k] - k <= DIFF_CONTEXT) out.push(ops[k]);
-    else if (out.at(-1)?.t !== "gap") out.push({ t: "gap", line: "" });
-  }
-  return out;
-}
-
-/** The diff of the changed middle: a longest common subsequence, or removed then added past `DIFF_CELLS_MAX`. */
-function middleDiff(a, b) {
-  if (a.length * b.length > DIFF_CELLS_MAX) return [...a.map((line) => ({ t: "-", line })), ...b.map((line) => ({ t: "+", line }))];
-  // Longest common subsequence, from the end, so the walk below reads forward.
-  const n = a.length;
-  const m = b.length;
-  const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i -= 1) for (let j = m - 1; j >= 0; j -= 1) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-  const ops = [];
-  let i = 0;
-  let j = 0;
-  while (i < n || j < m) {
-    if (i < n && j < m && a[i] === b[j]) {
-      ops.push({ t: " ", line: a[i] });
-      i += 1;
-      j += 1;
-    } else if (i < n && (j >= m || L[i + 1][j] >= L[i][j + 1])) {
-      // A removal before an addition, so a changed line reads as the old one then the new one.
-      ops.push({ t: "-", line: a[i] });
-      i += 1;
-    } else {
-      ops.push({ t: "+", line: b[j] });
-      j += 1;
-    }
-  }
-  return ops;
-}
-
-/** The diff of two file texts as escaped HTML: a `<pre>` with one element per line, at most `DIFF_LINES_MAX` of them. */
-export function diffHtmlOf(beforeText, afterText) {
-  const ops = lineDiff(displayLines(beforeText), displayLines(afterText));
-  const shown = ops.slice(0, DIFF_LINES_MAX);
-  const more = ops.length - shown.length;
-  return html`<pre class="diff">${shown.map((o) => {
-    if (o.t === "+") return html`<ins>+ ${o.line}</ins>\n`;
-    if (o.t === "-") return html`<del>- ${o.line}</del>\n`;
-    if (o.t === "gap") return html`<span class="gap">...</span>\n`;
-    return html`<span>  ${o.line}</span>\n`;
-  })}${more > 0 ? html`<span class="gap">... and ${more} more diff line(s), not shown</span>\n` : null}</pre>`;
-}
-
-/** A text shown as it is, one element per line (the answer to a parked run, exactly as it will be posted). */
-function textHtml(text) {
-  return html`<pre class="answer">${String(text).split("\n").map((line) => html`<span>${line}</span>\n`)}</pre>`;
-}
-
 // ---- the reserve -------------------------------------------------------------------------------------------------------
 
 /** What a paid action will hold, in words (CONST-BUDGET-BEFORE-TOKENS: the worker reserves at pickup; this says what). */
 export function reserveText(r) {
   if (!r) return null;
   if (r.bulk) {
-    const dollars = r.dollarsMicros > 0 ? ` and $${formatMicros(r.dollarsMicros)}${r.unknown > 0 ? " for the jobs whose reserve is known" : ""} in each dollar window that applies` : "";
-    return `Together they hold ${r.slots} job slot(s)${dollars}${r.unknown > 0 ? `; the reserve of ${r.unknown} job(s) is unknown (their data could not be read), so the total is at least this` : ""}.`;
+    const known = r.slots - r.unknown;
+    const dollars = r.dollarsMicros > 0 ? ` and $${formatMicros(r.dollarsMicros)}${r.unknown > 0 ? ` for the ${plural(known, "job whose reserve is", "jobs whose reserve is")} known` : ""} in each dollar window that applies` : "";
+    // A list of one is "It holds", as a single act's sentence reads; "Together they" is for two or more.
+    return `${r.slots === 1 ? "It holds" : "Together they hold"} ${plural(r.slots, "job slot")}${dollars}${r.unknown > 0 ? `; the reserve of ${plural(r.unknown, "job")} is unknown (${r.unknown === 1 ? "its" : "their"} data could not be read), so the total is at least this` : ""}.`;
   }
   if (r.unknown) return "Reserve unknown: the job's data could not be read, so what the worker will hold for it cannot be said.";
   if (r.invalid) return `The deployment's dollar setting does not parse (${r.invalid}), so the worker refuses every job until it is fixed.`;
@@ -404,13 +345,6 @@ function reserveMicros(r) {
   return Number.isSafeInteger(r?.dollarsMicros) && r.dollarsMicros >= 0 ? r.dollarsMicros : null;
 }
 
-/** The preview's HTML: the summary lines, the reserve, then the diff. Every value escaped. */
-function previewHtml(out) {
-  const lines = Array.isArray(out.summary) ? out.summary : [];
-  const reserve = reserveText(out.reserve);
-  return html`<div class="preview"><ul class="summary">${lines.map((l) => html`<li>${l}</li>`)}</ul>${reserve ? html`<p class="reserve"><strong>Reserve:</strong> ${reserve}</p>` : null}${out.diff ?? null}</div>`;
-}
-
 // ---- shared steps ------------------------------------------------------------------------------------------------------
 
 /**
@@ -418,7 +352,7 @@ function previewHtml(out) {
  * called once here against `dryRunFs` and once at the confirm against the real fs. Returns the preview's shape with the
  * exact before and after digests of `target`, or `{ refusal }` with the funnel's words, or `{ unchanged }`.
  */
-async function fileChange(ctx, { target, expect, summary, run, payload = {} }) {
+async function fileChange(ctx, { target, expect, summary, run, payload = {}, plan = null, unchanged = null, barLines = null }) {
   if (typeof target !== "string" || target === "") return { refusal: "this deployment does not name the file this change writes; set it in the deployment's .env", status: 409 };
   const now = readNow(ctx.fs, target);
   if (now.refusal) return now;
@@ -433,8 +367,12 @@ async function fileChange(ctx, { target, expect, summary, run, payload = {} }) {
   const after = dry.files.has(target) ? dry.files.get(target) : now.text;
   const beforeDigest = digestOf(now.text);
   const afterDigest = digestOf(after);
-  if (beforeDigest === afterDigest) return { unchanged: "no change: the file already says this" };
-  return { target, expect, summary, diff: diffHtmlOf(now.text, after), payload: { ...payload, run }, beforeDigest, afterDigest };
+  // The bar's title already says "No change", so the sentence says why (issue #737), and what, where the action
+  // knows it (`unchanged(plan)`: a setting's key and the value the file holds).
+  if (beforeDigest === afterDigest) return { unchanged: UNCHANGED, ...(typeof unchanged === "function" && plan ? unchanged(plan) : {}) };
+  // `beforeText` and `plan` stay on the server: the Undo and the confirm label read them (the trigger count before an
+  // add, a setting's old value), and the ticket keeps only what those decide.
+  return { target, expect, summary, ...(barLines ? { barLines } : {}), diff: diffHtmlOf(now.text, after, { file: target }), payload: { ...payload, run }, beforeDigest, afterDigest, beforeText: now.text, plan };
 }
 
 /** Apply a `fileChange`: the same write, on the real fs, with the preview's `expect`. */
@@ -504,11 +442,16 @@ const FILE_NEEDS = Object.freeze(["rm", "plans", "paths"]);
 const JOB_NEEDS = Object.freeze(["rm", "paths"]);
 const FLEET_NEEDS = Object.freeze(["fleet"]);
 
+/** What the console's trigger add calls itself in a planner's refusal (`planTriggerAdd`'s `tool`). */
+export const TRIGGER_FORM = "this form";
+
 /**
  * A file action: `build(body, ctx)` returns a planner's result (`{ plan }` with `mutate`/`expect`/`title`/`summary`, or
- * `{ refusal }`), `target(ctx)` the file, and `write(plan, ctx, { fs, expect })` the funnel call.
+ * `{ refusal }`), `target(ctx)` the file, and `write(plan, ctx, { fs, expect })` the funnel call. `bar(plan)`, when
+ * given, is the bar's lines in place of the planner's (the same words, with markup: a change's values in bold), and
+ * `unchanged(plan)` what the no-change bar says beyond `UNCHANGED` (`{ unchanged, unchangedHtml }`).
  */
-function fileAction({ name, kind, build, target, write }) {
+function fileAction({ name, kind, build, target, write, bar = null, unchanged = null }) {
   return {
     name,
     kind,
@@ -521,10 +464,20 @@ function fileAction({ name, kind, build, target, write }) {
       const p = got.plan;
       const file = target(ctx);
       const expect = Array.isArray(p.expect) ? p.expect : ctx.a.rm.writeInputs({ paths: [file], fs: ctx.fs });
-      return fileChange(ctx, { target: file, expect, summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : [])], run: (fs, exp) => write(p, ctx, { fs, expect: exp }) });
+      return fileChange(ctx, { target: file, expect, summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : [])], run: (fs, exp) => write(p, ctx, { fs, expect: exp }), plan: p, unchanged, barLines: typeof bar === "function" ? bar(p) : null });
     },
     apply: applyFile,
   };
+}
+
+/**
+ * A setting's change as the bar draws it, `maxTurns: <b>30</b> to <b>40</b>`, then the rest of the planner's lines (a
+ * dollar key's warning); and the no-change bar's words for it, the key as code and the value the file holds.
+ */
+const settingBar = (p) => [html`${changesHtml(p.changes)}`, ...(Array.isArray(p.summary) ? p.summary.slice(1) : [])];
+function settingUnchanged(p) {
+  const said = p.unset ? "is not set" : `is ${String(p.value)}`;
+  return { unchanged: `${UNCHANGED}: ${p.key} ${said}`, unchangedHtml: html`The file already says this: <span class="code">${p.key}</span> ${said}.` };
 }
 
 /** The deployment's paths, with the pause-windows file the console's config names when the paths leave it out. */
@@ -563,11 +516,14 @@ const pauseWindowsWhole = {
   async preview(body, ctx) {
     if (!Array.isArray(body.windows)) return { refusal: "send {\"windows\": [...]} with the whole new list of pause windows" };
     for (const [i, w] of body.windows.entries()) {
-      if (w === null || typeof w !== "object" || Array.isArray(w)) return { refusal: `pause window at index ${i} is not an object; nothing was changed` };
+      // Issue #737: the window by the index the Configuration page's table and forms show, until that page
+      // converts (PR 7a); the pi panel counts from 1.
+      const at = atIndex("pause window", i);
+      if (w === null || typeof w !== "object" || Array.isArray(w)) return { refusal: `${at} is not an object; nothing was changed` };
       for (const [k, value] of Object.entries(w)) {
-        if (!PAUSE_WINDOW_KEYS.includes(k)) return { refusal: `pause window at index ${i} has a field this file does not take (${PAUSE_WINDOW_KEYS.join(", ")} only); nothing was changed` };
+        if (!PAUSE_WINDOW_KEYS.includes(k)) return { refusal: `${at} has a field this file does not take (${PAUSE_WINDOW_KEYS.join(", ")} only); nothing was changed` };
         const plain = typeof value === "string" || (k === "days" && Array.isArray(value) && value.every((d) => typeof d === "string"));
-        if (!plain) return { refusal: `pause window at index ${i}: ${k} must be ${k === "days" ? "a list of weekday names" : "a string"}; nothing was changed` };
+        if (!plain) return { refusal: `${at}: ${k} must be ${k === "days" ? "a list of weekday names" : "a string"}; nothing was changed` };
       }
     }
     const path = ctx.config.pauseWindowsPath;
@@ -588,15 +544,16 @@ const pauseWindowsWhole = {
     }
     const beforeDigest = digestOf(snap.text);
     const afterDigest = digestOf(afterText);
-    if (beforeDigest === afterDigest) return { unchanged: "no change: the file already says this", extra: { before, after: body.windows } };
+    if (beforeDigest === afterDigest) return { unchanged: UNCHANGED, extra: { before, after: body.windows } };
     return {
       target: path,
       payload: { windows: body.windows },
       expect: [{ path, text: snap.text }],
-      summary: ["Replace the pause windows", `${before.length} window(s) now, ${body.windows.length} after`],
-      diff: diffHtmlOf(snap.text, afterText),
+      summary: ["Replace the pause windows", `${plural(before.length, "window")} now, ${body.windows.length} after`],
+      diff: diffHtmlOf(snap.text, afterText, { file: path }),
       beforeDigest,
       afterDigest,
+      beforeText: snap.text,
       extra: { before, after: body.windows },
     };
   },
@@ -644,21 +601,24 @@ const configActions = [
   fileAction({
     name: "trigger-add",
     kind: "trigger-add",
-    build: (body, ctx) => ctx.a.plans.planTriggerAdd({ params: { ...obj(body, "trigger") }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
+    // The form's own word for itself (issue #737): a refusal the planner names its caller in ("... does not take
+    // colour") says "this form" to a person on the console, never the pi tool's name.
+    build: (body, ctx) => ctx.a.plans.planTriggerAdd({ params: { ...obj(body, "trigger") }, paths: ctx.a.paths, env: ctx.a.env, tool: TRIGGER_FORM, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.triggersPath,
     write: writeTriggersOf,
   }),
   fileAction({
     name: "trigger-edit",
     kind: "trigger-edit",
-    build: (body, ctx) => ctx.a.plans.planTriggerEdit({ params: { index: index(body), flow: str(body, "flow", { required: true }), backend: str(body, "backend"), provider: str(body, "provider"), model: str(body, "model") }, paths: ctx.a.paths, env: ctx.a.env, fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planTriggerEdit({ params: { index: index(body), flow: str(body, "flow", { required: true }), backend: str(body, "backend"), provider: str(body, "provider"), model: str(body, "model") }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.triggersPath,
     write: writeTriggersOf,
+    bar: (p) => [html`${p.row} (${p.type}) ${changesHtml(p.changes)}`, ...(Array.isArray(p.summary) ? p.summary.slice(1) : [])],
   }),
   fileAction({
     name: "trigger-delete",
     kind: "trigger-delete",
-    build: (body, ctx) => ctx.a.plans.planTriggerDelete({ index: index(body), paths: ctx.a.paths, fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planTriggerDelete({ index: index(body), paths: ctx.a.paths, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.triggersPath,
     write: writeTriggersOf,
   }),
@@ -668,6 +628,8 @@ const configActions = [
     build: (body, ctx) => ctx.a.plans.planSettingSet({ key: str(body, "key", { required: true, max: 64 }), value: str(body, "value", { required: true }), paths: ctx.a.paths, env: ctx.a.env, shown: shownDir(ctx), fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.settingsFile,
     write: writeSettingsOf,
+    bar: settingBar,
+    unchanged: settingUnchanged,
   }),
   fileAction({
     name: "setting-unset",
@@ -675,6 +637,8 @@ const configActions = [
     build: (body, ctx) => ctx.a.plans.planSettingUnset({ key: str(body, "key", { required: true, max: 64 }), paths: ctx.a.paths, env: ctx.a.env, shown: shownDir(ctx), fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.settingsFile,
     write: writeSettingsOf,
+    bar: settingBar,
+    unchanged: settingUnchanged,
   }),
   fileAction({
     name: "secret-profile-add",
@@ -720,14 +684,14 @@ const configActions = [
   fileAction({
     name: "pause-window-edit",
     kind: "pause-window-edit",
-    build: (body, ctx) => ctx.a.plans.planPauseWindowEdit({ index: index(body), fields: pauseFields(body), paths: { ...ctx.a.paths, pauseWindowsPath: pausePath(ctx) }, fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planPauseWindowEdit({ index: index(body), fields: pauseFields(body), paths: { ...ctx.a.paths, pauseWindowsPath: pausePath(ctx) }, surface: "console", fs: ctx.fs }),
     target: pausePath,
     write: writePause,
   }),
   fileAction({
     name: "pause-window-delete",
     kind: "pause-window-delete",
-    build: (body, ctx) => ctx.a.plans.planPauseWindowDelete({ index: index(body), paths: { ...ctx.a.paths, pauseWindowsPath: pausePath(ctx) }, fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planPauseWindowDelete({ index: index(body), paths: { ...ctx.a.paths, pauseWindowsPath: pausePath(ctx) }, surface: "console", fs: ctx.fs }),
     target: pausePath,
     write: writePause,
   }),
@@ -741,14 +705,14 @@ const configActions = [
   fileAction({
     name: "limit-edit",
     kind: "limit-edit",
-    build: (body, ctx) => ctx.a.plans.planLimitEdit({ params: { ...obj(body, "limit"), index: index(body) }, paths: ctx.a.paths, env: ctx.a.env, fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planLimitEdit({ params: { ...obj(body, "limit"), index: index(body) }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.scopedLimitsPath,
     write: writeLimitsOf,
   }),
   fileAction({
     name: "limit-delete",
     kind: "limit-delete",
-    build: (body, ctx) => ctx.a.plans.planLimitDelete({ index: index(body), paths: ctx.a.paths, env: ctx.a.env, fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planLimitDelete({ index: index(body), paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.scopedLimitsPath,
     write: writeLimitsOf,
   }),
@@ -847,13 +811,15 @@ const configActions = [
       if (alloc?.unreachable) return { refusal: "the allocation history could not be read (is Valkey reachable?); nothing was changed", status: 503 };
       const log = Array.isArray(alloc?.log) ? alloc.log : [];
       const row = log[at];
-      if (!row) return { refusal: `no allocation history row at index ${at} (have ${log.length})` };
-      if (row.weights === null || typeof row.weights !== "object") return { refusal: `history row #${at} carries no split to go back to` };
+      // Issue #737: the row by the index the form asks for ("History row # (newest is 0)"), until the
+      // Configuration page converts (PR 7a).
+      if (!row) return { refusal: `no allocation ${atIndex("history row", at)} (have ${log.length})` };
+      if (row.weights === null || typeof row.weights !== "object") return { refusal: `${atIndex("history row", at)} carries no split to go back to` };
       return {
         target: "allocation",
         expect: { envelopeDigest: env.read.digest },
-        payload: { row },
-        summary: [`Revert the allocation to history row #${at} (writer operator-revert)`, `${String(row.at ?? "-")}: ${String(row.outcome ?? "-")}${row.planId ? `, plan ${String(row.planId)}` : ", the neutral split"}`, ...Object.entries(row.weights).map(([k, w]) => `${k}: weight ${String(w)}`)],
+        payload: { row, index: at },
+        summary: [`Revert the allocation to ${atIndex("history row", at)} (writer operator-revert)`, `${String(row.at ?? "-")}: ${String(row.outcome ?? "-")}${row.planId ? `, plan ${String(row.planId)}` : ", the neutral split"}`, ...Object.entries(row.weights).map(([k, w]) => `${k}: weight ${String(w)}`)],
       };
     },
     async apply(entry, ctx) {
@@ -903,7 +869,15 @@ function priorityLine(p) {
 }
 
 /** A failed job's row in a bulk list, as the preview shows and the ticket binds it. */
-const failedLine = (j) => `${j.jobId} on ${j.queue}, ${j.attemptsMade} attempt(s)${j.target ? `, ${j.target}` : ""}`;
+const failedLine = (j) => `${j.jobId} on ${j.queue}, ${plural(j.attemptsMade, "attempt")}${j.target ? `, ${j.target}` : ""}`;
+
+/**
+ * A bulk preview's last line when more match than one action takes: the text for the answer's `summary`, and the bar's
+ * markup with "not in this action" in bold, as the ConfirmStates card draws it (lower case: the bold carries it).
+ */
+function notInThisAction(lead, tail = "") {
+  return { text: `${lead} not in this action${tail}`, bar: html`${lead} <b>not in this action</b>${tail}` };
+}
 
 /** The failed job `jobId` as the bulk planner reads it now (optionally in `queue`), or the refusal. */
 async function failedJob(ctx, jobId, queue) {
@@ -962,16 +936,18 @@ function failedAll({ name, kind, verb, fn }) {
       const more = Number(read.more ?? 0);
       const reserves = verb === "Retry" ? await retryReserves(ctx, jobs) : null;
       const reserveOf = (j) => (reserves ? reserves.get(j.jobId) : null);
+      const lines = jobs.map((j) => `${failedLine(j)}${reserves ? reserveTail(reserveOf(j)) : ""}`);
+      const floor = read.examinedAll === false;
+      // A count the scan stopped short of is a floor, "at least 3 more match and are", never "3 or more more".
+      const past = more > 0 ? notInThisAction(`${floor ? "at least " : ""}${plural(more, "more matches and is", "more match and are")}`, ` (at most ${BULK_MAX} per action)`) : null;
       return {
         target: queue ?? repo ?? "failed",
         targets: jobs.map((j) => ({ jobId: j.jobId, queue: j.queue, attemptsMade: j.attemptsMade, finishedOn: j.finishedOn, ...(j.target ? { target: j.target } : {}), ...(reserves ? { reserve: reserveOf(j) } : {}) })),
-        payload: {},
+        // The filter rides the ticket for the banner after the write (`WRITE_RULES` `done`); the apply never reads it.
+        payload: { ...(queue ? { queue } : {}), ...(repo ? { repo } : {}) },
         reserve: reserves ? bulkReserve(jobs.map(reserveOf)) : null,
-        summary: [
-          `${verb} ${jobs.length} failed job(s)${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; each is re-checked and acted on alone`,
-          ...jobs.map((j) => `${failedLine(j)}${reserves ? reserveTail(reserveOf(j)) : ""}`),
-          ...(more > 0 ? [`${more}${read.examinedAll === false ? " or more" : ""} more match and are NOT in this action (at most ${BULK_MAX} per action)`] : []),
-        ],
+        summary: [`${verb} ${plural(jobs.length, "failed job")}${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; each is re-checked and acted on alone`, ...lines, ...(past ? [past.text] : [])],
+        barLines: [...lines, ...(past ? [past.bar] : [])],
       };
     },
     async apply(entry, ctx) {
@@ -1040,11 +1016,14 @@ const jobActions = [
       const rows = (Array.isArray(h.rows) ? h.rows : []).filter((r) => typeof r?.jobId === "string" && JOB_ID_RE.test(r.jobId)).slice(0, BULK_MAX);
       if (rows.length === 0) return { refusal: "no job is held; nothing to cancel" };
       const more = Number(h.more ?? 0);
+      const lines = rows.map((r) => `${r.jobId}${r.target ? ` (${r.target})` : ""}, waiting for ${r.label ?? "its wait"}`);
+      const past = more > 0 ? notInThisAction(plural(more, "more held is", "more held are")) : null;
       return {
         target: "held",
         targets: rows.map((r) => ({ jobId: r.jobId, ...(r.target ? { target: String(r.target) } : {}), ...(r.label ? { label: String(r.label) } : {}) })),
         payload: {},
-        summary: [`Cancel ${rows.length} held job(s); each is re-checked (still held) and removed alone`, ...rows.map((r) => `${r.jobId}${r.target ? ` (${r.target})` : ""}, waiting for ${r.label ?? "its wait"}`), ...(more > 0 ? [`${more} more held are NOT in this action`] : [])],
+        summary: [`Cancel ${plural(rows.length, "held job")}; each is re-checked (still held) and removed alone`, ...lines, ...(past ? [past.text] : [])],
+        barLines: [...lines, ...(past ? [past.bar] : [])],
       };
     },
     async apply(entry, ctx) {
@@ -1143,7 +1122,7 @@ const jobActions = [
         afterDigest: p.digest,
         summary: [
           // `p.jobId` is the job that takes it: the page's own, or the run's active recovery job (review F4).
-          `Send a ${mode === "followUp" ? "follow-up" : "steer"} to running job ${p.jobId}, as ${ctx.session.name} (message ${p.id}, ${p.bytes} bytes)`,
+          `Send a ${mode === "followUp" ? "follow-up" : "steer"} to running job ${p.jobId}, as ${ctx.session.name} (message ${p.id}, ${plural(p.bytes, "byte")})`,
           mode === "followUp" ? "The agent reads it once it would otherwise stop, and the run goes on from it." : "The agent reads it after its current tool calls, before its next model call.",
           "It spends from this run's existing reservation: no new reserve is taken, and the run's turn, dollar and token caps still bind.",
           "The audit log keeps the message's sha256, never its text.",
@@ -1206,7 +1185,7 @@ function waitingIn(rows) {
 function resumeWaiting(rows, what) {
   const n = waitingIn(rows);
   const names = rows.map((r) => String(r?.queue ?? "-")).join(", ");
-  return { count: n, line: `${n} job(s) wait to start in ${what}${names ? ` (${names})` : ""}: each reserves up to its own per-job dollar cap, and one job slot, when a worker picks it up, so no single reserve figure applies` };
+  return { count: n, line: `${plural(n, "job waits", "jobs wait")} to start in ${what}${names ? ` (${names})` : ""}: each reserves up to its own per-job dollar cap, and one job slot, when a worker picks it up, so no single reserve figure applies` };
 }
 
 /** The fleet's pause or resume: the kill switch's decision at the preview, the fleet reader's funnel at the confirm. */
@@ -1240,11 +1219,22 @@ function fleetSwitch({ name, kind, paused }) {
       };
     },
     async apply(_entry, ctx) {
-      const res = paused ? await ctx.a.fleet.pause() : await ctx.a.fleet.resume();
+      let res;
+      try {
+        res = paused ? await ctx.a.fleet.pause() : await ctx.a.fleet.resume();
+      } catch (e) {
+        // The switch walks the plan's Valkeys one after another (`killSwitchSet`), so a throw can come after one of them
+        // took it: what it reached is unknown, never "nothing".
+        return { invalid: `the kill switch stopped with an error (${codeOf(e)}) before it said which queues it reached. Look at the fleet and try again`, partial: true };
+      }
       if (res?.refused) return { invalid: String(res.refused) };
       const results = (res?.results ?? []).map((r) => ({ valkey: String(r.shown ?? "-"), ok: r.res?.ok === true, ...(Array.isArray(r.res?.queues) ? { queues: r.res.queues.map(String) } : {}), ...(r.res?.partial ? { partial: { done: (r.res.partial.done ?? []).map(String), failed: String(r.res.partial.failed ?? "-") } } : {}) }));
       if (results.length > 0 && results.every((r) => r.ok)) return { ok: true, results };
-      return { invalid: `the kill switch did not reach every queue: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? `stopped after ${r.partial.done.join(", ") || "none"}, failed at ${r.partial.failed}` : "unreachable"}`).join("; ") || "no Valkey answered"}. Look at the fleet and try again` };
+      // Issue #737: a Valkey that took the switch, or a loop that stopped part-way (the queue it failed at may have
+      // flipped too: the error came back, not the state), means part of the fleet DID change, so the refusal is
+      // `partial` and the slot never says "Nothing was changed" over it. Only when no Valkey's loop started did nothing.
+      const partial = results.some((r) => r.ok || r.partial);
+      return { invalid: `the kill switch did not reach every queue: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? `stopped after ${r.partial.done.join(", ") || "none"}, failed at ${r.partial.failed}` : "unreachable"}`).join("; ") || "no Valkey answered"}. Look at the fleet and try again`, ...(partial ? { partial: true } : {}) };
     },
   };
 }
@@ -1282,8 +1272,283 @@ const fleetActions = [
   queueSwitch({ name: "queue-resume", kind: "queue-resume", paused: false }),
 ];
 
+// ---- what each write takes, and how it is undone ------------------------------------------------------------------
+
+/**
+ * The Undo sentences of the writes the console cannot undo with another write (issue #737). Each is a ledger's
+ * `absent` source (the design's "Undo: Cancel the new run" needs a cancel of a queued job, which no console action
+ * makes yet) or a `new` one, and each says what a person CAN do, never only that they cannot. The bar and the banner
+ * draw one as "No undo: <sentence>", so none opens with "Cannot be undone" of its own.
+ *
+ * TWO PLACES. The bar is drawn beside the preview, so its sentence may point at it ("copy them from this preview"). The
+ * banner after the write is on the next page, where no preview is, so each sentence that points at one has a twin for
+ * the banner (`...After`, issue #737) that says the console kept no copy instead. A rule's `undo` answers one
+ * string (said in both places) or `{ bar, after }`.
+ */
+export const UNDO_SENTENCES = Object.freeze({
+  delete: "Add the removed lines back: copy them from this preview; the console keeps no copy.",
+  deleteAfter: "Add the removed lines back by hand: the console kept no copy of them.",
+  deleteSecrets: "Add the removed trigger back: copy it from this preview and its secret references from your own copy of the file, since the preview does not show them; the console keeps no copy.",
+  deleteSecretsAfter: "Add the removed trigger back by hand, with its secret references, from your own copy of the file: the console kept no copy of it.",
+  queued: "The console cannot remove a waiting job; once it runs, Cancel stops it.",
+  cancelled: "A cancelled run stays cancelled; re-run it from its run page (a re-run is paid).",
+  held: "The job leaves its queue; a redelivery of the same event queues it again.",
+  removed: "The queue's copy is gone; the run records its attempts wrote stay.",
+  answer: "The answer is queued, and the worker posts it once the job passes its checks.",
+  withdrawn: "Send the message again if you still mean it.",
+  allocation: "Revert it from the allocation history, which keeps the split before it.",
+  envelope: "Set it back with the envelope form: this preview's diff shows the old values; the console keeps no copy.",
+  envelopeAfter: "Set it back with the envelope form: the console kept no copy of the old values.",
+  tooBig: "Put the previous list back by hand: this preview showed it; the console keeps no copy.",
+  tooBigAfter: "Put the previous list back by hand: the console kept no copy of it.",
+});
+
+/** An Undo said in the bar, and in the banner after the write without pointing at the preview that is gone by then. */
+const twice = (bar, after) => Object.freeze({ bar, after });
+const DELETED = twice(UNDO_SENTENCES.delete, UNDO_SENTENCES.deleteAfter);
+
+/** A file's JSON as it was before the change (`beforeText`), or null when it was missing or does not parse. */
+function jsonOf(text) {
+  if (typeof text !== "string") return null;
+  try {
+    const v = JSON.parse(text);
+    return v !== null && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The list a file holds under `key` before the change (`[]` when it holds none), as the planners read it. */
+const listBefore = (out, key) => (Array.isArray(jsonOf(out.beforeText)?.[key]) ? jsonOf(out.beforeText)[key] : []);
+
+/** A sentence for an edit that cannot be put back by another edit: the field it gave a value had none before. */
+const byHand = (what, field) => `Edit ${what} back by hand: ${field} had no value before, and an edit cannot remove one.`;
+
+/**
+ * A paid single act's confirm words (the ConfirmStates card): the most the worker will hold for it, or why no figure
+ * can be said. Never "$0" for a reserve that is not known, the `reserveText` rule; and a zero-rated act says so in
+ * words (issue #737): "$0.00" on a button reads as a price, and the reserve sentence beside it says what it holds.
+ */
+function paidLabel(verb, r) {
+  if (!r || r.unknown || r.invalid) return `${verb} (reserve unknown)`;
+  if (r.zeroRated) return `${verb} (zero-rated)`;
+  if (!Number.isSafeInteger(r.dollarsMicros)) return `${verb}, 1 job slot`;
+  return `${verb} for up to $${formatMicros(r.dollarsMicros)}`;
+}
+
+/**
+ * A paid bulk act's confirm words: the sum of the known reserves, "at least" when some are unknown (the total is then
+ * a floor), "zero-rated" when every job is, and "no dollar reserve" when no job holds dollars (no per-job cap, or a cap
+ * of $0): the slots alone would repeat the count ("Retry 3, 3 job slots"), and the reserve sentence says them.
+ */
+function bulkPaidLabel(verb, out) {
+  const n = Array.isArray(out.targets) ? out.targets.length : 0;
+  const r = out.reserve ?? {};
+  const each = (out.targets ?? []).map((t) => t.reserve);
+  if (r.unknown > 0) return r.dollarsMicros > 0 ? `${verb} ${n}, at least $${formatMicros(r.dollarsMicros)}` : `${verb} ${n} (reserve unknown)`;
+  if (r.dollarsMicros > 0) return `${verb} ${n} for up to $${formatMicros(r.dollarsMicros)}`;
+  if (each.length > 0 && each.every((x) => x?.zeroRated)) return `${verb} ${n} (zero-rated)`;
+  return `${verb} ${n}, no dollar reserve`;
+}
+
+const say = (sentence) => () => sentence;
+const none = () => null;
+const confirmWord = () => "Confirm";
+
+/**
+ * A setting's way back: set it to the value it had, or unset it when it had none. A value this form cannot send back
+ * as it was (not a string or a number, or an empty string) is put back by hand.
+ */
+function settingBack(out, key) {
+  const before = jsonOf(out.beforeText) ?? {};
+  if (!Object.hasOwn(before, key)) return { undo: `Unset ${key} again`, inverse: { action: "setting-unset", body: { key } } };
+  const old = before[key];
+  const sendable = (typeof old === "string" && old.trim() !== "") || (typeof old === "number" && Number.isFinite(old));
+  if (!sendable) return { undo: `Set ${key} back by hand: its old value is not one this form can send.`, inverse: null };
+  return { undo: `Set ${key} back to ${String(old)}`, inverse: { action: "setting-set", body: { key, value: String(old) } } };
+}
+
+/**
+ * What a setting set did, in the past tense: "Changed maxTurns from 30 to 40", "Set dailyCap to 5" for a key the file
+ * did not hold, and "Changed maxTurns to 40" when its old value is not one a sentence can say (an empty string, an
+ * object: the Undo then goes by hand too).
+ */
+function settingDone(out) {
+  const key = out.plan.key;
+  const before = jsonOf(out.beforeText) ?? {};
+  const value = String(out.plan.value);
+  if (!Object.hasOwn(before, key)) return `Set ${key} to ${value}`;
+  const old = before[key];
+  const sayable = (typeof old === "string" && old.trim() !== "") || (typeof old === "number" && Number.isFinite(old));
+  return sayable ? `Changed ${key} from ${String(old)} to ${value}` : `Changed ${key} to ${value}`;
+}
+
+/**
+ * The whole pause-windows list's way back: the list as it was. A file that held no list it could read (not JSON, or no
+ * `windows` array) read as empty, and an empty list is not what it said, so that one is put back by hand.
+ */
+function pauseListBack(out) {
+  const unread = typeof out.beforeText === "string" && !Array.isArray(jsonOf(out.beforeText)?.windows);
+  if (unread) return { undo: twice(UNDO_SENTENCES.tooBig, UNDO_SENTENCES.tooBigAfter), inverse: null };
+  return { undo: "Put the previous pause windows back", inverse: { action: "pause-windows", body: { windows: out.extra.before } } };
+}
+
+/** A trigger edit's way back: the old flow, and the old value of each of backend, provider and model it set. */
+function triggerEditBack(out) {
+  const p = out.plan ?? {};
+  const n = atIndex("trigger", p.index);
+  const old = listBefore(out, "triggers")[p.index]?.run ?? {};
+  const set = ["flow", ...(p.backend !== undefined ? ["backend"] : []), ...["provider", "model"].filter((k) => p.ref?.[k] !== undefined)];
+  const missing = set.find((k) => typeof old[k] !== "string" || old[k] === "");
+  if (missing !== undefined) return { undo: byHand(n, missing), inverse: null };
+  return { undo: `Edit ${n} back to what it said`, inverse: { action: "trigger-edit", body: { index: p.index, ...Object.fromEntries(set.map((k) => [k, old[k]])) } } };
+}
+
+/**
+ * A trigger delete's way back, by hand (no inverse can carry a secret reference): the removed lines from the preview,
+ * and, for a trigger that names secrets (`run.secrets`, which the diff hides), its references from the operator's own
+ * copy of the file (issue #737), since "copy them from this preview" would copy the marker the diff shows.
+ */
+function triggerDeleteBack(out) {
+  const secrets = listBefore(out, "triggers")[out.plan?.index]?.run?.secrets;
+  const named = secrets !== null && typeof secrets === "object" && Object.keys(secrets).length > 0;
+  return named ? twice(UNDO_SENTENCES.deleteSecrets, UNDO_SENTENCES.deleteSecretsAfter) : DELETED;
+}
+
+/**
+ * An entry edit's way back (a pause window, a scoped limit): the entry as the planner read it (`plan.before`, through
+ * the same builder the edit runs, so a default the reader fills in, a pause window's `tz: "UTC"`, is on both sides),
+ * unless the edit gave a field a value it had none for, which an edit cannot take away again.
+ */
+function entryEditBack(out, { action, what, wrap }) {
+  const p = out.plan ?? {};
+  const n = atIndex(what, p.index);
+  const before = p.before;
+  if (before === null || typeof before !== "object") return { undo: twice(`Edit ${n} back by hand: this preview's diff shows what it said.`, `Edit ${n} back by hand: the console kept no copy of what it said.`), inverse: null };
+  const added = Object.keys(p.entry ?? {}).find((k) => before[k] === undefined && p.entry[k] !== undefined);
+  if (added !== undefined) return { undo: byHand(n, added), inverse: null };
+  return { undo: `Edit ${n} back to what it said`, inverse: { action, body: { index: p.index, ...wrap(before) } } };
+}
+
+/** A resolver add's way back: remove it again, unless it REPLACED one, whose path the console keeps no copy of. */
+function resolverAddBack(out, { key, remove, what }) {
+  const name = out.plan?.name;
+  if (Object.hasOwn(jsonOf(out.beforeText)?.[key] ?? {}, name)) return { undo: twice(`Put ${what} ${name} back by hand: this preview's diff shows the resolver it replaced; the console keeps no copy.`, `Put ${what} ${name} back by hand: the console kept no copy of the resolver it replaced.`), inverse: null };
+  return { undo: `Remove ${what} ${name}`, inverse: { action: remove, body: { name } } };
+}
+
+/** Whether a resolver add replaced one of the same name (its banner says "Replaced", not "Declared"). */
+const replacedOne = (out, key) => Object.hasOwn(jsonOf(out.beforeText)?.[key] ?? {}, out.plan?.name);
+
+/** A bulk filter as the banner says it: " in pi-jobs", " for acme/web", or nothing (the preview's filter, on the ticket). */
+const whereOf = (payload) => `${typeof payload?.queue === "string" ? ` in ${payload.queue}` : ""}${typeof payload?.repo === "string" ? ` for ${payload.repo}` : ""}`;
+
+/**
+ * A bulk act's banner (issue #737): every job done is "Retried 3 failed jobs in pi-jobs"; some is
+ * "Retried failed jobs in pi-jobs: 2 of 3 done" (the banner then in the attention tone); none leaves no banner at all.
+ */
+const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === count ? `${verb} ${plural(count, noun)}${whereOf(out.payload)}` : `${verb} ${noun}s${whereOf(out.payload)}: ${done} of ${count} done`);
+
+/**
+ * Each action's write rules, by name (issue #737): `fields`, `danger`, `undo`, `inverse`, `confirmLabel` (the entry's
+ * header says what each is) and `done`, what the banner after the write says happened, in the past tense ("Paused the
+ * fleet", "Changed maxTurns from 30 to 40"; the act's own summary, "Pause every queue of the fleet", stays the
+ * preview's title). One table, so the rules of every write read together and a write cannot exist without them:
+ * `ACTIONS` below throws at load on an action this table does not name, and the action test iterates `ACTIONS` so none
+ * is missed.
+ *
+ * WHEN `done` IS ASKED. A single act's at the preview, `done(out, body)`, where the file as it was is known (a
+ * setting's old value), and it rides the ticket with the Undo. A bulk act's at the confirm, `done(out, body, result)`
+ * with the ticket's entry as `out` (its `targets` and `payload`) and `result` `{ done, count }`, since only the confirm
+ * knows how many jobs landed.
+ *
+ * Indexes stay the 0-based values the forms send, and every sentence says them as the Configuration page does, "trigger
+ * at index 2" (`atIndex`), until that page converts (PR 7a). An inverse never carries a secret reference or a
+ * resolver path: the deletes and the secret removes, whose only way back would, have none.
+ */
+const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
+const WRITE_RULES = {
+  "cancel-active": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.cancelled), inverse: none, confirmLabel: () => "Cancel the run", done: (out) => `Cancelled running job ${out.payload.jobId}` },
+  "cancel-held": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: () => "Cancel the held job", done: (out) => `Cancelled held job ${out.payload.jobId}` },
+  "cancel-all-held": { fields: [], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: (out) => `Cancel ${plural(out.targets?.length ?? 0, "held job")}`, done: bulkDone("Cancelled", "held job") },
+  "retry-failed": { fields: ["jobId", "queue"], danger: false, undo: say(UNDO_SENTENCES.queued), inverse: none, confirmLabel: (out) => paidLabel("Retry", out.reserve), done: (out) => `Retried failed job ${out.payload.jobId}` },
+  "remove-failed": { fields: ["jobId", "queue"], danger: true, undo: say(UNDO_SENTENCES.removed), inverse: none, confirmLabel: () => "Remove the job", done: (out) => `Removed failed job ${out.payload.jobId}` },
+  "retry-all-failed": { fields: ["queue", "repo"], danger: false, undo: say(UNDO_SENTENCES.queued), inverse: none, confirmLabel: (out) => bulkPaidLabel("Retry", out), done: bulkDone("Retried", "failed job") },
+  "remove-all-failed": { fields: ["queue", "repo"], danger: true, undo: say(UNDO_SENTENCES.removed), inverse: none, confirmLabel: (out) => `Remove ${plural(out.targets?.length ?? 0, "job")}`, done: bulkDone("Removed", "failed job") },
+  rerun: { fields: ["jobId"], danger: false, undo: say(UNDO_SENTENCES.queued), inverse: none, confirmLabel: (out) => paidLabel("Re-run", out.reserve), done: (out) => `Queued a re-run of ${out.target}` },
+  "parked-answer": { fields: ["jobId", "text"], danger: false, undo: say(UNDO_SENTENCES.answer), inverse: none, confirmLabel: (out) => paidLabel("Answer", out.reserve), done: (out) => `Answered parked run ${out.target}` },
+  steer: {
+    fields: ["jobId", "mode", "text"],
+    danger: false,
+    // The message's id and the job that takes it are the plan's (`payload.plan`): the run's active recovery job when
+    // there is one, never the page's id taken on trust.
+    undo: (out) => `Withdraw message ${out.payload.plan.id} before the agent reads it`,
+    inverse: (out) => ({ action: "steer-withdraw", body: { jobId: out.payload.plan.jobId, id: out.payload.plan.id } }),
+    confirmLabel: (out) => (out.payload?.plan?.mode === "followUp" ? "Send follow-up" : "Send"),
+    done: (out) => `Sent a ${out.payload.plan.mode === "followUp" ? "follow-up" : "steer"} to running job ${out.payload.plan.jobId}`,
+  },
+  "steer-withdraw": { fields: ["jobId", "id"], danger: false, undo: say(UNDO_SENTENCES.withdrawn), inverse: none, confirmLabel: confirmWord, done: (out) => `Withdrew message ${out.payload.plan.id} from job ${out.payload.plan.jobId}` },
+  "fleet-pause": { fields: [], danger: true, undo: say("Resume the fleet"), inverse: () => ({ action: "fleet-resume", body: {} }), confirmLabel: () => "Pause the fleet", done: say("Paused the fleet") },
+  "fleet-resume": { fields: [], danger: false, undo: say("Pause the fleet again"), inverse: () => ({ action: "fleet-pause", body: {} }), confirmLabel: () => "Resume", done: say("Resumed the fleet") },
+  "queue-pause": { fields: ["queue"], danger: true, undo: (out) => `Resume queue ${out.payload.queue}`, inverse: (out) => ({ action: "queue-resume", body: { queue: out.payload.queue } }), confirmLabel: (out) => `Pause queue ${out.payload.queue}`, done: (out) => `Paused queue ${out.payload.queue}` },
+  "queue-resume": { fields: ["queue"], danger: false, undo: (out) => `Pause queue ${out.payload.queue} again`, inverse: (out) => ({ action: "queue-pause", body: { queue: out.payload.queue } }), confirmLabel: () => "Resume", done: (out) => `Resumed queue ${out.payload.queue}` },
+  "pause-windows": { fields: ["windows"], danger: false, undo: (out) => pauseListBack(out).undo, inverse: (out) => pauseListBack(out).inverse, confirmLabel: confirmWord, done: say("Replaced the pause windows") },
+  "trigger-add": { fields: ["trigger"], danger: false, undo: (out) => `Delete ${atIndex("trigger", listBefore(out, "triggers").length)}`, inverse: (out) => ({ action: "trigger-delete", body: { index: listBefore(out, "triggers").length } }), confirmLabel: confirmWord, done: (out) => `Added ${atIndex("trigger", listBefore(out, "triggers").length)} (${out.plan?.entry?.on?.type ?? "a trigger"})` },
+  "trigger-edit": { fields: ["index", "flow", "backend", "provider", "model"], danger: false, undo: (out) => triggerEditBack(out).undo, inverse: (out) => triggerEditBack(out).inverse, confirmLabel: confirmWord, done: (out) => `Changed ${atIndex("trigger", out.plan.index)}: ${(out.plan.changes ?? []).map(([k, a, b]) => `${k} from ${a} to ${b}`).join(", ")}` },
+  "trigger-delete": { fields: ["index"], danger: true, undo: triggerDeleteBack, inverse: none, confirmLabel: (out) => `Delete ${atIndex("trigger", out.plan?.index)}`, done: (out) => `Deleted ${atIndex("trigger", out.plan.index)}` },
+  "setting-set": { fields: ["key", "value"], danger: false, undo: (out) => settingBack(out, out.plan.key).undo, inverse: (out) => settingBack(out, out.plan.key).inverse, confirmLabel: confirmWord, done: settingDone },
+  "setting-unset": { fields: ["key"], danger: false, undo: (out) => settingBack(out, out.plan.key).undo, inverse: (out) => settingBack(out, out.plan.key).inverse, confirmLabel: confirmWord, done: (out) => `Unset ${out.plan.key}` },
+  "secret-profile-add": { fields: ["name", "path"], danger: false, undo: (out) => resolverAddBack(out, { key: "secretProfiles", remove: "secret-profile-remove", what: "profile" }).undo, inverse: (out) => resolverAddBack(out, { key: "secretProfiles", remove: "secret-profile-remove", what: "profile" }).inverse, confirmLabel: confirmWord, done: (out) => (replacedOne(out, "secretProfiles") ? `Replaced the resolver of profile ${out.plan.name}` : `Declared profile ${out.plan.name}`) },
+  "secret-profile-remove": { fields: ["name"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Remove profile ${out.plan?.name}`, done: (out) => `Removed profile ${out.plan.name}` },
+  "secret-bundle-add": { fields: ["name", "path", "format"], danger: false, undo: (out) => resolverAddBack(out, { key: "secretBundles", remove: "secret-bundle-remove", what: "bundle resolver" }).undo, inverse: (out) => resolverAddBack(out, { key: "secretBundles", remove: "secret-bundle-remove", what: "bundle resolver" }).inverse, confirmLabel: confirmWord, done: (out) => (replacedOne(out, "secretBundles") ? `Replaced bundle resolver ${out.plan.name}` : `Declared bundle resolver ${out.plan.name}`) },
+  "secret-bundle-remove": { fields: ["name"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Remove bundle resolver ${out.plan?.name}`, done: (out) => `Removed bundle resolver ${out.plan.name}` },
+  "pause-window-add": { fields: PAUSE_FIELDS, danger: false, undo: (out) => `Delete ${atIndex("pause window", listBefore(out, "windows").length)}`, inverse: (out) => ({ action: "pause-window-delete", body: { index: listBefore(out, "windows").length } }), confirmLabel: confirmWord, done: (out) => `Added ${atIndex("pause window", listBefore(out, "windows").length)}` },
+  "pause-window-edit": {
+    fields: ["index", ...PAUSE_FIELDS],
+    danger: false,
+    undo: (out) => entryEditBack(out, PAUSE_EDIT).undo,
+    inverse: (out) => entryEditBack(out, PAUSE_EDIT).inverse,
+    confirmLabel: confirmWord,
+    done: (out) => `Edited ${atIndex("pause window", out.plan.index)}`,
+  },
+  "pause-window-delete": { fields: ["index"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Delete ${atIndex("pause window", out.plan?.index)}`, done: (out) => `Deleted ${atIndex("pause window", out.plan.index)}` },
+  "limit-add": { fields: ["limit"], danger: false, undo: (out) => `Delete ${atIndex("scoped limit", listBefore(out, "limits").length)}`, inverse: (out) => ({ action: "limit-delete", body: { index: listBefore(out, "limits").length } }), confirmLabel: confirmWord, done: (out) => `Added ${atIndex("scoped limit", listBefore(out, "limits").length)}` },
+  "limit-edit": { fields: ["index", "limit"], danger: false, undo: (out) => entryEditBack(out, LIMIT_EDIT).undo, inverse: (out) => entryEditBack(out, LIMIT_EDIT).inverse, confirmLabel: confirmWord, done: (out) => `Edited ${atIndex("scoped limit", out.plan.index)}` },
+  "limit-delete": { fields: ["index"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Delete ${atIndex("scoped limit", out.plan?.index)}`, done: (out) => `Deleted ${atIndex("scoped limit", out.plan.index)}` },
+  "project-add": { fields: ["id", "name", "members"], danger: false, undo: (out) => `Delete project ${out.plan.added.id}`, inverse: (out) => ({ action: "project-delete", body: { id: out.plan.added.id } }), confirmLabel: confirmWord, done: (out) => `Added project ${out.plan.added.id}` },
+  "project-edit": {
+    fields: ["id", "name", "members"],
+    danger: false,
+    undo: (out) => `Edit project ${out.plan.before.id} back to what it said`,
+    // An empty name is what removes one (the tool's rule), so a project that had none gets "" back, never its new name.
+    inverse: (out) => ({ action: "project-edit", body: { id: out.plan.before.id, name: out.plan.before.name ?? "", members: [...out.plan.before.members] } }),
+    confirmLabel: confirmWord,
+    done: (out) => `Edited project ${out.plan.before.id}`,
+  },
+  "project-delete": { fields: ["id"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Delete project ${out.plan?.deleted}`, done: (out) => `Deleted project ${out.plan.deleted}` },
+  "envelope-set": { fields: ["envelope"], danger: false, undo: say(twice(UNDO_SENTENCES.envelope, UNDO_SENTENCES.envelopeAfter)), inverse: none, confirmLabel: confirmWord, done: say("Changed the allocation envelope") },
+  "priorities-set": { fields: ["projects", "validDays"], danger: false, undo: say(UNDO_SENTENCES.allocation), inverse: none, confirmLabel: confirmWord, done: say("Applied a priorities plan") },
+  "allocation-revert": { fields: ["index"], danger: false, undo: say(UNDO_SENTENCES.allocation), inverse: none, confirmLabel: confirmWord, done: (out) => `Reverted the allocation to ${atIndex("history row", out.payload.index)}` },
+};
+
+/** How an edit's way back reads its entry: the file's list, the row's word, and the body the edit takes the entry in. */
+const PAUSE_EDIT = Object.freeze({ action: "pause-window-edit", what: "pause window", wrap: (w) => Object.fromEntries(PAUSE_FIELDS.filter((k) => w[k] !== undefined).map((k) => [k, w[k]])) });
+const LIMIT_EDIT = Object.freeze({ action: "limit-edit", what: "scoped limit", wrap: (l) => ({ limit: { ...l } }) });
+
+/** The rule functions every write carries. */
+const RULE_FNS = Object.freeze(["undo", "inverse", "confirmLabel", "done"]);
+
+/** An action with its write rules, or a throw at load: no write exists without its fields, its Undo, its confirm words and its banner. */
+function withRules(a) {
+  const r = Object.hasOwn(WRITE_RULES, a.name) ? WRITE_RULES[a.name] : null;
+  if (r === null) throw new Error(`console action ${a.name} has no write rules (WRITE_RULES)`);
+  if (!Array.isArray(r.fields) || typeof r.danger !== "boolean" || RULE_FNS.some((k) => typeof r[k] !== "function")) throw new Error(`console action ${a.name}'s write rules need fields, danger, ${RULE_FNS.join(", ")}`);
+  if (r.danger && a.paid) throw new Error(`console action ${a.name} is paid and destructive; it is one or the other`);
+  return Object.freeze({ ...a, fields: Object.freeze([...r.fields]), danger: r.danger, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done });
+}
+
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions].map((a) => Object.freeze(a)));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {
@@ -1306,27 +1571,92 @@ function failureOf(result) {
   return null;
 }
 
+/** The console's clock, or the wall clock for a caller that wired none. */
+const clockOf = (deps) => (typeof deps.now === "function" ? deps.now() : Date.now());
+
+/**
+ * A refusal answer: the `error` sentence exactly as the planner, the ticket store or the funnel said it (the tool and
+ * the console share it byte for byte), and the slot's bar (`refusalHtml`), which adds "Nothing was changed." in its
+ * own markup when the sentence does not say so already, and never for a `partial` one (a write that may have done part
+ * of its work). `state` names the bar's state when the status alone cannot; `sentenceHtml` is the bar's own markup of
+ * the same words, for a sentence that names code (an action, a field).
+ */
+function refuse(ctx, where, status, error, state = null, sentenceHtml = null) {
+  return ctx.json(status, { error, html: String(refusalHtml({ where, sentence: error, status, state, sentenceHtml })) });
+}
+
+/**
+ * The refusal for a body key the action does not take (issue #737), or null: `{ text, html }`, the answer's `error` and
+ * the bar's markup of the same words, the action and every field it names as code (a sentence opening with the action's
+ * name would otherwise read "Setting-set takes ...", capitalised as a word). Named when it is a plain identifier,
+ * otherwise "a field it was sent" (`fieldNamed`), and never its value; the list it does take is always said, so the
+ * sentence names the fix.
+ */
+function unknownFieldRefusal(action, body) {
+  const sent = Object.keys(body ?? {}).find((k) => body[k] !== undefined && !action.fields.includes(k));
+  if (sent === undefined) return null;
+  const named = fieldNamed(sent);
+  const code = (s) => html`<span class="code">${s}</span>`;
+  const namedHtml = named === UNNAMED_FIELD ? named : code(named);
+  if (action.fields.length === 0) return { text: `${action.name} takes no fields; it refuses ${named}, so nothing was changed`, html: html`${code(action.name)} takes no fields; it refuses ${namedHtml}, so nothing was changed.` };
+  return {
+    text: `${action.name} takes ${action.fields.join(", ")} only; ${named} is not one of them, so nothing was changed`,
+    html: html`${code(action.name)} takes ${action.fields.map((f, i) => html`${i > 0 ? ", " : null}${code(f)}`)} only; ${namedHtml} is not one of them, so nothing was changed.`,
+  };
+}
+
+/**
+ * What the banner after the write will say, decided now, where the file as it was is known: the title (the summary's
+ * first line), the Undo sentence for the bar (`undo`) and for the banner (`undoAfter`, which never points at the
+ * preview), the inverse write, whether the act is destructive, and what the banner says happened (`done`; a
+ * bulk act's is asked at the confirm instead, `WRITE_RULES`). An inverse that names an action the table does not have,
+ * or carries a key that action does not take, is a programming error and throws (the preview then fails loudly with
+ * the console's log line), so an Undo button can never preview a refusal of its own.
+ */
+function metaOf(action, out, body) {
+  const summary = Array.isArray(out.summary) ? out.summary : [];
+  const inverse = action.inverse(out, body) ?? null;
+  if (inverse !== null) {
+    const target = actionNamed(inverse.action);
+    if (!target) throw new Error(`the ${action.name} inverse names no action (${inverse.action})`);
+    const extra = Object.keys(inverse.body ?? {}).find((k) => !target.fields.includes(k));
+    if (extra !== undefined) throw new Error(`the ${action.name} inverse sends ${target.name} a field it does not take (${extra})`);
+  }
+  const undo = action.undo(out, body);
+  const said = undo !== null && typeof undo === "object" ? { bar: String(undo.bar), after: String(undo.after) } : { bar: String(undo), after: String(undo) };
+  return { title: String(summary[0] ?? action.name), undo: said.bar, undoAfter: said.after, inverse, danger: Boolean(action.danger), done: action.bulk ? null : String(action.done(out, body)) };
+}
+
 /**
  * `POST /api/act/<name>/preview`: plan the change, issue the ticket, answer the escaped preview. Writes nothing, and is
- * not audited (only a confirm changes anything).
+ * not audited (only a confirm changes anything). In order: the action's dependencies, the body's shape, the body's
+ * keys against the action's `fields`, then the action's own preview. Every answer carries `html`, the bar the slot shows.
  */
 export async function previewAction(ctx, action) {
-  const { deps, body, session } = ctx;
+  const { deps, session } = ctx;
+  const body = ctx.body ?? {};
   const actx = actionCtx(ctx);
   const missing = (action.needs ?? []).filter((k) => actx.a[k] === null || actx.a[k] === undefined);
-  if (missing.length > 0) return ctx.json(503, { error: `this console was started without what the ${action.name} action needs (${missing.join(", ")}); see its log` });
-  if (!plainBody(body)) return ctx.json(400, { error: `the request body is nested too deep or holds too much (at most ${BODY_DEPTH_MAX} levels, ${BODY_KEYS_MAX} keys per object and 256 items per list)` });
+  if (missing.length > 0) return refuse(ctx, "preview", 503, `this console was started without what the ${action.name} action needs (${missing.join(", ")}); see its log`, "setup");
+  if (!plainBody(body)) return refuse(ctx, "preview", 400, `the request body is nested too deep or holds too much (at most ${BODY_DEPTH_MAX} levels, ${BODY_KEYS_MAX} keys per object and 256 items per list)`);
+  const unknown = unknownFieldRefusal(action, body);
+  if (unknown !== null) return refuse(ctx, "preview", 400, unknown.text, null, unknown.html);
   let out;
+  let meta;
   try {
     out = await action.preview(body, actx);
+    if (!out?.refusal && !out?.unchanged) meta = metaOf(action, out, body);
   } catch (e) {
-    if (e instanceof BadRequest) return ctx.json(400, { error: `${e.message}; nothing was changed` });
+    if (e instanceof BadRequest) return refuse(ctx, "preview", 400, `${e.message}; nothing was changed`);
     deps.log(`console: the ${action.name} preview failed (${codeOf(e)})`);
-    return ctx.json(500, { error: "the preview failed; the console's log has the reason" });
+    return refuse(ctx, "preview", 500, "the preview failed; the console's log has the reason; nothing was changed");
   }
-  if (out?.refusal) return ctx.json(out.status ?? 400, { error: out.refusal });
-  if (out?.unchanged) return ctx.json(200, { unchanged: true, action: action.name, summary: [String(out.unchanged)], ...(out.extra ?? {}) });
-  const { ticket } = deps.tickets.issue({
+  if (out?.refusal) return refuse(ctx, "preview", out.status ?? 400, out.refusal);
+  if (out?.unchanged) {
+    const summary = [String(out.unchanged)];
+    return ctx.json(200, { unchanged: true, action: action.name, summary, ...(out.extra ?? {}), html: String(unchangedBarHtml({ summary, sentenceHtml: out.unchangedHtml ?? null })) });
+  }
+  const issued = deps.tickets.issue({
     sessionId: session.id,
     action: action.name,
     target: out.target ?? null,
@@ -1337,26 +1667,86 @@ export async function previewAction(ctx, action) {
     reserve: out.reserve ?? null,
     targets: out.targets ?? null,
     count: Number.isSafeInteger(out.count) ? out.count : null,
+    meta,
   });
+  const expiresAt = Number.isSafeInteger(issued?.expiresAt) ? issued.expiresAt : null;
+  const summary = out.summary ?? [];
+  const confirmLabel = String(action.confirmLabel(out));
+  // The bar's lines: the action's own markup of them where it has one (`barLines`: a change's values in bold), else the
+  // summary's. A blank line is a paragraph break in the TUI's dialog, which a list has no use for, so none is drawn.
+  const lines = (Array.isArray(out.barLines) ? out.barLines : summary.slice(1)).filter((l) => !(typeof l === "string" && l.trim() === ""));
   return ctx.json(200, {
-    ticket,
+    ticket: issued.ticket,
     action: action.name,
     kind: action.kind,
     paid: Boolean(action.paid),
-    summary: out.summary ?? [],
-    diffHtml: String(previewHtml(out)),
+    summary,
     reserve: out.reserve ?? null,
     targets: out.targets ?? null,
     ...(Number.isSafeInteger(out.count) ? { count: out.count } : {}),
     beforeDigest: out.beforeDigest ?? null,
     afterDigest: out.afterDigest ?? null,
     ...(out.extra ?? {}),
+    expiresAt,
+    danger: meta.danger,
+    confirmLabel,
+    undo: meta.undo,
+    html: String(previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: out.diff ?? null, undo: meta.undo, undoable: meta.inverse !== null, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })),
   });
 }
 
 /**
+ * An audit writer that remembers which rows it appended (issue #737): `append(row)` is the writer's own (its row
+ * returned, its throw thrown), `first()` the `seq` of the first row an append returned, and `last()` the `seq` of the
+ * latest. Wrapped around the writer OUTSIDE `auditedWrite` (which stays as it is), so the banner after a write can link
+ * the exact rows this confirm wrote. `first()` is null when the first append returned no row (a writer that returns
+ * nothing): the banner then says the log holds its row, with no link it cannot vouch for.
+ */
+export function capturingAudit(audit) {
+  let first;
+  let last = null;
+  return {
+    append(row) {
+      const stored = audit.append(row);
+      const seq = Number.isSafeInteger(stored?.seq) ? stored.seq : null;
+      if (first === undefined) first = seq;
+      if (seq !== null) last = seq;
+      return stored;
+    },
+    first: () => first ?? null,
+    last: () => last,
+  };
+}
+
+/**
+ * The change a write made, as the session's next page reports it (`setFlash`) and the confirm answers it: what happened
+ * in the past tense (`summary`, the rule's `done`), who did it, the audit rows it wrote (`auditSeq` the first, `count`
+ * how many), how many of them landed (`done`: a bulk act's banner is in the attention tone when fewer than `count` did),
+ * and the banner's Undo (`undo`, the `undoAfter` sentence, and its `inverse`). Past the flash's bound (`FLASH_MAX_BYTES`,
+ * a whole pause-windows list as an inverse can pass it) the inverse is dropped and the Undo says to put the list back by
+ * hand: a banner without its Undo is honest, a flash the store refused says nothing.
+ */
+function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done = count, summary = null }) {
+  const meta = entry.meta ?? {};
+  const change = { summary: summary ?? String(meta.done ?? meta.title ?? action.name), by: String(ctx.session?.name ?? ""), auditSeq, auditLast, count, done, undo: String(meta.undoAfter ?? meta.undo ?? ""), inverse: meta.inverse ?? null, kind: action.kind, at: clockOf(ctx.deps) };
+  if (Buffer.byteLength(JSON.stringify(change), "utf8") > FLASH_MAX_BYTES) {
+    change.inverse = null;
+    change.undo = UNDO_SENTENCES.tooBigAfter;
+  }
+  try {
+    ctx.deps.sessions?.setFlash?.(ctx.session.id, change);
+  } catch (e) {
+    // The write landed and its row is in the log; a banner that does not show is the session store's own business.
+    ctx.deps.log(`console: the ${action.name} banner could not be kept (${codeOf(e)})`);
+  }
+  return change;
+}
+
+/**
  * `POST /api/act/<name>/confirm`: redeem the ticket (single use, this session, this action), then audit, then write
- * (`auditedWrite` for one change; one row per job for a bulk action), then poke the live hub.
+ * (`auditedWrite` for one change; one row per job for a bulk action), then keep the session's flash and poke the live
+ * hub. The answer is the funnel's, with the change (`change`, issue #737: not `done`, which a bulk confirm already
+ * answers as a number) and, on a refusal, the slot's bar.
  */
 export async function confirmAction(ctx, action) {
   const { deps, body, session } = ctx;
@@ -1368,44 +1758,55 @@ export async function confirmAction(ctx, action) {
     ctx.record({ actor, action: "write", kind: action.kind, target: ctx.route.path, outcome: "refused", reason: String(redeemed.refusal ?? "ticket refused") });
     // The refusal already says what to do (confirm.mjs ends each one with "Preview the change again and confirm the new
     // preview"), so it is sent as it is: one instruction, not two.
-    return ctx.json(409, { error: String(redeemed.refusal ?? `this confirmation is not valid. ${PREVIEW_AGAIN}`) });
+    return refuse(ctx, "confirm", 409, String(redeemed.refusal ?? `this confirmation is not valid. ${PREVIEW_AGAIN}`), "ticket");
   }
   const entry = redeemed.entry;
   const tag = sha256(ticket).slice(0, 12);
   const log = (line) => deps.log(String(line).replace(/^panel: /, "console: "));
   if (action.bulk) return confirmBulk(ctx, action, entry, { actor, tag, actx });
   const AUDIT = Symbol("audit");
+  const audit = capturingAudit(deps.audit);
   let result;
   try {
     result = await auditedWrite(
-      { audit: deps.audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: failureOf, refusal: () => ({ [AUDIT]: true }), log },
+      { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: failureOf, refusal: () => ({ [AUDIT]: true }), log },
       () => action.apply(entry, actx),
     );
   } catch (e) {
     deps.log(`console: the ${action.name} write threw (${codeOf(e)})`);
-    return ctx.json(500, { error: `the ${action.name} change could not be made; nothing was changed, and the console's log has the reason` });
+    return refuse(ctx, "confirm", 500, `the ${action.name} change could not be made; nothing was changed, and the console's log has the reason`, "failed");
   }
-  if (result?.[AUDIT]) return ctx.json(500, { error: AUDIT_FAILED });
-  if (typeof result?.invalid === "string") return ctx.json(409, { error: result.invalid });
-  if (result?.unreachable || !result?.ok) return ctx.json(503, { error: VALKEY_UNREACHABLE });
+  if (result?.[AUDIT]) return refuse(ctx, "confirm", 500, AUDIT_FAILED, "audit");
+  // A refusal the apply marks `partial` came after part of the write was made (the kill switch reached some queues), so
+  // its bar says what may have changed and offers Look again; any other was refused before anything was written.
+  if (typeof result?.invalid === "string") return refuse(ctx, "confirm", 409, result.invalid, result.partial === true ? "partial" : "changed");
+  if (result?.unreachable || !result?.ok) return refuse(ctx, "confirm", 503, VALKEY_UNREACHABLE, "valkey");
+  const change = changeOf(ctx, entry, action, { auditSeq: audit.first(), count: 1 });
   tickHub(deps);
-  return ctx.json(200, { ...result, ok: true, action: action.name, kind: action.kind, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null });
+  return ctx.json(200, { ...result, ok: true, action: action.name, kind: action.kind, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, change });
 }
 
 /**
  * A bulk confirm: one `ok` row per job FIRST (`count` the list's size, every row the same ticket digest), and none of
  * the jobs is touched unless every row was written; then the apply, which re-checks and acts per job; then a `failed`
- * row for each job it refused. The response lists every job's result.
+ * row for each job it refused. The response lists every job's result, `done` is how many landed (a number, as it has
+ * always been), `html` is the results bar, and `change` the banner the next page shows: none when no job landed (the
+ * bar's results already said so, and a banner over nothing done read as a success), else its rows and how many of
+ * them landed.
+ *
+ * An apply that THROWS has been acting job by job, so jobs before the throw may have been acted on: its refusal is
+ * `partial` (the bar says some of it may have been done and offers Look again), never "nothing was changed".
  */
 async function confirmBulk(ctx, action, entry, { actor, tag, actx }) {
   const { deps } = ctx;
+  const audit = capturingAudit(deps.audit);
   const targets = Array.isArray(entry.targets) ? entry.targets : [];
   const count = targets.length;
   const reserveBy = new Map(targets.map((t) => [t.jobId, reserveMicros(t.reserve)]));
   const rowOf = (jobId) => ({ actor, action: "write", kind: action.kind, target: jobId, count, reserve: reserveBy.get(jobId) ?? null, ticket: tag });
   const compensate = (jobId, reason) => {
     try {
-      deps.audit.append({ ...rowOf(jobId), outcome: "failed", reason: String(reason) });
+      audit.append({ ...rowOf(jobId), outcome: "failed", reason: String(reason) });
     } catch (e) {
       deps.log(`console: audit append failed (${codeOf(e)}) after a ${action.kind} job did not land; the log's last row for ticket ${tag} says ok and is wrong`);
     }
@@ -1413,31 +1814,40 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx }) {
   const written = [];
   for (const t of targets) {
     try {
-      deps.audit.append({ ...rowOf(t.jobId), outcome: "ok" });
+      audit.append({ ...rowOf(t.jobId), outcome: "ok" });
       written.push(t.jobId);
     } catch (e) {
       deps.log(`console: audit append failed (${codeOf(e)}), so the ${action.kind} action was refused`);
       for (const id of written) compensate(id, "the audit log could not take a row for every job, so none was acted on");
-      return ctx.json(500, { error: AUDIT_FAILED });
+      return refuse(ctx, "confirm", 500, AUDIT_FAILED, "audit");
     }
   }
+  // The rows this confirm wrote for its jobs, taken before any compensating row: the banner links exactly these.
+  const auditSeq = audit.first();
+  const auditLast = audit.last();
   let result;
   try {
     result = await action.apply(entry, actx);
   } catch (e) {
     for (const id of written) compensate(id, `the write threw (${codeOf(e)})`);
     deps.log(`console: the ${action.name} write threw (${codeOf(e)})`);
-    return ctx.json(500, { error: `the ${action.name} change could not be made; the console's log has the reason` });
+    return refuse(ctx, "confirm", 500, `the ${action.name} change failed before it finished; the console's log has the reason`, "partial");
   }
+  // A list or a fleet the funnel refused whole: it answers so before it acts on any job (job-actions.mjs `failedBulk`).
   if (!result?.ok) {
     const why = failureOf(result) ?? "the write was refused";
     for (const id of written) compensate(id, why);
-    return ctx.json(result?.unreachable ? 503 : 409, { error: result?.unreachable ? VALKEY_UNREACHABLE : why });
+    return result?.unreachable ? refuse(ctx, "confirm", 503, VALKEY_UNREACHABLE, "valkey") : refuse(ctx, "confirm", 409, why, "changed");
   }
   const results = Array.isArray(result.results) ? result.results : [];
   for (const r of results) if (!r.ok) compensate(r.jobId ?? "-", r.reason ?? "refused");
-  tickHub(deps);
-  return ctx.json(200, { ok: true, action: action.name, kind: action.kind, count, done: results.filter((r) => r.ok).length, results });
+  const done = results.filter((r) => r.ok).length;
+  let change = null;
+  if (done > 0) {
+    change = changeOf(ctx, entry, action, { auditSeq, auditLast, count, done, summary: String(action.done(entry, null, { done, count })) });
+    tickHub(deps);
+  }
+  return ctx.json(200, { ok: true, action: action.name, kind: action.kind, count, done, results, change, html: String(bulkResultsHtml({ kind: action.kind, results, count, done, auditSeq })) });
 }
 
 /** Ask the live hub for a tick now, so open tabs show the change; a hub that fails is the hub's own business. */

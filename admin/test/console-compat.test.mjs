@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { COLLISIONS, LEGACY_CLASSES, LEGACY_CSS, NEUTRALISED, PD_TOKENS, SVG_EXTRA } from "../src/console/compat-css.mjs";
-import { cssBlocks, selectorsOf, splitSelectors } from "../src/console/page-css.mjs";
+import { SHELL_CSS, cssBlocks, selectorsOf, splitSelectors } from "../src/console/page-css.mjs";
 // A static import, so a pages.mjs that stops exporting the list fails this file at load instead of skipping its checks.
-import { LEGACY_PAGES, PAGES } from "../src/console/pages.mjs";
+import { LEGACY_PAGES, PAGES, renderPage } from "../src/console/pages.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
+import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { loginCodePage, loginPage } from "../src/console/shell.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
 import { TONE_CLASS } from "../src/words.mjs";
@@ -25,14 +26,14 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));
 
 /**
  * The files whose markup is the old markup: the panels (each page's module under `console/panels/` while its page is
- * legacy, the shared `common.mjs` while any page is), the transcript, the action previews, the document (`html.mjs`),
- * the page assembly (`pages.mjs`: the transcript section, the operators-only page) and the insights renderers. The
- * `panels.mjs` barrel only re-exports, so it is not read. The sign-in pages' old markup is not a file of its own: it is
- * the content `shell.mjs` puts in their `.legacy` box, read from the rendered pages by `signInLegacy` (reading
- * `shell.mjs` itself would count the Pulse frame's classes as old markup).
+ * legacy, the shared `common.mjs` while any page is), the transcript, the document (`html.mjs`), the page assembly
+ * (`pages.mjs`: the transcript section) and the insights renderers. The `panels.mjs` barrel only re-exports, so it is
+ * not read. The action previews left the list with PR 2 of issue #737: their bars are `confirm-view.mjs`'s Pulse markup,
+ * drawn outside every wrapper, and `actions.mjs` writes no markup of its own. The sign-in pages and the operators-only
+ * refusal converted in the same pull request (`signin.mjs`, `error-pages.mjs`), so no old markup is read from them.
  */
 function legacySources() {
-  const files = ["console/transcript.mjs", "console/actions.mjs", "console/html.mjs", "console/pages.mjs", "insights-html.mjs", "graph-html.mjs"];
+  const files = ["console/transcript.mjs", "console/html.mjs", "console/pages.mjs", "insights-html.mjs", "graph-html.mjs"];
   for (const f of readdirSync(join(SRC, "console/panels")).filter((x) => x.endsWith(".mjs")).sort()) {
     const page = f.slice(0, -".mjs".length);
     if (page === "common" ? LEGACY_PAGES.length > 0 : LEGACY_PAGES.includes(page)) files.push(`console/panels/${f}`);
@@ -59,13 +60,8 @@ function legacyBoxes(html) {
   return boxes;
 }
 
-/** The sign-in pages as drawn (they have no golden yet: PR 2 of issue #737 adds one with their conversion), by name. */
-const SIGN_IN = Object.freeze({ login: String(loginPage()), "login-code": String(loginCodePage()) });
-
-/** The old markup the sign-in pages draw: what their `.legacy` boxes hold, while they are legacy. */
-function signInLegacy() {
-  return Object.entries(SIGN_IN).filter(([name]) => LEGACY_PAGES.includes(name)).flatMap(([, html]) => legacyBoxes(html));
-}
+/** The sign-in pages as drawn, by name, beside their goldens (the static shots), in every notice. */
+const SIGN_IN = Object.freeze({ login: String(loginPage({ notice: "idle" })), "login-code": String(loginCodePage()) });
 
 /**
  * A class built from a bare name (`class="${cls}"`): the values that name can hold, by name. Pinned both ways: every
@@ -77,11 +73,11 @@ const DYNAMIC = Object.freeze({
 });
 
 /**
- * The classes the browser script puts on old markup: the preview's confirm bar, the transcript's status, the topology's
- * highlight. Listed, because the script builds them by string concatenation; each must still be a literal there. (The
- * live pill's classes are the shell's, not old markup.)
+ * The classes the browser script puts on old markup: the transcript's status and the topology's highlight. Listed,
+ * because the script builds them by string concatenation; each must still be a literal there. (The live pill's classes
+ * and `main.stale` are the shell's, and since PR 2 the confirm bar is the server's markup, put in the slot whole.)
  */
-const SCRIPT_CLASSES = Object.freeze(["confirm", "dim", "ended", "hi", "off", "on", "t-status"]);
+const SCRIPT_CLASSES = Object.freeze(["dim", "ended", "hi", "off", "on", "t-status"]);
 
 const CLASS_TOKEN = /^[A-Za-z_][\w-]*$/;
 
@@ -144,7 +140,7 @@ function legacyEmitted() {
     if (!ok) all.problems.push(problem);
   };
   const texts = [];
-  for (const text of [...legacySources().map((file) => readFileSync(join(SRC, file), "utf8")), ...signInLegacy()]) {
+  for (const text of legacySources().map((file) => readFileSync(join(SRC, file), "utf8"))) {
     texts.push(text);
     const got = classesOf(text);
     for (const k of ["classes", "names", "prefixes"]) for (const v of got[k]) all[k].add(v);
@@ -207,7 +203,10 @@ test("a class glued to a run-time value never collides: bundle.css styles no cla
 test("the neutraliser is first and covers exactly the bundle.css selectors the old markup can still match", () => {
   assert.deepEqual([...NEUTRALISED].sort(), reachable(EMITTED.classes), "NEUTRALISED is the derived set: add what can collide, drop what no longer can");
   assert.deepEqual(COLLISIONS, [...new Set(NEUTRALISED.map((s) => classesIn(s)[0]))].sort(), "the collisions are the classes the neutralised selectors start with");
-  for (const c of ["banner", "kpi", "badge", "cap", "wl", "big", "note", "facts", "pager", "diff", "confirm", "phases"]) assert.ok(COLLISIONS.includes(c), `.${c} collides`);
+  for (const c of ["banner", "kpi", "badge", "cap", "wl", "big", "note", "facts", "pager", "phases"]) assert.ok(COLLISIONS.includes(c), `.${c} collides`);
+  // The write flow's bar and diff are the server's Pulse markup since PR 2, outside every wrapper: nothing old is called
+  // so any more, so bundle.css's rules for them need no reverting (and a revert inside a wrapper would be dead).
+  for (const c of ["confirm", "diff"]) assert.ok(!COLLISIONS.includes(c) && !EMITTED.classes.has(c), `.${c} is no old markup`);
   const { members, rest } = neutraliserOf(LEGACY_CSS);
   assert.ok(LEGACY_CSS.startsWith(":where(.legacy) :is("), "the neutraliser is the layer's first rule");
   assert.deepEqual([...members].sort(), [...NEUTRALISED].sort(), "every neutralised selector, once");
@@ -260,36 +259,104 @@ test("/insights fits a phone: the chart grids are one column there, and only a c
   assert.match(phone, /\.legacy section\[data-panel\] section\{overflow-x:auto\}/, "a pixel-drawn chart scrolls in its section instead of being cropped");
 });
 
-test("the sign-in pages' old markup is read from their .legacy boxes, one per page while it is legacy", () => {
-  for (const [name, html] of Object.entries(SIGN_IN)) assert.equal(legacyBoxes(html).length, LEGACY_PAGES.includes(name) ? 1 : 0, name);
-  assert.ok(signInLegacy().some((box) => box.includes('<form id="login-form"')), "the sign-in form is in what the scan reads");
+test("the pages PR 2 converted are not legacy: the audit log, the sign-in pages and the operators-only refusal", () => {
+  for (const name of ["audit", "login", "login-code", "forbidden"]) assert.ok(!LEGACY_PAGES.includes(name), name);
+  for (const [name, html] of Object.entries(SIGN_IN)) assert.equal(legacyBoxes(html).length, 0, name);
+  assert.ok(!legacySources().includes("console/panels/audit.mjs"), "the audit panels are read as old markup no more");
+  assert.ok(!legacySources().includes("console/actions.mjs"));
 });
 
 test("an empty LEGACY_PAGES leaves no legacy layer: the last converted page deletes it", () => {
   assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "LEGACY_PAGES is a frozen list of page names");
+  // The shell names the wrapper in one rule alone, a stale page's flat panels (page-css.mjs: a legacy panel is its own
+  // card), and that half goes with the layer.
+  const shellLegacy = selectorsOf(SHELL_CSS).filter((sel) => /\.legacy(?![\w-])/.test(sel));
   if (LEGACY_PAGES.length === 0) {
     assert.equal(LEGACY_CSS, "", "no page is legacy: delete compat-css.mjs and its import");
     assert.deepEqual(LEGACY_CLASSES, []);
+    assert.deepEqual(shellLegacy, [], "no page is legacy: drop the shell's stale rule for a legacy panel");
   } else {
     assert.notEqual(LEGACY_CSS, "");
+    assert.deepEqual(shellLegacy, ["main.stale .legacy>section[data-panel]"]);
   }
 });
 
+test("the wrapper draws no box of its own: its one section is the grid's cell, so an empty panel leaves no gap", () => {
+  // The last rule on the wrapper itself (the layer's own Pulse look, after the insights page's body rule) is the one
+  // that holds: no box, and only what its section inherits.
+  const own = cssBlocks(LEGACY_CSS).filter((b) => b.prelude === ".legacy");
+  assert.equal(own.at(-1).body, "display:contents;color:var(--ink);font:inherit");
+  // Nothing else on the wrapper draws a box that display: contents would drop and a reader would miss: the earlier rules
+  // set the old properties (inherited), and the insights page's ground and font, which the Pulse look replaces.
+  for (const { body } of own.slice(0, -1)) for (const decl of body.split(";")) assert.match(decl, /^(?:--pd-[a-z-]+|background|color|font):/, decl);
+  // The rule that keeps an empty panel off the page is the shell's, on the section; with a wrapper that draws no box,
+  // the section is the cell. Not `:has()`, which needs Chrome 105, Safari 15.4 and Firefox 121, past the floor.
+  assert.match(SHELL_CSS, /(?:^|\n)section\[data-panel\]:empty\{display:none\}/);
+  assert.doesNotMatch(LEGACY_CSS, /\.legacy:has\(/);
+});
+
 /**
- * The page a golden draws, by its file name (`<shot>.<role>.html`, a `SHOTS` row): the shot's screen, or `forbidden`
- * for an operators-only screen drawn for a viewer, which is the refusal page although its `<body>` says the screen's
- * `data-page` (the audit log's viewer golden). Keyed by name, not by `data-page`, so the audit log and the refusal can
- * convert in different pull requests and each golden is judged by its own page's entry.
+ * The page a golden draws, by its file name: a screen's (`<shot>.<role>.html`, a `SHOTS` row) is its screen, or
+ * `forbidden` for an operators-only screen drawn for a viewer, which is the refusal although its `<body>` says the
+ * screen's `data-page` (the audit log's viewer golden). Keyed by name, not by `data-page`, so the audit log and the
+ * refusal can convert in different pull requests and each golden is judged by its own page's entry. The static
+ * goldens PR 2 adds (the sign-in pages, signed out, and the error pages) are `login`, `login-code` and `error`, each
+ * with its own `data-page`.
  */
 function goldenPage(file) {
   const m = /^(.+)\.([a-z]+)\.html$/.exec(file);
   const row = m ? SHOTS.find(([shot]) => shot === m[1]) : undefined;
-  assert.ok(row && ROLES.includes(m[2]), `${file} is a SHOTS golden`);
+  if (row === undefined) {
+    const still = m ? /^(login|login-code)$|^error-\d{3}$/.exec(m[1]) : null;
+    assert.ok(still && [...ROLES, "anonymous"].includes(m[2]), `${file} is a SHOTS golden or a static one`);
+    const page = still[1] ?? "error";
+    return { screen: page, page };
+  }
+  assert.ok(ROLES.includes(m[2]), `${file} is a SHOTS golden`);
   const name = row[1];
   return { screen: name, page: PAGES[name].auth === "operator" && m[2] !== "operator" ? "forbidden" : name };
 }
 
-test("a converted page carries no .legacy and no class only the legacy layer styles; a legacy page's content is in one .legacy box", () => {
+/** The top-level sections of a page's `<main>` with their place: each panel and the run page's transcript section. */
+function sectionsOf(html) {
+  return [...html.matchAll(/<section id="(p-[a-z0-9-]+|transcript)"(?: data-panel| class="transcript-section")>/g)].map((m) => ({ id: m[1], at: m.index }));
+}
+
+/** The `[start, end)` of each `.legacy` box in a page, its nested divs balanced. */
+function boxSpans(html) {
+  const spans = [];
+  const open = '<div class="legacy">';
+  for (let at = html.indexOf(open); at !== -1; at = html.indexOf(open, at + 1)) {
+    const tags = /<div\b|<\/div>/g;
+    tags.lastIndex = at;
+    let depth = 0;
+    for (let m = tags.exec(html); m !== null; m = tags.exec(html)) {
+      depth += m[0] === "</div>" ? -1 : 1;
+      if (depth === 0) {
+        spans.push([at, m.index + m[0].length]);
+        break;
+      }
+    }
+  }
+  return spans;
+}
+
+/** Each screen for each role, drawn over no data (every panel says what it could not read), and the static pages. */
+async function renderedPages() {
+  const out = [];
+  for (const name of Object.keys(PAGES)) {
+    for (const role of ROLES) {
+      const query = name === "run" ? { id: "gh-1" } : {};
+      const html = String((await renderPage(name, { query, session: { name: "ops", role }, data: { now: 0, env: {} }, readOnly: false })).html);
+      out.push({ key: `${name}.${role} (rendered)`, page: PAGES[name].auth === "operator" && role !== "operator" ? "forbidden" : name, html });
+    }
+  }
+  for (const [name, html] of Object.entries(SIGN_IN)) out.push({ key: `${name} (rendered)`, page: name, html });
+  for (const kind of ERROR_KINDS) out.push({ key: `error ${kind} (rendered)`, page: "error", html: String(errorPage({ kind, session: { name: "ops", role: "operator" } }).html) });
+  return out;
+}
+
+test("a converted page carries no .legacy and no class only the legacy layer styles; a legacy page wraps each section in a .legacy of its own", async () => {
   const bundle = new Set(selectorsOf(PULSE_CSS).flatMap(classesIn));
   const legacyOnly = new Set(LEGACY_CLASSES.filter((c) => !bundle.has(c)));
   const drawn = readdirSync(FIXTURES).filter((f) => f.endsWith(".html")).sort().map((f) => {
@@ -300,11 +367,23 @@ test("a converted page carries no .legacy and no class only the legacy layer sty
   });
   assert.ok(drawn.length > 0);
   assert.ok(drawn.some((d) => d.page === "forbidden"), "the refusal page has a golden (the audit log's viewer)");
-  // The sign-in pages have no golden yet (PR 2 adds them): their render is judged by the same rule meanwhile.
-  for (const [name, html] of Object.entries(SIGN_IN)) drawn.push({ key: `${name} (rendered)`, page: name, html });
+  // The pages as rendered too, so the rule holds before a golden is regenerated and for the states no golden draws.
+  drawn.push(...(await renderedPages()));
   for (const { key, page, html } of drawn) {
     if (LEGACY_PAGES.includes(page)) {
-      assert.equal(legacyBoxes(html).length, 1, `${key}: ${page} is legacy, so its content sits in one <div class="legacy">`);
+      // One wrapper per section, so the confirm slot the script puts after a section lands between wrappers. Each
+      // box is one section, whole, and every section is in one.
+      const spans = boxSpans(html);
+      const sections = sectionsOf(html);
+      assert.ok(sections.length > 0, `${key}: ${page} has sections`);
+      assert.equal(spans.length, sections.length, `${key}: ${page} is legacy, so each of its ${sections.length} sections sits in a <div class="legacy"> of its own`);
+      for (const [i, [a, b]] of spans.entries()) {
+        const box = html.slice(a + '<div class="legacy">'.length, b - "</div>".length);
+        assert.ok(box.startsWith("<section ") && box.endsWith("</section>"), `${key}: box ${i} holds a section and nothing else`);
+        assert.equal(sectionsOf(box).length, 1, `${key}: box ${i} holds one section`);
+      }
+      const slot = html.indexOf('id="confirm-slot"');
+      if (slot !== -1) assert.ok(!spans.some(([a, b]) => slot > a && slot < b), `${key}: the confirm slot is outside every wrapper`);
       continue;
     }
     assert.ok(!/class="(?:[^"]* )?legacy(?: [^"]*)?"/.test(html), `${key}: ${page} is converted, so nothing is legacy`);

@@ -2465,6 +2465,21 @@ const HELD_ROWS = [
   { jobId: "gh-4", target: "acme/api#4", label: "deploy", waitedMs: 1_000 },
 ];
 
+// Issue #737: the panel names a trigger by the number a person counts it by, the console's and the planners' `#1`.
+test("the secret bundles section names the opted-out triggers by their row numbers, #1 for the first, never the raw index", async () => {
+  const secretBundles = { bundles: [{ id: "shop", project: "web", projectKnown: true, profile: "op-shop", declared: "env", format: "json", forkReviews: false, endpoints: [], optedOut: [0, 2], last: null }] };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, secretBundles }) }) });
+  await flush();
+  const text = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(text, /opt-out #1 #3/, "triggers 0 and 2 are the first and the third");
+  assert.doesNotMatch(text, /opt-out #0/);
+  const none = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, secretBundles: { bundles: [{ ...secretBundles.bundles[0], optedOut: [] }] } }) }) });
+  await flush();
+  assert.match(stripAnsi(none.render(120).join("\n")), /opt-out none/);
+  await none.dispose();
+});
+
 test("the HELD section is absent when nothing is held -- byte-identical to before the feature", async () => {
   // Conditional, not merely empty. `buildListLines` charges a RULE plus a divider for every section it is
   // given and its row budget is `chrome + sections.length - 1`, so an unconditional section would move the

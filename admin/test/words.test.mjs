@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, HELD_LABEL, NO_EXPLANATION, docsHref, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, TONE_CLASS, VENUE_LABEL, outcomeWord, reasonWords, shortSentence } from "../src/words.mjs";
+import { DOCS_ROOT, HELD_LABEL, NO_EXPLANATION, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, TONE_CLASS, UNNAMED_FIELD, VENUE_LABEL, outcomeWord, reasonWords, shortSentence } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
 import { RUNNER_COMPLETED_REASONS } from "../../worker/src/run-history.mjs";
@@ -96,6 +96,20 @@ test("the console's status (issue #737): completed ok, refused refused, failed f
 
 test("the titles: Venue, Spend and Held", () => {
   assert.deepEqual([VENUE_LABEL, SPEND_TITLE, HELD_LABEL], ["Venue", "Spend", "Held"]);
+});
+
+// Issue #737: a row is called by the number a person counts it by; the index stays the machine's.
+test("rowNumber says a 0-based index as the 1-based number a person reads, and never a number it is not", () => {
+  assert.deepEqual([0, 1, 9, 41].map(rowNumber), ["1", "2", "10", "42"]);
+  assert.equal(rowNumber(Number.MAX_SAFE_INTEGER - 1), String(Number.MAX_SAFE_INTEGER));
+  for (const bad of [-1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "0", "3", null, undefined, true, [], {}]) assert.equal(rowNumber(bad), "?", String(bad));
+});
+
+// Issue #737: a refusal names a field only when its name is a plain identifier, and never echoes a value.
+test("fieldNamed names a plain identifier of at most 40 characters and nothing else", () => {
+  for (const ok of ["colour", "maxTurns", "a", "A_b9", "x".repeat(40)]) assert.equal(fieldNamed(ok), ok);
+  for (const bad of ["", "x".repeat(41), "9lives", "_proto", "__proto__", "a b", "a-b", "a.b", "naïve", "ｍodel", "a\u202eb", "<b>", 7, null, undefined]) assert.equal(fieldNamed(bad), UNNAMED_FIELD, JSON.stringify(bad));
+  assert.equal(UNNAMED_FIELD, "a field it was sent");
 });
 
 // ---- the short sentence ------------------------------------------------------------------------------------------------
