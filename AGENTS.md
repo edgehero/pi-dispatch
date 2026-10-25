@@ -200,10 +200,11 @@ and merges it.
   Put the new value in the same commit as any fix.
 - **Fixes go on `chore/pi-bump`,** as ordinary signed-off commits, and the workflow never overwrites them. It rebuilds
   the branch only while it holds nothing but its own commit: one commit on the merge base, subject
-  `chore(pi): run on pi X`, by Rob Boerman, committed as `robboerman+pi-bump@live.nl` (only the workflow uses that
-  committer), changing only the pin files and the lockfile (`fixupsOn` in `pi-bump.mjs`). Anything else is a fix,
-  including the bump commit amended, rebased or squashed, which rewrites its committer. Then a run for a newer pi pushes nothing and comments once per version
-  on the pull request ("pi Y is out. ... Merge or close it, and the next run bumps to Y."). There is no flag to
+  `chore(pi): run on pi X`, by Rob Boerman, committed as `6673123+edgehero@users.noreply.github.com` (the ID form of
+  the maintainer's noreply address, which only the workflow commits as), changing only the pin files and the lockfile
+  (`fixupsOn` in `pi-bump.mjs`). Anything else is a fix, including the bump commit amended, rebased or squashed, which
+  rewrites its committer. Then a run for a newer pi pushes nothing and comments once per version on the pull request
+  ("pi Y is out. ... Merge or close it, and the next run bumps to Y."). There is no flag to
   force it, also not on a manual run: merge or close the pull request, or delete the branch. A branch left without
   a pull request is rebuilt only when a closed pull request still holds its tip (GitHub keeps those commits);
   otherwise the run warns and leaves it. A rebuild puts a ready pull request back to draft.
@@ -221,6 +222,12 @@ and merges it.
 - Conventional subjects citing the issue number. The body explains *why*, names the spec IDs touched, and
   states what was checked and left unchanged.
 - DCO sign-off (`git commit -s`). Branch names are `type/short-slug`.
+- **No personal email address in any commit message**, nor in a pull request, an issue or a comment. The
+  maintainer's commits are authored, committed and signed off as `Rob Boerman <edgehero@users.noreply.github.com>`
+  (set as the repository's `user.email` before committing): `git commit -s` writes the committer's address into
+  the `Signed-off-by` line, so a personal address in the git config ends up in the message. The pi bump workflow
+  authors as the same noreply address and is committed (so signed off) as its ID form, `BUMP_AUTHOR` and
+  `BUMP_COMMITTER` in `pi-bump.mjs`.
 - One PR per issue where possible; stacked PRs are merged one at a time, parent first, never with
   `--delete-branch` until the whole chain has landed.
 - **`gh pr merge --admin` is no longer the merge path.** It was, while `main` required an approving review
@@ -256,6 +263,7 @@ and merges it.
 
 ## One note on this file
 
-`CLAUDE.md` is read by the agent working on **this repository**. It is not `AGENTS.md`: pi discovers
-`AGENTS.md` natively, so a root `AGENTS.md` here would also be loaded into every job that services this
-repo. Keep instructions meant for maintenance out of the job containers.
+`AGENTS.md` is read by the agent working on **this repository**, and by pi in every job that services it: pi loads
+a directory's first context file of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md` and `CLAUDE.MD`
+(`loadContextFileFromDir` at the pinned version), so it did the same when this file was called `CLAUDE.md`. Write it
+for whoever maintains the repository, knowing that the jobs on this repository read it as context too.

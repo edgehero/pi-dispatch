@@ -110,7 +110,7 @@ test("the table is held to the renderer on every code point there is (#401)", as
   // version of this table was written out of UAX #11 by hand and checked against ten strings. It passed,
   // and it UNDER-counted 139,820 code points: CJK Extension B through H, Tangut, the Kana supplement, the
   // Hangul Jamo extensions and every emoji block added since Unicode 13. Ten examples cannot see that.
-  // CLAUDE.md already says a hand-written table restating a derivable source is either derived or pinned.
+  // AGENTS.md already says a hand-written table restating a derivable source is either derived or pinned.
   //
   // THE DIRECTION IS THE WHOLE POINT, so the hard assertion is one-sided. Over-counting cuts EARLY: the
   // line comes out short and the border holds. Under-counting cuts LATE: the line runs past the border,

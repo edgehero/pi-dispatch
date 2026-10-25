@@ -3539,7 +3539,7 @@ test("the boot-race rule fires only on a change, only with a live watch, and nev
 });
 
 test("one debounce, shared: the 150ms literal is written once (issue #386)", async () => {
-	// It was written four times, which is the shape CLAUDE.md warns about: four copies agree until one of
+	// It was written four times, which is the shape AGENTS.md warns about: four copies agree until one of
 	// them does not. The value itself is pinned because it is a contract with the panel's atomic writer --
 	// a tmp+rename delivers more than one event for one edit, and the window only has to outlast that burst.
 	const mod = await import("../src/watch-closer.mjs");

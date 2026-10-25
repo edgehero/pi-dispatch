@@ -81,13 +81,19 @@ export const BUMP_PATHS = Object.freeze([...new Set(PI_PIN_SITES.map((site) => s
 
 export const titleFor = (version) => `chore(pi): run on pi ${version}`;
 
-/** Who the workflow commits as. The workflow's `git config` lines are held to this by worker/test/pi-bump.test.mjs. */
-export const BUMP_AUTHOR = Object.freeze({ name: "Rob Boerman", email: "robboerman@live.nl" });
+/**
+ * Who the workflow commits as. The workflow's `git config` lines are held to this by worker/test/pi-bump.test.mjs. A
+ * GitHub noreply address, never a personal one: `git commit -s` writes the committer's address into the message.
+ */
+export const BUMP_AUTHOR = Object.freeze({ name: "Rob Boerman", email: "edgehero@users.noreply.github.com" });
 /**
  * The committer the workflow alone commits as. Amending, rebasing, squashing, cherry-picking and GitHub's "update
- * branch" all rewrite the committer, so a bump commit a person reworked no longer reads as the workflow's own.
+ * branch" all rewrite the committer, so a bump commit a person reworked no longer reads as the workflow's own. It is the
+ * ID form of the author's noreply address (both reach the same account), which a person committing does not write: the
+ * account's own commits, and GitHub's merges, use the plain form. Should GitHub ever give this account the ID form, a
+ * rebase made on GitHub would read as the workflow's own commit, and this committer would need another address.
  */
-export const BUMP_COMMITTER = Object.freeze({ name: "Rob Boerman", email: "robboerman+pi-bump@live.nl" });
+export const BUMP_COMMITTER = Object.freeze({ name: "Rob Boerman", email: "6673123+edgehero@users.noreply.github.com" });
 /** The subject of the workflow's own bump commit: titleFor of an exact version, and nothing else. */
 const BUMP_SUBJECT_RE = /^chore\(pi\): run on pi (0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -400,7 +406,7 @@ export function renderPullRequest({ from, to, versions }) {
 		"## How to review",
 		"",
 		"- If `worker/test/pi-derived.test.mjs` is red, run `node .github/scripts/pi-derived.mjs --write` on this branch and commit the result. Read the hosts it reports added: **a new catalog host widens the cost guard** (a capped call there is bounded by the output field pi picks for it).",
-		"- Every other red test is a pinned assumption about pi that no longer holds. Fix the code or the copy against the new release, never the assertion. A red content-hash test names the pi file that changed: re-verify the copy against it, then move the hash (`CLAUDE.md`, \"pi bumps\").",
+		"- Every other red test is a pinned assumption about pi that no longer holds. Fix the code or the copy against the new release, never the assertion. A red content-hash test names the pi file that changed: re-verify the copy against it, then move the hash (`AGENTS.md`, \"pi bumps\").",
 		"- Fixes go on this branch as signed-off commits. Once it carries one, the workflow never rebuilds it: a newer pi waits, with a comment here, until this pull request is merged or closed. Without fixes, a run for a newer pi, or after the base changed a pin file or the lockfile, rebuilds the branch on the base.",
 		"",
 		"## Review checklist (OQ-005)",

@@ -19,7 +19,7 @@ const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 // the worker's export the admin resolved it with, but both are listed so a hit names the one left behind.
 const RETIRED = Object.freeze(["insights.html", "PI_GRAPH_DIR", "buildInsightsHtml", "insightsCommand", "INSIGHTS_JS", "graphDir", "defaultGraphDir", "secureGraphRoot"]);
 const TREES = ["admin/src", "admin/skills", "worker/src", "receiver/src", "image", "deploy", "worker/deploy", "docs", "launch", "specs", ".github"];
-const FILES = ["README.md", "admin/README.md", "worker/README.md", "receiver/README.md", ".env.example", "worker/.env.example", "CLAUDE.md"];
+const FILES = ["README.md", "admin/README.md", "worker/README.md", "receiver/README.md", ".env.example", "worker/.env.example", "AGENTS.md"];
 const SKIP_DIRS = new Set(["node_modules", "dist", "test", "fixtures", ".git"]);
 const TEXT = /\.(?:mjs|js|cjs|ts|mts|md|json|ya?ml|sh|service|socket|timer|container|env|example|tape|txt|toml|conf)$|(?:^|\/)(?:Dockerfile|Containerfile)[^/]*$/;
 const REVISION_ROW = /^\| \d{4}-\d{2}-\d{2} \|/;

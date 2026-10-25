@@ -631,7 +631,7 @@ Start with [`specs/constitution.md`](specs/constitution.md) for the rules that n
 [`specs/interfaces.md`](specs/interfaces.md) for the file and container contracts. Every spec file ends
 with a revision history, corrections included.
 
-Working on this repo with an AI agent? [`CLAUDE.md`](CLAUDE.md) is the short version of what matters here.
+Working on this repo with an AI agent? [`AGENTS.md`](AGENTS.md) is the short version of what matters here.
 
 ## Contributing
 

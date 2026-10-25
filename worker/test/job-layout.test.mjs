@@ -33,7 +33,7 @@ test("layoutFor refuses a name the table does not hold, rather than guess a tree
 });
 
 test("INT-CONTAINER-JOB-INPUTS' layout table is the table, row for row", () => {
-	// The spec restates LAYOUTS by hand, so it is pinned here (CLAUDE.md: a hand-written table is derived or pinned).
+	// The spec restates LAYOUTS by hand, so it is pinned here (AGENTS.md: a hand-written table is derived or pinned).
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
 	const at = spec.indexOf("  | | `mounts` | `sandbox` |");
 	assert.ok(at > 0, "the layout table is in INT-CONTAINER-JOB-INPUTS");

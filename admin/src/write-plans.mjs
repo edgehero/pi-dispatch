@@ -5,7 +5,7 @@
  * PI-FREE ON PURPOSE. The operator console (`admin/src/console/`) is a separate process that never loads pi, and it must
  * refuse with the SAME words the tools and the commands use, or an operator sees two rules for one file. These lived in
  * `index.ts`, which imports pi and typebox, so the console could not reach them; a copy in the console would have been
- * the hand-written restatement this repository refuses (CLAUDE.md, "derived or pinned, never trusted"). So they moved
+ * the hand-written restatement this repository refuses (AGENTS.md, "derived or pinned, never trusted"). So they moved
  * here, `index.ts` imports them back, and `admin/test/write-plans.test.mjs` walks this module's imports to keep pi and
  * typebox out of it.
  *

@@ -6,7 +6,7 @@
  * BUILT FROM THE COMMENT TABLES, NEVER FROM A COPY. Where the worker already posts a FIXED sentence for a reason (its
  * forge comment), that sentence IS the catalog's, read from the table the call site posts from (comment-tables.mjs, and
  * mcp-preflight.mjs for the MCP refusals' one template, filled without a server name). A copy here would drift from the
- * comment the issue actually got, and `CLAUDE.md`'s rule is that a hand-written table restating a derivable source is
+ * comment the issue actually got, and `AGENTS.md`'s rule is that a hand-written table restating a derivable source is
  * derived or pinned. The test (reason-catalog.test.mjs) holds every derived entry identical to its source, and makes any
  * table keyed by a reason the catalog's source for it unless the reason is named there as ambiguous.
  *

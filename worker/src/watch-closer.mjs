@@ -86,7 +86,7 @@ export function makeWatchCloser(handles, log) {
  * The debounce every live-edit watch in this project uses, in one place (issue #386).
  *
  * The literal 150 was written four times -- the receiver's triggers watch and the worker's triggers,
- * pause-windows and scoped-limits watches -- and four copies of a number is the shape `CLAUDE.md` warns
+ * pause-windows and scoped-limits watches -- and four copies of a number is the shape `AGENTS.md` warns
  * about: they agree until one of them does not. It rides this module because this module is already what
  * both composition roots import for the same four watches.
  *

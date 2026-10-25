@@ -22,7 +22,7 @@ import { BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, SERVES, SERVES_WORDS } fro
 import { LIVE_SKIPPED_REASONS, STEER_SKIPPED_REASONS } from "../../worker/src/run-history.mjs";
 
 // Issue #712: the console and the panel say what a venue serves, and why a run went without a feature, in sentences
-// keyed by the worker's own tables. Each table is bolted to its source here (CLAUDE.md, "derived or pinned"), and an
+// keyed by the worker's own tables. Each table is bolted to its source here (AGENTS.md, "derived or pinned"), and an
 // openshell run, refused and completed, is rendered on both surfaces with no sentence that is wrong for its venue.
 
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));

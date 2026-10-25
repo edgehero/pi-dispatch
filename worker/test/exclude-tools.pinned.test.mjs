@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { EXCLUDABLE_TOOL_NAMES } from "../src/triggers.mjs";
 
 /**
- * The bolt on `EXCLUDABLE_TOOL_NAMES` (issue #291; CLAUDE.md's rule: a hand-written table that restates
+ * The bolt on `EXCLUDABLE_TOOL_NAMES` (issue #291; AGENTS.md's rule: a hand-written table that restates
  * a derivable source is either derived or pinned, never trusted).
  *
  * The constant CANNOT be derived where it lives: triggers.mjs is pure and pi-free (the receiver loads

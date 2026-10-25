@@ -108,7 +108,7 @@ export const SHORT_MAX = 72;
 
 /**
  * A catalog sentence cut to a list row, DERIVED, never written by hand (a second hand-written sentence per reason would
- * drift from the first, CLAUDE.md's "derived or pinned"). The rule, in order:
+ * drift from the first, AGENTS.md's "derived or pinned"). The rule, in order:
  *   1. drop a leading verdict of at most four words and a colon ("Refused: ", "Not run: ", "Failed, continuing: ",
  *      "Failed before it started: "), since the outcome word beside it already says it;
  *   2. keep the first sentence (up to the first full stop followed by a space, or the end), without its full stop;

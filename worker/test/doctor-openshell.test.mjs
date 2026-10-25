@@ -193,7 +193,7 @@ test("bind mode on a default gateway: one failing line naming the setting, with 
 });
 
 // The gateway.toml is restated by hand in the CI lane and in docs/backends.md: each copy is held to `gatewayTomlFor`, the
-// one the doctor fix prints (CLAUDE.md: a hand-written table restating a source is pinned).
+// one the doctor fix prints (AGENTS.md: a hand-written table restating a source is pinned).
 test("every hand-written gateway.toml is gatewayTomlFor's (#686 part 3)", async () => {
 	const { gatewayTomlFor } = await import("../src/openshell-cli.mjs");
 	const { readFileSync: read } = await import("node:fs");

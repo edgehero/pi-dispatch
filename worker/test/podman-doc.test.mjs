@@ -10,7 +10,7 @@ import { sandboxVenueRefusal } from "../src/sandbox.mjs";
 import { rootfulConfRefusal, rootfulConfWidening } from "../src/runtime-observations.mjs";
 import { localConfBootRefusal, podmanBootRefusal, podmanConfBootRefusal } from "../src/start.mjs";
 
-// docs/podman.md's property table restates two derivable sources, so it is BOLTED to them (CLAUDE.md: a hand-written
+// docs/podman.md's property table restates two derivable sources, so it is BOLTED to them (AGENTS.md: a hand-written
 // table is derived or pinned, never trusted): its rows are the backend table's properties in order, and its Docker
 // Engine column is what `local` declares. The Podman columns are measurements, which no source can derive, and the
 // first review of this file showed why pinning only their VOCABULARY is not enough: a page that said `isolation:
