@@ -156,7 +156,9 @@ Two consequences worth internalising before you design anything:
   console's four hand-written lists in `admin/test/console-doc-tables.test.mjs`: `docs/console.md`'s `ended` table
   against `ENDED_REASONS` and the sign-in page's titles, its error-page table against `ERROR_KINDS` and their statuses,
   the requirements' destructive actions against the actions whose write rules set `danger`, and `docs/triggers.md`'s
-  `pull_request` fields against the trigger add's `TRIGGER_ADD_FIELDS.pull_request`.
+  `pull_request` fields against the trigger add's `TRIGGER_ADD_FIELDS.pull_request`; and `INT-DEFER-REASON-KEY`'s
+  reason table, fields block and bucket lists against `worker/src/defer-reasons.mjs`, both ways, in
+  `worker/test/defer-reasons.test.mjs`.
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.

@@ -3314,7 +3314,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `dispatch_failed` model tool and a `failed` subcommand (both enumeration-pinned surfaces bought for
   a keypress the panel already answers -- "one keypress away" is the acceptance, and the panel is the
   keypress); a per-job delayed classifier (the breakdown line names parts counted from their own
-  sources, `INT-WAIT-PROFILES-CONTRACT`'s refusal of a guessing classifier stands).
+  sources, `INT-WAIT-PROFILES-CONTRACT`'s refusal of a guessing classifier stands). AMENDED 2026-10-25 (#737,
+  PR 3a): that refusal's two grounds were a guess and a job's data, and neither holds for what replaced the need:
+  the worker records why it deferred each job (`INT-DEFER-REASON-KEY`), and the console's `readWaiting` lists the
+  jobs that have not started from the queue's own sets, their scores and those records, reading no job's data
+  (`DES-WAITING-REASONS`). Nothing classifies a delayed job from its data or its timing.
 - **The dollar surfaces** (issue #501, part 7; `admin/src/dollar-windows.mjs`): the LIST panel gains a
   DOLLAR WINDOWS section, present only when a dollar window is set, with one row per ACTIVE window: the
   deployment's (its caps from the overlay over the env the console can see, the worker's merge), then each
@@ -6531,7 +6535,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   with the remainder called undifferentiated. This is compatible with, not a reversal of, the rejected
   per-job classifier below: nothing enumerates or hydrates the delayed set, nothing guesses which
   population a given job is in, and the wake-instant floors stay evidence for the WORKER's own
-  discrimination, never a display heuristic.
+  discrimination, never a display heuristic. AMENDED 2026-10-25 (#737, PR 3a): the panel's line is unchanged, and
+  the console's reader can list the delayed set's jobs (`readWaiting`, `DES-WAITING-REASONS`, built and tested but
+  turned on by no page in this pull request, since the console's `serve` does not ask for it): their ids and scores,
+  never their data, each with the reason the worker recorded as it deferred it (`INT-DEFER-REASON-KEY`). So something
+  can enumerate the delayed set now, and still nothing hydrates it or guesses: a job with no defer record says so,
+  and one past its due says that, from its own score.
+  The floors stay distinct, the evidence for a reader older than the record and for a job whose record could not be
+  written.
 - **Rejected**:
   - ***Widening the queue's dedup window for a held job*** — the obvious way to coalesce repeat deliveries,
     and wrong three times over: the key carries no trigger identity (so it would suppress an unflagged
@@ -8410,7 +8421,9 @@ a tunnel.
   - **A miss is a free deferral**, never a refusal: everything taken so far goes back (endpoint holds, the
     scope's fleet claim and in-process slot, the host slot), the log says `endpoint_busy_deferred` with the
     endpoint id, and the job is moved to `now + ENDPOINT_BUSY_RECHECK_MS` (7 s, distinct from every other
-    deferral's instant, since the instant is the only trace of why a job is delayed). Nothing has been
+    deferral's instant, since the instant was the only trace of why a job is delayed; since issue #737 the move
+    records the reason too, `endpoint` with the endpoint's id, `INT-DEFER-REASON-KEY`, and the instant stays the
+    trace for a reader older than that record). Nothing has been
     minted, cloned or reserved (`CONST-BUDGET-BEFORE-TOKENS`).
   - **The settings read moved above it**, once per pickup, because the job's effective provider and model
     can come from the overlay. Its throw is captured and raised at its old place, so the record and the
@@ -9247,7 +9260,19 @@ a tunnel.
   is a job that made that many attempts and waits to retry, whatever they recorded kept (a gate failing above the
   processor's `try` counts an attempt and records nothing, so no record is promised). The panel's doors are `x`
   on the ACTIVE row and a HELD drill-in view on `h`, both behind the trigger-delete's in-frame y/n, with
-  the armed jobId STORED at arm time so a refresh cannot retarget the question.
+  the armed jobId STORED at arm time so a refresh cannot retarget the question. AMENDED 2026-10-25 (#737, PR 3a):
+  the CLI's held and queued branches are one function, `removeQueuedJob` (`cancel-state.mjs`, after `removeHeldJob`,
+  which it calls), and the console's `cancel-queued` runs the same one, so the two doors share the sequence
+  and keep their own rules (the CLI removes a job waiting to retry too; the console takes only a job that never
+  started, `REQ-OPERATOR-CONSOLE-ACTIONS`). After a removal that succeeded it deletes the job's defer record
+  (`defer:job:<id>`, `INT-DEFER-REASON-KEY`), bounded at 2 s and best effort, so a removed job leaves no reason
+  behind; its TTL is the backstop, and no reader finds a record whose job is gone. The CLI's output has one new
+  line: a held job whose removal failed after its hold's keys were deleted (`removeHeldJob`'s `cleared`) says its
+  hold was cleared, that the job could not be removed and may still be queued without it, and to run `pi-dispatch
+  cancel <id>` again, where it said only the error, which read as nothing done. And every line that carries another
+  module's words (the registry's, a removal's, the error under the could-not-reach line) carries them bounded, each
+  C0, DEL and C1 character a space and at most 200 characters (`boundedText`), so a line whose words hold none of
+  those characters and are at most 200 characters long is byte for byte what it was.
 - **Why**: the abort machinery was complete with exactly two triggers, both automatic, and the only
   human-shaped door (`dispatch_wait_cancel`) reached held jobs only and was model-callable only -- an
   operator had to ask a model to stop a job the panel was showing them, or type `docker stop` by hand.
@@ -9269,7 +9294,15 @@ a tunnel.
 - **Residuals**: the one-tick ack race, the unreachable-owner timeout and the record latency are named
   in `INT-CANCEL-CHANNEL-CONTRACT`; a worker predating the contract acks nothing (release-ordering skew,
   `design.md`'s widening class, honest at the requester); the held partial failure keeps
-  `cancelHeldJob`'s pre-existing direction (hold keys gone, job survives, panel row honest).
+  `cancelHeldJob`'s pre-existing direction (hold keys gone, job survives, panel row honest), and since #737 PR 3a
+  every door says so: `removeHeldJob` answers `{ invalid, cleared: true }` once its first hold key's delete was
+  sent, unless that delete failed and the hold is read back in place afterwards (`HEXISTS` of its `since`,
+  `holdInPlace`: Valkey refused the command, such as NOPERM, READONLY or MISCONF), when the answer is `{ invalid }`,
+  nothing changed; a hold not read back, or a read that fails, keeps the mark, since a refusal can be the answer to
+  ioredis's resend, after a reconnect, of a delete that already ran; the CLI's line says the hold was cleared (its error
+  with each C0, DEL and C1 character a space, at most 200 characters of it), and `cancelHeldJob` (the panel's, the
+  tool's and the console's `cancel-held`) and the console's `cancel-queued` say so in fixed words (`heldClearedAnswer`,
+  `partial`, the console's bar the partial one), never the error's and never "nothing was changed".
 - **Traces to**: `REQ-OPERATOR-JOB-CANCEL`, `REQ-JOB-TIMEOUT-30M` (the abort machinery it rides),
   `CONST-RETRY-INFRA-ONLY` (policy, returned, never retried), `DES-CLI-SURFACE` (operator-typed tier),
   `INT-CANCEL-CHANNEL-CONTRACT`, `INT-WAIT-PROFILES-CONTRACT`
@@ -11870,8 +11903,12 @@ a tunnel.
   inline style", and the rejected options marked #737); issue #737 PR 2, most of #711: sessions and why they end,
   error pages, the write flow's slot, Undo and banner, the live states and the audit page (the bullet "Sessions, error
   pages, the write flow and the live states" below, the amended "The stream lifecycle", "The action table", "The
-  generic pipeline" and "The legacy layer", and the rejected options marked #737 PR 2). This entry supersedes three of the
-  rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull Board) where they
+  generic pipeline" and "The legacy layer", and the rejected options marked #737 PR 2); issue #737 PR 3a, cancelling a
+  job that never started, a re-run's Undo decided at the confirm, Retry's Undo, the probe's one question, the write
+  401's slot sentence and the tokens bar (the amended "The action table", "The action groups" and "Sessions, error
+  pages, the write flow and the live states"), over the waiting reader of `DES-WAITING-REASONS`. This entry
+  supersedes three of the rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull
+  Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
 - **Decision**: an operator console served over HTTP by a **separate process**, the bin `pi-dispatch-console` of the
   admin package (`@edgehero/pi-dispatch-admin`, `admin/src/console/cli.mjs` bundled to `dist/console.mjs` beside the
@@ -12165,7 +12202,15 @@ a tunnel.
   `{jobId, queue, startedAt, host}`, never a job's `.data`, beside the old `activeJobId`), counts per queue
   (`queueCounts`) beside the summed ones, `parked`, and `failures24h` (folded from a wide window of the newest 1000
   merged runs, read at most once per 15 s; `failures24hFloor` says the window did not reach back a day, so the count
-  is a floor). New readers, each over an injected client:
+  is a floor). AMENDED 2026-10-25 (#737 PR 3a): three more folds of that same window, drawn by no page yet, each
+  `{ ..., floor, partial }` and null when the window could not be read (not known, never an empty day): `runsDay`, the
+  runs whose instant is in the last 24 hours, newest first, each `{ jobId, kind, target, project, host, outcome,
+  reason, startedAt, endedAt, parentJobId }` re-checked by its rule (a mirrored record is another host's text);
+  `spendByHour`, today's settled micro-dollars per UTC hour by `endedAt` (`hours`, 24 entries, null for an hour still
+  to come), with `unpriced`, today's ended runs whose record carries no settled amount; and `softHoldToday`, how many
+  of today's records carry the reason `soft-hold` (`count`; today, as the count windows' UTC day). Beside them
+  `hostsReadAt`, when the host rows were last read; and with `waiting: true`, the waiting jobs (`DES-WAITING-REASONS`).
+  New readers, each over an injected client:
   - `readRunsPage`: one page of the merged history, newest first, at most 100 runs. **The cursor is a score, not an
     offset**: `before` is the instant of the last run shown, so a run that lands while an operator pages lands above
     every cursor already handed out and moves nothing, where an offset would shift every later page and show a run
@@ -12499,9 +12544,12 @@ a tunnel.
     `coresText`.
   - **The time rule: UTC bytes, local by script.** Every instant a console panel writes as text is `timeHtml`: a
     `<time datetime="<ISO, UTC>">` whose text is `utcText`'s, so a page is the same bytes for every reader and every
-    golden fixture keeps its UTC text. The Spend page's text instants are `<time>` too, built inside
-    `insights-html.mjs` (which may import neither `panels.mjs` nor the worker): the budget split's applied and until
-    instants and its history (`splitAtHtml`), and the capacity section's window and truncation instants
+    golden fixture keeps its UTC text. Since #737 PR 3a `utcText` draws only an instant from 0 to the defer leaf's
+    `DEFER_TIME_MAX_MS` (the year 9999's last) and says "unknown" outside it, before 1970 too, which `timeHtml` then
+    writes with no `<time>`: past the year 9999 an ISO string's year is six digits with a sign, and its first sixteen
+    characters would be a date that is not the instant's. The Spend page's text instants are `<time>` too, built
+    inside `insights-html.mjs` (which may import neither `panels.mjs` nor the worker): the budget split's applied and
+    until instants and its history (`splitAtHtml`), and the capacity section's window and truncation instants
     (`capWhenHtml`). What stays UTC, and says so where it is an instant: the charts' hover tips (strings shown through
     `textContent`, where no `<time>` can live; each ends its instant with "UTC"), the charts' day labels and daily
     buckets (the budget's UTC days), the split's short `MM-DD HH:MM` outside-edit notice (the panel's own words, held
@@ -12509,11 +12557,13 @@ a tunnel.
     swapped, and to the second), and the count and dollar windows, which say under them that they are UTC days, weeks
     and months (review round 1). `/static/console.js` rewrites each `time[datetime]` to the reader's zone with its UTC offset
     (`2026-10-08 17:39 UTC+2`) and sets its `title` to the UTC text rebuilt from the `datetime`, never read back from
-    the text, so running it twice changes nothing; it runs on load and inside every panel a live update swaps in. An
-    element whose `datetime` is not an ISO instant is left as drawn. Without the script a page reads UTC. No inline
-    script or style: the CSP is unchanged. REJECTED: formatting a zone on the server (it does not know the reader's,
-    and a cookie or header carrying it would make a page differ per reader); `Intl` zone names (long, and not on every
-    engine the same).
+    the text, so running it twice changes nothing; it runs on load, inside every panel a live update swaps in, and
+    since #737 PR 3a over every markup the script writes into the confirm slot (`fillSlot`: a preview's or an
+    answer's bar, whose lines can carry a time, a waiting job's among them), so a bar's times read as the page's do.
+    An element whose `datetime` is not an ISO instant is left as drawn. Without the script a page reads UTC. No
+    inline script or style: the CSP is unchanged. REJECTED: formatting a zone on the server (it does not know the
+    reader's, and a cookie or header carrying it would make a page differ per reader); `Intl` zone names (long, and
+    not on every engine the same).
 - **Doctor results** (AMENDED 2026-10-21, #712 PR C, `DES-DOCTOR-RESULTS-PUBLISHED`, `INT-DOCTOR-RESULTS-KEY`): the
   fleet reader's snapshot carries `doctor`, each host's last published doctor run, read for the index's hosts and the
   live ones at most every 15 s (a host publishes daily, so a per-tick MGET would be load for nothing), never pruning
@@ -12535,9 +12585,12 @@ a tunnel.
   frozen table, `ACTIONS` in `admin/src/console/actions.mjs`, shaped `{name, kind, paid, bulk, preview(body, ctx),
   apply(entry, ctx)}`, and since #737 PR 2 also `{fields, danger, undo(out, body), inverse(out, body),
   confirmLabel(out), done(out, body, result)}` from one table of write rules (`WRITE_RULES`), which the table throws at
-  load without. An entry's `preview` answers `{refusal}`, `{unchanged}` or `{summary, diff, expect, payload, targets,
-  reserve}` (the `diff` an escaped fragment, and since #737 PR 2 sometimes `plan` and `beforeText` too, which never
-  leave the server, and `barLines`, the bar's own markup of the summary's lines, a change's values in bold; an
+  load without. Since #737 PR 3a a rule may also say `atConfirm: true` (a single act's only; carried as false when
+  absent), and its `undo` and `inverse` take a third argument, `result`, undefined at the preview and the apply's
+  answer at the confirm ("Sessions, error pages, the write flow and the live states"); the table holds 38 actions.
+  An entry's `preview` answers `{refusal}`, `{unchanged}` or `{summary, diff, expect, payload, targets, reserve}`
+  (the `diff` an escaped fragment, and since #737 PR 2 sometimes `plan` and `beforeText` too, which never leave the
+  server, and `barLines`, the bar's own markup of the summary's lines, a change's values in bold; an
   `unchanged` says why, `UNCHANGED`, with a setting's key and value where the action knows them), and writes nothing;
   `apply` answers `{ok, results?}` or `{invalid}`, and since #737 PR 2 `{invalid, partial: true}` for a refusal that
   came after part of the write was made (the kill switch reached some queues). CORRECTED 2026-10-24: this sentence named the
@@ -12559,7 +12612,8 @@ a tunnel.
      jobs it will touch, and the reserve the page showed. It answers the summary, the diff (a `SafeHtml` fragment
      built by the one template, swapped by the served script into `[data-preview]` alone) and the ticket. AMENDED
      2026-10-24 (#737 PR 2): before the entry's preview runs, a body key outside its `fields` is refused 400 by name;
-     the ticket also holds `meta` (`{title, undo, undoAfter, inverse, danger, done}`: the bar's Undo sentence and the
+     the ticket also holds `meta` (`{title, undo, undoAfter, inverse, danger, done}`, and since #737 PR 3a `undoable`,
+     an inverse now or one the confirm decides, `atConfirm`: the bar's Undo sentence and the
      banner's, which never points at the preview the next page does not show, and the past-tense sentence the banner
      leads with, null for a bulk act, whose `done` is asked at the confirm with how many jobs landed; decided where the
      file as it was is known, so the browser cannot claim an Undo the preview did not offer), and a bulk retry's or
@@ -12592,7 +12646,8 @@ a tunnel.
     `finishedOn`); re-run a finished run (`planRerun`, `enqueueRerun`, paid); answer a parked run
     (`planParkedAnswer`, `enqueueParkedAnswer`, paid); since issue #646, send a message into a running job
     (`planSteer`, `enqueueSteer`, paid with no new reserve) and withdraw one (`planSteerWithdraw`,
-    `withdrawSteerMessage`).
+    `withdrawSteerMessage`); since issue #737 PR 3a, cancel a job that never started (`planCancelQueued`,
+    `cancelQueuedJob`, over the worker's `removeQueuedJob`: the console's rules, the CLI's sequence).
   - **Fleet**: pause and resume the whole fleet (`killSwitchPlan` and `killSwitchSet`, the tools' funnel, so a
     resume across two disagreeing Valkeys is refused here as it is everywhere); pause and resume one queue
     (`setQueuePausedOne`, which refuses a name the fleet does not drain rather than creating a paused queue
@@ -12697,7 +12752,18 @@ a tunnel.
   shows the first 100 and says how many more matched. The confirm acts per job, re-checking each one, so a job
   retried, removed or failed again since the preview is refused alone and the rest go on, and the answer reports per
   job. The audit has one row per job (`target` the job id), each with `count` the list's size and the one ticket
-  digest, so a reader can group a bulk action and see each job's outcome.
+  digest, so a reader can group a bulk action and see each job's outcome. Since #737 PR 3a a job whose own answer is
+  `partial` (a held job whose cancel was asked for and did not finish) keeps that mark in its result (`resultRow`),
+  so its line reads "did not finish, <its reason>", never "not done" (`bulkResultsHtml`), for a job whose hold may
+  be gone. A preview that reads the fleet snapshot (cancel-held's, cancel-all-held's, a queue's pause and resume,
+  and the fleet resume's count of waiting jobs) waits for it at most `SNAPSHOT_TIMEOUT_MS` (10 s), since the
+  snapshot's reads have no overall bound of their own and a Valkey that stops answering on an open socket would hold
+  the preview as long. Past it the preview refuses 503 with `SNAPSHOT_TIMEOUT_SENTENCE` ("the fleet did not answer
+  within 10 seconds, so this could not be previewed; nothing was changed"), saying what happened rather than guessing
+  why, while a snapshot that fails keeps "the fleet could not be read (is Valkey reachable?); nothing was changed"
+  (`snapshotOf`); the fleet resume previews without its count instead, its line saying the count could not be read.
+  Not the cancel funnels' 2.5 s, which would refuse a slow but healthy fleet: the snapshot is a long chain (every
+  registry row, every queue, the run records' walk) that such a fleet takes seconds over on its first read.
 - **One audit chain**: the TUI's writes and the extension's tools' writes land in the same log as the console's,
   as actor `{name: <os login>, role: "panel", session: null}`, in the deployment's `PI_LOGS_DIR/console-audit/`.
   `auditedWrite` (`admin/src/audited-write.mjs`) applies the console's rule to them: the `ok` row before the write,
@@ -13234,6 +13300,18 @@ a tunnel.
     (`signingOut`). The run page's transcript stream, when the browser closes it, is asked about with the same probe,
     saying on its own status line "reconnecting" while it asks and "not live" for the stream limit (on that line alone,
     never on the page's pill), where it said "not live" for every refusal, a session that had ended among them.
+    AMENDED 2026-10-25 (#737 PR 3a): ONE QUESTION, EVERY CALLER ANSWERED. The browser closes a run page's two streams
+    together (a 429 over the stream limit refuses both), and a write's 401 can come while a stream's question is out,
+    so each probe joins the callers waiting (`asks`) and says its own "asking", a question goes out only when none is
+    under way, and its answer settles every caller: another person goes to `switched` and a 401 to sign-in once for
+    all (with the answer's reason, else the first one a caller brought); a 200 for the page's person reloads when any
+    caller asked for a reload or a retry happened, and is otherwise the stream limit, said by every caller in its own
+    words, so two streams closed together both say it, whichever asked first. A 503 or no answer keeps the callers and
+    asks again; only a 200 or a 401 empties the queue. REJECTED: a guard that dropped the second caller (`if (probing)
+    return`), the first version, which left the pill Live over a closed page stream, or the transcript's line
+    "reconnecting" for good; and saying the limit on every stream the browser holds closed (`readyState` 2), since the
+    transcript's is closed too once its run is over (by the script, on `done`), and its "ended" line is not the limit's
+    to overwrite.
   - **A page acts only as the person it was drawn for.** The reload rule alone guarded one path: a page that is not
     live (configuration, the audit log, insights) went on previewing and confirming under whatever cookie the browser
     held while its bar named the first person, and a stream the browser reconnected by itself carried the new cookie
@@ -13322,8 +13400,10 @@ a tunnel.
     again, Try again, or Close for an audit log that could not be written and for a write that threw: nothing in the
     page fixes either, and a bar with no button kept the slot open and its panel held until a reload); refused at
     either for a page drawn for another person than the browser's sign-in (Look again, which goes to
-    `/login?ended=switched`); a write the console answers 503 for a tokens file it cannot use (Look again); stopped part
-    way (Look again, below); and the bulk results (Reload). A refusal's `error` stays the planner's sentence byte for
+    `/login?ended=switched`); a write the console answers 503 for a tokens file it cannot use (since #737 PR 3a the
+    `setup` state, "This console cannot take this action", with Close: nothing on the page fixes the file, and a reload
+    would meet the same 503; it offered Look again); stopped part way (Look again, below); and the bulk results
+    (Reload). A refusal's `error` stays the planner's sentence byte for
     byte (the tool and the console share it); only the bar adds "Nothing was changed." where the sentence does not say
     so, and never over a refusal that can follow part of a write: the kill switch that reached some Valkeys or
     queues and not others, or threw before it said which, and a bulk apply that threw part-way through its jobs. That
@@ -13333,27 +13413,50 @@ a tunnel.
     text. The audit log has no outcome for a change that partly landed, and none is added: such a write's rows are `ok`
     then `failed`, as any refused write's, the kill switch's `failed` row giving the refusal's sentence, which names
     what it reached, as its reason. A confirm that got no answer is never sent again: a ticket is single use, and the
-    change may have been made. AN ANSWER THAT IS NOT THE WRITE'S OWN IS NEVER A SENTENCE IN THE SLOT: a preview's or a
+    change may have been made. AN ANSWER THAT IS NOT THE WRITE'S OWN IS NEVER ITS SENTENCE IN THE SLOT: a preview's or a
     confirm's 401 is the session behind the page ending, so the script asks `/api/whoami` with the probe a closed
     stream uses and goes to sign-in with the reason, and a write's 503 for a tokens file the console cannot use
-    carries the server's own bar (`TOKENS_UNUSABLE`, Look again). REJECTED: the JSON's sentence in the slot's small
+    carries the server's own bar (`TOKENS_UNUSABLE` word for word, its `pi-dispatch doctor` in the code face through
+    `withCode`, in the `setup` state with Close: `tokensUnusableBar`, `server.mjs`). AMENDED 2026-10-25 (#737 PR 3a): a
+    write's 401 first puts `CONFIRM_SIGNED_OUT` in the slot as text ("This session ended before the change was sent, so
+    nothing was changed. The console is asked where it went.", `confirm-view.mjs`, embedded in the script as JSON),
+    then asks: the probe may already have a stream's question out, and its answer may be a while, and a slot left on
+    its skeleton meanwhile said "Previewing". REJECTED: the JSON's sentence in the slot's small
     message line, the earlier shape, which answered a person whose session had idled out with "sign in first" beside
     the form and no way to it.
   - **What a write takes, and how it is undone.** `fields` per action, held to its preview's reads by a recording
     Proxy, so a key a form sent and no planner reads is refused by name, not dropped in silence (named only when a
     plain identifier, never a value); the trigger add's own fields are `TRIGGER_ADD_FIELDS`, derived the same way
     from `buildTriggerEntry`, which found `reviewState` dropped though the tool's description offers it (now carried).
-    `undo` and `inverse` are decided at the preview, where the file as it was is known, and ride the ticket's `meta`;
-    an inverse is checked there to name an action whose `fields` take its body, so an Undo can never preview a
+    `undo` and `inverse` are decided at the preview, where the file as it was is known, and ride the ticket's `meta`
+    (a re-run's are asked again at the confirm, below); an inverse is checked there (`checkInverse`) to name an action
+    whose `fields` take its body, so an Undo can never preview a
     refusal of its own, and an old value the form cannot send back (an empty string, an object) gets no inverse and a
     sentence to put it back by hand. An Undo is said in two places, and a rule may answer both (`{bar, after}`): the
     bar sits beside the preview and may point at it ("copy them from this preview"), while the banner is on the next
     page, where no preview is, so its sentence says the console kept no copy instead (`undoAfter`); a trigger delete
     whose entry names `run.secrets` sends the person to their own copy of the file for its secret references, since
     the diff shows a marker in their place. The line reads "Undo: <the act>", the act alone in bold, where there is an
-    inverse, and "No undo: <what to do>", muted and not bold, where there is none. Retry, re-run and retry-all have no
-    Undo in this pull request: no console action removes a waiting job, so their line says what a person can do
-    (Cancel stops the job once it runs); the inverse for a queued job is decided later, and nothing here fixes how.
+    inverse, and "No undo: <what to do>", muted and not bold, where there is none. AMENDED 2026-10-25 (#737 PR 3a):
+    A RETRY HAS NO UNDO, A RE-RUN HAS ONE. The way back from a queued job is `cancel-queued`, which takes only a job
+    that never started; BullMQ 5.80.4's retry of a failed job keeps the attempts it made (`reprocessJob` drops `atm`
+    only when asked to reset them, and the console's retry does not), so a retried job is never one `cancel-queued`
+    takes, and Retry and Retry all say so (`UNDO_SENTENCES.retried`: "A retried job keeps the attempts it made, so the
+    console does not remove it from its queue; once it runs, Cancel stops it."). A re-run queues a NEW job, which has
+    made no attempt, so its Undo is that job's cancel, decided at the confirm, where the id the enqueue minted is
+    known (`atConfirm`): its rule's `undo` and `inverse` are asked at the preview with no result, where the bar reads
+    "Undo: Cancel the new run before it starts: the banner after it is queued offers it." (`rerunBefore`) and counts
+    as undoable (`metaOf`'s `undoable`), and again at the confirm with the apply's `{ jobId, queue }`, so the banner
+    says "Undo: Cancel <job id> before it starts." with an Undo form for `cancel-queued` carrying that job id and
+    queue (`changeOf`). An answer without both, a rule that throws, or an inverse `checkInverse` refuses at the confirm
+    costs the banner its Undo button and never the answer, since the write has landed and its row is in the log: the
+    console logs a line and the banner says `UNDO_SENTENCES.rerunUnnamed` ("The console could not name the run it
+    queued, so this banner offers no Undo."). `atConfirm` is a single act's only, which the action test holds: a bulk
+    confirm asks no rule for its Undo again, so a bulk act would keep its preview's in silence. A cancel of a queued
+    job has none (`cancelledQueued`: "The job leaves its queue before it starts; a redelivery of the same event, or its
+    trigger's next fire, queues it again."). Before PR 3a no console action took a queued job that was not held, and
+    Retry, re-run and retry-all all said `queued`'s "The console cannot remove a waiting job; once it runs, Cancel stops
+    it.", which is gone.
     Deletes and secret removes have none at all, so no secret reference or resolver path reaches a page through a
     banner. The confirm answers `change`, not `done` (a bulk confirm already answers a numeric `done`). What the
     banner says happened is each action's `done` rule, in the past tense ("Paused the fleet", "Changed maxTurns from 30
@@ -13389,9 +13492,10 @@ a tunnel.
     address in brackets, a dual-stack socket's `::ffff:a.b.c.d` as the IPv4 address, `localhost` when none is known),
     which the requester already knows, and nothing else of the listen address. Its sentence cannot say "127.0.0.1
     only" when `PI_CONSOLE_ALLOWED_HOSTS` or a unix socket is in use, and must not list the names. Its Copy button
-    works only where the page is a secure context, which a name other than localhost over plain http is not, so there
-    the command is text to select. The 500 and the 503 draw no navigation either: neither can vouch for the session
-    behind the request. A page that cannot be drawn falls back to the JSON, so a failure path never becomes a second
+    needs a page the browser treats as secure: https, or a loopback name such as localhost; other names over plain
+    http may not offer it, and there the command is text to select. The 500 and the 503 draw no navigation either:
+    neither can vouch for the session behind the request. A page that cannot be drawn falls back to the JSON, so a
+    failure path never becomes a second
     failure. REJECTED: the ErrorPage card's 421 with the navigation; and a fixed `127.0.0.1` in the tunnel command,
     the first shape, which does not answer for a console bound to `[::1]`, to another loopback address or to a LAN
     address.
@@ -13465,7 +13569,15 @@ a tunnel.
     says how a walked-for row was found, or why it was not, one clause for each way (`seek.by`,
     `AUDIT_SEEK_BY`, `walkWhy`: "The page that holds row 125, found by reading from the newest row: the last chain
     check counted rows up to row 120."), and where it got to; a row below the log's first is reaped or removed and a
-    row past the newest does not exist yet, and neither is walked for. REJECTED: the walk alone, the first version,
+    row past the newest does not exist yet, and neither is walked for. AMENDED 2026-10-25 (#737 PR 3a): a `seq` page
+    whose row was not found draws no rows (`readAuditView`), only its empty state under "Row N was not found", and its
+    Older link goes on from where the walk got to: what a walk kept is whatever it met of the row's chunk before it
+    stopped (one row above a row moved out of its place, say), which, above a foot saying the row was not found, read
+    as that row's page. The row a link opened is marked, and where the rows are stacked the mark is the row's own
+    background, one block (each cell's, as the table draws it, left the stacked grid's gaps unmarked, a patchwork at
+    375 px), and a time or a target that wraps keeps its label by its first line (`vertical-align: top`: a stacked
+    cell's label is drawn inline before its value, and an inline box's baseline is its last line, so a nine-line
+    target had its label beside the ninth). REJECTED: the walk alone, the first version,
     under the search's bound, so a kept link to a row opened a page without it once 2,000 newer rows were written; and
     the chunk placed by its top, the second, which sent every row of a chunk that runs past the check's count to that
     walk (row 41 of a chain broken at row 46, with 2,000 rows after it, was never found, under a sentence saying the
@@ -13520,6 +13632,19 @@ a tunnel.
     `suspect`, `files`); worker/src/console-client.mjs (`stream`'s `sinceShutdown`, `openedSinceRelogin`,
     `RELOGIN_WINDOW_MS`); .github/scripts/console-width-check.mjs;
     admin/test/console-client-states.test.mjs, admin/test/helpers/client-states.mjs, admin/test/helpers/script-dom.mjs.
+    Since #737 PR 3a: actions.mjs (the `cancel-queued` entry and its rule, `waitingLine`, `CANCEL_QUEUED_LINE`,
+    `atConfirm` in `withRules`, `rerun`'s rule and `rerunCancel`, `checkInverse`, `undoSaid`, `metaOf`'s `undoable`,
+    `changeOf`'s `result`, `UNDO_SENTENCES` `retried`, `rerunBefore`, `rerunUnnamed` and `cancelledQueued`,
+    `SNAPSHOT_TIMEOUT_MS`, `SNAPSHOT_TIMEOUT_SENTENCE`, `snapshotOf`, `resultRow`); confirm-view.mjs
+    (`CONFIRM_SIGNED_OUT`, `REFUSAL_STATES.setup`, `bulkResultsHtml`'s "did not finish"); server.mjs
+    (`tokensUnusableBar`); script.mjs (`probe`, `asks`, `settled`, `ask`, `signedOut`, `fillSlot`'s `localTimes`);
+    panels/common.mjs (`utcText`, `timeHtml`); audit-view.mjs (`readAuditView`'s rows on a page whose row was not
+    found); page-css.mjs (the audit rules' marked row); admin/src/job-actions.mjs (`planCancelQueued`,
+    `cancelQueuedJob`, `cancelQueuedRefusal`); admin/src/read-model.mjs (`readWaitingRow`);
+    worker/src/cancel-state.mjs (`removeQueuedJob`); admin/test/console-actions.test.mjs,
+    admin/test/cancel-queued.test.mjs, admin/test/console-client-states.test.mjs (`T.bothClosed`, "a bar's times are
+    shown as the page's are: ..."), admin/test/console-panels.test.mjs ("formatting: ages, UTC instants, dollars and
+    paths, never the host's zone or locale").
 - **Rejected**:
   - **Revert last change** (2026-10-24, #737 PR 2; #711 offered it as optional). It needs a copy of each file before
     each change, and the console keeps none: a store of copies would be a second record of the configuration, secret
@@ -13685,8 +13810,9 @@ a tunnel.
   2026-10-18), `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`,
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-TRIGGER-AUTHOR-GATE`, `OQ-044`, since #643 `REQ-LIVE-TRANSCRIPT`, `DES-LIVE-TRANSCRIPT-STREAM` and
-  `INT-LIVE-TRANSCRIPT-STREAM`, since #644 `REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS` and `INT-RUN-PROGRESS-KEY`, and since
-  #647 `REQ-TERMINAL-CHAT` and `DES-TERMINAL-CHAT`.
+  `INT-LIVE-TRANSCRIPT-STREAM`, since #644 `REQ-RUN-PROGRESS`, `DES-RUN-PROGRESS` and `INT-RUN-PROGRESS-KEY`, since
+  #647 `REQ-TERMINAL-CHAT` and `DES-TERMINAL-CHAT`, and since #737 PR 3a `DES-WAITING-REASONS`,
+  `INT-DEFER-REASON-KEY` and `INT-CANCEL-CHANNEL-CONTRACT`.
 - **Code evidence**: admin/src/console/ (`cli.mjs`, `config.mjs`, `listen.mjs`, `guards.mjs`, `headers.mjs`,
   `html.mjs`, `server.mjs`, `sessions.mjs` (`peek` since #641), `login-codes.mjs`, `confirm.mjs`, `lock.mjs`, and
   since #641 `pages.mjs`, `panels.mjs`, `style.mjs`, `script.mjs`, `live.mjs`), worker/src/console-tokens.mjs,
@@ -14406,7 +14532,11 @@ a tunnel.
     `settings.overlay`, `<boot file>.file` and `.file-shell`, `NAMED_CHECK_IDS`); every other check is
     `<section>.<n>`, its place in one of 33 pinned sections on that run (`DOCTOR_SECTIONS`, marked in `collectChecks`).
     A derived id is a key for a list, stable for one host's configuration and not across hosts; a test pins the
-    sections and the named ids against the source, and a repeat is suffixed so no two entries share an id.
+    sections and the named ids against the source, and a repeat is suffixed so no two entries share an id. AMENDED
+    2026-10-25 (#737 PR 3a): `egress.proxy` (does the egress proxy run) and `provider.key` (is the provider's key found)
+    join them, named for the console to read; `egress.proxy` is the one named id written at two sites
+    (`REPEATED_CHECK_IDS`: docker's proxy and rootless Podman's, each judged by its own line), and no id names a
+    forge's credentials, which no one check holds (`INT-DOCTOR-RESULTS-KEY`).
   - **Best effort**: a Valkey this run may not talk to (the owner rule, a database that does not exist, a line doctor
     cannot read) is not written to, a write that fails is one line on stderr, and neither changes what doctor prints on
     stdout or its exit code. `--no-publish` skips the write; `--publish` beside it is refused (exit 2).
@@ -14484,6 +14614,171 @@ a tunnel.
   admin/src/doctor-view.mjs, admin/src/read-model.mjs (`createFleetReader`'s `doctor`), admin/src/console/panels.mjs
   (`fleetDoctor`; since #737 in panels/fleet.mjs, and `doctorReason` in panels/config.mjs), admin/src/dashboard.ts
   (`doctorLines`).
+
+## DES-WAITING-REASONS
+
+- **Decision** (issue #737, PR 3a): the worker RECORDS why it defers a job, at the moment it defers it, and a reader
+  lists the jobs that have not started from the queue's own sets, their scores and those records, never a job's
+  data. Every deferral goes through one function (`deferTo`, `worker/src/defer-write.mjs`), which writes
+  `defer:job:<id>` (`INT-DEFER-REASON-KEY`) and then makes the move and the throw the gates always made; an
+  infrastructure retry's backoff is noted before its throw (`noteRetry`). The reader is `readWaiting`
+  (`admin/src/read-model.mjs`), built and tested here and drawn by no page yet; its one consumer in this pull request
+  is the `cancel-queued` preview (`readWaitingRow`), which says why the job waits in the worker's own sentence. That
+  cancel's preview and confirm load the ONE job they act on by its id (`getJob`, whose data they read for
+  `recoveryOf` and the target alone, never passed on); every reader of the waiting set reads no job's data.
+- **Why, and what it reverses.** This file refused a per-job classifier of the delayed set twice, in
+  `DES-ADMIN-VIA-PI-EXTENSION`'s FAILED surface and in `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`'s delayed count, both on
+  `INT-WAIT-PROFILES-CONTRACT`'s two grounds: a classifier could only GUESS (the delayed set mixed cron next runs,
+  retry backoff, pause windows, scope and host deferrals and waits, and recorded which for none of them), and building
+  a row would HYDRATE a job's data (a forge job's holds the issue's title, body and username). Neither ground holds
+  here. Nothing guesses: the reason is the worker's own word for its own decision, from a closed vocabulary; a
+  delayed job with no record, not past its due, says "No reason was recorded", which is true (a job in the wait list
+  or the prioritized set says "Waiting for a free slot", or "In a paused queue" when its queue is paused, as one in
+  the paused list does, and a held one "Waiting on a time or a check", none of which needs a record); one whose
+  record names a reason this console does not know (a newer worker's) says that reason's word, which is true too; and
+  a delayed job past its due says so, which the delayed set's score and the read's clock show. And no reader of the
+  waiting set reads a job's data: it takes ids, scores, a job hash's short scalar fields and the worker's own
+  hashes. So those refusals stand for what they refused (a classifier from a job's data or its timing), and the
+  guess they refused is no longer needed. The wake instants stay distinct (the scope re-check, the endpoint
+  re-check, the wait throttle floor, the supersede re-ask), the evidence for a reader older than the record and for
+  a job whose record could not be written.
+- **Write, then move.** A reader starts from the delayed set and looks up the records of the ids it finds there, so a
+  record written before the move is in place the moment the job is delayed, and one for a job still active is never
+  read. The write is one MULTI, bounded at 2 s and failing open, because the worker's client queues commands through
+  an outage, and a deferral never fails for its reason and waits for it at most the 2 s bound; a move that rejects
+  removes its own record by a compare-and-delete on the writer's nonce and is rethrown raw, so the failed-attempt
+  handling a raw rejection always had is unchanged.
+- **The buckets** (`DEFER_BUCKETS`, in the order a console shows them, each with a title and a short form in
+  `DEFER_BUCKET_WORDS`): `slot` (a free slot: the host's, a scope's, a project's, an endpoint's, the host budget's, a
+  size that fits no slot here, a host that serves the job's bundle profile), `run` (another run to finish: a chained
+  parent, the run a recovery continues), `check` (a time or a check: the `run.waitFor` gate's six reasons), `retry`
+  (a retry's backoff), `pause` (a pause window), `ready` (its host getting ready: rootful Podman's service, the network
+  keeper), `paused` (a paused queue), `due` (a delayed job past its due that no worker has taken, "Due since {due}; no
+  worker has taken it", `DEFER_DUE_SENTENCE`), `unknown` (a recorded reason this console does not know: it has the
+  reason charset and is not in the table, most often a newer worker's) and `none` (no reason recorded, or one that
+  fails the charset, which is no reason at all). The reasons are `INT-DEFER-REASON-KEY`'s table; no reason is
+  `paused`, `due`, `unknown` or `none`, which the reader gives itself. Each bucket's title is true of every job in it,
+  which is why a reason the console cannot explain has a bucket of its own: under `none` it would read "No reason was
+  recorded" for a job whose worker recorded one.
+- **How the reader classifies a job** (`readWaiting`), the due rule first: a delayed job whose due instant (its
+  score's, `dueOfScore`) is more than `WAITING_DUE_GRACE_MS` (10 s) before the read's clock is `due`, whatever its
+  record says, its scheduler's next run included (its fire time came, so it is a row in line marked `schedulerNext`,
+  no longer a scheduled entry). A free worker takes a due job within about a second, so past the grace no worker has
+  asked for a job since (every slot busy, or no worker draining the queue), and the record's reason has run its
+  course: without this the job would read as that reason and then, once its record expired 60 s after the due, as
+  "No reason was recorded". Otherwise a delayed job that is its scheduler's CURRENT next run (`isSchedulerNext`,
+  BullMQ's own `isJobSchedulerJob.lua` test) is scheduled, not in line, while a `repeat:` job a gate deferred after the
+  scheduler minted its successor is a real run and IS in line; a delayed job with a record whose `until` agrees with
+  its due time takes the record's bucket, `parseDefer`'s, so a reason the table does not hold is `unknown` (a record
+  whose reason fails the reason charset is no record at all); a delayed job held on `run.waitFor` with no such record
+  is `check`; any other delayed job is `none`; a job in the wait list or the prioritized set waits for a `slot`,
+  unless its queue is paused (its meta hash has a `paused` field at all, whatever it holds, the presence BullMQ 5.80.4
+  tests with `HEXISTS` in `isQueuePaused.lua` and `getTargetQueueList`; BullMQ's pause renames only the wait list, so
+  a paused queue keeps its prioritized set), when it, like a job in the paused list, is `paused`. The reader asks that
+  flag by presence too, `HEXISTS` (`pausedAsk`), never its value, which anything with the URL can make megabytes long
+  and which would otherwise cross the wire on every read. The project is the record's, else the repository read off a
+  forge job's dedup id through the worker's own `projectOf`, else a cron trigger's folder (the job id's
+  `repeat:<id>:` or `manual:<id>:`) through the triggers file, else not known. Rows sort oldest `queuedAt` first; a
+  scheduler's run's `queuedAt` is its slot, since its hash's timestamp is when the run before it minted it.
+- **What it reads, and what it never does.** Per queue, in one pipeline: the delayed set's first 201 ids with their
+  scores (the soonest due), the prioritized set's first 201 (the next to run), the wait and paused lists' last 201
+  (BullMQ pushes on the left and takes from the right, so the right end is the oldest) and whether the queue's paused
+  flag is there (`HEXISTS`), with `SMEMBERS wait:held` beside them; then per job an `HMGET` of `name`, `deid`, `rjk`,
+  `atm`, `attemptsMade`, `stc` and `timestamp` (short scalars BullMQ's own `Job.fromJSON` reads beside the data), a
+  delayed job's record (`HMGET` of `DEFER_FIELDS`) and a held job's `wait:job` hash; then one `ZSCORE` per named
+  scheduler. NEVER a job's `data`, `opts`, `stacktrace` or `returnvalue`, never `getJob` or `getJobs` (each hydrates
+  the data), never a keyspace walk, and no write of any kind: a stale `wait:held` member is skipped, not pruned. At
+  most 200 from each of the four lists (`WAITING_PER_LIST_MAX`), so one queue gives at most 800; one more in any list
+  marks the queue truncated, and its rows are then a floor. At most `WAITING_QUEUES_MAX` (64) queues, the first it is
+  given, the rest counted as `queuesCut`, which also makes the rows a floor (`truncated`): a SCAN finds any meta key a
+  writer plants, so the number of queues is a Valkey's to grow, and each costs five commands and four lists of rows.
+  Every value is re-checked on the way out (the record by `parseDefer`, the hash fields by their own rules, and every
+  instant it hands on, a job's `queuedAt`, a hold's `since` and `after` and each answer's `at`, at most
+  `DEFER_TIME_MAX_MS`, `instantOf`, so a page can draw it), since anything with the Valkey's URL can write these keys.
+  It never throws: `{ unreachable: true }` past its bound, the fleet reader's 2 s, or on any error, a boolean, so no
+  client's words (which can name a host) reach a snapshot or a page.
+- **When it is read, and which queues.** `createFleetReader(paths, { waiting: true })` adds `waiting` to `snapshot()`,
+  read at most once per `WAITING_TTL_MS` (5 s) for the same queues and caught as a unit; an unreachable read is kept
+  for the window as a good one is, so a Valkey that times out is sent the whole pipeline once per window, never on
+  every snapshot. Its queues are every queue that EXISTS: the registry's (this tick's) first, then the ones the
+  keyspace discovery the planners and the kill switch use found that the registry does not name, in name order
+  (`discoverHostQueuesReporting`, a SCAN for `bull:pi-jobs@*:meta`). So a queue the registry names is read before any
+  the scan alone found, and when `readWaiting` cuts at `WAITING_QUEUES_MAX` (64) a live host's queue is never the one
+  cut while the registry names at most that many; past that, one the registry names can be cut too, and the read
+  still counts every queue it did not read (`queuesCut`, the rows then a floor). The fleet reader keeps the
+  discovered set for `WAITING_DISCOVERY_TTL_MS` (60 s) on its own clock (a clock that went back asks again), since
+  the registry drops a host 90 s after it stops while its queue and the jobs waiting in it stay. One scan runs at a
+  time, shared by every caller meanwhile, and a snapshot that has a set never waits for a scan: it is handed the last
+  set while the next one runs, so a SCAN that takes its whole bound holds no snapshot, and only the first, with no
+  set yet, waits for one. A scan that did not finish adds what it read to the last set, and one that failed keeps it,
+  so a part-read keyspace never shrinks the set; a queue the reader's pool does not hold is read by its name alone
+  (the read needs only its keys, never a BullMQ Queue of its own). The walk is the fleet reader's, once a minute at
+  most: `readWaiting` itself never walks the keyspace. Off by default, so a surface that draws no waiting job pays no
+  read for one, and the console's `serve` does not turn it on in this pull request. `/api/state` is UNCHANGED:
+  `stateOf` projects the snapshot by name, and a test holds the document free of `waiting`.
+- **Rejected**:
+  - ***A classifier from the job's data or from its timing***, the two refusals above: still refused.
+  - ***The hold's lease horizon as the time a held job waits until.*** `hold`'s `untilMs` is the next check on the
+    polled path and the maximum wait on a throttled wake, so a console showing it would draw a time nobody chose. The
+    hold stores the job's own `after` instead, and the next wake is the defer record's `until`
+    (`INT-WAIT-PROFILES-CONTRACT`).
+  - ***Reading a job's `opts` for a retry's total attempts.*** The reader reads no `opts`, so the worker writes the
+    total into the retry record (`attempts`).
+  - ***The host budget's dimension in the record.*** The gate judges memory, CPU and the job count in one expression,
+    and its verdict names none of them, so the record carries the verdict's word (`budgetWhy`) and no dimension.
+  - ***A plain `DEL` when the move rejects.*** It could remove the record another worker wrote for a later deferral of
+    the same job id; the compare-and-delete on the nonce removes only this writer's.
+  - ***An unbounded write.*** The worker's client queues commands during an outage rather than rejecting them, so the
+    deferral would wait for the whole outage on a record that is advisory.
+- **Residuals**, stated rather than implied:
+  - a failed write leaves the previous deferral's record until it expires, beside a job now delayed for another reason;
+    the reader drops it only when its `until` disagrees with the job's new due time;
+  - a job BullMQ delays by itself has no defer record: a retry whose backoff `retryDelayOf` cannot know (jittered,
+    custom), a job added with a delay, and a raw gate rejection, a `moveToDelayed` that rejects above the processor's
+    `try` and escapes raw (after `deferTo` removed its own record), which BullMQ retries with no defer record, read as
+    "No reason was recorded", which is true, until it is more than the grace past its due, when it reads `due`;
+  - a record whose `until` disagrees with the score's due time (outside `until` minus 5 s to the later of `until` and
+    `at` plus 5 s, `DEFER_STALE_MS`) is read as no reason, never as the old one; a retry's due time is BullMQ's own
+    clock a little after the record's `until`, inside that window;
+  - a timed-out write may land after the job ran; it is never read while the job is not delayed, and it expires;
+  - `due` is judged on the reader's clock against a due instant the deferring worker's clock set, so a console clock
+    more than about 9 s ahead of that worker's reads a job `due` while a free worker may still be about to take it,
+    and one behind reads it late; and it cannot say WHY no worker took the job (every slot busy, or no worker
+    draining its queue), only that none has, which is what the sets show;
+  - the `cancel-queued` confirm reads the never-started rule's moving parts again right before the removal is sent
+    (`removeQueuedJob`'s `guard`: the job's state, then a fresh `getJob`, its attempts, stall count and `finishedOn`)
+    and refuses ("started since the preview", or "changed since the preview") if anything moved, because BullMQ's
+    remove checks only the job's lock and its scheduler. What remains is the one round trip between that read and the
+    remove, and for a held job `removeHeldJob`'s own steps (its state read again, then the hold's deletes, then the
+    remove). A worker that takes the job there and still holds it is refused: by its lock, or, for a held job taken
+    before that state read, by the read itself; a held job taken after the read, before its first delete or after it,
+    answers that its hold was cleared (the partial bar), unless that first delete failed and the hold was then read
+    back in place (`holdInPlace`: Valkey refused the command), so nothing was changed; a hold not read back, or a
+    read that fails, keeps the partial answer, since a refusal can be the answer to ioredis's resend of a delete that
+    already ran. But a job a worker took and finished, or failed back to the delayed set, inside that window would be
+    removed. The removal, its own reads included, is bounded as one step, so a bound that fires in it may have fired
+    before anything was sent or after: its answer says only that the removal was asked for and not answered within
+    the bound and may have landed, and names the hold for a held job (`removalUnknown`), and an error's own words
+    reach any answer only with its control bytes made spaces and cut at 200 characters (`boundedText`).
+- **Traces to**: `INT-DEFER-REASON-KEY`, `INT-WAIT-PROFILES-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`,
+  `INT-CANCEL-CHANNEL-CONTRACT`, `DES-ADMIN-VIA-PI-EXTENSION`, `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`,
+  `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED`, `DES-OPERATOR-CONSOLE`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-WAIT-FOR`,
+  `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`.
+- **Code evidence**: worker/src/defer-reasons.mjs (`DEFER_WHYS`, `DEFER_BUCKETS`, `DEFER_BUCKET_WORDS`,
+  `DEFER_DUE_SENTENCE`, `DEFER_FIELDS`, `DEFER_TIME_MAX_MS`, `deferHsetArgs`, `parseDefer`, `deferTtlMs`, `dueOfScore`,
+  `isSchedulerNext`), worker/src/defer-write.mjs (`makeDeferTo` and its guarded `say`, `retryDelayOf`,
+  `DEFER_WRITE_TIMEOUT_MS`, `DEFER_CAD_LUA`), worker/src/index.mjs (`makeProcessor`: every deferral, `deferScope`'s
+  reason, the four retry exits, the check loop's answers), worker/src/wait-state.mjs (`hold`'s `afterMs`, `answerOf`,
+  `noteAnswer`), worker/src/cancel-state.mjs (`removeQueuedJob`'s `guard`, `removeHeldJob`'s `cleared`,
+  `holdInPlace`), admin/src/read-model.mjs (`readWaiting`, `hydrateWaiting`, `readWaitingRow`, `isPausedFlag`,
+  `pausedAsk`, `instantOf`, `WAITING_PER_LIST_MAX`, `WAITING_QUEUES_MAX`, `WAITING_DUE_GRACE_MS`,
+  `WAITING_DISCOVERY_TTL_MS`, `WAITING_TTL_MS`, `WAITING_STATES`, `DEFER_STALE_MS`, `createFleetReader`'s `waiting`,
+  `waitingOf` and `existingQueueNames`), admin/src/job-actions.mjs (`planCancelQueued`, `cancelQueuedJob`,
+  `movedSince`, `heldClearedAnswer`, `removalUnknown`, `boundedText`), admin/src/console/actions.mjs (`waitingLine`,
+  `filledLine`, `drawable`); worker/test/defer-reasons.test.mjs, worker/test/defer-write.test.mjs,
+  worker/test/defer-write.integration.test.mjs, worker/test/cancel-state.test.mjs,
+  admin/test/read-model-waiting.test.mjs, admin/test/read-model-waiting.valkey.test.mjs,
+  admin/test/cancel-queued.test.mjs.
 
 ## Revision History
 
@@ -14854,3 +15149,4 @@ a tunnel.
 | 2026-10-23 (#737, PR 1) | Issue #737, PR 1: the Pulse foundation. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names #737 PR 1; NEW bullet "The visual system": `tokens.json` and `bundle.css` pasted verbatim, each copy pinned by its file's sha256 (`PULSE_TOKENS_SHA256`, `PULSE_CSS_SHA256`); one stylesheet in five parts, in cascade order (the tokens, the bundle, the shell's rules, each converted page's rules confined by `scopeCss`, the legacy layer); light, dark and the system from three token rules (`:root`, the `prefers-color-scheme` block on `:root:not([data-theme="light"])`, `:root[data-theme="dark"]`); the theme choice as the `pd_theme` cookie, written only by the served script, read by the server for every page and both sign-in pages as a closed set (exactly `light` or `dark`; a second copy is neither) and stamped as one of two constants, so a page is in its theme from the first byte with no flash (not `pdc_`, the prefix the leak canary fails on); one inline sprite per signed-in page (a pattern or a marker resolves only in its own document, and every response is `no-store`); the kit; the shell and its navigation (Overview, Runs, Parked, Fleet, Spend, Configuration, and More with Audit for an operator alone) with the Parked count as a shell panel (`span#p-nav-parked[data-panel]`); a panel element carries only `id` and `data-panel`, since a live swap replaces only its inner HTML; the temporary legacy layer inside `.legacy`, its collision neutraliser first, its deletion forced (an empty `LEGACY_PAGES` forces an empty `LEGACY_CSS`; Configuration converts last, in PR 7a); the WCAG AA contrast test, and the 375 px width and CSP check as a step of the required `contract-tests` job against Chrome for Testing at a pinned version and sha256; the browser floor, Chrome 88, Safari 14 and Firefox 78. "No inline style" AMENDED: still one served stylesheet under `style-src 'self'`, now those five parts, a card's page-only style joining it as a `PAGE_CSS` entry. Six options REJECTED, marked #737: a served sprite file; the theme in `localStorage` only; a no-JavaScript `GET /theme` with a side effect; `light-dark()`, CSS nesting and `@scope` (the floor); a browser test library; rewriting the old markup in the foundation. **Code pointers CORRECTED** after the split of `admin/src/console/panels.mjs` into one module per screen under `panels/` (the file is now a barrel that re-exports every renderer it exported before, `navHtml` aside): `DES-OPERATOR-CONSOLE` ("A page is a list of panels", `profileUse` in `panels/config.mjs`, `openshellRows` in `panels/run.mjs`, `steerForms` and `chatDrawsSteer` in `panels/run.mjs`, `parkedAnswerForm` in `panels/common.mjs`), `DES-OPENSHELL-VENUE` (`openshellRows`), `DES-DOCTOR-RESULTS-PUBLISHED` (`doctorReason` in `panels/config.mjs`) and `DES-ADMIN-VIA-PI-EXTENSION` (the console's panels import `words.mjs`); a pointer to a renderer the barrel re-exports still resolves and is left as written. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION` otherwise (the panel's words, glyphs and tones are as they were; `words.mjs` only gains a `status` per word and `STATUS_KINDS`), `DES-LIVE-TRANSCRIPT-STREAM` (the run page's transcript section is drawn as before, inside the legacy wrapper), the live hub and the stream lifecycle (the shell's count is one more panel of a live page, by the same digest rule); and the constitution: `CONST-PI-VERSION-PINNED` governs pi and the image bases, and no pin of either moves (the browser the width check runs is pinned by exact version and sha256 in its own file), and `CONST-MERGE-NEVER-AUTOMATIC`'s grep covers the new `.github/scripts` file, which merges nothing. **Review round 1 (same PR)**: the theme cookie is `SameSite=Lax` (a preference; `Strict` withheld it on a navigation from another site, so that page was drawn in the system's theme), and the bullet now says what follows from it being readable script-side: any page on the console's host name can read, overwrite or shadow it, the browser sends it to other services there, and a second copy pins the system's theme, all cosmetic. The rejected `localStorage` option's reason CORRECTED: a non-deferred `<script src>` in the head is allowed by the CSP and runs before the first paint; the real costs are a render-blocking request on every `no-store` page and a theme that needs JavaScript, where the cookie draws it in a page whose script never runs. The contrast check holds the 56 declared pairs a theme, status marks exempt and the legacy layer unmeasured; the kit's status rule narrowed to what holds. The width check gains the shell sweep (every page by `renderPage`; an operator, a viewer, a read-only console and the longest token name on one; 375, 800, 1024, 1280 and 1440 px; `barVerdict` and `moreVerdict`), the forced themes' `color-scheme` meta read off `page()` (`themeHead`), `--check-pin` before an https-only download, and tests of its glue and of the workflow step. The browser floor names `:has()` and `overflow-wrap: anywhere` and what each refines. Round 1 review also: `GET /favicon.ico` answers an empty 204 without a session (REQ-CONSOLE-SECURITY Statement and DES-OPERATOR-CONSOLE item 2 name it), so a browser's own request is neither a 404 nor a sign-in redirect. **Review round 2 (same PR)**: `DES-OPERATOR-CONSOLE` AMENDED, the "The visual system" bullet: NEW sub-bullet "The top bar's layout": by the viewport's width and the server's `top--ro` alone, never by what the script changes; on a phone the bundle's scrolling row (a focused pill scrolled into view with its ring, the current one once on load, never re-centred); above it a grid that never scrolls, two rows (the navigation broken after its fourth pill up to 939 px) and one from 1440 px (1600 read-only), measured in DejaVu Sans so that only the name gives way; More under its button by CSS above a phone and by the script on one, closing when its button scrolls out of view there; REJECTED, the navigation scrolling at every width (round 1's fix: pills out of a mouse's reach, clipped rings, a re-centring that fought the reader, a 60 px jump). The shell: More also closes when focus leaves it, on a phone Live is a dot alone and every other state its word, the name whole in its `title`. The kit: the `dot` claim narrowed (colour, an image with a name given a `label`, drawn only beside its word); `outLink` takes only a URL written as the browser writes it back, with no user name or password; the reserved ids gain the spend topology's `n<k>`, `w<k>`, `g<k>` and `sg<k>`; a copy box quotes an argument starting with `=` and a first word holding one. The theme cookie's `Lax` reason CORRECTED: what a cross-site navigation lands on is the sign-in page or a one-time sign-in link, any other page being a redirect to sign-in for want of the `Strict` session cookie; and a planted copy for a path holds only the pages under that path to the system's theme (a `Domain` copy for the console's own host replaces the person's, measured in Chrome for Testing 155). The width check: every part of the bar against every other, every pill whole with its focus ring above 760 px, one height across the live words and the theme button, the name rule, More under its button, the window's emulation read back from the page, the page side reduced to boxes and computed styles with every rule a pure function (`shellMetrics`), and a negative control in every run that must fail with exactly its nine sentences. UNCHANGED, checked: "No inline style" (More's phone placement is still the element's style property, the CSSOM, as the insights tooltip's) and the CSP; `DES-ADMIN-VIA-PI-EXTENSION` (the panel draws none of this). **Review round 3 (same PR)**: `DES-OPERATOR-CONSOLE` AMENDED, "The visual system": the shell's live pill on a phone is one 16 px slot that never changes size, a mark whose shape says the state (`LIVE_GLYPHS`: Live the dot, Reconnecting a retry arrow, Not live the stop square, Signed out the sign-out arrow, each at 3:1 or more on the bar's ground), its word hidden from view in every state and kept in the status region, the classes the whole state; the theme button keeps its space while hidden (`visibility: hidden`), so its reveal moves nothing and without a script it is an empty gap; who is signed in carries the name and the role in the block's `title`; "The top bar's layout": the bar holds its height on a phone too, the desktop rules apply exactly where the phone's query does not (`not all and (max-width: 760px)`, so no fractional width between 760 and 761 px matches neither), and on a phone More, on every opening, first scrolls its button whole into view and closes only when a later scroll takes it wholly out (REJECTED, closing whenever the button is partly out: round 3 measured it shutting a menu in the task that opened it, so a click that moves no focus could not open a cut button at all); the kit's `dot` rule stated as the kit's, no page drawing one yet. The width check: 761, 940 and 1600 px added, held to `TOP_BAR`; the bar read also with the Parked count emptied and widened to five digits, and the page's width in every read; the height rule at every width (round 3 found it blind on a phone, where the server's Not live stood 52 px taller than Live); every live word read (`liveReadProblems`) and no two drawn alike (`liveStateProblems`); one row from 1440 px unless read-only (`oneRowProblems`); a part's shown box its own and everything drawn inside it (`inkOf`); the role word under the name rule, against the nearest `title`; More on a phone clicked with its button cut, nothing focused, never scrolled into view first (`moreSource`), and opened with its button whole; a run with page scripts off (`NO_SCRIPT`, `noScriptVerdict`); the emulation probe and More's click run against stubbed pages in the worker test; a second negative control at 375 px as a phone (`phoneControlDoc`), whose bar jumps with the last live word and with its Parked count emptied, whose page is wide only while the count is emptied, and whose own script shuts a More clicked cut, failed with exactly its four sentences; the first control's claim NARROWED to its nine named rules. Measured with Chrome for Testing 155 on macOS, each commit's whole `admin/src/console` put back into this round's tree: the PR's first CSS fails 263 of the 321 shell runs, round 1's 264, round 2's 61 (all at 320 and 375 px), this round's none. The theme cookie's `Domain` sentence CORRECTED: a planted `Domain` copy replaces the person's on `localhost` or `127.0.0.1` only; under a domain name it is a second copy on every page. UNCHANGED, checked: the CSP, "No inline style" (More's phone placement and its scroll are still the CSSOM and `scrollLeft`), `DES-ADMIN-VIA-PI-EXTENSION`. |
 | 2026-10-24 (#737, PR 2) | Issue #737, PR 2 (most of #711). **`DES-OPERATOR-CONSOLE` AMENDED**: Status names PR 2; NEW bullet "Sessions, error pages, the write flow and the live states": tombstones kept under the session's id with one closed word each (in the order idle, max, all, role, revoked; written by a failing `get`, the sweep, `destroy` as `elsewhere` for a sign-out and for a sign-in over a live cookie once that sign-in succeeded, and with no word for the session a sign-in refused for its audit row made), the `restart` possibility rule (a well-formed id the store never held, while the process is younger than `maxMs` and has evicted nothing) and why it is only a possibility, the FIFO of 1024, and no word crossing tokens or planted for another session; accepted, the `restart` answer telling a client with no token that the process is younger than `maxMs` and has evicted nothing, and a flush of the FIFO by about 1024 sign-ins, after which the dropped reasons are lost and `restart` is never said; a tokens file the console cannot read signs nobody out (a 503 with no Set-Cookie, and the hub ends no stream and draws nothing, saying `stale` with `what: "tokens"`), sign-out needing no tokens file at all and ending every session its cookies name (`auth: "none"`, `readSessionCookies`, `destroy` saying who it ended, one audit row each; the page signed out only on its 200, and otherwise, or with no answer within `SIGN_OUT_TIMEOUT_MS`, told once that it was not confirmed); the stream's end and `shutdown`, for the browser and for the terminal chat (whose once-a-minute re-login no longer counts a restart's 401, at most once per stream that opened since the last sign-in, and never an `end`); `elsewhere` asked after `RETRY_MS`, a sign-in ending the old session's streams only once its answer has gone out, and a probe's 200 read for the person first, reloading only into the person the page was drawn for, else `switched`; a page acting only as the person it was drawn for (its streams saying `as`, its previews and confirms `x-console-as`, a stream for another person 401 with `ended: "switched"`, a preview or confirm 409 and audited, a request saying no person not checked; `switched` the page's own word, in `ENDED_REASONS` but never a tombstone, a redirect or a stream's end); `stale` (with `since` and `what`) and `fresh`, every page stream told its state before any panel, a stream whose browser holds panels (a good render sent to it, a `Last-Event-ID`, or a `stale` told it) never drawn over by a read-failed load, a failed load never touching a view (a view holds good renders only; the degraded panels go to a stream that holds none, for it alone), a throw telling every stream it was for `stale`, a recovery logged only after a good load, only `fresh` taking the dimming back, at subscribe only the data and the render judged, a stale page drawn flat with its ink kept and its secondary controls ringed in `line-strong` (the first CSS's opacity rejected); the server drawing every state hidden and the script only switching, the sign-in pages' `hidden data-reveal` parts revealed first, and the script's three own sentences (`SIGN_IN_GAVE_UP`, `SIGN_OUT_UNCONFIRMED`, `STALE_TOKENS_BODY`); the confirm slot after the card that asked, and its bar states (an audit failure and a write that threw offer Close; a page drawn for another person Look again, which goes to `/login?ended=switched`; a write's 503 for the tokens file the server's own bar with Look again; a preview's or confirm's 401 never a sentence in the slot but the probe and sign-in; the `partial` state, Look again and `PARTIAL_NOTE`, never "Nothing was changed", for a kill switch that reached part of the fleet or threw and a bulk apply that threw part-way, the action saying which and the audit log keeping it as `ok` then `failed`, having no outcome for part of a change); `fields`, `undo` (said in the bar and, never pointing at the preview, in the banner; "Undo:" with the act alone in bold, or a muted "No undo:"; a trigger delete's secret references from the operator's own copy), `inverse` (checked at the preview; none for an old value the form cannot send), each action's past-tense `done` rule for the banner (a bulk act's asked at the confirm; no banner when no job landed, the attention tone when some did), `change` and not `done`, the audit rows counted from the first `capturingAudit` saw and never drawn as a range (the writer locks per row, so another session's row can land between them), the flash; retry, re-run and retry-all with no Undo in this pull request, the inverse for a queued job decided later; the bar's lines in the planners' words with a change's values in bold, never an arrow in any planner's confirm on either surface (the pi panel's own scope-change dialog and its notices after a write, built outside the planners, still draw one), every count through one `plural` in `confirm-view.mjs` with the words that agree with it, and no capitals for stress; the banner's Undo a sentence with its full stop; the error pages (HTML only for a browser's navigation, closed kinds, the 404's and 405's `peek`, the 421 with no navigation and no session, its sentence never claiming 127.0.0.1 alone, its tunnel for the address and port the connection reached and its Copy button only in a secure context); the sign-in pages (the help naming `/dispatch console --link` and the token command with its `<you>` quoted, the three ids the script finds drawn by hand in the kit's classes, the 2 s retry capped at 30 posts or 60 s, the serve hint, `link --port`, a notice's commands in the code face, the used link's commands each led in by where it runs, the no-script notice first in the card, the link page titled "One-time sign-in link", no notice drawn that no answer selects, a link's 429 keeping its first state since the link is not spent, and a new link pasted into the tab loading the page again); the audit page (rows judged by their place, through opt-in reader options that leave the format untouched; a row vouched for only by a next line whose `prev` matches it, compared before that line's other checks, so the row before a break whose line carries no matching `prev` is `withLast`'s `suspect` and only a line whose `prev` matched and fails another check is damaged alone; the newest row, which nothing vouches for yet; a row's `count` said by its write's kind; a damaged entry shown under every filter and not counted as a match; the 2,000-row cap with no read past it; the damaged place named by the line the check names, everywhere; `audit verify` following the same rule; `?seq=` placed by the row asked for through `withLast`'s `files`, read in one read from the newest row of its chunk the check counted, walked for only for a row the check did not count or a place that no longer holds it (a read from the place that does not find it included, and a walk that then does not find it never saying the row is gone), the page saying how a walked-for row was found or why not, and refused with a filter; bounded cells, the reason at least 200 px, the log beside its side card from 1600 px and its rows stacked up to 1119 px, by a media query; the 30 s cache); pages drawn once. "The stream lifecycle" AMENDED (the end's word, `elsewhere` for a sign-in over the cookie once its answer has gone out, `shutdown`, an unreadable file ending nothing); the guards' order AMENDED (the 401's `ended` and no Set-Cookie, the 303's `?ended=`, the 503, the person after the session, the `anyHost` files before the Host check, sign-out `auth: "none"` and ending every session its cookies name); the audit threat AMENDED (a sign-out with no session held among the counted rows, so the one row counts rows; a write refused for another person audited); the Host rule notes the `anyHost` files; the transcript stream's end carries the same word and never gets `stale`; "The screens" notes the reader's `positions` and the verifier's `withLast` (`last`, `suspect`, `files`); "The action table" AMENDED (the write rules, `done` among them; a preview's `barLines` and its no-change sentence; an apply's `{invalid, partial: true}`) and CORRECTED (it named an entry's diff `diffHtml`, which was the preview answer's key; the answer now carries the bar as `html`); "The generic pipeline" AMENDED (the unknown-field refusal, the ticket's `meta` with `undoAfter` and `done`, a bulk retry's or removal's filter in its payload, the bar as `html`, `change` and the flash, and no `change` when no job of a bulk act landed); "The legacy layer" AMENDED (a wrapper per section, and why; the wrapper drawing no box of its own, `display: contents`, so an empty panel leaves no gap, `:has()` rejected for the browser floor; the kept-still note's spacing said at the panel; the audit, sign-in and operators-only pages out of the layer; its dead rules deleted, and `.confirm` and `.diff` out of `NEUTRALISED`); the shell's sign-in sentence AMENDED (`frameHtml`, the hidden `h1`); "The visual system"'s kit AMENDED (a copy box writes each argument as a span of its own and wraps between them, and `withCode` draws a catalog sentence's backticks in the code face); "Two checks hold the look" AMENDED (the panel goldens and the static shots, every state a panel golden draws, the sign-in pages by their goldens, a link page held as drawn, the run without scripts proven and its read run against stubbed pages, the Parked text read back). Rejected, NEW: Revert last change (declined: the console keeps no copy of a file), `done: {...}` on the confirm's answer, and one legacy wrapper with the slot inside it; in the new bullet, a tombstone written by `peek`, the old session ended before a sign-in's audit row, ending every stream on an unreadable file, `stale` for every failed read, the script drawing its own states, the 421 with the navigation, vouching for the row before every broken link, judging a line's action, outcome and fields before its `prev`, a read-failed render stored in the view a same-person tab shares, Look again reloading into the other person's console, a write's 401 and 503 said as the slot's message line, a fixed 127.0.0.1 in the 421's tunnel, a damaged line matching no filter, a seq's chunk found by a bounded walk alone and one placed by its top, the damaged place named "row N" where the page had read it, the audit log beside its side card from 761 px and from 1440 px, cells that wrap anywhere, a container query for the audit log's layout, a sign-out by the one cookie every other route reads, `other` as the page's word for another person, the person checked only at the probe, and the dimming taken back when a stream opens. Residuals NEW: the `restart` sentence shown for a planted cookie and the process's age (and that nothing was evicted) it tells, the FIFO's flush by a token holder, the script and stylesheet readable from a rebinding name, the flash lost when the console stops, a rebinding page reading its own 421, an unreadable tokens file keeping tabs on what they last saw, and a page on another loopback port taking the session's flash (cosmetic). **`DES-TERMINAL-CHAT` AMENDED**: the stream's re-login window does not count a restart's sign-in (a 401 saying `restart`, or the first 401 after a `shutdown`), only a 401 and at most once per stream that opened since the last sign-in (`openedSinceRelogin`). UNCHANGED, checked: "No inline style" and the CSP (`headers.mjs` untouched; every new page and bar is server markup in the one stylesheet's classes, `admin/test/console-headers.test.mjs`); `DES-ADMIN-VIA-PI-EXTENSION` (its tool list and confirm rule as they were; the add tool's refusal of a field its kind does not take, and its `reviewState`, are planner rules held by `REQ-ADMIN-VIA-PI-EXTENSION`). |
 | 2026-10-25 | The maintainer notes moved from `CLAUDE.md` to `AGENTS.md` (pi loads either as a job's context file, `AGENTS.md` first), so the two sentences that point at them (why the recovery reset is mandatory, and the console tokens' pin rule) name `AGENTS.md`. Words only, no decision changes; where a sentence lists the context files pi loads, `CLAUDE.md` stays, since pi still loads it. |
+| 2026-10-25 (#737, PR 3a) | Issue #737, PR 3a: why a job waits, and cancelling one that never started. **NEW `DES-WAITING-REASONS`**: the worker records why it defers a job as it defers it (`deferTo`, the one deferral, writing `defer:job:<id>` before the move; `noteRetry` before an infrastructure retry's throw), and the console's `readWaiting` lists the jobs that have not started from the queue's own sets, their scores and those records, and the `cancel-queued` preview and confirm load the one job they act on by id; it reverses the need for the per-job classifier this file refused in `DES-ADMIN-VIA-PI-EXTENSION` and `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`, whose two grounds (a guess, and a job's data) do not hold, since the worker says why and no reader of the waiting set reads a job's data; the write, which a deferral never fails for and waits for at most 2 s; the buckets, `due` and `unknown` among them (`due` a delayed job more than `WAITING_DUE_GRACE_MS`, 10 s, past its due, whatever its record says, `DEFER_DUE_SENTENCE`; `unknown` a recorded reason this console does not know, a newer worker's, so no bucket's title is false of a job in it); how a job is classified (the due rule first, an overdue scheduler's next run then a row in line marked `schedulerNext`; the scheduler's current next run is scheduled, a gate-deferred `repeat:` run is in line, a record whose `until` disagrees with the due time is none, a reason the table does not hold is `unknown`, a reason outside the charset is no record, the paused flag is the field's presence, as BullMQ 5.80.4 reads it, asked by `HEXISTS`, never its value); what it reads and never reads, 200 from each of the four lists (`WAITING_PER_LIST_MAX`), at most 64 queues (`WAITING_QUEUES_MAX`) with the rest counted as `queuesCut` and the rows then a floor, every instant it hands on at most `DEFER_TIME_MAX_MS` (`instantOf`), `{ unreachable: true }` and never a client's words; the queues it reads, the registry's first, then the others a keyspace discovery found, in name order, so a queue the registry names is read before any the scan alone found and a live host's queue is never the one cut while the registry names at most 64, past which one can be cut too and the read still counts every queue it did not read, the discovery kept 60 s by the fleet reader (`WAITING_DISCOVERY_TTL_MS`), one scan at a time, and a snapshot that has a set never waiting for one, `readWaiting` itself never walking the keyspace; the 5 s cache, which keeps an unreachable read for the window as it keeps a good one, the console not reading it yet and `/api/state` unchanged; rejected, a classifier from data or timing, the lease horizon as a hold's end, reading `opts`, the host budget's dimension, a plain `DEL` and an unbounded write; the residuals (a failed write leaves the previous record until it expires; a job BullMQ delays by itself has no record, a raw gate rejection retried among them; a record whose `until` disagrees with the score's due time reads as no reason; a timed-out write that lands later is never read; `due` judged on the reader's clock against the worker's due, and unable to say why no worker took the job; the `cancel-queued` confirm's fresh read right before the removal, leaving one round trip, and a held job's `removeHeldJob` steps, in which a job a worker takes and finishes, or fails back to the delayed set, would be removed, a held job taken after that state read answers that its hold was cleared, unless the first delete failed and the hold was read back in place (`holdInPlace`), which changed nothing, a hold not read back keeping the mark since a refusal can be the answer to ioredis's resend of a delete that already ran, and a bound that fires during the removal says only that it was asked for and may have landed, naming the hold for a held job, `removalUnknown`). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the FAILED surface's rejected classifier: its grounds do not hold for the worker's record. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**, the delayed count bullet: the panel's line is unchanged, and the console's reader can enumerate the delayed set's ids and scores (turned on by no page in this pull request), never hydrating the set and never guessing, and a job past its due says so from its own score. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED**, one clause: the endpoint re-check's instant was the only trace of why a job is delayed, and the move records `endpoint` now. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the CLI's held and queued branches are `removeQueuedJob`, shared with the console's `cancel-queued`, which deletes the defer record after a successful remove (bounded, best effort), each door keeping its own rule of who may be removed; the CLI's output has one new line, for a held job whose removal failed after its hold was cleared, and every line that carries another module's words (the registry's, a removal's, the error under the could-not-reach line) carries them bounded (each C0, DEL and C1 character a space, at most 200 characters, `boundedText`), so a line whose words hold none of those characters and are at most 200 characters long is byte for byte what it was; the residual of that held partial failure keeps its direction, and every door now says the hold was cleared (`removeHeldJob`'s `cleared`, `heldClearedAnswer`), except after a first delete that failed with the hold then read back in place (`HEXISTS` of its `since`, `holdInPlace`), which answers `{ invalid }`, a hold not read back, or a read that fails, keeping the mark. **`DES-DOCTOR-RESULTS-PUBLISHED` AMENDED**, the ids bullet: `egress.proxy` and `provider.key`, the one repeated id and why no id names a forge's credentials. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names PR 3a; the fleet reader's snapshot gains three folds of its wide window that no page draws yet (`runsDay`, `spendByHour`, `softHoldToday`) and `hostsReadAt`; the action table's `atConfirm` and the rule functions' `result`, 38 actions; the action groups gain cancelling a job that never started; the ticket's `meta` gains `undoable`; the Undo rule (a retry has no Undo and says `retried`, since BullMQ's retry keeps its attempts; a re-run's Undo is decided at the confirm, the bar saying `rerunBefore`, the banner offering a `cancel-queued` form for the job the enqueue minted, and an Undo that cannot be decided costing the banner its button, never the answer, with `rerunUnnamed`; the old `queued` sentence gone), which replaces the sentence that said retry, re-run and retry-all had no Undo and the inverse for a queued job was decided later; the probe's one question that settles every caller, with its two rejected shapes; the write 401's `CONFIRM_SIGNED_OUT` in the slot; the tokens bar in the `setup` state with Close; a `seq` page whose row was not found draws no rows; the audit page's marked row at 375 px as one block; the Copy button's secure-context sentence; a bulk job whose answer was partial keeps that mark, its line reading "did not finish" (`resultRow`, `bulkResultsHtml`); a preview that reads the fleet snapshot waits for it at most `SNAPSHOT_TIMEOUT_MS` (10 s, not the cancel funnels' 2.5 s, which would refuse a slow but healthy fleet's first snapshot) and then refuses 503 in `SNAPSHOT_TIMEOUT_SENTENCE`'s words, a snapshot that fails keeping its own sentence (`snapshotOf`); the time rule's `utcText` draws only 0 to `DEFER_TIME_MAX_MS` and says "unknown" outside it, before 1970 too, and the script shows the times of every bar it writes into the confirm slot in the reader's zone (`fillSlot`); traces and code evidence. **`DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` UNCHANGED, checked**: the pause gate's position and its window-end move are the same, now through `deferTo`, and a rejection still escapes raw. **`DES-HOST-REGISTRY` UNCHANGED, checked**: the writer and its beat are untouched; the reader's three expiry fields are `INT-HOST-REGISTRY-CONTRACT`'s. **Code evidence**: worker/src/defer-reasons.mjs, worker/src/defer-write.mjs, worker/src/index.mjs (`makeProcessor`), worker/src/wait-state.mjs, worker/src/cancel-state.mjs (`removeQueuedJob`, `removeHeldJob`, `holdInPlace`), worker/src/cancel-cli.mjs (`runCancel`, `boundedText`), worker/src/doctor.mjs, worker/src/doctor-results.mjs (`REPEATED_CHECK_IDS`), admin/src/read-model.mjs (`readWaiting`, `readWaitingRow`, `cancelHeldJob`), admin/src/job-actions.mjs (`planCancelQueued`, `cancelQueuedJob`, `heldClearedAnswer`), admin/src/console/actions.mjs, confirm-view.mjs, script.mjs, server.mjs, audit-view.mjs, page-css.mjs, panels/common.mjs (`utcText`). |

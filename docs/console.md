@@ -337,13 +337,16 @@ it, the confirm is refused and nothing is written. Preview again. [Actions](#act
 While the console answers it says "Previewing" with Confirm greyed. Then it lists what will happen (a setting's
 change reads "maxTurns: **30** to **40**"), the diff for a file, what a paid action will reserve, and a line saying how
 the change can be undone. Where a write puts it back it reads **Undo:** and that write (deleting the trigger you add,
-setting a setting back to the value it had, resuming the queue you pause, withdrawing the message you send). Where
-there is none it reads "No undo:" and what you can do instead: for a deleted line, copy it from this preview, since
-the console keeps no copy (for a deleted trigger that names secrets, its secret references come from your own copy
-of the file, since the preview does not show them); for a retry or a re-run, the console cannot remove a waiting job,
-but Cancel stops it once it runs; for a setting whose old value the form cannot send back (an empty one, say), set it
-back by hand. The Confirm button says what it does ("Pause the fleet", "Delete trigger at index 1", "Retry for up to
-$2.00", "Retry (zero-rated)" for a job that cannot spend), yellow for an action that spends and red for one the
+setting a setting back to the value it had, resuming the queue you pause, withdrawing the message you send). A re-run's
+way back is cancelling the run it queues before it starts, and only the confirm knows that run's id, so its bar says
+"Cancel the new run before it starts: the banner after it is queued offers it." and the banner after it does (below).
+Where there is none it reads "No undo:" and what you can do instead: for a deleted line, copy it from this preview,
+since the console keeps no copy (for a deleted trigger that names secrets, its secret references come from your own
+copy of the file, since the preview does not show them); for a retry, the job keeps the attempts it made, so the
+console does not take it out of its queue, but Cancel stops it once it runs; for a setting whose old value the form
+cannot send back (an empty one, say), set it back by hand. The Confirm button says what it does ("Pause the fleet",
+"Delete trigger at index 1", "Retry for up to $2.00", "Retry (zero-rated)" for a job that cannot spend), yellow for
+an action that spends and red for one the
 console counts as destructive: a pause of the fleet or a queue (which Resume undoes, but which stops work), a cancel,
 a removal and a delete. The bar counts down the preview's 5 minutes, and at 0:00 Confirm stops working: preview
 again.
@@ -361,16 +364,18 @@ The bar's other states:
 - **Refused for another person**, at the preview or the confirm, with Look again: this browser is now signed in as
   someone else (in another tab), so the page you are on may not act for them ([Sessions](#sessions)). Nothing was
   changed. Look again goes to the sign-in page, which says so.
-- **The tokens file cannot be used**, with Look again: the console cannot read its tokens file right now, so it
-  changed nothing; an operator should run `pi-dispatch doctor` on the host ([Sessions](#sessions)).
-- A preview or a confirm whose session has ended (it was idle too long, say) shows no refusal: the page goes to the
-  sign-in page, which says why, as a live page does when its updates stop.
+- **The tokens file cannot be used**, titled "This console cannot take this action", with Close: the console cannot
+  read its tokens file right now, so it changed nothing; an operator should run `pi-dispatch doctor` on the host
+  ([Sessions](#sessions)). Nothing on the page can fix the file, and reloading would only meet the same answer.
+- A preview or a confirm whose session has ended (it was idle too long, say) shows no refusal bar: the slot says
+  "This session ended before the change was sent, so nothing was changed. The console is asked where it went.", and
+  the page goes to the sign-in page, which says why, as a live page does when its updates stop.
 - **Did not finish**, with Look again: the change stopped after doing part of its work. The kill switch can reach
   some queues and not others (a Valkey that did not answer, a loop that stopped part-way) or fail before it says which,
-  and a bulk action can fail part-way through its jobs. The bar never says nothing was changed here: it says some of
-  it may have been done, and Look again reloads the page so you see what did. The audit log has no outcome for a
-  change that partly landed, so such a write's line reads `failed` (for the kill switch, its reason says what it
-  reached).
+  a bulk action can fail part-way through its jobs, and the cancel of a held or a queued job can be asked for and not
+  finish (below). The bar never says nothing was changed here: it says some of it may have been done, and Look again
+  reloads the page so you see what did. The audit log has no outcome for a change that partly landed, so such a
+  write's line reads `failed` (for the kill switch, its reason says what it reached).
 - **No answer at all**: the bar says the change may or may not have been made. Reload to see; the audit log says
   which. The same confirmation is never sent twice.
 
@@ -379,9 +384,13 @@ maxTurns from 30 to 40"), who did it and its audit row, linked to that row on th
 41" for a bulk action, linked to the first), with the Undo line again. Where the change has a way back, the banner's
 **Undo** button opens that write's own preview with the old values filled in, so nothing is undone without you
 seeing it first; where it has none, the line says what to do by hand (after a delete, that the console kept no copy
-of the removed lines). The banner shows once. A bulk action with a job that did not go through shows each job's
-result in the bar instead, with its audit rows and Reload; its banner on the next page is amber and says how many
-were done ("2 of 3 done"), and a bulk action where no job went through leaves no banner at all.
+of the removed lines). After a re-run the banner says "Undo: Cancel <job id> before it starts.", naming the job the
+re-run queued, and its Undo opens that job's [cancel](#cancelling-a-queued-job); if the console could not name the
+job, the banner says so and offers no Undo. The banner shows once. A bulk action with a job that did not go through
+shows each job's result in the bar instead ("not done" and why, or "did not finish" and why for a job part of whose
+change may have been made, such as a held job whose cancel was asked for and not answered), with its audit rows and
+Reload; its banner on the next page is amber and says how many were done ("2 of 3 done"), and a bulk action where no
+job went through leaves no banner at all.
 
 **A field an action does not take is refused.** Every action takes only the fields its form sends; any other is
 refused by name with the fields it does take, and nothing is changed. A field whose name is not a plain word is
@@ -489,8 +498,12 @@ pages above it. Where the check did not count the row itself (a row newer than t
 no check at all) or the files have changed since, the page searches for it from the newest row instead, up to 2,000
 rows, and says how it found the row, or why it did not ("The page that holds row 125, found by reading from the newest
 row: the last chain check counted rows up to row 120."). A row older than the log's first says it was reaped by
-retention or removed, and a row past the newest says it does not exist yet. `seq` takes no filter: `?seq=` with `who`,
-`action`, `outcome` or `q` is refused, since the page it opens is the row's own, unfiltered.
+retention or removed, and a row past the newest says it does not exist yet. A page whose row was not found shows no
+rows, only that sentence, so the rows the search happened to pass on its way are never mistaken for that row's page;
+its Older link goes on from where the search stopped. The row a link opened is marked, and on a narrow screen, where
+each row is a stacked block, the whole block is marked, with a time or a target that wraps keeping its label at its
+first line. `seq` takes no filter: `?seq=` with `who`, `action`, `outcome` or `q` is refused, since the page it opens
+is the row's own, unfiltered.
 
 ## What doctor checks
 
@@ -663,12 +676,13 @@ window a fraction of a cent short of its cap never reads as the cap (and a spend
 or a price is rounded to the nearest cent.
 
 Times written out on a console page (the run lists, the run page, the fleet's schedules and failed jobs, the parked
-inbox, the audit log, and the instants in the Spend page's budget split and capacity text) are in your browser's
-time zone, with its UTC offset (`2026-10-08 17:39 UTC+2`); hover one for the UTC time. The console sends UTC (the same
-page for every reader), and the page's script turns it into local time, so with scripts off a page reads UTC. Some
-times stay UTC on purpose: the live transcript's entry times (`HH:MM:SS UTC`, to the second), the hover tips on the
-Spend page's charts (they say "UTC"), the charts' day labels and daily buckets (UTC days, the budget's), and the
-budget split's short "at MM-DD HH:MM" notice, which uses the panel's words. The insights file written by `/dispatch insights` runs no such script, so its times read UTC.
+inbox, the audit log, the instants in the Spend page's budget split and capacity text, and the lines of a preview bar,
+such as a waiting job's "Held until <time>") are in your browser's time zone, with its UTC offset (`2026-10-08 17:39
+UTC+2`); hover one for the UTC time. The console sends UTC (the same page for every reader), and the page's script
+turns it into local time, so with scripts off a page reads UTC. Some times stay UTC on purpose: the live transcript's
+entry times (`HH:MM:SS UTC`, to the second), the hover tips on the Spend page's charts (they say "UTC"), the charts'
+day labels and daily buckets (UTC days, the budget's), and the budget split's short "at MM-DD HH:MM" notice, which
+uses the panel's words. The insights file written by `/dispatch insights` runs no such script, so its times read UTC.
 
 ### Outcomes and reasons
 
@@ -891,13 +905,14 @@ is refused here with the same words, and every action lands in the [audit log](#
 
 | Where | Action | What it does |
 |---|---|---|
-| Fleet | Cancel | Stops a running job on whichever host runs it, or removes a held one. A running job that no worker acknowledges is reported as not cancelled, never as done. |
-| Fleet | Retry | Puts a failed job back in the queue. The worker runs it again from the start, through every budget check, so it can cost money. |
+| Fleet | Cancel | Stops a running job on whichever host runs it, or removes a held one. A running job that no worker acknowledges is reported as not cancelled, never as done. A held job whose removal was asked for and not answered within the time limit, or whose hold was cleared while the job itself could not be removed, is reported as a change that did not finish, never as nothing changed. A held job's preview comes within 10 seconds whatever Valkey does (past that it says the fleet did not answer within 10 seconds, and that nothing was changed), and its answer within its own time limit. |
+| Fleet | Retry | Puts a failed job back in the queue. The worker runs it again from the start, through every budget check, so it can cost money. The job keeps the attempts it made, so it has no Undo: Cancel stops it once it runs. |
 | Fleet | Remove | Deletes a failed job from the queue. Its run record stays. |
-| Fleet | Pause, Resume | The whole fleet, as `p` and `r` do in the panel, or one queue. A fleet resume is refused while the console's environment and the deployment's `.env` name different Valkeys, as in the panel and the tools. |
+| Fleet | Pause, Resume | The whole fleet, as `p` and `r` do in the panel, or one queue. A fleet resume is refused while the console's environment and the deployment's `.env` name different Valkeys, as in the panel and the tools. A queue's preview waits for the fleet at most 10 seconds, then says it did not answer and that nothing was changed; a fleet resume's preview then leaves out how many jobs wait to start, and says it could not read them. |
 | Fleet | Retry all, Remove all, Cancel all held | The bulk actions (below). |
 | Parked | Answer | Sends your answer to a run that is waiting on an issue ([below](#answering-a-parked-run)). Costs money. |
-| Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. |
+| Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. Its banner's Undo cancels the new run before it starts. |
+| After a re-run | Cancel a queued job | Takes a job that never started out of its queue ([below](#cancelling-a-queued-job)). |
 | Run | Steer, Follow-up, Withdraw | Sends a message to a running, steer-armed job, or takes one back ([below](#steering-a-running-job)). Spends from the run's own reservation. |
 | Run | Sandbox | Shows the command that opens the run's sandbox on the host ([below](#opening-a-sandbox)). |
 | Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, secret profile names, and bundle resolvers (a name, a path and a format). |
@@ -925,8 +940,10 @@ Retry all failed jobs, remove all failed jobs (optionally only one queue or one 
 The preview lists every job the action will touch, at most 100; when more match, it says how many more (or, for a
 repository filter whose scan stopped before the end, at least how many), and you run it again for the rest. The confirm
 acts on exactly that list and re-checks each job: a job that was retried, removed or failed again since the preview is
-skipped and reported, and the others go ahead. The answer lists what happened to each job, and the audit log has one
-line per job. A bulk retry can start up to 100 paid jobs from one confirm, each still held to every cap.
+skipped and reported, and the others go ahead. The answer lists what happened to each job ("did not finish" for a
+held job whose cancel may have partly landed, never "not done"), and the audit log has one line per job. A bulk retry
+can start up to 100 paid jobs from one confirm, each still held to every cap. The preview of cancel all held waits for
+the fleet at most 10 seconds, as a held job's cancel does, then says the fleet did not answer: nothing was changed.
 
 ### Answering a parked run
 
@@ -982,6 +999,57 @@ list of queues cannot be read, it does not conclude the data is gone, and judges
 checked when you press it, as before. The same issue and flow run or queued within the last 10 minutes take a forge re-run as a
 duplicate, and a local or scheduled re-run within the same minute likewise; the console says so and nothing is
 queued.
+
+After a re-run is queued, the banner's **Undo** offers to cancel the new run before it starts
+([Cancelling a queued job](#cancelling-a-queued-job)).
+
+### Cancelling a queued job
+
+The console can take a job out of its queue before it starts: waiting, delayed, waiting by priority or in a paused
+queue, held on a [`run.waitFor`](wait-for.md) condition or not. Today the way to it is the Undo on a re-run's banner.
+It takes only a job that has never started, and refuses, with nothing changed:
+
+- a job that has made an attempt and waits to retry: a retry keeps its run's steer and held replies open for the next
+  attempt, so the console leaves it alone; once it runs, Cancel on its run page stops it (`pi-dispatch cancel` at a
+  terminal removes such a job too);
+- a job handed back after a stall, since an attempt of it may have finished;
+- a recovery, which owes the run it continues that run's final record;
+- a cron trigger's next run: pause the trigger or edit its schedule (the queue refuses to remove it anyway);
+- a job that is not waiting to start any more.
+
+The preview names the job and says why it waits, in the worker's own words ("Its folder is busy with another run",
+"Held until <time>"), from the reason the worker recorded when it put the job back in line
+([wait-for.md](wait-for.md), trap 4). A delayed job more than 10 seconds past the time it was due, which no worker has
+taken, says "Due since <time>; no worker has taken it", whatever it recorded. A reason this console does not know
+(from a newer worker) is shown as its word with "no explanation yet". With no record, a delayed job says "No reason
+was recorded" and a held one "Waiting on a time or a check"; a job ready to run (waiting, or waiting by priority) says
+"Waiting for a free slot", or "In a paused queue" when its queue is paused. It says the job is removed before it
+starts and that no other job's run records are touched. The confirm button is red ("Cancel the queued job"), and
+there is no Undo: a redelivery of the same event, or the trigger's next fire, queues the job again. The confirm looks
+for the job again and refuses if it moved to another queue, if it started since the preview, or if any rule above now
+applies, and reads the job once more right before the removal, refusing then too if it started or changed in
+between; then it removes the job the way `pi-dispatch cancel` does (a held job's hold first, then the job, then its
+recorded reason), writing no run record.
+
+A worker can still take the job in the moment between that last read and the removal. A job that is not held, taken
+and still running, is refused by the queue itself, and the job runs on: the bar says it started since the preview and
+that nothing was changed. A held job taken before the console reads its state once more is refused by that read, with
+nothing changed; one taken after it is the case below, whose hold was cleared. A held job whose hold could not be
+deleted (Valkey refused it, for a Valkey user that may not delete or a read-only replica, or the connection dropped)
+is refused with nothing changed when the console then reads the hold back still in place; a hold it cannot read back
+is answered as cleared (below), since after a dropped connection a refusal can be the answer to a delete sent again
+that had already gone through. And a job a worker took and finished, or that failed back to the delayed set, in that
+same moment is removed.
+
+Once the removal is asked for, any answer but those refusals is a change that did not finish: the bar says so and
+offers Look again, never that nothing was changed. That covers a removal that was asked for and not answered within
+the time limit (it says only that the removal may or may not have landed, and for a held job that its hold, or the
+job, may or may not be gone: look at the fleet to see whether the job is still queued), one answered in a way the
+console cannot read, and a held job whose hold was cleared while the job itself could not be removed: the bar says the
+hold was cleared and the job was not removed, so it may still be queued without its hold (cancel it again if it is),
+or that the job started while its hold was being cleared. An error's own words appear only with their control
+characters made spaces and at most 200 characters of them. The preview and the confirm answer within their time limit
+whatever Valkey does. The audit log's line has the kind `cancel-queued`.
 
 ### Steering a running job
 
@@ -1094,7 +1162,9 @@ refreshes every 5 seconds. Only the parts of the page that changed are sent.
 A live page holds one connection open. Each token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all
 its sign-ins, and the console 32 in all, of which 8 are kept for operators. A page opened past either limit still loads, but stays still until you reload it after closing
 another tab; its pill then says Not live, and its note says how many live tabs one token may hold, with Reload. A
-run page with its transcript open counts as two.
+run page with its transcript open counts as two. When both of its streams are refused at once, the page asks the
+console one question for both and each says the answer: the pill says Not live and the transcript's line says "not
+live: reload after closing another console tab", whichever was refused first.
 
 **An open page does not keep you signed in.** Only a page load or a request counts as activity. A page left open
 signs out after `PI_CONSOLE_IDLE_MINUTES`, and its updates stop and send you to the sign-in page when:
@@ -1140,8 +1210,8 @@ never which names were added, and gives the tunnel to open instead, for the addr
 ssh -L 4790:127.0.0.1:4790 '<this host>'
 ```
 
-Its Copy button works only where the browser counts the page as secure, which a name other than `localhost` over
-plain http never is, so there you select the command instead.
+Copy needs a page the browser treats as secure: https, or a loopback name such as localhost; other names over plain
+http may not offer it, and there you select the command instead.
 
 On a unix socket, which has no port, it gives `ssh -L '4790:<console socket>' '<this host>'`: put in your socket's
 path, which the page does not show.

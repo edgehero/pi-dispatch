@@ -8052,13 +8052,17 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   was spent). The worker log names the scope by its 16-hex key, never the raw string (a folder path in the
   log would breach no-PII-in-logs); the forge comment may name the repo it posts on, and names it without a
   forge prefix (issue #498: the comment already lives on that forge). Concurrency defers at
-  the pickup gate with a fixed re-check delay; deferral consumes no attempt, no budget, no record. Since
+  the pickup gate with a fixed re-check delay; deferral consumes no attempt, no budget, no run record (since
+  issue #737 it writes the job's defer record, `INT-DEFER-REASON-KEY`). Since
   issue #230 the delayed set holds a FIFTH population beside cron next-occurrences, retry backoff, quiet
   hours and scope deferrals: jobs held on `run.waitFor`. A POLLED hold is told apart from a scope deferral
   by wake instant, which is why the wait interval floor is deliberately greater than this gate's re-check;
   an `after` hold is not, since it wakes at an instant the operator chose and may legitimately fall inside
-  the same few seconds. Nothing records WHY a job sits in the delayed set, which is what makes both
-  statements about wake instants rather than about state. No
+  the same few seconds. Until issue #737 nothing recorded WHY a job sits in the delayed set, which is what
+  made both statements about wake instants rather than about state. The worker now records its reason as it
+  defers (`scope-folder`, `scope-repo`, `scope-project` or `chained` here, `INT-DEFER-REASON-KEY`), and the
+  distinct instants stay: they are the evidence for a reader older than that record and for a job whose
+  record could not be written. No
   per-scope FIFO is promised: a newer job may take a freed scope ahead of an older deferred one, and a
   sustained same-scope arrival rate can starve a deferred job indefinitely — deferral is a gate, not a
   queue. A lowered `concurrent` never preempts in-flight jobs (next-pickup grain); a lowered cap applies
@@ -8787,12 +8791,16 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   them read the worker's own `wait:job:*` hashes rather than enumerating the delayed set, and that is a
   PII decision before it is a convenience: a delayed forge job's `.data` holds the issue title, body and
   username, so hydrating one to build a row would pull into the panel exactly what the snapshot refuses
-  to carry. It also removes a PER-JOB classifier that could only ever be a guess, since the delayed set
+  to carry. It also removed a PER-JOB classifier that could only ever have been a guess, since the delayed set
   mixes five populations (scope and host deferrals counted as one, though the worker defers them at
-  two distinct sites) and records which for none of them -- and issue #289's breakdown line keeps
+  two distinct sites) and recorded which for none of them; and issue #289's breakdown line keeps
   that refusal intact while naming what CAN be counted: the status area says how many are cron
   next-occurrences (the scheduler list's own count) and how many are held (this index's own count),
   with the remainder stated as undifferentiated, still never enumerating or hydrating a delayed job.
+  AMENDED 2026-10-25 (#737, PR 3a): the worker now records which, as it defers each job
+  (`INT-DEFER-REASON-KEY`), so the guess is no longer needed: the console's `readWaiting` lists the jobs
+  that have not started from the queue's own sets, their scores and those records, and reads no job's
+  data (`DES-WAITING-REASONS`). The panel's held section and its breakdown line still read as above.
   The section is CONDITIONAL and SELF-BOUNDING:
   absent when nothing is held, so a deployment that never waits renders byte-identically to one before
   this existed; capped, with the remainder counted from the whole index rather than from whatever the
@@ -8806,10 +8814,32 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   design and a stale hash can outlive a job that already woke and ran. Its blast radius therefore cannot
   reach a cron occurrence, a retry backoff, or a completed run — writes no run record (the job never
   ran), and cannot be undone, which is why the model tool is confirm-gated like every other write and the
-  panel's `x` sits behind the same in-frame y/n the trigger delete uses.
+  panel's `x` sits behind the same in-frame y/n the trigger delete uses. Since issue #737 the CLI's door reaches
+  `removeHeldJob` through `removeQueuedJob` (`cancel-state.mjs`, the sequence the console's `cancel-queued` runs
+  too, `INT-CANCEL-CHANNEL-CONTRACT`), which then also deletes the removed job's `defer:job:<id>`; the panel's, the
+  tool's and the console's `cancel-held` doors call `removeHeldJob` through `cancelHeldJob` and leave that record to
+  its TTL, where no reader finds it, since every reader starts from the delayed set.
+- **The hold's own fields for a console** (issue #737, PR 3a): `wait:job:<jobId>` also holds `after` and one
+  `a:<profile>` field per profile it checked (`wait-state.mjs`). `after` is the job's own `after` instant in ms
+  (`afterMs(job.data)`), written by `hold` beside the label in the same HSET when it is a safe integer, on every hold
+  path; it is the job's own instant, not the hold's lease horizon (`untilMs`, which on the polled path is the next
+  check and on a throttled wake the maximum wait, a time nobody chose). The next wake is the defer record's `until`
+  (`INT-DEFER-REASON-KEY`). `a:<profile>` is `<answer>:<ms>`, the last thing that profile's check said and when
+  (`noteAnswer`, after each check): `go`, `hold`, `fault` (a hold that could not tell), `refuse`, or `unclear` (an
+  answer the gate does not understand), by `answerOf(verdict)` in the gate's own order of tests, and nothing at all
+  for a check that said nothing about the condition (aborted by a restart or a cancel, a profile this worker does not
+  declare, a target no check can be handed). A profile outside `WAIT_PROFILE_FIELD_RE` (`[A-Za-z0-9._-]{1,64}`) or
+  an answer outside `WAIT_ANSWERS` is not written; the field is overwritten by the profile's next answer, so the hash
+  grows with the job's conditions and never with its wakes; it carries the counters' TTL, and a failed write costs
+  the console its detail and never the gate its decision. The admin reads both and holds each to the same rules on
+  the way out, an instant (`after`, an answer's time, `readWaiting`'s hold clock) also to at most `DEFER_TIME_MAX_MS`
+  (`INT-DEFER-REASON-KEY`), so a page can draw it: the fleet reader's held rows gain `checks`, `after` and `answers`
+  (at most four, sorted by profile), and so does `readWaiting`'s hold; the `dispatch_waits` listing keeps its keys.
 - **The 30s floor is load-bearing twice**, and lowering it would break the second silently: it is also what
   distinguishes a wait deferral from a scope deferral by wake instant, since `SCOPE_BUSY_RECHECK_MS` is 5s
-  and nothing else records WHY a job sits in the delayed set.
+  and, until issue #737, nothing else recorded WHY a job sits in the delayed set. The worker's defer record says it
+  now (`INT-DEFER-REASON-KEY`); the floor stays, because the wake instant remains the evidence for a reader older
+  than that record and for a job whose record could not be written.
 - **The load-time half** (`pi-dispatch doctor`), which `INT-TRIGGERS-FILE-CONTRACT`'s `run.waitFor` bullet
   promised and this contract now states. Four checks, and what separates a FAILURE from a warning here is
   whether something actually refuses: a hard failure means a worker that will not start or a delivery that
@@ -9052,7 +9082,8 @@ abstains.
     name            the worker's name; redundant with the key so a row is self-describing when pasted
     version         the worker package version, so a rolling upgrade is a visible fact
     startedAt       epoch ms, first beat of this process
-    beatAt          epoch ms, this beat. Readers derive AGE from it rather than trusting expiry
+    beatAt          epoch ms, this beat. Readers derive AGE from it rather than trusting expiry (`staleMs` stays
+                    `now - beatAt`; the key's PTTL, read beside the row, gives the reader's three expiry fields, below)
     pid             the worker process id on its own host
     concurrency     the LIVE slot count, not the boot value (published as a thunk, so the overlay moves it)
     image           the deployment's default job image TAG
@@ -9093,6 +9124,30 @@ abstains.
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
 carries no configuration and no authority: nothing here is an instruction to anybody.
+
+**What a reader reads off the key's expiry** (issue #737, PR 3a, ADDED 2026-10-25). `readLiveHosts(redis, { now,
+timeoutMs, prune, ttlMs })` asks each member's `PTTL` beside its `HGETALL`: both are issued before either is awaited
+(`Promise.all`, so no second round trip), each under its own bound, and only where the client has `pttl`; a PTTL that
+throws, rejects, hangs past the bound or answers no whole number costs these three fields and never the row. **Valkey's
+clock is used only as a duration**: `ttlMs - PTTL` is how long ago the row's last PEXPIRE landed, counted by the server
+that holds it, and no field is ever compared with Valkey's own time of day. Each row gains:
+- `ttlAgeMs`: that duration, `max(0, ttlMs - PTTL)`. `ttlMs` is the TTL the writer sets, `HOST_TTL_MS` (90 s) for
+  every worker and the reader's default; a value that is not a positive whole number reads as `HOST_TTL_MS`.
+- `skewMs`: `(now() - beatAt) - ttlAgeMs`, the reader's clock minus the host's as a third party measures it,
+  positive when the host's clock is behind; null without a readable `beatAt`. It carries a round trip and up to one
+  beat period of noise (a read between a beat's HSET, the new `beatAt`, and its PEXPIRE sees the previous beat's
+  expiry), so a reader claims a skew only past `HOST_SKEW_CLAIM_MS` (30 s, two beats).
+- `noExpiry`: true when the key has no expiry at all (`PTTL` -1), a row the TTL will never remove, false when it has
+  one. A reader walks `host:live`, and a beat SADDs the name only after its PEXPIRE, so a host's first beat is never
+  read this way: a reader meets a row with no expiry only under a name an EARLIER beat indexed, for a moment when a
+  beat re-creates a row that expired while its name stayed in `host:live` (between that HSET and its PEXPIRE), and
+  for good when the process died between that HSET and its PEXPIRE. Either is a row the writer did not finish.
+All three are null where the client has no `pttl`, where the PTTL failed or timed out, and where the key went between
+the two reads (-2). `staleMs` is unchanged. The admin's fleet reader carries them on its host rows (`hostRowOf`, each
+re-checked: null is "not known", never 0 or false) in the snapshot's `hostBudgets`, beside the new `hostsReadAt`, when
+those rows were last read, on the reader's clock (null before the first read; a registry it cannot read keeps the last
+rows and their time). No surface draws them yet, `/api/state` projects its host rows by name and names none of them
+(`INT-CONSOLE-STATE-API` UNCHANGED, checked), and NO DECISION READS THEM.
 
 **The budget fields' readers** (issue #596): doctor (each host's budget, use and largest fitting project size), and
 since phase 3 the admin panel's PROJECTS view and the insights page, which cap a size suggestion's raise at what a
@@ -9379,7 +9434,43 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   `job.remove()` (a mid-dispatch pickup re-reads the state and falls through to the channel, since
   `remove()` throws on a locked job); active gets the request/ack poll above; completed/failed refuse.
   Queued and held cancels write NO run record -- the job never ran, the `dispatch_wait_cancel` rule --
-  and the CLI says so in its output.
+  and the CLI says so in its output. AMENDED 2026-10-25 (#737, PR 3a): the held and the queued branches are
+  ONE function, `removeQueuedJob({ redis, queue, job, jobId, state, guard })` in `cancel-state.mjs`, placed after
+  `removeHeldJob` and calling it, which the console's `cancel-queued` runs too, so the two doors cannot drift. The
+  CLI's output has one new line, for a held job whose removal failed after its hold was cleared (below): "could not
+  cancel held job <id>: its hold was cleared, but the job itself could not be removed (<the error>); it may still be
+  queued, now without its hold. Run `pi-dispatch cancel <id>` again to remove or stop it", an `error:` line on stderr
+  with exit 1, where it said "could not cancel held job <id>: <the error>". And every line that carries another
+  module's words carries them bounded (`boundedText` in `cancel-cli.mjs`), since they are of any length and any bytes
+  on a terminal: each C0, DEL and C1 character made a space, then at most 200 characters of them. Those are the
+  registry's words in "no job <id> in <n> queue(s) [registry unreadable: <its words> ...]", a removal's in the
+  cleared line, in "could not cancel held job <id>: <the error>" and in "could not remove <id> ... the remove failed
+  with: <the error>", and the error under the could-not-reach line (a lookup's, or anything else that threw). So, but
+  for the new line, a line whose words hold none of those characters and are at most 200 characters long is byte for
+  byte what it was, as is every line that carries none (a thrown value that is not an Error and has no message now reads
+  "no reason given"); the worker's name in "cancel accepted by <host>", read from the ack key, is bounded the same way.
+  It judges the hold first by the hash's `since` (a hash that cannot be read is no hold, as the CLI always read it),
+  else removes a job in `QUEUED_STATES` (`delayed`, `waiting`, `prioritized`, `paused`), else changes nothing.
+  `guard` is optional (the CLI passes none): a caller's last check, asked with the job right before the removal is
+  sent (before `removeHeldJob` for a held job; after the state check and before `remove()` otherwise), which answers
+  null to go on or what to refuse with, a throw refusing too; BullMQ's remove checks only the job's lock and its
+  scheduler, so a caller whose rule is about what the job has DONE reads that again here. It answers
+  `{ ok, held: true, jobId, attemptsMade }`, `{ invalid }` (removeHeldJob's refusal, nothing changed),
+  `{ invalid, cleared: true }` (removeHeldJob failed once its hold's first key had been sent for deletion, most often
+  `remove()` refusing a job a worker locked in between: the hold is gone, or partly gone, and the job stayed, which a
+  caller never words as nothing changed; a first delete that failed, whatever the error, is followed by a read of the
+  hold's clock (`HEXISTS wait:job:<id> since`, `holdInPlace`), and only a hold read back in place answers `{ invalid }`,
+  nothing changed (Valkey refused the command, such as NOPERM, READONLY or MISCONF); a hold not read back, a read
+  that fails, or a client with no `hexists` keeps the mark, since a refusal can be the answer to ioredis's resend,
+  after a reconnect, of a delete that already ran), `{ refused, error? }` (the guard's answer, or its throw as
+  `error` with `refused` null; nothing was sent), `{ notQueued, state }`, `{ ok, held: false, jobId, state,
+  attemptsMade }` or `{ raced, state, error }` (`remove()` threw: a worker took the job between the read and the
+  remove, or it is a job scheduler's next run, which BullMQ refuses to remove; the state read again), and never
+  throws. Once a job is removed, and only then, it deletes the job's defer record (`DEL defer:job:<jobId>`,
+  `INT-DEFER-REASON-KEY`): bounded (2 s), best effort (a failed delete leaves the record to its TTL, and a record
+  whose job is gone is never read), and only where the client has `del`; a job that stays keeps its reason. WHO may
+  be removed stays each caller's rule: the CLI also removes a job waiting to retry, and the console's `cancel-queued`
+  takes only a job that never started (`REQ-OPERATOR-CONSOLE-ACTIONS`).
 - **A cancelled job is never run again, and never recorded against what its requester was told** (issue
   #476, gate of PR #479). The poll runs from pickup, so a cancel could be acknowledged after a job was picked
   up and before the processor handed it back to the queue (one of its holds, the podman.service hold or the
@@ -9439,10 +9530,12 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   per job id, it has no ack key (the state hash says `written` and `delivered`), and it is opened only for a
   steer-armed attempt. Nothing in this contract changes.
 
-**Code evidence**: worker/src/cancel-state.mjs -> requestCancel, removeHeldJob; worker/src/index.mjs ->
-the cancel poll beside the kill timer, the abortReason mapping; worker/src/processor.mjs -> the
-classification; worker/src/cancel-cli.mjs -> runCancel; admin/src/read-model.mjs -> cancelHeldJob
-(delegating); admin/src/dashboard.ts -> cancelActive/cancelHeld deps, the HELD_LIST view.
+**Code evidence**: worker/src/cancel-state.mjs -> requestCancel, removeHeldJob, and since #737 QUEUED_STATES,
+removeQueuedJob, holdInPlace; worker/src/index.mjs -> the cancel poll beside the kill timer, the abortReason mapping;
+worker/src/processor.mjs -> the classification; worker/src/cancel-cli.mjs -> runCancel, and since #737 boundedText;
+admin/src/read-model.mjs -> cancelHeldJob (delegating); admin/src/job-actions.mjs -> planCancelQueued,
+cancelQueuedJob, heldClearedAnswer (since #737); admin/src/dashboard.ts -> cancelActive/cancelHeld deps, the
+HELD_LIST view.
 
 ## INT-STEER-INBOX-CONTRACT
 
@@ -10081,7 +10174,8 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     `secret-bundle-remove` (issue #704, AMENDED 2026-10-20), `cancel-active`,
     `cancel-held`, `fleet-pause`, `fleet-resume` and `run-enqueue`; and the console's own `queue-pause`,
     `queue-resume`, `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`,
-    `run-rerun`, `parked-answer` and (issue #646) `steer-withdraw`; and `steer` (issue #646), which the console and
+    `run-rerun`, `parked-answer`, (issue #646) `steer-withdraw` and (issue #737, PR 3a) `cancel-queued`, a job that
+    never started taken out of its queue, `target` its job id; and `steer` (issue #646), which the console and
     the panel (the TUI's `t` and `T`) both write. The list is descriptive: the writer enforces the charset, not the list, and
     the console's configuration actions write the kind of their action's own name, plus `pause-windows-set` for the
     whole-list replace.
@@ -10186,7 +10280,10 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   sign in again", "ended": "switched" }` (`PERSON_CHANGED`), a write's with `html` (the confirm bar's refusal, whose
   Look again the console's page sends to `/login?ended=switched`) and an audit row. A request that sends no such
   header is not checked: a script is held to the cookie alone, as before. A write's `503` `TOKENS_UNUSABLE` carries
-  `html` too, the confirm bar's refusal with Look again.
+  `html` too, the confirm bar's refusal: since #737 PR 3a in the setup state ("This console cannot take this
+  action"), its sentence `TOKENS_UNUSABLE`'s words with `pi-dispatch doctor` in the code face, and Close, since
+  nothing on the page can fix the file and a reload would meet the same 503 (it offered Look again); the `error`
+  beside it is the sentence as it always was.
 - **Response**: `200`, `Content-Type: application/json`, with the security headers of every console response
   (`Cache-Control: no-store` among them). The body is ONE fleet reader snapshot (`createFleetReader`, the reader the
   pages and the `/dispatch` panel read), projected by `stateOf` (`admin/src/console/live.mjs`) to these keys and no
@@ -10793,7 +10890,19 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   `<scaffold name>.file`, the service's verdict on the file it reads, and `<scaffold name>.file-shell`, this shell's);
   else `<section>.<n>`, the check's place in its section on that run (`DOCTOR_SECTIONS`, `--live` read-backs in
   `live`). A repeat gets `-2`, `-3`. A reader matches on named ids only: a derived id is stable for one host's
-  configuration, not across hosts. Both lists are pinned against `doctor.mjs` by a test.
+  configuration, not across hosts. Both lists are pinned against `doctor.mjs` by a test. AMENDED 2026-10-25 (#737,
+  PR 3a): two more named ids. `egress.proxy` says whether the egress proxy runs, on each venue that has one: docker's
+  proxy line carries it, and so does the line doctor prints in its place for a running proxy that is not this
+  deployment's (or is out of date), which takes the id from the proxy's check (`proxyCheck.id`); rootless Podman's
+  proxy line carries it too, so a host on both venues publishes `egress.proxy` and `egress.proxy-2`, and a reader
+  of the proxy takes both and judges the worse. `provider.key` says whether the provider's key is found where the
+  worker looks (the provider key line, not drawn for a malformed `PI_PROVIDER`, whose shape row is the one line).
+  Every named id is written at ONE site of `doctor.mjs`, except those in `REPEATED_CHECK_IDS`
+  (`{ "egress.proxy": 2 }`: the proxy is a different container on each venue, each judged by its own line, and the
+  question a reader asks of either is the same), and the test counts the literal sites against it. No id names a
+  forge's credentials, because no one check holds them: the `github` section alone prints about twenty lines across
+  its three auth sources, and the other forges print theirs under `forges`; a reader judges those by the section part
+  of their derived ids, which `DOCTOR_SECTIONS` pins.
 - **Content rule** (`redactText`, applied by the writer), in this order: invisible characters (zero-width, joiners,
   marks, the soft hyphen, the byte-order mark) are deleted, and control, bidi, line and paragraph separator characters
   are spaces; every value of a secret-named variable in doctor's resolution (and the `.env` values
@@ -10837,6 +10946,183 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   write's one `SET ... PX` and the refreshed TTL, the read's allowlist, prune and bounds), worker/test/doctor.test.mjs
   ("doctor publishes one record per run", "publishing is best effort"), worker/test/doctor-spawner.test.mjs,
   admin/test/doctor-view.test.mjs, admin/test/console-pages.test.mjs (the Fleet fixtures).
+
+## INT-DEFER-REASON-KEY
+
+**The worker → Valkey → the admin console's waiting reader.** Why the worker put a job that has not started back on
+the delayed set, in the worker's own words, written at the moment it defers (issue #737, PR 3a,
+`DES-WAITING-REASONS`). The key, the closed vocabulary and every field's rule are ONE leaf,
+`worker/src/defer-reasons.mjs`, exported as `@edgehero/pi-dispatch/defer-reasons` (`./defer-reasons` in the worker's
+exports map). It imports nothing, so the console imports it without the worker's dependencies, and the writer and the
+reader cannot drift on the key, a field, a reason or a bucket. The writer is `worker/src/defer-write.mjs`
+(`makeDeferTo`, worker only, never loaded by the admin); the readers are the admin's `readWaiting` and
+`readWaitingRow` (`admin/src/read-model.mjs`); besides the writer itself, the one deleter is `removeQueuedJob`
+(`INT-CANCEL-CHANNEL-CONTRACT`).
+
+```
+  defer:job:<jobId>   HASH, one per job id, with its own TTL; the fields in DEFER_FIELDS order, the readers' HMGET
+    why         the reason, a key of DEFER_WHYS (below)
+    at          epoch ms on the deferring worker's clock: when it wrote the record (a retry's: the reading its delay is from)
+    until       epoch ms: the instant it moved the job to, the very value it hands `moveToDelayed`
+    project     the job's project id, as this pickup resolved it, when it has one
+    host        the deferring worker's name, as the registry names its row
+    holder      a job id the wait is on: the chained parent, the run a recovery continues, or the holder of the target
+    endpoint    the model endpoint's id (`endpoint`)
+    budgetWhy   the host budget's verdict word: `budget`, `share`, `running-here` or `unseeded` (`host-budget`)
+    trigger     the job's matched trigger index, `job.data.trigger.matched.index`, 0-based
+    attempt     the attempt a retry will be (`retry`)
+    attempts    the job's total attempts, `opts.attempts` (`retry`), so a reader need not read `opts`
+    n           the writer's nonce, 16 hex characters; never returned by a reader
+```
+
+- **Who writes it.** Every gate of `makeProcessor` that puts a job back on the delayed set goes through ONE function,
+  `deferTo(job, token, untilMs, why, extra)`: it writes the record, then calls `job.moveToDelayed(untilMs, token)`,
+  then throws BullMQ's `DelayedError`, the move and the throw the gates always made (the class is handed in by the
+  processor, which imports bullmq, so the processor's own `instanceof` still tells a deferral apart). No module in
+  `worker/src` moves a job to the delayed set except `defer-write.mjs`, which a source-shape test holds. Before each of
+  the four `InfraRetry` throws (the netns keeper loop's three and the processor's own retryable failure),
+  `noteRetry(job, { project })` writes the `retry` record, because BullMQ delays that job itself after the throw, where
+  no gate can say why: only when `retryDelayOf(job)` knows the delay, which mirrors the pinned BullMQ 5.80.4's retry
+  decision and builtin backoffs (`attemptsMade + 1 < opts.attempts` and not discarded; a number or `fixed` waits
+  `delay`, `exponential` waits `round(2^attemptsMade * delay)`), and is null, so nothing is written, for a jittered or
+  custom backoff and a delay at or below zero. Its `until` is the worker's `now()` plus that delay, `attempt` is
+  `attemptsMade + 2` and `attempts` is `opts.attempts`.
+- **The reasons** (`DEFER_WHYS`, closed: each its bucket and the sentence a console shows, whose `{placeholders}` the
+  console fills from the record's own fields, escaped, times drawn as `<time>`):
+
+  | Reason | Bucket | The gate |
+  |---|---|---|
+  | `pause-window` | pause | a scoped pause window |
+  | `size-never-fits` | slot | a job size that never fits this host, on a fleet's shared queue, which another host may take |
+  | `host-slot` | slot | this host's job slots across its queues, on a host without a host budget |
+  | `scope-folder`, `scope-repo` | slot | a folder's or a repository's concurrent limit, in process or the fleet lease |
+  | `chained` | run | the same slot, for a job with a `parentJobId`; `holder` is that parent |
+  | `scope-project` | slot | a project row's concurrent limit |
+  | `endpoint` | slot | every slot of a model endpoint; `endpoint` is its id |
+  | `host-budget` | slot | the host budget; `budgetWhy` is its verdict |
+  | `bundle-profile` | slot | a host that serves the job's secret bundle profile |
+  | `recovery-wait` | run | a recovery whose run's attempt still runs; `holder` is that run |
+  | `wait-after` | check | an `after` hold |
+  | `wait-hold` | check | a wait check that said not yet, or could not tell |
+  | `wait-throttled` | check | the check lease denied, on this host's or the fleet's |
+  | `wait-supersede` | check | the supersede probe could not answer; `holder` is the delivery holding the target |
+  | `wait-aborted` | check | a wait check a restart or a cancel stopped |
+  | `wait-unclear` | check | a wait check that answered what the gate cannot read |
+  | `podman-restart` | ready | rootful Podman's service, restarting |
+  | `netns-keeper` | ready | the rootless network keeper, too young |
+  | `retry` | retry | an infrastructure retry's backoff (`noteRetry`) |
+
+  The buckets are `DEFER_BUCKETS`, in the order a console shows them: `slot`, `run`, `check`, `retry`, `pause`,
+  `ready`, `paused`, `due`, `unknown` and `none`, each with a title and a short form (`DEFER_BUCKET_WORDS`). No reason
+  is `paused`, `due`, `unknown` or `none`: a reader gives these four itself. `due` comes first: a delayed job more
+  than `WAITING_DUE_GRACE_MS` (10 s, the admin's `read-model.mjs`) past its due instant, the delayed set's score read
+  against the read's own clock, is `due` whatever its record says, and its line is the leaf's `DEFER_DUE_SENTENCE`,
+  "Due since {due}; no worker has taken it", which no worker records, since the job is overdue exactly because no
+  worker has looked at it since. Then `paused`, a job in the paused list or in a paused queue's wait list or
+  prioritized set (the queue's meta hash has a `paused` field at all, whatever it holds, as BullMQ 5.80.4 reads it).
+  Then `unknown` ("A reason this console does not know", short "Unknown reason"), a delayed job whose record names a
+  reason within the reason charset (`DEFER_WHY_RE`) that the table does not hold, most often a newer worker's, whose
+  line names that reason's word with "no explanation yet"; and `none` ("No reason was recorded"), a delayed job with
+  no record it can use (none at all, an earlier episode's, or one whose reason fails the charset) that is not held on
+  `run.waitFor` (a held one with none is `check`). Each title is true of every job in its bucket, which is why a
+  reason a console cannot explain has a bucket of its own rather than `none`'s "No reason was recorded". A
+  source-shape test holds every reason to a site that writes it, and every site to a reason of the table.
+- **Field rules**, judged on the way in by `deferHsetArgs` (a field that fails its rule is left out and the record is
+  still written; a reason outside the table throws `RangeError`, a defect at the call site, and nothing is written)
+  and on the way out by `parseDefer`: `at` and `until` decimal integers with no leading zero from 0 to
+  253402300799999 (`DEFER_TIME_MAX_MS`, 9999-12-31T23:59:59.999Z, the last instant a UTC date-time can be written
+  with a four-digit year, so a console that draws an instant's first sixteen characters as `YYYY-MM-DD HH:MM` can
+  always draw one; it is not the latest instant a JavaScript Date holds, 8.64e15 in the year 275760, whose ISO form
+  writes the year as six digits with a sign, which those sixteen characters would draw as another date); `project`
+  `DEFER_PROJECT_RE` (a copy of `project-id.mjs`'s `PROJECT_ID_RE`); `host` `DEFER_HOST_RE` (a copy of
+  `worker-name.mjs`'s `WORKER_NAME_RE`); `holder` `DEFER_ID_RE`, `[A-Za-z0-9._:-]{1,200}` (the admin reader's
+  `RUN_ID_RE`); `endpoint` `DEFER_ENDPOINT_RE` (a copy of `model-endpoints.mjs`'s `MODEL_ENDPOINT_ID_RE`);
+  `budgetWhy` `DEFER_WHY_RE`, `[a-z][a-z0-9-]{0,31}`; `trigger` 0 to 9999; `attempt` and `attempts` 1 to 1000; `n`
+  `DEFER_N_RE`, 16 lowercase hex characters. The leaf carries the four copies because it imports nothing, and
+  `worker/test/defer-reasons.test.mjs` imports the sources and holds each copy to its source byte for byte. So every
+  value is an id, a name, a closed word or an integer: never a path, a repository name or payload text
+  (`INT-HOST-REGISTRY-CONTRACT`'s content rule).
+- **The write, then the move.** `writeReason` sends ONE `MULTI` of `DEL`, `HSET` and `PEXPIRE` on the key, so a reader
+  never sees this deferral's fields mixed with an earlier one's, raced against `DEFER_WRITE_TIMEOUT_MS` (2 s), and
+  always BEFORE the move, so the record is in place the moment the job is delayed. The bound is load-bearing: the
+  worker's client queues a command during an outage rather than rejecting it (`maxRetriesPerRequest: null`), so an
+  unbounded write would hold the deferral for the whole outage. The record is ADVISORY and fails open: a write that
+  fails, errors in its reply or outlasts the bound changes nothing about the deferral, and the job is moved all the
+  same. So the gate waits for the write at most the 2 s bound, and a deferral never fails for its reason. Nothing is
+  written where the processor's client has no `multi` (a bare test wiring, which then moves exactly as it always did)
+  or the job has no string id.
+- **The TTL**: `deferTtlMs(until, at)`, the time until the job is due plus `DEFER_TTL_SLACK_MS` (60 s), and never
+  less than 60 s, so the record outlives the job's promotion and the pickup that follows it.
+- **A timed-out MULTI may still land.** The bound stops the waiting, not the command: a queued MULTI runs when the
+  connection comes back. So a timed-out write still answers its nonce, and the compare-and-delete below goes out on
+  the same connection after it, so it runs after the MULTI if that lands at all. A record that lands for a job that
+  ran meanwhile is never read, since the job is not delayed, and expires with its TTL.
+- **A move that rejects** (a lost lock, Valkey gone) leaves a record for a job that is not delayed, so `deferTo`
+  removes ITS OWN record by a compare-and-delete on the nonce (`DEFER_CAD_LUA`: `DEL` only while `HGET n` is this
+  write's), bounded by the same 2 s with its own failure swallowed, and rethrows the move's rejection unchanged, so it
+  reaches BullMQ's failed-attempt handling exactly as a raw `moveToDelayed` rejection always did. A plain `DEL` could
+  remove the record another worker wrote for a later deferral of the same job id.
+- **The log, once per outage for each queue a worker drains.** The first failed write says
+  `defer_reason_unwritten { why, reason }`, `reason` a fixed word (`timeout`, `threw`, `rejected`, `error-reply`) or
+  an errno-shaped code, never an error's message (it can quote a URL); nothing more is said until a write succeeds,
+  which says `defer_reason_restored { why }` once. One writer per processor, and a worker runs one processor per queue
+  it drains (`createWorker`'s `[QUEUE, hostQueue]`: the shared queue and, on a host with one, its own), so one episode
+  spans every job that processor defers, never a line per wake, and a worker with a host queue says each line once per
+  queue. Every line goes through one guarded call: a logger that throws loses its line, never the deferral, and the
+  episode's state is set before the line, so it holds even when the line is lost.
+- **Readers start from the delayed set; the record alone proves nothing.** A record can outlive its deferral (a late
+  MULTI, a delete that failed) and a job can be delayed for a reason nobody recorded, so a reader lists the delayed
+  set first (`ZRANGE ... WITHSCORES`) and reads the records (`HMGET defer:job:<id>` of `DEFER_FIELDS`, in that order)
+  of the ids it found there only. The job's due time is BullMQ's own score: at 5.80.4 a delayed job's score is
+  `due * 4096 + counter` (`getDelayedScore.lua`; `DELAYED_SCORE_SHIFT`), so its due time is `floor(score / 4096)`
+  (`dueOfScore`, null for anything but a non-negative number or a non-empty string, so a missing member never reads
+  as a due time at the epoch, and null for a due time past `DEFER_TIME_MAX_MS`, since a score anything with the URL
+  wrote can be any double and such an instant has no date a console can draw). Every other instant the admin's
+  reader hands on from a hash is held to the same bound (`instantOf`, null past it): a job's enqueue instant and a
+  scheduler run's slot (`queuedAt`), a hold's `since` and `after`, and each answer's `at`; and the console draws an
+  instant only where `utcText` draws one, a whole number of milliseconds from 0 to `DEFER_TIME_MAX_MS`, the year
+  9999's last, past which it says "unknown", as it does before 1970 (`drawable` is `utcText`'s own answer). So a
+  console's line never says "at unknown": an instant no date can show is a missing value, and a sentence missing one
+  says its bucket's title instead (`waitingLine`). `readWaiting` reads a record whose `until` disagrees with that due
+  time (outside `until` minus 5 s to the later of `until` and `at` plus 5 s, `DEFER_STALE_MS`) as no reason at all,
+  an earlier episode's, never as the old reason. The leaf also holds `isSchedulerNext`: a `repeat:` job is its
+  scheduler's CURRENT next run only when its id is `repeat:<scheduler>:<the scheduler's score in the queue's repeat
+  zset>` (BullMQ's `isJobSchedulerJob.lua`).
+- **`parseDefer(values)`**, the HMGET reply in `DEFER_FIELDS` order: null when there is no `why` (absent, null or
+  empty), else every field, each null when absent or failing its rule. A `why` within `DEFER_WHY_RE` that the table
+  does not hold is read as unknown (`known: false`, bucket `unknown`): a newer worker's reason an older console has no
+  words for, which the console says by its token. A `why` outside the charset is no reason at all (`why: null`,
+  bucket `none`), and `readWaiting` reads such a hash as no record at all, so a held job with one still waits on its
+  check. The nonce is never returned.
+- **Deleted** by the writer (the `DEL` that opens each write, and its compare-and-delete after a rejected move), by
+  `removeQueuedJob` once the job it removed is gone, bounded and best effort, and otherwise by its TTL. Nothing else
+  deletes it, and NO DECISION READS IT.
+- **The falsification test**: delete every `defer:*` key while the fleet runs, and every job is deferred, moved and
+  run exactly as before; a console then says "No reason was recorded" for a delayed job (one held on `run.waitFor`
+  still reads as waiting on a time or a check, from its `wait:job` hash) until its next deferral writes one, and a
+  job past its due by more than the grace reads "Due since ...; no worker has taken it" with or without one. It is
+  not the Redis state `OQ-008` refuses: it describes delayed jobs, which Valkey already holds, expires with them, and
+  instructs nobody.
+- **What a record cannot promise** (`DES-WAITING-REASONS`): a failed write leaves the previous deferral's record, until
+  it expires, beside a job now delayed for another reason; a job BullMQ delays by itself (a raw gate rejection the
+  queue retries, a backoff `retryDelayOf` cannot know, a job added with a delay) gets no fresh record. Both show as a
+  record that is missing or whose `until` is not the job's due time, which is how a reader tells a record that
+  describes the wait from one that does not. Neither is shown once the job is more than the grace past its due:
+  it is then `due`, whatever its record says.
+- **Acceptance**: worker/test/defer-reasons.test.mjs (the closed tables, the leaf imports nothing, the four copied
+  rules, `parseDefer` against hostile values, the TTL, `dueOfScore`, `isSchedulerNext`, and "INT-DEFER-REASON-KEY
+  restates the leaf: its reason table is DEFER_WHYS with each bucket, its fields block DEFER_FIELDS, its bucket lists
+  DEFER_BUCKETS", which reads this section's reason table, its fields block and both of its bucket lists and holds
+  each two-way to the leaf), worker/test/defer-write.test.mjs (the write before the move as one transaction, a
+  failed or slow write still moves, the raw rethrow after the compare-and-delete, one log episode, a logger that
+  throws, `retryDelayOf`, `noteRetry`, "BY SHAPE: no module in worker/src moves a job to the delayed set except
+  through defer-write.mjs", "BY SHAPE: every reason in the table is written by a site, and every site writes a reason
+  from the table"), worker/test/defer-write.integration.test.mjs (a real Valkey and BullMQ: the record and the
+  score's due, a failed write, a wrong token, a retry's record against BullMQ's own delay), the gate tests that record
+  each site's reason (wait-gate, pause-gate, scope-mutex, host-budget-gate, podman-restart-hold, netns-keeper-young,
+  processor-bundles), admin/test/read-model-waiting.test.mjs (the reader, "readWaiting: every instant it hands on is
+  one a page can draw, at most DEFER_TIME_MAX_MS: ..." among them) and admin/test/read-model-waiting.valkey.test.mjs
+  (the reader against a real Valkey and BullMQ).
 
 ## Revision History
 
@@ -11172,3 +11458,4 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
 | 2026-10-23 (#737, PR 1) | Issue #737, PR 1: the Pulse foundation. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: a `panel` event's `id` may also name the shell's panel, `p-nav-parked`, the `<span id="p-nav-parked" data-panel>` inside the navigation's Parked pill, drawn on every live page and sent after that page's own panels by the same digest rule; its `html` is the count of unanswered parked runs, or empty when none waits or the count is unknown, and an empty one is hidden by the stylesheet. No event, field or route changed, and the client's `data-panel` guard is the same. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: no key added or changed; the navigation's count is drawn from the snapshot the page read (the same `parked` rows `/api/state` projects) or from the fleet reader's new `parkedCount()`, which no route exposes. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: the theme choice is no action and writes no row, and no row holds its cookie; no `kind` added. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked**: the theme cookie is not a session or a token and is never read as one. **Code evidence**: admin/src/console/shell.mjs -> NAV_PARKED_ID, navParkedCount, navParkedHtml, shellHtml; admin/src/console/pages.mjs -> panelIds, pagePanels; admin/src/console/page-css.mjs -> SHELL_CSS; admin/src/read-model.mjs -> createFleetReader (`parkedCount`); admin/test/helpers/console-pages-harness.mjs -> assertPanelsMatch. |
 | 2026-10-24 (#737, PR 2) | Issue #737, PR 2 (most of #711). **`INT-CONSOLE-EVENT-STREAM` AMENDED**: `end`'s data is `{"ended": <word>}`, never empty, the word a member of `STREAM_ENDS` (`idle`, `max`, `revoked`, `role`, `all`, `elsewhere`, `shutdown`) or null, and never `restart`; `shutdown` is the console stopping and not a sign-out (the page keeps itself, waits and asks `/api/whoami`; the terminal chat backs off and reconnects with its cookie, signing in again on a restarted console's 401 inside its retry loop); `elsewhere` ends a session's streams at once on a sign-out, and on a sign-in over its cookie once that sign-in's answer, with the new cookie, has gone out; on `shutdown` and `elsewhere` the page waits 2 s, asks `/api/whoami` and reloads only into the person it was drawn for, else goes to sign-in with `switched`; the terminal chat's once-a-minute re-login does not count a 401 saying `restart` or the first 401 after a `shutdown`, never an `end`, and at most once per stream that opened since the last sign-in; the request's `as=<name>.<role>` (`PERSON_PARAM`, the hub's stream and the transcript's), taken off before the page's query is parsed, a stream whose person is not the session's refused 401 `PERSON_CHANGED_STREAM` with `ended: "switched"` before any slot, none sent not checked, and `as` not read as a person on any other route; two new events, `stale` (`{"since": <ms or null>, "what": "tokens" or "data"}`, the hub time of the view's last good render, null when the hub holds none, and which failed) and `fresh` (`{}`), page streams only, a stream's state and its first message before any panel, each said once and again when it changes, a stream whose browser holds panels (a good render sent, a `Last-Event-ID`, or a `stale` told it) sent `stale` and no panel by a read-failed load and a first stream that holds none the degraded panels, never kept as what another stream of the view holds, a throw and an unreadable tokens file sending `stale` to every stream they were for, at subscribe only data and render judged, a client taking its stale state back on `fresh` alone; a tick that cannot read the tokens file ends no stream and sends no panel and no entry, only `stale` and the pings; the example shows the new events. **`INT-CONSOLE-STATE-API` AMENDED**: the 401 of every `/api/*` route and every write that needs a session is `{"error": "sign in first", "ended": <reason or null>}`, the `error` sentence as it was, with no Set-Cookie (it cleared the cookie before; a page's 303 and sign-out still do); the sign-in posts' own refusals (`POST /login`'s wrong token, `POST /login/code`'s refused link) carry `error` alone, and `switched` is never this 401's; a request with a session cookie while the tokens file cannot be used is `503` `TOKENS_UNUSABLE` with no Set-Cookie and the session kept, and `POST /logout`, which needs no session, ends every session its cookies name and is `200` with the clearing Set-Cookie whatever the file; a request whose `x-console-as` (`PERSON_HEADER`, the page's previews and confirms) names another person than the session's is `409` `PERSON_CHANGED` ("...; sign in again") with `ended: "switched"`, a write's with `html` (whose Look again the page sends to `/login?ended=switched`) and an audit row, and one without the header is not checked; a write's `503` carries the confirm bar's refusal as `html` too; `/api/run`'s errors say the same. `/api/state`'s keys and `version` UNCHANGED, checked. **`INT-CONSOLE-AUDIT-LOG` AMENDED, words only**: the row, the files, the chain and the closed vocabularies are as they were (no action, outcome or kind added; a confirm wraps the writer in `capturingAudit`, outside `auditedWrite`, and appends the same rows); the Verification bullet gains the opt-in `withLast`, which the audit page asks for: `last: {file, line, seq}` (the last row the chain vouches for), `suspect` (the row before a break whose line carries no `prev` that matches it, the `prev` compared before the line's other checks, since only a next line's matching `prev` vouches for a row; `last` then the row before it) and `files: [{file, seq, rows}]` (each month file's first `seq` and the rows walked, so row s is at line `s - seq + 1`), the result without it as before; the `action` bullet gains a sign-out's `logout` row for each session it ended and, with none held, the one `anonymous` row (outcome `ok`, "no session was held, so only the cookie was cleared"); the `reason` bullet gains the `person` guard; "Rate-limited refusals" gains that anonymous `logout` row, so the count is of rows and its reason says so; the `count` bullet CORRECTED: a resume's `count` (since #642) is the jobs waiting to start in what it resumes, not a bulk action's size, so a reader takes `count` by the row's `kind`. The reader's opt-in `positions` (each entry's own `YYYY-MM:<line>`, parallel to `rows`) is not in this entry, which describes no reader option; `DES-OPERATOR-CONSOLE` says it. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked**: the file and its reader are as they were; only what the console does while it cannot use the file changed (`REQ-CONSOLE-SECURITY` (i)). **Code evidence**: admin/src/console/live.mjs (`finish`, `markStale` and its `what`, `failingNow`, `markFresh`, a stream's `holds`, `said` and `degraded`, `drawDegraded`, `runTick`, `drawTick`, `subscribe`, `close`); admin/src/console/session-ends.mjs (`PERSON_PARAM`, `PERSON_HEADER`, `switched`); admin/src/console/server.mjs (`resolveSession`, the auth step, the person check, `PERSON_CHANGED` and `PERSON_CHANGED_STREAM`, `startSession`, `postLogout`, the count row's words, `SIGN_IN_FIRST`, `TOKENS_UNUSABLE`); admin/src/console/sessions.mjs (`readSessionCookies`); admin/src/console/script.mjs (`streamEnded`, `probe`, `samePerson`, the person each request says, `RETRY_MS`); worker/src/console-client.mjs (`endedOf`, `STREAM_SHUTDOWN`, `stream`'s `sinceShutdown` and `openedSinceRelogin`, `RELOGIN_WINDOW_MS`); worker/src/console-audit.mjs (`verifyConsoleAudit`'s `withLast`: `last`, `suspect`, `files`; `readConsoleAudit`'s `positions`). |
 | 2026-10-25 | The maintainer notes moved from `CLAUDE.md` to `AGENTS.md`, so the hand-written-table bullet's pointer names `AGENTS.md`. Words only, no contract changes; the context files pi discovers (`AGENTS.md` and `CLAUDE.md`) are unchanged. |
+| 2026-10-25 (#737, PR 3a) | Issue #737, PR 3a: why a job waits, and cancelling one that never started. **NEW `INT-DEFER-REASON-KEY`**: `defer:job:<jobId>`, the HASH the worker writes as it defers a job (`deferTo`, the one deferral, and `noteRetry` before the four `InfraRetry` throws): its twelve fields (`DEFER_FIELDS`) and their rules (`at` and `until` at most 253402300799999, `DEFER_TIME_MAX_MS`, 9999-12-31T23:59:59.999Z, the last instant a four-digit year can write, so a console can always draw one, where a Date's own limit, 8.64e15, writes a six-digit year), the closed vocabulary of twenty reasons in ten buckets (`DEFER_WHYS`, `DEFER_BUCKETS`), four of them the reader's own (`paused`; `due`, a delayed job more than `WAITING_DUE_GRACE_MS`, 10 s, past its due whatever its record says, said by `DEFER_DUE_SENTENCE`; `unknown`, "A reason this console does not know", a record whose reason has the reason charset and is not in the table, most often a newer worker's; `none`, no record it can use, or one whose reason fails the charset), each title true of every job in its bucket, the TTL (due plus 60 s, never less than 60 s), the write before the move as one MULTI bounded at 2 s and failing open (the gate waits for it at most 2 s and a deferral never fails for its reason), a timed-out MULTI that may still land, the compare-and-delete on the nonce when the move rejects and the rejection rethrown raw, a failed write logged once per outage for each queue a worker drains (one writer per processor, one processor per queue) and a logger that throws losing its line, never the deferral, readers that start from the delayed set and its BullMQ 5.80.4 score (`floor(score / 4096)`, `dueOfScore` null past `DEFER_TIME_MAX_MS`, every other instant the admin's reader hands on held to the same bound, `instantOf`, and the console drawing an instant only where `utcText` does, 0 to `DEFER_TIME_MAX_MS`, "unknown" outside it, before 1970 too, `drawable` being `utcText`'s own answer, so a line never says "at unknown"), `parseDefer`'s unknown and charset rules (an unknown reason is bucket `unknown`; a reason outside the charset is bucket `none`, and no record to `readWaiting`), the leaf export `./defer-reasons`, who deletes it, its falsification test, and its acceptance, which names the test that holds this section's reason table, fields block and both bucket lists two-way to the leaf. **`INT-WAIT-PROFILES-CONTRACT` AMENDED**: the operator surface says the worker now records which population a delayed job is in, so the console's `readWaiting` lists them without a guess and without a job's data, while the panel reads as before; the 30 s floor stays, the evidence for a reader older than the record; the CLI's cancel door reaches `removeHeldJob` through `removeQueuedJob`, which also deletes the defer record (the panel's, the tool's and the console's `cancel-held` doors leave it to its TTL); NEW bullet, the hold's `after` (the job's own instant, never the lease horizon) and its `a:<profile>` answers (`answerOf`, `noteAnswer`), with the admin's held rows' `checks`, `after` and `answers`, each instant at most `DEFER_TIME_MAX_MS`. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: a deferral writes no run record but its defer record, and "nothing records why a job sits in the delayed set" is past tense, the distinct instants kept as an older reader's evidence. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: `readLiveHosts` reads each row's PTTL beside its HGETALL and gives `ttlAgeMs`, `skewMs` and `noExpiry`, Valkey's clock used only as a duration, a skew claimed only past `HOST_SKEW_CLAIM_MS` (30 s), and a row with no expiry met only under a name an earlier beat indexed (a reader walks `host:live` and a beat SADDs after its PEXPIRE, so never a first beat): for a moment when a beat re-creates a row that expired while its name stayed, and for good when the process died between that HSET and its PEXPIRE; the admin's host rows carry them re-checked, beside the snapshot's `hostsReadAt`; no decision reads them, so the falsification test holds unamended. **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**: the CLI's held and queued branches are `removeQueuedJob`, which the console's `cancel-queued` shares, with its optional `guard` (a caller's last check, asked right before the removal is sent), its seven answers (`{ invalid, cleared: true }` for a held job whose removal failed after its hold was cleared, except where the first hold delete failed and the hold was read back in place, `HEXISTS` of its `since` (`holdInPlace`), which is `{ invalid }`, while a hold not read back, or a read that fails, keeps the mark, since a refusal can be the answer to ioredis's resend of a delete that already ran, and `{ refused, error? }` for the guard's refusal among them) and the defer record deleted after a successful remove, bounded and best effort; the CLI's output has one new line, for a held job whose removal failed after its hold was cleared, which says so and how to finish, and every line that carries another module's words (the registry's, a removal's, the error under the could-not-reach line) carries them bounded (each C0, DEL and C1 character a space, at most 200 characters, `boundedText`), so a line whose words hold none of those characters and are at most 200 characters long is byte for byte what it was; the code evidence widened. **`INT-DOCTOR-RESULTS-KEY` AMENDED**: two named ids, `egress.proxy` (docker's proxy line or the line that stands in for it, and podman's, hence `REPEATED_CHECK_IDS`) and `provider.key`, every other named id at one site, and why no id names a forge's credentials. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the kind `cancel-queued`; the row, the chain and the verifier are unchanged. **`INT-CONSOLE-STATE-API` AMENDED**, one sentence: a write's 503 for an unusable tokens file carries the setup bar with Close, where it offered Look again; the body of `/api/state` is UNCHANGED, checked (`stateOf` projects by name, a test holds it free of `waiting`, and its host rows name none of the three registry fields). **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: no event, field or route moved; the probe's one question is the page script's. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a deferral and a cancel of a queued job write no run record, and no reason token was added. **Code evidence**: worker/src/defer-reasons.mjs; worker/src/defer-write.mjs -> makeDeferTo, retryDelayOf, DEFER_CAD_LUA; worker/src/index.mjs -> makeProcessor (every deferral, the four retry exits, the check loop's answers); worker/src/wait-state.mjs -> answerOf, hold, noteAnswer; worker/src/host-registry.mjs -> readLiveHosts, HOST_SKEW_CLAIM_MS; worker/src/doctor.mjs; worker/src/doctor-results.mjs -> NAMED_CHECK_IDS, REPEATED_CHECK_IDS; worker/src/cancel-state.mjs -> QUEUED_STATES, removeQueuedJob, holdInPlace; worker/src/cancel-cli.mjs -> runCancel, boundedText; admin/src/read-model.mjs -> readWaiting, readWaitingRow, createFleetReader, hostRowOf, instantOf; admin/src/job-actions.mjs -> planCancelQueued, cancelQueuedJob; admin/src/console/actions.mjs -> drawable; admin/src/console/panels/common.mjs -> utcText; admin/src/console/server.mjs -> tokensUnusableBar. |

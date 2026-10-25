@@ -425,6 +425,18 @@ project id, size and start, and an `o` flag on a container whose stop did not ta
 `jobsMore` (how many it does not list) and `waiters` (jobs waiting for the host budget). Ids and numbers only: a job id
 outside the usual characters is published as its hash, and a repository name never is. Nothing decides on them.
 
+**What the console reads off a row's expiry.** Since issue #737 the console's reader also asks Valkey how long each
+host row has left before it expires (its `PTTL`, sent beside the row's own read, so it costs no extra round trip). It
+uses Valkey's clock only to count time, never as a time of day. From it each host row gets how long ago its expiry
+was last set (`ttlAgeMs`), an estimate of how far that host's clock is from the console's (`skewMs`, positive when the
+host's clock is behind; it carries up to one beat period and a round trip of noise, so less than 30 seconds is not
+called a skew), and whether the row has no expiry at all (`noExpiry`: a row the 90 second TTL will never remove). A
+host's first beat never reads that way, since the reader finds rows through the list of live names and a beat adds
+its name only after setting the expiry. A row with no expiry is one a beat did not finish: for a moment, when a beat
+writes again a row that expired while its name was still listed, and for good when the worker died between writing
+the row and setting its expiry. A reader that cannot ask, or a key that went between the two reads, leaves all three
+unknown. No page draws them yet, and nothing decides on them.
+
 What it does **not** check yet: whether two hosts are sharing a directory they should not be. That one is
 on you.
 
