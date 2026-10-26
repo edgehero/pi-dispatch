@@ -24,7 +24,7 @@ staging a workflow extension).
 
 | `on.type` | Fires on | Required in `on` | What narrows it | What the agent gets as its task |
 |---|---|---|---|---|
-| `cron` | your schedule | `id` (unique, no `:`) · `pattern` (5 or 6 cron fields) | nothing: a schedule is its own condition | `run.task`, written in the file |
+| `cron` | your schedule | `id` (unique, letters, digits, `.`, `_` and `-`, at most 176 characters) · `pattern` (5 or 6 cron fields) | nothing: a schedule is its own condition | `run.task`, written in the file |
 | `label` | a label on an **issue** (or an Azure work item), never a pull request | at least one positive selector, `any` or `all` | the label **predicate**: `any` (any of these) · `all` (all of them) · `none` (suppress-only, it can prevent a fire but never cause one) | the issue title and body |
 | `comment` | a comment containing your phrase | `phrase`, for example `@pi` | the phrase, and **one comment trigger per forge** | the comment body plus the issue title and body |
 | `pull_request` | a PR or MR event, including a submitted GitHub review, and including its close (the close word rides **alone**, never mixed with other actions; on GitHub and Forgejo a merged PR counts as closed, on GitLab only an explicit close fires it) | `action`, a non-empty array in your forge's own words | `action`, plus the same label predicate; where the forge has a label action and you name it, a positive selector becomes **required**; on a GitHub review, also `reviewState`; on a close-only rule, `number` and `once` instead of the predicate | the PR title and body, plus the review body when a review fired it |
@@ -42,7 +42,9 @@ relative path resolves against the worker's own directory) and, with `flow`, a `
 `comment` triggers need `run.repository`, because a work item belongs to a project and names no repository.
 The webhook types also charset check `run.flow` at load (skill names are lowercase). A flow that could
 never name a repo skill is refused when the file loads, at no cost, instead of failing inside a paid
-container.
+container. A cron `id` longer than 176 characters refuses the file too: each run its schedule starts is the job
+`repeat:<id>:<time>`, and the console and the panel read a job id of at most 200 characters (and a schedule's id of
+at most 176), so a longer one would run with nothing able to name it.
 
 Two matching behaviours to know before you turn on a paid trigger:
 

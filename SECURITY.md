@@ -402,7 +402,9 @@ The threat model, and what answers each part:
   nothing costs a bounded read of the mirror, not a walk of its whole history. This host's own run files are read
   into one shared index at most every 15 seconds, whatever the filter, and the newest 5000 kept; a live runs page
   refreshes every few seconds rather than every second, and one token's streams share one budget, so distinct
-  filters cannot multiply the load past a fixed bound. A run id outside the shapes the worker mints is
+  filters cannot multiply the load past a fixed bound. The overview's timeline choices (`rows`, `zoom`, `project`, each
+  a closed value) only regroup one read, so every overview stream shares it whatever they say. A run id outside the
+  shapes the worker mints is
   refused before any file path or Valkey key is built from it. No page read writes: the console's reader is built
   read-only, so it reads the run mirror without pruning it and leaves the held-jobs set as it finds it (the panel's
   own reader still tidies both, as it always did), and a test records every Valkey command a snapshot sends. The one
@@ -413,6 +415,23 @@ The threat model, and what answers each part:
   free text the screens show, a failed job's reason from BullMQ, is shown to the operator role alone, on a detail
   page alone, never in a list, and is absent from a viewer's `/api/state`. The audit page is the operator's alone.
   Secret profiles appear by name; no page shows a resolver, a reference or a value. No page shows a job's `.log`.
+  **Since #737 the overview says why each job that has not started waits**, from the worker's own record of it in
+  Valkey, which anything holding the Valkey URL could also write: so it is said only in the worker's vocabulary, a
+  reason word this console has no words for shown as that word (it passes the reason charset, at most 32 lowercase
+  letters, digits and hyphens, no wider than an id either role reads anyway) and escaped, while a wait check's
+  profile names, the operator's own configuration, are left out for a viewer. The first-run checklist says Valkey
+  answers, never its address, and names the deployment folder by its last part alone. A host the registry lists,
+  which anything holding the Valkey URL could also write, is shown only under a name in the worker name charset
+  (`WORKER_NAME_RE`: a letter or a digit, then letters, digits, `.`, `_` and `-`, at most 64 characters; looser than
+  the boot rule for `PI_WORKER_NAME`, which also refuses a `.json` or `.log` tail so that no file a worker names after
+  itself passes for a run record); any other is no host to any reader of the registry, the console's among them, and
+  no reader removes it. A job scheduler, which the same URL could also add, is named by the admin's surfaces (the
+  console, the `/dispatch` panel and its tools) only by an id and a job name in the cron trigger id's characters
+  (`[A-Za-z0-9._-]`) and at most 176 of them, the longest cron id the triggers file takes (`SCHEDULER_NAME_MAX` is
+  `CRON_ID_MAX`, `mapSchedulers`); any other is read as no name, never cut to one, and no other name stands in for
+  it: the schedule is still shown by its pattern and next run, every surface takes a trigger's scheduler by its id
+  alone (never by its job name or its pattern), and a planted id can neither widen a page nor pass for another
+  trigger's.
   **Since #643 the run page shows a running job's live transcript, to the operator role alone** (`OQ-044`,
   `REQ-LIVE-TRANSCRIPT`): what the agent said, the tools it called with their arguments, and what they returned, as
   the worker published it to Valkey, redacted (see [Live transcripts are in Valkey](#what-is-not-defended-v1)).

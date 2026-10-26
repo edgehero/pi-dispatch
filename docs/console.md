@@ -334,22 +334,41 @@ file changed after the preview (the panel, another browser, a hand edit), or a j
 it, the confirm is refused and nothing is written. Preview again. [Actions](#actions) lists every write.
 
 **The preview bar.** A preview opens in one bar right after the card whose button you pressed, never inside a table.
-While the console answers it says "Previewing" with Confirm greyed. Then it lists what will happen (a setting's
-change reads "maxTurns: **30** to **40**"), the diff for a file, what a paid action will reserve, and a line saying how
-the change can be undone. Where a write puts it back it reads **Undo:** and that write (deleting the trigger you add,
-setting a setting back to the value it had, resuming the queue you pause, withdrawing the message you send). A re-run's
-way back is cancelling the run it queues before it starts, and only the confirm knows that run's id, so its bar says
-"Cancel the new run before it starts: the banner after it is queued offers it." and the banner after it does (below).
-Where there is none it reads "No undo:" and what you can do instead: for a deleted line, copy it from this preview,
-since the console keeps no copy (for a deleted trigger that names secrets, its secret references come from your own
-copy of the file, since the preview does not show them); for a retry, the job keeps the attempts it made, so the
-console does not take it out of its queue, but Cancel stops it once it runs; for a setting whose old value the form
-cannot send back (an empty one, say), set it back by hand. The Confirm button says what it does ("Pause the fleet",
-"Delete trigger at index 1", "Retry for up to $2.00", "Retry (zero-rated)" for a job that cannot spend), yellow for
-an action that spends and red for one the
-console counts as destructive: a pause of the fleet or a queue (which Resume undoes, but which stops work), a cancel,
-a removal and a delete. The bar counts down the preview's 5 minutes, and at 0:00 Confirm stops working: preview
-again.
+On the overview a button in the row of four cards at the top (Needs you, In line, Running, Spend today) opens it under
+the whole row, never between two of its cards; in the columns under the row it opens right after its card. Wherever it
+opens, the page scrolls just enough to bring the bar into view and puts the keyboard focus on its title, so a screen
+reader and the Tab key go on from the bar; an answer that redraws the bar while the focus is in it puts the focus on
+its new title, and never takes a focus you moved elsewhere meanwhile. Each time the bar's contents change while it is
+open (the answer arrives, a refusal, a line of the page's own), the page scrolls just enough again, so an answer taller
+than the "Previewing" bar never leaves its Confirm below the screen's edge; and so it does when the page changes around
+the bar while you can see it (a card above it redrawn, the "Updates paused while you edit" note, a live note, the
+sign-out banner), but not once you have scrolled the bar wholly out of view to read something else. Closing the bar
+(Cancel, Close, or after an answer) puts the focus back on the button you pressed, or, when that card was redrawn
+meanwhile, on the same button in the redrawn card (the overview's Hosts card is redrawn almost every second, as its beat
+ages change), or on the card itself when it has no such button any more, so Tab goes on from where you were; it does so
+only when the focus was in the bar or nowhere, and never takes a focus you moved elsewhere either. A name too long for
+the bar (a host's queue in its lines, its Undo or its Confirm button) breaks inside it rather than widening the page.
+While the console answers it says "Previewing" with Confirm greyed. Then it lists what will happen (a setting's change
+reads "maxTurns: **30** to **40**"), the diff for a file, what a paid action will reserve, and a line saying how the
+change can be undone. Where a write puts it back it reads **Undo:** and that write (deleting the trigger you add,
+setting a setting back to the value it had, resuming the queue you pause, withdrawing the message you send, and for
+Resume fleet pausing again exactly what was paused before it: the whole fleet, or the one queue that was, of every queue
+the resume reaches, which is every queue a fleet pause reaches, the queue of a host that has stopped and left the
+registry included, so its preview names and counts that queue's jobs too). A re-run's way back is cancelling the run it
+queues before it starts, and only the confirm knows that run's id, so its bar says "Cancel the new run before it starts:
+the banner after it is queued offers it." and the banner after it does (below). Where there is none it reads "No undo:"
+and what you can do instead: for a deleted line, copy it from this preview, since the console keeps no copy (for a
+deleted trigger that names secrets, its secret references come from your own copy of the file, since the preview does
+not show them); for a retry, the job keeps the attempts it made, so the console does not take it out of its queue, but
+Cancel stops it once it runs; for Resume fleet on a fleet where more than one queue but not all of them were paused,
+pause those again by hand, one at a time, since no single write pauses only them (the line names them, and never offers
+Pause fleet, which would stop the hosts you had left running; when none was paused it says "No queue of the fleet was
+paused, so there is nothing to pause again.", and when the fleet did not answer the preview, it says which queues were
+paused is not known); for a setting whose old value the form cannot send back (an empty one, say), set it back by hand.
+The Confirm button says what it does ("Pause the fleet", "Delete trigger at index 1", "Retry for up to $2.00", "Retry
+(zero-rated)" for a job that cannot spend), yellow for an action that spends and red for one the console counts as
+destructive: a pause of the fleet or a queue (which Resume undoes, but which stops work), a cancel, a removal and a
+delete. The bar counts down the preview's 5 minutes, and at 0:00 Confirm stops working: preview again.
 
 The bar's other states:
 
@@ -559,12 +578,12 @@ readers ([Live updates](#live-updates)).
 
 | Page | What it shows |
 |---|---|
-| `/` | The overview ([The overview](#the-overview)): the running jobs and how many runs are waiting for an answer (and how many of those are being answered now) first, then whether the fleet is paused and whether any worker is online, the queue counts, today's spend against the caps, the hosts online and how long ago each last checked in, and the problems of the last 24 hours: failed runs, and refused runs with their most frequent reasons. |
+| `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) with the caps under it, and beside them the waiting jobs by reason ([Waitlists](#waitlists)) and the hosts. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. The Outcome column says completed, refused, failed, awaiting input or cancelled, amber for refused, awaiting input and cancelled and red for failed. A refused or failed run also names its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). |
 | `/run?id=<job id>` | One run, led by its **Outcome**: the outcome word, what the reason means, what to do about it, and a link to the reason's entry in [reasons.md](reasons.md) on GitHub ([The run page's outcome](#the-run-pages-outcome)). Then the run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
 | `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
-| `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
+| `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules (each by its trigger's id) with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. How far its hash chain is verified, which rows it does not vouch for, filters and a search ([The audit log](#the-audit-log)). A line that is not a valid row is shown as damaged in its place, never skipped. |
 
@@ -603,8 +622,10 @@ A test holds every colour pair the design declares (56 in each theme: each text 
 on, each status's ink on its tint and its text on its solid colour, the focus ring on the canvas and every surface)
 to WCAG AA contrast in both themes. A status mark's own colour is exempt (the amber attention mark is 2:1 against a
 card in the light theme), because a mark is not what tells a state: every status badge is an icon and a word; the
-kit's coloured dot is, by its rule, drawn only beside the word it marks (given a label, it also carries a name for a
-screen reader), though no page draws one yet; and every state of the live pill is a word beside its mark, except on a
+kit's coloured dot is, by its rule, drawn only beside what it marks (given a label, it also carries a name for a
+screen reader): the overview's Hosts card draws one per host, beside the host's name and the age of its last beat
+(amber once the beat is late), named "beating" or "beat late"; and every state of the live pill is a word beside its
+mark, except on a
 phone, where the pill is one mark whose shape says the state (a dot for Live, a retry arrow for Reconnecting, a stop
 square for Not live, the sign-out arrow for Signed out), each at 3:1 or more against the bar in both themes, its word
 kept for screen readers. Until a page is redrawn in the new design its panels are the old ones, and their colour
@@ -617,23 +638,28 @@ destructive preview, a preview with a line that has no space to break at, no cha
 one refusal at the preview and one at the confirm, the refusal for another person, a change that did not finish,
 and the banner after a write with an Undo and without one; each live note, a page shown as last seen and a panel
 kept still; the read-only banner; the audit page's damaged and not verified rows; every notice of the sign-in page
-and every state and notice of the one-time link's page. The top bar is checked too, at 320 and 375 pixels as a phone and
-at 761, 800, 940, 1024, 1180, 1280, 1440 and 1600, for an operator, a viewer, a read-only console and the longest name a
-token can have, with the bar read in every combination of the live pill's states, the theme button shown and hidden,
-and the Parked count as drawn, emptied and five digits long. In each of those reads no two of its parts overlap and
-the page does not scroll sideways; above a phone's width every pill of the navigation is wholly in view, focus ring
-included; at every width, a phone's too, the bar keeps its height through all of those reads; from 1440 pixels the
-bar of a console that is not read-only is one row, as the design draws it; a name or role that is cut ends in an ellipsis and
-its tooltip holds it whole, and the longest name is always cut where the bar shows it; and More, opened by a click
-(on a phone with its button left half scrolled out of the navigation and nothing focused, as a screen reader's
-activation is), opens inside the window right under its button, its button whole. One more run opens More with the
-page's script switched off and fails unless it opens under its button all the same (and unless the script really was
-off, and the run was made at all). Each run first checks two top
-bars built to fail, one built to break nine of its rules and a phone's bar built to break four (a jump with the last
-live word and one with its Parked count emptied, a page that scrolls sideways only while the count is emptied, and a
-More that shuts itself when opened with its button cut), and fails unless each fails with exactly those, so a check
-that stopped seeing one of those thirteen could not pass in silence. The other rules are held by the check's own
-tests.
+and every state and notice of the one-time link's page; the overview all clear, its first run for each role, each
+kind of wait alone, a host whose clock is out of step or whose registry row has no expiry, and the longest names it
+draws in running text (a host with the longest name a worker can have, its queue paused and holding a job waiting for
+its slot, another such host gone from the registry with a job left in its queue, a 176-character cron trigger next in
+Scheduled, and a long doctor result), and the preview bar under the Hosts card with the longest names in it (Resume
+fleet with two such hosts' queues paused, which its lines and its Undo name, and one such queue's Pause, which its
+lines, its Undo and its Confirm button name). The top bar is checked too, at 320 and 375
+pixels as a phone and at 761, 800, 940, 1024, 1180, 1280, 1440 and 1600, for an operator, a viewer, a read-only
+console and the longest name a token can have, with the bar read in every combination of the live pill's states,
+the theme button shown and hidden, and the Parked count as drawn, emptied and five digits long. In each of those
+reads no two of its parts overlap and the page does not scroll sideways; above a phone's width every pill of the
+navigation is wholly in view, focus ring included; at every width, a phone's too, the bar keeps its height through
+all of those reads; from 1440 pixels the bar of a console that is not read-only is one row, as the design draws it; a
+name or role that is cut ends in an ellipsis and its tooltip holds it whole, and the longest name is always cut where
+the bar shows it; and More, opened by a click (on a phone with its button left half scrolled out of the navigation and
+nothing focused, as a screen reader's activation is), opens inside the window right under its button, its button
+whole. One more run opens More with the page's script switched off and fails unless it opens under its button all the
+same (and unless the script really was off, and the run was made at all). Each run first checks two top bars built to
+fail, one built to break nine of its rules and a phone's bar built to break four (a jump with the last live word and
+one with its Parked count emptied, a page that scrolls sideways only while the count is emptied, and a More that shuts
+itself when opened with its button cut), and fails unless each fails with exactly those, so a check that stopped
+seeing one of those thirteen could not pass in silence. The other rules are held by the check's own tests.
 
 The console works in Chrome or Edge 88, Safari 14 and Firefox 78, or newer. In an older browser parts of the look are
 lost. A few details need a newer browser. Without one, some spacing and the focus ring fall back to
@@ -645,44 +671,416 @@ less neatly, and a page titled with a very long unbroken run id can scroll sidew
 
 ### The overview
 
-The overview leads with what may need you: the jobs running now, then the parked runs waiting for an answer. Below
-them:
+The overview leads with what may need you. The line under its title says it, and stays current while the page is
+open. It is one of four lines:
 
-- **Fleet**: whether the queue is paused, partly paused or running, and the workers. A worker is online when its host
-  checked in within the last minute (every worker checks in every 15 seconds). When no host has and the queue sees no
-  worker connected either, the panel starts with "No worker online: jobs queue but nothing runs them", and the queue's
-  state is never shown green, even when nothing is paused: jobs are accepted and wait, and nothing picks them up. A
-  host's check-in age is measured with the console host's clock against the worker's, so a worker whose clock is
-  behind looks staler than it is; while the queue still sees workers connected (a count with no clock in it), the
-  panel says "Host beats look stale (clock skew?), but the queue still sees its workers connected" instead, and the
-  queue stays green. Keep the hosts' clocks in sync (NTP) and the note goes away. The workers line says how many hosts
-  are registered and how many of those are online, and how many the queue sees connected when that is more. When the
-  host registry cannot be read, the page says it shows the fleet as last seen and judges nothing. "Failed jobs awaiting retry" is the queue's failed set: jobs whose last
-  attempt failed, which an operator can retry or remove on the fleet page.
-- **Spend against caps**: the jobs started today, this week and this month and the tokens used today, each against
-  its cap ("no cap" when none is set), then each dollar window. These windows are UTC days, Monday to Sunday UTC weeks
-  and UTC months, as the budget counts them, and the panel says so under them: "today" may have started at 02:00 your
-  time.
-- **Hosts online**, with how long ago each last checked in.
-- **Problems (24h)**: the failed runs and the refused runs of the last 24 hours, each linked to the runs list, and the
-  five most frequent refusal reasons, each as a short sentence linked to the runs it refused
-  (`/runs?outcome=policy&reason=<reason>`). A run an operator cancelled is not counted as refused: the runs list
-  shows it as cancelled, and nothing about it needs a rule changed. When every run the console read was inside the
-  day, both counts say "at least".
+- "All clear. 4 jobs running, nothing needs you.", only when the Needs you card says All clear (below);
+- "Needs you: 1 question and 3 to fix. 4 jobs running.", for what it counted;
+- when something Needs you reads could not be read, which one and what that leaves: "The failed jobs could not be
+  read, so what needs you is not known. 4 jobs running.", or, beside what it did count, "Needs you: 1 question. The
+  failed jobs could not be read, so more may need you. 4 jobs running.". Needs you reads four things: the parked
+  runs, the failed jobs, the doctor results and the host registry, whose hosts' failing doctors it counts to fix. A
+  registry that could not be read this time is never taken as read, even when the queue still sees a worker
+  connected (the queue's own list says only whether a worker is online, not which hosts there are), so the line says
+  "The host registry could not be read, so what needs you is not known." (or "so more may need you" beside what it
+  counted);
+- "Nothing needs you. 4 jobs running.", when nothing is to answer or fix but the last 24 hours had a failed or refused
+  run, or could not be read back a whole day (the card's last line says which).
 
-Money in lists and on the overview is shown in one form, to the cent with thousands commas (`$1,234.56`), so the rows
-of a column compare at a glance; hover it for the exact amount. An amount spent against a cap is rounded down, so a
-window a fraction of a cent short of its cap never reads as the cap (and a spend under a cent reads `$0.00`); a cap
-or a price is rounded to the nearest cent.
+With no worker online the line is never All clear, and starts with "No worker online: jobs queue but nothing runs
+them." (which then stands in for "Nothing needs you."). On a deployment that has never run a job the line says how
+many steps stand before the first one ([First run](#first-run)), and when Valkey cannot be read, that it could not be
+and the next refresh tries again.
+
+One rule holds on every card: a whole count, an empty sentence ("The settings overlay sets no cap.", "nothing is
+waiting", "No run has settled any spend today.") or All clear is shown only over what the console read in full. When a
+read failed, or stopped short, the card says that in a sentence of its own instead, rather than showing nothing as if
+nothing were there.
+
+Four cards come first, in a row:
+
+- **Needs you**: how many questions (parked runs nobody has answered) and how many things to fix (failed jobs the
+  queue still keeps, and hosts in the registry whose last doctor run has a failing check; a host gone from the
+  registry is not counted, since its doctor result outlives it by days), then up to four of them, each with its
+  project (where a run record the console read names one; a line says so once when a row has none) and id and one way
+  on: on a console that takes changes a question's **Answer** opens its run's page, whose Chat panel takes the answer
+  ([The Chat panel](#the-chat-panel)), and a failed job's **Retry** puts it back in the queue and can cost money
+  ([Actions](#actions)); elsewhere (for a viewer, and on a read-only console) each is **Open**, its run's page; a
+  failing host's **Open** goes to Fleet. Past four it says how many more, with links to Parked and Fleet (the two
+  numbers link there too). A question that a queued or running job is already answering is not counted: a line says
+  how many more are being answered now. Under them, the last 24 hours: "Last 24 hours: 2 failed and 9 refused, not
+  counting runs an operator cancelled.", each count linked to those runs on the runs list, and "at least" when the run
+  history the console read does not reach back a day; when that history holds neither, the line says so ("Last 24
+  hours: no failed or refused run among the runs read, but the run history read does not reach back a day."), since
+  it is why the card is not All clear.
+
+  A number is a whole count, and 0 means none, only when everything behind it was read: the questions need the parked
+  runs, and "to fix" the failed jobs, the doctor results and the host registry. When one could not be read, the card
+  says which in a line of its own, and the number says what was read as a floor ("1 or more to fix") or, with nothing
+  read, a dash beside "questions: not known", never a 0. When the host registry could not be read, no host's failing
+  doctor is counted (the console then shows the hosts as last seen, and one may have left since), and the card says "The
+  host registry could not be read, so failing doctors are not counted.", adding that whether a worker is online is not
+  known when the queue sees no worker connected either. The card shows its single "0 nothing needs you" only when all
+  four were read, a worker is online and nothing is to answer or fix, and says All clear ("No questions, failures or
+  refusals in the last 24 hours.") only when, beyond that, the last 24 hours were read back a whole day with no failed
+  and no refused run: the same rule as the line under the title, so the two never disagree. With no worker online it
+  says so, and is never All clear: nothing in line runs until a worker starts.
+- **In line**: how many jobs wait to start, how long the oldest has waited, and how many wait for each reason: a free
+  slot, another run, a time or a check, and a retry's backoff always, and a pause window, a host getting ready, a
+  paused queue, a job past its due that no worker has taken, a reason this console does not know, or no reason
+  recorded when a job does. Each reason is the one the worker recorded as it put the job back in line
+  ([wait-for.md](wait-for.md), trap 4); [Waitlists](#waitlists) lists the jobs. When the console's read of the waiting
+  jobs stopped short (a queue holds more than it reads, there are more than 64 queues, or a queue holds a job whose id
+  is not one the console shows), every number on the card is a floor: "5 or more jobs waiting to start", each reason's
+  count "2 or more" (or "-" where it found none of that reason), and "longest 40m or more", since the job that has
+  waited longest may be one it did not read; the card then says "Not every waiting job was read, so jobs in line may
+  be missing here.", the timeline's sentence for the same thing. When such a read found none, the number is a dash
+  beside "jobs waiting: not known", never "nothing is waiting".
+- **Running**: how many jobs run, in how many of all the hosts' slots, and each host's slots as dots (running, held,
+  free) with how many are free, "full", or how many a job that is gone still holds. A host that publishes no slot
+  count says "slots not published". With no host in the registry, jobs that run say so ("4 jobs running, slots not
+  published": a worker from before the registry). When the registry could not be read the card says so ("The host
+  registry could not be read; this shows the fleet as it was last seen."), under the hosts as last seen or in their
+  place, never that no host is registered. A host whose slots are not known has no dots and no slot shown free or
+  held: every host while the registry could not be read ("as last seen": its row is as the last read left it, so a
+  slot shown free there is one nobody knows is free), a host that has not checked in within the last minute ("not
+  beating", since a host that does not check in takes no job), and one whose list of running jobs could not be read
+  ("running jobs unreadable"); then the count of slots used is a floor ("in 5 or more slots"; with none counted, just
+  "nothing is running" or "4 jobs running, slots not known"). A long host name is cut short with an ellipsis to leave
+  room for its dots and words; hover it for the whole name.
+- **Spend today**: the deployment's day window, spent and held, against its cap and as a percentage of it; with no day
+  cap, or when that window's counter could not be read, the spend settled today (the dots' sum); with neither read, a
+  dash beside "not known". Under it a column of dots for each UTC hour so far, that hour's settled spend from the run
+  records (the hours under the dots are UTC), and a line that says what the dots are and where the number comes from
+  ("The number is the day window's spent and held.", or "The number is their sum."), with how many of today's runs
+  carry no settled amount; when no hour has settled anything, "No run has settled any spend today.", but only when
+  every run record of today was read. When the run records were not all read the card says "Not every run record of
+  today was read, so these hours may be missing spend.", and when the dollar counters could not be read, it says that
+  too.
+
+Under them, on the left, the [timeline](#the-overviews-timeline) and the caps; on the right, the
+[waitlists](#waitlists) and the hosts.
+
+- **Caps**: a capsule for each window that has a cap, filled to its percent used: the jobs started today, this week
+  and this month, the tokens used today, then each dollar window (`Deploy $` for the deployment's, a project's by its
+  id, a model's by the model alone, the key under them saying which of those is a project and which a model; a scope's
+  by its last folder, as every page shows a path, or a repository as it is, and the key names no scope). Open, Soft
+  hold and Full are words in the key as well as colours. On the job windows a mark shows the soft hold, at the
+  settings overlay's `softHoldPct`, and a job window at or past it is amber: from there the worker refuses new starts
+  and nothing is spent, which the card says. The token and dollar windows have no soft hold. A percentage short of the
+  cap is rounded down, so a window short of its cap never reads 100%. The caps show no money: Spend opens the Spend
+  page, which has the amounts. The windows are UTC days, Monday to Sunday UTC weeks and UTC months, as the budget
+  counts them, and the card says so: "today" may have started at 02:00 your time. The job and token caps and the soft
+  hold come from the settings overlay, so when the console could not read that file, or the worker would refuse it
+  (and with it every job), the card draws none of them and says "The settings overlay could not be read, so its caps
+  are not drawn."; the dollar windows are read on their own and still show. A window whose counter could not be read
+  is not drawn, and the card says so ("The job or token counters could not be read, so their windows are not
+  drawn.", "The dollar counters could not be read."). It says "The settings overlay sets no cap." only when no window
+  has a cap and nothing went unread, since over a failed read that would say the deployment spends without a limit;
+  the sentence names the overlay because a cap the worker takes from its own environment (`PI_DAILY_CAP` and the
+  rest) is in nothing the console reads.
+- **Hosts**: its head says what it counts: "3 beating" (the hosts that checked in within the last minute), "3
+  registered, 2 beating" when not all of them did, "3 registered, 2 beating, 3 connected" when the queue also sees more
+  workers connected than beat, "2 connected" with no host registered (the workers the queue sees), "none registered"
+  when it cannot say, and "as last seen" when the registry could not be read. Beside it, whether the fleet is paused
+  (or, when only some of its queues are, how many: "Partly paused: 2 host queues", "Partly paused: the shared queue", or
+  both; the Waitlists' Queues line and each host's row name them), and **Pause fleet** until the whole fleet is paused,
+  **Resume fleet** once any of it is (so a fleet partly paused offers both, as Fleet does). A worker is online when its
+  host checked in within the last minute (every worker checks in every 15 seconds). When none has and the queue sees no
+  worker connected either, the card starts with "No worker online: jobs queue but nothing runs them", with a link to
+  Fleet. A host's check-in age is how long ago Valkey last refreshed the host's registry row, which every check-in does,
+  so it needs neither host's clock and a worker whose clock is behind still checks in on time; only where the console
+  could not ask Valkey that is it the console host's clock against the worker's, and then a worker whose clock is behind
+  looks staler than it is. While the queue still sees more workers connected than check in (a count with no clock in
+  it), the card says "Host beats look stale (clock skew?), but the queue still sees its workers connected" instead. When
+  the host registry cannot be read, it says it shows the fleet as last seen and judges nothing. Then a row per host: how
+  long ago it beat (amber past a minute), its venues (its default first), its slots (no dots for a host whose slots are
+  not known, as on Running: one that has not checked in within the last minute, and every host while the registry could
+  not be read), its last doctor result in one line (the first failing check and how old the result is, how many warn,
+  how many pass, or "No doctor result yet"), its own queue's waiting and running counts, and the pause of its own queue
+  (Resume once it is paused). A host's name, its notes and its queue break wherever they must, so a 64-character name,
+  the longest a worker can have, fits a phone; a name outside the characters a worker name is made of (a letter or a
+  digit, then letters, digits, `.`, `_` and `-`, at most 64; one written into Valkey by hand) is no host and is not
+  shown. A host whose list of running jobs could not be read says so ("Its list of running jobs could not be read, so
+  how many it runs, and how many of its slots are free, is not known."). A host whose clock is more than 30 seconds out
+  from the console's gets a line that says by how much ("build3's clock is about 1m 48s behind this console's: its beat
+  says 2m ago, and Valkey last refreshed its row 12s ago."), measured against how long ago Valkey last refreshed the
+  host's row, which needs neither host's clock ([multi-host.md](multi-host.md)). Keep the hosts' clocks in sync (NTP)
+  and the line goes away. A host whose registry row has no expiry, so that it never leaves the registry by itself, is
+  said too: the host may be gone, and doctor or a restart of its worker clears it.
+
+The fleet page judges the queue the same way: with no worker online its Fleet line is never green, even when nothing
+is paused ("not paused, but no worker is online").
+
+Below 1,200 pixels the two columns stand one under the other and the four cards two to a row; on a phone everything is
+one column, Needs you first.
+
+**What a viewer sees.** The same cards, numbers and ids, with no button that changes something (Retry, Cancel, a
+host's pause, Pause fleet), none of the waitlists' links (their Open Fleet, Edit and Chain) and no command to copy; a
+row of Needs you opens its run's page or Fleet, and the "No worker online" warning's Open Fleet is there too. Why a
+job waits is said in the worker's own words for both roles, a reason this console has no words for (one a newer worker
+recorded) included, as its word with "no explanation yet", since saying no reason was recorded would be false; a wait
+check's profiles and their last answers, and the sentence about a slot a gone job holds, are an operator's. Nobody
+reads a failed job's own text on the overview: its row is its id. An operator on a read-only console reads all of
+that, and gets no button and none of the waitlists' links either.
+
+**Where the old panels went.** Before issue #737 the overview was the old panels, one under another. What they showed
+is still here, or one click away:
+
+- whether the fleet is paused: the Hosts card's head (Paused, or Partly paused with how many queues are), and each
+  queue's "paused" in the Waitlists' Queues line and on its host's row;
+- the queue counts: the Waitlists' Queues line, and each host's own queue on its Hosts row; the whole table is on
+  Fleet;
+- the parked runs waiting for an answer, and how many are being answered: Needs you's questions;
+- the failed jobs awaiting retry: Needs you's "to fix", with Retry; every failed job, with its record's reason, is on
+  Fleet;
+- the problems of the last 24 hours: Needs you's last line, linked to the runs. The five most frequent refusal reasons
+  are in [`/api/state`](#the-state-api) (`refusals24h`), and the runs list filters the refused runs by reason;
+- "No worker online" and the stale-beats note: the Hosts card;
+- how many workers there are: the Hosts card's head, which says how many hosts beat, and how many are registered and
+  connected where those differ;
+- the spend against the caps: Caps, as percentages, and Spend today, in money;
+- the running jobs with their progress: the fleet page's Active jobs table ([Run progress](#run-progress)); the
+  overview counts them in Running and draws each one on the timeline.
+
+### The overview's timeline
+
+The timeline ("Runs by project", or "Runs by host") draws the last hours as one row per project or per host: left of
+the now line what ran and runs ("Ran and running"), right of it what is in line ("In line"). Each mark is a pill with
+its id where it fits (a cron trigger's run in line by its trigger and its run time instead, "hourly-sync" with "15:00
+run", since `repeat:hourly-sync:1791471600000` says neither), and its tooltip says the id, the target and what
+happened, with UTC times. A run that just ended can take up to 15 seconds to appear among the ended runs: the console
+reads the run history at most that often. The key under it names each kind, so a colour is never the only cue:
+
+- **Completed**: a run that ended completed. A run an operator cancelled, and a question answered since, are drawn the
+  same and titled so.
+- **Running**: a running job, from its start to now, labelled with its host (by project) or its project (by host).
+- **Awaiting input**: a run that asked a question nobody has answered, its pill and then a tail to now. "Waiting for
+  you" is written over the tail where it ends before the now line, else with the id before the pill; neither ever
+  reaches now, since right of it is what is in line, which a question is not. A question older than the window is
+  still drawn, as the tail alone.
+- **Failed**: a run that failed, or whose outcome this console does not know.
+- **Refused**: a circle at the instant the run was refused: a refusal spends nothing and takes no time.
+- **Slot held**: a job that is gone while its container still holds a slot on its host ("still holds a build3 slot"),
+  from when it took the slot to now.
+- **In line**: a job waiting to start, from when it is due (or just right of now, when it is due already) to the
+  window's end, with its reason's mark (each reason its own: a bell for a job past its due that no worker has taken, a
+  tag for a reason this console does not know) and words ("needs a build3 slot", "retry in 4m", "checks again in 12m",
+  "due since 15:30"). Each reason has one latest start: the last place in the window where its mark, a name of ten
+  characters (a longer one cut to its first nine), its reason's word and a time still fit. A pill starts at its due
+  time, the dotted gap from now leading to it, unless that is later than its reason's latest start; then it is drawn
+  there, further left, and says its due time, since where it starts is no longer when ("check 07:00", in UTC as the axis
+  is; "window in 2d 4h" for one more than a day off). So of two jobs waiting for the same reason, the one due later is
+  never drawn left of the other, whatever their names; only near now can a pill moved left stand before one of another
+  reason due earlier, and then it says its time. A pill too narrow for its words says its reason in one ("slot",
+  "retry", "due", "not ready"). Every pill keeps its mark and its reason's word: when room is short its name is what is
+  cut, down to nothing on a narrow pill far from its due, and its tooltip and the Waitlists card name it whole. A cron
+  trigger's next run is drawn here once it is overdue, since then it waits in line like any other job. An arrow ("waits
+  for a run") leads to it from what it waits for, when that is in the same lane: the run a chained job follows, the run
+  a recovery continues, or the gone job whose slot it needs (a job past its due waits on none of them). A dotted line
+  leads to a due time still to come.
+
+By project, a row is the record's project, with its repositories (at most two, the ones it ran most) under its name,
+and what carries no project comes last as "no project". By host, a row is the host the record, the registry or the
+waiting job names (a job in a host's own queue is that host's); the shared queue's waiting jobs are "any host", and
+what ran on a host nobody named is "host not known". A name too long for the row heads' column is cut with an
+ellipsis; hover it for the whole name. A row has at most four lanes: when more overlap it keeps what a person acts on
+(running, held and awaiting input, then failed, refused and in line) and fits completed runs in what is left, and its
+head says "+3 more". Each job in line takes a lane of its own, so a row draws at most four of them, the next four to
+start (a job that waits for something on its row first, then the soonest due), and counts the rest, however many
+thousands wait (the Waitlists card lists them). The timeline draws at most 12 rows, the ones with the most pressing
+marks first (then the most marks, then by name), in name order; a line under the timeline, outside its scroll box,
+says how many more rows it left out and how many runs and jobs they hold ("3 more rows are not drawn (41 runs and jobs
+in them)."), so a phone shows it whole. A screen reader hears each row once, with every count ("web: 5 completed, 1
+failed, 2 running, 3 in line").
+
+Above it, the project chips: All, then each project the window holds, with how many marks it has, at most 24 of them,
+chosen as the rows are and shown in name order, the rest said as "+5 more"; All counts every project, those too. The
+chips wrap onto as many lines as they need, so every one shows; on a phone they are one line that scrolls sideways.
+One shows that project's rows alone; All goes back. A project you filter by that has nothing in the window, or would
+not be among the 24, still has its chip (with 0 when it has nothing), so the way back is always there. Beside the
+title, Project and Host pick the rows, and 1h, 3h and 24h the window:
+
+| Window | Reaches back | Looks ahead |
+|---|---|---|
+| `1h` | an hour | 30 minutes |
+| `3h` (the default) | 3 hours | an hour and a half |
+| `24h` | a day | 12 hours |
+
+Now is two thirds of the way across at every window. The axis is UTC and says so: its times are drawn inside the
+picture, where the page's script cannot turn them into your time zone as it does every other time on the page. The
+times written on the pills are UTC too.
+
+The timeline is at least 720 pixels wide and scrolls sideways inside its card wherever the card is narrower: on a
+phone, just above a phone's width (up to about 810 pixels), and beside the right column on windows from 1,200 to about
+1,300 pixels wide. On a phone it opens scrolled to its end, where now and what is in line are; scroll back for the row
+heads and the earlier hours. Under it a line says each read that was not whole: the run history could not be read
+(then only what runs and waits is drawn), some run records could not be read ("Some run records could not be read, so
+runs in this window may be missing."), the console read only the newest runs and older ones in the window may be
+missing, or the waiting jobs could not be read, or not all of them ("Not every waiting job was read, so jobs in line
+may be missing here."). "No run in this window, and nothing in line." shows only when the run history was read whole
+and every waiting job was read.
+
+**The overview's address.** The choices are its query: `?rows=project` or `?rows=host`, `?zoom=1h`, `3h` or `24h`, and
+`?project=<project id>`, each optional (the defaults are by project, 3 hours and every project), and the links the
+card draws leave a default out. The overview takes no other parameter, and a value outside these is refused with the
+400 page, which names the parameter and what it takes, never what was sent. Every grouping, window and project is
+drawn from the same read of the deployment: three open tabs on three groupings are read once a second together, as one
+tab is ([Live updates](#live-updates)).
+
+### Waitlists
+
+The Waitlists card lists the jobs waiting to start by why they wait. A bar at its top shows each reason's share, each
+part at least wide enough for its mark and its count (it wraps onto more rows when they do not all fit); then a
+group for each reason that has jobs, in this order:
+
+| Group | What its jobs wait for |
+|---|---|
+| Waiting for a free slot | a job slot on its host or room in its host's budget, a host where its size fits, its folder, repository, project or model endpoint to be free, or a host that serves its secret bundle's profile; and every job waiting its turn in a queue that is not paused |
+| Waiting for another run to finish | the run a chained job follows, or the run a recovery continues while that run's attempt still runs |
+| Waiting on a time or a check | its [`run.waitFor`](wait-for.md): the `after` time, or its wait check |
+| Retry backoff | the next attempt after a failed one |
+| In a pause window | the end of a pause window |
+| Waiting for its host to get ready | rootful Podman's service to restart, or the network keeper to settle |
+| In a paused queue | its queue to be resumed |
+| Due, and no worker has taken it | a worker to take it: it is more than 10 seconds past the time it was due, whatever it recorded ("Due since <time>; no worker has taken it"), a cron trigger's overdue next run among them |
+| A reason this console does not know | what its record names, a reason this console has no words for (most often a newer worker's), shown as its word with "no explanation yet" |
+| No reason was recorded | nothing the worker recorded: a worker older than the record, a retry the queue made by itself, a job added with a delay, or a record that is an earlier wait's or that names no reason at all |
+
+Each group lists up to five jobs, then says how many more it does not list ("And 3 more waiting for this, not listed:
+the overview lists the first 5 of each reason."). A job's line has its project (where it is known before the job
+starts; when a line shown has none, a note says once that such a job "is in no project, or its project is not known
+until it starts"), its id and why it waits in the worker's own words: "build3 has no free job slot", "Chained after
+gh-b3d7; starts when its folder is free", "Held until <time>", "Attempt 2 of 3 at <time>". A cron trigger's run is
+named by its trigger and its run time ("hourly-sync, <time> run"), its id (`repeat:<trigger>:<time>`) in the tooltip.
+The line adds the job that is gone and still holds one of the host's slots, where a job sits in the queue of a host
+the registry no longer names ("It is in `pi-jobs@zeta`, whose host is not in the registry": only that host's worker
+takes jobs from it), how long a held job has been held, and for an operator each wait check's last answer (met, not
+yet, fault, refused or unclear). A long id or name (a host, a host's queue, the job holding a slot) wraps inside its
+line rather than pushing the line out of the card: a name that fits a line moves to the next one whole, and only a
+longer one breaks. A line's action stays at its right, also when it wraps onto a line of its own.
+
+For an operator on a console that takes changes, a line has at most one action:
+
+- **Open Fleet**, on a job waiting for a slot on a host where a job that is gone still holds one: a link to the fleet
+  page, where the host is. There is no button that frees the slot, since the console reaches no other host's container
+  runtime, and the group says so for an operator ("The slot frees when that job's container is gone; nothing in the
+  console reaches another host's runtime.").
+- **Edit**, on a cron trigger's next run that is overdue, while the triggers file holds that trigger: a link to the
+  configuration page, where it is. It gets no Cancel, since the queue refuses to remove a trigger's next run.
+- **Chain**, on a job waiting for another run: a link to that run's page.
+- **Edit**, on a job held on a check whose record names its trigger: a link to the configuration page, where the
+  triggers are.
+- **Cancel**, otherwise, on a job that never started ([Cancelling a queued job](#cancelling-a-queued-job)). A job
+  waiting to retry has made an attempt, so it gets none.
+
+When no job waits for a slot, another run, or a time or a check, the card says so in one line, but only when it read
+every waiting job. When the read stopped short, one line says the counts are a floor, for both roles: "Only the first
+64 queues were read; 3 more were not, so the counts are a floor." (more than 64 queues), or "A queue holds more
+waiting jobs than are read, so the counts are a floor." (also when a queue holds a job whose id is not one the console
+shows, which it counts as not read), or both in one sentence. Under the groups, always:
+
+- **Queues**: each queue's counts, the shared `pi-jobs` and each registered host's by its name (`@build3`): paused,
+  how many wait, how many are delayed, and how many the pause holds; then each other queue that still holds jobs in
+  line, most often one whose host left the registry ("`@zeta` 3 in line, its host not in the registry"); a queue a
+  host left behind with nothing in it is not listed. A queue whose name is too long for the line puts its counts on
+  the line under it;
+- **Scheduled**: the next three cron fires, soonest first, each by its trigger's id, and how many more. The console
+  shows a schedule's id only when it is made of the characters a trigger id may hold, at most 176 of them, the longest
+  cron id the triggers file takes ([triggers.md](triggers.md)); one written into Valkey by hand may be neither, and
+  then no other name stands in for it (not the schedule's job name, `local` for every one): it is left out here, and
+  the fleet page's Schedules table shows it as "-", with "-" for its stalls, beside its pattern and next run;
+- **the soft hold's refusals**: "The soft hold refuses rather than holds. 3 today.", linked to those runs. None of
+  them waits in line: from the soft hold the worker refuses a new start rather than queueing it, so a job it turned
+  away is a refused run, never a waiting one. The line shows when the settings overlay sets `softHoldPct` or the soft
+  hold refused a run today.
+
+### First run
+
+A deployment that has never run a job sees a checklist in the overview's place, "Getting ready": how many of its eight
+steps are ready, a bar of them, and what jobs wait for ("Jobs start once a worker runs and its egress proxy is up.").
+The line under the title says how many steps stand between the deployment and its first job ("The console is up. Two
+steps stand between this deployment and its first job."). The page stays the overview, and it updates as each step is
+done: as soon as the checklist no longer applies (below), the overview takes its place without a reload.
+
+**When it applies.** Only when the console read the deployment's Valkey, no run is on record (neither among the newest
+runs nor in the last 24 hours), and either no host is registered (in a registry that was read) or the triggers file
+holds no trigger. So a Valkey that does not answer for a moment never turns the overview into the checklist (its cards
+say Valkey could not be read), and neither does every worker of a deployment that has run jobs going down: its
+overview says no worker is online.
+
+**The steps**, in doctor's order, each Ready, Not yet, Check, To do or Optional:
+
+1. **Deployment**: the deployment folder the console reads its files from, by its last folder alone.
+2. **Queue**: "Valkey answers." It never shows Valkey's address: a viewer's page carries none.
+3. **Console token**: whether you are signed in as an operator or a viewer; an operator is offered the command that
+   makes a viewer token for people who only watch.
+4. **A worker**: a registered host that beat within the last minute (measured as the Hosts card measures it, by when
+   Valkey last refreshed its row), or, with no host registered, a worker the queue sees connected. A host that is
+   registered but has not beat for a minute is Check, and so is a host registry that cannot be read; none is Not yet,
+   with `pi-dispatch service install`, or `pi-dispatch worker` to run one in a terminal.
+5. **The egress proxy**: the worst any host's last doctor run said of its egress proxy, on every venue that runs one.
+   Not running is Not yet ("Every job is refused before it starts until the egress proxy runs."), with
+   `pi-dispatch up`. A doctor result that does not name the check is Check (egress may be off there, or that doctor is
+   older than the check); no doctor result at all is To do, with `pi-dispatch doctor` (a worker runs doctor a minute
+   after it starts).
+6. **The provider key**: the worst any host's doctor said of the provider key, whether it is found and never its
+   value, with `pi-dispatch doctor` to run again once it is set. A doctor that checked the provider but not the key by
+   name is older than the check, and the step says so.
+7. **A first trigger**: how many triggers the triggers file holds. A file that does not load is Not yet, and none is
+   To do, with **Add a trigger** for an operator on a console that takes changes (it opens the configuration page) and
+   a link to what triggers can do ([`triggers.md`](triggers.md)).
+8. **Forge credentials**: Optional while every trigger is a cron trigger; with a label, comment, issue or pull request
+   trigger, the worst of doctor's GitHub and other forge checks.
+
+Each step that doctor judged says which host's doctor said it, and the card says how long ago the newest doctor run
+was. A check that did not pass is quoted as the check it is, failing or warning, never as if doctor said it was so (a
+check's label names the check, and many read as the passing case): "Doctor on build3 reports a failing check: <the
+check's label>.", then what it means for jobs, or "Doctor on build3 reports a warning: <the check's label>.". Beside
+the steps, **Do it from pi** offers the guided setup in pi, which walks through every step and asks before each one
+and never asks for the provider key; and **The Overview, once it runs** shows what each of its cards says while
+nothing has happened yet ("nothing needs you", "no runs in the spend window", ...), except that In line, Running and
+Hosts say what they already have ("2 jobs waiting to start", "1 host registered", or, when the waiting jobs were not
+all read and none was found, "Not every waiting job was read, so jobs in line may be missing here."), so the preview
+never says no host is registered beside a host that beats.
+
+The shell commands an operator is offered, each with a Copy button:
+
+```bash
+pi-dispatch-console token add --name '<name>' --role viewer
+pi-dispatch service install
+pi-dispatch worker
+pi-dispatch up
+pi-dispatch doctor
+pi-dispatch setup github --webhook-url '<receiver URL>'
+```
+
+`setup github` is refused without `--webhook-url` or `--no-webhook`, so it is offered whole. A command with a
+placeholder in angle brackets carries a line under it that says what to put there, since a command copied as it
+stands does something nobody asked for: for the token, "Put a name for whoever will hold the token in place of
+`<name>`; the command prints the token once."; for `setup github`, the public URL of this deployment's
+`pi-dispatch-receiver`, where GitHub delivers events, in place of `<receiver URL>`, or, without a receiver,
+`--no-webhook` instead of `--webhook-url` and its URL. Do it from pi offers `/dispatch setup`, which runs in pi. A
+viewer sees the same steps and states with no command, no hint and no Add button; on a read-only console an operator
+still gets the commands and their hints (they run in a shell, not here), but not the Add button.
+
+### Money and times
+
+Money in lists and on the overview's Spend today card is shown in one form, to the cent with thousands commas
+(`$1,234.56`), so the rows of a column compare at a glance; hover it for the exact amount. An amount spent against a
+cap is rounded down, so a window a fraction of a cent short of its cap never reads as the cap (and a spend under a
+cent reads `$0.00`); a cap or a price is rounded to the nearest cent. The overview's Caps show percentages, not money.
 
 Times written out on a console page (the run lists, the run page, the fleet's schedules and failed jobs, the parked
-inbox, the audit log, the instants in the Spend page's budget split and capacity text, and the lines of a preview bar,
-such as a waiting job's "Held until <time>") are in your browser's time zone, with its UTC offset (`2026-10-08 17:39
-UTC+2`); hover one for the UTC time. The console sends UTC (the same page for every reader), and the page's script
-turns it into local time, so with scripts off a page reads UTC. Some times stay UTC on purpose: the live transcript's
-entry times (`HH:MM:SS UTC`, to the second), the hover tips on the Spend page's charts (they say "UTC"), the charts'
-day labels and daily buckets (UTC days, the budget's), and the budget split's short "at MM-DD HH:MM" notice, which
-uses the panel's words. The insights file written by `/dispatch insights` runs no such script, so its times read UTC.
+inbox, the audit log, the overview's waiting jobs and schedules, the instants in the Spend page's budget split and
+capacity text, and the lines of a preview bar, such as a waiting job's "Held until <time>") are in your browser's time
+zone, with its UTC offset (`2026-10-08 17:39 UTC+2`); hover one for the UTC time. The console sends UTC (the same page
+for every reader), and the page's script turns it into local time, so with scripts off a page reads UTC. Some times
+stay UTC on purpose: the overview timeline's axis, its marks' tooltips (they say UTC) and the times on its pills, the
+hours under the Spend today card's dots (plain `HH:00`, under a chart of UTC hours), the live transcript's entry
+times (`HH:MM:SS UTC`, to the second), the hover tips on the Spend page's charts (they say "UTC"), the charts' day
+labels and daily buckets (UTC days, the budget's), and the budget split's short "at MM-DD HH:MM" notice, which uses
+the panel's words.
 
 ### Outcomes and reasons
 
@@ -730,8 +1128,8 @@ while something is parked, up to 10,000 queued and running jobs in all (it reads
 text). When that look cannot see everything, the column says unknown and the park gets no answer form, as the run
 page's Chat panel draws none: a queue too deep to check says so ("answer it on the forge, or wait until the queue is
 shorter"), because on such a queue an answer already sent can wait longer than the ten minutes in which a second one
-would be dropped as a duplicate. The overview's waiting count leaves out the parks being answered and says how many there
-are. The count of resumes
+would be dropped as a duplicate. The overview's Needs you leaves the parks being answered out of its questions and
+says how many more are being answered now. The count of resumes
 comes from the session store, so the console can read it only when `PI_SESSIONS_DIR` is on its own host; anywhere
 else, and for a pull request (whose session the record cannot name), it shows as unknown rather than as 0.
 An operator can answer an issue's parked run from this page ([Answering a parked run](#answering-a-parked-run)).
@@ -791,7 +1189,8 @@ its hosts view (`u`).
 
 ### Run progress
 
-Every running job shows where it is. The overview's and the fleet page's running jobs have a Progress column: the
+Every running job shows where it is. The fleet page's running jobs have a Progress column (the overview draws each
+running job on its timeline, without one): the
 turn, the steps done and failed, the tool running now and for how long, and the phase (2 of 4) when the job reports
 phases. The run page has a Progress panel at the top: the same counters, the tools running, the last steps with how
 long each took, and the phase as numbers ("Phase 2 of 4: 3 of 10 done"). An operator also sees the phase names the
@@ -905,6 +1304,9 @@ is refused here with the same words, and every action lands in the [audit log](#
 
 | Where | Action | What it does |
 |---|---|---|
+| Overview | Retry | A failed job in Needs you, as on Fleet (below). |
+| Overview | Cancel | A job in the Waitlists that never started ([below](#cancelling-a-queued-job)). |
+| Overview | Pause, Resume | One host's queue, on its Hosts row, or with Pause fleet and Resume fleet the whole fleet, as on Fleet (below). |
 | Fleet | Cancel | Stops a running job on whichever host runs it, or removes a held one. A running job that no worker acknowledges is reported as not cancelled, never as done. A held job whose removal was asked for and not answered within the time limit, or whose hold was cleared while the job itself could not be removed, is reported as a change that did not finish, never as nothing changed. A held job's preview comes within 10 seconds whatever Valkey does (past that it says the fleet did not answer within 10 seconds, and that nothing was changed), and its answer within its own time limit. |
 | Fleet | Retry | Puts a failed job back in the queue. The worker runs it again from the start, through every budget check, so it can cost money. The job keeps the attempts it made, so it has no Undo: Cancel stops it once it runs. |
 | Fleet | Remove | Deletes a failed job from the queue. Its run record stays. |
@@ -912,7 +1314,7 @@ is refused here with the same words, and every action lands in the [audit log](#
 | Fleet | Retry all, Remove all, Cancel all held | The bulk actions (below). |
 | Parked | Answer | Sends your answer to a run that is waiting on an issue ([below](#answering-a-parked-run)). Costs money. |
 | Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. Its banner's Undo cancels the new run before it starts. |
-| After a re-run | Cancel a queued job | Takes a job that never started out of its queue ([below](#cancelling-a-queued-job)). |
+| After a re-run | Cancel a queued job | Takes the job the re-run queued out of its queue before it starts ([below](#cancelling-a-queued-job)). |
 | Run | Steer, Follow-up, Withdraw | Sends a message to a running, steer-armed job, or takes one back ([below](#steering-a-running-job)). Spends from the run's own reservation. |
 | Run | Sandbox | Shows the command that opens the run's sandbox on the host ([below](#opening-a-sandbox)). |
 | Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, secret profile names, and bundle resolvers (a name, a path and a format). |
@@ -1006,15 +1408,17 @@ After a re-run is queued, the banner's **Undo** offers to cancel the new run bef
 ### Cancelling a queued job
 
 The console can take a job out of its queue before it starts: waiting, delayed, waiting by priority or in a paused
-queue, held on a [`run.waitFor`](wait-for.md) condition or not. Today the way to it is the Undo on a re-run's banner.
-It takes only a job that has never started, and refuses, with nothing changed:
+queue, held on a [`run.waitFor`](wait-for.md) condition or not. The ways to it are Cancel on a job in the overview's
+[Waitlists](#waitlists), which shows it only for a job this would take, and the Undo on a re-run's banner. It takes
+only a job that has never started, and refuses, with nothing changed:
 
 - a job that has made an attempt and waits to retry: a retry keeps its run's steer and held replies open for the next
   attempt, so the console leaves it alone; once it runs, Cancel on its run page stops it (`pi-dispatch cancel` at a
   terminal removes such a job too);
 - a job handed back after a stall, since an attempt of it may have finished;
 - a recovery, which owes the run it continues that run's final record;
-- a cron trigger's next run: pause the trigger or edit its schedule (the queue refuses to remove it anyway);
+- a cron trigger's next run: pause the trigger or edit its schedule (the queue refuses to remove it anyway; once it
+  is overdue, its line in Waitlists offers its trigger's Edit instead of Cancel);
 - a job that is not waiting to start any more.
 
 The preview names the job and says why it waits, in the worker's own words ("Its folder is busy with another run",
@@ -1023,7 +1427,8 @@ The preview names the job and says why it waits, in the worker's own words ("Its
 taken, says "Due since <time>; no worker has taken it", whatever it recorded. A reason this console does not know
 (from a newer worker) is shown as its word with "no explanation yet". With no record, a delayed job says "No reason
 was recorded" and a held one "Waiting on a time or a check"; a job ready to run (waiting, or waiting by priority) says
-"Waiting for a free slot", or "In a paused queue" when its queue is paused. It says the job is removed before it
+"Waiting for a free slot", or "In a paused queue" when its queue is paused. Each is the same sentence the job's line
+in [Waitlists](#waitlists) starts with. It says the job is removed before it
 starts and that no other job's run records are touched. The confirm button is red ("Cancel the queued job"), and
 there is no Undo: a redelivery of the same event, or the trigger's next fire, queues the job again. The confirm looks
 for the job again and refuses if it moved to another queue, if it started since the preview, or if any rule above now
@@ -1149,15 +1554,20 @@ read its tokens file, and then the note says so: the console could not read its 
 
 **A panel you are using is kept still.** While a preview is open for a panel, or you have typed into or focused one of
 its fields, or its editor is open, updates to that panel wait: it says "Updates paused while you edit" and "Newer data
-is waiting. It shows when you close the preview or leave the field.", and the newest update lands when you do.
+is waiting. It shows when you close the preview or leave the field.", and the newest update lands when you do. A
+button is not a field: the one you pressed to open a preview, which has the focus again once the bar closes, keeps
+nothing still. When a panel is redrawn under your keyboard focus, the focus stays on the same button in the new
+panel, so Tab carries on from where you were.
 
 Each state is a word as well as a colour, and only Live pulses; Signed out shows the sign-out mark in place of the
 dot. On a phone the pill never changes size: it is one small mark whose shape says the state, a dot for Live, a retry
 arrow for Reconnecting, a stop square for Not live and the sign-out arrow for Signed out, and a screen reader still
 hears the word, so neither the first load (drawn Not live, then Live) nor a reconnect moves the page. The console reads
 Valkey once a second for every open page together,
-and only while a page is open, so ten open tabs cost the deployment what one does; the runs page, whose filters make each view its own read,
-refreshes every 5 seconds. Only the parts of the page that changed are sent.
+and only while a page is open, so ten open tabs cost the deployment what one does; the overview's timeline choices
+(`rows`, `zoom`, `project`) only regroup that one read, so every overview tab shares it, while the runs page, whose
+filters make each view its own read, refreshes every 5 seconds. Only the parts of the page that changed are sent,
+the line under the overview's title included.
 
 A live page holds one connection open. Each token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all
 its sign-ins, and the console 32 in all, of which 8 are kept for operators. A page opened past either limit still loads, but stays still until you reload it after closing
@@ -1255,13 +1665,17 @@ rm ~/.pdc-cookies
 ```
 
 Each parked run in `parked` carries its `jobId` as well, so a script can open it or answer it without a second
-lookup. `refusals24h` is the overview's refused count beside `failures24h`: `{count, top: [{reason, count}]}`, the
-runs refused in the last 24 hours (a run an operator cancelled is not counted) and the five most frequent reasons,
-or null when the run history could not be read; `failures24hFloor` marks both counts as a floor. Whether a worker is
-online is `hosts[].lastBeatAgeMs` with `workers`: the overview counts a host whose last beat is at most 60,000 ms
+lookup. `refusals24h` is the refused count beside `failures24h` (the two the overview's Needs you counts in its last
+line): `{count, top: [{reason, count}]}`, the runs refused in the last 24 hours (a run an operator cancelled is not
+counted) and the five most frequent reasons, which no console page lists any more, or null when the run history
+could not be read; `failures24hFloor` marks both counts as a floor. Whether a worker is online is
+`hosts[].lastBeatAgeMs` with `workers`: the overview's Hosts card counts a host whose last beat is at most 60,000 ms
 old, and says no worker is online only when none is and `workers` (BullMQ's connected workers on the shared queue,
 which holds no clock; null, read as 0, when unknown) is not above zero either. With `fleetDegraded` true it judges
-neither way.
+neither way. `lastBeatAgeMs` is the age the card judges by: when Valkey last refreshed the host's row where the
+console read it, so a host whose clock runs behind reads as beating to a script as it does to the card. A scheduler's
+`name` in `schedulers` is its cron trigger's id, or null for a schedule whose id the console does not take (never its
+job name).
 Whether a park is being answered is not in `/api/state`; `/api/run` says it per run (`pendingRunOnTarget`).
 
 `GET /api/run?id=<job id>` (or `?url=<issue or pull request link>`, which finds the newest run on that target) returns
