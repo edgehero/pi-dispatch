@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { UNREADABLE_RECORD } from "../src/run-history.mjs";
-import { MIRROR_MAX_DAYS, PRUNE_SCRIPT, RUNS_HORIZON, RUNS_INDEX, RUNS_SINCE, TRIM_SCRIPT, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredPage, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
+import { MIRROR_MAX_DAYS, PRUNE_SCRIPT, RUNS_HORIZON, RUNS_INDEX, RUNS_SINCE, TRIM_SCRIPT, UNREAD_RECORD, hostsIn, makeRunMirror, mergeRuns, mirrorWindowMs, readMirroredPage, readMirroredRecord, readMirroredRuns, runRecordKey } from "../src/run-mirror.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -355,6 +355,18 @@ test("readMirroredRecord reads one record by its sanitized id; absent or unreach
 	assert.equal(await readMirroredRecord({ get: () => new Promise(() => {}) }, "x", { timeoutMs: 5 }), null, "a server that never answers is bounded, not awaited forever");
 	assert.equal(await readMirroredRecord(null, "x"), null, "no mirror armed");
 	assert.equal(await readMirroredRecord(redis(JSON.stringify(rec)), ""), null, "no id");
+});
+
+test("readMirroredRecord with tellUnread answers UNREAD_RECORD for a GET that did not complete, and everything else as before (#737)", async () => {
+	const rec = { jobId: "gh-1", outcome: "completed" };
+	const redis = (value) => ({ get: async () => (typeof value === "function" ? value() : value) });
+	const tell = { tellUnread: true };
+	assert.equal(await readMirroredRecord(redis(() => Promise.reject(new Error("ECONNREFUSED"))), "x", tell), UNREAD_RECORD, "unreachable is not absent");
+	assert.equal(await readMirroredRecord({ get: () => new Promise(() => {}) }, "x", { ...tell, timeoutMs: 5 }), UNREAD_RECORD, "no answer within the bound is not absent");
+	assert.equal(await readMirroredRecord(redis(null), "x", tell), null, "absent is still null");
+	assert.equal(await readMirroredRecord(redis("{nope"), "x", tell), UNREADABLE_RECORD);
+	assert.deepEqual(await readMirroredRecord(redis(JSON.stringify(rec)), "gh-1", tell), rec);
+	assert.ok(Object.isFrozen(UNREAD_RECORD) && UNREAD_RECORD !== UNREADABLE_RECORD);
 });
 
 // --- the fleet's history horizon (issue #599) --------------------------------------------------------------

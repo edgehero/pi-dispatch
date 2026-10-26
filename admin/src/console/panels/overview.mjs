@@ -390,7 +390,7 @@ function dayLine(day, view) {
   const floor = day.floor ? "at least " : "";
   const parts = [];
   if (day.failed > 0) parts.push(html`<a href="${hrefTo(view, "runs", { outcome: "failed" })}">${floor}${count(day.failed)} failed</a>`);
-  if (day.refused > 0) parts.push(html`<a href="${hrefTo(view, "runs", { outcome: "policy" })}">${floor}${count(day.refused)} refused</a>`);
+  if (day.refused > 0) parts.push(html`<a href="${hrefTo(view, "runs", { outcome: "refused" })}">${floor}${count(day.refused)} refused</a>`);
   return html`<p class="card__sub">Last 24 hours: ${parts.length === 2 ? html`${parts[0]} and ${parts[1]}` : parts[0]}${day.refused > 0 ? ", not counting runs an operator cancelled" : ""}.</p>`;
 }
 
@@ -521,6 +521,9 @@ export const NOT_BEATING_WORDS = "not beating";
 
 /** A host row of a registry that could not be read this tick (the rows last seen), as its Running row and slots say it. */
 export const LAST_SEEN_WORDS = "as last seen";
+
+/** The Hosts row's beat dot, named for a screen reader, over a registry that could not be read this tick. */
+export const BEAT_NOT_READ_WORDS = "beat not read";
 
 /** Why a host's slots are not known, in a row's words (`slotsOf`'s `unknown`). */
 const UNKNOWN_SLOT_WORDS = Object.freeze({ unread: JOBS_UNREAD_WORDS, stale: NOT_BEATING_WORDS, lastSeen: LAST_SEEN_WORDS });
@@ -964,7 +967,7 @@ function softHoldLine(s, view) {
   const hold = Number.isInteger(s?.settings?.overlay?.softHoldPct);
   if (!t || !Number.isSafeInteger(t.count) || (t.count === 0 && !hold)) return null;
   const n = html`${t.floor ? "at least " : ""}${count(t.count)} today`;
-  return html`<p class="card__sub">${SOFT_HOLD_REFUSED_TEXT} ${t.count > 0 ? html`<a href="${hrefTo(view, "runs", { outcome: "policy", reason: "soft-hold" })}">${n}</a>` : n}.</p>`;
+  return html`<p class="card__sub">${SOFT_HOLD_REFUSED_TEXT} ${t.count > 0 ? html`<a href="${hrefTo(view, "runs", { outcome: "refused", reason: "soft-hold" })}">${n}</a>` : n}.</p>`;
 }
 
 /**
@@ -1124,17 +1127,25 @@ export const overviewHosts = overviewPanel("Hosts", (s, view) => {
       ? ui.banner({ status: "attention", icon: "beat", sm: true, title: STALE_BEATS_TEXT })
       : null;
   const degraded = q.fleetDegraded ? ui.banner({ status: "attention", icon: "fleet", sm: true, title: REGISTRY_UNREAD_TEXT }) : null;
+  const lastSeen = Boolean(q.fleetDegraded);
   const rows = hosts.map((h) => {
     const stale = !beatFresh(h);
     const age = beatAgeOf(h);
     // Running's rule for the slots, so the two cards never disagree: none drawn free from a registry not read this tick.
-    const sl = slotsOf(h, Boolean(q.fleetDegraded));
+    const sl = slotsOf(h, lastSeen);
+    // And the same rule for the beat (issue #737): the rows are the last ones read and their ages as old as that read,
+    // so the dot judges nothing (the neutral tone, "beat not read") and the age is "as last seen", never a fresh or late
+    // beat nobody saw this tick.
+    const beat = lastSeen ? ui.dot("idle", { label: BEAT_NOT_READ_WORDS }) : ui.dot(stale ? "attention" : "ok", { label: stale ? "beat late" : "beating" });
+    const ageCell = lastSeen
+      ? html`<span class="hostrow__beat">${ui.icon("beat", { size: "sm" })}${LAST_SEEN_WORDS}</span>`
+      : html`<span class="${stale ? "hostrow__beat tone-attention" : "hostrow__beat"}">${ui.icon("beat", { size: "sm" })}${age !== null ? ageText(age) : "unknown"}</span>`;
     const hq = hostQueueOf(s, h.name);
     const skew = hostSkewText(h);
     // A note in a tone carries its glyph, as the doctor's line does, so the tone is never the only cue.
     const note = (text) => html`<span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}${text}</span>`;
     const x = [doctorLine(s, h.name), hostQueueLine(hq), h.jobsUnreadable === true ? note(JOBS_UNREAD_TEXT) : null, skew === null ? null : note(skew), h.noExpiry === true ? note(HOST_NO_EXPIRY_TEXT) : null].filter(Boolean);
-    return html`<li class="hostrow">${ui.dot(stale ? "attention" : "ok", { label: stale ? "beat late" : "beating" })}<span class="hostrow__n"><b>${h.name}</b><span>${venuesText(h)}</span></span>${slotDots(h.name, sl)}<span class="${stale ? "hostrow__beat tone-attention" : "hostrow__beat"}">${ui.icon("beat", { size: "sm" })}${age !== null ? ageText(age) : "unknown"}</span><span class="hostrow__p">${act ? hostPause(hq, h.name) : null}</span><span class="hostrow__x">${x}</span></li>`;
+    return html`<li class="hostrow">${beat}<span class="hostrow__n"><b>${h.name}</b><span>${venuesText(h)}</span></span>${slotDots(h.name, sl)}${ageCell}<span class="hostrow__p">${act ? hostPause(hq, h.name) : null}</span><span class="hostrow__x">${x}</span></li>`;
   });
   const list = rows.length > 0 ? html`<ul class="hosts">${rows}</ul>` : q.fleetDegraded ? null : html`<p class="muted">${HOSTS_EMPTY.body}</p>`;
   return ui.card({ title: "Hosts", sub, end: state === null && fleetAct === null ? null : html`${state}${fleetAct}`, body: html`${banner}${degraded}${list}` });

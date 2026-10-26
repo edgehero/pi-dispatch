@@ -1,7 +1,7 @@
 /**
  * The frame every console page is drawn in (issue #737, the Pulse design's Shell card): the skip link, the icon sprite,
- * the top bar (the pi-dispatch pill, the pill navigation, the live state, the theme button, the read-only chip, who is
- * signed in and sign-out), then `<main>` with the page's title bar and its content. The sign-in pages get the same
+ * the top bar (the pi-dispatch pill, the pill navigation, the Search button, the live state, the theme button, the
+ * read-only chip, who is signed in and sign-out), then `<main>` with the page's title bar and its content. The sign-in pages get the same
  * frame with a top bar of two things only (the SignIn card's): the pi-dispatch pill and the theme button, since nobody
  * is signed in yet.
  *
@@ -14,7 +14,8 @@
  * (the live pill, on live pages only), `[data-theme-toggle]` (drawn `hidden`; the script reveals it where it can set
  * the cookie, the sign-in pages included), `details.more` (Escape, a click elsewhere and focus leaving it close it),
  * `nav.pillnav` with its `aria-current="page"` pill (scrolled into view once on load where the navigation scrolls, on a
- * phone) and `#main` (the skip link's target, focusable with `tabindex="-1"`).
+ * phone) and `#main` (the skip link's target, focusable with `tabindex="-1"`). The Search button (PR 4) is a plain
+ * link to the runs page's search field (`SEARCH_HREF`), which the script focuses there.
  *
  * `top--ro` MARKS A READ-ONLY CONSOLE'S BAR. Its end holds one more part (the read-only chip), so the stylesheet lays
  * the bar out on one row only from a wider viewport (`SHELL_CSS`). The class is the server's, from the console's own
@@ -34,10 +35,12 @@
  *
  * EVERY STATE THE SCRIPT CAN SWITCH TO IS DRAWN HERE, HIDDEN (PR 2 of issue #737). The live notes (`LIVE_NOTES`: the
  * console out of reach, the stream refused, the session over, the data shown as last seen) are all in `#live-note`,
- * each hidden; the write flow's one slot (`#confirm-slot`) and the note a panel kept still carries (`<template
- * id="held-note">`) are drawn for an operator who can write. The script reveals, fills in text and moves the slot; it
- * never writes their markup, so each can be pinned by a golden. A page drawn once (not live) says when, beside a
- * Reload, in its title bar: nothing on it moves, and the reader should know how old it is.
+ * each hidden; the write flow's one slot (`#confirm-slot`) is drawn for an operator who can write, and the note a panel
+ * kept still carries (`<template id="held-note">`) on every live page, for every role: a viewer's runs filters, and a
+ * read-only console's, hold their panel too, and a page that is not live is never updated, so it never holds one. The
+ * script reveals, fills in text and moves the slot; it never writes their markup, so each can be pinned by a golden. A
+ * page drawn once (not live) says when, beside a Reload, in its title bar: nothing on it moves, and the reader should
+ * know how old it is.
  *
  * `frameHtml` is the same frame for a page that is not a screen: the sign-in pages (`signin.mjs`'s content) and the
  * error pages (`error-pages.mjs`), with the signed-in bar when there is a session to show and the sign-in bar (the pill
@@ -227,6 +230,26 @@ function navLink(name, here, parked) {
   return html`<a href="${p.path}"${name === here ? html` aria-current="page"` : null}>${ui.icon(p.icon)}${p.nav}${name === "parked" ? parked : null}</a>`;
 }
 
+/**
+ * Where the top bar's Search button goes (the Shell card's round Search button, PR 4 of issue #737): the runs page's
+ * search field, which the browser script focuses when the page opens at it, or when the runs page itself is sent there
+ * (`script.mjs`). A link and not a form, so it works without the script: the page then opens scrolled to the field.
+ * Written from the runs path rather than read from `PAGES`, which this module may not touch while it loads (the cycle
+ * above); the shell test holds the two together.
+ */
+export const SEARCH_HREF = `/runs#${ui.SEARCH_ID}`;
+
+/**
+ * The Search button: a round link with the search icon, named "Search runs". Off a phone's bar (`hide-phone`, which
+ * bundle.css hides inside the bar's end there), as the Shell card draws it: a phone's bar has no room for it, and the
+ * runs page's search pill stays in view there while the other filters fold. `top__search` names it for the shell's
+ * rules, which also leave it off a desktop bar just past each width where the bar's end is tightest (the end gives the
+ * button the room the signed-in name had there, `page-css.mjs` `SHELL_CSS`).
+ */
+function searchButton() {
+  return html`<a class="roundbtn hide-phone top__search" href="${SEARCH_HREF}" aria-label="Search runs" title="Search runs">${ui.icon("search")}</a>`;
+}
+
 /** The theme button, named for the choice the page was drawn in; drawn hidden, the script shows it (see the header). */
 function themeButton(theme) {
   const label = themeLabel(theme);
@@ -259,7 +282,7 @@ function signedInBar({ here, role, parked, live, theme, readOnly, session }) {
   // into this same person, never into whoever this browser's cookie names by then. Absent when there is none to name.
   const whoData = typeof s.name === "string" && role !== null ? html` data-name="${s.name}" data-role="${role}"` : null;
   const who = html`<span class="who"${whoData} title="${role === null ? whoName : `${whoName}, ${roleWord}`}"><span><b>${whoName}</b><small>${roleWord}</small></span><span class="avatar">${initialsOf(s.name)}</span></span>`;
-  return html`<header class="${readOnly ? "top top--ro" : "top"}">${brandPill()}${navHtml(here, role, parked)}<div class="top__end">${live}${themeButton(theme)}${readOnly ? ui.chip("Read-only console", { status: "attention", icon: "shield" }) : null}${who}<button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out">${ui.icon("logout")}</button></div></header>`;
+  return html`<header class="${readOnly ? "top top--ro" : "top"}">${brandPill()}${navHtml(here, role, parked)}<div class="top__end">${searchButton()}${live}${themeButton(theme)}${readOnly ? ui.chip("Read-only console", { status: "attention", icon: "shield" }) : null}${who}<button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out">${ui.icon("logout")}</button></div></header>`;
 }
 
 /** A session's role as the bar knows it, or null for one it does not (which opens no operator page). */
@@ -273,8 +296,8 @@ const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(
  *
  * In order inside `<main>`: the title bar (on a page drawn once, when it was drawn and Reload, where the role may open
  * it: a viewer refused the audit log is not offered its address), the read-only banner on a read-only console, the done
- * banner, the live notes on a live page, `inner`, and for an operator on a console that takes changes the confirm slot
- * and the held note's template.
+ * banner, the live notes on a live page, `inner`, for an operator on a console that takes changes the confirm slot, and
+ * on a live page the held note's template.
  *
  * `headline` is the page's headline panel's first content (text or a fragment, an empty one included, which the stream
  * fills later), drawn under the title as `#p-headline` (see the header); null, the default, draws no line.
@@ -298,7 +321,8 @@ export function shellHtml(name, ctx, inner, { headline = null } = {}) {
   const ro = readOnly ? ui.banner({ status: "attention", icon: "shield", sm: true, title: READ_ONLY_TITLE, body: READ_ONLY_BODY }) : null;
   const flash = ctx?.flash !== null && typeof ctx?.flash === "object" ? doneBannerHtml(ctx.flash) : null;
   const notes = meta.live ? liveNoteHtml({ maxStreams: ctx?.maxStreams, reload }) : null;
-  const writes = role === "operator" && !readOnly && ctx?.slot !== false ? html`${confirmSlotHtml()}<template id="held-note">${heldNoteHtml()}</template>` : null;
+  const writes = role === "operator" && !readOnly && ctx?.slot !== false ? confirmSlotHtml() : null;
+  const held = meta.live ? html`<template id="held-note">${heldNoteHtml()}</template>` : null;
   const sub = headline === null ? null : html`<p class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></p>`;
   return html`<a class="skip" href="#main">Skip to content</a>
 ${SPRITE}
@@ -306,7 +330,7 @@ ${SPRITE}
 ${signedInBar({ here, role, parked, live: liveHtml, theme: ctx?.theme, readOnly, session: ctx?.session })}
 <main id="main" tabindex="-1">
 <div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1>${sub}</div>${drawn}</div>
-${ro}${flash}${notes}${inner}${writes}
+${ro}${flash}${notes}${inner}${writes}${held}
 </main>
 </div>`;
 }
@@ -320,12 +344,15 @@ ${ro}${flash}${notes}${inner}${writes}
  * false keeps the `<h1>` for a screen reader and draws no title bar (the SignIn card's page is its card alone, whose
  * own heading leads it). `sub` is the title bar's line under the title (the ErrorPage card's "The console could not find
  * what this address points to."), drawn only with a title bar. `name` is the body's `data-page`, which the script and
- * the page's stylesheet read.
+ * the page's stylesheet read. `here` marks a screen's pill current where the page stands for one (the run-id 404 is a
+ * run's page, which counts as Runs as the run detail does); by default none is.
  */
-export function frameHtml({ name, title, sub = null, theme = null, session = null, readOnly = false, nav = false, skip = "Skip to content", titleShown = true }, inner) {
+export function frameHtml({ name, title, sub = null, theme = null, session = null, readOnly = false, nav = false, skip = "Skip to content", titleShown = true, here = null }, inner) {
   const signedIn = nav && session !== null && typeof session === "object";
+  const role = roleOf(session);
+  const current = typeof here === "string" && NAV.includes(here) && mayOpen(here, role) ? here : null;
   const bar = signedIn
-    ? signedInBar({ here: null, role: roleOf(session), parked: null, live: null, theme, readOnly: Boolean(readOnly), session })
+    ? signedInBar({ here: current, role, parked: null, live: null, theme, readOnly: Boolean(readOnly), session })
     : html`<header class="top">${brandPill()}<div class="top__end">${themeButton(theme)}</div></header>`;
   const subLine = typeof sub === "string" && sub !== "" ? html`<p class="titlebar__sub">${sub}</p>` : null;
   const head = titleShown ? html`<div class="titlebar"><div class="titlebar__lead"><h1>${title}</h1>${subLine}</div></div>` : html`<h1 class="sr">${title}</h1>`;

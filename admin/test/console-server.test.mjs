@@ -1920,7 +1920,7 @@ test("ERROR_SENTENCES: one per kind, frozen, each tile a STATUS_KINDS status and
 const SOMEONE = Object.freeze({ name: "alice-nav-mark", role: "operator" });
 
 test("errorPage: each kind's status, its one panel, data-page error, and a bar with the person only where the kind keeps the nav", () => {
-  const want = { "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405 };
+  const want = { "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405, "no-run": 404 };
   for (const kind of ERROR_KINDS) {
     const out = errorPage({ kind, session: SOMEONE, readOnly: true, host: "myhost.lan", port: 7788, page: "insights", sentence: "range must be one of 7d, 30d, mtd" });
     const text = String(out.html);
@@ -1928,7 +1928,7 @@ test("errorPage: each kind's status, its one panel, data-page error, and a bar w
     assert.match(text, /data-page="error"/, kind);
     assert.deepEqual(panelsOf(text), [kind === "host" ? "p-error-421" : "p-error"], kind);
     assert.match(panelText(text, kind === "host" ? "p-error-421" : "p-error"), new RegExp(`<p class="er-code">${want[kind]}</p>`), kind);
-    const nav = ["no-page", "bad-query", "operators-only", "method"].includes(kind);
+    const nav = ["no-page", "bad-query", "operators-only", "method", "no-run"].includes(kind);
     assert.equal(text.includes(SOMEONE.name), nav, `${kind}: the person ${nav ? "is" : "is not"} named`);
     assert.equal(text.includes('id="logout"'), nav, `${kind}: sign-out ${nav ? "is" : "is not"} drawn`);
     assert.ok(!text.includes("pdc_"), kind);
@@ -2091,5 +2091,16 @@ test("a one-time code's return path (issue #708): one of this console's own page
     const res = await c.post("/login/code", next === undefined ? { code } : { code, next });
     assert.equal(res.status, 200, String(next));
     assert.equal(JSON.parse(res.text).next, want, String(next));
+  }
+});
+
+test("a page request tells loadPageData who asks and the console's readOnly, so a read-only console's Parked page reads no planner check", async () => {
+  for (const readOnly of [true, false]) {
+    const loads = [];
+    const pages = { ...fakePages(), loadPageData: async (name, query, deps, who) => (loads.push({ name, who }), { name }) };
+    const c = await start({ config: { readOnly }, pages });
+    const { cookie } = await c.login();
+    assert.equal((await c.send({ path: "/parked", headers: { cookie } })).status, 200);
+    assert.deepEqual(loads.at(-1), { name: "parked", who: { role: "operator", readOnly } });
   }
 });

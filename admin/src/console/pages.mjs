@@ -33,7 +33,7 @@ import { HEADLINE_ID, legacyWrap, NAV_PARKED_ID, navParkedHtml, shellHtml } from
 import { TIMELINE_ROWS, TIMELINE_ZOOMS } from "./timeline.mjs";
 import { auditAbout, auditChain, auditFilter } from "./panels/audit.mjs";
 import { AUDIT_PARAMS, auditQueryString, parseAuditQuery, readAuditView } from "./audit-view.mjs";
-import { forbiddenContent } from "./error-pages.mjs";
+import { errorPage, forbiddenContent } from "./error-pages.mjs";
 import {
   auditLog,
   configMcp,
@@ -71,7 +71,8 @@ import {
   overviewTimeline,
   overviewWaiting,
   overviewWaitlists,
-  parkedInbox,
+  parkedCheckRows,
+  parkedQuestions,
   runChain,
   runChat,
   runCostPanel,
@@ -81,7 +82,8 @@ import {
   runResources,
   runSession,
   runSummary,
-  runsFilter,
+  runsFilters,
+  runsSummary,
   runsTable,
   RUN_ID_RE,
   refusedBeforeStart,
@@ -89,7 +91,8 @@ import {
 import { chatFactsOf, parkedAnswerCheckOf, rerunCheckOf, sandboxCheckOf } from "./run-api.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
-import { SPEND_TITLE } from "../words.mjs";
+import { SPEND_TITLE, recordReason } from "../words.mjs";
+import { RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
 
 /**
  * The screens. `path` is the route, `auth` the least role that may open it, `live` whether the page opens the event
@@ -125,7 +128,7 @@ export const PAGES = Object.freeze({
  * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
  * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
  */
-export const LEGACY_PAGES = Object.freeze(["runs", "run", "parked", "insights", "fleet", "config"]);
+export const LEGACY_PAGES = Object.freeze(["run", "insights", "fleet", "config"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
@@ -134,9 +137,9 @@ const PAGE_PANELS = Object.freeze({
   // on the page in both states (`panels/overview.mjs`'s header), so the stream moves a first run to the overview by
   // swapping panels; on a phone, where the layout is one column, Needs you comes first once the checklist is gone.
   overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
-  runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
+  runs: [["p-filters", runsFilters], ["p-summary", runsSummary], ["p-runs", runsTable]],
   run: [["p-outcome", runOutcome], ["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
-  parked: [["p-parked", parkedInbox]],
+  parked: [["p-questions", parkedQuestions]],
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
   config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles], ["p-secret-bundles", configSecretBundles]],
@@ -389,9 +392,9 @@ export function returnPathOf(raw) {
  */
 const PAGE_READS = Object.freeze({
   overview: ["snapshot", "waiting"],
-  runs: ["runsPage", "subscriptions", "parkedCount"],
+  runs: ["runsPage", "subscriptions", "runsWindow", "parkedCount"],
   run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
-  parked: ["snapshot"],
+  parked: ["snapshot", "parkedChecks"],
   insights: ["insights", "parkedCount"],
   fleet: ["snapshot"],
   config: ["snapshot"],
@@ -462,12 +465,22 @@ async function childrenOf(fleet, record) {
     }
     if (!Array.isArray(pageRead?.runs)) break;
     searched += pageRead.runs.length;
-    for (const r of pageRead.runs) if (r?.parentJobId === record.jobId) children.push({ jobId: r.jobId ?? null, outcome: r.outcome ?? null, reason: typeof r.reason === "string" ? r.reason : null, startedAt: r.startedAt ?? null });
+    for (const r of pageRead.runs) if (r?.parentJobId === record.jobId) children.push({ jobId: r.jobId ?? null, outcome: r.outcome ?? null, reason: recordReason(r), startedAt: r.startedAt ?? null });
     if (pageRead.next === null || pageRead.next === undefined || (Number.isFinite(startMs) && pageRead.next <= startMs)) break;
     before = pageRead.next;
   }
   children.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)) || String(a.jobId).localeCompare(String(b.jobId)));
   return { children, searched };
+}
+
+/**
+ * Whether a load's page can draw an answer form (issue #737, the Parked page's planner checks): a console that takes
+ * changes (`readOnly` not true), seen by an operator or by a session the load does not name. A `who` without a role (a
+ * caller that does not say) reads as one an operator may see, so the checks are read rather than silently left out.
+ */
+function formsDrawn(who) {
+  if (who?.readOnly === true) return false;
+  return who?.role === undefined || who?.role === null || who.role === "operator";
 }
 
 /**
@@ -486,8 +499,18 @@ async function childrenOf(fleet, record) {
  *   - `now`: the clock (a function or a number), read ONCE; every panel draws from this instant.
  *   - `deployment` (optional, issue #737): `{ folder }`, the deployment directory's last folder, kept as `data.deployment`.
  *
- * `who` is the session asking (`{ role }`): only the spend screen's `paths=full` reads by role, and only an operator's
- * request reads full paths, so a viewer's page data never holds them. The live hub passes none (insights is not live).
+ * `who` is who will see the page (`{ role, readOnly, live }`, `readOnly` the console's own): the spend screen's
+ * `paths=full` reads full paths for an operator's request alone, so a viewer's page data never holds them, and the
+ * Parked page reads its planner checks only where a form can be drawn (`formsDrawn`). The server passes the request's
+ * role; the live hub (`live.mjs`) passes `{ readOnly, live: true }`, with `role: "viewer"` for a load no operator's
+ * stream shows, and never an operator's role, since one load serves every role watching it (insights, which reads full
+ * paths, is not live).
+ *
+ * A KEYSPACE SCAN FOR AN ABSENCE IS A REQUEST'S, NEVER THE LIVE HUB'S (issue #737). The by-id lookups of one load (the
+ * chat facts, the re-run check, the parked answer checks: the run and Parked pages) ask one question: a request's
+ * (`fleet.lookupQuestion`, read once here) costs at most one keyspace scan however many of them miss, and they run
+ * together, so a load waits for that scan once; a live load's (`who.live`) costs none, and keeps what the request was
+ * told of an absence (the reader's `lookUp`).
  *
  * Never throws for a read that fails: the field is null (or carries a sentence), and the panel says so.
  */
@@ -499,6 +522,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // the first run's checklist; null where the caller passes none.
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
   const reads = PAGE_READS[name];
+  // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
+  const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
   if (reads.includes("snapshot")) {
     try {
       data.snapshot = await (reads.includes("waiting") ? deps.fleet.snapshot({ waiting: true }) : deps.fleet.snapshot());
@@ -517,11 +542,18 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.readFailed = true;
     }
   }
+  if (reads.includes("runsWindow")) {
+    try {
+      data.runsWindow = (await deps.fleet.runsWindow?.()) ?? null;
+    } catch {
+      data.runsWindow = null;
+    }
+  }
   if (reads.includes("run")) {
     try {
       data.run = await deps.fleet.runById(q.id);
     } catch {
-      data.run = { missing: true };
+      data.run = { unreadable: RUN_RECORD_UNREAD };
       data.readFailed = true;
     }
     if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record).then(({ children, searched }) => ({ children, childrenSearched: searched })));
@@ -529,9 +561,12 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (reads.includes("transcriptMeta") && typeof deps.fleet?.transcriptMeta === "function") {
     // Issue #643: whether the run has a live transcript stream, without a byte of its text (the stream's text goes to an
     // operator's `/api/transcript` alone). Read for both roles, as all page data is; only an operator's page uses it.
+    // Only a read's own answer (`exists` true or false) says whether a stream exists: anything else, an answer that is
+    // not one included, is a stream that could not be read, never "none".
     try {
       const meta = await deps.fleet.transcriptMeta(q.id);
-      data.transcript = meta?.unreachable || meta?.invalid ? { unreachable: Boolean(meta.unreachable), exists: false } : { exists: meta?.exists === true, ended: meta?.ended === true, outcome: typeof meta?.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta?.length) ? meta.length : 0 };
+      const read = meta !== null && typeof meta === "object" && !meta.unreachable && !meta.invalid && typeof meta.exists === "boolean";
+      data.transcript = read ? { exists: meta.exists, ended: meta.ended === true, outcome: typeof meta.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta.length) ? meta.length : 0 } : { unreachable: true, exists: false };
     } catch {
       data.transcript = { unreachable: true, exists: false };
     }
@@ -565,12 +600,13 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.inbox = { unreachable: true };
     }
   }
-  if (reads.includes("chat")) {
+  // The chat facts with their answer check, and the actions' checks, run together (see above).
+  const chatRead = async () => {
     // Issue #647: the chat this run can have (`chatFactsOf`: the job's queue state, its active recovery, and for a parked
     // record whether a later run took the answer), for the Chat panel. Null without a job-state reader. The newer-run
     // search is a runs-page read, so the live loop pays it only for a parked record, whose mode depends on it.
     try {
-      data.chat = await chatFactsOf(deps.fleet, q.id, data.run?.record ?? null, { searchNewer: "parked", now: () => now });
+      data.chat = await chatFactsOf(deps.fleet, q.id, data.run?.record ?? null, { searchNewer: "parked", now: () => now, lookup });
     } catch {
       data.chat = { unreachable: true };
     }
@@ -578,19 +614,20 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // parked run's retained job and the triggers file (`parkedAnswerCheck`, a sentence or ok, never the job's data),
     // reused for PARK_CHECK_CACHE_MS per run id (`parkedAnswerCheckOf`), so the 2 s loop does not read it every tick.
     if (data.chat?.mode === "reply" && typeof deps.fleet?.parkedAnswerCheck === "function") {
-      data.chatAnswer = await parkedAnswerCheckOf(deps.fleet, q.id, data.run?.record ?? null, { now: () => now });
+      data.chatAnswer = await parkedAnswerCheckOf(deps.fleet, q.id, data.run?.record ?? null, { now: () => now, lookup });
     }
-  }
-  if (reads.includes("actions") && data.run?.record) {
+  };
+  const actionsRead = async () => {
     // Issue #710: whether the run's two actions can work, so the page offers only those (REQ-OPERATOR-CONSOLE-ACTIONS):
     // the planner's cheap re-run refusals over the retained job's data (`rerunCheck`) and the panel's sandbox manifest
     // verdict for a run of this host (`sandboxCheck`), each reused for PARK_CHECK_CACHE_MS per run id, so the live loop
     // does not read them every tick. Read for both roles, as all page data is; only an operator's page draws the actions.
     // A run refused before it started has no workspace, whatever a manifest says, so its sandbox check is not read.
     const record = data.run.record;
-    data.rerunCheck = await rerunCheckOf(deps.fleet, q.id, record, { now: () => now });
+    data.rerunCheck = await rerunCheckOf(deps.fleet, q.id, record, { now: () => now, lookup });
     if (!refusedBeforeStart(record)) data.sandboxCheck = await sandboxCheckOf(deps.fleet, q.id, record, { now: () => now });
-  }
+  };
+  await Promise.all([reads.includes("chat") ? chatRead() : null, reads.includes("actions") && data.run?.record ? actionsRead() : null]);
   if (reads.includes("insights")) {
     const fullPaths = q.paths === "full" && who?.role === "operator";
     try {
@@ -622,6 +659,16 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     } catch {
       data.audit = null;
     }
+  }
+  if (reads.includes("parkedChecks") && data.snapshot && formsDrawn(who)) {
+    // Issue #737: whether each parked run that could take an answer can take one here, the planner's own check
+    // (`parkedAnswerCheckOf`, reused per run for PARK_CHECK_CACHE_MS, an unreadable answer as long as a good one), for
+    // the rows `parkedCheckRows` names. Not for a load no form is drawn from (a viewer's, a read-only console's): the
+    // panel draws a form for an operator on a console that takes changes alone.
+    const rows = parkedCheckRows(data.snapshot);
+    const isoOf = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
+    const got = await Promise.all(rows.map((p) => parkedAnswerCheckOf(deps.fleet, p.jobId, { jobId: p.jobId, endedAt: isoOf(p.parkedAt), target: p.target }, { now: () => now, lookup })));
+    data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
   }
   if (reads.includes("parkedCount")) data.parkedCount = await parkedCountOf(deps);
   return data;
@@ -688,10 +735,24 @@ function runHasTranscript(data) {
 }
 
 /**
+ * What each place a run is kept answered of a run page's id (issue #737), as `runPlaces` and `runAbsent` take them (the
+ * rule `/api/run` keeps too): the history (this host's file and the fleet's run mirror), the queue lookup's whole answer
+ * (the job, or its run's active or queued recovery, over every queue the kill switch flips), the live transcript and the
+ * progress key. A load whose primary read failed (`readFailed`) and holds no record could not read one, whatever else
+ * `run` says.
+ */
+function runPlacesOf(data) {
+  const run = data?.readFailed === true && !data?.run?.record ? { unreadable: RUN_RECORD_UNREAD } : data?.run;
+  return { run, lookup: data?.chat, transcript: data?.transcript, progress: data?.progress };
+}
+
+/**
  * The whole page for screen `name`: `{ status, html }`. `ctx = { query, session: { name, role }, data, readOnly,
- * theme }`, `theme` the request's theme choice (`theme.mjs` `themeOf`). Status 200; 404 for a run that does not exist
- * (the panels say so); 403 for the audit log asked by a viewer (the route table refuses that first; this is the belt,
- * and it draws no panel).
+ * theme }`, `theme` the request's theme choice (`theme.mjs` `themeOf`). Status 200, but: for a run id no place shows a
+ * run for, with every place read and saying it holds none (`runAbsent`), the run-not-found page, 404; for one no place
+ * shows a run for while a place could not be read, the run page, 503, its outcome banner saying which could not be read;
+ * and 403 for the audit log asked by a viewer (the route table refuses that first; this is the belt, and it draws no
+ * panel). A run page some place shows a run for is 200, a queued job's included.
  */
 export async function renderPage(name, ctx) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
@@ -704,6 +765,10 @@ export async function renderPage(name, ctx) {
     const body = shellHtml(name, ctx, forbiddenContent());
     return { status: 403, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, theme }) };
   }
+  const places = name === "run" ? runPlacesOf(ctx?.data) : null;
+  if (places !== null && runAbsent(places)) {
+    return errorPage({ kind: "no-run", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), theme, runId: typeof ctx?.query?.id === "string" ? ctx.query.id : null });
+  }
   const panels = panelFragments(name, ctx);
   // The run detail's live transcript (issue #643) is a section of its own, never a panel: a panel is what the hub
   // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
@@ -714,9 +779,7 @@ export async function renderPage(name, ctx) {
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
   const body = shellHtml(name, ctx, html`${inner}${extra === null ? null : legacyWrap(name, extra)}`, headline === null ? {} : { headline });
-  // A run with no record yet but a live transcript or progress snapshot is a running job (its record is written at its
-  // end): 200, not 404.
-  const progressing = ctx?.data?.progress !== null && typeof ctx?.data?.progress === "object" && ctx.data.progress.v === 1;
-  const status = name === "run" && !ctx?.data?.run?.record && ctx?.data?.transcript?.exists !== true && !progressing ? 404 : 200;
+  // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
+  const status = places !== null && !runPlaces(places).shown ? 503 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query, theme }) };
 }

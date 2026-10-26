@@ -470,7 +470,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       now,
     };
     hub = m.live.makeLiveHub({
-      loadPageData: (page, query) => m.pages.loadPageData(page, query, pageDeps),
+      loadPageData: (page, query, who) => m.pages.loadPageData(page, query, pageDeps, who),
       pagePanels: (page, ctx) => m.pages.pagePanels(page, ctx),
       queryKeyOf: (page, query) => m.pages.pageQueryString(page, query),
       // Issue #737: one load per page whatever its query's view-only parameters (pages.mjs's `dataQueryOf`: the

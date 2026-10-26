@@ -20,6 +20,7 @@
  * It imports no worker module itself: the html builder, the kit and the page table, all console modules. The page
  * table is read inside the functions only, never at load, since `pages.mjs` reaches this module back through the shell.
  */
+import { capitalised } from "../words.mjs";
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
 import { PAGES } from "./pages.mjs";
@@ -171,6 +172,10 @@ export function unchangedBarHtml({ summary, sentenceHtml = null }) {
  *   - changed: the write was refused at the confirm (the file or the job changed since the preview, a dedup window,
  *     a worker that did not acknowledge); Look again reloads, since the page is what changed.
  *   - valkey: Valkey could not be reached; Try again submits the same form.
+ *   - timeout: the fleet snapshot a preview reads did not answer within its bound (`actions.mjs`
+ *     `SNAPSHOT_TIMEOUT_MS`), which says what happened and blames no cause: a slow deployment's first read is as
+ *     likely as a Valkey that stopped answering, so the title does not name Valkey as `valkey`'s does. Chosen only by
+ *     the refusal's own `state: "timeout"` (`snapshotOf`), never by reading its sentence; Try again.
  *   - audit: the audit log could not take its row, so nothing was written; nothing in the page fixes that, so Close,
  *     which puts the slot away and lets the panel it held take its live updates again (with no button the slot stayed
  *     open and its panel held until a reload).
@@ -195,6 +200,7 @@ export const REFUSAL_STATES = Object.freeze({
   ticket: Object.freeze({ status: "attention", icon: "clock", title: "This confirmation cannot be used", act: Object.freeze({ attr: "data-again", label: "Preview again", kind: ["sm", "primary"] }) }),
   changed: Object.freeze({ status: "attention", icon: "attention", title: "The change did not go through", act: Object.freeze({ attr: "data-reload", label: "Look again", kind: ["sm"] }) }),
   valkey: Object.freeze({ status: "failed", icon: "failed", title: "The deployment's Valkey could not be reached", act: Object.freeze({ attr: "data-again", label: "Try again", kind: ["sm"] }) }),
+  timeout: Object.freeze({ status: "attention", icon: "clock", title: "The fleet did not answer in time", act: Object.freeze({ attr: "data-again", label: "Try again", kind: ["sm"] }) }),
   audit: Object.freeze({ status: "failed", icon: "audit", title: "The audit log could not be written", act: Object.freeze({ attr: "data-close", label: "Close", kind: ["sm"] }) }),
   failed: Object.freeze({ status: "failed", icon: "failed", title: "The change could not be made", act: Object.freeze({ attr: "data-close", label: "Close", kind: ["sm"] }) }),
   refused: Object.freeze({ status: "refused", icon: "refused", title: "The change was refused", act: Object.freeze({ attr: "data-close", label: "Close", kind: ["sm"] }) }),
@@ -216,17 +222,12 @@ const SAYS_NOTHING_CHANGED = /\bnothing (?:was|is) (?:changed|done|applied|rever
 /** The ticket store's instruction, which every `redeem` refusal ends with (`confirm.mjs` `PREVIEW_AGAIN`'s opening). */
 const TICKET_TAIL = /Preview the change again and confirm the new preview$/;
 
-/** A sentence's first letter in capitals: the planners write theirs in lower case, as the tools' errors read. */
-function capitalised(s) {
-  const t = String(s ?? "");
-  return t.charAt(0).toUpperCase() + t.slice(1);
-}
-
 /**
  * The refusal's state when the caller names none, by where it happened and its status: at the confirm a 409 is a ticket
  * refusal when the sentence ends with the ticket store's instruction, else a write the funnel refused; 503 is Valkey; a
  * 500 is the audit log or a write that threw. At the preview a 503 is Valkey (a read the preview needed), a 500 the
- * preview itself, anything else the change refused.
+ * preview itself, anything else the change refused. A 503 that is not Valkey's says so by its own `state` (the fleet
+ * snapshot's `timeout`), which the caller passes and this never derives.
  */
 function refusalStateOf(where, status, sentence) {
   if (where === "confirm") {
@@ -340,13 +341,24 @@ export function doneBannerHtml(change) {
   return ui.banner({ status: partial ? "attention" : "ok", title: String(c.summary ?? "Changed"), body, actions: form });
 }
 
+/** The kept-still note's chip: the panel takes no update while it is in use. */
+export const HELD_NOTE_CHIP = "Updates paused while you edit";
+
+/**
+ * The kept-still note's sentence: the swap is waiting, and when it lands. One sentence for every role, since the
+ * shell draws one template for the page and a viewer's or a read-only console's filter bar holds its panel too (where
+ * no preview can open): it names what ends a hold in words true wherever one can be held (a field left that holds no
+ * change, a change applied or set back, a preview or an editor closed), never a control a reader may not have.
+ */
+export const HELD_NOTE_TEXT = "Newer data is waiting. It shows when you are done here: once you leave a field you did not change, apply or set back what you changed, and close what you opened.";
+
 /**
  * The note a panel the script keeps still carries (a form in it is being edited, or its preview is open), cloned from
- * the shell's `<template id="held-note">` as the panel's first child: the swap is waiting, and when it lands.
+ * the shell's `<template id="held-note">` as the panel's first child: `HELD_NOTE_CHIP`, then `HELD_NOTE_TEXT`.
  */
 export function heldNoteHtml() {
   // A space between the chip and the sentence, so a screen reader announcing the status reads two phrases, not one word.
-  return html`<div class="held" role="status">${ui.chip("Updates paused while you edit", { icon: "pause" })} <span class="held__s">Newer data is waiting. It shows when you close the preview or leave the field.</span></div>`;
+  return html`<div class="held" role="status">${ui.chip(HELD_NOTE_CHIP, { icon: "pause" })} <span class="held__s">${HELD_NOTE_TEXT}</span></div>`;
 }
 
 // ---- the diff -------------------------------------------------------------------------------------------------------

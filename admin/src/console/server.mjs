@@ -418,7 +418,7 @@ function pageHandler(name) {
     const parsed = pageQueryOr400(ctx, name, ctx.searchParams);
     if (!parsed) return;
     const { pages, pageDeps, config } = ctx.deps;
-    const data = await pages.loadPageData(name, parsed.query, pageDeps, { role: ctx.session.role });
+    const data = await pages.loadPageData(name, parsed.query, pageDeps, { role: ctx.session.role, readOnly: Boolean(config.readOnly) });
     ctx.flash = ctx.req.method === "GET" && data?.readFailed !== true ? ctx.deps.sessions.takeFlash?.(ctx.session.id) ?? null : null;
     const out = await pages.renderPage(name, {
       query: parsed.query,

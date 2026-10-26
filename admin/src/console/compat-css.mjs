@@ -40,7 +40,9 @@
  * all. (The action previews left that list in PR 2: their bars are `confirm-view.mjs`'s Pulse markup, outside every
  * wrapper, and the rules that drew the old ones went with them. The overview left it in PR 3, and no rule went with
  * it: every class its old panels drew is still drawn by another old page or by `common.mjs`, and the ratchet holds the
- * neutraliser and the dead-rule check to that.)
+ * neutraliser and the dead-rule check to that. The runs and parked pages left it in PR 4, and the old pager went with
+ * them: the runs table's Newer and Older links were the last old markup to draw `.pager`, so its two rules and its
+ * collision went too.)
  */
 import { PAGE_THEME } from "../graph-html.mjs";
 import { INSIGHTS_CSS } from "../insights-html.mjs";
@@ -56,12 +58,12 @@ export const NEUTRALISED = Object.freeze([
   ".banner",
   ".big",
   ".cap",
+  ".code",
   ".facts",
   ".kpi",
   ".kpi b",
   ".kpi span",
   ".note",
-  ".pager",
   ".phases",
   ".phases .bar",
   ".phases .bar i",
@@ -159,7 +161,6 @@ table.grid td.keep,table.grid td.keep .mono{white-space:nowrap;overflow-wrap:nor
 form.filters{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px 12px;align-items:end}
 form.filters label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--pd-dim)}
 form.filters .actions{display:flex;gap:8px;align-items:center}
-.pager{display:flex;gap:16px;margin-top:10px;font-size:13px}
 .range{display:flex;gap:8px;list-style:none}
 .range a{padding:3px 10px;border:1px solid var(--pd-border);border-radius:6px;text-decoration:none}
 .range a[aria-current="page"]{background:var(--pd-control);font-weight:600}
@@ -225,7 +226,7 @@ export function insightsFont(css = INSIGHTS_CSS) {
  * children inherit (the `--pd-*` properties, the ink and the font, which a box-less element still passes down) and a
  * ground of its own that drew nothing, so there is no box to lose.
  *
- * A CONTROL DRAWN WITH THE SECONDARY FILL WEARS THE STALE RING: a button, the editor's summary and a pager or range
+ * A CONTROL DRAWN WITH THE SECONDARY FILL WEARS THE STALE RING: a button, the editor's summary and a range
  * link are pills of `surface-3` and nothing else, which on a page shown as last seen (its panels flat on the canvas,
  * `page-css.mjs` `SHELL_CSS`) left a word with no shape. The flat panel hands down `--stale-ring`; anywhere else it is
  * unset, and the control draws no ring.
@@ -276,8 +277,7 @@ details.editor{margin:var(--space-3) 0 0}
 details.editor>summary{display:inline-flex;align-items:center;height:30px;padding:0 13px;border-radius:var(--radius-pill);background:var(--surface-3);box-shadow:var(--stale-ring,none);color:var(--ink);font-size:13px;font-weight:650;list-style:none}
 details.editor>summary::-webkit-details-marker{display:none}
 details.editor[open]>summary{background:var(--primary);color:var(--on-primary)}
-.pager{gap:var(--space-2);margin-top:var(--space-3)}
-.pager a,.range a{display:inline-flex;align-items:center;height:30px;padding:0 13px;border:0;border-radius:var(--radius-pill);background:var(--surface-3);box-shadow:var(--stale-ring,none);color:var(--ink);font-size:13px;font-weight:650;text-decoration:none;white-space:nowrap}
+.range a{display:inline-flex;align-items:center;height:30px;padding:0 13px;border:0;border-radius:var(--radius-pill);background:var(--surface-3);box-shadow:var(--stale-ring,none);color:var(--ink);font-size:13px;font-weight:650;text-decoration:none;white-space:nowrap}
 .range{flex-wrap:wrap;gap:6px}
 .range a[aria-current="page"]{background:var(--primary);color:var(--on-primary)}
 .preview-area{margin-top:var(--space-2);padding:var(--space-3) var(--space-4);border:0;border-radius:var(--radius-md);background:var(--surface);box-shadow:inset 0 0 0 2px var(--primary);font-size:13px}

@@ -58,6 +58,9 @@ export const SHOTS = Object.freeze([
   ["overview-host", "overview", "rows=host&zoom=24h"],
   ["runs", "runs", ""],
   ["runs-filtered", "runs", "project=web&outcome=completed"],
+  // Issue #737: the runs that did not complete, and a search by a job id (the parked run's), its row found by its id.
+  ["runs-problems", "runs", "problems=1"],
+  ["runs-search", "runs", "q=gh-2f6a"],
   ["run", "run", "id=gh-2f6a"],
   // Issue #644: a running job's detail (no record yet), with a progress snapshot that declared phases and left a note.
   ["run-live", "run", "id=gh-b3d7"],

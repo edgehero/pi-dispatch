@@ -50,6 +50,12 @@ test("the sandbox policy is a leaf: no package in its graph", async () => {
   assert.deepEqual(inputs.filter((k) => k.includes("node_modules")), []);
 });
 
+test("the record-reason leaf imports nothing: the console and the panel take the record's reason rule without the worker", async () => {
+  const inputs = await bundledInputs(join(here, "../../worker/src/record-reason.mjs"));
+  assert.deepEqual(inputs.map((k) => k.split("/").pop()), ["record-reason.mjs"]);
+  assert.ok((await bundledInputs(join(here, "../src/console/cli.mjs"))).some((k) => k.endsWith("record-reason.mjs")), "the console bundles it");
+});
+
 test("the sandbox module re-exports the policy under the same names, the same functions", () => {
   for (const name of Object.keys(policy)) assert.equal(sandbox[name], policy[name], name);
 });

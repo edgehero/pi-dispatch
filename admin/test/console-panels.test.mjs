@@ -198,12 +198,12 @@ test("a run id outside the run-id charset is shown as escaped text with no link 
   const data = { runsPage: { runs: [{ ...base, jobId: "gh-ok.1:2" }, { ...base, jobId: odd }, { ...base, jobId: "x".repeat(201) }], next: null, mirror: "ok" } };
   const q = parsePageQuery("runs", "").query;
   const out = (await pagePanels("runs", ctxOf("viewer", data, q))).map((p) => p.html).join("");
-  assert.match(out, /<a class="mono" href="\/run\?id=gh-ok.1%3A2">gh-ok.1:2<\/a>/, "a well-formed id is linked");
+  assert.match(out, /<td class="id"><span class="code"><a href="\/run\?id=gh-ok.1%3A2">gh-ok.1:2<\/a><\/span><\/td>/, "a well-formed id is linked, in the id face that never breaks");
   const links = [...out.matchAll(/href="\/run\?id=([^"]*)"/g)].map((m) => decodeURIComponent(m[1]));
   for (const id of links) assert.equal(parsePageQuery("run", new URLSearchParams({ id })).refusal, undefined, `every run link is one /run accepts: ${id}`);
   assert.deepEqual(links, ["gh-ok.1:2"]);
-  assert.match(out, /<span class="mono">gh 1&lt;b&gt;&amp;x<\/span>/, "the odd id is plain escaped text");
-  assert.ok(out.includes(`<span class="mono">${"x".repeat(201)}</span>`), "an over-long id too");
+  assert.match(out, /<td class="id"><span class="code">gh 1&lt;b&gt;&amp;x<\/span><\/td>/, "the odd id is plain escaped text");
+  assert.ok(out.includes(`<span class="code">${"x".repeat(201)}</span>`), "an over-long id too");
 });
 
 test("the insights body renders an empty payload and lists no tips", () => {
@@ -1635,9 +1635,10 @@ test("the spend screen makes zero external requests: every reference is this con
 
 // ---- one vocabulary, reasons as sentences (issue #710, PR 2) -----------------------------------------------------------
 
-test("the runs table: the outcome in the panel's words, its tone as a class, and the reason as a short sentence linked to its runs", async () => {
+test("the runs table: the outcome as the panel's word on a badge, quiet when completed, and the reason as a short sentence linked to its runs (#710, #737)", async () => {
   const { REASONS } = await import("@edgehero/pi-dispatch/reason-catalog");
-  const { shortSentence } = await import("../src/words.mjs");
+  const { NO_EXPLANATION, shortSentence } = await import("../src/words.mjs");
+  const { NO_REASON_SHORT } = await import("../src/console/panels/common.mjs");
   const base = { kind: "github", target: "acme/web#1", endedAt: "2026-10-08T15:00:00Z", tokens: { total: 5, cost: 0.1 } };
   const runs = [
     { ...base, jobId: "gh-c", outcome: "completed" },
@@ -1645,34 +1646,38 @@ test("the runs table: the outcome in the panel's words, its tone as a class, and
     { ...base, jobId: "gh-r", outcome: "policy", reason: "scope-cap" },
     { ...base, jobId: "gh-x", outcome: "policy", reason: "operator-cancel" },
     { ...base, jobId: "gh-f", outcome: "failed", reason: "container-never-started", failedReason: "FREE-TEXT <b>" },
+    { ...base, jobId: "gh-k", outcome: "policy", reason: "recovery-cap" },
     { ...base, jobId: "gh-n", outcome: "policy", reason: "brand-new-reason" },
     { ...base, jobId: "gh-h", outcome: "policy", reason: "<img src=x>" },
     { ...base, jobId: "gh-u", outcome: "vapour" },
     { ...base, jobId: "gh-l", outcome: "policy", reason: `LONG${"z".repeat(500)}` },
+    { ...base, jobId: "gh-i", outcome: "failed", reason: "infra failure, container exit 1" },
     { ...base, jobId: "gh-m", outcome: "policy", reason: "model-unknown" },
     { ...base, jobId: "gh-mv", outcome: "policy", reason: "model-unknown", why: "overlay-link" },
     { ...base, jobId: "gh-f2", outcome: "policy", reason: "model-not-allowed" },
     { ...base, jobId: "gh-f2v", outcome: "policy", reason: "model-not-allowed", why: "fallback-unlisted" },
   ];
   const out = (await pagePanels("runs", ctxOf("viewer", { runsPage: { runs, next: null, mirror: "ok" } }, parsePageQuery("runs", "").query))).map((p) => p.html).join("");
-  const rowOf = (id) => out.match(new RegExp(`<tr><td>(?:<time datetime="[^"]*">[^<]*</time>|[^<]*)</td><td><a class="mono" href="/run\\?id=${id}">.*?</tr>`))?.[0] ?? "";
-  const cellOf = (id) => rowOf(id).split("</td>")[6] ?? "";
-  // The words and the tones: no class for completed, warn for refused, awaiting input and cancelled, bad for failed.
-  assert.equal(cellOf("gh-c"), "<td>completed");
-  assert.equal(cellOf("gh-a"), '<td class="warn">awaiting input', "the word says it all: no reason part");
-  assert.equal(cellOf("gh-x"), '<td class="warn">cancelled');
+  const rowOf = (id) => out.match(new RegExp(`<tr><td class="when"[^>]*>(?:(?!</tr>).)*?<a href="/run\\?id=${id}">.*?</tr>`))?.[0] ?? "";
+  const cellOf = (id) => (rowOf(id).match(/<td class="wide">(.*?)<\/td>/)?.[1] ?? "").replace(/<svg class="ic" aria-hidden="true"><use href="#i-[a-z-]+"><\/use><\/svg>/g, "");
+  const badge = (tone, word) => `<span class="badge tone-${tone}">${word}</span>`;
+  // Completed is quiet: the idle tone, nothing more. A word that says why stands alone.
+  assert.equal(cellOf("gh-c"), badge("idle", "Completed"));
+  assert.equal(cellOf("gh-a"), badge("parked", "Awaiting input"), "the word says it all: no reason part");
+  assert.equal(cellOf("gh-x"), badge("idle", "Cancelled"));
   const scope = shortSentence(REASONS["scope-cap"].sentence);
-  assert.equal(cellOf("gh-r"), `<td class="warn">refused · <a href="/runs?outcome=policy&amp;reason=scope-cap" title="scope-cap">${scope.replace(/'/g, "&#39;")}</a>`);
-  assert.match(cellOf("gh-f"), /^<td class="bad">failed · <a href="\/runs\?outcome=failed&amp;reason=container-never-started" title="container-never-started">/);
+  assert.equal(cellOf("gh-r"), `${badge("refused", "Refused")}<span class="reason"><a href="/runs?outcome=refused&amp;reason=scope-cap" title="scope-cap">${scope.replace(/'/g, "&#39;")}</a></span>`);
+  assert.match(cellOf("gh-f"), /^<span class="badge tone-failed">Failed<\/span><span class="reason"><a href="\/runs\?outcome=failed&amp;reason=container-never-started" title="container-never-started">/);
+  // A recovery end the worker records as policy reads failed, its link by the word, its sentence kept.
+  assert.equal(cellOf("gh-k"), `${badge("failed", "Failed")}<span class="reason"><a href="/runs?outcome=failed&amp;reason=recovery-cap" title="recovery-cap">${shortSentence(REASONS["recovery-cap"].sentence).replace(/'/g, "&#39;")}</a></span>`);
   // REQ-CONSOLE-SECURITY (l): a job's free text never reaches a list row, only the closed enum.
   assert.ok(!out.includes("FREE-TEXT"), "no failedReason in a list row");
-  // An unknown token: shown raw, with no explanation, still linked when the filter accepts it.
-  assert.equal(cellOf("gh-n"), '<td class="warn">refused · <a href="/runs?outcome=policy&amp;reason=brand-new-reason" title="brand-new-reason">brand-new-reason, no explanation yet</a>');
-  // A token the filter refuses: escaped text, once, no link (its /runs would answer with a refusal) and no title copy.
-  assert.equal(cellOf("gh-h"), '<td class="warn">refused · &lt;img src=x&gt;, no explanation yet');
-  // And bounded: a very long one is cut to 64 characters, printed once (#710 round 1).
-  assert.equal(cellOf("gh-l"), `<td class="warn">refused · LONG${"z".repeat(60)}…, no explanation yet`);
-  assert.equal(out.split("LONGzz").length - 1, 1, "the long token appears once in the page");
+  // An unknown token: shown in the code face, with no explanation, still linked.
+  assert.equal(cellOf("gh-n"), `${badge("refused", "Refused")}<span class="reason"><a href="/runs?outcome=refused&amp;reason=brand-new-reason" title="brand-new-reason"><span class="code">brand-new-reason</span>, ${NO_EXPLANATION}</a></span>`);
+  // A reason that is no token is shown to nobody (issue #737): markup, an over-long string, an older worker's error text.
+  for (const id of ["gh-h", "gh-l"]) assert.equal(cellOf(id), `${badge("refused", "Refused")}<span class="reason">${NO_REASON_SHORT}</span>`, id);
+  assert.equal(cellOf("gh-i"), `${badge("failed", "Failed")}<span class="reason">${NO_REASON_SHORT}</span>`);
+  for (const bad of ["img src", "LONGzz", "infra failure"]) assert.ok(!out.includes(bad), bad);
   // The why variant changes the row's sentence, as the catalog's variant does.
   const { explainReason } = await import("@edgehero/pi-dispatch/reason-catalog");
   for (const [plainId, variantId, reason, why] of [["gh-m", "gh-mv", "model-unknown", "overlay-link"], ["gh-f2", "gh-f2v", "model-not-allowed", "fallback-unlisted"]]) {
@@ -1682,11 +1687,11 @@ test("the runs table: the outcome in the panel's words, its tone as a class, and
     assert.ok(cellOf(plainId).includes(`>${shortOf(null)}</a>`), cellOf(plainId));
   }
   // An outcome this release does not know: shown as itself, as a failure.
-  assert.equal(cellOf("gh-u"), '<td class="bad">vapour');
+  assert.equal(cellOf("gh-u"), `${badge("failed", "vapour")}<span class="reason">${NO_REASON_SHORT}</span>`);
   // Every link in the column is one the runs filter accepts.
   for (const m of out.matchAll(/href="\/runs\?([^"]*)"/g)) assert.equal(parsePageQuery("runs", new URLSearchParams(m[1].replace(/&amp;/g, "&"))).refusal, undefined, m[1]);
   assert.ok(!/style=/.test(out), "no inline style (the CSP forbids it)");
-  assert.match(out, /<th scope="col">Venue<\/th>/);
+  assert.match(out, /<th scope="col" class="hide-phone">Venue<\/th>/);
 });
 
 test("the run summary and the chain say the panel's words; the nav, the spend page and the held panel use its titles", async () => {
@@ -1736,7 +1741,7 @@ test("the overview: the first run's three, then what needs a person, what waits,
 test("the day's failed and refused runs are Needs you's foot line, linked, a floor said once, cancels not counted (#710, #737)", async () => {
   const needs = async (over) => new Map(await overviewOf({ ...snapshot(), ...over })).get("p-needs");
   const html = await needs({ failures24h: 2, failures24hFloor: false, refusals24h: { count: 9, top: [{ reason: "scope-cap", count: 5 }] } });
-  assert.match(html, /Last 24 hours: <a href="\/runs\?outcome=failed">2 failed<\/a> and <a href="\/runs\?outcome=policy">9 refused<\/a>, not counting runs an operator cancelled\./);
+  assert.match(html, /Last 24 hours: <a href="\/runs\?outcome=failed">2 failed<\/a> and <a href="\/runs\?outcome=refused">9 refused<\/a>, not counting runs an operator cancelled\./);
   const floor = await needs({ failures24h: 3, failures24hFloor: true, refusals24h: { count: 0, top: [] } });
   assert.match(floor, /Last 24 hours: <a href="\/runs\?outcome=failed">at least 3 failed<\/a>\./);
   assert.ok(!floor.includes("refused"));
@@ -1827,7 +1832,7 @@ test("readable numbers: money in one fixed form with the exact amount on hover, 
   // The runs list's Job cap column.
   const runs = [{ jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "completed", endedAt: "2026-10-08T15:00:00Z", dollars: { reservedMicros: 2_500_001 } }];
   const list = (await pagePanels("runs", ctxOf("viewer", { runsPage: { runs, next: null, mirror: "ok" } }, parsePageQuery("runs", "").query))).map((p) => p.html).join("");
-  assert.match(list, /<td class="num"><span title="\$2\.500001">\$2\.50<\/span><\/td><\/tr>/);
+  assert.match(list, /<td class="num hide-phone" data-l="Job cap"><span title="\$2\.500001">\$2\.50<\/span><\/td><\/tr>/);
   // Fleet hosts: hundredths as cores; off and unknown as before; a value that is not hundredths shown as it is.
   const hosts = [
     { name: "h1", concurrency: "2", jobs: [], staleMs: 1000, budgetMemMiB: "8192", usedMemMiB: "2048", budgetCpuCenti: "800", usedCpuCenti: "150" },
@@ -1894,11 +1899,11 @@ function timeDom(times, offsetMin, { live = false } = {}) {
     getHours() { return this.l.getUTCHours(); }
     getMinutes() { return this.l.getUTCMinutes(); }
   }
-  const timeEl = (iso, text) => {
-    const attrs = { datetime: iso };
+  const timeEl = (iso, text, more = {}) => {
+    const attrs = { datetime: iso, ...more };
     return { textContent: text, getAttribute: (n) => attrs[n] ?? null, setAttribute: (n, v) => { attrs[n] = v; }, attrs };
   };
-  const els = times.map(([iso, text]) => timeEl(iso, text));
+  const els = times.map(([iso, text, more]) => timeEl(iso, text, more));
   const swapped = [timeEl("2026-10-08T01:05:00.000Z", "2026-10-08 01:05 UTC")];
   const panel = { hasAttribute: (n) => n === "data-panel", innerHTML: "", querySelector: () => null, contains: () => false, querySelectorAll: (sel) => (sel === "time[datetime]" ? swapped : []) };
   const listeners = new Map();
@@ -1929,4 +1934,27 @@ test("the script shows each <time> in the reader's zone with the UTC text in its
   live.listeners.get("panel")({ data: JSON.stringify({ id: "p-x", html: "<time>" }) });
   assert.equal(live.panel.innerHTML, "<time>");
   assert.deepEqual([live.swapped[0].textContent, live.swapped[0].attrs.title], ["2026-10-08 02:05 UTC+1", "2026-10-08 01:05 UTC"]);
+});
+
+test("only a time whose row names its day (data-day) stays alone, on the reader's day when it is the UTC day, gaining the reader's date when it is not; every other time carries the reader's date", () => {
+  const alone = [["2026-10-08T15:39:08.000Z", "15:39 UTC", { "data-day": "" }], ["2026-10-08T23:30:00.000Z", "23:30 UTC", { "data-day": "" }], ["2026-10-08T00:30:00.000Z", "00:30 UTC", { "data-day": "" }]];
+  const said = (offsetMin) => timeDom(alone, offsetMin).els.map((e) => [e.textContent, e.attrs.title]);
+  assert.deepEqual(said(0), [["15:39 UTC", "2026-10-08 15:39 UTC"], ["23:30 UTC", "2026-10-08 23:30 UTC"], ["00:30 UTC", "2026-10-08 00:30 UTC"]], "a reader in UTC reads what the server wrote");
+  assert.deepEqual(said(120), [["17:39 UTC+2", "2026-10-08 15:39 UTC"], ["2026-10-09 01:30 UTC+2", "2026-10-08 23:30 UTC"], ["02:30 UTC+2", "2026-10-08 00:30 UTC"]], "past the reader's midnight, the reader's date");
+  assert.deepEqual(said(-300).map(([t]) => t), ["10:39 UTC-5", "18:30 UTC-5", "2026-10-07 19:30 UTC-5"], "before it too");
+  // A second run over its own text keeps the first's form (the live swap and the slot run it again over what it wrote).
+  for (const offsetMin of [120, -300]) {
+    const first = timeDom(alone, offsetMin).els.map((e) => e.textContent);
+    assert.deepEqual(timeDom(alone.map(([iso, , more], i) => [iso, first[i], more]), offsetMin).els.map((e) => e.textContent), first, `${offsetMin}: twice is once`);
+  }
+  // A time drawn with its date keeps it, on the reader's day or not.
+  assert.deepEqual(timeDom([["2026-10-08T15:39:08.000Z", "2026-10-08 15:39 UTC"]], 120).els[0].textContent, "2026-10-08 17:39 UTC+2");
+  // A time drawn alone that no row dates (a page's "Drawn at", a transcript entry's "HH:MM:SS UTC") carries the
+  // reader's date on the reader's day too, in a reader's zone and in UTC, and after a second run.
+  const undated = [["2026-10-08T15:39:08.000Z", "15:39 UTC"], ["2026-10-08T15:39:08.000Z", "15:39:08 UTC"], ["2026-10-08T23:30:00.000Z", "23:30 UTC"]];
+  for (const [offsetMin, want] of [[0, ["2026-10-08 15:39 UTC", "2026-10-08 15:39 UTC", "2026-10-08 23:30 UTC"]], [120, ["2026-10-08 17:39 UTC+2", "2026-10-08 17:39 UTC+2", "2026-10-09 01:30 UTC+2"]], [-300, ["2026-10-08 10:39 UTC-5", "2026-10-08 10:39 UTC-5", "2026-10-08 18:30 UTC-5"]]]) {
+    const first = timeDom(undated, offsetMin).els.map((e) => e.textContent);
+    assert.deepEqual(first, want, `${offsetMin}: dated`);
+    assert.deepEqual(timeDom(undated.map(([iso], i) => [iso, first[i]]), offsetMin).els.map((e) => e.textContent), first, `${offsetMin}: twice is once`);
+  }
 });

@@ -1170,3 +1170,43 @@ test("a client's or a registry's error reaches no refusal unbounded: the planner
   assert.deepEqual(await planCancelQueued({ ...fakes, jobId: "gh-1", redisFn: blind, queueFn: empty }), { refusal: "no job gh-1 in 1 queue (the host registry could not be read; a host that is not registered may still hold it); nothing was changed", status: 404 });
   assert.deepEqual(await setQueuePausedOne({ url: "redis://x", queue: "pi-jobs@gone", paused: true, redisFn: blind, makeQueueFn: empty, parseConnectionFn: () => ({}) }), { invalid: "\"pi-jobs@gone\" is not a queue this deployment drains (pi-jobs); the host registry could not be read, so a host's queue may be missing from that list. Nothing was changed" });
 });
+
+test("a re-run or an answer over a record that could not be read says which read failed and that nothing was queued, never that the run has no record", async () => {
+  const { RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_RECORD_UNREAD } = await import("../src/read-model.mjs");
+  const { recordReadRefusal } = await import("../src/job-actions.mjs");
+  const logsDir = tempDir("pd-737-planner-unread-");
+  writeFileSync(join(logsDir, "triggers.json"), "[]");
+  writeFileSync(join(logsDir, "gh-bad.json"), "{ half a reco");
+  const down = () => ({ on() {}, async get() { throw new Error("ECONNRESET"); }, disconnect() {}, quit() {} });
+  const empty = () => ({ on() {}, async get() { return null; }, disconnect() {}, quit() {} });
+  const common = { url: "redis://unused", logsDir, triggersPath: join(logsDir, "triggers.json"), timeoutMs: 200 };
+  // The mirror did not answer for a run this host has no file of; this host's file is there and is no record.
+  for (const [jobId, redisFn, why] of [["gh-none", down, RUN_MIRROR_UNREAD], ["gh-bad", empty, RUN_FILE_UNREADABLE]]) {
+    assert.equal((await planRerun({ ...common, jobId, redisFn })).refusal, `${why}, so ${jobId} cannot be re-run now; nothing was queued, try again`);
+    assert.equal((await planParkedAnswer({ ...common, jobId, text: "yes", by: "ops", redisFn })).refusal, `${why}, so ${jobId} cannot be answered now; nothing was queued, try again`);
+  }
+  // Both read, neither holds it: the one answer that says no record.
+  assert.equal((await planRerun({ ...common, jobId: "gh-gone", redisFn: empty })).refusal, "no run record for gh-gone on this host or in the fleet mirror");
+  assert.equal((await planParkedAnswer({ ...common, jobId: "gh-gone", text: "yes", by: "ops", redisFn: empty })).refusal, "no run record for gh-gone on this host or in the fleet mirror");
+  // The one rule both planners use: "no run record" only on the reader's missing; any other answer is a read that failed.
+  assert.equal(recordReadRefusal({ missing: true }, "gh-1", "re-run"), "no run record for gh-1 on this host or in the fleet mirror");
+  assert.equal(recordReadRefusal({ invalid: "a run id is letters" }, "gh-1", "re-run"), "a run id is letters");
+  for (const read of [{}, null, { missing: false }, { unreadable: 7 }]) assert.equal(recordReadRefusal(read, "gh-1", "answered"), `${RUN_RECORD_UNREAD}, so gh-1 cannot be answered now; nothing was queued, try again`, JSON.stringify(read));
+});
+
+test("a parked answer's refusal for a run that is not parked names how it ended only in tokens: a reason or an outcome that is no token reaches no refusal", async () => {
+  const logsDir = tempDir("pd-737-not-parked-");
+  writeFileSync(join(logsDir, "triggers.json"), "[]");
+  const empty = () => ({ on() {}, async get() { return null; }, disconnect() {}, quit() {} });
+  const ended = (jobId, outcome, reason) => writeFileSync(join(logsDir, `${jobId}.json`), JSON.stringify({ jobId, kind: "github", target: "acme/web#1", outcome, reason, startedAt: "2026-10-14T11:59:00.000Z", endedAt: "2026-10-14T12:00:00.000Z" }));
+  const refusal = async (jobId) => (await planParkedAnswer({ url: "redis://unused", logsDir, triggersPath: join(logsDir, "triggers.json"), jobId, text: "yes", by: "ops", redisFn: empty, timeoutMs: 200, now: () => Date.parse("2026-10-14T12:01:00.000Z") })).refusal;
+  const FREE = ["GET /repos/acme/secret failed", "connect ECONNREFUSED 10.0.0.7:6379", "host\u202eevil", "Container-Lost"];
+  for (const [i, reason] of FREE.entries()) {
+    ended(`gh-r${i}`, "failed", reason);
+    assert.equal(await refusal(`gh-r${i}`), `gh-r${i} is not parked (it ended failed), so there is no question to answer`, reason);
+  }
+  ended("gh-token", "failed", "container-lost");
+  assert.equal(await refusal("gh-token"), "gh-token is not parked (it ended failed, container-lost), so there is no question to answer");
+  ended("gh-odd", "<b>done</b>", null);
+  assert.equal(await refusal("gh-odd"), "gh-odd is not parked (it ended unknown), so there is no question to answer");
+});

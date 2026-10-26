@@ -196,6 +196,48 @@ test("a 400 page sets the refusal's leading parameter name in the code face, and
   assert.ok(pair.includes('so it read nothing: <span class="code">seq</span> and <span class="code">before</span> do not go together: each says where the page starts.</p>'));
 });
 
+// ---- the run-id 404 -----------------------------------------------------------------------------------------------
+
+test("the run-id 404: where the console looked, the runs search holding the asked id as its value and nowhere else, Runs current", () => {
+  const said = ERROR_SENTENCES["no-run"];
+  assert.deepEqual({ ...said }, { title: "Run not found", sub: "The console could not find a run with this id.", heading: "No run with this id", sentence: "No run with that id is in this host's history, the fleet's run mirror or the queue. It may be another host's run with the fleet's run mirror off, or one the history no longer keeps.", status: "idle", icon: "search" });
+  for (const role of ["operator", "viewer"]) {
+    const out = errorPage({ kind: "no-run", session: { name: "ops", role }, runId: "gh-2f6a" });
+    const page = String(out.html);
+    assert.equal(out.status, 404, role);
+    assert.match(page, /<body data-page="error">/);
+    assert.deepEqual([...page.matchAll(/<section id="([^"]+)" data-panel>/g)].map((m) => m[1]), ["p-error"], `${role}: one panel`);
+    assertClean(`no-run.${role}`, page);
+    // The card: the tile, the code, the heading and the sentence, then the search, then the way back.
+    const search = `<form class="er-search" method="get" action="/runs" role="search"><label class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg><span class="sr">Search runs</span><input id="q" type="search" name="q" value="gh-2f6a" placeholder="Repository, target or job id" autocomplete="off" spellcheck="false"></label></form>`;
+    assert.ok(page.includes(`<h2 class="er-h">No run with this id</h2><p class="er-s">${said.sentence.replaceAll("'", "&#39;")}</p>${search}<div class="er-act"><a class="btn btn--primary" href="/runs">`), `${role}: the card in order`);
+    assert.ok(page.includes(">Go to Runs</a>") && page.includes(">Go to Overview</a>"), `${role}: Runs and Overview`);
+    // The id is the field's value, the person's own query, and appears nowhere else: not the title, not a sentence.
+    assert.equal(page.split("gh-2f6a").length - 1, 1, `${role}: the asked id once, as the search field's value`);
+    assert.ok(page.includes(`<title>pi-dispatch console: Run not found</title>`) && page.includes("<h1>Run not found</h1>"));
+    // It counts as Runs in the navigation, as the run page it stands in for does.
+    assert.deepEqual([...page.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]), ["/runs"], `${role}: Runs current`);
+    assert.equal(page.includes('href="/audit"'), role === "operator", `${role}: the role's own navigation`);
+  }
+  // Only an id the runs search takes is shown, as it is; any other (markup, a quote, a control byte, past 200
+  // characters, a space at an end) leaves the field empty rather than cut or cleaned into one it takes. Every id the
+  // run page takes (RUN_ID_RE: 200 characters) is one the search takes, so the field holds any run id it was asked for.
+  const valueOf = (runId) => /<input id="q" [^>]*?(?: value="([^"]*)")?(?= placeholder)/.exec(String(errorPage({ kind: "no-run", session: { name: "ops", role: "operator" }, runId }).html))?.[1] ?? null;
+  for (const ok of ["repeat:nightly-tidy:1760000000000", "manual:a.b_c:1", "x".repeat(200), "A".repeat(200), "-", ":", "._:-", "gl-9a2c#1!"]) assert.equal(valueOf(ok), ok, ok);
+  const ESC = String.fromCharCode(27);
+  for (const bad of [`"><script>alert(1)</script>`, `gh-1${ESC}`, "x".repeat(201), " gh-1", "gh-1 ", "gh'1", "gh<1", "", null, 7]) {
+    assert.equal(valueOf(bad), null, JSON.stringify(bad));
+    const page = String(errorPage({ kind: "no-run", session: { name: "ops", role: "operator" }, runId: bad }).html);
+    assert.ok(!page.includes("<script>alert") && !page.includes("alert(1)"), `${JSON.stringify(bad)}: nothing of it on the page`);
+  }
+  // With no session: no navigation and no current pill, the card and its search as before.
+  const anonymous = String(errorPage({ kind: "no-run", runId: "gh-2f6a" }).html);
+  assert.ok(!anonymous.includes('class="pillnav"') && anonymous.includes('value="gh-2f6a"'));
+  // The other 404 still names nothing and marks nothing current.
+  const other = String(errorPage({ kind: "no-page", session: { name: "ops", role: "operator" } }).html);
+  assert.ok(!other.includes('id="q"') && !other.includes('aria-current="page"'));
+});
+
 test("each error page's title bar says its title and the line under it, as the ErrorPage card's does", () => {
   for (const kind of ERROR_KINDS) {
     const said = ERROR_SENTENCES[kind];

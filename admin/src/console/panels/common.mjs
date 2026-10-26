@@ -12,9 +12,11 @@ import { classifyRow } from "../../costs.mjs";
 import { beatAgeOf } from "../../doctor-view.mjs";
 import { fmtCost, usd2 } from "../../panel.mjs";
 import { resolveWorkerCount, forgeLinkOf, progressStaleFor } from "../../read-model.mjs";
+import { parseRunFilter } from "../../run-filter.mjs";
 // The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
-import { outcomeWord } from "../../words.mjs";
+import { NO_EXPLANATION, NO_REASON_FAILED, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../../words.mjs";
 import { html } from "../html.mjs";
+import * as ui from "../kit.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -352,7 +354,7 @@ function activeTable(s, now, act = false) {
   );
 }
 
-// ---- a run's outcome in a row (the runs list's and the run page's; the token bound the overview's too) ---------------
+// ---- a run's outcome in a row (the runs list's and the run page's) ---------------------------------------------------
 
 /**
  * A record's outcome in the console's words (words.mjs, the panel's too): completed, refused, failed, awaiting input or
@@ -363,8 +365,47 @@ function outcomeText(r) {
   return w.known ? w.word : cell(r?.outcome);
 }
 
-/** The most of a reason token the runs filter refuses that a row prints, in code points, before its ellipsis. */
-const ODD_TOKEN_MAX = 64;
+/**
+ * What a row says for a run that did not complete and whose record names no reason token (issue #737): the short form
+ * of `NO_REASON_FAILED`, derived (`shortSentence`), so the row cannot drift from that sentence. The run page does not
+ * draw it: its banner says its own words for a record that names no reason (`run.mjs` `NO_REASON_TEXT`).
+ * Outcome-neutral once the verdict is dropped, so a refused record with no token says it too.
+ */
+export const NO_REASON_SHORT = shortSentence(NO_REASON_FAILED);
+
+/**
+ * A run's outcome as a list cell (issue #737, the DataTable and RunsScreen cards): the outcome's badge, then for a run
+ * that did not complete why, in one short sentence (`<span class="reason">`). The runs table's Outcome column and the
+ * run page's chain draw this one cell.
+ *   - A completed run is quiet: the badge in the idle tone with its check, and nothing more, so the runs that need a
+ *     person stand out of a list that is mostly completed ones.
+ *   - A word that says why (awaiting input, cancelled: `outcomeWord(...).says`) draws the badge alone.
+ *   - Otherwise the reason's short catalog sentence (`reasonWords`, its `why` variant included), linked to every run
+ *     with the same outcome key and reason where the runs filter accepts the pair (`link`), with the token in the
+ *     link's title; a token the catalog does not know is shown as itself, in the code face, with `NO_EXPLANATION`; and
+ *     a record with no token says `NO_REASON_SHORT`.
+ * ONLY A TOKEN IS EVER PRINTED (words.mjs `recordReason`, the record's own charset), and a job's free-text
+ * `failedReason` never comes here (REQ-CONSOLE-SECURITY (l)): an older worker recorded an infrastructure error's
+ * message as the reason (an API path, a repository, a library's words), and a record from another host is that host's
+ * text, so a reason that is no token is shown to nobody, in either role. Every other string is the catalog's own.
+ */
+export function outcomeCell(record, { link = true } = {}) {
+  const outcome = record?.outcome;
+  const raw = record?.reason;
+  const w = outcomeWord(outcome, raw);
+  const key = outcomeKey(outcome, raw);
+  if (key === "completed") return ui.badge("idle", w.word.charAt(0).toUpperCase() + w.word.slice(1), { icon: ui.STATUS.ok.icon });
+  const badge = ui.outcomeBadge(outcome, raw);
+  if (w.says) return badge;
+  const token = recordReason(record);
+  if (token === null) return html`${badge}<span class="reason">${NO_REASON_SHORT}</span>`;
+  const said = reasonWords(token, typeof record.why === "string" ? record.why : null);
+  const text = said.known ? said.short : html`<span class="code">${token}</span>, ${NO_EXPLANATION}`;
+  // An outcome this release does not know has no key: its link names the reason alone, which the filter takes.
+  const query = key === null ? { reason: token } : { outcome: key, reason: token };
+  const href = link && parseRunFilter(query).filter ? `/runs?${new URLSearchParams(query)}` : null;
+  return html`${badge}<span class="reason">${href === null ? text : html`<a href="${href}" title="${token}">${text}</a>`}</span>`;
+}
 
 // ---- a token cut (the outcome banner's and the failed jobs list's) ---------------------------------------------------
 
@@ -394,6 +435,6 @@ function parkedAnswerForm(jobId) {
 // Shared with the screens' modules only; `../panels.mjs` does not re-export these.
 export {
   SEC, MIN, cell, msOf, count, runLink, targetLink, titled, actForm, field, area, indexField, editor, table, facts,
-  fromSnapshot, costText, capMicrosOf, pausedState, beatCell, blessedText, activeTable, outcomeText, ODD_TOKEN_MAX,
-  bannerCut, parkedAnswerForm
+  fromSnapshot, costText, capMicrosOf, pausedState, beatCell, blessedText, activeTable, outcomeText, bannerCut,
+  parkedAnswerForm
 };

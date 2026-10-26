@@ -11,6 +11,7 @@ import { waitArmed } from "./wait-for.mjs";
 import { secretProfileNeeded } from "./capabilities.mjs";
 import { scheduledForMillis } from "./repeat-slot.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
+import { recordReasonOf } from "./record-reason.mjs";
 
 export { EARLIER_MAX, recordedEarlier };
 
@@ -889,8 +890,12 @@ function rebuildUsage(u) {
  * path stay out of the record -- for local jobs only the folder's `basename` is kept, because the full
  * path embeds the operator's OS account name.
  *
- * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | portfolio-snapshot-oversize | unprotected-branch |
- * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
+ * `reason` is a token of the fixed enum (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | portfolio-snapshot-oversize | unprotected-branch |
+ * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | container-infra-exit | ...), never free-form or payload text,
+ * and it comes through ONE door, `recordReasonOf` (record-reason.mjs), rather than as `source.reason` copied: an InfraRetry
+ * built without a token carries its whole message as its reason, and a forge host's message names an API path, a
+ * repository and a library's own words. So an error whose reason is no token records `worker-error` (a failure is never
+ * reasonless), and a result's records null. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
@@ -922,7 +927,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		startedAt: startedAt ?? null,
 		endedAt: endedAt ?? null,
 		outcome: result ? (result.outcome ?? null) : "failed",
-		reason: source.reason ?? null,
+		reason: recordReasonOf({ result, error }),
 		exitCode: source.exitCode ?? null,
 		turns: source.turns ?? null,
 		// Token accounting (INT-RUN-HISTORY-FILE-CONTRACT): additive and nullable, an explicit literal, no

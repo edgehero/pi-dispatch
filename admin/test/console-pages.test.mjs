@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { confirmSlotHtml, heldNoteHtml } from "../src/console/confirm-view.mjs";
 import { SHELL_PANEL_IDS } from "../src/console/shell.mjs";
+import { RUN_PLACES, RUN_RECORD_UNREAD } from "../src/read-model.mjs";
+import { runUntoldText } from "../src/console/panels/run.mjs";
 import { ESC, FIXTURES, ROLES, SHOTS, STATIC_SHOTS, assertClean, assertPanelsMatch, renderAll, skip } from "./helpers/console-pages-harness.mjs";
 
 /**
@@ -191,17 +193,18 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   const parkedPill = /<a href="\/parked"(?: aria-current="page")?><svg class="ic" aria-hidden="true"><use href="#i-parked"><\/use><\/svg>Parked<span id="p-nav-parked" data-panel><span class="count tone-parked"><span aria-hidden="true">1<\/span><span class="sr">1 unanswered<\/span><\/span><\/span><\/a>/;
   for (const [key, page] of Object.entries(first)) assert.match(page.html, parkedPill, `${key}: the fixture's one parked run`);
   assert.match(first["parked.viewer"].html, /href="https:\/\/github\.com\/acme\/api\/issues\/131" rel="noreferrer noopener" target="_blank">acme\/api#131<\/a>/, "the parked run links to its issue");
-  assert.match(first["parked.viewer"].html, /<td class="num">2<\/td>/, "with the session store's chain count");
+  assert.match(first["parked.viewer"].html, /github, resumed 2 times/, "with the session store's chain count");
   assert.match(first["run.viewer"].html, /awaiting-input/);
   // Issue #643: the live transcript section, outside every panel. The fixture's run has ended and Valkey holds no
   // stream for it, so the operator reads why and nothing is opened; a viewer reads that transcripts are operators'.
   // Since issue #737 each section is in a .legacy wrapper of its own, and an operator's page ends with the confirm slot
-  // and the held note's template, outside every wrapper, where a viewer's ends with the section's wrapper.
+  // and the held note's template, outside every wrapper, where a viewer's ends with the section's wrapper and the held
+  // note's template (every live page draws it, for every role).
   const writes = `${confirmSlotHtml()}<template id="held-note">${heldNoteHtml()}</template>`;
   assert.ok(first["run.operator"].html.includes(`<div class="legacy"><section id="transcript" class="transcript-section"><h2>Live transcript</h2><p class="note">No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired, or not started yet. Reload to check again.</p></section></div>${writes}\n</main>`), "the operator's transcript section, then the slot");
   // Issue #712: a local run's page shows the command that reopens its sandbox.
   assert.match(first["run.operator"].html, /<code class="mono">pi-dispatch sandbox gh-2f6a<\/code>/);
-  assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/div>\n<\/main>/);
+  assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/div><template id="held-note">/);
   for (const key of ["run.operator", "run.viewer"]) assert.doesNotMatch(first[key].html, /data-transcript/, `${key}: no stream for an ended run without one`);
   // Issue #644: the active tables carry each job's progress as integers and a tool name, the remote host's job too; the
   // running job's detail shows its counters to everyone and its phase names, bar and note to the operator alone.
@@ -225,9 +228,9 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
     for (const [key, page] of Object.entries(first)) if (key !== "run-live.operator") assert.ok(!page.html.includes(text), `${key} carries no ${text}`);
   }
   assert.match(first["runs.viewer"].html, /<th scope="col">Job<\/th>/);
-  assert.match(first["runs.viewer"].html, /href="\/runs\?before=\d+">Older runs<\/a>/, "the runs page pages by a cursor");
+  assert.match(first["runs.viewer"].html, /<a class="btn btn--sm" href="\/runs\?before=\d+">Older<\/a>/, "the runs page pages by a cursor");
   assert.match(first["runs-filtered.viewer"].html, /value="web"/, "the filter form shows the query's values");
-  assert.match(first["runs-filtered.viewer"].html, /href="\/runs\?project=web&amp;outcome=completed&amp;before=\d+">Older runs<\/a>/, "and paging keeps the filter");
+  assert.match(first["runs-filtered.viewer"].html, /<a class="btn btn--sm" href="\/runs\?project=web&amp;outcome=completed&amp;before=\d+">Older<\/a>/, "and paging keeps the filter");
   assert.match(first["insights.viewer"].html, /<ol id="insights-tips" class="hidden-tips" hidden><li>/, "the chart tooltips are listed");
   // The insights move to the console: the two-window line, the chips' data list, the what-if form, and its answer.
   assert.match(first["insights.viewer"].html, /<p id="windows" class="note">spend window: last 7d · topology: fixed 30d record window · series bounded by retention \(PI_LOG_RETENTION_DAYS\) and the 92-day scan cap<\/p>/);
@@ -264,13 +267,13 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
   }
   // The hostile run is listed, escaped, and NOT linked: its id is outside the run-id charset, so /run would answer 400.
   const runs = pages["runs.viewer"].html;
-  assert.match(runs, /<span class="mono">gh-&lt;script&gt;alert\(1\)&lt;\/script&gt;&quot;&#39; ?\[31m<\/span>/, "the hostile job id is plain text");
+  assert.match(runs, /<td class="id"><span class="code">gh-&lt;script&gt;alert\(1\)&lt;\/script&gt;&quot;&#39; ?\[31m<\/span><\/td>/, "the hostile job id is plain text");
   assert.doesNotMatch(runs, /href="\/run\?id=gh-%3Cscript/, "with no dead link");
   const runLinks = [...runs.matchAll(/href="\/run\?id=([^"]*)"/g)].map((m) => decodeURIComponent(m[1]));
   assert.ok(runLinks.length > 5);
   const { parsePageQuery: parseQuery } = await import("../src/console/pages.mjs");
   for (const id of runLinks) assert.equal(parseQuery("run", new URLSearchParams({ id })).refusal, undefined, `every run link is one /run accepts: ${id}`);
-  assert.match(runs, /<span class="mono">javascript:alert\(3\)\/x#5<\/span>/, "a javascript: repository is shown as text, never linked");
+  assert.match(runs, /<td class="tgt">javascript:alert\(3\)\/x#5<\/td>/, "a javascript: repository is shown as text, never linked");
   assert.match(pages["parked.viewer"].html, /acme\/web&quot;&gt;&lt;script&gt;alert\(2\)&lt;\/script&gt; ?#7/, "a hostile parked target is text");
   assert.match(pages["fleet.viewer"].html, /gh-&lt;b onmouseover=alert\(5\)&gt;/, "a hostile active job id is text");
   // The operator sees the reason, escaped and scrubbed, in its details element only.
@@ -460,7 +463,7 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
   const broken = { fleet: { snapshot: async () => { throw new Error("down"); }, runsPage: async () => { throw new Error("down"); }, runById: async () => { throw new Error("down"); }, transcriptMeta: async () => { throw new Error("down"); } }, insights: async () => { throw new Error("down"); }, audit: async () => { throw new Error("down"); }, now: 1 };
   assert.equal((await loadPageData("overview", {}, broken)).snapshot, null);
   assert.equal((await loadPageData("runs", { filter: {}, before: null }, broken)).runsPage, null);
-  assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).run, { missing: true });
+  assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).run, { unreadable: RUN_RECORD_UNREAD }, "a record read that throws is unread, never a run that is not there");
   assert.deepEqual((await loadPageData("run", { id: "x" }, broken)).transcript, { unreachable: true, exists: false }, "a transcript read that throws is a stated absence");
   assert.match((await loadPageData("insights", { range: "7d" }, broken)).insightsError, /could not be assembled/);
   // The audit page's read is a view either way (audit-view.mjs `readAuditView`): a reader that throws is a view with the
@@ -594,13 +597,235 @@ test("the audit page's Older rows link carries readConsoleAudit's own cursor, wh
   assert.doesNotMatch(page2, /href="\/audit\?[^"]*">Older</);
 });
 
-test("renderPage answers 404 for a run that does not exist, and the stream's panels are the page's sections", async () => {
+test("a run id in no history, no queue, no transcript and no progress is the run-not-found page, with the runs search holding the id", async () => {
+  const { renderPage } = await import("../src/console/pages.mjs");
+  // Every source's own explicit none: the record read on both sides, the whole queue lookup, the stream, the key.
+  const none = { run: { missing: true }, chat: { found: false }, transcript: { exists: false, ended: false, outcome: null, length: 0 }, progress: { absent: true } };
+  const ctx = (data, id = "gh-nope") => ({ query: { id }, session: { name: "a", role: "operator" }, data: { now: 0, env: {}, ...none, ...data }, readOnly: false });
+  const page = await renderPage("run", ctx({}));
+  assert.equal(page.status, 404);
+  const html = String(page.html);
+  assert.match(html, /<body data-page="error">/);
+  assert.match(html, /No run with this id/);
+  assert.match(html, /<form [^>]*action="\/runs"[^>]*>[^]*<input id="q" type="search" name="q" value="gh-nope"/, "the search holds the id, the person's own query");
+  assert.match(html, /<a href="\/runs" aria-current="page">/, "Runs is the current screen");
+  // A source that said anything but its none keeps the run page, which says what could not be read: a read that failed,
+  // a record that could not be read, a queue lookup that could not be made or was not over every queue, a transcript or
+  // progress read that did not answer, and a source with no reader at all.
+  const kept = [
+    { readFailed: true },
+    { run: { unreadable: "the fleet's run mirror could not be read" } },
+    { run: { record: { jobId: "gh-nope" } } },
+    { chat: { unreachable: true } },
+    { chat: null },
+    { chat: { found: null } },
+    { chat: { found: true, jobState: "waiting" } },
+    { transcript: { exists: true } },
+    { transcript: { unreachable: true, exists: false } },
+    { transcript: undefined },
+    { progress: { unreachable: true } },
+    { progress: { invalid: "has a note that is not one" } },
+    { progress: undefined },
+    { progress: null },
+  ];
+  for (const data of kept) {
+    const other = await renderPage("run", ctx(data));
+    assert.ok(String(other.html).includes('<body data-page="run"'), JSON.stringify(data));
+    assert.ok(!String(other.html).includes("No run with this id"), JSON.stringify(data));
+  }
+});
+
+test("the run-not-found page is not answered while the live transcript and the progress could not be read: the run page keeps them, 503", async () => {
+  const { renderPage } = await import("../src/console/pages.mjs");
+  const data = { run: { missing: true }, chat: { found: false }, transcript: { unreachable: true, exists: false }, progress: { unreachable: true }, subscriptions: [] };
+  const got = await renderPage("run", { query: { id: "gh-9" }, session: { name: "ops", role: "operator" }, data, readOnly: false, theme: null });
+  assert.equal(got.status, 503);
+  assert.ok(String(got.html).includes('<body data-page="run"'));
+  assert.ok(!String(got.html).includes("No run with this id"), "a page that claims nothing was found while two reads failed");
+});
+
+test("a run with no record and no queued job but a progress snapshot is a running job's page, never the run-not-found page", async () => {
+  const { renderPage } = await import("../src/console/pages.mjs");
+  const progress = { v: 1, turn: 1, steps: 0, failed: 0, interrupted: 0, running: [], recent: [], phase: null, phases: [], note: null, prior: null, startedAt: 2, updatedAt: 3, ended: false, outcome: null };
+  const ctx = { query: { id: "gh-live" }, session: { name: "a", role: "operator" }, data: { now: 0, env: {}, run: { missing: true }, chat: { found: false }, transcript: { exists: false }, progress }, readOnly: false };
+  const page = await renderPage("run", ctx);
+  assert.equal(page.status, 200);
+  assert.ok(String(page.html).includes('<body data-page="run"'), "the run page");
+  assert.ok(!String(page.html).includes("No run with this id"));
+});
+
+test("loadPageData hands the run-not-found rule each source's own answer: a stream answer that is not one, or a record read that throws, is unread", async () => {
+  const { loadPageData, renderPage } = await import("../src/console/pages.mjs");
+  const session = { name: "ops", role: "operator" };
+  const base = {
+    runById: async () => ({ missing: true }),
+    runsPage: async () => ({ runs: [], next: null, mirror: "off" }),
+    jobStatus: async () => ({ found: false, state: null, continuesAs: null, queuedAs: null }),
+    transcriptMeta: async () => ({ exists: false, ended: false, outcome: null, length: 0, firstId: null, lastId: null }),
+    progress: async () => ({ absent: true }),
+    progressOfRun: async () => ({ progress: { absent: true }, continues: false, continuesAs: null }),
+  };
+  const page = async (fleet) => String((await renderPage("run", { query: { id: "gh-1" }, session, data: await loadPageData("run", { id: "gh-1" }, { fleet, now: () => 1 }), readOnly: false })).html);
+  assert.match(await page(base), /No run with this id/, "every source read and said none");
+  for (const [what, over] of [
+    ["a transcript answer that is no answer", { transcriptMeta: async () => null }],
+    ["a transcript answer with no exists", { transcriptMeta: async () => ({ length: 0 }) }],
+    ["an invalid transcript answer", { transcriptMeta: async () => ({ invalid: "a run id is letters" }) }],
+    ["a record read that throws", { runById: async () => { throw new Error("down"); } }],
+    ["a mirror that could not be read", { runById: async () => ({ unreadable: "the fleet's run mirror could not be read" }) }],
+    ["a queue lookup that was not whole", { jobStatus: async () => ({ found: null, state: null, continuesAs: null, queuedAs: null }) }],
+    ["a progress key that could not be read", { progressOfRun: async () => ({ progress: { unreachable: "timed out" }, continues: false, continuesAs: null }) }],
+  ]) {
+    assert.doesNotMatch(await page({ ...base, ...over }), /No run with this id/, what);
+  }
+});
+
+test("one status rule for the run page: 404 only for the run-not-found page, 503 for a page kept because a place could not be read, 200 for every run a place shows, a queued job's included (#737)", async () => {
+  const { renderPage } = await import("../src/console/pages.mjs");
+  const none = { run: { missing: true }, chat: { found: false, activeJobId: null, queuedJobId: null }, transcript: { exists: false, ended: false, outcome: null, length: 0 }, progress: { absent: true } };
+  const snapshot = { v: 1, turn: 1, steps: 0, failed: 0, interrupted: 0, running: [], recent: [], phase: null, phases: [], note: null, prior: null, startedAt: 2, updatedAt: 3, ended: false, outcome: null };
+  const statusOf = async (data) => {
+    const got = await renderPage("run", { query: { id: "gh-9" }, session: { name: "ops", role: "operator" }, data: { now: 0, env: {}, ...none, ...data }, readOnly: false });
+    const html = String(got.html);
+    return [got.status, html.includes('<body data-page="error">') ? "not found" : html.includes('<body data-page="run"') ? "run" : "other"];
+  };
+  assert.deepEqual(await statusOf({}), [404, "not found"], "every place read, each saying none");
+  for (const data of [
+    { readFailed: true },
+    { run: { unreadable: "the fleet's run mirror could not be read" } },
+    { chat: { unreachable: true } },
+    { chat: null },
+    { chat: { found: null } },
+    { transcript: { unreachable: true, exists: false } },
+    { transcript: undefined },
+    { progress: { unreachable: true } },
+    { progress: { invalid: "has a note that is not one" } },
+    { progress: null },
+  ]) {
+    assert.deepEqual(await statusOf(data), [503, "run"], JSON.stringify(data));
+  }
+  for (const data of [
+    { run: { record: { jobId: "gh-9", outcome: "completed" }, source: "local" } },
+    { chat: { found: true, jobState: "waiting", activeJobId: null, queuedJobId: null } },
+    { chat: { found: false, jobState: null, activeJobId: "gh-9.r1", queuedJobId: null } },
+    { chat: { found: false, jobState: null, activeJobId: null, queuedJobId: "gh-9.r1" } },
+    { transcript: { exists: true, ended: false, outcome: null, length: 2 } },
+    { progress: snapshot },
+    // A place that shows the run is a run, whatever another could not read.
+    { chat: { found: true, jobState: "waiting", activeJobId: null, queuedJobId: null }, transcript: { unreachable: true, exists: false } },
+  ]) {
+    assert.deepEqual(await statusOf(data), [200, "run"], JSON.stringify(data));
+  }
+});
+
+test("a base run whose job the queue no longer holds while its recovery runs or waits is the run page, as /api/run says: the lookup's whole answer, never its found alone (#737)", async () => {
+  const { loadPageData, renderPage } = await import("../src/console/pages.mjs");
+  const { runDocument } = await import("../src/console/run-api.mjs");
+  const { readJobStatus } = await import("../src/read-model.mjs");
+  for (const state of ["active", "waiting"]) {
+    // The base job "gh-base" is gone; its recovery "gh-base.r1" is in the queue (readJobStatus's own walk).
+    const recovery = { id: "gh-base.r1", data: { recoveryOf: "gh-base" }, getState: async () => state };
+    const status = await readJobStatus({ queues: [{ name: "pi-jobs", getJob: async (id) => (id === "gh-base.r1" ? recovery : null) }], jobId: "gh-base", whole: true });
+    assert.equal(status.found, false, `${state}: no queue holds the base job itself`);
+    const fleet = {
+      runById: async () => ({ missing: true }),
+      jobStatus: async () => status,
+      transcriptMeta: async () => ({ exists: false, ended: false, outcome: null, length: 0 }),
+      progressOfRun: async () => ({ progress: { absent: true }, continues: false, continuesAs: null }),
+      progress: async () => ({ absent: true }),
+      inbox: async () => ({ found: false }),
+      runsPage: async () => ({ runs: [], next: null }),
+    };
+    const api = await runDocument(fleet, "gh-base");
+    assert.equal(api.status, undefined, `${state}: /api/run answers the run (${api.error})`);
+    const data = await loadPageData("run", { id: "gh-base" }, { fleet, now: 0, env: {} }, { role: "operator", readOnly: false });
+    const page = await renderPage("run", { query: { id: "gh-base" }, session: { name: "a", role: "operator" }, data, readOnly: false });
+    assert.equal(page.status, 200, state);
+    assert.ok(String(page.html).includes('<body data-page="run"'), `${state}: the run page`);
+    assert.ok(!String(page.html).includes("No run with this id"), state);
+  }
+});
+
+test("a run page kept because a place could not be read says which, for both roles: not every queue, the live transcript, the progress (#737)", async () => {
+  const { loadPageData, renderPage } = await import("../src/console/pages.mjs");
+  const base = {
+    runById: async () => ({ missing: true }),
+    jobStatus: async () => ({ found: false, state: null, continuesAs: null, queuedAs: null }),
+    transcriptMeta: async () => ({ exists: false }),
+    progress: async () => ({ absent: true }),
+    runsPage: async () => ({ runs: [], next: null, mirror: "ok" }),
+  };
+  const banner = (html) => (String(html).match(/<section id="p-outcome"[\s\S]*?<\/section>/)?.[0] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").replace(/&#39;/g, "'");
+  for (const [what, over, unread] of [
+    ["a queue lookup over a set that was not whole", { jobStatus: async () => ({ found: null, state: null, continuesAs: null, queuedAs: null }) }, [RUN_PLACES.queues]],
+    ["a queue that could not be read", { jobStatus: async () => ({ unreachable: true }) }, [RUN_PLACES.queues]],
+    ["a stream that did not answer", { transcriptMeta: async () => ({ unreachable: "timed out", exists: false, length: 0 }) }, [RUN_PLACES.transcript]],
+    ["a stream answer that says both", { transcriptMeta: async () => ({ unreachable: true, exists: false }) }, [RUN_PLACES.transcript]],
+    ["a progress key that could not be read", { progress: async () => ({ unreachable: "timed out" }) }, [RUN_PLACES.progress]],
+    ["two at once", { jobStatus: async () => ({ found: null, state: null, continuesAs: null, queuedAs: null }), transcriptMeta: async () => { throw new Error("down"); } }, [RUN_PLACES.queues, RUN_PLACES.transcript]],
+  ]) {
+    for (const role of ["operator", "viewer"]) {
+      const session = { name: "u", role };
+      const data = await loadPageData("run", { id: "gh-none" }, { fleet: { ...base, ...over } }, session);
+      const got = await renderPage("run", { query: { id: "gh-none" }, session, data, readOnly: false, theme: null });
+      assert.equal(got.status, 503, `${what}, ${role}`);
+      assert.ok(!String(got.html).includes("No run with this id"), `${what}, ${role}: not the run-not-found page`);
+      assert.ok(banner(got.html).includes(runUntoldText(unread)), `${what}, ${role}: ${banner(got.html)}`);
+    }
+  }
+  assert.equal(runUntoldText([RUN_PLACES.queues, RUN_PLACES.transcript]), "No record of this run is in this host's history or the fleet's run mirror, but this page could not read every queue and the live transcript, so it cannot say whether the run exists. Reload to try again.");
+});
+
+test("the run page's children carry a reason only when it is a token", async () => {
+  const { loadPageData, renderPage } = await import("../src/console/pages.mjs");
+  const FREE = "GET /repos/acme/secret failed \u202e";
+  const parent = { jobId: "gh-p", kind: "github", target: "acme/web#1", outcome: "completed", reason: null, startedAt: "2026-10-14T11:00:00.000Z", endedAt: "2026-10-14T11:05:00.000Z" };
+  const kids = [
+    { jobId: "gh-c1", parentJobId: "gh-p", outcome: "failed", reason: FREE, startedAt: "2026-10-14T11:06:00.000Z", endedAt: "2026-10-14T11:07:00.000Z" },
+    { jobId: "gh-c2", parentJobId: "gh-p", outcome: "failed", reason: "container-lost", startedAt: "2026-10-14T11:08:00.000Z", endedAt: "2026-10-14T11:09:00.000Z" },
+  ];
+  const fleet = {
+    runById: async () => ({ record: parent, source: "local" }),
+    runsPage: async () => ({ runs: kids, next: null, mirror: "ok" }),
+    jobStatus: async () => ({ found: false, state: null, continuesAs: null, queuedAs: null }),
+  };
+  const data = await loadPageData("run", { id: "gh-p" }, { fleet }, { role: "operator" });
+  assert.deepEqual(data.children.map((c) => c.reason), [null, "container-lost"]);
+  const html = String((await renderPage("run", { query: { id: "gh-p" }, session: { name: "ops", role: "operator" }, data, readOnly: false, theme: null })).html);
+  assert.ok(!html.includes("/repos/acme/secret"), "no child's free text on the page");
+});
+
+test("the Parked page reads its planner checks only for a load a form can be drawn from: an operator's, or one that does not say, on a console that takes changes (#737)", async () => {
+  const { loadPageData } = await import("../src/console/pages.mjs");
+  const row = (jobId) => ({ target: "acme/web#1", kind: "github", jobId, parkedAt: 1, ageMs: 0, answered: false, chainCount: 1, project: null, pendingScan: { jobId: null } });
+  const asked = [];
+  // A fresh reader per load, so the checks' per-run cache never hides a read.
+  const fleetOf = () => ({ snapshot: async () => ({ parked: [row("gh-1"), row("gh-2")] }), parkedAnswerCheck: async (id) => (asked.push(id), { ok: true }) });
+  for (const [who, read] of [
+    [{ role: "operator" }, true],
+    [{ role: "operator", readOnly: false }, true],
+    [{}, true],
+    [undefined, true],
+    [{ readOnly: false }, true],
+    [{ role: "viewer" }, false],
+    [{ role: "viewer", readOnly: false }, false],
+    [{ role: "operator", readOnly: true }, false],
+    [{ readOnly: true }, false],
+  ]) {
+    asked.length = 0;
+    const data = await loadPageData("parked", {}, { fleet: fleetOf(), now: () => 1 }, who);
+    assert.deepEqual(asked, read ? ["gh-1", "gh-2"] : [], JSON.stringify(who));
+    assert.equal(Object.hasOwn(data, "parkedChecks"), read, JSON.stringify(who));
+  }
+});
+
+test("renderPage answers 503 for a run no place shows while the other places were not read, and the stream's panels are the page's sections", async () => {
   const { pagePanels, renderPage } = await import("../src/console/pages.mjs");
   const ctx = { query: { id: "gh-404" }, session: { name: "a", role: "viewer" }, data: { now: 0, env: {}, run: { missing: true } }, readOnly: true };
   const page = await renderPage("run", ctx);
-  assert.equal(page.status, 404);
+  assert.equal(page.status, 503);
   const html = String(page.html);
-  assert.match(html, /No run with that id/);
+  assert.ok(html.includes(runUntoldText([RUN_PLACES.queues, RUN_PLACES.transcript, RUN_PLACES.progress]).replace(/'/g, "&#39;")), "the banner names what it did not read");
   assert.match(html, /Read-only console<\/span>/);
   assert.match(html, /<body data-page="run" data-live="run" data-query="id=gh-404">/, "the run detail is live (issue #644: its progress panel moves)");
   for (const { id, html: inner } of await pagePanels("run", ctx)) {

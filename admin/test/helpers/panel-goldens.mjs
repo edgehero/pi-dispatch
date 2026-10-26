@@ -6,7 +6,7 @@ import { makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } from "@edgeher
 import { DEFER_BUCKETS } from "@edgehero/pi-dispatch/defer-reasons";
 import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
-import { actionNamed, confirmAction, previewAction } from "../../src/console/actions.mjs";
+import { SNAPSHOT_TIMEOUT_SENTENCE, actionNamed, confirmAction, previewAction } from "../../src/console/actions.mjs";
 import { makeConfirmTickets } from "../../src/console/confirm.mjs";
 import { confirmSlotHtml, heldNoteHtml, refusalHtml } from "../../src/console/confirm-view.mjs";
 import { originRefusal } from "../../src/console/guards.mjs";
@@ -380,6 +380,89 @@ async function auditPage(deps) {
   const page = await renderPage("audit", { query: parsed.query, session: { name: OPERATOR.name, role: OPERATOR.role }, data, readOnly: false, theme: null, maxStreams: MAX_STREAMS });
   assert.equal(page.status, 200);
   return String(page.html);
+}
+
+// ---- the runs, parked and run-not-found states ----------------------------------------------------------------------
+
+/** A run record as the history holds one, ISO times, a priced model and a reserve, `over` setting what it is about. */
+const record = (over) => ({
+  jobId: "gh-0000", kind: "github", target: "acme/web#1", project: "web", host: "mini1", backend: "podman", flow: "fix", provider: "anthropic", model: "claude-sonnet-5-5",
+  outcome: "completed", reason: null, startedAt: new Date(NOW - 40 * MIN).toISOString(), endedAt: new Date(NOW - 20 * MIN).toISOString(),
+  tokens: { input: 900, output: 300, total: 1200, cost: 0.11 }, dollars: { reservedMicros: 2_000_000 }, parentJobId: null, ...over,
+});
+
+/** The runs a runs state shows: a completed one, a refusal with its reason, a failure with none, one cancelled. */
+const RUNS_PAGE_RUNS = Object.freeze([
+  record({ jobId: "gh-9575", target: "acme/web#490" }),
+  record({ jobId: "gh-e9a0", target: "acme/billing#295", project: "billing", host: null, outcome: "policy", reason: "scope-cap", tokens: null, dollars: null }),
+  record({ jobId: "gh-f0c2", target: "acme/web#433", outcome: "failed", reason: null, endedAt: new Date(NOW - 26 * HOUR).toISOString(), startedAt: new Date(NOW - 26 * HOUR - 4 * MIN).toISOString() }),
+  record({ jobId: "gh-4a7e", target: "acme/billing#290", project: "billing", host: "build3", outcome: "policy", reason: "operator-cancel", endedAt: new Date(NOW - 27 * HOUR).toISOString(), startedAt: new Date(NOW - 27 * HOUR - 20 * MIN).toISOString() }),
+]);
+
+/** The last 24 hours as the fleet reader's `runsWindow` answers them for `RUNS_PAGE_RUNS`. */
+const RUNS_WINDOW = Object.freeze({
+  at: NOW, floor: false, partial: false,
+  byOutcome: { completed: 1, refused: 1, failed: 0, "awaiting-input": 0, cancelled: 0, other: 0 },
+  byProject: [
+    { project: "billing", count: 1, byOutcome: { completed: 0, refused: 1, failed: 0, "awaiting-input": 0, cancelled: 0, other: 0 }, spentMicros: 0, unpriced: 0 },
+    { project: "web", count: 1, byOutcome: { completed: 1, refused: 0, failed: 0, "awaiting-input": 0, cancelled: 0, other: 0 }, spentMicros: 110_000, unpriced: 0 },
+  ],
+  projectsMore: false, byReason: { "scope-cap": 1 },
+  values: { kind: ["github"], flow: ["fix"], trigger: [], host: ["mini1"], backend: ["podman"], model: ["claude-sonnet-5-5"] },
+  spentMicros: 110_000, unpriced: 0,
+});
+
+/** The runs page with the stream open, over a fleet whose runs reads answer `page` and `window`. */
+async function runsLive({ page = { runs: RUNS_PAGE_RUNS, mirror: "ok", next: null }, window = RUNS_WINDOW, session = OPERATOR, query = "" } = {}) {
+  const parsed = parsePageQuery("runs", query);
+  assert.ok(parsed.query, parsed.refusal);
+  const fleet = {
+    runsPage: async () => {
+      if (page instanceof Error) throw page;
+      return page;
+    },
+    runsWindow: async () => window,
+    parkedCount: async () => 1,
+  };
+  const data = await loadPageData("runs", parsed.query, { fleet, now: () => NOW });
+  const ctx = { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS };
+  const out = await renderPage("runs", ctx);
+  assert.equal(out.status, 200);
+  for (const { id, html: inner } of await pagePanels("runs", ctx)) assert.ok(String(out.html).includes(`id="${id}" data-panel>${inner}</`), `runs: panel ${id}`);
+  return markLive(String(out.html), "on");
+}
+
+/** A parked row as the snapshot's `parked` list holds one, `over` setting what it is about. */
+const parkedRow = (over) => ({ jobId: "gh-2f6a", kind: "github", target: "acme/api#131", project: "api", parkedAt: NOW - 26 * MIN, ageMs: 26 * MIN, answered: false, chainCount: 1, pendingScan: { jobId: null }, ...over });
+
+/** The parked page with the stream open, over a snapshot whose `parked` list is `rows` and a planner check answering `check`. */
+async function parkedLive(rows, { check = { ok: true }, session = OPERATOR } = {}) {
+  const snapshot = { ...SNAPSHOT, parked: rows };
+  const fleet = { snapshot: async () => snapshot, parkedAnswerCheck: async () => check };
+  const data = await loadPageData("parked", {}, { fleet, now: () => NOW });
+  const ctx = { query: {}, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS };
+  const out = await renderPage("parked", ctx);
+  assert.equal(out.status, 200);
+  for (const { id, html: inner } of await pagePanels("parked", ctx)) assert.ok(String(out.html).includes(`id="${id}" data-panel>${inner}</`), `parked: panel ${id}`);
+  return markLive(String(out.html), "on");
+}
+
+/** A run id in no history, no queue, no transcript and no progress: the run-not-found page. */
+async function runNotFoundPage(session) {
+  const parsed = parsePageQuery("run", "id=gh-7777");
+  // Each place a run is kept answers its own none (pages.mjs `runNotFound`): the record, the whole queue lookup, the
+  // stream and the progress key.
+  const fleet = { runById: async () => ({ missing: true }), jobStatus: async () => ({ found: false }), transcriptMeta: async () => ({ exists: false }), progress: async () => ({ absent: true }), progressOfRun: async () => ({ progress: { absent: true }, continues: false, continuesAs: null }), parkedCount: async () => 0 };
+  const data = await loadPageData("run", parsed.query, { fleet, now: () => NOW });
+  const out = await renderPage("run", { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS });
+  assert.equal(out.status, 404);
+  return String(out.html);
+}
+
+/** The fleet with `n` host queues, every one paused: more than a switch's sentence names. */
+function manyPausedSnapshot(n) {
+  const queues = Array.from({ length: n }, (_, i) => `pi-jobs@host${String(i + 1).padStart(2, "0")}`);
+  return { ...SNAPSHOT, queueCounts: [{ queue: "pi-jobs", paused: true, counts: { paused: 1, waiting: 0 } }, ...queues.map((queue) => ({ queue, paused: true, counts: { paused: 1, waiting: 0 } }))], switchTotal: n + 1, switchTruncated: false, switchIncomplete: null };
 }
 
 // ---- the overview's states ---------------------------------------------------------------------------------------------
@@ -825,6 +908,40 @@ const DRAW = {
   // trigger's, in the Hosts card, the Waitlists' sentences, the Queues line and Scheduled, with a long doctor label: the
   // page holds them at 375 px and in the side column, so the width check covers them.
   "overview-host-long-names.operator": async () => overviewLive(longNamesSnapshot()),
+  // RunsScreen's footer, one state each: the fleet's run mirror off or partly read, the history read cut, the history
+  // not read at all, nothing matching, and a reason token this console has no words for.
+  "runs-mirror-off.operator": async () => runsLive({ page: { runs: RUNS_PAGE_RUNS, mirror: "off", next: null } }),
+  "runs-mirror-degraded.operator": async () => runsLive({ page: { runs: RUNS_PAGE_RUNS, mirror: "degraded", next: null } }),
+  "runs-truncated.operator": async () => runsLive({ page: { runs: RUNS_PAGE_RUNS, mirror: "ok", truncated: true, examined: 2000, next: Date.parse(RUNS_PAGE_RUNS[3].endedAt) } }),
+  "runs-unreadable.viewer": async () => runsLive({ page: new Error("ECONNREFUSED"), window: null, session: VIEWER }),
+  "runs-empty.viewer": async () => runsLive({ page: { runs: [], mirror: "ok", next: null }, session: VIEWER, query: "outcome=cancelled" }),
+  "runs-unknown-reason.viewer": async () => runsLive({ page: { runs: [record({ jobId: "gh-77aa", outcome: "failed", reason: "hold-tight" })], mirror: "ok", next: null }, session: VIEWER }),
+  // ParkedPhone: a question answerable here, one the planner refuses here, one a run is answering, one whose answer
+  // scan could not tell, and nothing parked.
+  "parked-answerable.operator": async () => parkedLive([parkedRow({})]),
+  "parked-unanswerable.operator": async () => parkedLive([parkedRow({})], { check: { refusal: "gh-2f6a parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge" } }),
+  "parked-being-answered.operator": async () => parkedLive([parkedRow({ pendingScan: { jobId: "gh-3c88" } })]),
+  "parked-unknown.operator": async () => parkedLive([parkedRow({ pendingScan: { unknown: true } })]),
+  "parked-empty.viewer": async () => parkedLive([], { session: VIEWER }),
+  // ErrorPage: a run id the console looked for everywhere and did not find, the search holding it.
+  "run-not-found.operator": async () => runNotFoundPage(OPERATOR),
+  "run-not-found.viewer": async () => runNotFoundPage(VIEWER),
+  // ConfirmStates: a preview the fleet did not answer in time; Resume fleet over a scan for the queues that did not
+  // finish; and over more paused queues than a sentence names.
+  "confirm-refused-timeout.operator": async () => {
+    const bar = String(refusalHtml({ where: "preview", status: 503, sentence: SNAPSHOT_TIMEOUT_SENTENCE, state: "timeout" }));
+    return openSlotAfter(await fleetLive(), "p-queues", { inner: bar });
+  },
+  "confirm-preview-resume-incomplete.operator": async () => {
+    const snap = { ...longQueuesSnapshot([LONG_NAMES.host]), switchIncomplete: RM.SWITCH_SCAN_INCOMPLETE, switchTotal: 3, switchTruncated: false };
+    const answer = await actionWorld({ fleet: { snapshot: async () => snap } }).preview("fleet-resume");
+    return openSlotAfter(await overviewLive(snap), "p-hosts", { inner: answerHtml(answer, 200, "fleet-resume, scan incomplete") });
+  },
+  "confirm-preview-many-queues.operator": async () => {
+    const snap = manyPausedSnapshot(24);
+    const answer = await actionWorld({ fleet: { snapshot: async () => snap } }).preview("fleet-resume");
+    return openSlotAfter(await overviewLive(snap), "p-hosts", { inner: answerHtml(answer, 200, "fleet-resume, many queues") });
+  },
   // SignIn: why the last session ended, each reason; each refusal, and one no notice names (the server's sentence, as
   // the script sets it); the console out of reach.
   ...Object.fromEntries(ENDED_REASONS.map((r) => [`login-ended-${r}.anonymous`, () => loginPage({ theme: null, notice: r, limits: LIMITS, listen: "tcp" })])),

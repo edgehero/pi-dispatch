@@ -9,8 +9,12 @@ import { html, isSafeHtml } from "../src/console/html.mjs";
 import { PAGES, renderPage } from "../src/console/pages.mjs";
 import { ICON_NAMES, SPRITE } from "../src/console/pulse-icons.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
+import { selectorsOf } from "../src/console/page-css.mjs";
+import { QCARD_CSS } from "../src/console/parked-css.mjs";
+import { RUNS_CSS } from "../src/console/runs-css.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
+import { ANSWER_TEXT_MAX_BYTES } from "@edgehero/pi-dispatch/console-answer";
 import { DEFER_BUCKETS, DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { ACTIONS } from "../src/console/actions.mjs";
 import { HEADLINE_ID, SHELL_PANEL_IDS, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
@@ -280,31 +284,35 @@ test("withCode: a catalog sentence's backticked runs in the code face, every run
 
 const RUN_HEADS = [{ label: "When", l: "" }, "Job", "Target", "Project", "Flow", "Host", "Venue", "Outcome", { label: "Tokens", num: true }, { label: "Cost", num: true }];
 
-test("tbl: the DataTable card's runs, stacked on a phone with each cell labelled from its column, ids that never break", () => {
+test("tbl: the DataTable card's runs, stacked on a phone with each cell labelled from its column where the card labels it, ids that never break", () => {
   const rows = [
     [{ when: true, html: "15:30" }, { id: true, html: html`<a href="/run?id=gh-e9a0">gh-e9a0</a>` }, { tgt: true, wide: true, html: html`<a href="/runs?target=acme%2Fbilling%23260">acme/billing#260</a>` }, ui.ptag("billing"), "fix", "build3", ui.vtag("podman"), { wide: true, html: html`${ui.outcomeBadge("policy", "egress-proxy-down")}<span class="reason">Refused: the egress proxy is not running on build3.</span>` }, "-", "not metered"],
     [{ when: true, html: "15:25" }, { id: true, html: "gh-a91e" }, { tgt: true, wide: true, html: "acme/web#422" }, ui.ptag("web"), "fix", "mini2", ui.vtag("openshell"), { wide: true, html: ui.outcomeBadge("completed") }, "85,577", "$0.17"],
   ];
   // The card's head cells have no scope and its other cells no `data-l`: the kit names every column (`scope="col"`) and
-  // labels every stacked cell from its head, the When column with the empty label the card gives it.
+  // labels every stacked cell from its head, but the When column, whose empty label writes no `data-l` (the card writes
+  // one and switches it off in its stylesheet).
   const want = `<div class="tbl-wrap"><table class="tbl tbl--stack" aria-label="Runs"><thead><tr><th scope="col">When</th><th scope="col">Job</th><th scope="col">Target</th><th scope="col">Project</th><th scope="col">Flow</th><th scope="col">Host</th><th scope="col">Venue</th><th scope="col">Outcome</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th></tr></thead><tbody>`
-    + `<tr><td class="when" data-l="">15:30</td><td class="id" data-l="Job"><span class="code"><a href="/run?id=gh-e9a0">gh-e9a0</a></span></td><td class="tgt wide" data-l="Target"><a href="/runs?target=acme%2Fbilling%23260">acme/billing#260</a></td><td data-l="Project"><span class="ptag">billing</span></td><td data-l="Flow">fix</td><td data-l="Host">build3</td><td data-l="Venue"><span class="vtag">podman</span></td><td class="wide" data-l="Outcome"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"></use></svg>Refused</span><span class="reason">Refused: the egress proxy is not running on build3.</span></td><td class="num" data-l="Tokens">-</td><td class="num" data-l="Cost">not metered</td></tr>`
-    + `<tr><td class="when" data-l="">15:25</td><td class="id" data-l="Job"><span class="code">gh-a91e</span></td><td class="tgt wide" data-l="Target">acme/web#422</td><td data-l="Project"><span class="ptag">web</span></td><td data-l="Flow">fix</td><td data-l="Host">mini2</td><td data-l="Venue"><span class="vtag">openshell</span></td><td class="wide" data-l="Outcome"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"></use></svg>Completed</span></td><td class="num" data-l="Tokens">85,577</td><td class="num" data-l="Cost">$0.17</td></tr>`
+    + `<tr><td class="when">15:30</td><td class="id" data-l="Job"><span class="code"><a href="/run?id=gh-e9a0">gh-e9a0</a></span></td><td class="tgt wide" data-l="Target"><a href="/runs?target=acme%2Fbilling%23260">acme/billing#260</a></td><td data-l="Project"><span class="ptag">billing</span></td><td data-l="Flow">fix</td><td data-l="Host">build3</td><td data-l="Venue"><span class="vtag">podman</span></td><td class="wide" data-l="Outcome"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"></use></svg>Refused</span><span class="reason">Refused: the egress proxy is not running on build3.</span></td><td class="num" data-l="Tokens">-</td><td class="num" data-l="Cost">not metered</td></tr>`
+    + `<tr><td class="when">15:25</td><td class="id" data-l="Job"><span class="code">gh-a91e</span></td><td class="tgt wide" data-l="Target">acme/web#422</td><td data-l="Project"><span class="ptag">web</span></td><td data-l="Flow">fix</td><td data-l="Host">mini2</td><td data-l="Venue"><span class="vtag">openshell</span></td><td class="wide" data-l="Outcome"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"></use></svg>Completed</span></td><td class="num" data-l="Tokens">85,577</td><td class="num" data-l="Cost">$0.17</td></tr>`
     + `</tbody></table></div>`;
   assert.equal(out(ui.tbl({ label: "Runs", heads: RUN_HEADS, rows, stack: true })), want);
 });
 
-test("tbl: a caption instead of a label, a marked row, a cell hidden on a phone, and the empty case", () => {
+test("tbl: a caption instead of a label, a marked row, a column hidden on a phone, head and cells, and the empty case", () => {
   const t = out(ui.tbl({ caption: "Audit log", heads: [{ label: "Seq", num: true }, "Who", { label: "Note", hidePhone: true }], rows: [{ cells: [7, "ops", "x"], mark: "failed" }, [8, { html: "watcher", hidePhone: true }, null]] }));
-  assert.equal(t, `<div class="tbl-wrap"><table class="tbl"><caption class="sr">Audit log</caption><thead><tr><th scope="col" class="num">Seq</th><th scope="col">Who</th><th scope="col">Note</th></tr></thead><tbody><tr class="row--failed"><td class="num">7</td><td>ops</td><td class="hide-phone">x</td></tr><tr><td class="num">8</td><td class="hide-phone">watcher</td><td class="hide-phone"></td></tr></tbody></table></div>`);
+  assert.equal(t, `<div class="tbl-wrap"><table class="tbl"><caption class="sr">Audit log</caption><thead><tr><th scope="col" class="num">Seq</th><th scope="col">Who</th><th scope="col" class="hide-phone">Note</th></tr></thead><tbody><tr class="row--failed"><td class="num">7</td><td>ops</td><td class="hide-phone">x</td></tr><tr><td class="num">8</td><td class="hide-phone">watcher</td><td class="hide-phone"></td></tr></tbody></table></div>`);
   assert.equal(out(ui.tbl({ label: "Runs", heads: RUN_HEADS, rows: [], empty: "No runs in the last 24 hours." })), `<p class="note">No runs in the last 24 hours.</p>`);
   const none = ui.empty({ status: "ok", title: "All clear" });
   assert.equal(out(ui.tbl({ label: "Runs", heads: RUN_HEADS, rows: [], empty: none })), String(none), "a fragment is drawn as it is");
   assert.equal(out(ui.tbl({ label: "Runs", heads: ["A"], rows: [] })), `<div class="tbl-wrap"><table class="tbl" aria-label="Runs"><thead><tr><th scope="col">A</th></tr></thead><tbody></tbody></table></div>`);
-  // A head written as markup has no phone label (its markup is not a word to print before a cell), unless `l` gives
-  // one (review mutant K5).
+  // A head written as markup has no phone label (its markup is not a word to print before a cell), so its cells carry
+  // no `data-l`, unless `l` gives one.
   const marked = out(ui.tbl({ label: "t", heads: [html`<span class="sr">Actions</span>`, { label: html`<b>Job</b>`, l: "Job" }], rows: [["x", "y"]], stack: true }));
-  assert.equal(marked, `<div class="tbl-wrap"><table class="tbl tbl--stack" aria-label="t"><thead><tr><th scope="col"><span class="sr">Actions</span></th><th scope="col"><b>Job</b></th></tr></thead><tbody><tr><td data-l="">x</td><td data-l="Job">y</td></tr></tbody></table></div>`);
+  assert.equal(marked, `<div class="tbl-wrap"><table class="tbl tbl--stack" aria-label="t"><thead><tr><th scope="col"><span class="sr">Actions</span></th><th scope="col"><b>Job</b></th></tr></thead><tbody><tr><td>x</td><td data-l="Job">y</td></tr></tbody></table></div>`);
+  // A column right-aligned and hidden on a phone marks its head with both, in the cells' order.
+  const both = out(ui.tbl({ label: "t", heads: [{ label: "Tokens", num: true, hidePhone: true }, { label: "Cost", num: true }], rows: [[5, 6]], stack: true }));
+  assert.ok(both.includes(`<thead><tr><th scope="col" class="num hide-phone">Tokens</th><th scope="col" class="num">Cost</th></tr></thead><tbody><tr><td class="num hide-phone" data-l="Tokens">5</td><td class="num" data-l="Cost">6</td></tr></tbody>`), both);
 });
 
 test("tbl: a row id, held to the kit's id rule, so a link can open the page at a row (the audit log's #seq-41)", () => {
@@ -315,6 +323,23 @@ test("tbl: a row id, held to the kit's id rule, so a link can open the page at a
     assert.throws(() => ui.tbl({ label: "t", heads: ["a"], rows: [{ cells: ["x"], id }] }), RangeError, String(id));
   }
   assert.throws(() => ui.tbl({ label: "t", heads: ["a"], rows: [{ cells: ["x"], klass: "x" }] }), /unknown row option "klass"/);
+});
+
+test("tbl: day rows, each the header of a body of its own, as the RunsScreen card groups its runs", () => {
+  const rows = [{ group: "2026-10-08 UTC" }, [{ when: true, html: "15:30" }, { id: true, html: "gh-e9a0" }], [{ when: true, html: "15:25" }, { id: true, html: "gh-a91e" }], { group: "2026-10-07 UTC" }, [{ when: true, html: "23:59" }, { id: true, html: "gh-03a9" }]];
+  // The card's day row is `<tr class="runs-day"><td colspan="12" class="wide">Thursday 8 October</td></tr>` inside its
+  // one body: here it is a row header (`th scope="rowgroup"`) across every column, opening a body of its own, so the
+  // header names its own rows and no other day's, and a stacked table labels no cell of it.
+  const t = out(ui.tbl({ label: "Runs", heads: [{ label: "Ended", l: "" }, "Job"], rows, stack: true }));
+  assert.equal(t, `<div class="tbl-wrap"><table class="tbl tbl--stack" aria-label="Runs"><thead><tr><th scope="col">Ended</th><th scope="col">Job</th></tr></thead>`
+    + `<tbody><tr class="tbl-group"><th scope="rowgroup" colspan="2">2026-10-08 UTC</th></tr><tr><td class="when">15:30</td><td class="id" data-l="Job"><span class="code">gh-e9a0</span></td></tr><tr><td class="when">15:25</td><td class="id" data-l="Job"><span class="code">gh-a91e</span></td></tr></tbody>`
+    + `<tbody><tr class="tbl-group"><th scope="rowgroup" colspan="2">2026-10-07 UTC</th></tr><tr><td class="when">23:59</td><td class="id" data-l="Job"><span class="code">gh-03a9</span></td></tr></tbody></table></div>`);
+  // Rows before the first header keep a body of their own; a table with no header is one body, as before.
+  const lead = out(ui.tbl({ label: "t", heads: ["a"], rows: [["x"], { group: "Earlier" }, ["y"]] }));
+  assert.ok(lead.includes(`<tbody><tr><td>x</td></tr></tbody><tbody><tr class="tbl-group"><th scope="rowgroup" colspan="1">Earlier</th></tr><tr><td>y</td></tr></tbody>`), lead);
+  assert.equal((out(ui.tbl({ label: "t", heads: ["a"], rows: [["x"], ["y"]] })).match(/<tbody>/g) ?? []).length, 1);
+  // A group row is its label alone: no cells, mark or id beside it, and never empty.
+  for (const bad of [{ group: "x", cells: [] }, { group: "x", id: "d1" }, { group: "" }, { group: null }]) assert.throws(() => ui.tbl({ label: "t", heads: ["a"], rows: [bad] }), TypeError, JSON.stringify(bad));
 });
 
 test("tblFoot and pager: the DataTable card's foot, and a pager at the first page", () => {
@@ -425,6 +450,8 @@ test("field, input, select and textarea: the FieldsDiffCommand card's fields, th
   assert.equal(out(ui.select({ id: "venue2", options: [{ value: null, label: "Any" }, { value: undefined, label: "None" }, "podman"] })), `<select id="venue2" class="select"><option value="">Any</option><option value="">None</option><option>podman</option></select>`);
   // A textarea keeps its text's line breaks, a leading one too; every other control byte is scrubbed.
   assert.equal(out(ui.textarea({ id: "a", name: "answer", rows: 4, value: "\nfirst\r\nsecond\tthird" })), `<textarea id="a" class="textarea" name="answer" rows="4">\n\nfirst\nsecond third</textarea>`);
+  // The most characters it takes, as the action that reads it bounds its text, after its rows.
+  assert.equal(out(ui.textarea({ id: "b", name: "text", rows: 3, maxlength: 8192, required: true })), `<textarea id="b" class="textarea" name="text" rows="3" maxlength="8192" required></textarea>`);
 });
 
 test("cmd: the FieldsDiffCommand card's copy box, its Copy button hidden until the script can copy, and the host line under it", () => {
@@ -954,6 +981,101 @@ test("actForm: a write's form, its hidden fields typed as the script reads them,
   assert.throws(() => ui.actForm({ action: "x", label: "Pause", kind: ["sm", "round"] }), TypeError, "a round button is its icon");
 });
 
+// ---- filters and summaries ----------------------------------------------------------------------------------------------------
+
+test("searchPill and filterToggle: the RunsScreen card's search pill and the RunsPhone card's Filters button", () => {
+  // The card's pill, its hidden word "Search" as the console names the field, with the field's id, name and value, and
+  // its search left to the person (no autocomplete, no spell check).
+  const card = `<label class="search runs-search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="sr">Search</span><input type="search" placeholder="Repository, target or job id"></label>`;
+  const want = fromCard(card).replace(" runs-search", "").replace(">Search<", ">Search runs<").replace(`<input type="search"`, `<input id="q" type="search" name="q" value="gh-2f6a"`).replace(`job id">`, `job id" autocomplete="off" spellcheck="false">`);
+  assert.equal(out(ui.searchPill({ id: ui.SEARCH_ID, name: "q", value: "gh-2f6a" })), want);
+  assert.equal(out(ui.searchPill({ id: "au-q", name: "q", label: "Search the log", placeholder: null })), `<label class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg><span class="sr">Search the log</span><input id="au-q" type="search" name="q" autocomplete="off" spellcheck="false"></label>`, "any kit id, no value and no placeholder");
+  // The card's Filters button with its count, drawn hidden for the script to reveal (the type, the hook and the state
+  // added; the card's `(1)` is the number of filters it folds).
+  const toggle = `<button class="fpill filterbar__toggle" type="button" aria-expanded="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Filters <b>(1)</b></button>`;
+  assert.equal(out(ui.filterToggle({ count: 1 })), fromCard(toggle).replace(` aria-expanded="false"`, ` data-filter-toggle aria-expanded="false" hidden data-reveal`));
+  assert.equal(out(ui.filterToggle()), `<button class="fpill filterbar__toggle" type="button" data-filter-toggle aria-expanded="false" hidden data-reveal><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"></use></svg>Filters</button>`, "no filter applied, no count");
+  assert.equal(out(ui.filterToggle({ count: 0 })), out(ui.filterToggle()));
+  for (const bad of [-1, 1.5, "1", Number.NaN]) assert.throws(() => ui.filterToggle({ count: bad }), TypeError, String(bad));
+  for (const name of ["", "q q", "1q", null]) assert.throws(() => ui.searchPill({ id: "s", name }), RangeError, String(name));
+  assert.throws(() => ui.searchPill({ id: "s", name: "q", label: "" }), TypeError, "a search field is named");
+});
+
+test("fpill, fchip and chipRow: the RunsScreen card's project chips and applied filters, as links a page opens without the script", () => {
+  // The card's project row is a segmented control of buttons (`.projseg`); the console's chips are links, each the runs
+  // page filtered to it, the current one marked by `aria-current` as well as its fill.
+  assert.equal(out(ui.fpill({ label: "All", count: 27, href: "/runs", on: true })), `<a class="fpill fpill--on" href="/runs" aria-current="page">All <b>27</b></a>`);
+  assert.equal(out(ui.fpill({ label: ui.ptag("billing"), count: 1204, href: "/runs?project=billing" })), `<a class="fpill" href="/runs?project=billing"><span class="ptag">billing</span> <b>1,204</b></a>`);
+  assert.equal(out(ui.fpill({ label: "Only problems", href: "/runs?problems=1" })), `<a class="fpill" href="/runs?problems=1">Only problems</a>`);
+  // The card's applied chip, its remove control a link (opening the page without the filter needs no script), named for
+  // what it removes, the filter's value in the code face.
+  const fchip = ui.fchip({ label: "Outcome", value: "failed", href: "/runs?project=web" });
+  const chip = out(fchip);
+  assert.equal(chip, `<span class="chip">Outcome: <span class="code">failed</span><a class="chip__x" href="/runs?project=web" aria-label="Remove Outcome"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"></use></svg></a></span>`);
+  const row = out(ui.chipRow([fchip, ui.btn({ kind: ["sm", "ghost"], label: "Clear filters", href: "/runs" })], { label: "Applied filters" }));
+  assert.equal(row, `<div class="chiprow" role="group" aria-label="Applied filters">${chip}<a class="btn btn--sm btn--ghost" href="/runs">Clear filters</a></div>`);
+  for (const bad of [Number.NaN, "27", Infinity]) assert.throws(() => ui.fpill({ label: "All", count: bad, href: "/runs" }), TypeError, String(bad));
+  assert.throws(() => ui.fpill({ label: "x", href: "?project=web" }), RangeError, "a console link");
+  assert.throws(() => ui.fchip({ label: html`<b>x</b>`, value: "y", href: "/runs" }), TypeError, "a chip's label is text: it names its remove link");
+  assert.throws(() => ui.fchip({ label: "x", value: "y", href: "https://evil.example/" }), RangeError);
+  assert.throws(() => ui.chipRow("x", { label: "r" }), TypeError);
+  assert.throws(() => ui.chipRow([], {}), TypeError, "a row is named");
+});
+
+test("sumStrip: the RunsScreen card's counts by outcome, each a link to its runs, a lower bound said in words, an item off a phone", () => {
+  // The card's `.runs-k` items under the kit's names: the count in bold over its label with the status's icon, the
+  // tone on the item; a neutral item (the spend) has no tone and no icon.
+  const card = `<a class="runs-k tone-failed" href="#"><b>1</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg>failed</span></a><a class="runs-k" href="#"><b>$6.13</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg>metered spend</span></a>`;
+  const strip = out(ui.sumStrip([{ n: 1, label: "failed", status: "failed", href: "/runs?outcome=failed" }, { n: "$6.13", label: "metered spend", href: "/insights" }], { label: "Runs that ended in the last 24 hours" }));
+  const items = fromCard(hrefs(card, "/runs?outcome=failed", "/insights")).replaceAll("runs-k", "sumstrip__i").replace(`<svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"></use></svg>`, "");
+  assert.equal(strip, `<ul class="sumstrip" aria-label="Runs that ended in the last 24 hours">${items.replace(/<a /g, "<li><a ").replace(/<\/a>/g, "</a></li>")}</ul>`);
+  // A count is grouped; a lower bound says "at least" before it; an item with no link is text; one off a phone says so.
+  const more = out(ui.sumStrip([{ n: 2000, label: "completed", status: "ok", floor: true }, { n: 3, label: "awaiting input", status: "parked", hidePhone: true }], { label: "s" }));
+  assert.equal(more, `<ul class="sumstrip" aria-label="s"><li><span class="sumstrip__i tone-ok"><b><small>at least</small> 2,000</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"></use></svg>completed</span></span></li><li class="hide-phone"><span class="sumstrip__i tone-parked"><b>3</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"></use></svg>awaiting input</span></span></li></ul>`);
+  assert.throws(() => ui.sumStrip([{ n: 1, label: "x", status: "warn" }], { label: "s" }), RangeError, "a status is a STATUS kind");
+  assert.throws(() => ui.sumStrip([{ n: 1, label: "x", tone: "ok" }], { label: "s" }), RangeError, "an unknown item option");
+  for (const bad of [Number.NaN, null, undefined, {}]) assert.throws(() => ui.sumStrip([{ n: bad, label: "x" }], { label: "s" }), TypeError, String(bad));
+  assert.throws(() => ui.sumStrip([{ n: 1, label: "x", href: "javascript:alert(1)" }], { label: "s" }), RangeError);
+  assert.throws(() => ui.sumStrip([], {}), TypeError, "a strip is named");
+});
+
+// ---- a parked run's question ----------------------------------------------------------------------------------------------------
+
+test("questionCard and answerForm: the ParkedPhone card's question card, its answer box posting the parked answer's own fields", () => {
+  // The card's markup under the kit's names (`pp-` is the card's own prefix), an article and not the panel's section,
+  // named for who asks, the id a link to its run, the wait said for a screen reader, the card's quote holding whatever
+  // the caller puts there (the console's callers say where the question is read: no question text is on any panel).
+  const answer = ui.answerForm({ jobId: "gh-2f6a", id: "answer-gh-2f6a", hint: "Posted to acme/api#131 after you confirm. It resumes the run.", runHref: "/run?id=gh-2f6a" });
+  const card = out(ui.questionCard({ jobId: "gh-2f6a", runHref: "/run?id=gh-2f6a", waited: "26m", project: "api", target: html`<a class="link" href="/runs?q=acme%2Fapi%23131">acme/api#131</a>`, where: "triage, mini1", body: "The question is on its issue.", answer }));
+  const top = fromCard(`<p class="pp-top"><span class="tile tile--sm tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg></span><b id="pp-q"><span class="code">gh-2f6a</span> asks</b><span class="pp-wait">26m</span></p>`)
+    .replaceAll("pp-", "qcard__").replace(` id="qcard__q"`, "").replace(`<span class="code">gh-2f6a</span>`, `<a class="code" href="/run?id=gh-2f6a">gh-2f6a</a>`).replace(">26m<", `><span class="sr">waiting </span>26m<`);
+  const meta = `<p class="qcard__meta"><span class="ptag">api</span><a class="link" href="/runs?q=acme%2Fapi%23131">acme/api#131</a><span>triage, mini1</span></p>`;
+  assert.equal(card, `<article class="card card--ring tone-parked qcard" aria-label="gh-2f6a asks">${top}${meta}<div class="qcard__body">The question is on its issue.</div>${answer}</article>`);
+  // The answer box: the card's hidden label and field, its buttons, its hint, as the parked answer's form. The field
+  // posts `text` beside the hidden `jobId`, the names panels/common.mjs parkedAnswerForm posts and the action reads, and
+  // takes at most the worker's bound on an answer.
+  assert.equal(String(answer), `<form class="act qform" data-action="parked-answer" autocomplete="off"><input type="hidden" name="jobId" value="gh-2f6a"><label class="sr" for="answer-gh-2f6a">Your answer, as the reply on the issue</label><textarea id="answer-gh-2f6a" class="textarea" name="text" rows="3" maxlength="8192" placeholder="Write your answer" required aria-describedby="answer-gh-2f6a-hint"></textarea><div class="qform__act"><button class="btn btn--answer" type="submit"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"></use></svg>Preview the answer</button><a class="btn btn--ghost" href="/run?id=gh-2f6a">Open run</a></div><p class="field__hint" id="answer-gh-2f6a-hint">Posted to acme/api#131 after you confirm. It resumes the run.</p></form>`);
+  assert.equal(ui.ANSWER_MAX, ANSWER_TEXT_MAX_BYTES, "the worker's bound on an answer");
+  assert.ok(ACTIONS.some((a) => a.name === "parked-answer"), "an action the script posts");
+  const legacy = readFileSync(new URL("../src/console/panels/common.mjs", import.meta.url), "utf8");
+  assert.match(legacy, /actForm\("parked-answer", \{ hidden: \[\["jobId", jobId\]\], fields: area\("text", /, "the old form's field names, which the kit's keeps");
+  // With nothing but its id: no meta line, no body, no answer; no Open run and no hint on a bare form.
+  assert.equal(out(ui.questionCard({ jobId: "gh-1", runHref: "/run?id=gh-1" })), `<article class="card card--ring tone-parked qcard" aria-label="gh-1 asks"><p class="qcard__top"><span class="tile tile--sm tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"></use></svg></span><b><a class="code" href="/run?id=gh-1">gh-1</a> asks</b></p></article>`);
+  const bare = out(ui.answerForm({ jobId: "gh-1", id: "a1", hint: null }));
+  assert.ok(!bare.includes("Open run") && !bare.includes("field__hint") && !bare.includes("aria-describedby"), bare);
+  assert.throws(() => ui.questionCard({ jobId: "gh-1", runHref: "https://evil.example/" }), RangeError);
+  assert.throws(() => ui.questionCard({ jobId: html`<b>x</b>`, runHref: "/run?id=x" }), TypeError, "an id is text: it names the card");
+  for (const id of ["q", "p-answer", "Answer", ""]) assert.throws(() => ui.answerForm({ jobId: "gh-1", id, hint: "h" }), RangeError, id);
+});
+
+test("SEARCH_ID is reserved, and searchPill is the one helper that writes it", () => {
+  assert.equal(ui.SEARCH_ID, "q");
+  assert.ok(ui.RESERVED_IDS.includes(ui.SEARCH_ID));
+  assert.ok(String(ui.searchPill({ id: ui.SEARCH_ID, name: "q" })).includes(`<input id="q" `));
+  for (const fn of [() => ui.input({ id: "q" }), () => ui.select({ id: "q", options: [] }), () => ui.textarea({ id: "q" }), () => ui.btn({ label: "x", id: "q" })]) assert.throws(fn, RangeError);
+  for (const id of ["main", "logout", "p-filters", "i-search"]) assert.throws(() => ui.searchPill({ id, name: "q" }), RangeError, `#${id}`);
+});
+
 test("an unknown status, icon, kind, size, tag, type, option or link THROWS: those come from code, never from a record", () => {
   const throwsRange = (fn, label) => assert.throws(fn, RangeError, label);
   for (const bad of ["warn", "success", "Running", "", "__proto__", "constructor", null, undefined, 1]) {
@@ -981,7 +1103,8 @@ test("an unknown status, icon, kind, size, tag, type, option or link THROWS: tho
   throwsRange(() => ui.big({ n: 1, label: "x", trend: "sideways" }));
   throwsRange(() => ui.input({ id: "a", type: "file" }));
   throwsRange(() => ui.input({ id: "a", requred: true }), "a misspelt option");
-  throwsRange(() => ui.textarea({ id: "a", maxlength: 3 }), "an option the kit does not write");
+  throwsRange(() => ui.textarea({ id: "a", maxLength: 3 }), "an option the kit does not write (its maxlength is spelt as the attribute)");
+  for (const bad of [0, -1, 1.5, "3", Number.NaN]) throwsRange(() => ui.textarea({ id: "a", maxlength: bad }), `maxlength ${String(bad)}`);
   for (const bad of ["Bad", "a b", "1a", "", "a_b", null]) throwsRange(() => ui.field({ label: "x", id: bad, control: "" }), `id ${String(bad)}`);
   throwsRange(() => ui.input({ id: "a", describedBy: ["a-err", "x\"y"] }));
   // A reserved id (the frame's, the sprite's, an icon's or a panel's) is refused wherever the kit writes an id, the
@@ -1031,6 +1154,12 @@ test("hostile text is escaped and its control bytes scrubbed in every helper tha
     ui.spendDots({ hours: [1], label: H }), ui.waitBar([{ icon: "slot", count: 1 }], { label: H }),
     ui.rowPill({ items: [H], end: { text: H, status: "attention" }, action: { label: H, href: "/run?id=\"><script>" } }), ui.rowPill({ items: [], end: H }), ui.rowPill({ items: [], end: { text: H, faint: true } }),
     ui.actForm({ action: "x", hidden: [["n", H]], label: H }),
+    // PR 4's filters, summaries and question card.
+    ui.searchPill({ id: "s", name: "q", value: H, label: H, placeholder: H }), ui.filterToggle({ label: H, count: 2 }),
+    ui.fpill({ label: H, count: 1, href: "/runs?q=\"><script>" }), ui.fchip({ label: H, value: H, href: "/runs?q=\"><script>" }), ui.chipRow([H], { label: H }),
+    ui.sumStrip([{ n: H, label: H, status: "failed", href: "/runs?q=\"><script>" }], { label: H }), ui.tbl({ label: "t", heads: ["a"], rows: [{ group: H }, [H]] }),
+    ui.questionCard({ jobId: H, runHref: "/run?id=\"><script>", waited: H, project: H, target: H, where: H, body: H, answer: H }),
+    ui.answerForm({ jobId: H, id: "a", hint: H, runHref: "/run?id=\"><script>" }),
   ];
   for (const f of frags) {
     const s = out(f);
@@ -1057,6 +1186,11 @@ test("every link form the kit writes passes the page reference rule (assertOwnRe
     ui.outLink({ href: docsHref("docs/reasons.md#scope-cap"), label: "the reasons docs", code: true }),
     ui.outLink({ href: docsHref("docs/triggers.md"), label: "What triggers can do", btn: "ghost" }),
     ui.field({ label: "Answer", id: "answer", control: ui.textarea({ id: "answer" }), hint: "h", error: "e" }),
+    // PR 4's: the filter pills and chips, the summary strip's links, the question card's run link and its Open run.
+    ui.chipRow([ui.fpill({ label: "web", count: 2, href: ui.pageHref(PAGES, "runs", { project: "web" }), on: true }), ui.fchip({ label: "Outcome", value: "failed", href: ui.pageHref(PAGES, "runs") })], { label: "Filters" }),
+    ui.sumStrip([{ n: 1, label: "failed", status: "failed", href: ui.pageHref(PAGES, "runs", { outcome: "failed" }) }], { label: "Runs" }),
+    ui.questionCard({ jobId: "gh-2f6a", runHref: ui.pageHref(PAGES, "run", { id: "gh-2f6a" }), answer: ui.answerForm({ jobId: "gh-2f6a", id: "answer-1", hint: "h", runHref: ui.pageHref(PAGES, "run", { id: "gh-2f6a" }) }) }),
+    ui.searchPill({ id: ui.SEARCH_ID, name: "q" }),
   ].map(String);
   // A page around them: the sprite every icon names, the skip link's target, and the element `#why` names.
   const page = `<a class="skip" href="#main">Skip</a>${SPRITE}<main id="main"><p id="why">why</p>${links.join("")}</main>`;
@@ -1194,7 +1328,18 @@ test("every icon a fragment uses is a symbol in the sprite, and every class it w
     assert.doesNotMatch(s, /<use href="[^#]/, "an icon is always in-page");
   }
   assert.equal(used.size, ICON_NAMES.length, "the sweep drew every icon");
-  // Every class the kit writes (and the samples' own `code`, `link` and `reason`) is a class PULSE_CSS has a rule for.
+  // Every class the kit writes (and the samples' own `code`, `link` and `reason`) is a class PULSE_CSS has a rule for,
+  // or one of the few the console styles itself where bundle.css has none (the kit's header): the summary strip, a
+  // table's day rows and a chip row in the runs page's rules, the question card and its form in the card's own, which
+  // every page that draws one serves. Each of those is named, so a class added to the kit that nothing styles fails.
+  const own = new Map([[RUNS_CSS, ["chip__x", "chiprow", "sumstrip", "sumstrip__i", "tbl-group"]], [QCARD_CSS, ["qcard", "qcard__body", "qcard__meta", "qcard__top", "qcard__wait", "qform", "qform__act"]]]);
+  const styledBy = (css, c) => selectorsOf(css).some((sel) => new RegExp(`\\.${c.replace(/[-_]/g, "\\$&")}(?![a-z0-9_-])`).test(sel));
   const classes = new Set(OUT.flatMap((s) => Array.from(s.matchAll(/\sclass="([^"]*)"/g), (m) => m[1].split(" "))).flat());
-  for (const c of classes) assert.match(PULSE_CSS, new RegExp(`\\.${c.replace(/[-_]/g, "\\$&")}(?![a-z0-9_-])`), `.${c} is styled by the stylesheet`);
+  for (const c of classes) {
+    const page = [...own].find(([, names]) => names.includes(c));
+    if (page) assert.ok(styledBy(page[0], c), `.${c} is styled by the rules the kit's header names for it`);
+    else assert.match(PULSE_CSS, new RegExp(`\\.${c.replace(/[-_]/g, "\\$&")}(?![a-z0-9_-])`), `.${c} is styled by the stylesheet`);
+  }
+  for (const [, names] of own) for (const c of names) assert.ok(classes.has(c), `.${c} is a class the kit writes`);
+  for (const [, names] of own) for (const c of names) assert.doesNotMatch(PULSE_CSS, new RegExp(`\\.${c.replace(/[-_]/g, "\\$&")}(?![a-z0-9_-])`), `.${c} is not bundle.css's: it would be styled twice`);
 });

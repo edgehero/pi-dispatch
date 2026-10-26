@@ -391,6 +391,12 @@ export async function readMirroredPage(redis, { before = null, offset = 0, limit
 }
 
 /**
+ * What `readMirroredRecord` answers, when asked to tell it (`tellUnread`), for a GET that did not complete: the server
+ * unreachable, or no answer within the bound. Nothing was read, which is not the same as no record.
+ */
+export const UNREAD_RECORD = Object.freeze({ unread: true });
+
+/**
  * One run's mirrored record, by its sanitized id: the parsed object, `null`, or `UNREADABLE_RECORD`. Never throws,
  * never rejects.
  *
@@ -399,8 +405,12 @@ export async function readMirroredPage(redis, { before = null, offset = 0, limit
  * is there but is not a record (unparseable, empty, not an object) is `UNREADABLE_RECORD`, exactly as the local
  * reader says it, so the check can log `unreadable` from `mirror`. Neither is ever accepted: the caller keeps
  * today's path.
+ *
+ * `tellUnread: true` answers `UNREAD_RECORD` for a GET that did not complete instead of `null`, for a caller that must
+ * not take an unread record for an absent one: the console's run page, whose "no run with this id" is a claim that
+ * every place a run is kept was read. The worker's own reads keep `null`, which fails toward today's path.
  */
-export async function readMirroredRecord(redis, sanitizedJobId, { timeoutMs = OP_TIMEOUT_MS } = {}) {
+export async function readMirroredRecord(redis, sanitizedJobId, { timeoutMs = OP_TIMEOUT_MS, tellUnread = false } = {}) {
 	if (!redis || !sanitizedJobId) return null;
 	try {
 		const raw = await bounded(redis.get(runRecordKey(sanitizedJobId)), timeoutMs);
@@ -414,7 +424,7 @@ export async function readMirroredRecord(redis, sanitizedJobId, { timeoutMs = OP
 		}
 		return rec !== null && typeof rec === "object" && !Array.isArray(rec) ? rec : UNREADABLE_RECORD;
 	} catch {
-		return null; // unreachable or timed out: nothing was read
+		return tellUnread === true ? UNREAD_RECORD : null; // unreachable or timed out: nothing was read
 	}
 }
 

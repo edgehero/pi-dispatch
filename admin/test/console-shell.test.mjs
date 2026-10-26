@@ -9,7 +9,8 @@ import { html } from "../src/console/html.mjs";
 import { STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
 import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "../src/console/session-ends.mjs";
 import { LINK_NOTICES, LINK_STATES, LISTEN_FOOTERS, NO_SCRIPT_TEXT, linkContent, signInContent } from "../src/console/signin.mjs";
-import { HEADLINE_ID, LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, SHELL_PANEL_IDS, frameHtml, legacyWrap, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
+import { HEADLINE_ID, LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, SEARCH_HREF, SHELL_PANEL_IDS, frameHtml, legacyWrap, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
+import { RESERVED_IDS, SEARCH_ID } from "../src/console/kit.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "../src/console/theme.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
 
@@ -106,6 +107,35 @@ test("every page, both roles: one h1, one sprite, a skip link to the focusable m
       }
     }
   }
+});
+
+test("the Search button: a round link to the runs page's search field, first in the bar's end, on every page for both roles, off a phone", async () => {
+  // The Shell card's round button, as a link (it opens a page; the card's is a placeholder `button`), with a title for
+  // a pointer, `hide-phone` as the card draws it, and the class the shell's width rules name it by.
+  const card = `<button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>`;
+  const want = card.replace(`<button `, `<a `).replace(`hide-phone"`, `hide-phone top__search"`).replace(` type="button"`, ` href="/runs#q"`).replace(`aria-label="Search runs">`, `aria-label="Search runs" title="Search runs">`).replace(`<use href="#i-search"/>`, `<use href="#i-search"></use>`).replace(`</button>`, `</a>`);
+  assert.equal(SEARCH_HREF, `${PAGES.runs.path}#${SEARCH_ID}`, "the runs page's search field");
+  assert.ok(SEARCH_ID === "q" && RESERVED_IDS.includes(SEARCH_ID), "an id the kit reserves for it");
+  for (const name of Object.keys(PAGES)) {
+    for (const role of ROLES) {
+      for (const readOnly of [false, true]) {
+        const { html: page } = await draw(name, { role, readOnly });
+        assert.equal(count(page, want), 1, `${name}.${role}${readOnly ? ".read-only" : ""}: the Search button, once`);
+        assert.ok(page.includes(`<div class="top__end">${want}`), `${name}.${role}: first in the bar's end, as the card draws it`);
+      }
+    }
+  }
+  // The error pages that keep the navigation keep it too, and the sign-in pages, with nobody signed in, have none.
+  assert.ok(String(frameHtml({ name: "error", title: "Page not found", nav: true, session: { name: "ops", role: "viewer" } }, html``)).includes(want));
+  assert.ok(!String(loginPage()).includes(SEARCH_HREF) && !String(loginCodePage()).includes(SEARCH_HREF));
+});
+
+test("frameHtml marks a screen's pill current only where the page stands for one, and only one the role may open", () => {
+  const nav = (here, role = "operator") => navOf(String(frameHtml({ name: "error", title: "Run not found", nav: true, session: { name: "ops", role }, here }, html``)));
+  assert.deepEqual([...nav("runs").matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]), ["/runs"]);
+  assert.ok(!nav(null).includes('aria-current="page"'), "by default none");
+  for (const bad of ["run", "nope", "__proto__"]) assert.ok(!nav(bad).includes('aria-current="page"'), `${bad}: not a screen in the navigation`);
+  assert.ok(!nav("audit", "viewer").includes('aria-current="page"'), "not a page the role may open");
 });
 
 test("the title bar: the page's title, and the run detail's back link to Runs with the run named", async () => {
@@ -258,8 +288,9 @@ test("the Parked count: from the snapshot or the reader's count, drawn only when
 
 test("LEGACY_PAGES is a written-out frozen list: a page added to PAGES later is not legacy by default", () => {
   // The list as written: a copy derived from PAGES would make every new page start in the old markup. PR 2
-  // converted the audit log, the two sign-in pages and the operators-only refusal; PR 3 the overview.
-  assert.deepEqual(LEGACY_PAGES, ["runs", "run", "parked", "insights", "fleet", "config"]);
+  // converted the audit log, the two sign-in pages and the operators-only refusal; PR 3 the overview; PR 4 the runs and
+  // parked pages.
+  assert.deepEqual(LEGACY_PAGES, ["run", "insights", "fleet", "config"]);
   assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "an array, frozen: a frozen Set still takes .add()");
   assert.throws(() => LEGACY_PAGES.push("models"), TypeError);
   assert.equal(new Set(LEGACY_PAGES).size, LEGACY_PAGES.length);
@@ -505,17 +536,22 @@ test("the read-only banner on every page of a read-only console; the done banner
   assert.ok(both.indexOf(banner) < both.indexOf(String(doneBannerHtml(flash))) && both.indexOf(String(doneBannerHtml(flash))) < both.indexOf('id="live-note"'));
 });
 
-test("the confirm slot and the held note's template: once, after the content, for an operator on a console that takes changes", async () => {
+test("the confirm slot for an operator on a console that takes changes, the held note's template on every live page for every role: once, after the content", async () => {
   const slot = String(confirmSlotHtml());
   const tpl = `<template id="held-note">${heldNoteHtml()}</template>`;
   for (const name of Object.keys(PAGES)) {
     for (const role of ROLES) {
       for (const readOnly of [false, true]) {
-        const { html } = await draw(name, { role, readOnly });
-        const writes = role === "operator" && !readOnly && !(PAGES[name].auth === "operator" && role !== "operator");
+        const { status, html } = await draw(name, { role, readOnly });
+        const shown = !(PAGES[name].auth === "operator" && role !== "operator");
+        const writes = shown && role === "operator" && !readOnly;
+        // A live page's panels can be held by a field in use (a viewer's runs filters, a read-only console's too), so
+        // each says why it stands still; a page drawn once is never updated and holds nothing.
+        const held = shown && PAGES[name].live;
         assert.equal(count(html, slot), writes ? 1 : 0, `${name}.${role}.${readOnly}: the slot`);
-        assert.equal(count(html, tpl), writes ? 1 : 0, `${name}.${role}.${readOnly}: the template`);
-        if (writes) assert.ok(html.endsWith(`${slot}${tpl}\n</main>\n</div>\n</body>\n</html>\n`), `${name}: last in main`);
+        assert.equal(count(html, tpl), held ? 1 : 0, `${name}.${role}.${readOnly}: the template (${status})`);
+        const last = `${writes ? slot : ""}${held ? tpl : ""}`;
+        if (last !== "") assert.ok(html.endsWith(`${last}\n</main>\n</div>\n</body>\n</html>\n`), `${name}.${role}.${readOnly}: last in main`);
       }
     }
     assert.ok(!(await draw(name, { slot: false })).html.includes('id="confirm-slot"'), `${name}: slot false keeps it off`);

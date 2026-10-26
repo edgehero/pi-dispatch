@@ -23,9 +23,9 @@
  *   2. a stream whose socket buffer holds more than `maxBufferBytes` (a reader that stopped reading) is cut, so one
  *      stalled browser cannot grow this process's memory; it reconnects to a fresh snapshot;
  *   3. `loadPageData` runs ONCE per distinct page + data key, however many streams show it, and for a page with a
- *      `pageMinMs` (the runs page) at most once per that many ms. The data key is the part of the query the page's data
- *      depends on (`dataQueryOf`, issue #737): the overview's grouping, zoom and project only regroup one snapshot, so
- *      every overview query shares one load; any other page's is its whole query;
+ *      `pageMinMs` (the runs, run and Parked pages) at most once per that many ms. The data key is the part of the
+ *      query the page's data depends on (`dataQueryOf`, issue #737): the overview's grouping, zoom and project only
+ *      regroup one snapshot, so every overview query shares one load; any other page's is its whole query;
  *   4. `pagePanels` renders each view (page + whole query + the viewer's role and name: the role rule makes a viewer's
  *      panels differ from an operator's), and only the panels whose digest changed are written, each as
  *      `id: <seq>`, `event: panel`, `data: {"id","html"}`.
@@ -91,6 +91,7 @@ import { scrubControls } from "../panel.mjs";
 import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
 import { compareTranscriptIds, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
+import { recordReason } from "../words.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { STREAM_SHUTDOWN, streamEndOf } from "./session-ends.mjs";
 import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
@@ -101,10 +102,12 @@ import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
  * at 5 s its views still move, at a fifth of the cost. The run detail (live since issue #644, for its progress panel)
  * reads its record, its children (up to three runs pages), two Valkey keys and (issue #646) the job's inbox per load, so
  * it is held to 2 s; the worker writes progress at most once a second, so a 2 s view misses nothing an operator could
- * read. Between loads the last data is rendered again (cheap), so a new
- * view of the same page and query is drawn at once from it.
+ * read. The Parked page (issue #737) reads a whole snapshot and up to twenty planner checks per load, and what it draws
+ * moves slower than either: its rows are the parked fold and its pending-answer scans, which the reader refreshes at
+ * most once per 15 s, so it is held to 5 s. Between loads the last data is rendered again (cheap), so a new view of the
+ * same page and query is drawn at once from it.
  */
-export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000, run: 2000 }), transcriptPagesPerTick: 4 });
+export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000, run: 2000, parked: 5000 }), transcriptPagesPerTick: 4 });
 
 const digestOf = (text) => createHash("sha256").update(text).digest("hex");
 
@@ -127,9 +130,14 @@ export const TOKENS_HELD_LINE = "console: the tokens file cannot be read; live s
 export const TOKENS_BACK_LINE = "console: the tokens file is read again; live streams are judged and drawn again";
 
 /**
- * The hub. `loadPageData(page, query)` resolves the page's data (the CLI binds its deps), called with
- * `dataQueryOf(page, query)`; `pagePanels(page, ctx)` resolves `[{id, html}]` with `ctx = {query, session: {name, role},
- * data, readOnly}`, `query` the view's whole query; `peekSession(id, file)` and
+ * The hub. `loadPageData(page, query, who)` resolves the page's data (the CLI binds its deps), called with
+ * `dataQueryOf(page, query)` and `who`, what the load knows of who will see it (pages.mjs `loadPageData`):
+ * `{ readOnly, live: true }`, and `role: "viewer"` when no operator's stream shows it, never an operator's role, since
+ * one load serves every role watching it (so the Parked page reads no planner check that no form is drawn from). `live`
+ * marks the load as the hub's: its by-id job lookups start no keyspace scan, however many pages and ids are open
+ * (pages.mjs, the reader's `lookUp`); only a request's lookups (a page GET's, `/api/run`'s) scan for an absence. A load
+ * made for viewers alone is not reused once an operator's stream shows the page. `pagePanels(page, ctx)` resolves `[{id, html}]` with
+ * `ctx = {query, session: {name, role}, data, readOnly}`, `query` the view's whole query; `peekSession(id, file)` and
  * `readTokens()` are the session store's `peek` and the server's token reader. `endedReason(id, file)` says why a
  * session that failed `peekSession` ended (the CLI binds the store's `verdict`); without it every end says null.
  *
@@ -185,7 +193,10 @@ export function makeLiveHub({
   let running = null;
   let again = false;
   let closed = false;
-  /** dataKey -> {at, data}: the last load of a page with a `pageMinMs`, reused until it is that old. */
+  /**
+   * dataKey -> {at, data, viewersOnly}: the last load of a page with a `pageMinMs`, reused until it is that old, and
+   * not for an operator's stream when it was made for viewers alone (it may lack what only an operator is drawn).
+   */
   const loaded = new Map();
   /** Data and view keys that failed at their last attempt, so a lasting failure is logged once. */
   const failing = new Set();
@@ -399,11 +410,12 @@ export function makeLiveHub({
       let data;
       const minMs = Object.hasOwn(pageMinMs, page) ? pageMinMs[page] : 0;
       const held = minMs > 0 ? loaded.get(dk) : undefined;
+      const viewersOnly = !group.some((sub) => sub.session.role === "operator");
       try {
-        if (held && t - held.at < minMs) data = held.data;
+        if (held && t - held.at < minMs && (viewersOnly || !held.viewersOnly)) data = held.data;
         else {
-          data = await loadPageData(page, query);
-          if (minMs > 0) loaded.set(dk, { at: t, data });
+          data = await loadPageData(page, query, viewersOnly ? { role: "viewer", readOnly, live: true } : { readOnly, live: true });
+          if (minMs > 0) loaded.set(dk, { at: t, data, viewersOnly });
         }
       } catch (e) {
         failed(`data\n${dk}`, `console: live data for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);
@@ -709,14 +721,14 @@ function inboxOf(a) {
   }));
 }
 
-/** A record reason in a state document: the record's token charset (the runs filter's), else null. */
-const REASON_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-
-/** The snapshot's `refusals24h` rebuilt by name (issue #710): `{ count, top: [{ reason, count }] }`, or null. */
+/**
+ * The snapshot's `refusals24h` rebuilt by name (issue #710): `{ count, top: [{ reason, count }] }`, or null. Each
+ * listed reason is the one every surface shows (words.mjs `recordReason`: a token, else the row is dropped).
+ */
 function refusalsOf(r) {
   if (r === null || typeof r !== "object" || num(r.count) === null) return null;
   const top = Array.isArray(r.top) ? r.top : [];
-  return { count: num(r.count), top: top.filter((t) => typeof t?.reason === "string" && REASON_RE.test(t.reason) && num(t.count) !== null).map((t) => ({ reason: t.reason, count: num(t.count) })) };
+  return { count: num(r.count), top: top.filter((t) => recordReason(t) !== null && num(t.count) !== null).map((t) => ({ reason: recordReason(t), count: num(t.count) })) };
 }
 
 /** The `/api/state` document's version: a script checks it before it reads a field, and a breaking change bumps it. */

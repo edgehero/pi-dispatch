@@ -4,9 +4,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, HELD_LABEL, NO_EXPLANATION, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, TONE_CLASS, UNNAMED_FIELD, VENUE_LABEL, outcomeWord, reasonWords, shortSentence } from "../src/words.mjs";
+import { DOCS_ROOT, capitalised, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, TONE_CLASS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
+import { RECOVERY_COMMENTS } from "../../worker/src/comment-tables.mjs";
+import { RECORD_REASON_RE as LEAF_REASON_RE } from "../../worker/src/record-reason.mjs";
 import { RUNNER_COMPLETED_REASONS } from "../../worker/src/run-history.mjs";
 import { RUN_OUTCOMES } from "../../worker/src/portfolio-snapshot.mjs";
 import { LIVE_OUTCOMES } from "../../worker/src/live-transcript.mjs";
@@ -50,7 +52,96 @@ test("REASON_WORDS: every key is a catalog reason, each qualifies one outcome, a
   // nothing else claims the completed outcome (run-history.mjs RUNNER_COMPLETED_REASONS, both ways).
   const completed = Object.entries(REASON_WORDS).filter(([, q]) => q.outcome === "completed").map(([t]) => t).sort();
   assert.deepEqual(completed, [...RUNNER_COMPLETED_REASONS].sort());
-  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.word])), { "awaiting-input": "awaiting input", "operator-cancel": "cancelled" });
+  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.word])), {
+    "awaiting-input": "awaiting input",
+    "operator-cancel": "cancelled",
+    "recovery-cap": "failed",
+    "recovery-checkpoint-absent": "failed",
+    "recovery-unsafe-extensions": "failed",
+  });
+  // Whether the word says why (issue #737): "awaiting input" and "cancelled" do, so a row adds no sentence; "failed"
+  // does not, so a recovery end keeps its reason's sentence.
+  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.says])), {
+    "awaiting-input": true,
+    "operator-cancel": true,
+    "recovery-cap": false,
+    "recovery-checkpoint-absent": false,
+    "recovery-unsafe-extensions": false,
+  });
+});
+
+test("the recovery ends the worker records as policy read failed: derived from the processor's returns and the comments it posts (issue #737)", () => {
+  // Every recovery comment that opens "Failed:" belongs to a run that failed, whatever outcome the processor records
+  // for it: the ones it records as `policy` are REASON_WORDS entries that say failed, the one it records as `failed`
+  // needs none, and no other recovery token is one.
+  const src = readFileSync(fileURLToPath(new URL("../../worker/src/processor.mjs", import.meta.url)), "utf8");
+  const recorded = new Map();
+  for (const m of src.matchAll(/outcome: "(completed|policy|failed)", reason: "(recover[a-z-]*)"/g)) {
+    assert.ok(!recorded.has(m[2]) || recorded.get(m[2]) === m[1], `${m[2]} is recorded under one outcome`);
+    recorded.set(m[2], m[1]);
+  }
+  const failedPolicy = [...recorded].filter(([t, o]) => o === "policy" && RECOVERY_COMMENTS[t]?.startsWith("Failed:")).map(([t]) => t).sort();
+  assert.ok(failedPolicy.length >= 3, `the processor's policy recovery ends were found: ${failedPolicy.join(", ")}`);
+  const asFailed = Object.entries(REASON_WORDS).filter(([, q]) => q.outcome === "policy" && q.word === OUTCOME_WORDS.failed.word).map(([t]) => t).sort();
+  assert.deepEqual(asFailed, failedPolicy, "the policy reasons that read failed are exactly the recovery ends the processor records as policy");
+  for (const t of asFailed) {
+    const q = REASON_WORDS[t];
+    assert.deepEqual([q.glyph, q.tone, q.status, q.says], [OUTCOME_WORDS.failed.glyph, OUTCOME_WORDS.failed.tone, OUTCOME_WORDS.failed.status, false], `${t} looks as a failure looks`);
+    assert.equal(outcomeWord("policy", t).word, "failed");
+    assert.equal(outcomeWord("failed", t).word, "failed", "under the failed outcome it is a failure as it is");
+    assert.equal(outcomeWord("completed", t).word, "completed", "and under another outcome it borrows nothing");
+  }
+});
+
+test("outcomeWord says whether the word says why: a qualified word that names its cause, never a plain outcome or an unknown one (issue #737)", () => {
+  assert.deepEqual([outcomeWord("completed", "awaiting-input").says, outcomeWord("policy", "operator-cancel").says], [true, true]);
+  assert.deepEqual([outcomeWord("policy", "recovery-cap").qualified, outcomeWord("policy", "recovery-cap").says], [true, false]);
+  for (const [o, r] of [["completed", null], ["policy", "scope-cap"], ["failed", "container-lost"], ["policy", "awaiting-input"], ["vapour", "operator-cancel"], [null, null]]) {
+    assert.equal(outcomeWord(o, r).says, false, `${o}/${r}`);
+  }
+});
+
+test("the outcome keys: the five words a badge says, as query values, each with its word and status, and the record's raw values mapped onto them (issue #737)", () => {
+  assert.deepEqual([...OUTCOME_KEYS], ["completed", "refused", "failed", "awaiting-input", "cancelled"]);
+  assert.ok(Object.isFrozen(OUTCOME_KEYS) && Object.isFrozen(OUTCOME_KEY_WORDS));
+  // Every word a known record can be given has a key, and every key is a word one can be given: both ways.
+  const words = [...new Set([...Object.values(OUTCOME_WORDS), ...Object.values(REASON_WORDS)].map((w) => w.word))].sort();
+  assert.deepEqual(OUTCOME_KEYS.map((k) => OUTCOME_KEY_WORDS[k].word).sort(), words);
+  assert.deepEqual(Object.fromEntries(OUTCOME_KEYS.map((k) => [k, [OUTCOME_KEY_WORDS[k].word, OUTCOME_KEY_WORDS[k].status]])), {
+    completed: ["completed", "ok"],
+    refused: ["refused", "refused"],
+    failed: ["failed", "failed"],
+    "awaiting-input": ["awaiting input", "parked"],
+    cancelled: ["cancelled", "cancelled"],
+  });
+  for (const k of OUTCOME_KEYS) assert.equal(k, OUTCOME_KEY_WORDS[k].word.replace(/ /g, "-"), "a key is its word as a query value");
+  const cases = [
+    ["completed", null, "completed"],
+    ["completed", "awaiting-input", "awaiting-input"],
+    ["policy", "scope-cap", "refused"],
+    ["policy", null, "refused"],
+    ["policy", "operator-cancel", "cancelled"],
+    ["policy", "recovery-cap", "failed"],
+    ["policy", "recovery-checkpoint-absent", "failed"],
+    ["failed", "container-lost", "failed"],
+    ["failed", "operator-cancel", "failed"],
+    ["vapour", null, null],
+    ["__proto__", null, null],
+    [null, null, null],
+  ];
+  for (const [o, r, want] of cases) assert.equal(outcomeKey(o, r), want, `${o}/${r}`);
+});
+
+test("recordReason takes the record's token charset alone, the worker leaf's own, and NO_REASON_FAILED names no token (issue #737)", () => {
+  assert.equal(RECORD_REASON_RE, LEAF_REASON_RE, "words.mjs re-exports the leaf's charset, never a copy");
+  for (const ok of ["scope-cap", "container-infra-exit", "worker-error", "a", "9", "x".repeat(64)]) assert.equal(recordReason({ reason: ok }), ok);
+  for (const bad of ["infra failure, container exit 1", "unknown container exit 42", "GET /repos/acme/web failed", "Scope-cap", "-x", "x".repeat(65), "<img src=x>", "a\nb", "", null, 7, undefined]) {
+    assert.equal(recordReason({ reason: bad }), null, JSON.stringify(bad));
+  }
+  assert.equal(recordReason(null), null);
+  assert.equal(recordReason(undefined), null);
+  assert.match(NO_REASON_FAILED, /^Failed: /, "a failure's verdict, which the short form drops");
+  assert.equal(shortSentence(NO_REASON_FAILED), "No reason was recorded");
 });
 
 test("the tones: refused, awaiting input and cancelled warn, failed is an error, and each tone's console class is in the stylesheet", () => {
@@ -80,7 +171,7 @@ test("the console's status (issue #737): completed ok, refused refused, failed f
   assert.deepEqual(STATUS_KINDS, ["running", "parked", "failed", "refused", "attention", "ok", "idle", "cancelled"]);
   assert.ok(Object.isFrozen(STATUS_KINDS));
   assert.deepEqual(Object.fromEntries(Object.entries(OUTCOME_WORDS).map(([k, v]) => [k, v.status])), { completed: "ok", policy: "refused", failed: "failed" });
-  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.status])), { "awaiting-input": "parked", "operator-cancel": "cancelled" });
+  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.status])), { "awaiting-input": "parked", "operator-cancel": "cancelled", "recovery-cap": "failed", "recovery-checkpoint-absent": "failed", "recovery-unsafe-extensions": "failed" });
   // outcomeWord hands the status on, and a qualifier changes it only under its own outcome, as it does the word.
   const status = (o, r) => outcomeWord(o, r).status;
   assert.equal(status("completed"), "ok");
@@ -89,6 +180,7 @@ test("the console's status (issue #737): completed ok, refused refused, failed f
   assert.equal(status("policy", "operator-cancel"), "cancelled");
   assert.equal(status("policy", "awaiting-input"), "refused", "a qualifier under another outcome keeps the outcome's status");
   assert.equal(status("failed", "operator-cancel"), "failed");
+  assert.equal(status("policy", "recovery-cap"), "failed", "a recovery end is a failure (issue #737)");
   for (const bad of ["vapour", "__proto__", null, undefined]) assert.equal(status(bad), "failed", String(bad));
   // Every status a word carries is a kind the console draws.
   for (const w of [...Object.values(OUTCOME_WORDS), ...Object.values(REASON_WORDS), outcomeWord("vapour")]) assert.ok(STATUS_KINDS.includes(w.status), w.status);
@@ -304,7 +396,7 @@ test("the panel's run detail prints the reason's sentence and next step under it
 });
 
 test("the panel's list row and sections say the console's words", async () => {
-  const rows = [RUN, { ...RUN, jobId: "gh-w2", outcome: "completed", reason: "awaiting-input" }, { ...RUN, jobId: "gh-w3", outcome: "policy", reason: "operator-cancel" }, { ...RUN, jobId: "gh-w4", outcome: "failed", reason: null }];
+  const rows = [RUN, { ...RUN, jobId: "gh-w2", outcome: "completed", reason: "awaiting-input" }, { ...RUN, jobId: "gh-w3", outcome: "policy", reason: "operator-cancel" }, { ...RUN, jobId: "gh-w4", outcome: "failed", reason: null }, { ...RUN, jobId: "gh-w5", outcome: "policy", reason: "recovery-cap" }];
   const lines = (await render(rows, 140)).map(stripAnsi);
   const row = (id) => lines.find((l) => l.includes(`${id} · `)) ?? "";
   // The word in the outcome cell, and a reason the word does not say as the row's LAST cell (#710 round 1).
@@ -312,6 +404,8 @@ test("the panel's list row and sections say the console's words", async () => {
   assert.match(row("gh-w2"), /· ✔ awaiting input · 0t · -\s*│$/);
   assert.match(row("gh-w3"), /· ⚠ cancelled · 0t · -\s*│$/);
   assert.match(row("gh-w4"), /· ✘ failed · 0t · -\s*│$/);
+  // A recovery end is a failure (issue #737), and "failed" does not say why, so its token stays the row's last cell.
+  assert.match(row("gh-w5"), /· ✘ failed · 0t · - · recovery-cap\s*│$/);
   assert.ok(lines.some((l) => /│ SPEND & LIMITS ─/.test(l)), "the spend section's divider, upper-case by the divider's style");
 });
 
@@ -366,4 +460,21 @@ test("/dispatch runs says the console's words in its OUTCOME column and keeps th
   assert.deepEqual(cells("gh-5").slice(3, 5), ["vapour", "-"], "an outcome this release does not know prints as itself");
   assert.deepEqual(cells("gh-6").slice(3, 5), ["completed", "-"]);
   assert.doesNotMatch(table, /policy/);
+});
+
+test("capitalised: a sentence that opens with a word starts with a capital; one that opens with an id keeps the id as written", () => {
+  assert.equal(capitalised("the fleet did not answer"), "The fleet did not answer");
+  assert.equal(capitalised("nothing was changed"), "Nothing was changed");
+  assert.equal(capitalised("rejected: maxTurns must be an integer"), "Rejected: maxTurns must be an integer");
+  assert.equal(capitalised("done."), "Done.");
+  for (const s of ["gh-2f6a parked on a pull request", "pi-jobs@build3 is already paused", "cron:nightly:17 is the next run", "gh_1 x", "e2e runs", ""]) assert.equal(capitalised(s), s, s);
+});
+
+test("capitalised keeps an id whose word is joined to the rest by @, as written", () => {
+  assert.equal(capitalised("jobs@east is already paused"), "jobs@east is already paused");
+});
+
+test("capitalised keeps an id joined by a full stop with no space after it, as written", () => {
+  assert.equal(capitalised("valkey.internal did not answer"), "valkey.internal did not answer");
+  assert.equal(capitalised("done. Look again"), "Done. Look again");
 });

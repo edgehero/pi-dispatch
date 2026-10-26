@@ -9,7 +9,8 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { makeLiveHub, stateOf } from "../src/console/live.mjs";
 import * as realPages from "../src/console/pages.mjs";
-import { parkedInbox, runChat, runInbox } from "../src/console/panels.mjs";
+import { parkedQuestions, runChat, runInbox } from "../src/console/panels.mjs";
+import { PARKED_ANSWERING } from "../src/console/panels/parked.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
 import * as RM from "../src/read-model.mjs";
@@ -81,7 +82,7 @@ test("Chat panel, live: the steer and follow-up forms MOVE here from the Inbox p
   assert.ok(!viewer.includes("data-action") && !viewer.includes("pi-dispatch chat") && !viewer.includes("#transcript"), "status only");
 });
 
-test("Chat panel, reply: the parked inbox's own answer form for an operator, status only for a viewer", () => {
+test("Chat panel, reply: the answer form the Parked page draws too (one action, the same fields) for an operator, status only for a viewer", () => {
   const record = { ...RECORD, reason: "awaiting-input" };
   const data = { chat: chat("parked", "reply"), run: { record } };
   const op = String(runChat(view("operator", data)));
@@ -89,8 +90,15 @@ test("Chat panel, reply: the parked inbox's own answer form for an operator, sta
   assert.match(op, /href="https:\/\/github.com\/acme\/web\/issues\/12"/);
   const form = /<form class="act" data-action="parked-answer"[\s\S]*?<\/form>/.exec(op)?.[0];
   assert.ok(form, "the answer form");
-  const parkedPage = String(parkedInbox({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: [{ target: "acme/web#12", kind: "github", jobId: "gh-1", parkedAt: T0, ageMs: 0, chainCount: 1, pendingScan: { jobId: null } }] } } }));
-  assert.ok(parkedPage.includes(form), "byte for byte the /parked page's form: one action, one form");
+  const parkedPage = String(parkedQuestions({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: [{ target: "acme/web#12", kind: "github", jobId: "gh-1", parkedAt: T0, ageMs: 0, chainCount: 1, pendingScan: { jobId: null } }] }, parkedChecks: { "gh-1": { ok: true } } } }));
+  const parkedForm = /<form class="act qform" data-action="parked-answer"[\s\S]*?<\/form>/.exec(parkedPage)?.[0];
+  assert.ok(parkedForm, "the Parked page's answer form");
+  // Issue #737: the Parked page draws the kit's answer form, the run page its own until it converts; both post the one
+  // action with the same named fields, so the script and the planner read either alike.
+  const named = (f) => [...f.matchAll(/<(input|textarea)\b[^>]*\sname="([^"]+)"[^>]*>/g)].map((m) => `${m[1]} ${m[2]}`).sort();
+  assert.deepEqual(named(parkedForm), named(form));
+  assert.deepEqual(named(form), ["input jobId", "textarea text"]);
+  for (const f of [form, parkedForm]) assert.ok(f.includes('name="jobId" value="gh-1"') && /maxlength="8192"/.test(f) && /\srequired/.test(f), f);
   assert.match(op, /pi-dispatch chat gh-1/);
   const viewer = String(runChat(view("viewer", data)));
   assert.ok(!viewer.includes("data-action") && !viewer.includes("<textarea"));
@@ -135,11 +143,10 @@ test("Chat panel and /parked: a park whose answer is queued or running is being 
     { target: "acme/web#14", kind: "github", jobId: "gh-3", parkedAt: T0, ageMs: 0, chainCount: 1, answering: null, pendingScan: { unknown: true, tooMany: false } },
     { target: "acme/web#15", kind: "github", jobId: "gh-4", parkedAt: T0, ageMs: 0, chainCount: 1, answering: null, pendingScan: { unknown: true, tooMany: true } },
   ];
-  const page = String(parkedInbox({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: rows } } }));
-  assert.match(page, /being answered by <a class="mono" href="\/run\?id=gh-77">/);
-  assert.match(page, /unknown \(the queue could not be fully read\)/);
-  assert.match(page, /unknown \(too many queued jobs to check\)/);
-  assert.ok(page.includes(CHAT_REFUSALS.parkedTooMany), "the honest sentence, once");
+  const page = String(parkedQuestions({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: rows }, parkedChecks: Object.fromEntries(rows.map((r) => [r.jobId, { ok: true }])) } }));
+  assert.ok(page.includes(`${PARKED_ANSWERING} <a class="link code" href="/run?id=gh-77">gh-77</a>.`), page);
+  assert.ok(page.includes(CHAT_REFUSALS.parkedUnknown.replace(/'/g, "&#39;")), "a scan that could not read the queue whole");
+  assert.equal(page.split(CHAT_REFUSALS.parkedTooMany).length - 1, 1, "the honest sentence, on the one card it is true of");
   // Review round 2: a scan that could not tell draws no form, as the Chat panel draws none (the shared verdict).
   assert.equal(count(page, /data-action="parked-answer"/g), 1, "a form for the waiting park alone");
   assert.ok(page.includes('name="jobId" value="gh-2"'), "the waiting park's");

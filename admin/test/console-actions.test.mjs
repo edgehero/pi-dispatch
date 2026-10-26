@@ -13,7 +13,7 @@ import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-
 import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
-import { ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
+import { ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
@@ -22,7 +22,7 @@ import { fieldNamed, UNNAMED_FIELD } from "../src/words.mjs";
 import { FLASH_MAX_BYTES } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { readJobsData } from "../src/console/job-data.mjs";
-import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parkedInbox, runSummary } from "../src/console/panels.mjs";
+import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parkedQuestions, runSummary } from "../src/console/panels.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
@@ -395,6 +395,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     envelopeAfter: "Set it back with the envelope form: the console kept no copy of the old values.",
     tooBig: "Put the previous list back by hand: this preview showed it; the console keeps no copy.",
     tooBigAfter: "Put the previous list back by hand: the console kept no copy of it.",
+    resumeUnread: "Pause the queues that were paused again by hand: the fleet was not read before the resume, so which they were is not known.",
+    resumeShort: "Pause the queues that were paused again by hand: not every queue was read before the resume, so which they were is not fully known.",
   });
   for (const [k, v] of Object.entries(UNDO_SENTENCES)) assert.ok(!/^Cannot be undone/.test(v), `${k}: the bar says "No undo:" before it`);
   const U = UNDO_SENTENCES;
@@ -441,8 +443,15 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["fleet-resume", { payload: {}, pausedBefore: { queues: 3, paused: ["pi-jobs@beta"] } }, twice("Pause queue pi-jobs@beta again"), { action: "queue-pause", body: { queue: "pi-jobs@beta" } }, "Resume", "Resumed the fleet"],
     ["fleet-resume", { payload: {}, pausedBefore: { queues: 7, paused: ["pi-jobs@alpha", "pi-jobs@beta"] } }, twice("Pause queues pi-jobs@alpha, pi-jobs@beta again by hand, one at a time: no single write pauses only those."), null, "Resume", "Resumed the fleet"],
     ["fleet-resume", { payload: {}, pausedBefore: { queues: 3, paused: [] } }, twice("No queue of the fleet was paused, so there is nothing to pause again."), null, "Resume", "Resumed the fleet"],
-    ["fleet-resume", { payload: {}, pausedBefore: null }, twice("Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known."), null, "Resume", "Resumed the fleet"],
-    ["fleet-resume", { payload: {} }, twice("Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known."), null, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {}, pausedBefore: null }, twice(U.resumeUnread), null, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {} }, twice(U.resumeUnread), null, "Resume", "Resumed the fleet"],
+    // A short read (the queue scan did not finish, or more queues than a preview reads) saw part of the set: by hand,
+    // even where every queue it read was paused, or only one.
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 3, paused: ["pi-jobs", "pi-jobs@alpha", "pi-jobs@beta"], short: true } }, twice(U.resumeShort), null, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 3, paused: ["pi-jobs@beta"], short: true } }, twice(U.resumeShort), null, "Resume", "Resumed the fleet"],
+    // Past SWITCH_QUEUES_NAMED paused queues no sentence names them all: by hand, and the banner says no list was kept.
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 40, paused: Array.from({ length: 21 }, (_, i) => `pi-jobs@h${i}`) } }, ["Pause the 21 queues that were paused again by hand, one at a time: no single write pauses only those, and this preview names only the first 20.", "Pause the 21 queues that were paused again by hand, one at a time: no single write pauses only those, and the console kept no list of them."], null, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 40, paused: Array.from({ length: 20 }, (_, i) => `pi-jobs@h${i}`) } }, twice(`Pause queues ${Array.from({ length: 20 }, (_, i) => `pi-jobs@h${i}`).join(", ")} again by hand, one at a time: no single write pauses only those.`), null, "Resume", "Resumed the fleet"],
     ["queue-pause", { payload: { queue: "pi-jobs" } }, twice("Resume queue pi-jobs"), { action: "queue-resume", body: { queue: "pi-jobs" } }, "Pause queue pi-jobs", "Paused queue pi-jobs"],
     ["queue-resume", { payload: { queue: "pi-jobs" } }, twice("Pause queue pi-jobs again"), { action: "queue-pause", body: { queue: "pi-jobs" } }, "Resume", "Resumed queue pi-jobs"],
     ["pause-windows", { beforeText: json({ windows: [windows] }), extra: { before: [windows] } }, twice("Put the previous pause windows back"), { action: "pause-windows", body: { windows: [windows] } }, "Confirm", "Replaced the pause windows"],
@@ -1035,6 +1044,16 @@ test("a write that throws at the confirm refuses 500 with Close, the slot's one 
   }
 });
 
+// A planner's answer may carry a field named `state` for something else (a job's BullMQ state): the bar's state comes
+// from the slot's own set alone, so such a refusal is drawn as refused, never as a bar the slot has no state for.
+test("a planner refusal whose state field is no slot state still draws the refused bar, never a thrown preview", async () => {
+  const action = { name: "probe", kind: "probe", fields: [], needs: [], async preview() { return { refusal: "the job is active, so it cannot be removed", state: "active" }; } };
+  const ctx = { deps: { log() {}, actionDeps: {} }, session: { id: "s", name: "ops", role: "operator" }, body: {}, json: (status, obj) => ({ status, obj }) };
+  const got = await previewAction(ctx, action);
+  assert.equal(got.status, 400);
+  assert.match(got.obj.html, /The change was refused/);
+});
+
 // Issue #737: "Nothing was changed." only where it is true. A refusal that can come after part of the write
 // was made is the action's own `partial`, never a reading of its words, and its bar offers Look again.
 test("a refusal that can follow a write never says nothing was changed: the kill switch's partial pause, a switch that throws, and bulk applies that throw part-way offer Look again", async () => {
@@ -1122,24 +1141,45 @@ test("a preview that reads the fleet snapshot answers within its bound when the 
     assert.ok(ms >= SNAPSHOT_TIMEOUT_MS - 50 && ms < SNAPSHOT_TIMEOUT_MS + 2_000, `${name}: ${ms} ms`);
   }
   const [held, allHeld, queue, resume] = answers.map((a) => a.res);
-  for (const r of [held, allHeld, queue]) assert.deepEqual([r.status, r.json().error], [503, SNAPSHOT_TIMEOUT_SENTENCE]);
-  // The fleet's resume previews without its count, and says why.
+  const title = (r) => /<p class="banner__t">([^<]*)<\/p>/.exec(r.json().html)?.[1];
+  for (const r of [held, allHeld, queue]) {
+    assert.deepEqual([r.status, r.json().error], [503, SNAPSHOT_TIMEOUT_SENTENCE]);
+    // Issue #737: its own bar, chosen by the refusal's state: a timeout blames no cause, so the title names no Valkey.
+    assert.equal(title(r), "The fleet did not answer in time", r.text);
+    assert.match(r.json().html, /^<div class="banner banner--sm tone-attention" role="status">/);
+    assert.match(r.json().html, /<button class="btn btn--sm" type="button" data-again>Try again<\/button>/);
+    assert.doesNotMatch(r.json().html, /Valkey/);
+  }
+  // The fleet's resume previews without its count, and says why: the bound fired, in its own words.
   assert.equal(resume.status, 200, resume.text);
-  assert.ok(resume.json().summary.includes("How many jobs wait to start could not be read (the fleet did not answer); each reserves up to its own per-job dollar cap when a worker picks it up"), resume.text);
+  assert.ok(resume.json().summary.includes(RESUME_WAITING_UNKNOWN.timeout), resume.text);
+  assert.equal(RESUME_WAITING_UNKNOWN.timeout, "How many jobs wait to start is not known: the fleet did not answer within 10 seconds. Each reserves up to its own per-job dollar cap when a worker picks it up");
+  assert.equal(resume.json().undo, UNDO_SENTENCES.resumeUnread);
+  // The Undo beside it is true of a bound that fired as of a read that failed: it says the fleet was not read, never why.
+  assert.doesNotMatch(UNDO_SENTENCES.resumeUnread, /could not|did not answer/);
   // Past a slow but healthy deployment's first snapshot, and said in the refusal's own words.
   assert.equal(SNAPSHOT_TIMEOUT_MS, 10_000);
   assert.equal(SNAPSHOT_TIMEOUT_SENTENCE, "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed");
-  // A snapshot that fails at once keeps its own sentence: the read failed, which the timeout's words do not say.
-  const failing = await start({ paths, a: { fleet: { snapshot: async () => { throw new Error("down"); } } } });
-  const failed = await failing.act("cancel-held", { jobId: "gh-h1" });
-  assert.deepEqual([failed.status, failed.json().error], [503, "the fleet could not be read (is Valkey reachable?); nothing was changed"]);
+  // A snapshot that fails at once keeps its own sentence and the Valkey bar: the read failed, which the timeout's words
+  // do not say. A snapshot that answers nothing is such a read too, never a timeout.
+  assert.equal(SNAPSHOT_UNREAD_SENTENCE, "the fleet could not be read (is Valkey reachable?); nothing was changed");
+  assert.equal(RESUME_WAITING_UNKNOWN.unread, "How many jobs wait to start is not known: the fleet could not be read. Each reserves up to its own per-job dollar cap when a worker picks it up");
+  for (const snapshot of [async () => { throw new Error("down"); }, async () => null]) {
+    const failing = await start({ paths, a: { fleet: { snapshot }, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+    const failed = await failing.act("cancel-held", { jobId: "gh-h1" });
+    assert.deepEqual([failed.status, failed.json().error], [503, SNAPSHOT_UNREAD_SENTENCE]);
+    assert.equal(title(failed), "The deployment&#39;s Valkey could not be reached");
+    const unread = await failing.act("fleet-resume", {});
+    assert.ok(unread.json().summary.includes(RESUME_WAITING_UNKNOWN.unread), unread.text);
+    assert.ok(!unread.json().summary.includes(RESUME_WAITING_UNKNOWN.timeout), "a failed read is not said to have timed out");
+  }
 });
 
 // Issue #737: a bulk cancel's row whose answer is partial keeps the mark, and its line says it did not finish.
 test("cancel-all-held keeps each row's partial mark: its line says it did not finish, never not done, and its audit row says why", async () => {
   const { paths } = deployment();
   const held = [{ jobId: "gh-h1", label: "jira" }, { jobId: "gh-h2", label: "jira" }, { jobId: "gh-h3", label: "jira" }];
-  const unanswered = "the cancel of held job gh-h2 was asked for and not answered within the bound, so its hold, or the job, may or may not be gone; look at the fleet";
+  const unanswered = "the job or its hold may or may not be gone: their removal was asked for and not answered within the bound; look at the fleet (job gh-h2)";
   const answers = { "gh-h1": { ok: true, jobId: "gh-h1", attemptsMade: 0 }, "gh-h2": { invalid: unanswered, partial: true }, "gh-h3": { invalid: "job gh-h3 is not waiting on a condition" } };
   const rm = { ...RM, cancelHeldJob: async ({ jobId }) => answers[jobId] };
   const c = await start({ paths, a: { fleet: { snapshot: async () => ({ held: { rows: held } }) }, rm } });
@@ -1587,7 +1627,7 @@ test("cancel-queued refusals: the planner's sentence as it is, a Valkey that did
   assert.deepEqual([lost.confirm.status, lost.confirm.json().error], [503, VALKEY_UNREACHABLE]);
   // The removal was sent and Valkey did not answer: it may have landed, so the bar says the change did not finish and
   // never that nothing was changed.
-  removed = { invalid: "the removal of job gh-q2 was asked for and not answered within the bound, so it may or may not have landed; look at the fleet to see whether the job is still queued", partial: true };
+  removed = { invalid: "the job may or may not have been removed: its removal was asked for and not answered within the bound; look at the fleet (job gh-q2)", partial: true };
   const unsure = await c.both("cancel-queued", { jobId: "gh-q2" });
   assert.equal(unsure.confirm.status, 409);
   assert.match(unsure.confirm.json().html, /The change did not finish/);
@@ -1725,8 +1765,28 @@ test("a fleet resume's Undo pauses again exactly what was paused before it, neve
   // A fleet that did not answer names no set: no inverse, never every queue.
   answers = false;
   const blind = await c.both("fleet-resume", {});
-  assert.deepEqual([blind.confirm.json().change.inverse, blind.confirm.json().change.undo], [null, "Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known."]);
+  assert.deepEqual([blind.confirm.json().change.inverse, blind.confirm.json().change.undo], [null, UNDO_SENTENCES.resumeUnread]);
   assert.ok(!acted.slice(2).some(([what]) => what === "pause"), "no Undo paused anything by itself");
+});
+
+test("a queue's own switch asks the reader for that queue, so one past the queues a preview reads is still found and switched", async () => {
+  // The reader reads a bounded number of the switch's queues and always the one a preview names (`opts.queue`).
+  const { paths } = deployment();
+  const asked = [];
+  const acted = [];
+  const fleet = {
+    snapshot: async (opts) => {
+      asked.push(opts ?? null);
+      const named = typeof opts?.queue === "string" ? [{ queue: opts.queue, paused: false, counts: { waiting: 0, paused: 0 } }] : [];
+      return { queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 0, paused: 0 } }, ...named], switchTotal: 250, switchTruncated: true, switchIncomplete: null };
+    },
+    pauseQueue: async ({ queue, paused }) => (acted.push([paused ? "pause" : "resume", queue]), { ok: true }),
+  };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  const r = await c.both("queue-pause", { queue: "pi-jobs@far" });
+  assert.equal(r.confirm.status, 200, r.confirm.text);
+  assert.deepEqual(acted, [["pause", "pi-jobs@far"]]);
+  assert.ok(asked.length > 0 && asked.every((o) => o?.switchQueues === true && o?.queue === "pi-jobs@far"), JSON.stringify(asked));
 });
 
 test("a fleet or queue switch previews over the queues the switch flips: a stopped host's paused queue is named, counted, and paused again by the Undo", async () => {
@@ -1765,6 +1825,101 @@ test("a fleet or queue switch previews over the queues the switch flips: a stopp
   assert.equal((await c.both("fleet-resume", {})).confirm.json().change.inverse, null);
   pausedNow = new Set(flipped);
   assert.deepEqual((await c.both("fleet-resume", {})).confirm.json().change.inverse, { action: "fleet-pause", body: {} });
+});
+
+// Issue #737: the switch's queues as one preview read them can be short: a keyspace scan that did not finish
+// (`switchIncomplete`), or a fleet of more queues than a preview reads (`switchTruncated`).
+test("a short switch read never claims an exact Undo: paused before is not known, the waiting count is a floor, and a queue it did not read is not called foreign", async () => {
+  const { paths } = deployment();
+  const names = ["pi-jobs", "pi-jobs@alpha", "pi-jobs@beta"];
+  let shape = {};
+  const fleet = {
+    snapshot: async () => ({ queueCounts: names.map((queue) => ({ queue, paused: true, counts: { waiting: 2 } })), ...shape }),
+    resume: async () => ({ results: [{ shown: "redis://h/0", res: { ok: true, queues: names } }] }),
+    pauseQueue: async () => ({ ok: true }),
+  };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  // A whole read: every queue was paused, so the fleet's pause is the exact way back.
+  const whole = await c.both("fleet-resume", {});
+  assert.deepEqual(whole.confirm.json().change.inverse, { action: "fleet-pause", body: {} });
+  assert.ok(whole.preview.summary.includes("6 jobs wait to start in the paused queues (pi-jobs, pi-jobs@alpha, pi-jobs@beta): each reserves up to its own per-job dollar cap, and one job slot, when a worker picks it up, so no single reserve figure applies"), JSON.stringify(whole.preview.summary));
+  assert.equal(whole.preview.count, 6, "a whole read's count is exact");
+  assert.deepEqual([lastWrite(c).kind, lastWrite(c).count], ["fleet-resume", 6], "and rides the audit row");
+  const read3 = "This preview read 3 of the 2003 queues the switch flips, so these counts are of those it read, and floors; the switch itself flips every queue";
+  for (const [over, line] of [[{ switchIncomplete: "the queue scan stopped at 10.9.8.7" }, SWITCH_SHORT_LINES.incomplete], [{ switchTruncated: true }, SWITCH_SHORT_LINES.truncated], [{ switchTruncated: true, switchTotal: 2003 }, read3]]) {
+    shape = over;
+    const p = await c.both("fleet-resume", {});
+    const said = JSON.stringify(over);
+    assert.deepEqual([p.confirm.json().change.inverse, p.confirm.json().change.undo], [null, UNDO_SENTENCES.resumeShort], `${said}: no exact inverse over part of the set`);
+    assert.ok(p.preview.summary.includes("At least 6 jobs wait to start in the paused queues (pi-jobs, pi-jobs@alpha, pi-jobs@beta): each reserves up to its own per-job dollar cap, and one job slot, when a worker picks it up, so no single reserve figure applies"), `${said}: a floor`);
+    assert.ok(p.preview.summary.includes(line), `${said}: why it is a floor`);
+    // A floor is said in the line ("At least"), never carried as a count: the ticket and the audit row take exact ones.
+    assert.equal(p.preview.count, undefined, `${said}: a floor is no count`);
+    assert.equal(p.confirm.status, 200, p.confirm.text);
+    assert.deepEqual([lastWrite(c).kind, lastWrite(c).count ?? null], ["fleet-resume", null], `${said}: the audit row carries no count`);
+    assert.ok(!JSON.stringify(p.preview).includes("10.9.8.7"), `${said}: the scan's own reason is never shown`);
+    // A queue the short read did not see may exist: never "not a queue this deployment drains".
+    const q = await c.act("queue-resume", { queue: "pi-jobs@zeta" });
+    assert.equal(q.status, 400, q.text);
+    assert.equal(q.json().error, queueUnreadRefusal("pi-jobs@zeta"));
+  }
+  assert.equal(queueUnreadRefusal("pi-jobs@zeta"), "\"pi-jobs@zeta\" is not among the queues this preview read, and it did not read every queue, so whether this deployment drains it is not known here; nothing was changed");
+  // The read's numbers only where they say a read of fewer than all; else the line without them.
+  assert.equal(switchReadLine(3, 2003), read3);
+  for (const [n, total] of [[3, null], [3, 3], [3, 2], [null, 2003], [-1, 2003]]) assert.equal(switchReadLine(n, total), SWITCH_SHORT_LINES.truncated, `${n} of ${total}`);
+  shape = { switchIncomplete: "x", switchTruncated: true };
+  const both = await c.both("fleet-resume", {});
+  assert.deepEqual(both.preview.summary.slice(-2), [SWITCH_SHORT_LINES.incomplete, SWITCH_SHORT_LINES.truncated], "both, in that order");
+  // No reason and no flag: a whole read again.
+  shape = { switchIncomplete: null, switchTruncated: false };
+  assert.deepEqual((await c.both("fleet-resume", {})).confirm.json().change.inverse, { action: "fleet-pause", body: {} });
+});
+
+test("a cut fleet resume preview names how many queues it read, running ones included, of how many the switch flips", async () => {
+  // Three queues read of ten, two of them paused: the line counts the queues the preview read, not the paused ones.
+  const snap = {
+    queueCounts: [
+      { queue: "pi-jobs", paused: true, counts: { waiting: 1 } },
+      { queue: "pi-jobs@a", paused: false, counts: { waiting: 0 } },
+      { queue: "pi-jobs@b", paused: true, counts: { waiting: 2 } },
+    ],
+    switchTruncated: true,
+    switchTotal: 10,
+  };
+  const ctx = { a: { fleet: { snapshot: async () => snap }, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }), urlShown: () => "redis://h/0" } };
+  const p = await ACTIONS.find((a) => a.name === "fleet-resume").preview({}, ctx);
+  assert.equal(switchReadLine(3, 10), "This preview read 3 of the 10 queues the switch flips, so these counts are of those it read, and floors; the switch itself flips every queue");
+  assert.ok(p.summary.includes(switchReadLine(3, 10)), JSON.stringify(p.summary));
+});
+
+test("a switch preview names at most SWITCH_QUEUES_NAMED queues, then how many more; past that many paused queues its Undo is by hand", async () => {
+  const { paths } = deployment();
+  // Two thousand queues, the shape that once made a 134,000-character line: the registry's three running, the rest paused.
+  const names = ["pi-jobs", "pi-jobs@alpha", "pi-jobs@beta", ...Array.from({ length: 2000 }, (_, i) => `pi-jobs@planted-${String(i).padStart(4, "0")}`)];
+  const fleet = {
+    snapshot: async () => ({ queueCounts: names.map((queue, i) => ({ queue, paused: i >= 3, counts: { waiting: i >= 3 ? 1 : 0 } })) }),
+    resume: async () => ({ results: [{ shown: "redis://h/0", res: { ok: true, queues: names } }] }),
+  };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  assert.equal(SWITCH_QUEUES_NAMED, 20);
+  const p = await c.both("fleet-resume", {});
+  const first = names.slice(3, 23).join(", ");
+  const line = p.preview.summary.find((l) => l.includes("to start in the paused queues"));
+  assert.equal(line, `2000 jobs wait to start in the paused queues (${first}, and 1980 more): each reserves up to its own per-job dollar cap, and one job slot, when a worker picks it up, so no single reserve figure applies`);
+  assert.ok(!line.includes("planted-0020"), "the 21st is not named");
+  assert.ok(JSON.stringify(p.preview).length < 20_000, `${JSON.stringify(p.preview).length} characters`);
+  assert.deepEqual([p.confirm.json().change.inverse, p.confirm.json().change.undo], [null, "Pause the 2000 queues that were paused again by hand, one at a time: no single write pauses only those, and the console kept no list of them."]);
+  assert.equal(p.preview.undo, "Pause the 2000 queues that were paused again by hand, one at a time: no single write pauses only those, and this preview names only the first 20.");
+  assert.deepEqual(resumeManyUndo(2000), { bar: p.preview.undo, after: p.confirm.json().change.undo }, "the two sentences are resumeManyUndo's");
+  // A queue's refusal names at most as many of them.
+  const q = await c.act("queue-resume", { queue: "pi-jobs@ghost" });
+  assert.equal(q.json().error, `"pi-jobs@ghost" is not a queue this deployment drains (${names.slice(0, 20).join(", ")}, and 1983 more); nothing was changed`);
+  // Twenty are all named, and the Undo still names them; one queue named is that queue.
+  const twenty = names.slice(0, 23);
+  const small = await start({ paths, a: { fleet: { ...fleet, snapshot: async () => ({ queueCounts: twenty.map((queue, i) => ({ queue, paused: i >= 3, counts: { waiting: 0 } })) }) }, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  const s = await small.both("fleet-resume", {});
+  assert.ok(s.preview.summary.some((l) => l.includes(`(${twenty.slice(3).join(", ")}):`)), JSON.stringify(s.preview.summary));
+  assert.equal(s.confirm.json().change.undo, `Pause queues ${twenty.slice(3).join(", ")} again by hand, one at a time: no single write pauses only those.`);
 });
 
 test("retry-all-failed shows each job's reserve and the sum; a job whose data cannot be read is 'reserve unknown', never $0", async () => {
@@ -2123,8 +2278,9 @@ test("the controls: drawn for an operator, never for a viewer or on a read-only 
     parked: [{ jobId: "gh-4", kind: "github", target: "o/r#2", parkedAt: 1, ageMs: 1, pendingScan: { jobId: null } }],
     triggers: { triggers: [] },
   };
-  const panels = [fleetQueues, fleetActive, fleetHeld, fleetFailed, parkedInbox, configTriggers];
-  const view = (role, readOnly = false) => ({ data: { snapshot, now: 10 }, role, readOnly, env: {}, now: 10, query: {} });
+  const panels = [fleetQueues, fleetActive, fleetHeld, fleetFailed, parkedQuestions, configTriggers];
+  // The parked answer form follows the planner's check the page read for the row (issue #737), as the page hands it.
+  const view = (role, readOnly = false) => ({ data: { snapshot, now: 10, parkedChecks: { "gh-4": { ok: true } } }, role, readOnly, env: {}, now: 10, query: {} });
   for (const render of panels) {
     assert.match(String(render(view("operator"))), /data-action="/, `${render.name || "panel"} has controls for an operator`);
     assert.ok(!String(render(view("viewer"))).includes("data-action"), "none for a viewer");

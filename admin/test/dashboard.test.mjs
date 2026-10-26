@@ -895,6 +895,43 @@ test("RUN_DETAIL names the reason's detail after it, and points an unboundable c
   }
 });
 
+test("RUN_DETAIL shows a record's reason only when it is a token: an older worker's error text is shown nowhere, and a recovery end reads failed", async () => {
+  const opened = async (extra) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], ...extra }] }) }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const lines = comp.render(80).map(stripAnsi);
+    await comp.dispose();
+    return lines;
+  };
+  const head = (lines) => lines.map((l) => l.trim()).find((l) => /^│ [⚠✔✘] /.test(l)) ?? null;
+  const row = (value) => `│ ${value.padEnd(66)} │`;
+  const text = await opened({ outcome: "failed", reason: "infra failure, container exit 1" });
+  assert.equal(head(text), row("✘ failed"));
+  assert.ok(!text.some((l) => l.includes("infra failure")), "the error's own words are on no line");
+  const cap = await opened({ outcome: "policy", reason: "recovery-cap" });
+  assert.equal(head(cap), row("✘ failed · recovery-cap"));
+  assert.ok(cap.some((l) => l.includes("│ what ")), "and its catalog sentence");
+});
+
+test("the panel's list row leaves out a reason that is no token, an older worker's error text", async () => {
+  const run = { ...SNAPSHOT.runs[0], jobId: "gh-x1", target: "acme/web#1", outcome: "failed", reason: "GET /repos/acme/secret failed" };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [run] }), sandboxInfo: () => null }) });
+  await flush();
+  const lines = comp.render(160).map(stripAnsi);
+  await comp.dispose();
+  const listed = lines.find((l) => l.includes("gh-x1 · ")) ?? "";
+  assert.ok(listed !== "", "the row is drawn");
+  assert.ok(!listed.includes("secret") && !listed.includes("GET /repos"), listed);
+  // A token is drawn at the row's end, so the rule leaves out only what is no token.
+  const token = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...run, reason: "infra" }] }), sandboxInfo: () => null }) });
+  await flush();
+  const tokenRow = token.render(160).map(stripAnsi).find((l) => l.includes("gh-x1 · ")) ?? "";
+  await token.dispose();
+  assert.match(tokenRow, /\binfra\b/, tokenRow);
+});
+
 test("RUN_DETAIL says in words whether a run kept a budget slot, and nothing for a value the record contract has not got (#507)", async () => {
   // `budgetReserved` is a boolean or null (INT-RUN-HISTORY-FILE-CONTRACT). The line used to print the value itself:
   // "true budget slot". Pinned as the whole framed row, so the words and their place on the line are both held.

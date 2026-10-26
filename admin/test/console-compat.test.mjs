@@ -203,7 +203,7 @@ test("a class glued to a run-time value never collides: bundle.css styles no cla
 test("the neutraliser is first and covers exactly the bundle.css selectors the old markup can still match", () => {
   assert.deepEqual([...NEUTRALISED].sort(), reachable(EMITTED.classes), "NEUTRALISED is the derived set: add what can collide, drop what no longer can");
   assert.deepEqual(COLLISIONS, [...new Set(NEUTRALISED.map((s) => classesIn(s)[0]))].sort(), "the collisions are the classes the neutralised selectors start with");
-  for (const c of ["banner", "kpi", "badge", "cap", "wl", "big", "note", "facts", "pager", "phases"]) assert.ok(COLLISIONS.includes(c), `.${c} collides`);
+  for (const c of ["banner", "kpi", "badge", "cap", "wl", "big", "note", "facts", "phases"]) assert.ok(COLLISIONS.includes(c), `.${c} collides`);
   // The write flow's bar and diff are the server's Pulse markup since PR 2, outside every wrapper: nothing old is called
   // so any more, so bundle.css's rules for them need no reverting (and a revert inside a wrapper would be dead).
   for (const c of ["confirm", "diff"]) assert.ok(!COLLISIONS.includes(c) && !EMITTED.classes.has(c), `.${c} is no old markup`);
@@ -272,6 +272,17 @@ test("the overview PR 3 converted is not legacy: its panels are read as old mark
   // Its old panels drew only classes another old page or the shared helpers still draw: the dead-rule check and the
   // neutraliser's derived set (above) hold with them gone, so the layer kept every rule.
   for (const c of ["big", "note", "warn", "plain", "num"]) assert.ok(EMITTED.classes.has(c), `.${c} is still old markup`);
+});
+
+test("the runs and parked pages PR 4 converted are not legacy: their panels are read as old markup no more, and the old pager went with them", () => {
+  for (const name of ["runs", "parked"]) {
+    assert.ok(!LEGACY_PAGES.includes(name), name);
+    assert.ok(!legacySources().includes(`console/panels/${name}.mjs`), `${name}'s panels are Pulse markup`);
+  }
+  // The runs table's Newer and Older links were the last old `.pager`: no old markup draws one, so neither the layer's
+  // two rules for it nor its collision with bundle.css's `.pager` are left.
+  assert.ok(!EMITTED.classes.has("pager") && !COLLISIONS.includes("pager") && !LEGACY_CLASSES.includes("pager"));
+  for (const c of ["filters", "note", "warn", "range"]) assert.ok(EMITTED.classes.has(c), `.${c} is still old markup`);
 });
 
 test("an empty LEGACY_PAGES leaves no legacy layer: the last converted page deletes it", () => {

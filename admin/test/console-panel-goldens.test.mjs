@@ -38,7 +38,13 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   // The overview's states (issue #737): all clear and the first run for both roles where the role changes the page, the
   // waitlists with each kind of wait alone (`DEFER_BUCKETS`), and the two hosts the registry has something to say of.
   const overview = ["overview-all-clear.operator", "overview-all-clear.viewer", "setup-nothing-ready.operator", "setup-partial.operator", "setup-partial.viewer", ...DEFER_BUCKETS.map((b) => `waitlist-${b}.operator`), "overview-host-skew.operator", "overview-host-no-expiry.operator", "overview-host-long-names.operator"];
-  assert.deepEqual([...PANEL_STATES], [...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...signIn, ...link]);
+  // The runs page's footer states, the parked page's answer states, the run-not-found page for both roles, and three
+  // more bars: a preview the fleet did not answer in time, a resume over a scan that did not finish, and one over more
+  // paused queues than a sentence names.
+  const runs = ["runs-mirror-off.operator", "runs-mirror-degraded.operator", "runs-truncated.operator", "runs-unreadable.viewer", "runs-empty.viewer", "runs-unknown-reason.viewer"];
+  const parked = ["parked-answerable.operator", "parked-unanswerable.operator", "parked-being-answered.operator", "parked-unknown.operator", "parked-empty.viewer"];
+  const more = ["run-not-found.operator", "run-not-found.viewer", "confirm-refused-timeout.operator", "confirm-preview-resume-incomplete.operator", "confirm-preview-many-queues.operator"];
+  assert.deepEqual([...PANEL_STATES], [...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });

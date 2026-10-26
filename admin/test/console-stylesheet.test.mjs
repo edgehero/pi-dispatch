@@ -13,6 +13,8 @@ import { CONFIRM_CLASSES } from "../src/console/confirm-view.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { LIVE_GLYPHS, LIVE_STATES } from "../src/console/shell.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
+import { RUNS_CSS, RUNS_PHONE_MAX, RUNS_TABLE } from "../src/console/runs-css.mjs";
+import { PARKED_CSS, PARKED_LAYOUT, PARKED_PHONE_MAX, QCARD_CSS } from "../src/console/parked-css.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
 import { INSIGHTS_CSS } from "../src/insights-html.mjs";
 
@@ -80,17 +82,28 @@ test("the shell's rules and the legacy layer's declarations hold no colour liter
   assert.match(SHELL_CSS, /details\.more>summary\{/, "the More menu");
 });
 
-test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR 3: the overview), each served only under its own body", () => {
+test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR 3: the overview; PR 4: runs, parked), each served only under its own body", () => {
   assert.ok(Object.isFrozen(PAGE_CSS));
-  assert.deepEqual(Object.keys(PAGE_CSS), ["login", "login-code", "error", "audit", "overview"]);
+  assert.deepEqual(Object.keys(PAGE_CSS), ["login", "login-code", "error", "audit", "overview", "runs", "parked"]);
+  assert.equal(PAGE_CSS.runs, RUNS_CSS);
+  assert.equal(PAGE_CSS.parked, PARKED_CSS);
   assert.equal(PAGE_CSS.login, PAGE_CSS["login-code"], "the two sign-in pages are one card's rules");
   // The audit log's viewer refusal draws the error card inside the signed-in frame, on the audit page's body.
   assert.ok(PAGE_CSS.audit.endsWith(PAGE_CSS.error), "the audit page carries the error card's rules too");
   const served = pageCss();
   assert.ok(CONSOLE_CSS.includes(served));
-  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:login|login-code|error|audit|overview)"\](?:$|[ >])/, sel);
+  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:login|login-code|error|audit|overview|runs|parked)"\](?:$|[ >])/, sel);
   for (const name of Object.keys(PAGE_CSS)) assert.ok(served.includes(`body[data-page="${name}"] `), name);
   assert.equal(scopeCss('body[data-page="runs"]', ".x .y{color:var(--ink)}\nbody{gap:0}"), 'body[data-page="runs"] .x .y{color:var(--ink)}\nbody[data-page="runs"]{gap:0}');
+});
+
+test("the run-id 404's search is the ErrorPage card's: 420 px at most, on the inset's ground on the card, ringed when its field has the focus", () => {
+  const E = rulesOf(PAGE_CSS.error);
+  assert.deepEqual(E.top[".er-search"], { width: "420px", "max-width": "100%", "margin-top": "var(--space-2)" });
+  assert.deepEqual(E.top[".er-search .search"], { background: "var(--surface-2)" });
+  assert.deepEqual(E.top[".er-search .search:focus-within"], { outline: "2px solid var(--focus)", "outline-offset": "2px" });
+  assert.match(PULSE_CSS, /\n\.search \{[^}]*background: var\(--surface\);/, "bundle.css grounds the pill on a card's own surface");
+  assert.match(PULSE_CSS, /\n\.card \{ background: var\(--surface\);/);
 });
 
 test("scopeCss confines every selector, maps the document to the scope and refuses what it cannot confine", () => {
@@ -192,6 +205,10 @@ const DESKTOP = "@media not all and (max-width: 760px)";
 const NAV_BREAK = `${DESKTOP} @media (max-width: 939px)`;
 const ONE_ROW = "@media (min-width: 1440px)";
 const ONE_ROW_RO = "@media (min-width: 1600px)";
+/** The bands the Search button is left off a desktop bar in: just past each width where the bar's end is tightest. */
+const SEARCH_OFF_RO = `${DESKTOP} @media not all and (min-width: 817px)`;
+const SEARCH_OFF = `${ONE_ROW} @media not all and (min-width: 1496px)`;
+const SEARCH_OFF_ONE_ROW_RO = `${ONE_ROW_RO} @media not all and (min-width: 1656px)`;
 const SHELL = rulesOf(SHELL_CSS);
 
 /** The write flow's markup, as written (the Undo row's parts). */
@@ -209,14 +226,14 @@ function contrast(a, b) {
 }
 
 test("the top bar's breakpoints follow the viewport and the read-only class alone: phone, two rows, one row", () => {
-  assert.deepEqual(TOP_BAR, { phoneMax: 760, navBreakMax: 939, oneRowMin: 1440, oneRowReadOnlyMin: 1600 });
+  assert.deepEqual(TOP_BAR, { phoneMax: 760, navBreakMax: 939, oneRowMin: 1440, oneRowReadOnlyMin: 1600, searchRoom: 56 });
   assert.ok(Object.isFrozen(TOP_BAR));
   // The phone is bundle.css's own: its breakpoint, its scrolling row; above it bundle.css's navigation is no scroll box.
   assert.ok(PULSE_CSS.includes(`@media (max-width: ${TOP_BAR.phoneMax}px) {`));
   assert.match(PULSE_CSS, /@media \(max-width: 760px\) \{[^]*\.pillnav \{ order: 3; width: 100%; overflow-x: auto;/, "bundle.css's phone row");
   assert.match(PULSE_CSS, /\n\.pillnav \{ display: flex; gap: 6px; min-width: 0; \}\n/, "and nothing else in it scrolls");
   // Exactly these media blocks, each named from TOP_BAR: no rule keyed to anything the script changes.
-  assert.deepEqual(Object.keys(SHELL.media), [DESKTOP, NAV_BREAK, ONE_ROW, ONE_ROW_RO, PHONE]);
+  assert.deepEqual(Object.keys(SHELL.media), [DESKTOP, NAV_BREAK, ONE_ROW, ONE_ROW_RO, SEARCH_OFF_RO, SEARCH_OFF, SEARCH_OFF_ONE_ROW_RO, PHONE]);
   assert.ok(SHELL_CSS.includes(`\n${DESKTOP}{@media (max-width: ${TOP_BAR.navBreakMax}px){`), "the navigation's break nested inside the desktop's own query");
   // Above the phone the navigation never scrolls: no overflow on it anywhere but the phone block.
   for (const [where, rules] of [["top", SHELL.top], ...Object.entries(SHELL.media).filter(([m]) => m !== PHONE)]) {
@@ -235,6 +252,9 @@ test("the media queries cover every width, fractional ones too: the desktop's ru
     assert.equal(on[NAV_BREAK], on[DESKTOP] && w <= TOP_BAR.navBreakMax, `${w}px: the navigation breaks on a desktop up to ${TOP_BAR.navBreakMax}px`);
     assert.equal(on[ONE_ROW], w >= TOP_BAR.oneRowMin, `${w}px: one row`);
     assert.equal(on[ONE_ROW_RO], w >= TOP_BAR.oneRowReadOnlyMin, `${w}px: one row, read-only`);
+    assert.equal(on[SEARCH_OFF_RO], w > TOP_BAR.phoneMax && w < TOP_BAR.phoneMax + 1 + TOP_BAR.searchRoom, `${w}px: a read-only bar just above a phone`);
+    assert.equal(on[SEARCH_OFF], w >= TOP_BAR.oneRowMin && w < TOP_BAR.oneRowMin + TOP_BAR.searchRoom, `${w}px: just past one row`);
+    assert.equal(on[SEARCH_OFF_ONE_ROW_RO], w >= TOP_BAR.oneRowReadOnlyMin && w < TOP_BAR.oneRowReadOnlyMin + TOP_BAR.searchRoom, `${w}px: just past one row, read-only`);
   }
   // The legacy layer's own phone block is the same query, so it switches with the shell's.
   assert.ok(Object.hasOwn(LEGACY.media, PHONE));
@@ -277,6 +297,21 @@ test("above a phone the bar is a grid: the pi-dispatch pill and the end, then th
   assert.deepEqual(SHELL.top[".pillnav>a"], { position: "relative", flex: "none" }, "a pill keeps its size and contains its own visually hidden text");
   assert.deepEqual(SHELL.top[".pillnav [data-panel]:empty"], { display: "none" }, "an empty Parked count leaves no gap in its pill");
   assert.deepEqual(SHELL.top[".pillnav [data-panel]"], { display: "inline-flex" });
+});
+
+test("the Search button is left off a desktop bar for its own width past each place the end is tightest, and off a phone's", async () => {
+  // Its room is its own size and the end's gap between parts, both tokens bundle.css reads.
+  assert.match(PULSE_CSS, /\n\.roundbtn \{[^}]*width: var\(--control-h\); height: var\(--control-h\);/);
+  assert.match(PULSE_CSS, /\n\.top__end \{[^}]*gap: var\(--space-2\);/);
+  const px = (name) => Number(new RegExp(`--${name}:(\\d+)px`).exec(tokenCss())[1]);
+  assert.equal(TOP_BAR.searchRoom, px("control-h") + px("space-2"));
+  assert.deepEqual(SHELL.media[SEARCH_OFF_RO], { ".top--ro .top__search": { display: "none" } });
+  assert.deepEqual(SHELL.media[SEARCH_OFF], { ".top:not(.top--ro) .top__search": { display: "none" } });
+  assert.deepEqual(SHELL.media[SEARCH_OFF_ONE_ROW_RO], { ".top--ro .top__search": { display: "none" } });
+  // On a phone bundle.css hides it in the bar's end, by the class the card gives it.
+  assert.match(PULSE_CSS, /\n {2}\.top__end \.live, \.top__end \.who > span:first-child, \.top__end \.hide-phone \{ display: none; \}/);
+  const page = String((await renderPage("fleet", { query: {}, session: { name: "ops", role: "operator" }, readOnly: true, data: { now: 0, env: {} }, theme: null })).html);
+  assert.ok(page.includes('<div class="top__end"><a class="roundbtn hide-phone top__search" href="/runs#q"'), "the class these rules key on, in the bar's end");
 });
 
 test("the classes those rules key on are the shell's: top--ro on a read-only console's bar alone, and the cut name and role's title", async () => {
@@ -492,7 +527,7 @@ test("the parts a page draws hidden take no space until they show; a page shown 
   assert.match(PULSE_CSS, /\n\.btn \{[^}]*background: var\(--surface-3\);/, "the plain button's fill");
   // The legacy controls drawn with that fill wear it too; the legacy layer's other surface-3 rules are no control.
   const legacyFill = cssBlocks(LEGACY_CSS).filter((b) => !b.prelude.startsWith("@") && /(?:^|;)background:var\(--surface-3\)/.test(b.body));
-  assert.deepEqual(legacyFill.filter((b) => /box-shadow:var\(--stale-ring,none\)/.test(b.body)).map((b) => b.prelude), [".legacy button", ".legacy details.editor>summary", ".legacy .pager a,.legacy .range a"]);
+  assert.deepEqual(legacyFill.filter((b) => /box-shadow:var\(--stale-ring,none\)/.test(b.body)).map((b) => b.prelude), [".legacy button", ".legacy details.editor>summary", ".legacy .range a"]);
   assert.deepEqual(legacyFill.filter((b) => !/--stale-ring/.test(b.body)).map((b) => b.prelude), [".legacy .badge"], "a badge is a mark, not a control");
   assert.ok(!/--stale-ring:/.test(LEGACY_CSS) && !/--stale-ring:/.test(pageCss()), "the ring is declared on the flat panels alone");
   assert.ok(contrast(colorOf("ink-faint", "light"), colorOf("canvas", "light")) < 4.5, "the faint ink alone would miss AA on the light canvas");
@@ -614,12 +649,12 @@ test("the neutraliser keeps each selector's own specificity: one :is() per speci
     ".banner": [0, 1, 0],
     ".big": [0, 1, 0],
     ".cap": [0, 1, 0],
+    ".code": [0, 1, 0],
     ".facts": [0, 1, 0],
     ".kpi": [0, 1, 0],
     ".kpi b": [0, 1, 1],
     ".kpi span": [0, 1, 1],
     ".note": [0, 1, 0],
-    ".pager": [0, 1, 0],
     ".phases": [0, 1, 0],
     ".phases .bar": [0, 2, 0],
     ".phases .bar i": [0, 2, 1],
@@ -919,6 +954,140 @@ test("pageCss confines each page's rules to its own body, and refuses a key that
   ].join("\n"));
   assert.equal(pageCss(), pageCss(PAGE_CSS), "the default table is PAGE_CSS");
   for (const bad of ["Runs", "a b", "x{", "__proto__x;"]) assert.throws(() => pageCss({ [bad]: "a{b:c}" }), /not a page name/, bad);
+});
+
+// ---- the runs and parked pages' rules (PR 4) --------------------------------------------------------------------------------
+
+/** What every page's own rules keep: they scope, name no colour by hex, and read only tokens and bundle.css's tone set. */
+function pageRulesHold(label, css, page) {
+  const scoped = scopeCss(`body[data-page="${page}"]`, css);
+  for (const sel of selectorsOf(scoped)) assert.match(sel, new RegExp(`^body\\[data-page="${page}"\\](?:$|[ >])`), `${label}: ${sel}`);
+  for (const body of declarationsOf(css)) assert.ok(!/#[0-9a-f]{3,8}\b/i.test(body), `${label}: ${body} names a colour by hex`);
+  const tokens = declared(tokenCss());
+  const tones = declared(PULSE_CSS);
+  for (const name of read(css)) assert.ok(tokens.has(name) || tones.has(name), `${label} reads ${name}, a token or bundle.css's tone set`);
+  assert.deepEqual([...declared(css)], [], `${label} declares no property of its own`);
+}
+
+test("the runs page's rules: the filter bar's pills, a chip row that scrolls inside itself on a phone, the summary strip, the day rows, the RunsPhone card's stacked rows", () => {
+  assert.equal(RUNS_PHONE_MAX, TOP_BAR.phoneMax, "bundle.css's phone breakpoint, as the shell names it");
+  pageRulesHold("RUNS_CSS", RUNS_CSS, "runs");
+  const R = rulesOf(RUNS_CSS);
+  const NARROW = `@media not all and (min-width: ${RUNS_TABLE.allMin}px)`;
+  assert.deepEqual(Object.keys(R.media), [DESKTOP, NARROW, PHONE]);
+  // Every part of a filter bar's row stands on its bottom edge, where a labelled list's pill ends, and Apply is the
+  // controls' height: bundle.css centres the row and draws a button 38 px high, which stood 8 px above the lists' edge.
+  assert.match(PULSE_CSS, /\n\.filterbar \{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; \}/);
+  assert.match(PULSE_CSS, /\n\.btn \{[^}]*height: 38px;/);
+  assert.match(PULSE_CSS, /\n\.field \{ display: grid; gap: 6px; min-width: 0; \}/, "a field's label stands above its control");
+  assert.deepEqual(R.top[".filterbar"], { "align-items": "flex-end" });
+  assert.deepEqual(R.top[".filterbar>.btn"], { height: "var(--control-h)" });
+  // The filter bar: the search pill grows from the card's 320 px to its 420, ringed when its bare field has the focus
+  // (bundle.css draws the field with no outline); a list is a pill of its own width that never passes the row.
+  assert.match(PULSE_CSS, /\n\.search input \{ flex: 1; min-width: 0; border: 0; background: transparent; outline: 0; \}/);
+  assert.deepEqual(R.top[".filterbar .search"], { flex: "1 1 320px", "max-width": "420px" });
+  assert.deepEqual(R.top[".filterbar .search:focus-within"], { outline: "2px solid var(--focus)", "outline-offset": "2px" });
+  assert.deepEqual(R.top[".filterbar>.field"], { flex: "0 1 auto", "min-width": "0", "max-width": "100%", "grid-template-columns": "minmax(0,1fr)" });
+  assert.equal(R.top[".filterbar .select"]["min-width"], "0");
+  assert.equal(R.top[".filterbar .select"]["max-width"], "100%");
+  assert.deepEqual(R.media[PHONE][".filterbar>.field,.filterbar>.select"], { flex: "1 1 100%" });
+  // bundle.css folds the bar on a phone by the class the script sets, all but the search and the toggle, and shows the
+  // toggle there alone; this page adds nothing to that.
+  assert.match(PULSE_CSS, /\n {2}\.filterbar--collapsible > :not\(\.filterbar__toggle\):not\(\.search\) \{ display: none; \}/);
+  assert.match(PULSE_CSS, /\n\.filterbar__toggle \{ display: none; \}/);
+  assert.ok(CONSOLE_SCRIPT.includes('bar.classList.add("filterbar--collapsible")'), "the script's class");
+  // A chip row wraps above a phone, and on one is a line scrolling inside itself, padded for a focus ring; a chip whose
+  // value is wider than the row breaks it above a phone.
+  assert.deepEqual(R.top[".chiprow"], { display: "flex", "flex-wrap": "wrap", "align-items": "center", gap: "8px", "min-width": "0", "max-width": "100%" });
+  assert.equal(R.top[".chiprow>.chip"]["overflow-wrap"], "anywhere");
+  assert.equal(R.top[".chiprow>.chip>.code"]["overflow-wrap"], "anywhere");
+  assert.deepEqual(R.media[PHONE][".chiprow"], { flex: "1 1 100%", "flex-wrap": "nowrap", "overflow-x": "auto", "scrollbar-width": "none", margin: "-4px", padding: "4px" });
+  assert.deepEqual(R.media[PHONE][".chiprow>*"], { flex: "none" });
+  // The summary strip: equal columns, four or more to a phone's card, an item marked off a phone not drawn there; a
+  // label wraps between its icon and its words before it breaks a word, and a count breaks only where it is wider than
+  // its column (break-word, which unlike anywhere keeps a word's width as the least the item takes); the idle tone's
+  // count in ink, as the card writes it.
+  assert.equal(R.top[".sumstrip"]["grid-template-columns"], "repeat(auto-fit,minmax(120px,1fr))");
+  assert.equal(R.media[PHONE][".sumstrip"]["grid-template-columns"], "repeat(auto-fit,minmax(72px,1fr))");
+  assert.ok(4 * 72 <= 375 - 2 * 16 - 2 * 16, "four columns of 72 px in a 375 px phone's card");
+  assert.deepEqual(R.media[PHONE][".sumstrip>.hide-phone"], { display: "none" });
+  assert.equal(R.top[".sumstrip__i>b"]["overflow-wrap"], "break-word");
+  assert.equal(R.top[".sumstrip__i>span"]["flex-wrap"], "wrap");
+  assert.equal(R.top[".sumstrip__i>span"]["overflow-wrap"], "break-word");
+  assert.equal(R.media[PHONE][".sumstrip__i"].padding, "10px 6px");
+  assert.equal(R.top[".sumstrip__i>b"]["min-width"], "0");
+  assert.deepEqual(R.top[".sumstrip__i.tone-idle>b"], { color: "var(--ink)" });
+  // A day row: a header across the table on the inset's ground, never sticky as bundle.css makes a column head.
+  assert.match(PULSE_CSS, /\n\.tbl th \{ position: sticky; top: 0;/);
+  assert.equal(R.top[".tbl .tbl-group>th"].position, "static");
+  assert.equal(R.top[".tbl .tbl-group>th"].background, "var(--surface-2)");
+  assert.deepEqual(R.media[PHONE][".tbl--stack tr.tbl-group"], { display: "block", padding: "0" });
+  // The table on a desktop, as the RunsScreen card draws it: the outcome's sentence at least 240 px, every other cell
+  // but the target's on one line (a model or a flow never breaks at its hyphens), and a value of no fixed length a box
+  // of its own, as wide as the value up to its bound and broken inside itself past it, so a long one grows its own row
+  // and widens no column past the bound: a job id in its code face up to 22 characters, which holds a forge delivery's
+  // id in two lines, and a host, a flow or a model (`.val`) up to 20, which hold the card's values (`build3`,
+  // `claude-sonnet-5-5`) on their line.
+  const box = (ch) => ({ display: "inline-block", width: "max-content", "max-width": `${ch}ch`, "white-space": "normal", "overflow-wrap": "anywhere" });
+  assert.deepEqual(R.media[DESKTOP], {
+    ".tbl td.wide": { "min-width": "240px" },
+    ".tbl td:not(.wide):not(.tgt)": { "white-space": "nowrap" },
+    ".tbl .id .code": box(22),
+    ".tbl .val": box(20),
+  });
+  assert.deepEqual(RUNS_TABLE, { allMin: 1440, idMaxCh: 22, valueMaxCh: 20 });
+  assert.ok(Object.isFrozen(RUNS_TABLE));
+  for (const id of ["gh-e9a0", "gh-a91e", "gh-2f6a"]) assert.ok(id.length <= RUNS_TABLE.idMaxCh, `${id} stands on one line`);
+  // A forge delivery's id (`gh-` and a GUID, a re-run's `-r2` too) in two lines of the box.
+  for (const id of ["gh-1b2c3d4e-5f60-4718-9a0b-c1d2e3f4a5b6", "gh-1b2c3d4e-5f60-4718-9a0b-c1d2e3f4a5b6-r2"]) assert.ok(id.length <= 2 * RUNS_TABLE.idMaxCh, `${id} in two lines`);
+  for (const v of ["build3", "mini2", "openshell", "triage", "portfolio-manager", "claude-sonnet-5-5", "claude-haiku-5-5"]) assert.ok(v.length <= RUNS_TABLE.valueMaxCh, `${v} stands on one line`);
+  // Below the RunsScreen card's own width the columns a phone leaves to the run page (the kit marks their heads and
+  // cells hide-phone) are left out on a desktop too, so the table fits a 1,280 px window; on a phone bundle.css already
+  // hides them in a stacked table.
+  assert.deepEqual(R.media[NARROW], { ".tbl .hide-phone": { display: "none" } });
+  assert.match(PULSE_CSS, /\n {2}\.tbl--stack \.hide-phone \{ display: none; \}/);
+  // The RunsPhone card's stacked row, by the kit's cell flags: the id, then when it ended at the right; the outcome; the
+  // target and its tag across the row; the host and the cost at the right.
+  const order = Object.fromEntries(Object.entries(R.media[PHONE]).filter(([, d]) => d.order !== undefined).map(([sel, d]) => [sel, Number(d.order)]));
+  assert.deepEqual(order, { ".tbl--stack td": 5, ".tbl--stack td.id": 1, ".tbl--stack td.when": 2, ".tbl--stack td.wide": 3, ".tbl--stack td.tgt": 4, ".tbl--stack td.num": 6 });
+  assert.equal(R.media[PHONE][".tbl--stack td.tgt"]["grid-column"], "1/-1");
+  assert.equal(R.media[PHONE][".tbl--stack td.when"]["text-align"], "right");
+  assert.equal(R.media[PHONE][".tbl--stack td.num"]["text-align"], "right");
+  // A cell shrinks below its content and breaks where it must; an id is a box of its own as wide as its line at most
+  // (bundle.css keeps an id cell and the code face on one line).
+  assert.match(PULSE_CSS, /\n\.tbl \.id \{ white-space: nowrap; \}/);
+  assert.deepEqual(R.media[PHONE][".tbl--stack td"], { order: "5", "min-width": "0", "overflow-wrap": "anywhere" });
+  assert.deepEqual(R.media[PHONE][".tbl--stack .id .code"], { display: "inline-block", "max-width": "100%", "white-space": "normal", "overflow-wrap": "anywhere", "vertical-align": "top" }, "on its line's top, by the row's first line");
+  // The RunsPhone card labels the host and the cost alone: the kit writes no data-l for a column whose label is "",
+  // so no rule here switches a label off.
+  assert.ok(!RUNS_CSS.includes("data-l"), "no rule keyed to a phone label");
+  // A filter pill that is a link draws no underline: bundle.css draws the pill for a button.
+  assert.deepEqual(R.top["a.fpill"], { "text-decoration": "none" });
+});
+
+test("the parked page's rules: the question card wherever it is drawn, the ApprovalRequest frame's two columns, one below 1200 px", () => {
+  assert.equal(PARKED_PHONE_MAX, TOP_BAR.phoneMax);
+  assert.deepEqual(PARKED_LAYOUT, { stackMax: OVERVIEW_LAYOUT.stackMax }, "the overview's breakpoint for its two columns, for the same side column");
+  assert.ok(Object.isFrozen(PARKED_LAYOUT));
+  pageRulesHold("PARKED_CSS", PARKED_CSS, "parked");
+  pageRulesHold("QCARD_CSS", QCARD_CSS, "run");
+  assert.ok(PARKED_CSS.startsWith(QCARD_CSS), "the parked page serves the card's rules first");
+  const Q = rulesOf(QCARD_CSS);
+  assert.deepEqual(Object.keys(Q.media), [], "the card's rules hold at every width");
+  // "<id> asks" gives way, its id breaking only when wider than its line; the wait keeps its width, in the parked ink.
+  assert.deepEqual(Q.top[".qcard__top>b"], { flex: "1 1 auto", "min-width": "0", "overflow-wrap": "anywhere" });
+  assert.deepEqual(Q.top[".qcard__top .code"], { display: "inline-block", "max-width": "100%", "font-size": "14px", "font-weight": "700", "white-space": "normal", "overflow-wrap": "anywhere" });
+  assert.equal(Q.top[".qcard__wait"].flex, "none");
+  assert.equal(Q.top[".qcard__wait"].color, "var(--parked-ink)");
+  assert.deepEqual(Q.top[".qcard__meta>*"], { "min-width": "0", "overflow-wrap": "anywhere" });
+  assert.equal(Q.top[".qcard__body"].background, "var(--parked-tint)");
+  assert.equal(Q.top[".qform__act>.btn--answer"].flex, "1 1 auto");
+  const P = rulesOf(PARKED_CSS);
+  assert.deepEqual(Object.keys(P.media), [`@media (max-width: ${PARKED_LAYOUT.stackMax}px)`, PHONE]);
+  assert.deepEqual(P.media[`@media (max-width: ${PARKED_LAYOUT.stackMax}px)`][".cols"], { "grid-template-columns": "minmax(0,1fr)" });
+  // bundle.css's two columns, the side one --side-w, and one column on a phone.
+  assert.match(PULSE_CSS, /\n\.cols \{ display: grid; grid-template-columns: minmax\(0, 1fr\) var\(--side-w\);/);
+  assert.match(PULSE_CSS, /\n {2}\.cards-4, \.cards-3, \.cards-2, \.cols, \.cols--wide-side \{ grid-template-columns: minmax\(0, 1fr\); \}/);
 });
 
 test("cssBlocks reads a backslash escape inside a quoted string as part of the string", () => {

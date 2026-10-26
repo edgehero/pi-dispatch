@@ -779,3 +779,35 @@ test("the console bundle does not reach the pi runtime (@earendil-works/pi-codin
     for (const imp of output.imports) assert.ok(!imp.path.includes("@earendil-works/pi-coding-agent"), `the bundle imports ${imp.path}`);
   }
 });
+
+test("serve hands each live load's who to loadPageData: a load no operator's stream shows says viewer, one an operator's shows names no role, each is marked live, and the console's readOnly rides along", async (t) => {
+  const nullRes = () => ({ writableLength: 0, write: () => true, end() {}, destroy() {} });
+  const dep = deployment();
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  const loads = [];
+  modules.pages = { ...realPages, loadPageData: async (name, query, deps, who) => (loads.push([name, who]), {}), pagePanels: async () => [{ id: "p-main", html: "<p>x</p>" }] };
+  modules.sessions = { ...modules.sessions, makeSessionStore: () => ({ ...fakeModules().sessions.makeSessionStore(), peek: (id) => ({ id }) }) };
+  let hub = null;
+  modules.live = { ...live, makeLiveHub: (opts) => (hub = live.makeLiveHub(opts)) };
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
+  await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  hub.subscribe({ res: nullRes(), sessionId: "s1", session: { name: "bob", role: "viewer" }, page: "parked", query: {} });
+  await hub.tick();
+  const viewers = loads.filter(([name]) => name === "parked");
+  loads.length = 0;
+  hub.subscribe({ res: nullRes(), sessionId: "s2", session: { name: "alice", role: "operator" }, page: "parked", query: {} });
+  await hub.tick();
+  const operators = loads.filter(([name]) => name === "parked");
+  stop();
+  assert.equal(await running, 0);
+  assert.ok(viewers.length >= 1, JSON.stringify(viewers));
+  for (const [, who] of viewers) assert.deepEqual(who, { role: "viewer", readOnly: false, live: true });
+  assert.ok(operators.length >= 1, JSON.stringify(operators));
+  for (const [, who] of operators) assert.deepEqual(who, { readOnly: false, live: true });
+});

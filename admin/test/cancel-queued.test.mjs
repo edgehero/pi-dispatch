@@ -88,21 +88,21 @@ async function writeRecord(redis, jobId, rec) {
 
 // --- the sentences --------------------------------------------------------------------------------------------------
 
-test("cancelQueuedRefusal: one sentence per reason, each ending 'nothing was changed'; an unknown reason is a programming error", () => {
+test("cancelQueuedRefusal: one sentence per reason, each saying 'nothing was changed' and then naming the job; an unknown reason is a programming error", () => {
   const cases = {
-    retried: [{ jobId: "gh-1", attempts: 2 }, "job gh-1 has made 2 attempts and waits to retry: a retry keeps its run's steer and held replies open for the next attempt, so the console cancels only a job that never started; once it runs, Cancel on its run page stops it; nothing was changed"],
-    stalled: [{ jobId: "gh-1" }, "job gh-1 was handed back after a stall, so an attempt of it may have finished; nothing was changed"],
-    recovery: [{ jobId: "gh-1.r1", run: "gh-1" }, "job gh-1.r1 recovers run gh-1 and owes that run its final record; nothing was changed"],
-    scheduled: [{ jobId: "repeat:nightly:1", scheduler: "nightly" }, "job repeat:nightly:1 is cron trigger nightly's next run: pause the trigger or edit its schedule; BullMQ refuses to remove a scheduler's next job; nothing was changed"],
-    notQueued: [{ jobId: "gh-1", state: "active" }, "job gh-1 is active, not waiting to start; nothing was changed"],
-    started: [{ jobId: "gh-1" }, "job gh-1 started since the preview; nothing was changed"],
-    changed: [{ jobId: "gh-1" }, "job gh-1 changed since the preview; nothing was changed"],
+    retried: [{ jobId: "gh-1", attempts: 2 }, "the job has made 2 attempts and waits to retry: a retry keeps its run's steer and held replies open for the next attempt, so the console cancels only a job that never started; once it runs, Cancel on its run page stops it; nothing was changed (job gh-1)"],
+    stalled: [{ jobId: "gh-1" }, "the job was handed back after a stall, so an attempt of it may have finished; nothing was changed (job gh-1)"],
+    recovery: [{ jobId: "gh-1.r1", run: "gh-1" }, "the job recovers run gh-1 and owes that run its final record; nothing was changed (job gh-1.r1)"],
+    scheduled: [{ jobId: "repeat:nightly:1", scheduler: "nightly" }, "the job is cron trigger nightly's next run: pause the trigger or edit its schedule; BullMQ refuses to remove a scheduler's next job; nothing was changed (job repeat:nightly:1)"],
+    notQueued: [{ jobId: "gh-1", state: "active" }, "the job is active, not waiting to start; nothing was changed (job gh-1)"],
+    started: [{ jobId: "gh-1" }, "the job started since the preview; nothing was changed (job gh-1)"],
+    changed: [{ jobId: "gh-1" }, "the job changed since the preview; nothing was changed (job gh-1)"],
   };
   for (const [kind, [facts, sentence]] of Object.entries(cases)) {
     assert.equal(cancelQueuedRefusal(kind, facts), sentence, kind);
-    assert.match(sentence, /; nothing was changed$/, kind);
+    assert.ok(sentence.endsWith(`; nothing was changed (job ${facts.jobId})`), kind);
   }
-  assert.match(cancelQueuedRefusal("retried", { jobId: "gh-1", attempts: 1 }), /^job gh-1 has made 1 attempt and waits/);
+  assert.match(cancelQueuedRefusal("retried", { jobId: "gh-1", attempts: 1 }), /^the job has made 1 attempt and waits/);
   assert.throws(() => cancelQueuedRefusal("bored", { jobId: "gh-1" }), RangeError);
 });
 
@@ -270,25 +270,25 @@ test("each removeQueuedJob answer in the console's words: a lock is started, ano
     };
     const run = (res, extra = {}) => cancelQueuedJob({ url: URL_, jobId, expect, removeQueuedJobFn: answer(res), ...extra });
     assert.deepEqual(await run({ raced: true, state: "active", error: new Error("locked") }), { invalid: cancelQueuedRefusal("started", { jobId }) });
-    assert.deepEqual(await run({ raced: true, state: "delayed", error: new Error(`Job ${jobId} belongs to a job scheduler and cannot be removed directly. remove`) }), { invalid: `job ${jobId} could not be removed: it is delayed now, and the remove failed with: Job ${jobId} belongs to a job scheduler and cannot be removed directly. remove; nothing was changed` });
+    assert.deepEqual(await run({ raced: true, state: "delayed", error: new Error(`Job ${jobId} belongs to a job scheduler and cannot be removed directly. remove`) }), { invalid: `the job could not be removed: it is delayed now; nothing was changed; the remove failed with: the job belongs to a job scheduler and cannot be removed directly. remove (job ${jobId})` });
     assert.deepEqual(await run({ notQueued: true, state: "completed" }), { invalid: cancelQueuedRefusal("started", { jobId }) });
     assert.deepEqual(await run({ notQueued: true, state: "waiting-children" }), { invalid: cancelQueuedRefusal("notQueued", { jobId, state: "waiting-children" }) });
-    assert.deepEqual(await run({ invalid: "job x is not waiting on a condition" }), { invalid: "job x is not waiting on a condition" });
+    assert.deepEqual(await run({ invalid: `job ${jobId} is not waiting on a condition` }), { invalid: `the job is not waiting on a condition (job ${jobId})` });
     assert.deepEqual(await run({ ok: true, held: false, jobId, state: "delayed", attemptsMade: 0 }), { ok: true, jobId, queue: v.name, held: false });
     // The bound covers the removal's first reads as well as its writes, so its answer says the removal was asked for and
     // may have landed, never that it was sent: a removal that hangs in its first read sent nothing.
-    const unanswered = `the removal of job ${jobId} was asked for and not answered within the bound, so it may or may not have landed; look at the fleet to see whether the job is still queued`;
+    const unanswered = `the job may or may not have been removed: its removal was asked for and not answered within the bound; look at the fleet (job ${jobId})`;
     assert.deepEqual(await run(() => new Promise(() => {}), { timeoutMs: 1500 }), { invalid: unanswered, partial: true }, "a removal that hangs is not 'unreachable, nothing was changed'");
     // A throw, or an answer this does not know, is no timeout: it may have landed, in words that say only that.
-    const unread = `the removal of job ${jobId} answered in a way this console cannot read, so it may or may not have landed; look at the fleet to see whether the job is still queued`;
+    const unread = `the job may or may not have been removed: its removal answered in a way this console cannot read; look at the fleet (job ${jobId})`;
     assert.deepEqual(await run(() => { throw new Error("bug"); }), { invalid: unread, partial: true });
     assert.deepEqual(await run({ weird: true }), { invalid: unread, partial: true });
     assert.deepEqual(await run(undefined), { invalid: unread, partial: true });
-    // A remove that threw and a job that could not be read back: the remove may have landed.
-    assert.deepEqual(await run({ raced: true, state: "unknown", error: new Error("Connection is closed.") }), { invalid: `the removal of job ${jobId} failed (Connection is closed.) and the job could not be read back, so it may or may not have been removed; look at the fleet to see whether the job is still queued`, partial: true });
+    // A remove that threw and a job that could not be read back: the remove may have landed, said in the console's words.
+    assert.deepEqual(await run({ raced: true, state: "unknown", error: new Error("Connection is closed.") }), { invalid: `the job may or may not have been removed: its removal failed and it could not be read back; look at the fleet (job ${jobId})`, partial: true });
     // The guard refused before anything was sent: its words, and nothing was changed.
     assert.deepEqual(await run({ refused: cancelQueuedRefusal("started", { jobId }) }), { invalid: cancelQueuedRefusal("started", { jobId }) });
-    assert.deepEqual(await run({ refused: null, error: new Error("ECONNRESET") }), { invalid: `job ${jobId} could not be read again right before its removal, so it was not removed; nothing was changed` });
+    assert.deepEqual(await run({ refused: null, error: new Error("ECONNRESET") }), { invalid: `the job could not be read again right before its removal, so it was not removed; nothing was changed (job ${jobId})` });
     // A held job whose removal failed after its hold was cleared: partial, from the job's state read again (here still
     // delayed, the seam having removed nothing), and never BullMQ's words.
     const locked = `Job ${jobId} could not be removed because it is locked by another worker`;
@@ -299,16 +299,16 @@ test("each removeQueuedJob answer in the console's words: a lock is started, ano
     // Another module's words are bounded on the way out: control bytes made spaces, at most 200 characters.
     const long = `x\u001b[2Jy${"z".repeat(300)}`;
     const raced = await run({ raced: true, state: "delayed", error: new Error(long) });
-    assert.equal(raced.invalid, `job ${jobId} could not be removed: it is delayed now, and the remove failed with: ${`x [2Jy${"z".repeat(300)}`.slice(0, 200)}; nothing was changed`);
-    assert.deepEqual(await run({ invalid: long }), { invalid: `x [2Jy${"z".repeat(300)}`.slice(0, 200) });
+    assert.equal(raced.invalid, `the job could not be removed: it is delayed now; nothing was changed; the remove failed with: ${`x [2Jy${"z".repeat(300)}`.slice(0, 200)} (job ${jobId})`);
+    assert.deepEqual(await run({ invalid: long }), { invalid: `${`x [2Jy${"z".repeat(300)}`.slice(0, 200)} (job ${jobId})` });
     // The sequence is handed the job the confirm found, on its queue, with the state it read, and the guard.
     assert.deepEqual([seen[0].jobId, seen[0].queue.name, seen[0].job.id, seen[0].state, typeof seen[0].guard], [jobId, v.name, jobId, "delayed", "function"]);
     assert.equal(seen[0].verdict, null, "the guard of a job that has not moved lets the removal go");
     assert.notEqual(await v.queue.getJob(jobId), undefined, "the seam removed nothing");
     // A job the re-checks read as held: the answer that cannot say what landed names its hold too, whose keys go first.
     await v.redis.hset(`wait:job:${jobId}`, { since: String(Date.now() - 1000), label: "jira" });
-    assert.deepEqual(await run(() => new Promise(() => {}), { timeoutMs: 1500 }), { invalid: `the removal of job ${jobId} and its hold was asked for and not answered within the bound, so its hold, or the job, may or may not be gone; look at the fleet to see whether the job is still queued`, partial: true });
-    assert.deepEqual(await run({ weird: true }), { invalid: `the removal of job ${jobId} and its hold answered in a way this console cannot read, so its hold, or the job, may or may not be gone; look at the fleet to see whether the job is still queued`, partial: true });
+    assert.deepEqual(await run(() => new Promise(() => {}), { timeoutMs: 1500 }), { invalid: `the job or its hold may or may not be gone: their removal was asked for and not answered within the bound; look at the fleet (job ${jobId})`, partial: true });
+    assert.deepEqual(await run({ weird: true }), { invalid: `the job or its hold may or may not be gone: their removal answered in a way this console cannot read; look at the fleet (job ${jobId})`, partial: true });
   } finally {
     await v.done();
   }
@@ -409,7 +409,7 @@ test("a held job a worker locks during its removal: its hold was cleared, so the
     const res = await cancelQueuedJob({ url: URL_, jobId, expect: { queue: v.name, attemptsMade: 0, stalledCounter: 0 }, removeQueuedJobFn: (args) => removeQueuedJob({ ...args, queue: lockingQueue(args.queue) }) });
     assert.deepEqual(res, heldClearedAnswer(jobId, "active"));
     assert.equal(res.partial, true);
-    assert.match(res.invalid, new RegExp(`^job ${jobId} started while its hold was being cleared`));
+    assert.ok(res.invalid.startsWith("the job was not removed: it started while its hold was being cleared") && res.invalid.endsWith(`(job ${jobId})`), res.invalid);
     assert.ok(!/locked by another worker|nothing was changed/i.test(res.invalid), res.invalid);
     assert.equal(await v.redis.exists(`wait:job:${jobId}`), 0, "the hold was cleared, as the answer says");
     assert.equal(await v.redis.sismember("wait:held", jobId), 0);
@@ -589,7 +589,7 @@ test("the read right before the removal: a job gone is changed, a read that thro
   let states = 0;
   const unread = quietJob({ async getState() { if (++states >= 2) throw new Error("ECONNRESET"); return "delayed"; }, async remove() { removed += 1; } });
   const unreadQueue = (_c, { name }) => ({ name, toKey: (type) => `bull:${name}:${type}`, getJob: async () => unread, close: async () => {} });
-  assert.deepEqual(await cancelQueuedJob({ ...onFakes, expect: asPreviewed, redisFn: () => quietRedis(), queueFn: unreadQueue, removeQueuedJobFn: removeQueuedJob }), { invalid: "job gh-1 could not be read again right before its removal, so it was not removed; nothing was changed" });
+  assert.deepEqual(await cancelQueuedJob({ ...onFakes, expect: asPreviewed, redisFn: () => quietRedis(), queueFn: unreadQueue, removeQueuedJobFn: removeQueuedJob }), { invalid: "the job could not be read again right before its removal, so it was not removed; nothing was changed (job gh-1)" });
   assert.equal(removed, 0);
   // The job fails back to the delayed set (an attempt made) just after the guard reads its state: the hash read after
   // it sees the attempt. Read the other way round, the hash would be from before and the state from after.

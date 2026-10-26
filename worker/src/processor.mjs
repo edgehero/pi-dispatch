@@ -10,6 +10,7 @@ import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
+import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "./record-reason.mjs";
 import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS, recoveryCounts, recoveryCountsFromProgress } from "./run-history.mjs";
 import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
@@ -2428,7 +2429,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// the whole infra class lives at the terminal seam -- start.mjs's failed listener, guarded on
 				// BullMQ's own finishedOn -- which also catches the stall-kill and wait-gate paths this
 				// function never sees (issue #288).
-				return await recoverOrThrow(new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources }));
+				return await recoverOrThrow(new InfraRetry(`infra failure, container exit ${code}`, { reason: CONTAINER_INFRA_EXIT, exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources }));
 			default:
 				// THE RUNTIME NEVER HANDED CONTROL TO THE RUNNER, in whatever integers this venue spells that
 				// (issue #227). For docker it is 125 (`docker run` itself failed), 126 (the entrypoint exists
@@ -2446,7 +2447,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 					// No `dollars` here: the hold is still standing, and the catch refunds it whole with the job-count slots.
 					throw new InfraRetry(`the runtime could not start the container, exit ${code}`, { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), resources });
 				}
-				return await recoverOrThrow(new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources }));
+				return await recoverOrThrow(new InfraRetry(`unknown container exit ${code}`, { reason: CONTAINER_EXIT_UNKNOWN, exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars, resources }));
 		}
 	} catch (e) {
 		// A CONFIG-tagged throw is a determinate policy refusal wearing an exception, and issue #310 is the
@@ -2664,6 +2665,9 @@ export class InfraRetry extends Error {
 		super(message, cause ? { cause } : undefined);
 		this.name = "InfraRetry";
 		this.piDispatchRetry = true;
+		// The message default is never recorded or passed on as text: the record's door (`recordReasonOf`) records a
+		// reason that is no token as `worker-error`, and the failure hook flattens one to `infra`. A throw that knows its
+		// cause passes a token.
 		this.reason = reason ?? message;
 		this.exitCode = exitCode ?? null;
 		this.turns = turns ?? null;

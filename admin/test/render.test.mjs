@@ -112,6 +112,15 @@ test("renderRuns renders a fully-null record as dashes (chain column included)",
   assert.match(dataRow, /^-(\s+-)+\s*$/, "a non-chain record renders '-' in the chain column");
 });
 
+test("renderRuns' REASON column holds a token only: an older worker's error text is shown as no reason, a recovery end reads failed", () => {
+  const base = { jobId: "gh-1", target: "acme/web#1", flow: "fix", turns: 2, chainDepth: null, endedAt: "2026-10-08T12:00:00.000Z" };
+  const out = renderRuns([{ ...base, outcome: "failed", reason: "infra failure, container exit 1" }, { ...base, jobId: "gh-2", outcome: "policy", reason: "recovery-cap" }]);
+  assert.ok(!out.includes("infra failure"), "the error's own words are shown nowhere");
+  const [, first, second] = out.split("\n");
+  assert.match(first, /\bfailed\s+-\s/, "no reason");
+  assert.match(second, /\bfailed\s+recovery-cap\s/);
+});
+
 test("renderRuns degrades on empty and unreachable inputs", () => {
   assert.match(renderRuns([]), /No runs/);
   assert.match(renderRuns({ unreachable: "x" }), /unreachable/);

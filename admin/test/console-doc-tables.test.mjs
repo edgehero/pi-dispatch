@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { ACTIONS } from "../src/console/actions.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
+import { RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES } from "../src/run-filter.mjs";
 import { planTriggerAdd, TRIGGER_ADD_FIELDS } from "../src/write-plans.mjs";
 
 /**
@@ -47,6 +48,14 @@ test("docs/console.md's table of error pages: one row per ERROR_KINDS member, by
   const rows = tableRows(read("docs/console.md"), "| Status | When | What it offers |");
   const statuses = (list) => [...list].sort((a, b) => a - b);
   assert.deepEqual(statuses(rows.map(([status]) => Number(status))), statuses(ERROR_KINDS.map((kind) => errorPage({ kind }).status)));
+});
+
+test("docs/console.md's table of runs filters: one row per RUN_FILTER_FIELDS member, in order, the outcome row naming RUN_OUTCOME_VALUES", () => {
+  const rows = tableRows(read("docs/console.md"), "| Filter | Matches the run's |");
+  assert.deepEqual(rows.map(([field]) => field), RUN_FILTER_FIELDS.map((f) => `\`${f}\``));
+  // The outcome row names every value the filter takes, in the code's order, and no other: its code spans are the list.
+  const [, outcome] = rows.find(([field]) => field === "`outcome`");
+  assert.deepEqual([...outcome.matchAll(/`([^`]+)`/g)].map((m) => m[1]), [...RUN_OUTCOME_VALUES]);
 });
 
 test("the requirements' list of destructive actions is exactly the actions whose write rules set danger", () => {

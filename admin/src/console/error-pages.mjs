@@ -7,9 +7,15 @@
  * WHAT A PAGE NEVER CARRIES.
  *   - The path it was asked for: a 404 names no path, so a crafted link cannot make the console's own page display a
  *     message of the link maker's choosing.
- *   - A value from the request, with one exception: a 421 names the Host it refused, which the person needs to see to
+ *   - A value from the request, with two exceptions. A 421 names the Host it refused, which the person needs to see to
  *     understand the refusal. It is the hostname `guards.mjs` `hostnameOf` normalized (or none, for a Host that is not a
- *     plain name), escaped by `html` and cut to `HOST_SHOWN_MAX` characters.
+ *     plain name), escaped by `html` and cut to `HOST_SHOWN_MAX` characters. And the run-id 404 (`no-run`, PR 4 of issue
+ *     #737) offers the runs search with the asked id in its field, the ErrorPage card's "search pill already filled
+ *     with that id": the id is the person's own query there, never a sentence of the page, and it is written only when
+ *     the runs page's own `q` rule accepts it (`run-filter.mjs`, at most 200 characters of an id's or a target's
+ *     letters, so every id the run page takes), so the search it fills is one the runs page answers; any other id
+ *     leaves the field empty. It is escaped by `html` as every value is, and appears nowhere else on the page: not in
+ *     a title, a heading or a sentence.
  *   - On a 421, any navigation or session data: every link would hit the same refused name, and the request came by a
  *     name the console does not answer to, so who is signed in is none of its business. The tunnel command uses the
  *     address and port this connection reached (`req.socket.localAddress` and `localPort`, which the requester already
@@ -23,6 +29,7 @@
  * whole by the server; the script only reveals the theme button and wires the copy box, as on every page.
  */
 import { isIP, isIPv4 } from "node:net";
+import { parseRunFilter } from "../run-filter.mjs";
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
 // A cycle by design, as the shell's own: `pages.mjs` draws the 403 belt with `forbiddenContent`, and this module reads
@@ -30,14 +37,17 @@ import * as ui from "./kit.mjs";
 import { PAGES } from "./pages.mjs";
 import { frameHtml } from "./shell.mjs";
 
-/** The kinds of error page, one per refusal the server answers with a page. */
-export const ERROR_KINDS = Object.freeze(["no-page", "bad-query", "operators-only", "host", "unavailable", "failed", "method"]);
+/**
+ * The kinds of error page, one per refusal the server answers with a page. `no-run` is the run page's own 404 (PR 4 of
+ * issue #737): `pages.mjs` `renderPage` answers it for a run id that no record, no queue and no live stream knows.
+ */
+export const ERROR_KINDS = Object.freeze(["no-page", "bad-query", "operators-only", "host", "unavailable", "failed", "method", "no-run"]);
 
 /** Each kind's status when the caller gives none: the status the server answers it with. */
-const KIND_STATUS = Object.freeze({ "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405 });
+const KIND_STATUS = Object.freeze({ "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405, "no-run": 404 });
 
 /** The kinds whose page keeps the console's navigation (when a session is known); the rest draw the sign-in bar. */
-const NAV_KINDS = new Set(["no-page", "bad-query", "operators-only", "method"]);
+const NAV_KINDS = new Set(["no-page", "bad-query", "operators-only", "method", "no-run"]);
 
 /** The most characters of a refused Host a 421 page shows; a longer one is cut, with an ellipsis. */
 export const HOST_SHOWN_MAX = 64;
@@ -62,6 +72,9 @@ const entry = (title, sub, heading, sentence, status, icon) => Object.freeze({ t
  * The operators-only heading names the audit log because the audit log is the one page whose `auth` is "operator"
  * (`pages.mjs` `PAGES`; `console-server.test.mjs` pins that relation): the first page with that auth that is not the
  * audit log makes this heading wrong, and must word it for whichever page refused.
+ *
+ * The no-run sentence says where the console looked (what `renderPage` read before it answered 404: the run history,
+ * the fleet's run mirror and the queue) and why a run may still exist.
  */
 export const ERROR_SENTENCES = Object.freeze({
   "no-page": entry("Page not found", "The console could not find what this address points to.", "No page at this address", "This console has no page at this address. Go to one of its screens instead.", "idle", "search"),
@@ -71,6 +84,7 @@ export const ERROR_SENTENCES = Object.freeze({
   unavailable: entry("Console unavailable", "The console cannot check who is signed in right now.", "The console's tokens file cannot be used right now", "No page can be shown until it can be read again, and nobody was signed out. An operator should run `pi-dispatch doctor` on the host; then reload this page.", "failed", "config"),
   failed: entry("Something went wrong", "The console could not draw this page.", "The console failed on this request", "Its log has the reason. Reload to try again.", "failed", "failed"),
   method: entry("Not a page", "The browser opened an address that only takes the console's own requests.", "This address is not a page", "It takes requests from the console's own buttons, which send them themselves. Go to one of its screens instead.", "idle", "info"),
+  "no-run": entry("Run not found", "The console could not find a run with this id.", "No run with this id", "No run with that id is in this host's history, the fleet's run mirror or the queue. It may be another host's run with the fleet's run mirror off, or one the history no longer keeps.", "idle", "search"),
 });
 
 /** The kit's tone of a catalog status (`ui.STATUS`), or a throw: the catalog is code, so an unknown status is a bug. */
@@ -176,12 +190,33 @@ export function forbiddenContent() {
   return errorCard({ status: KIND_STATUS["operators-only"], said: ERROR_SENTENCES["operators-only"], actions: goTo("overview", true) });
 }
 
+/**
+ * The run id a no-run page puts in its search field: the asked id when the runs page's `q` rule takes it as it is
+ * (`parseRunFilter`, the rule the search it fills is read by), else null, an empty field. Never cut or cleaned into
+ * something the rule takes: a value that does not pass is not shown at all.
+ */
+function searchedId(runId) {
+  if (typeof runId !== "string" || runId === "") return null;
+  return parseRunFilter({ q: runId }).filter?.q === runId ? runId : null;
+}
+
+/**
+ * The no-run card's search (the ErrorPage card's search pill): a GET form to the runs page holding its search field,
+ * `#q` as on the runs page, filled with the asked id where `searchedId` shows it. A plain form, so it works without the
+ * script; Enter in the field submits it.
+ */
+function runSearch(runId) {
+  return html`<form class="er-search" method="get" action="${PAGES.runs.path}" role="search">${ui.searchPill({ id: ui.SEARCH_ID, name: "q", value: searchedId(runId) })}</form>`;
+}
+
 /** The card for `kind` (every kind but host), with its way back. */
-function cardOf(kind, { status, sentence, page }) {
+function cardOf(kind, { status, sentence, page, runId }) {
   const said = ERROR_SENTENCES[kind];
   switch (kind) {
     case "no-page":
       return errorCard({ status, said, actions: html`${goTo("runs", true)}${goTo("overview", false)}` });
+    case "no-run":
+      return errorCard({ status, said, extra: runSearch(runId), actions: html`${goTo("runs", true)}${goTo("overview", false)}` });
     case "bad-query": {
       const back = backTo(page);
       const told = typeof sentence === "string" && sentence.trim() !== "" ? html`${said.sentence}: ${refusalTail(sentence)}` : html`${said.sentence}.`;
@@ -204,16 +239,18 @@ function cardOf(kind, { status, sentence, page }) {
  * server names kinds in code). `status` is what the server answers (its kind's when not a 4xx or 5xx number);
  * `session` (`{name, role}`) and `readOnly` draw the signed-in bar for a kind that keeps the navigation; `theme` is the
  * request's theme choice. `sentence` and `page` are the 400's refusal and the page that refused it; `host`, `port` and
- * `address` the 421's refused name and the connection's local port and address. Every value goes through `html`.
+ * `address` the 421's refused name and the connection's local port and address; `runId` the no-run page's asked id,
+ * shown only as its search field's value (see the header). Every value goes through `html`. A no-run page's navigation
+ * marks Runs current, as the run page's does: it stands where the run's page would.
  */
-export function errorPage({ status, kind, theme = null, session = null, readOnly = false, sentence = null, host = null, port = null, address = null, page = null }) {
+export function errorPage({ status, kind, theme = null, session = null, readOnly = false, sentence = null, host = null, port = null, address = null, page = null, runId = null }) {
   if (typeof kind !== "string" || !ERROR_KINDS.includes(kind)) throw new RangeError(`error-pages: unknown kind ${JSON.stringify(kind)} (one of ${ERROR_KINDS.join(", ")})`);
   const code = Number.isInteger(status) && status >= 400 && status <= 599 ? status : KIND_STATUS[kind];
   const said = ERROR_SENTENCES[kind];
   const nav = NAV_KINDS.has(kind) && session !== null && typeof session === "object";
-  const inner = kind === "host" ? hostCard({ status: code, host, port, address }) : cardOf(kind, { status: code, sentence, page });
+  const inner = kind === "host" ? hostCard({ status: code, host, port, address }) : cardOf(kind, { status: code, sentence, page, runId });
   return {
     status: code,
-    html: frameHtml({ name: "error", title: said.title, sub: said.sub, theme, session: nav ? session : null, readOnly: nav ? Boolean(readOnly) : false, nav }, inner),
+    html: frameHtml({ name: "error", title: said.title, sub: said.sub, theme, session: nav ? session : null, readOnly: nav ? Boolean(readOnly) : false, nav, here: kind === "no-run" ? "runs" : null }, inner),
   };
 }
