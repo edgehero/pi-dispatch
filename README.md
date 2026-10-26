@@ -311,7 +311,7 @@ wait for its budget, the jobs running there now, and how busy it was over the la
 `pi-dispatch capacity`, `pi-dispatch doctor`, the insights page and the `dispatch_capacity` tool read the same report. It counts jobs
 only: a machine busy with other work reads as idle.
 
-![The panel's hosts view: three machines, each with its slots in use of its limit, the memory and CPU its budget has promised against that budget (or that it has none), its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, average and peak jobs at once, time at the slot limit, the 95th percentile wait and the projects that used it most, each host's last doctor run with its failing and warning checks and their fixes (one result stale, one host that has published none), ending with the note that only jobs are counted](docs/images/dispatch-hosts.svg?v=2026-10-21)
+![The panel's hosts view: three machines, each with its slots in use of its limit, the memory and CPU its budget has promised against that budget (or that it has none), its running jobs with project, size and age, a host with an orphaned container, and the last 7 days as busy share, average and peak jobs at once, time at the slot limit, the 95th percentile wait and the projects that used it most, each host's last doctor run with its failing and warning checks and their fixes (one result stale, one host that has published none), ending with the note that only jobs are counted](docs/images/dispatch-hosts.svg?v=2026-10-26)
 
 ## Flows: the custom prompt a trigger runs
 

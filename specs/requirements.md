@@ -1303,6 +1303,31 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     page's Chat panel shows a viewer the state and a refusal's sentence only, never a form or a command. Tests:
     `admin/test/console-transcript.test.mjs` (the two `format=json` tests), `admin/test/console-run-api.test.mjs`
     ("no free text, job data or session key for either role", the `safeRunOf` test), `admin/test/console-chat.test.mjs`.
+    **Extended to the overview** (issue #737 PR 3b, `REQ-OPERATOR-CONSOLE-SCREENS` (a)): given a viewer's session, the
+    overview says why a job waits only in the worker's vocabulary (a reason token the worker's table does not hold,
+    which passes `DEFER_WHY_RE`, is shown as recorded, escaped in the code face, with "no explanation yet", on Waitlists
+    and on the timeline alike, as for an operator; a wait check's profile names and their answers are left out), draws
+    no write, none of the waitlists' links and no command (the links it does draw only open a page: a row of Needs you
+    opens its run's page or Fleet, the no-worker warning opens Fleet), and its first run's queue step says "Valkey
+    answers", never the address, while its deployment step names the deployment folder's last part alone, for either
+    role; given a failed job, Needs you shows its id and never `failedReason`; given a refused overview query (`rows`,
+    `zoom` or `project`), the refusal names the parameter and the values it takes, never the value sent; given a host
+    row's name, a doctor label or a venue from another host, each is escaped; given a job scheduler's id or job name
+    outside the cron id charset or longer than `SCHEDULER_NAME_MAX` (the triggers loader's `CRON_ID_MAX`, 176), which
+    anything holding the Valkey URL can plant and the admin's surfaces print in running text, the reader carries it as
+    null, never a cut, and keeps the entry (`mapSchedulers`), and no surface names it by its job name instead. Tests:
+    `admin/test/console-overview.test.mjs` ("Waitlists for a viewer: the worker's vocabulary, no action, no profile, no
+    slot sentence", "the timeline shows every role a reason this console has no words for as recorded, never as no
+    reason", "first run for a viewer: ...", "a hostile value from another host is text: ..."),
+    `admin/test/console-pages.test.mjs` ("parsePageQuery: each screen takes only its own parameters, bounded and
+    charset-checked, and refuses without echoing"), `admin/test/doctor-view.test.mjs` ("first run: the token step reads
+    the session's role only, ..."), `admin/test/read-model.test.mjs` ("a scheduler's id and job name are read in the
+    cron id charset and at most SCHEDULER_NAME_MAX characters, else null, and the entry stays"), and the surfaces that
+    name a scheduler by its key alone: `admin/test/console-overview.test.mjs` ("Scheduled names a scheduler by its key
+    alone: ..."), `admin/test/render.test.mjs` ("renderTriggers names a scheduler by its key alone: ..."),
+    `admin/test/dashboard.test.mjs` ("a cron trigger's detail takes its scheduler by key alone: ...") and
+    `admin/test/graph-model.test.mjs` ("buildGraphModel: a cron trigger takes its scheduler by key alone, never by
+    BullMQ's job name or a shared pattern").
   - (m) **The insights page's reads** (2026-10-18, insights move to the console). Given a viewer's session, then
     `/insights?whatif=<provider>/<model>&flow=<flow>` is answered as a read (a GET, no ticket, no audit row, no write)
     and its record scan is bounded by the 92-day scan ceiling and cached 30 s, at most 64 answers; given `paths=full`
@@ -1371,7 +1396,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   wide without scrolling sideways. **AMENDED 2026-10-24 (#737 PR 2)**: a live page whose data can no longer be read
   shall keep what it showed and say since when, a live page that loses its stream shall say whether the console is out
   of reach, the stream was refused or the session ended, a page that is not live shall say when it was drawn, and the
-  audit page shall say how far its hash chain is verified and which rows it does not vouch for.
+  audit page shall say how far its hash chain is verified and which rows it does not vouch for. **AMENDED 2026-10-25
+  (#737 PR 3b)**: the overview shall lead with what needs a person, say why each job that has not started waits in
+  the worker's own words, draw the last hours and what is in line as one timeline whose groupings all read the same
+  data, and, on a deployment that has never run a job, show what stands before its first job instead.
 - **Scope**: reads only. Every write and action, answering a parked run included, is #642's
   (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; the live transcript on
   the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's (`REQ-RUN-PROGRESS`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
@@ -1394,49 +1422,298 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `REQ-AWAIT-INPUT`, `REQ-DURABLE-RUN-HISTORY`, `REQ-INSIGHTS-HTML-EXPORT` (retired into this entry on 2026-10-18),
   `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`, `REQ-MULTI-HOST-COORDINATION`, `OQ-044`.
 - **Acceptance**:
-  - (a) **Overview** (`/`). Given the fixture deployment, the page shows the paused state (a partial pause named as
-    such), the queue counts, the hosts online with the age of each one's last beat, today's spend against its caps,
-    the number of parked runs waiting, and the failures of the last 24 hours; given a run window that does not reach
-    back a day, the failure count is shown as a floor ("at least"), never as an exact number; given Valkey down, the
-    page renders and says the fleet is unreachable rather than showing zeros. Since issue #647 the parked count leaves
-    out the parks being answered (a job queued or running on the target, the parked rows' `answering`) and names how
-    many those are. Tests: `admin/test/console-pages.test.mjs`, `admin/test/read-model-pages.test.mjs`
-    (`failures24h`), `admin/test/console-chat.test.mjs` (the parks being answered). **AMENDED 2026-10-23 (#710): a
-    truthful overview.** The panels are in the order a person acts on them: Active jobs and Parked first, then Fleet,
-    Spend, Hosts and Problems. Given no live host whose last beat is at most a minute old (`BEAT_FRESH_MS`, four of the
-    worker's 15 s beats; the hosts tables flag an older beat by the same bound), a registry that was read, and no
-    worker in BullMQ's own list (`queue.workers`, which holds no host clock), the Fleet
-    panel starts with the warning "No worker online: jobs queue but nothing runs them" and the queue's state is never
-    green ("not paused, but no worker is online", amber; a paused fleet stays red); given a registry with no row, BullMQ's
-    worker count is the fallback, as the status line's; given an unreadable registry, nothing is judged and the page
-    says it shows the fleet as last seen; given beats that look stale while BullMQ sees more workers than beat freshly
-    (a host clock behind the console's, or a wedged worker), the panel gives the note "Host beats look stale (clock
-    skew?), but the queue still sees its workers connected" in place of the warning and the queue stays green (review
-    round 1). The Workers fact is the registry-aware count (`resolveWorkerCount`) and, when
-    they differ, how many are online. "Failed (kept by the queue)" reads "Failed jobs awaiting retry". The day's
-    failures panel is "Problems (24h)": the failed runs and the refused runs of the last 24 hours (`refusals24h`, from
-    the same window, so one floor says "at least" for both), the refused count leaving out an operator's cancel (a
-    `policy` record whose word is "cancelled", `words.mjs`), and the five most frequent refusal reasons, each its
-    catalog sentence cut by `shortSentence`, linked to `/runs?outcome=policy&reason=<token>` only where the runs
-    filter accepts the pair, the token in the link's `title`; a token the catalog does not know reads as itself with
-    "no explanation yet", one the filter refuses is printed once, unlinked, cut to 64 characters. Money on the overview
-    and in the runs list (the dollar windows, the Job cap column) is one fixed form (`usd2`: `$1,234.56`, two decimals
-    and thousands commas; half up, but DOWN for an amount spent against a cap, so a window short of its cap never reads
-    as the cap) with the exact amount (`formatMicros`) in its `title` (review round 1); the count windows read "Jobs started today", "this
-    week", "this month" and "Tokens used today" in a Used column, a missing cap "no cap", and a note under the
-    windows says they are UTC days, weeks and months. Every instant a console panel writes as text, the Spend page's
-    split and capacity instants included, is a `<time datetime>` whose text is the UTC instant, the same bytes for
-    every reader (the charts' tips, day labels and buckets, the split's short outside-edit notice and the live
-    transcript's entry times stay UTC, `DES-OPERATOR-CONSOLE`); the browser script shows it
-    in the reader's zone with its offset and keeps the UTC text in the `title`, on load, after each live swap and,
-    since #737 PR 3a, in each bar it writes into the confirm slot (a preview's or an answer's lines, a waiting job's
-    time among them), and a page without the script reads UTC (`DES-OPERATOR-CONSOLE`). Tests:
-    `admin/test/console-panels.test.mjs` ("the overview leads with what needs a person", "Problems (24h)", "no worker
-    online", "clock skew", "readable numbers", "times", "the script shows each `<time>` in the reader's zone"),
-    `admin/test/panel.test.mjs` ("usd2"), `admin/test/insights-html.test.mjs` (the split's and the capacity section's
-    `<time>`), `admin/test/read-model-pages.test.mjs` (`refusalsIn` and the fleet reader's day boundary, the reader's
-    `refusals24h`), `admin/test/console-pages.test.mjs`, `admin/test/console-client-states.test.mjs` ("a bar's times
-    are shown as the page's are: ...").
+  - (a) **Overview** (`/`). **REWRITTEN 2026-10-25 (#737 PR 3b): the overview in the Pulse markup.** It replaces
+    the clauses #641, #647 and #710 PR 4 wrote for the old panels (the revision history keeps what each said), and
+    keeps every fact they pinned on the panel that holds it now. Given the fixture deployment, the page draws eleven
+    panels in this order (`PAGE_PANELS.overview`): the first run's three (`p-setup`, `p-setup-pi`, `p-setup-empty`);
+    Needs you (`p-needs`), In line (`p-waiting`), Running (`p-active`) and Spend today (`p-spend`), a row of four
+    cards; then the timeline (`p-timeline`) and Caps (`p-caps`) in one column, beside Waitlists (`p-waitlists`) and
+    Hosts (`p-hosts`) in the side column; and the shell's headline (`p-headline`) under the title. The eight are empty
+    while the first run applies and the three are empty otherwise, so the stream moves a deployment from the checklist
+    to the overview by swapping panels; given no snapshot (Valkey down), each of the eight says one fixed sentence,
+    never zeros, the three draw nothing and the headline says Valkey could not be read. Every panel keeps ONE READ
+    RULE (`UNREAD`, `panels/overview.mjs`): a whole count, an empty sentence (`CAPS_EMPTY_TEXT`, "nothing is waiting",
+    "No run has settled any spend today.", "No run in this window, and nothing in line.", the waitlists' calm line) or
+    All clear is drawn only over the reads behind it, each made whole; a read that failed or was cut says so in a fixed
+    sentence of its own instead, never drawn as nothing. Each of these holds too:
+    - (a1) **The headline** and Needs you say All clear by ONE rule (`needsOf`): every read behind Needs you made (the
+      parked runs, the failed jobs, the doctor results, and the host registry itself, read this tick: its rows a list
+      and the snapshot's `fleetDegraded` unset, since "to fix" counts the registry's hosts whose doctor fails; BullMQ's
+      own list answers only whether a worker is online and never stands in for that read), a worker online, nothing to
+      answer or fix, and the last 24 hours read whole with no failure, no refusal and no floor. The headline is "All
+      clear. 4 jobs running, nothing needs you." only then; else what needs the person as it was counted ("Needs you: 1
+      question and 3 to fix. 4 jobs running."); where a read behind Needs you failed, which one in fixed words and that
+      what needs the person is not known ("The failed jobs could not be read, so what needs you is not known. 4 jobs
+      running.", "The host registry could not be read, so ..."), or, beside what was counted, that more may need them
+      ("... so more may need you."); else "Nothing needs you. 4 jobs running." (the day had a failure or a refusal, or
+      was not read whole). With no worker online it is never All clear and leads with `NO_WORKER_TEXT`, which then
+      stands in for "Nothing needs you.". On a first run it says how many steps stand before the first job.
+    - (a2) **Needs you** counts the questions (unanswered parks; a park a queued or running job is answering, the parked
+      rows' `answering`, is named in a line of its own and not counted, as since #647) and what to fix (the failed jobs
+      the queue keeps, and the hosts in the registry whose published doctor result has a failing check, never a host
+      gone from it, `NEEDS_DEFINITION`, and none while the registry was not read this tick, whose rows are then the last
+      ones seen); each number is a whole count, a true 0, only where every read behind it was made (the questions the
+      parked runs; "to fix" the failed jobs, the doctor results and the host registry), else what was read as a floor
+      ("1 or more to fix") or, with nothing read, a dash with "not known", and its one "0, nothing needs you" needs all
+      four reads, a worker online and nothing to answer or fix. A host registry not read is said in its own line, "The
+      host registry could not be read, so failing doctors are not counted.", and where BullMQ sees no worker connected
+      either, "The host registry could not be read and the queue sees no worker connected, so failing doctors are not
+      counted and whether a worker is online is not known.". It lists at most `NEEDS_ROWS_MAX` (4) of them, each with
+      its project where a run record read here names one (a row without a project tag is said once,
+      `NEEDS_UNKNOWN_PROJECT_TEXT`), its id and one action (on a console that takes changes, `canAct`, a question's
+      Answer, a link to its run page, whose Chat panel takes the answer only there, and a failed job's Retry,
+      `retry-failed`, paid; Open otherwise, for a viewer and on a read-only console; a failing host's Open goes to
+      Fleet, its name whole in its `title`), and counts the rest. Its last line is the last 24 hours' failed and refused
+      runs, each count linked to the runs list, the refused count leaving out an operator's cancel (a `policy` record
+      whose word is "cancelled", `refusalsIn`) and folded from the same window as `failures24h`, so one floor says "at
+      least" for both; a floor with neither in it says so (`DAY_FLOOR_TEXT`), since it is why the card is not All clear;
+      a window that could not be read is a fixed sentence and no count. A read that failed is a fixed sentence, never
+      the reader's message.
+    - (a3) **In line** counts the jobs that have not started (the snapshot's `waiting`, which only the overview's load
+      asks for, `DES-WAITING-REASONS`), with the oldest's age and each bucket's count, the four of
+      `WAITING_MAIN_BUCKETS` always. Where the read was cut (`truncated`: more queues than `WAITING_QUEUES_MAX`, 64, a
+      queue holding more waiting jobs than one read takes, or a list member the read refuses as no run id) EVERY NUMBER
+      THE CARD DRAWS IS A FLOOR: the count is said as one in its label ("5 or more jobs waiting to start", the big
+      number a count alone), each bucket's count is "2 or more", or a dash where the read found none of it, never a
+      whole number, and the oldest's age is "longest 40m or more", since the job that has waited longest may be one the
+      read did not reach (none drawn where no age was read); under every cut read the card says `WAITING_CUT_TEXT`
+      ("Not every waiting job was read, so jobs in line may be missing here.", the constant the timeline draws too). A
+      cut read that found none is a dash with "jobs waiting: not known", never "nothing is waiting" or "0 or more", in
+      the first run's preview too, which then says `WAITING_CUT_TEXT` (`inLineOf`). **Running** counts the active jobs
+      in the slots used of all the hosts', and per host draws its slots as dots, running, held (a registry orphan) and
+      free, a held slot called out, the host's name whole in its `title`; with no host row it says "4 jobs running,
+      slots not published". Where the registry could not be read this tick it says `REGISTRY_UNREAD_TEXT`, under the
+      rows last seen or in their place, never that no host is registered. A host whose slots are not known draws no
+      dots and no slot free or held, and leaves the slots used a floor with no total ("in 5 or more slots"): every row
+      of a registry that could not be read this tick says "as last seen" (`LAST_SEEN_WORDS`), since its rows and their
+      beat ages are as old as the last read, so a slot drawn free from them is one nobody knows is free; one that has
+      not beaten within `BEAT_FRESH_MS` (its beat's age as `beatAgeOf` gives it, or no beat that can be read) says "not
+      beating", since a host that does not beat takes no job; and one whose list of running jobs could not be read says
+      "running jobs unreadable"; a floor of none says the count's own words instead ("nothing is running", "4 jobs
+      running, slots not known"). **Spend today** is the deployment's day window, spent and held, of its cap, where it
+      has one and its counter was read; else the run records' settled spend today ("settled today"); else, with neither
+      read, a dash with "not known". Under it each UTC hour's settled spend from the records as dots, and a line that
+      says what the dots are and where the number comes from (`SPEND_HOURS_TEXT`, the day window's spent and held;
+      `SPEND_SUM_TEXT`, the dots' sum), or, where no hour settled anything, "No run has settled any spend today.", only
+      over the day's records read whole; a dollar read that failed, or a day window whose counter came back null, says
+      "The dollar counters could not be read."; and a day of records not read whole (only the newest read, or a side of
+      them unread: `spendByHour`'s `floor` or `partial`) says "Not every run record of today was read, so these hours
+      may be missing spend.", its note then naming the number's source and never the empty sentence.
+    - (a4) **The timeline** (`admin/src/console/timeline.mjs`, pure) draws the window's ended runs (clipped at its
+      start), the running jobs, the unanswered parks, the slots a gone job holds and the jobs in line, by project or by
+      host (`?rows=`), over 1h, 3h or 24h (`?zoom=`, now at two thirds of the window), for every project or one
+      (`?project=`, the chips counted before the filter, a filtered project with nothing keeping its chip); an arrow
+      only from a blocker in the same lane, a dotted gap to a due time to come; at most `TIMELINE_LANES_MAX` lanes a
+      row, what a person acts on kept and the rest counted, no packing pass opening a lane past the cap (a queue of tens
+      of thousands draws in a bounded time, its waits past the cap counted without being packed, the ones drawn the next
+      to start: a job that waits on something in its row first, then by due time, then by id); at most
+      `TIMELINE_ROWS_MAX` (12) rows and `TIMELINE_CHIPS_MAX` (24) project chips, the most pressing kept and shown in
+      name order, the filtered project always keeping its chip, the rows left out counted in a line of the card under
+      the timeline's scroll box ("12 more rows are not drawn (340 runs and jobs in them).") and the chips in "+N more",
+      one word that never wraps, All counting every project, the chips wrapping onto more lines above a phone's width
+      and one line that scrolls inside itself on a phone; one accessible name a row that counts every item, drawn or
+      not; a row's head cut to its column with its name whole in its `title`; its axis UTC text inside its SVG that says
+      "UTC"; every target, project, host and id escaped. A waiting pill starts by ONE RULE: at its due time or at its
+      bucket's start (`WAIT_START_X`), whichever is earlier, and never before just right of now, where one already due
+      starts; a bucket's start is where its glyph, a name of `WAIT_NAME_MIN` characters (10 with the ellipsis), its
+      bucket's word and an `HH:MM` due time just fit before the window's end, one number for every pill of the bucket. A
+      pill at its due is drawn there, the dotted gap from now leading to it; one due later than its bucket's start, near
+      the window's end or past it, is moved left to that start, and its line is its word and its due time ("check
+      07:00", UTC as the axis is; "window in 2d 4h" for one more than a day off), since where it starts is not when. So
+      of two pills of one bucket the one due later never stands left of the other, whatever their names and however far
+      off they are due; across buckets the starts differ by their words' widths, so only near now can a moved pill stand
+      left of another bucket's drawn at its due before it, and it says its time. Either way the name is what gives way,
+      cut to what the pill leaves it and whole in the title, and the word is never dropped; its label ends at least 4 px
+      before the pill's end, by the widths Chrome draws. Each bucket has a glyph of its own (`due` the bell, `unknown`
+      the tag) and a word a pill too narrow for its line still says (`ready`'s "not ready"); a scheduler's next run past
+      its due is drawn in line, its pill naming its trigger and run time and its title the raw id; a park's label and
+      words never reach now. Every role reads a reason this console has no words for as recorded, never as no reason. An
+      ended run reaches it with the day's records, read at most once per 15 s (`DOLLAR_RECORDS_TTL_MS`), so one can take
+      that long to appear. Under it, by the read rule, a line says each read that was not made whole: the run history
+      that could not be read, some run records unread ("Some run records could not be read, so runs in this window may
+      be missing."), only the newest runs read, and the waiting jobs not read or not all read ("Not every waiting job
+      was read, so jobs in line may be missing here."); "No run in this window, and nothing in line." only where the run
+      history was read whole and the waiting read was made and not cut.
+    - (a5) **Caps** draws a capsule per window that has a cap, its percent used (rounded down below the cap) and no
+      money: the job windows take the soft-hold line at the overlay's `softHoldPct` and turn amber at it, as the
+      budget's own band does (`budget.mjs`), and the token and dollar windows take none, since no dollar window has a
+      soft hold; it says what the soft hold does ("From the soft hold new starts are refused; nothing is spent.") and
+      that the windows are UTC days, weeks and months. A dollar capsule names a project by its id and a model by the
+      model alone, the key under them saying which is a project and which a model; a scope is named by its last folder
+      for every role (`shownPath`, a repository as it is), and no line writes a scope's raw name. The job and token caps
+      and the soft hold are the settings overlay's, so they are drawn only from a settings read made whole (the reader's
+      `{ path, overlay }`, an object; never its `{ path, invalid }`, on which the worker refuses every job, and never a
+      read that is missing), and any other read draws none of them and says "The settings overlay could not be read, so
+      its caps are not drawn."; the dollar windows are a read of their own and are drawn beside it. A window with a cap
+      whose counter was not read is drawn as no capsule and said instead, by the read rule: "The job or token counters
+      could not be read, so their windows are not drawn." (the budget's counts not read, or one not a number), and "The
+      dollar counters could not be read." (the dollar read failed, or a capped dollar window's counter came back null).
+      The empty sentence, `CAPS_EMPTY_TEXT` ("The settings overlay sets no cap."), is drawn only where no window has a
+      cap and none of that went unread, since over a failed read it would say the deployment spends without a limit, and
+      it names its source: the worker's own caps from its environment are in no read the console makes.
+    - (a6) **Waitlists** lists the jobs in line by bucket, in `DEFER_BUCKETS`' order (`due`, "Due, and no worker has
+      taken it", a delayed job more than `WAITING_DUE_GRACE_MS` past its due whatever it recorded, a scheduler's overdue
+      next run among them; `unknown`, "A reason this console does not know"), at most `WAITLIST_ROWS_MAX` (5) each and
+      the rest said as not listed ("And 3 more waiting for this, not listed: the overview lists the first 5 of each
+      reason."), each job with its project (a row without one said once, `WAITING_UNKNOWN_PROJECT_TEXT`, only where a
+      shown row has none), its id (a scheduler's run as its trigger and run time, "hourly-sync, <time> run", the raw id
+      in its `title`; a long one wrapping inside its row) and the worker's own sentence (`waitingSentence`, the cancel
+      preview's `waitingLine`, so the two say why alike, for every role: a `due` row "Due since <time>; no worker has
+      taken it", an `unknown` row "Recorded reason: <token>, no explanation yet"; a placeholder the row lacks says the
+      bucket's title, never a sentence with a hole), and for a job in the queue of a host no registry row names, in a
+      registry that was read, "It is in `pi-jobs@zeta`, whose host is not in the registry". The bar of reasons gives
+      each segment at least the room its glyph and count need and wraps onto more rows when they do not fit one; each
+      row's action stands at the row's right at every width, and every name in a row's sentence (a host, a stray host
+      queue, the job holding a slot, a wait check's profiles) breaks anywhere where it must, so the longest name holds a
+      375 px page. The calm line ("No job waits for a slot, another run, or a time or check.") is drawn only over a read
+      made whole, never over a cut one. Each row has at most one action, an operator's on a console that takes changes:
+      a job waiting for a slot that a job that is gone holds on its host, an Open Fleet link (the host's page by its
+      name once it exists) and no button, since no console action reaches another host's runtime, its group saying
+      `FREE_SLOT_TEXT` to an operator; a scheduler's overdue next run, its cron trigger's Edit (Configuration until a
+      trigger page exists) and no Cancel, which the queue refuses; Chain, the run it waits for; Edit, the trigger where
+      its record names one; else Cancel (`cancel-queued`) and only for a job that action would plan (no attempt made,
+      never stalled back, no recovery, not a scheduler's next run). A read cut at `WAITING_QUEUES_MAX` queues, or inside
+      a queue, says in one line, for every role, that the counts are a floor ("Only the first 64 queues were read; 3
+      more were not, so the counts are a floor."). Under them, each queue's counts and pause (the shared queue and each
+      registered host's, then each queue the waiting read found jobs in that those leave out, `byQueue`, "3 in line, its
+      host not in the registry"; a queue's pill breaks its name alone, its counts going under a name too long for the
+      line), the next cron fires (Scheduled, each by its scheduler's `key` alone, the cron trigger's id; BullMQ's `name`
+      is the job name, `local` for every one, and never stands in for it, so a scheduler whose key the reader refused is
+      left out), and today's soft-hold refusals with "The soft hold refuses rather than holds.", since from the soft
+      hold the worker refuses a start and none of them waits.
+    - (a7) **Hosts** gives per host its beat's age, its venues, its slots (no dots for a host whose slots are not known,
+      as on Running, and so none for any row of a registry that could not be read this tick, its rows as last seen), its
+      doctor in one line, its own queue's counts and pause (`queue-pause` and `queue-resume` on `pi-jobs@<name>`, drawn
+      only for a queue the snapshot counts), its clock's skew past `HOST_SKEW_CLAIM_MS` (`hostSkewText`, from the
+      registry's `skewMs`) and a row with no expiry (`noExpiry`, `HOST_NO_EXPIRY_TEXT`), a host whose running jobs could
+      not be read (`JOBS_UNREAD_TEXT`), and a host's name, its notes and its queue broken wherever they must, so the
+      longest name a worker can have holds a 375 px page; in its head what it counts, "3 beating", "2 connected" with no
+      registry row, "none registered", "as last seen" for a registry that could not be read, and "3 registered, 2
+      beating, 3 connected" where those differ (the old overview's Workers fact), the fleet paused or partly paused (how
+      many queues, never their names: "Partly paused: 2 host queues", "the shared queue", or both, the chip's words
+      wrapping inside the card; the Queues line and each host's row name them), and an operator's Pause fleet unless the
+      whole fleet is paused and Resume fleet once any of it is (both on a partial pause), as Fleet offers them. A beat's
+      age is `beatAgeOf` (`admin/src/doctor-view.mjs`): Valkey's measure of the row's last refresh (`ttlAgeMs`) where
+      the reader had it, since every beat refreshes the row, else the console's clock against the host's (`staleMs`);
+      the online rule, Running's slots, each host row's dot and age, the first run's worker step, the fleet page's hosts
+      table, `/api/state`'s `hosts[].lastBeatAgeMs` and the `/dispatch` panel's HOSTS view all judge by it, so a host
+      whose clock runs behind beats when it beats, and its skew sentence says its clock. Given no live host whose last
+      beat is at most a minute old (`BEAT_FRESH_MS`, four of the worker's 15 s beats), a registry that was read, and no
+      worker in BullMQ's own list (`queue.workers`, which holds no host clock), it starts with "No worker online: jobs
+      queue but nothing runs them"; given a registry with no row, BullMQ's worker count is the fallback; given beats
+      that look stale while BullMQ sees more workers than beat freshly (a host clock behind the console's where Valkey's
+      measure was not read, or a wedged worker), the note "Host beats look stale (clock skew?), but the queue still sees
+      its workers connected" in its place; given an unreadable registry, it judges nothing and says it shows the fleet
+      as last seen. The fleet page's Fleet fact follows the same rule and is never green with no worker online ((f)). A
+      `host:live` member, or a row's own `name`, outside the worker name charset (`WORKER_NAME_RE`) is no host and is
+      drawn nowhere (`INT-HOST-REGISTRY-CONTRACT`).
+    - (a8) **The old panels are re-homed**, so nothing they showed is lost: the paused state is Hosts' head and the
+      Waitlists' queue line; the queue counts are that line and each host's row; the parked count, with the parks
+      being answered, is Needs you's questions; "Failed jobs awaiting retry" is Needs you's to fix; "Problems (24h)"
+      is Needs you's last line (the five most frequent refusal reasons stay in `/api/state`'s `refusals24h`); the
+      Workers fact (how many hosts beat, and registered and connected where those differ) is Hosts' head; the count
+      and dollar windows are Caps; the no-worker warning and the stale-beats note lead Hosts; and the active jobs'
+      table with its Progress column is the fleet page's alone (`REQ-RUN-PROGRESS`).
+    - (a9) **The query** is `rows`, `zoom` and `project`, each a closed value (`TIMELINE_ROWS`, an OWN key of
+      `TIMELINE_ZOOMS`, so an inherited name such as `toString` or `__proto__` is refused too, `PROJECT_ID_RE`),
+      refused 400 by its name and rule and never by its value, and every overview query reads the same data, once a
+      tick (`dataQueryOf`: the overview's data query is `{}`).
+    - (a10) **The first run** (`firstRunState`, `admin/src/doctor-view.mjs`) applies only when the snapshot was read, no
+      run is on record (the newest runs and the last 24 hours') and there is no host row (in a registry that was read)
+      or no trigger, so a Valkey that did not answer, or every worker down on a deployment that has run, never turns the
+      overview into the checklist. Its eight steps (`FIRST_RUN_STEPS`, in doctor's order, each a state of
+      `FIRST_RUN_STATES`, each `{ id, state, title, sentence, commands }` and no more: who reads a command is each
+      surface's rule) are judged from the snapshot, the session's role alone and the deployment folder's last part
+      (`deploymentOf`): a worker by a beat within the console's fresh bound (its age by `beatAgeOf`, as Hosts judges
+      it), the egress proxy and the provider key by the worst level any host's doctor published for `egress.proxy` (with
+      its repeats) and `provider.key` (a doctor that wrote the provider section without the named check is said to
+      predate it), the forge credentials optional without a forge trigger and otherwise the worst of the `github` and
+      `forges` sections, and the queue by "Valkey answers", never its address. A check that did not pass is quoted as
+      the check it failed or warned on ("Doctor on build3 reports a failing check: <label>.", "... reports a warning:
+      <label>."), never as what doctor says is so. Its commands (`FIRST_RUN_COMMANDS`) are each in its CLI's usage,
+      `setup github` with the `--webhook-url` the CLI requires, every one with a placeholder drawn with the sentence
+      that says what to put there (`FIRST_RUN_COMMAND_HINTS`: the token's `<name>`; for `setup github` the receiver's
+      URL, or `--no-webhook` in its place), and an operator's alone; a read-only console keeps them and draws no Add a
+      trigger button. The preview of the overview's panels reads In line, Running and Hosts from the live rows ("2 jobs
+      waiting to start", "1 host registered"), and every other panel by its own empty words.
+    - (a11) **A viewer** reads the same counts, ids, hosts and why each job waits in the worker's vocabulary (a reason
+      this console has no words for as recorded, its token with "no explanation yet", and a wait check's profiles and
+      answers never), with no write, none of the waitlists' links and no command (the links it does draw only open a
+      page: a row of Needs you opens its run's page or Fleet, and the no-worker warning opens Fleet); no panel holds a
+      failure's text (`REQ-CONSOLE-SECURITY` (l)).
+    - (a12) **Money and times.** Money on the overview's Spend today and in the runs list (the Job cap column) is one
+      fixed form (`usd2`: `$1,234.56`, two decimals and thousands commas; half up, but DOWN for an amount spent against
+      a cap, so a window short of its cap never reads as the cap) with the exact amount (`formatMicros`) in its `title`.
+      Every instant a console panel writes as text, the Spend page's split and capacity instants included, is a
+      `<time datetime>` whose text is the UTC instant, the same bytes for every reader (the charts' tips, day labels and
+      buckets, the split's short outside-edit notice, the live transcript's entry times, the overview timeline's axis,
+      titles and pill times, and Spend today's hour axis, plain `HH:00` text under its dots, stay UTC,
+      `DES-OPERATOR-CONSOLE`); the browser script shows it in the reader's zone with its offset and keeps the UTC text
+      in the `title`, on load, after each live swap and, since #737 PR 3a, in each bar it writes into the confirm slot
+      (a preview's or an answer's lines, a waiting job's time among them), and a page without the script reads UTC.
+    Tests: `admin/test/console-overview.test.mjs` (every panel, both roles: "no snapshot: the eight say the one fixed
+    sentence ...", "the headline counts what needs the person ...", "the headline and Needs you say All clear by one
+    rule: ...", "with any read behind Needs you failed, neither the headline nor the card says All clear or 0: ...", "no
+    worker online is no All clear: ...", "a host registry that could not be read is no All clear and no whole to fix,
+    whatever BullMQ sees: the headline names it", "Needs you counts a failing doctor only of a host in the registry:
+    ...", the five "Needs you: ..." tests, "In line: ..." (the cut read's dash among them), "In line under a cut read:
+    every number a floor, each reason's count N or more or a dash, never a whole count", the five "Running: ..." tests
+    ("Running: a host that has not beaten within the minute has no slot drawn free: ..." and "Running: the rows of a
+    registry that could not be read are as last seen: no slot drawn free from them, and said so" among them), "a host
+    whose running jobs could not be read has no slot drawn free: ...", "Spend today: ...", "Spend today with each read
+    behind it failed: ...", the three "the timeline card: ..." tests, "the timeline with each read behind it failed or
+    cut: ...", "the timeline reads no hold's label or answers, so a viewer's carries none of a wait check's profiles",
+    "the timeline shows every role a reason this console has no words for as recorded, never as no reason", the three
+    "Caps: ..." tests ("Caps: a folder scope is named by its last folder for every role, and no line writes a scope's
+    raw name" among them), "Caps with each read behind it failed: ...", "Caps draws the overlay's caps only from a
+    settings read made whole: an invalid or missing overlay is said, never the empty sentence", the nine "Waitlists ..."
+    tests (the slot's Open Fleet link, the scheduler's Edit and the due and unknown rows in "Waitlists: every reason's
+    jobs in the worker's order ...", "Waitlists: a read cut at its queue bound or inside a queue says the counts are a
+    floor, in one line, for every role", "Waitlists with its read failed or cut: says so, and never its calm line", and
+    "Waitlists: a job in the queue of a host the registry no longer names says so, and the Queues line lists that
+    queue"), "Scheduled names a scheduler by its key alone: one whose key the reader refused is left out, whatever its
+    job name", "a scheduler's run is named by its trigger and its run time wherever a row draws its id, the raw id in
+    its title", both "waitingSentence ..." tests, "hostSkewText: ...", the five "Hosts: ..." tests ("Hosts: a partial
+    pause says how many queues are paused, never their names, whatever their length" among them), "a hostile value from
+    another host is text ...", and the five "first run ..." tests), `admin/test/console-timeline.test.mjs` ("the zooms,
+    groupings, defaults and lane cap are the contract's, frozen", "ended runs are clipped at the window's start ...",
+    "an arrow leads from a blocker in the same lane ...", "lanes: ...", "a queue of tens of thousands draws in a bounded
+    time: no pass opens a lane past the cap", "rows and project chips are bounded: ...", "a long row name is whole in
+    its head's title, which the page's rules cut to the column", "the project filter keeps one project's rows ...", "one
+    accessible name per row ...", "a hostile target, project, host or id is escaped wherever it is drawn", "the words
+    are words.mjs's and the waiting buckets the worker leaf's, each with a sprite glyph", "waiting jobs: from now or
+    their due time to the end, a glyph and words per bucket", "a waiting pill too narrow for what it waits for in full
+    still says it in a word", the three "at <zoom> a waiting pill holds its glyph, its word and a name cut to fit, and
+    one moved left of its due says its due time" tests, "a waiting pill is drawn at its due up to its bucket's start;
+    one due later stands there and says when", the three "at <zoom> the order of waiting pills by their due is their
+    order by x: within a bucket whatever their names, across buckets only near now" tests, "a waiting label ends at
+    least 4 px before its pill's end, ...", "a cron trigger's run is named by its trigger and its time on its pill,
+    ...", the three "at <zoom> no park's label or words reach past now ..." tests, "past the row bound the most pressing
+    row is kept, ...", "a row too full for its lanes is packed by kind: ...", "a job waiting for its full host leads
+    from the oldest slot a gone job holds there, in that slot's lane", and the rest), `admin/test/console-kit.test.mjs`
+    ("schedulerRunOf: ...", "waitBar: ..."), `admin/test/console-stylesheet.test.mjs` ("the overview's spacing: ...", a
+    long id wrapping in its waitlist row, and "the overview's long names: ..."), `admin/test/doctor-view.test.mjs`
+    ("first run applies only on a read snapshot with no run on record and no host row or no trigger", "first run: with
+    no host beating, the worker step names the host that beat last, its age as Valkey measured it", "first run: egress
+    and provider take the worst any host published ...", "first run: a check that did not pass is quoted as the check it
+    failed or warned on, never as what doctor says is so", "first run: every command with a placeholder has the sentence
+    that fills it", "first run: a step is its id, state, title, sentence and commands; ...", "first run: the forge step
+    is optional ...", "first run's commands are the CLIs' own ..."), `admin/test/console-panels.test.mjs` ("the
+    overview: the first run's three, then what needs a person ...", "the day's failed and refused runs are Needs you's
+    foot line ...", "no worker online: the hosts panel warns first ...", "clock skew: ...", "readable numbers: ...",
+    "times: ...", "the script shows each <time> in the reader's zone ..."), `admin/test/console-pages.test.mjs`
+    ("parsePageQuery: each screen takes only its own parameters ...", an inherited name as a `zoom` among its refusals,
+    "the overview's query draws, never reads ...", the fixtures), `admin/test/console-panel-goldens.test.mjs` ("the
+    overview's states: all clear, the first run for each role, each kind of wait alone, and the hosts' registry notes"),
+    `admin/test/panel.test.mjs` ("usd2: ..."), `admin/test/insights-html.test.mjs` (the split's and the capacity
+    section's `<time>`), `admin/test/read-model-pages.test.mjs` (`refusalsIn` and the fleet reader's day boundary,
+    `failures24h`, the reader's `refusals24h`, and "createFleetReader: a registry member no worker could be named is no
+    host: ..."), `admin/test/read-model-waiting.test.mjs` ("only the overview's load reads the waiting jobs: ...",
+    "readWaiting: a member that is no run id is no row, and makes its queue's read a floor, never a whole count that
+    misses it", and the "snapshot({ waiting: true }): ..." tests), `admin/test/hosts-view.test.mjs` ("a row's freshness
+    is Valkey's measure where the reader had it, the host's own beat time only where not"),
+    `worker/test/host-registry.test.mjs` ("a member or a row name no worker can have is no host: ..."),
+    `admin/test/console-client-states.test.mjs` ("a bar's times are shown as the page's are: ...").
   - (b) **Runs** (`/runs`). Given the filters `repo`, `kind`, `flow`, `trigger`, `project`, `host`, `backend` (a venue
     name, a newer worker's included; a record naming none is a `local` run, ADDED 2026-10-21, #712), `outcome`,
     `reason`, `model` and `q` (a target substring), each alone returns exactly the runs whose field matches (the test
@@ -1618,6 +1895,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     stays in the operator's per-job details below the list and never in a row (`REQ-CONSOLE-SECURITY` (l)). Tests:
     `admin/test/console-panels.test.mjs` ("failed jobs: each id links to its run", "readable numbers"),
     `admin/test/read-model-pages.test.mjs`.
+    AMENDED 2026-10-25 (#737 PR 3b): the Schedules table names each scheduler by its `key` alone, the cron trigger's
+    id, which its stall count is kept under; BullMQ's `name` is the job name the scheduler mints its runs with
+    (`local` for every cron trigger) and never stands in for it, so a scheduler whose key the reader refused reads "-"
+    in its id cell and in its stall cell, since no stall count is kept under no key, beside its pattern and next run.
+    The reader carries a scheduler's `key` (BullMQ's `key` alone, no other field standing in) and `name` only in the
+    cron id charset and at most `SCHEDULER_NAME_MAX` characters, the triggers loader's longest cron id (`CRON_ID_MAX`,
+    176, `INT-TRIGGERS-FILE-CONTRACT`), so every id the loader takes is one the reader keeps (`mapSchedulers`), else
+    null, never cut, and keeps the entry (`REQ-CONSOLE-SECURITY`). Tests:
+    `admin/test/console-panels.test.mjs` ("the Schedules table names a scheduler by its key, the trigger's id, and
+    reads its stalls under it (BullMQ's name is the job's)"), `admin/test/read-model.test.mjs` ("a scheduler's id and
+    job name are read in the cron id charset and at most SCHEDULER_NAME_MAX characters, else null, and the entry
+    stays").
   - (g) **Configuration** (`/config`). The page shows the triggers, the settings overlay, the pause windows, the
     scoped limits, the projects, the envelope and allocation, the MCP servers and the staged packages, and the secret
     profiles by NAME only: no page and no `/api/state` body carries a resolver path, a secret's value or a secret's
@@ -1736,7 +2025,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     are its own (`REQ-CONSOLE-SECURITY` (m)). Tests: `admin/test/console-pages.test.mjs` (`assertPanelsMatch`,
     `assertClean`), `admin/test/console-compat.test.mjs` (a page not in `LEGACY_PAGES` has no `.legacy` in its
     fixture, and a legacy page's has one). **AMENDED 2026-10-24 (#737 PR 2): one wrapper per section, and the states no
-    fixture reaches.** A page in `LEGACY_PAGES` (overview, runs, run, parked, insights, fleet, config) draws each panel
+    fixture reaches.** A page in `LEGACY_PAGES` (then overview, runs, run, parked, insights, fleet, config; since #737 PR
+    3b runs, run, parked, insights, fleet, config, the overview drawn in the Pulse markup, (a)) draws each panel
     section, and the run page's transcript section, inside a `<div class="legacy">` of its own, the section byte for
     byte as before inside it, so the confirm slot the script moves after a section lands between two wrappers and
     never inside one (`DES-OPERATOR-CONSOLE`); the wrapper draws no box of its own (`display: contents`), so its one
@@ -1751,10 +2041,23 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     Signed out), a page shown as
     last seen and a panel kept still; the read-only banner for each role; the audit page's damaged and not-verified
     rows; each ended reason and each refusal the sign-in page draws, and its unreachable notice; and the link page's
-    used and no-code states and each of its notices. The sign-in pages and the 404, 400, 403, 421 and 503 error pages
-    are static goldens (`STATIC_SHOTS` in `admin/test/helpers/console-pages-harness.mjs`, the role `anonymous` where
+    used and no-code states and each of its notices; and since #737 PR 3b the overview all clear and its first run
+    with two steps not yet ready, for each role, and for an operator its first run with no doctor result yet, each
+    waiting bucket alone, a host whose clock is out of step or whose registry row has no expiry, and the longest names
+    the overview draws in running text (`overview-host-long-names.operator`, `LONG_NAMES`, which the width check
+    measures with the others: a host with the longest name a worker can have, its queue paused and holding a job that
+    waits for its slot, a gone host's queue of that length holding a job, a 176-character cron trigger id next in
+    Scheduled and a long doctor label, so the Hosts head, the waitlists' sentences, the Queues line and Scheduled are
+    measured with long names), and two confirm bars asked from the overview's Hosts card, in its column, over two
+    registered hosts of that length (`LONG_NAMES.peer` the second): Resume fleet with both their queues paused
+    (`confirm-preview-long-names.operator`, whose waiting line and Undo name both) and one such queue's Pause
+    (`confirm-preview-long-queue.operator`, its name in the summary, the Undo and the Confirm label), so the bar's
+    title, lines, Undo and buttons are measured with long names. The sign-in pages
+    and the 404, 400, 403, 421 and 503 error pages are static goldens (`STATIC_SHOTS` in
+    `admin/test/helpers/console-pages-harness.mjs`, the role `anonymous` where
     nobody is signed in). Each is held to `assertClean`. Tests: `admin/test/console-shell.test.mjs` ("the legacy
-    wrapper: ..."), `admin/test/console-compat.test.mjs` ("the pages PR 2 converted are not legacy ...", "the
+    wrapper: ...", "LEGACY_PAGES is a written-out frozen list: ..."), `admin/test/console-compat.test.mjs` ("the pages
+    PR 2 converted are not legacy ...", "the overview PR 3 converted is not legacy ...", "the
     wrapper draws no box of its own ...", "a converted page carries no .legacy ...; a legacy page wraps each section in
     a .legacy of its own"), `admin/test/console-panel-goldens.test.mjs`, `admin/test/console-static-pages.test.mjs`.
   - (j) **Live updates.** Given a live page open, its stream first sends every panel of the page (since #737 PR 2 after
@@ -1822,11 +2125,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     one of those notes is drawn by the server, hidden, in `#live-note` (`LIVE_NOTES`: retry, limit, out, stale), and the
     script reveals one; three sentences are the script's own, set as text (`STALE_TOKENS_BODY`, the sign-in's stop
     notice and the sign-out that was not confirmed, `REQ-CONSOLE-SECURITY` (i), `DES-OPERATOR-CONSOLE`). Given a live
-    panel holding a form in use (its preview open in the slot, a field focused or edited, its editor open), the panel is
-    not swapped: the newest update waits under the server's kept-still note ("Updates paused while you edit", from
-    `<template id="held-note">`), added once, and lands when the hold ends (Cancel, Close, or focus leaving the field).
-    Given a page that is not live (insights, config, audit), its title bar says when it was drawn (a `<time>` the script
-    shows in the reader's zone) and that it is not live, beside Reload to its own address, where the role may open it.
+    panel holding a form in use (its preview open in the slot, a field focused or edited, its editor open; a button is
+    no field, since it holds nothing half made, and since #737 PR 3b a focused one holds nothing, as closing the slot
+    gives the focus back to the button that opened it), the panel is not swapped: the newest update waits under the
+    server's kept-still note ("Updates paused while you edit", from `<template id="held-note">`), added once, and lands
+    when the hold ends (Cancel, Close, or focus leaving the field). Given a swap that replaces the control holding the
+    keyboard focus, the focus goes to the same form's button in the new markup, else to a link to the same place, else
+    to the panel, so a Tab walk through a card redrawn every tick carries on. Given a page that is not live (insights,
+    config, audit), its title bar says when it was drawn (a `<time>` the script shows in the reader's zone) and that it
+    is not live, beside Reload to its own address, where the role may open it.
     Tests: `admin/test/console-live.test.mjs` (stale and fresh, "a tokens file that cannot be read ends no stream
     ...", "a load whose read failed draws its degraded panels until the key has a good render ...", "stale says what
     failed, tokens or data ...", "a reconnect is a new stream: joining a key that still fails, it is told stale first
@@ -1838,7 +2145,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     as last seen draws its panels flat, its ink kept"), `admin/test/console-contrast.test.mjs` (the stale ground's
     pairs, and its secondary buttons' ring on the canvas), `admin/test/console-client-states.test.mjs` (the real script
     under a DOM stub, over the server's own markup, reaching every row of `CLIENT_STATES` in
-    `admin/test/helpers/client-states.mjs`), `admin/test/console-live-pill.test.mjs`,
+    `admin/test/helpers/client-states.mjs`, and "a focused button never holds its panel: after Cancel gives the focus
+    back to the button that opened the slot, the panel's next update lands", "a swap never drops the focus: a focused
+    button goes to the same form's button in the new markup, a link to the same link, else to the panel"),
+    `admin/test/console-live-pill.test.mjs`,
     `admin/test/console-shell.test.mjs` ("a page drawn once says when ...", "the live notes: ...").
   - (k) **`/api/state`.** Given a session, it answers the JSON of `INT-CONSOLE-STATE-API`; given a viewer, the body
     carries no `failedReason`; given no session, it answers 401 JSON, never a redirect. Test:
@@ -1869,7 +2179,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `.legacy` until each page converts, are not measured. A state is a word, not a colour alone, with one exception:
     every status the kit draws as a badge (`badge`, `outcomeBadge`) carries an icon and a word; a `chip` is its word,
     with an icon only when given one; its `dot` is colour (given a `label`, an image with that accessible name) and the
-    kit's rule is to draw it only beside the word it marks (no page draws one yet), and its `count` is a number (given
+    kit's rule is to draw it only beside what it marks (since #737 PR 3b the overview's Hosts card draws one per host,
+    labelled "beating" or "beat late", beside the host's name and its last beat's age, amber once late), and its
+    `count` is a number (given
     a `label`, with that sentence visually hidden beside it); every state of the live pill is a word beside its mark,
     except on a phone, where the pill is one mark whose SHAPE says the state (Live the dot, Reconnecting a retry arrow,
     Not live the stop square, Signed out the sign-out arrow), each at 3:1 or more on the bar's ground in both themes,
@@ -2234,23 +2546,31 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     (i)), else "Confirm". `undo` is the bar's Undo line, decided at the preview where the file as it was is known: the
     write that puts the change back where one exists (`inverse`, `{action, body}` with a body that action's `fields`
     take, checked at the preview; a trigger, pause window, scoped limit or project add's delete of the new entry, a
-    setting set back to its old value or unset again, a queue's or the fleet's pause and resume, an edit back to what
+    setting set back to its old value or unset again, a queue's pause and resume, the fleet's pause, since #737 PR 3b a
+    fleet resume's pause of exactly what was paused before it, by the preview's read of the queues the resume flips
+    (`resumeBack`, over the kill switch's set: the registry's queues unioned with every host queue that exists, a
+    stopped host's paused queue among them, `snapshot({ switchQueues: true })`, which a queue's pause or resume previews
+    from too; every queue of that set paused, `fleet-pause`; exactly one, `queue-pause` for it), an edit back to what
     the entry said, a steer's withdraw, and since #737 PR 3a a re-run's cancel of the job it queues, decided at the
     confirm as (q) says, which the bar names as "Cancel the new run before it starts: the banner after it is queued
-    offers it."), drawn "Undo: <the act>" with the act alone in bold; else an `UNDO_SENTENCES`
-    sentence that says what a person can do, drawn "No undo: <the sentence>" in the line's muted ink with nothing bold
-    (a delete: copy the removed lines from this preview, the console keeps no copy; a trigger delete whose entry names
-    `run.secrets`: its secret references from the operator's own copy of the file, since the diff hides them; a retry:
-    a retried job keeps the attempts it made, so the console does not remove it from its queue, and Cancel stops it
-    once it runs, `UNDO_SENTENCES.retried`, since #737 PR 3a; a cancel: re-run it from its run page; a cancel of a
-    queued job: a redelivery of the same event, or its trigger's next fire, queues it again), or why it must be done
-    by hand (an edit that gave a field its first value, a resolver add that
-    replaced one, a setting whose old value the form cannot send back, an empty string or anything but a non-empty
-    string or a number). No inverse ever carries a secret reference or a resolver path: the deletes and the secret
-    removes have none. The bar's lines are the planner's words with the values of a change in bold ("maxTurns: <b>30</b>
-    to <b>40</b>"), in words and never an arrow (a change "a to b", a mapping "name: path"), the rule every planner's
-    confirm keeps on the pi panel's surface too; the pi panel's own dialog when a scoped limit's edit moves its scope,
-    and its notices after a trigger add, a flow edit or a resolver declared, which no planner builds, still draw one.
+    offers it."), drawn "Undo: <the act>" with the act alone in bold; else an `UNDO_SENTENCES` sentence that says what a
+    person can do, drawn "No undo: <the sentence>" in the line's muted ink with nothing bold (a delete: copy the removed
+    lines from this preview, the console keeps no copy; a trigger delete whose entry names `run.secrets`: its secret
+    references from the operator's own copy of the file, since the diff hides them; a retry: a retried job keeps the
+    attempts it made, so the console does not remove it from its queue, and Cancel stops it once it runs,
+    `UNDO_SENTENCES.retried`, since #737 PR 3a; a cancel: re-run it from its run page; a cancel of a queued job: a
+    redelivery of the same event, or its trigger's next fire, queues it again), or why it must be done by hand (since
+    #737 PR 3b, a fleet resume from a pause of any other set of queues, which no single write pauses again,
+    `fleet-pause` taking no list: the queues named, to pause again one at a time; from no paused queue of that set: "No
+    queue of the fleet was paused, so there is nothing to pause again."; from a fleet that did not answer: which queues
+    were paused is not known; never `fleet-pause` for a part, which stopped the hosts left running; an edit that gave a
+    field its first value, a resolver add that replaced one, a setting whose old value the form cannot send back, an
+    empty string or anything but a non-empty string or a number). No inverse ever carries a secret reference or a
+    resolver path: the deletes and the secret removes have none. The bar's lines are the planner's words with the values
+    of a change in bold ("maxTurns: <b>30</b> to <b>40</b>"), in words and never an arrow (a change "a to b", a mapping
+    "name: path"), the rule every planner's confirm keeps on the pi panel's surface too; the pi panel's own dialog when
+    a scoped limit's edit moves its scope, and its notices after a trigger add, a flow edit or a resolver declared,
+    which no planner builds, still draw one.
     Every count goes through one rule (`plural`, `confirm-view.mjs`, which `actions.mjs` re-exports): the count and each
     word that agrees with it are one call ("1 job", "3 jobs", "1 job waits", "3 jobs wait", "1 byte", never "job(s)"),
     and a count the scan stopped short of is a floor ("at least 3 more match and are"). No word is in capitals for
@@ -2262,8 +2582,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     says. Tests: `admin/test/console-actions.test.mjs` ("every action has frozen fields, a danger flag never beside
     paid, and its undo, inverse and confirm label", "each action's Undo, inverse, confirm label and banner title, as
     literals over the preview's own shapes", "the confirm button says what it does ...", "an Undo is the way back as it
-    was ...", "every count in a bar agrees with its words ...", "a resolver's replace and removal are said in words in
-    the bar, never an arrow ...", "every action's preview was held to the copy rules: no arrow, no empty item"),
+    was ...", "a fleet resume's Undo pauses again exactly what was paused before it, never every queue: the fleet, one
+    queue, or the queues named to pause by hand", "a fleet or queue switch previews over the queues the switch flips: a
+    stopped host's paused queue is named, counted, and paused again by the Undo", "fleet-resume on Valkey, through the
+    real fleet reader: a paused queue whose host left the registry is named, counted, resumed and paused again by the
+    Undo", "every count in a bar agrees with its words ...", "a resolver's replace and removal are said in words in the
+    bar, never an arrow ...", "every action's preview was held to the copy rules: no arrow, no empty item"),
     `admin/test/console-confirm.test.mjs` (`issue` returns `expiresAt`; every state the slot can show; "the bar's Undo
     line: one inline run, the act alone in bold, or a muted No undo ..."), `admin/test/write-plans.test.mjs` ("no
     confirm a planner builds says a change or a mapping with an arrow ..."), `admin/test/console-client-states.test.mjs`
@@ -2312,17 +2636,34 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   - (r) **One confirm slot, after the card that asked** (issue #737 PR 2). Given an operator on a console that is not
     read-only, every page carries one confirm slot (`#confirm-slot`, a polite live region labelled Preview, hidden),
     drawn by the server after the page's content and holding the previewing skeleton; a viewer and a read-only console
-    get none. A form's submit moves the slot after the card that asked (the form's panel, else its banner, lifted out
-    of that panel's `.legacy` wrapper), never inside a panel or a table cell, titles it "Previewing: <the button's
-    words>" with Confirm disabled until a ticket arrives, and puts the answer's server-rendered `html` in it: the
-    preview bar, the no-change bar (Close alone), or a refusal (at the preview, Close; at the confirm, a ticket that
-    expired, was used or is another sign-in's offers Preview again, a write the funnel refused Look again, Valkey Try
-    again, an audit failure Close, a write that threw Close; at either, a page drawn for another person than this
-    browser is now signed in as, `REQ-CONSOLE-SECURITY` (i), Look again, which goes to `/login?ended=switched`; and a
-    write the console answers 503 for a tokens file it cannot use, since #737 PR 3a in the setup state, "This console
-    cannot take this action", its sentence `TOKENS_UNUSABLE`'s words with `pi-dispatch doctor` in the code face, and
-    Close, where it offered Look again, since nothing on the page can fix the file). Every one of those refusals
-    came before anything was written, so its bar adds "Nothing was changed." where the sentence does not say so. One
+    get none. A form's submit moves the slot after the card that asked (the form's panel, else its banner, lifted out of
+    that panel's `.legacy` wrapper and, since #737 PR 3b, out of every layout grid around it marked `data-slot-after`,
+    the overview's row of four cards, to after the outermost; a column of cards carries no mark, so there the slot stays
+    under its card), never inside a panel, a table cell or such a grid, titles it "Previewing: <the button's words>"
+    with Confirm disabled until a ticket arrives, and, since #737 PR 3b, whatever the anchor put it after, scrolls it
+    into view by the least move (`block: "nearest"`) and gives its title the focus, so a keyboard and a screen reader go
+    on from the slot (the title made focusable by the script alone, `tabindex="-1"`, outside the tab order); an answer
+    that replaces the title moves the focus to the new heading only if the focus was in the slot, and never takes it
+    from elsewhere. Every fill while the slot is open (the answer, a refusal, the script's own sentence) brings it into
+    view again by the least move, since an answer is taller than the skeleton it replaces and its Confirm could land
+    below the fold, and so does every other change the script makes to the page while the slot shows (a panel swapped,
+    the kept-still note, a live note shown or hidden, the stale note's words, the sign-out banner), each of which moves
+    what is under it; only a slot some part of which was in the window before the change is brought back, so a reader
+    who scrolled it wholly away keeps their place, and a closed slot is never scrolled. Closing it (Cancel, Close, after
+    an answer) gives the focus back to the button that opened it, else, when the stream swapped that button's panel
+    meanwhile, to the button of the form with the same action and the same hidden fields in the swapped card, at the
+    opener's place among its submit buttons, else to the card that asked (focusable by the script alone, as the title
+    is), and only when the focus was in the slot or on nothing (a browser that does not focus a button on a click leaves
+    the page's body focused): a focus the reader moved elsewhere is never taken, and Preview again keeps the button that
+    opened the slot as the one the focus goes back to. The answer's server-rendered `html` goes in the slot: the preview
+    bar, the no-change bar (Close alone), or a refusal (at the preview, Close; at the confirm, a ticket that expired,
+    was used or is another sign-in's offers Preview again, a write the funnel refused Look again, Valkey Try again, an
+    audit failure Close, a write that threw Close; at either, a page drawn for another person than this browser is now
+    signed in as, `REQ-CONSOLE-SECURITY` (i), Look again, which goes to `/login?ended=switched`; and a write the console
+    answers 503 for a tokens file it cannot use, since #737 PR 3a in the setup state, "This console cannot take this
+    action", its sentence `TOKENS_UNUSABLE`'s words with `pi-dispatch doctor` in the code face, and Close, where it
+    offered Look again, since nothing on the page can fix the file). Every one of those refusals came before anything
+    was written, so its bar adds "Nothing was changed." where the sentence does not say so. One
     refusal can follow part of a write, and its bar is the `partial` state instead ("The change did not finish", in the
     attention tone, with Look again): the kill switch that reached some Valkeys or queues and not others, or threw
     before it said which, a bulk apply that threw part-way through its jobs, and since #737 PR 3a a cancel of a held
@@ -2343,7 +2684,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     is never sent again (a ticket is single use). A bulk confirm with a job refused shows its
     results bar in the slot ((j)); any other success reloads the page, whose banner then names the change. The script
     writes markup in exactly three places: the slot, the panel swap behind `data-panel`, and the transcript append.
-    Tests: `admin/test/console-client-states.test.mjs` (every confirm state of `CLIENT_STATES`),
+    Tests: `admin/test/console-client-states.test.mjs` (every confirm state of `CLIENT_STATES`, the grids in "a
+    preview opens the slot after the panel that asked, outside its .legacy wrapper, any table cell and any layout grid
+    marked data-slot-after, titled, with Confirm disabled", and "a preview brings the slot into view and gives its
+    title the focus, wherever the slot was put; an answer keeps the focus in the slot, and never takes it from
+    elsewhere", "every fill while the slot is open brings it into view again (the answer, a refusal, the script's own
+    sentence), and a closed slot is never scrolled", "every change the script makes while the slot shows brings it into
+    view again, never a slot scrolled away or closed", "closing the slot gives the focus back to the button that opened
+    it, else to the card that asked, only when the focus was in the slot", and "where a swap replaced the button that
+    opened the slot, closing it gives the focus to the same form's button in the swapped card, else to the card"),
     `admin/test/console-actions.test.mjs` ("an audit append failure refuses the confirm 500 ...", "a write that throws
     at the confirm refuses 500 with Close ...", "a refusal that can follow a write never says nothing was changed ...",
     "the script writes markup in exactly three places ..."), `admin/test/console-confirm.test.mjs` ("a partial refusal
@@ -2653,8 +3002,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     hostile one (an unnamed field, a wrong type, a value past a cap) it refuses the whole key, and an off-charset tool
     name reads as `?`; a run id outside the charset is refused before any read; many keys are read in ONE `MGET` of at
     most 50 distinct ids; the fleet's `active` rows carry integers and a checked tool name only. The console's active
-    tables show a Progress column, the remote host's job too; the run page's Progress panel shows counters, running
-    tools, recent steps and phase integers to both roles and the phase names, a `<progress>` bar and the note to the
+    tables show a Progress column, the remote host's job too (AMENDED 2026-10-25, #737 PR 3b: the fleet page's alone
+    since the overview's Pulse panels, which count the running jobs and draw them on the timeline); the run page's
+    Progress panel shows counters, running tools, recent steps and phase integers to both roles and the phase names, a
+    `<progress>` bar and the note to the
     operator role alone, escaped, and a finished run shows its record's `progress` by the worker's rule; hostile values
     stay inert. The panel's ACTIVE row shows the turn, steps, the running tool and the phase, rich and plain, within
     every width, for a remote host's job, and without a progress seam (or with one that fails) keeps the integers and
@@ -6259,6 +6610,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-25 (#737, PR 3b) | Issue #737, PR 3b: the overview in the Pulse markup, with its timeline, its waitlists and its first run. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the Statement gains an overview that leads with what needs a person, says why each job that has not started waits in the worker's own words, draws the last hours and what is in line as one timeline whose groupings read the same data, and on a deployment that has never run shows what stands before its first job. **(a) REWRITTEN**: the clauses #641, #647 and #710 PR 4 wrote for the old panels (Active jobs and Parked first, then Fleet, Spend, Hosts and Problems; the Fleet panel's no-worker warning and its never-green queue state; the Workers fact; "Failed jobs awaiting retry"; "Problems (24h)" with the five most frequent refusal reasons; the "Jobs started today" and "Tokens used today" windows in a Used column with "no cap") give way to the eleven panels in their layout and the headline, under one read rule for every panel (`UNREAD`: a whole count, an empty sentence or All clear only over the reads behind it made whole, a read that failed or was cut said in its own sentence), with sub-clauses (a1) to (a12): the headline and Needs you's one All clear rule (`needsOf`: every read behind Needs you made, the host registry itself among them, read this tick, which BullMQ's list of connected workers never stands in for, since it answers only whether a worker is online, a worker online, nothing to answer or fix, the day read whole with no failure, refusal or floor), the headline's four lines, never All clear and led by `NO_WORKER_TEXT` with no worker online; Needs you (the questions without the parks being answered, what to fix, a failing doctor counted only for a host in the registry and none while the registry was not read, said in its own line, a whole count only where every read behind it was made and else a floor or a dash with "not known", never 0, at most four rows with one action each, Answer and Retry only where the console takes changes and Open otherwise, a row without a project tag said once, the day's failed and refused runs as its last line under one floor, `DAY_FLOOR_TEXT` for a floor with neither); In line (under a read cut at the queue bound, inside a queue or by a list member that is no run id, every number a floor: "5 or more jobs waiting to start", each reason's count "N or more" or a dash, the longest wait "or more", and `WAITING_CUT_TEXT`, the timeline's sentence, under every cut read; a cut read that found none a dash, never "nothing is waiting" or "0 or more"), Running ("slots not published" with no host row, `REGISTRY_UNREAD_TEXT` for an unread registry, under its rows as last seen, which draw no slot free or held, a host that has not beaten within `BEAT_FRESH_MS` ("not beating") or whose running jobs could not be read with no slot drawn free and the slots used a floor with no total, a floor of none said in the count's own words) and Spend today (its note naming where its number comes from, `SPEND_HOURS_TEXT` or `SPEND_SUM_TEXT`, its empty sentence only over the day's records read whole, a dash with "not known" with neither read, the dollar counters and a day of records not read whole each said); the timeline (rows, zoom, project, lanes, one accessible name a row, a glyph and a word per bucket, a scheduler's overdue run in line, a park's words never past now, a UTC axis; no packing pass past the lane cap, the waits drawn the next to start, at most `TIMELINE_ROWS_MAX` rows and `TIMELINE_CHIPS_MAX` chips with the rest counted under the scroll box and All counting every project, the chips wrapping above a phone's width, a row head cut with its name in its `title`, a waiting pill at its due or at its bucket's start (`WAIT_START_X`), whichever is earlier, one start for every pill of a bucket, so one due later never stands left of one of its bucket due before it, and one moved left of its due saying its word and its due time, its word always held and its name what gives way, each read not made whole said and the empty sentence only over both reads made whole, `ready`'s word "not ready", a cron trigger's run in line named by its trigger and run time, an ended run up to 15 s late); Caps (percentages and no money, the soft hold on the job windows only, a scope by its last folder and the key naming projects and models alone, the overlay's caps and soft hold only from a settings read made whole, else "The settings overlay could not be read, so its caps are not drawn.", a counter not read said in its own line, and the empty sentence, `CAPS_EMPTY_TEXT` ("The settings overlay sets no cap."), only where nothing went unread); Waitlists (the worker's own sentence for every role, the `due` row's "Due since <time>; no worker has taken it" and the `unknown` row's "Recorded reason: <token>, no explanation yet" among them; at most one action, a held slot's Open Fleet link with no button and `FREE_SLOT_TEXT` for an operator, a scheduler's overdue next run's trigger Edit and no Cancel, Cancel only where `cancel-queued` would plan; the line that says a cut read's counts are a floor, and no calm line over it; the queue line, with each queue the waiting read found jobs in beyond the registry's; the next cron fires, each by its scheduler's `key` alone, one whose key the reader refused left out; today's soft-hold refusals; the rest of a reason said as not listed; a scheduler's run by its trigger and run time, its raw id in the `title`; a job in the queue of a host the registry does not name said so; the unknown-project note only beside a shown row; the reason bar giving each segment room for its glyph and count and wrapping onto more rows; every name in a sentence breaking where it must); Hosts (beat, its age by `beatAgeOf`, Valkey's measure of the row's last refresh where read, the age the fleet page's hosts table, `/api/state`'s `lastBeatAgeMs` and the `/dispatch` panel's HOSTS view take too, venues, slots, none for a row of an unread registry, doctor, own queue and pause, a skew past `HOST_SKEW_CLAIM_MS`, a row with no expiry, the no-worker warning and the stale-beats note, with the fleet page's Fleet fact the one never green with no worker online; the head's count saying what it counts, the old Workers fact; Pause fleet and Resume fleet as Fleet offers them, both on a partial pause, whose chip counts the paused queues and never names them; a long name, its notes and its queue broken where they must; a member or row name outside the worker name charset drawn nowhere); where each old panel went; the query's closed values (an inherited name such as `toString` or `__proto__` refused as a `zoom` too), refused by name, and one data load a tick; the first run's `applies`, steps and commands (a check quoted as a failing check or a warning, never as what doctor says is so; each step `{ id, state, title, sentence, commands }`; each placeholder's hint, `FIRST_RUN_COMMAND_HINTS`; the preview's In line, Running and Hosts from the live rows; the folder by `deploymentOf`); a viewer's view (a reason this console does not know shown as recorded, as to an operator, and no wait check profile, write, waitlist link or command); money and times (the timeline's axis, titles and pill times and Spend today's hour axis stay UTC). The test names that no longer exist ("the overview leads with what needs a person", "Problems (24h)") are replaced by the tests that pin each sub-clause, each grepped, the overview's states test cited from `admin/test/console-panel-goldens.test.mjs`, where it is. **(f) AMENDED**: the Schedules table names a scheduler by its `key`, the cron trigger's id, which its stall count is kept under (BullMQ's `name` is the job's, `local`); BullMQ's `name` never stands in for a refused key, whose id and stall cells read "-"; the reader keeps a scheduler's `key` (BullMQ's `key` alone) and `name` only in the cron id charset and at most `SCHEDULER_NAME_MAX`, the triggers loader's `CRON_ID_MAX` (176), else null and never cut, and keeps the entry; tests named. **(i) AMENDED**: `LEGACY_PAGES` is runs, run, parked, insights, fleet and config since this PR; the panel goldens gain the overview's states, the longest names it draws in running text among them (`overview-host-long-names.operator`, `LONG_NAMES`: a 64-character host, its paused queue holding a job, a gone host's queue, a 176-character cron trigger id (the longest the triggers file takes) and a long doctor label, measured by the width check with the others), and two confirm bars asked from the Hosts card over two hosts of that length (`confirm-preview-long-names.operator`, Resume fleet naming both paused queues in its waiting line and Undo; `confirm-preview-long-queue.operator`, one queue's Pause naming it in the summary, the Undo and the Confirm label); the shell and compat tests that pin the list named. **(j) AMENDED**: a button is no field, so a focused one never holds its panel (closing the slot gives the focus back to the button that opened it, and the panel then takes its next update), and a swap never drops the keyboard focus; the test named. **(n) AMENDED**: a page now draws the kit's dot, the overview's hosts card, labelled, beside each host's beat age. **`REQ-OPERATOR-CONSOLE-ACTIONS` (p) AMENDED**: a fleet resume's Undo pauses again exactly what was paused before it, by the preview's read of the queues the resume flips (the kill switch's set, the registry's queues and every host queue that exists, `snapshot({ switchQueues: true })`, which a queue's pause or resume previews from too, so a stopped host's paused queue is named, counted and paused again; `resumeBack`: every queue, `fleet-pause`; exactly one, `queue-pause` for it; any other set, none, or a fleet that did not answer, no inverse and a line saying what to pause by hand), never `fleet-pause` for a part; the tests named. **(r) AMENDED**: the confirm slot is lifted out of every layout grid marked `data-slot-after` (the overview's row of four cards) to after the outermost, and stays under its card in a column; wherever the anchor put it, a preview scrolls it into view by the least move and gives its title the focus, every fill while it is open brings it into view again, an answer that replaces the title moves the focus to the new heading only if the focus was in the slot, every other change the script makes to the page while the slot shows brings it into view again too, and closing it gives the focus back to the button that opened it, else to the same form's button in a card a swap redrew, else to the card that asked, when the focus was in the slot or on nothing; the six client-state tests named. The rest of `REQ-OPERATOR-CONSOLE-ACTIONS` UNCHANGED, checked: the overview's forms post existing actions (`retry-failed`, `cancel-queued`, `queue-pause`, `queue-resume`, `fleet-pause`, `fleet-resume`) through the same table, previews and write rules (`fleet-resume`'s Undo aside), and the waitlist's sentence is the cancel preview's `waitingLine`. **`REQ-CONSOLE-SECURITY` (l) AMENDED**, extended to the overview: a viewer reads why a job waits in the worker's vocabulary, a reason token this console has no words for shown as recorded and escaped (it passes `DEFER_WHY_RE`), with no wait check profile, write, waitlist link or command (the links that only read stay); the first run's queue step never shows the Valkey address and its deployment step names the folder's last part alone; a refused overview query names the parameter, never the value; a value from another host is escaped; a job scheduler's id or job name outside the cron id charset or past `SCHEDULER_NAME_MAX` (`CRON_ID_MAX`, 176) is read as null, never cut, and no surface (Scheduled, the Schedules table, `/api/state`, the `/dispatch` triggers block and cron detail, the topology graph) names it by its job name instead; tests named. The Statement and the other clauses UNCHANGED, checked: the CSP, the headers, the role guard and the stream rules are untouched, and the headline span carries `id` and `data-panel` alone. **`REQ-RUN-PROGRESS` (g) AMENDED**, one parenthesis: the Progress column is the fleet page's active table's alone. **`REQ-CRON-SCHEDULED-JOBS` UNCHANGED, checked**: it states no rule for a cron trigger's id; the loader's longest one, `CRON_ID_MAX`, is `INT-TRIGGERS-FILE-CONTRACT`'s. |
 | 2026-10-25 (#737, PR 3a) | Issue #737, PR 3a: cancelling a queued job that never started, the Undo of a retry and a re-run, the probe's one question, and smaller fixes on the converted pages. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: the Statement gains cancelling a queued job that never started, saying why it waits, and a re-run's Undo as that cancel; NEW (s), `cancel-queued` (destructive and free): who it takes (no attempt made, never stalled back, no recovery owing a record, not a cron trigger's next run, held or not), the preview's lines in the worker's own words (a delayed job more than 10 s past its due "Due since <time>; no worker has taken it", "No reason was recorded" only for a delayed job with no record, a waiting, paused or held one its bucket's title, never "at unknown"), `expect`, the confirm label, its Undo sentence and banner, the confirm's re-checks (another queue or other counts is changed, counts that grew or a lock is started since the preview) and its fresh read of the job's state and hash right before the removal, with the one round trip that remains, the removal through the CLI's `removeQueuedJob`, the one job loaded by id (once at the preview, twice at the confirm, three times for a held job, `removeHeldJob`'s own read), the refusals with their statuses (400, 404, which names a host registry that could not be read without that read's words, 409, 503), a held job taken before `removeHeldJob`'s state read refused by that read and one whose first hold delete failed with its hold then read back in place (`holdInPlace`) refused too, nothing changed in either, a hold not read back, or a read that fails, keeping the partial answer, since a refusal can be the answer to ioredis's resend of a delete that already ran, the removal bounded as one step with its reads, "nothing was changed" after it only for the guard's refusal, `removeHeldJob`'s refusal before its first delete or after a failed one whose hold was read back in place, and a refused removal of a job read back in place, every other answer partial, a bound that fired saying only that the removal was asked for and may have landed and naming the hold for a held job (`removalUnknown`), a held job whose removal failed after its hold was cleared said in the console's words (`heldClearedAnswer`, naming no preview), an error's words only bounded (control bytes made spaces, at most 200 characters, `boundedText`), the round trip that remains, in which a job a worker took and finished, or failed back to the delayed set, would be removed, and both answering within their 2.5 s bound whatever Valkey does, the fleet's connections released in the background; (c) `cancel-held` answers partial once its removal was asked for and did not finish (its bound's sentence says it was asked for and not answered within the bound), but not after a first hold delete that failed with its hold read back in place, carries an error's words only bounded, and answers within its bound whatever Valkey does, its preview and cancel-all-held's within one of their own, each waiting for the fleet snapshot at most `SNAPSHOT_TIMEOUT_MS` (10 s) and then refusing 503 in `SNAPSHOT_TIMEOUT_SENTENCE`'s words ("the fleet did not answer within 10 seconds, ..."), a snapshot that fails keeping "the fleet could not be read", and cancel-all-held keeps each job's partial mark, its line reading "did not finish"; (h) a queue's pause and resume previews read the fleet snapshot within the same bound and refuse 503 in the same two sentences, and the fleet's resume previews without its count of waiting jobs instead; (j) a bulk job whose own answer was partial reads "did not finish" with its reason, never "not done"; (p)'s destructive list gains `cancel-queued` (held to the write rules by `admin/test/console-doc-tables.test.mjs`), its Undo examples gain a re-run's cancel of the job it queues (`rerunBefore` on the bar) and replace the sentence that the console cannot remove a waiting job with Retry's `retried` (a retry keeps its attempts) and the queued cancel's sentence; (q) a re-run's `change.undo` and `change.inverse` are decided at the confirm (`atConfirm`: the `cancel-queued` inverse for the job and queue the enqueue answered, else `rerunUnnamed`, never a 500 after the write); (r) the tokens 503 bar is the setup state with Close, a write's 401 says `CONFIRM_SIGNED_OUT` in the slot before it asks, the partial bar's list gains a cancel of a held or a queued job whose removal did not finish, and the tests name the new cases. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (a) the script shows the times in each bar it writes into the confirm slot in the reader's zone too, as the page's own (`fillSlot`); (j) the probe asks one question at a time and its answer settles every caller, so a run page's two streams closed together both say the stream limit, and a write's 401 says its sentence in the slot; (h) the audit page's `seq` page whose row was not found draws no rows. **`REQ-CONSOLE-SECURITY` AMENDED in two acceptance sentences only**, words that had become untrue: (b) the 421 page's Copy button needs a page the browser treats as secure (https, or a loopback name such as localhost; other names over plain http may not offer it), and (i) the tokens 503's write bar is the setup state with Close; the Statement, every guard and every other clause are UNCHANGED, checked: `cancel-queued` is one more table entry behind the same guards in the same order. **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, one sentence: the console's `cancel-queued` door, through the CLI's own sequence, `removeQueuedJob`; and its acceptance's host-queue test, cited by a prefix of its name, now ends "...". **`REQ-WAIT-FOR` UNCHANGED, checked**: it names no surface and no reason a person sees; the hold's new `after` and answer fields and the defer record are `INT-WAIT-PROFILES-CONTRACT`'s and `INT-DEFER-REASON-KEY`'s, and a held job still writes no run record, consumes no attempt and reserves nothing. **`REQ-SCOPED-LIMITS` AMENDED**, one word in its acceptance: a deferral writes no RUN record, since it now writes its defer record (`INT-DEFER-REASON-KEY`); the deferral is the same free deferral and never fails for that record. **`REQ-SCOPED-PAUSE-WINDOWS` UNCHANGED, checked**: the pause gate's deferral is the same move to the window's end, now with its reason recorded. **Code evidence**: admin/src/console/actions.mjs (the `cancel-queued` entry, `waitingLine`, `WRITE_RULES`'s `rerun` with `atConfirm`, `changeOf`, `UNDO_SENTENCES`, `snapshotOf`, `SNAPSHOT_TIMEOUT_MS`, `SNAPSHOT_TIMEOUT_SENTENCE`, `resultRow`); admin/src/console/confirm-view.mjs (`CONFIRM_SIGNED_OUT`, `bulkResultsHtml`); admin/src/console/script.mjs (`probe`, `signedOut`, `fillSlot`); admin/src/console/server.mjs (`tokensUnusableBar`); admin/src/console/audit-view.mjs (`readAuditView`); admin/src/job-actions.mjs (`cancelQueuedRefusal`, `planCancelQueued`, `cancelQueuedJob`, `heldClearedAnswer`, `removalUnknown`, `boundedText`, `notInFleet`); admin/src/read-model.mjs (`readWaitingRow`, `cancelHeldJob`); worker/src/cancel-state.mjs (`removeQueuedJob`, `removeHeldJob`, `holdInPlace`). |
 | 2026-10-24 (#737, PR 2) | Issue #737, PR 2 (most of #711): writes, live states, sessions, sign-in, error pages and the audit page. **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement gains why a session ended told in the console's own words from a reason kept under the session's id, no sign-out and no stream ended over a tokens file the console cannot read, and the error pages, and names the console's script and stylesheet and sign-out among what answers without a session. **(h) AMENDED**: the one row that counts the rows without a session past the limit counts rows, a sign-out with none held among them; `audit verify` counts a row intact only where the next line's `prev` matches it (at a break whose line carries no matching `prev`, whatever else is wrong with that line, the row before it is not vouched for either and the rows through the one before are intact; at a line whose `prev` matched and that fails another check, the row before it is intact), and says a directory it cannot read cannot be checked. **(i) AMENDED**: tombstones (`ENDED_REASONS`, judged idle, max, all, role, revoked; written by a failing `get`, the sweep, `destroy` as `elsewhere` on a sign-out and on a sign-in over a live cookie once that sign-in succeeded (one refused for its audit row ends nothing the browser held), and with no reason for the session such a refused sign-in made; a FIFO of 1024 whose first eviction ends `restart`); a page request with an ended cookie goes to `/login?ended=<reason>` with the cookie cleared, an API or write 401 says `{error, ended}` and sends no Set-Cookie (it cleared the cookie before, which lost the reason for the probe after a closed stream and could clear a newer sign-in's cookie), and a request with no cookie is still `/login` exactly; `restart` only for a well-formed unknown id while the process is younger than `PI_CONSOLE_MAX_HOURS` and nothing was evicted, worded as a possibility; `GET /login` picks a notice only for exactly one member and echoes nothing; a cookie while the tokens file cannot be used is 503 `TOKENS_UNUSABLE` with no Set-Cookie and the session kept (it was a 401 or a redirect that cleared the cookie), a write's carrying the confirm bar's refusal with Look again, on every route but sign-out, which is `auth: "none"`, needs no tokens file, ends EVERY session its cookies name that is held (`readSessionCookies`, so a cookie planted beside the real one, `Path=/logout`, cannot make it a no-op; `destroy` says who), ends their streams, writes one row per session it ended (or one `anonymous` row with outcome `ok` when none was held) and always answers 200 clearing the cookie, the page going to sign-in only on that 200 and otherwise, or with no answer within `SIGN_OUT_TIMEOUT_MS` (10 s), saying once that the sign-out was not confirmed; a page acts only as the person it was drawn for: its streams say `as=<name>.<role>` (`PERSON_PARAM`) and its previews and confirms `x-console-as` (`PERSON_HEADER`), a stream whose person is not the cookie's session is 401 `PERSON_CHANGED_STREAM` with `ended: "switched"`, a preview or confirm 409 `PERSON_CHANGED` ("...; sign in again") with `ended: "switched"` and the bar's Look again, which goes to `/login?ended=switched`, and an audit row, nothing changed, only a stream's query read for the person, and a request that says no person is not checked; `switched` joins `ENDED_REASONS` as the page's own word, with its sign-in notice, never a tombstone, a redirect or a stream's end. **(b) AMENDED**: the three `anyHost` routes (`/static/console.js`, `/static/console.css`, `/favicon.ico`, GET and HEAD) answer before the Host check, public bytes the 421 page loads (its Copy button only where the page is a secure context); every other path and every write is still 421 first. **(k) AMENDED**: every `end` carries `{ended}`, a member of `STREAM_ENDS` or null, never `restart`, never empty; a sign-out ends the session's streams with `elsewhere` at once, and a sign-in over the cookie once its answer has gone out (the response's `finish`); stopping ends every stream with `shutdown`; a tick that cannot read the tokens file ends nothing, draws nothing, says `stale` with `what: "tokens"` once to each page stream and keeps the pings. **(n) NEW**: error pages, HTML only to a GET or HEAD outside `/api/` and `/static/` whose Accept names `text/html`, else the JSON as before, byte for byte; the same headers and escaping; the kinds 400, 403, 404, 405, 421, 500 and 503 with fixed sentences and the path never named; the navigation kept for 404, 405, 400 and 403 (the 404's and 405's person read with `peek`); the 421 reads no session, names the refused Host escaped and cut to 64 characters, gives the tunnel from the connection's own local address and port (an IPv6 address in brackets, `localhost` when none is known, never a fixed 127.0.0.1), and never lists the allowed hosts. **(e) UNCHANGED, checked**: `headers.mjs` is untouched and the CSP the same string; every error path carries the headers, as JSON and as a page. **(f) UNCHANGED, checked**: the sign-in help names the commands that print a token, never its prefix, and the leak canary sees every new body. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the Statement gains last-seen data, the live states, drawn-once pages and the audit chain. **(g) AMENDED**: a bundle's opted-out triggers, and the triggers a secret profile's use names, by the 0-based index the page's Triggers table and forms show ("index 0"), one number for one row until the page converts in PR 7a (before, both wrote that index after a `#`); the pi panel and `/dispatch secrets list` count from 1 (`rowNumber`). **(h) AMENDED**: the audit page's chain banner, its filters (who, action and outcome as selects, and a search), the 2,000-row examine cap that says where it stopped, each row judged by its place (damaged, not verified, unchecked) through the reader's opt-in `positions` and the verifier's opt-in `withLast` (`last`, `suspect`, `files`); a row vouched for only by a next line whose `prev` matches it, compared before that line's other checks, so the row before a break whose line carries no matching `prev` (an edited outcome shows only in the next line's `prev`) reads not verified and the verified range ends before it, where it showed the edited outcome as verified, and only a line whose `prev` matched and that fails another check is damaged alone; the newest row, which nothing vouches for yet, shown with its outcome; a row's `count` said by its kind (one of a bulk write's rows, the jobs a resume found waiting, else the count); a damaged entry shown under every filter, in its place, and not counted as a match; no read issued past the 2,000-row cap, and the stop said once; the damaged place named by the line the check names ("Line 8 of 2026-10.jsonl is damaged.") in the banner's title, its sentence and About, never "row N", and its button "Show the damaged line"; `?seq=` opening the 50-row chunk that holds the row, placed by the row asked for and never by the chunk's top, read in one read through the month files' index from the newest row of that chunk the check counted (seq and place both checked), and walked for (bounded at 2,000) only for a row the check did not count or a place that no longer holds its row (a read from the place that does not find it included), the page saying how a walked-for row was found or why it was not, one clause for each way, and a walk that does not find a row whose place moved never saying the log holds none, a reaped row and a row not yet written each said, and `seq` refused with a filter; About; and a 30 s verification cache. **(i) AMENDED**: one `.legacy` wrapper per section of a legacy page, drawing no box of its own (`display: contents`), so an empty panel leaves no gap; the audit, sign-in and operators-only pages out of the layer; panel goldens and static goldens for the states no fixture reaches, each one named (a preview line with no space to break at, the refusal for another person and the bar of a change that did not finish among them). **(j) AMENDED**: every page stream told its state first, before any panel: `fresh` once its page's load and render succeeded, `stale` (with `since` and `what`, tokens or data) once they failed and its browser holds panels (a good render sent to it, a `Last-Event-ID`, or a `stale` told it), a throw and an unreadable tokens file telling every stream they were for, each said once and again when it changes; a read-failed load drawing nothing over a stream that holds panels and the degraded panels for a first stream that holds none, for that stream alone and never into a view, which holds good renders only, so a same-person tab holding one is sent every panel that changed at the next good render; the failure logged once and its recovery only after a good load; only `fresh` taking the dimming back, never the stream opening; at subscribe only the data and the render judged; the panels as last seen drawn flat with their ink kept and their secondary buttons ringed in `--line-strong`, never dimmed; the probe after a closed stream, the transcript's included on its own line (a 200 naming another person `switched`, a 200 the limit, a 401 sign-in with its reason, a 503 or no answer kept and asked every 2 s), and after a preview's or confirm's 401, `shutdown` and `elsewhere` each asked after 2 s, every probe reload only into the person the page was drawn for (`.who`'s `data-name` and `data-role`), else sign-in with `switched`, and the page's streams, previews and confirms saying that person; the server-drawn notes and the script's three own sentences; the kept-still note; and drawn-once pages with Reload. **(k) AMENDED**: the 401 body's `ended` and no Set-Cookie, the 503 for a cookie the console cannot judge; the 200's keys UNCHANGED, checked. **(o) AMENDED**: the width check loads the panel goldens and the static shots (role `anonymous`), measures the sign-in pages from their goldens, keeps a one-time link page in its drawn state, proves the run without scripts (its theme button read held to true, false or null on stubbed pages) and fails when it never ran, and reads the Parked panel's text back. **(p) CORRECTED**: Reconnecting also covers a stopped or silent console, Not live is the stream limit alone, and a restarted console is said at sign-in (the old words had a stopped console sign the page out); AMENDED: the sign-in pages' skip link and hidden `h1`, the link page named "One-time sign-in link", without a script only what works (the form and the link page's first state drawn `hidden data-reveal`, the no-script notice first), a sign-in post that reaches nothing retried for at most 30 posts or 60 s and then dropped, a link's post refused 429 keeping the link page's first state under the rate notice (the limiter answers before the code is read, so the link is not spent), a new link pasted into the same tab loading the page again, an error page's line under its title, the read-only banner, the phone's Live dot inside its slot. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: the Statement gains fields, the Undo and the after-write banner. **(i) AMENDED**: a Configuration row named in the console's sentences by the 0-based index that page's tables and forms show ("trigger at index 2", `atIndex`, `rowName`) until the page converts in PR 7a, and by its 1-based number on the pi tools and the panel as before; the index a form or a body sends is the same value on both. **(j) AMENDED**: the bulk answer (its `change` null when no job landed) and its results bar, its audit rows counted from the first ("3 audit rows, from row 41", never a range: another session's row can land between them), the zero-rated and no-dollar confirm labels, "not in this action" in bold and lower case, and an apply that throws part-way answered as the `partial` bar. **(m) AMENDED**: the kept-still note. **(o) NEW**: `fields` per action, an unknown key refused 400 by name or as "a field it was sent", never a value, the bar drawing the action and its fields as code; the console's trigger add naming itself "this form". **(p) NEW**: `expiresAt`, `danger`, `confirmLabel`, `undo` and `html` (which replaced `diffHtml`), the inverses and `UNDO_SENTENCES`, no inverse carrying a secret reference or a resolver path; the Undo line "Undo: <the act>" with the act alone in bold, or a muted "No undo: <sentence>"; a trigger delete that named `run.secrets` sending its references to the operator's own copy of the file; a setting whose old value the form cannot send put back by hand; a zero-rated act's label in words, never "$0.00"; the bar's lines in words with a change's values in bold, never an arrow in any planner's confirm, the pi panel's included (the pi panel's own scope-change dialog and its notices after a write, which no planner builds, still draw one), every count through one `plural` (`confirm-view.mjs`) with the words that agree with it, a floor as "at least N more", and no capitals for stress; the no-change sentence. **(q) NEW**: the confirm's `change`, its `summary` the past-tense sentence of each action's `done` rule (a bulk act's asked at the confirm), its `count` and `done` (a bulk confirm's top-level `done` stays a number; no `change` and no banner when no job landed, the attention tone and "N of M done" when some did) and its own Undo sentence, which never points at the preview the next page lacks; the session's flash; and the banner with its audit rows counted from the first, "Undo:" and an Undo that previews, or "No undo:", either a sentence with its full stop. **(r) NEW**: the one confirm slot after the card that asked, never in a panel or a table cell, and its bars; an audit failure and a write that threw offer Close, a page drawn for another person than the browser's sign-in Look again, which goes to `/login?ended=switched`, and a write's 503 for a tokens file the console cannot use Look again; a preview's or confirm's 401 asked about by the page's probe and never said in the slot; the `partial` state ("The change did not finish", Look again, `PARTIAL_NOTE`, never "Nothing was changed") for a kill switch that reached part of the fleet or threw and a bulk apply that threw part-way, its audit rows `ok` then `failed`, since the log has no outcome for part of a change. **`REQ-TERMINAL-CHAT` (e) AMENDED**: a 401 saying `restart` and the first 401 after a `shutdown` neither meet nor start the once-a-minute re-login window, so two console restarts inside a minute keep the chat; a real end still counts; only a 401 is ever a restart, never an `end`, and the free sign-in is had at most once per stream that opened since the last one, so a console answering every stream 401 `restart` ends the chat after one counted sign-in. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: `dispatch_trigger_add` refuses a field its kind does not take before the confirm, and carries `reviewState`, both of which were dropped in silence; bundle opt-outs by their 1-based row on the panel and in `/dispatch secrets list` (the console's Configuration page by its 0-based index); an unknown `kind` refused by naming the five, never by quoting the one sent; the console's add naming itself "this form" in the same sentences; the tool enumeration UNCHANGED, checked. `specs/constitution.md` UNCHANGED, checked: no constraint moves (`CONST-ISSUE-TEXT-IS-DATA` holds: the new pages draw fixed sentences and escaped values only). **Code evidence**: admin/src/console/session-ends.mjs (`switched`, `PERSON_PARAM`, `PERSON_HEADER`); sessions.mjs (`verdict`, `endedOf`, `destroy` and who it ended, `readSessionCookies`, `setFlash`, `takeFlash`, `TOMBSTONE_MAX`, `FLASH_MAX_BYTES`); server.mjs (`wantsHtml`, `sendFailure`, `resolveSession`, `startSession`, `postLogout`, the `anyHost` routes, the person check, `PERSON_CHANGED` and `PERSON_CHANGED_STREAM`, the count row's words, `TOKENS_UNUSABLE`, `SIGN_IN_FIRST`, the flash kept over a failed read); error-pages.mjs (`tunnelHost`); live.mjs (`finish`, `markStale` and its `what`, `markFresh`, a stream's `holds`, `said` and `degraded`, `drawDegraded`, `failingNow`, `subscribe`); actions.mjs (`WRITE_RULES` and its `done` rule, `UNDO_SENTENCES`, `capturingAudit`, `unknownFieldRefusal`, `metaOf`, `changeOf`, `atIndex`, `TRIGGER_FORM`, `UNCHANGED`, the kill switch's `partial`, `confirmBulk`); confirm.mjs; confirm-view.mjs (`plural`, `REFUSAL_STATES`, `PARTIAL_NOTE`, `refusalHtml`, `previewBarHtml`, `unchangedBarHtml`, `doneBannerHtml`, `bulkResultsHtml`); compat-css.mjs (`PULSE_LOOK`); panels/config.mjs; shell.mjs (`LIVE_NOTES`, `READ_ONLY_TITLE`, `frameHtml` and its `sub`, `legacyWrap`, `LINK_PAGE_TITLE`); error-pages.mjs (`ERROR_SENTENCES`' `sub`); signin.mjs; audit-view.mjs (`parseAuditQuery`, `readAuditView`, `seqPlace`, `AUDIT_SEEK_BY`); panels/audit.mjs (`damagedLabel`, `walkWhy`, `seqSentence`, `countText`, `AUDIT_BULK_KINDS`, `AUDIT_WAITING_KINDS`); page-css.mjs (`AUDIT_LAYOUT`, `SECONDARY_BTN`, the stale ring); script.mjs (`revealScripted`, `samePerson`, the person each request says, `streamEnded`, `signedOut`, `answerBar`, the link page's `hashchange`, `SIGN_IN_TRIES_MAX`, `SIGN_IN_RETRY_FOR_MS`, `SIGN_IN_GAVE_UP`, `SIGN_OUT_TIMEOUT_MS`, `SIGN_OUT_UNCONFIRMED`, `STALE_TOKENS_BODY`); cli.mjs (`link --port`, `AUDIT_VERIFY_CACHE_MS`, `audit verify`'s sentence); admin/src/write-plans.mjs (`TRIGGER_ADD_FIELDS`, `rowName`, `changeText`, `resolverText`, `renderProfiles`, `planTriggerAdd`'s kind refusal); admin/src/read-model.mjs (`envelopeChangeLines`, `renderBundleProfiles`); admin/src/index.ts (the add tool's `reviewState`); admin/src/words.mjs (`rowNumber`, `fieldNamed`); worker/src/console-audit.mjs (`verifyConsoleAudit`'s `withLast`: `last`, `suspect`, `files`); worker/src/console-client.mjs (`stream`'s `sinceShutdown`, `openedSinceRelogin`, `RELOGIN_WINDOW_MS`); .github/scripts/console-width-check.mjs. |
 | 2026-10-23 (#737, PR 1) | Issue #737, PR 1: the Pulse foundation, every page in the new shell and look. **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement gains the CSP kept, the theme cookie read only as a closed set and every reference a page's own. **(e) UNCHANGED, checked**: the CSP is the same string (`headers.mjs` untouched); the shell, the tokens, the sprite and the theme add no inline style, no inline script and no external resource, and a real browser now also holds every page to the CSP through `REQ-OPERATOR-CONSOLE-SCREENS` (o). **(f) AMENDED**: `pd_theme` is a preference, not a credential, written only by the served script, read for every page and both sign-in pages as exactly `light` or `dark` in one copy, the page carrying the console's own constant and never the cookie's bytes, set by no response, in no log line or audit row, and not named `pdc_`, so the leak canary still holds for every body. **(m) AMENDED**: on every page in `PAGES`, both roles, plain and hostile, every reference is a console path or an in-page `#id` whose element the page holds (the sprite's `<use href="#i-...">`, the skip link's `#main`, `url(#hatch)`), the one other kind an outbound `<a>` with `rel="noreferrer noopener"` and `target="_blank"`; the stylesheet holds no `url(` at all. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the Statement gains one visual design inside one shell, AA contrast in both themes and a phone's width; the Scope's (m) now covers every page. **(i) AMENDED**: the fixtures hold the shell (the head gains only the `color-scheme` meta; the skip link, the sprite, the top bar and the title bar; a legacy page's panels inside one `.legacy`), and every panel element, the shell's Parked count included, carries only `id` and `data-panel`. **NEW (n)**, contrast: every declared token pair at WCAG 2 AA in both themes, the pair set pinned, every colour token in a pair or in `NO_PAIR` with its reason, no status by colour alone. **NEW (o)**, a phone's width: every page fixture and both sign-in pages in Chrome at 375 by 812, light and dark and forced each way, under the console's own headers: no sideways page scroll, no CSP violation, the theme's canvas, a fixture per page and role, a `WIDTH_PENDING` ratchet (empty), as a step of the required `contract-tests` job against Chrome for Testing at a pinned version and sha256. **NEW (p)**, the shell: the skip link; the navigation in order (Spend is `/insights`) with More holding Audit for an operator alone; the Parked count as a panel (updated by the stream on a live page) drawn only when known and above zero; the live pill's words (Live, Reconnecting, Not live, Signed out); the theme button cycling the system's theme, light and dark; the read-only chip; who is signed in; the run detail's back link. UNCHANGED, checked: `REQ-OPERATOR-CONSOLE-SCREENS` (j) (the shell's count is one more panel of a live page, sent in full first and then only on change, like any other) and (l); `REQ-CONSOLE-SECURITY` (l) (the shell shows a viewer a name, a role and fixed words only, and every panel is drawn as before); `REQ-OPERATOR-CONSOLE-ACTIONS` (no action is added or changed, every form is drawn inside the legacy wrapper as before, and the kit's command box with its hidden Copy button reaches no page yet); `REQ-LIVE-TRANSCRIPT` (the run page's transcript section is drawn as before, inside the legacy wrapper). **Review round 1 (same PR)**: the `REQ-CONSOLE-SECURITY` Statement and (m) name the one outbound link (`https:`, or `http:` for a self-hosted forge, with `rel="noreferrer noopener"` and `target="_blank"`). **(n) CORRECTED**: the pairs held are the 56 declared a theme, a status colour as a mark is in `NO_PAIR` (attention is 2.00:1 on a light `surface`) and the legacy layer's combinations are not measured; the kit's claim is narrowed to what holds (a badge is an icon and a word, a chip its word, `dot` and `count` colour drawn beside a word). **(o) AMENDED**: a forced page carries `page()`'s `color-scheme` meta as well as its `data-theme`; NEW, the shell sweep: every page drawn by `renderPage` for an operator, a viewer, a read-only console and the 32-character longest name on one, with a Parked count and a 120-character run id, at 375, 800, 1024, 1280 and 1440 px, failing on a sideways scroll, a navigation pill meeting the bar's end or a More menu that does not open whole inside the viewport clear of its button (on the PR's first CSS it measured pills up to 124 px under the live pill at 800 px, overlaps up to 1440 px on a read-only console, and More covering its own button on a read-only phone); the pin checked before an https-only download; the glue and the workflow step tested. **(p) CORRECTED**: unique ids are checked on every golden and on the hostile variants; Not live also follows a console restart (sessions live in memory) and Signed out a console stop; a phone keeps the live word for assistive technology. Round 1 review also: `GET /favicon.ico` answers an empty 204 without a session (REQ-CONSOLE-SECURITY Statement and DES-OPERATOR-CONSOLE item 2 name it), so a browser's own request is neither a 404 nor a sign-in redirect. **Review round 2 (same PR)**: the top bar's rule replaced, since round 1's navigation scrolled inside itself at every width, which hid pills from a mouse at desktop widths, clipped focus rings and let the bar jump 60 px when the live word or the revealed theme button crossed a wrap. **(p) AMENDED**: the layout follows the viewport's width and the server's `top--ro` alone; on a phone the navigation scrolls in its own row, a focused pill scrolled wholly into view and the current one once on load, never re-centred; above 760 px it never scrolls, under the brand pill and the end, and on one row with them from 1440 px (1600 on a read-only console); More opens under its button and also closes when focus leaves it, and on a phone when its button scrolls out of view; on a phone Live is a dot alone and every other state its word; a cut name is whole in its `title`; unique ids are also checked on each screen's read-only render; the tests named. **(n) NARROWED**: a state is a word but Live's dot on a phone, and the kit's `dot` is colour (an image with an accessible name, given a `label`) drawn only beside its word. **(o) AMENDED**: the shell sweep at 320 and 375 as a phone and 800, 1024, 1180, 1280 and 1440 px, the window's emulation read back from the page, the bar read at each live word with the theme button shown and hidden: every pair of the bar's parts apart (the end's against each other too), above 760 px every pill whole with its focus ring and one height, a cut name with an ellipsis and its `title` and the longest name cut, More opened under its button; NEW, a negative control in every run, a bar built to break each rule once, failed with exactly its nine sentences or the run fails. Measured with Chrome for Testing 155 on macOS, the check run in a copy of this round's tree with an earlier commit's whole `admin/src/console` put back (with only some of its modules put back the numbers differ): on this PR's first CSS the check fails 180 of the 224 shell runs (pills under the end from 800 to 1440 px, the page wider than its window at 320 and 800 px, More covering its button on a phone, the longest name never cut); on round 1's 171 (pills hidden or cut at every desktop width, the bar jumping at 800, 1024 and 1180 px, More away from its button at 320, 375 and 800 px, a cut name without a title); on this round's, none, each run about 62 s. **`REQ-CONSOLE-SECURITY` (m) AMENDED**: the reference rule names every attribute it reads (`poster`, `data`, `background` and `codebase` on any element, `srcset`, `imagesrcset` and `ping`), read as a browser reads the tag, no `<meta http-equiv>`, and every screen's read-only render. **(f) UNCHANGED, checked**: what the console reads and draws of `pd_theme` is as it was; only the docs' reasons were corrected (`Lax` serves the sign-in and one-time-link pages, since any other page reached from another site is a redirect to sign-in, and a planted copy for a path holds only the pages under that path to the system's theme). **Review round 3 (same PR)**: the phone's bar no longer moves, and the check now holds it there. **(p) AMENDED**: on a phone the live pill never changes size, one mark whose shape says the state (Live the dot, Reconnecting a retry arrow, Not live the stop square, Signed out the sign-out arrow) with its word kept for assistive technology, so neither the first load (drawn Not live, then Live) nor a reconnect moves the bar, which round 3 measured moving 50 to 52 px; the theme button keeps its place while hidden, so its reveal moves nothing; on a phone any opening of More first scrolls its button wholly into view and only a later scroll that takes it wholly out closes it (round 3 found that a click moving no focus could not open a button partly scrolled away at all); the block naming who is signed in carries the name and the role in its `title`, the longer of name and role cut first; the desktop's rules apply exactly where the phone's do not, so no fractional width matches neither. **(n) NARROWED**: on a phone each live state is a mark of its own shape at 3:1 or more, and the dot rule is the kit's (no page draws one yet). **(o) AMENDED**: the shell sweep gains 761, 940 and 1600 px (the layout's tightest places, held to `TOP_BAR`); the bar is also read with the Parked count emptied and five digits long, and the page's width in every read; the height rule holds at every width, a phone's included; every live word read, and no two drawn with the same classes; one row from 1440 px for a console that is not read-only; a part judged by its box and everything drawn inside it (a word spilling out of the phone's fixed slot meets its neighbour); a cut role word held to the title too; on a phone More is clicked with its button cut in half, nothing focused and never scrolled into view by the check, and must open with its button whole; one run with page scripts off; a second negative control, at 375 px as a phone (a jump with the last live word and one with its Parked count emptied, a page wide only while the count is emptied, a More its own script shuts when clicked cut), failed with exactly its four sentences; and the first control's claim NARROWED to the nine rules it breaks, every other rule held by the worker test. The round 2 figures above now say how they were measured. Measured the same way with this round's check: the first CSS fails 263 of its 321 shell runs (the 320 of the sweep and the run without scripts) and, before any run, its live table, which drew Not live and Signed out with the same classes; round 1's 264; round 2's 61, every one at 320 or 375 px (the bar 52 px taller while the server's Not live stood, the theme button's reveal moving the bar, More not opening on a click with its button cut); this round's none, a run about 80 s (63 s before this round's reads and widths). **`REQ-CONSOLE-SECURITY` (f) UNCHANGED, checked**: what the console reads and draws of `pd_theme` is as it was; the docs CORRECTED: on a console served under a domain name a copy planted with `Domain`, or a parent domain's from a sibling host, is a second copy on every page, holding every page to the system's theme until it expires (on `localhost` or an IP address it replaces the person's). |

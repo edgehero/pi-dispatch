@@ -380,8 +380,9 @@ Three doors, same as quiet hours:
   wrote and a scope deferral is a ceiling that clears in seconds without anyone acting; a row per scope
   deferral would be a panel that redraws itself every few seconds saying nothing has gone wrong. Since issue #737 the
   worker also records why it deferred each job (`scope-folder`, `scope-repo`, `scope-project`, or `chained` for a
-  chained job, with the parent job it follows; see [wait-for.md](wait-for.md), trap 4), which the console's preview
-  of a queued job's cancel shows; the panel's count is unchanged.
+  chained job, with the parent job it follows; see [wait-for.md](wait-for.md), trap 4), which the console's overview
+  counts and lists by reason (In line and Waitlists, [console.md](console.md#waitlists)) and its preview of a queued
+  job's cancel says; the panel's count is unchanged.
 - The counters live under hashed keys (`budget:s:<16 hex>`) so scopes containing `:` or `/` cannot
   collide with the global key namespace; the panel and `dispatch_limits` recompute the hash from the
   configured scope to display used counts.

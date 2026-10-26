@@ -341,13 +341,15 @@ fixed list (for a wait, `wait-after`, `wait-hold`, `wait-throttled`, `wait-super
 and never stops the move: if it cannot be written, the job waits exactly as before, and the worker logs
 `defer_reason_unwritten` once per outage for each queue it drains (a worker with a host queue drains two, the shared
 one and its own) and `defer_reason_restored` when a write works again. The console's reader of the waiting jobs reads
-it and never reads a job's data, and its preview of a queued job's cancel, which loads only the one job it would
-cancel, says why that job waits in the worker's own words. A delayed job with no record says "No reason was
-recorded"; one whose record names a reason this console does not know (a newer worker's) shows that reason's word with
-"no explanation yet"; one more than 10 seconds past the time it was due, which no worker has taken, says "Due since
-<time>; no worker has taken it", whatever it recorded. The hold's own record (`wait:job:<id>`) now also keeps your
-`after` instant and each check's last answer (`go`, `hold`, `fault`, `refuse` or `unclear`) with its time, and the
-console's reader carries both with each held job.
+it and never reads a job's data: the console's overview counts the waiting jobs by reason and lists each one with why
+it waits ([Waitlists](console.md#waitlists)), and its preview of a queued job's cancel, which loads only the one job it
+would cancel, says why that job waits in the same words, the worker's own. A delayed job with no record says "No
+reason was recorded"; one whose record names a reason this console does not know (a newer worker's) shows that
+reason's word with "no explanation yet"; one more than 10 seconds past the time it was due, which no worker has taken,
+says "Due since <time>; no worker has taken it", whatever it recorded. The hold's own record (`wait:job:<id>`) now
+also keeps your `after` instant and each check's last answer (`go`, `hold`, `fault`, `refuse` or `unclear`) with its
+time, and the console's reader carries both with each held job: the Waitlists say how long a held job has been held
+and, to an operator, each check's last answer.
 
 ### 5. Whoever clears the condition chooses the commit
 
