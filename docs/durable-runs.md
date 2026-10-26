@@ -206,6 +206,12 @@ The reasons a durable run can end with:
 | `recover-store-unset` | policy | no checkpoint store on this worker; commented, nothing spent |
 | `job-image-recover-unsupported` | policy | the image lacks `recover`; commented, nothing spent |
 
+The console and the `/dispatch` panel call a run that ended `recovery-unsafe-extensions`, `recovery-checkpoint-absent`
+or `recovery-cap` **failed**, though its record says `policy`: the run was lost and could not be continued, which is no
+rule's refusal. Each keeps its reason beside the word, counts among the day's failures on the overview, and is found by
+`/runs?outcome=failed` (and still by `outcome=policy`, the record's own value). The other `policy` reasons above keep
+the word refused.
+
 The run's live transcript, progress and status comment carry on through a recovery: they belong to the run, not to
 one attempt. In progress, a replayed call counts as `replayed`, and an interrupted or not started one as
 `interrupted`.

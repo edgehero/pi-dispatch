@@ -24,6 +24,13 @@ armed for recovery, or why a portfolio plan did not apply. Those are at the end 
 A reason this page does not list comes from a newer worker than the one that wrote these docs. The console then shows
 the word as it is.
 
+A failed record written by an older worker may name no reason, or may keep an error's own words where a reason belongs
+(a container exit or a forge call that failed, before `container-infra-exit`, `container-exit-unknown` and
+`worker-error` existed): the worker that ran it predates the reasons for infrastructure exits. The console's runs list
+and the `/dispatch` panel (its list, its run detail and the REASON column of `/dispatch runs`) show those words to no
+one: they read such a record as having no reason, and the runs list says "No reason was recorded". The console's run
+page still shows the reason as it was recorded.
+
 ## Stopped while running
 
 ### worker-abort
@@ -479,6 +486,36 @@ runtime. The worker could not see how the run ended, so it was retried.
 
 What to do: check the worker's connection to its runtime, and stop any job container left running. See
 [backends.md](backends.md).
+
+### container-infra-exit
+
+The job's container ended with the runner's infrastructure exit (exit code 1). The runner uses it for a fault that is
+not the job's: an error or rate limit from the AI provider, a lost network, an MCP server it could not reach, or a crash
+inside the container. The worker counted the attempt as an infrastructure fault and retried it while attempts were
+left. The container ran, so its spend is counted and partial work may exist. A run armed for recovery (`run.recover`)
+that has a checkpoint continues from it instead, and that attempt's record says `recovery-enqueued`.
+
+What to do: read the `exit` line in the job log for what the runner met, then run the job again if every attempt was
+used. See [durable-runs.md](durable-runs.md).
+
+### container-exit-unknown
+
+The job's container ended with an exit code the runner never uses, so the worker could not tell what happened. A
+container stopped from outside the worker (a signal, or a memory kill the runtime did not confirm) ends this way, and so
+can a job image older or newer than the worker. The worker retried it while attempts were left, and kept the spend
+counted, since the container may have run. The record's `exitCode` is the code it ended with.
+
+What to do: read the job log for how the container ended, and check that the job image matches the worker's release.
+See [job-image.md](job-image.md).
+
+### worker-error
+
+The worker met an error it has no reason for: a forge or Valkey call that failed, or a fault in the worker itself. The
+record names no cause of its own, because the error's words can carry an API path, a repository name or a library's
+message, and the record holds fixed words only.
+
+What to do: read the worker log's `job_failed` line for this job, which carries the start of the error's message, then
+run the job again.
 
 ### config-refused
 

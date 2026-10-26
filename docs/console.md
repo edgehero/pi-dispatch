@@ -363,19 +363,24 @@ not show them); for a retry, the job keeps the attempts it made, so the console 
 Cancel stops it once it runs; for Resume fleet on a fleet where more than one queue but not all of them were paused,
 pause those again by hand, one at a time, since no single write pauses only them (the line names them, and never offers
 Pause fleet, which would stop the hosts you had left running; when none was paused it says "No queue of the fleet was
-paused, so there is nothing to pause again.", and when the fleet did not answer the preview, it says which queues were
-paused is not known); for a setting whose old value the form cannot send back (an empty one, say), set it back by hand.
-The Confirm button says what it does ("Pause the fleet", "Delete trigger at index 1", "Retry for up to $2.00", "Retry
-(zero-rated)" for a job that cannot spend), yellow for an action that spends and red for one the console counts as
-destructive: a pause of the fleet or a queue (which Resume undoes, but which stops work), a cancel, a removal and a
-delete. The bar counts down the preview's 5 minutes, and at 0:00 Confirm stops working: preview again.
+paused, so there is nothing to pause again.", and when the fleet did not answer the preview or could not be read, it
+says which queues were paused is not known; when the preview could not read every queue (the look for the queues did not
+finish, or the fleet has more than the 200 a preview reads), it says which ones were paused is not fully known; and past
+20 paused queues it asks you to pause them again by hand, naming the first 20); for a setting whose old value the form
+cannot send back (an empty one, say), set it back by hand. The Confirm button says what it does ("Pause the fleet",
+"Delete trigger at index 1", "Retry for up to $2.00", "Retry (zero-rated)" for a job that cannot spend), yellow for an
+action that spends and red for one the console counts as destructive: a pause of the fleet or a queue (which Resume
+undoes, but which stops work), a cancel, a removal and a delete. The bar counts down the preview's 5 minutes, and at
+0:00 Confirm stops working: preview again.
 
 The bar's other states:
 
 - **No change**, with Close, when the change would write what is already there ("The file already says this:
   maxTurns is 40.").
 - **Refused at the preview**, with Close: the console's reason, and that nothing was changed. Fix the form and try
-  again.
+  again. A preview that could not read what it needed offers Try again instead: titled for Valkey when the read failed,
+  or "The fleet did not answer in time" when the fleet did not answer within 10 seconds, which says only that, since a
+  slow first read is as likely as a Valkey that stopped answering.
 - **Refused at the confirm**: Preview again (the confirmation expired, was used, or belongs to another sign-in), Look
   again (the file or the job changed since the preview; it reloads the page), Try again (Valkey could not be
   reached), or Close (the audit log could not be written, so nothing was; or the write failed, and the console's log
@@ -546,14 +551,15 @@ folder path on the insights page (an operator can ask for those with `?paths=ful
 forms that change something ([Actions](#actions)) are shown to operators only, and not at all on a read only
 console.
 
-Every page has the same bar along the top: the navigation (Overview, Runs, Parked, Fleet, Spend and Configuration),
-the live pill on the pages that update themselves ([Live updates](#live-updates)), the theme button
-([Look and theme](#look-and-theme)), a "Read-only console" chip when `PI_CONSOLE_READ_ONLY=1` is set, who is signed
-in, and Sign out. Spend is the `/insights` page. Parked shows how many parked runs are waiting for an answer, kept
-current on the pages that update themselves; it shows no number when none is waiting or the count could not be
+Every page has the same bar along the top: the navigation (Overview, Runs, Parked, Fleet, Spend and Configuration), a
+round **Search** button, which opens the runs page with its search field ready to type in
+([Finding runs](#finding-runs)), the live pill on the pages that update themselves ([Live updates](#live-updates)), the
+theme button ([Look and theme](#look-and-theme)), a "Read-only console" chip when `PI_CONSOLE_READ_ONLY=1` is set, who
+is signed in, and Sign out. Spend is the `/insights` page. Parked shows how many parked runs are waiting for an answer,
+kept current on the pages that update themselves; it shows no number when none is waiting or the count could not be
 read. An operator also gets **More**, which holds the audit log; a viewer has no More. The first thing the keyboard
-reaches is a "Skip to content" link, which jumps past the bar. A read-only console also says so in a banner under
-every screen's title ("This console is read-only"): every change is refused and no page shows a form.
+reaches is a "Skip to content" link, which jumps past the bar. A read-only console also says so in a banner under every
+screen's title ("This console is read-only"): every change is refused and no page shows a form.
 
 The bar's layout depends only on the window's width and on whether the console is read-only, never on what the bar
 shows, so it does not move, on a phone or a desktop, when the live pill's state changes, when the theme button
@@ -569,6 +575,11 @@ JavaScript, stays an empty gap), so showing it moves nothing either.
 - On a phone (760 pixels or less) the navigation is a row of its own that scrolls sideways. The page you are on is
   scrolled into view once when the page loads, and a pill the keyboard moves to is scrolled wholly into view, its
   focus ring included; the row never scrolls back by itself, so where you scrolled it stays.
+- The Search button is not on a phone's bar (the runs page keeps its search field in view there), and on a desktop it is
+  left out for its own width (56 pixels) just past the three widths where the bar is tightest (761 pixels on a read-only
+  console, 1440 on any other, and 1600 on a read-only console), so the signed-in name never has less room than it had
+  without it. It is a plain link to `/runs#q`: without JavaScript the runs page opens scrolled to the field, and with it
+  the field takes the keyboard's focus.
 
 More opens its list right under its own button. It closes on Escape, on a click outside it and when the keyboard's
 focus leaves it. On a phone, opening it (a tap, a click or a screen reader's activation) first scrolls its button
@@ -579,9 +590,9 @@ readers ([Live updates](#live-updates)).
 | Page | What it shows |
 |---|---|
 | `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) with the caps under it, and beside them the waiting jobs by reason ([Waitlists](#waitlists)) and the hosts. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
-| `/runs` | Every run this host and the fleet's run mirror know of, newest first, with filters and paging. The Outcome column says completed, refused, failed, awaiting input or cancelled, amber for refused, awaiting input and cancelled and red for failed. A refused or failed run also names its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). |
+| `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
 | `/run?id=<job id>` | One run, led by its **Outcome**: the outcome word, what the reason means, what to do about it, and a link to the reason's entry in [reasons.md](reasons.md) on GitHub ([The run page's outcome](#the-run-pages-outcome)). Then the run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
-| `/parked` | The runs waiting for an answer, with a link to where the question was asked, its age, how many times the session was resumed, and an **Answer** column: waiting, being answered by a run (linked), or unknown. |
+| `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules (each by its trigger's id) with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
@@ -618,18 +629,17 @@ the site's cookies. All of this is cosmetic: none of it reaches a session, what 
 Without JavaScript the theme button is not shown (its place in the bar stays empty), and a page follows the system (or
 a choice the cookie already holds).
 
-A test holds every colour pair the design declares (56 in each theme: each text colour on the grounds it is used
-on, each status's ink on its tint and its text on its solid colour, the focus ring on the canvas and every surface)
-to WCAG AA contrast in both themes. A status mark's own colour is exempt (the amber attention mark is 2:1 against a
-card in the light theme), because a mark is not what tells a state: every status badge is an icon and a word; the
-kit's coloured dot is, by its rule, drawn only beside what it marks (given a label, it also carries a name for a
-screen reader): the overview's Hosts card draws one per host, beside the host's name and the age of its last beat
-(amber once the beat is late), named "beating" or "beat late"; and every state of the live pill is a word beside its
-mark, except on a
-phone, where the pill is one mark whose shape says the state (a dot for Live, a retry arrow for Reconnecting, a stop
-square for Not live, the sign-out arrow for Signed out), each at 3:1 or more against the bar in both themes, its word
-kept for screen readers. Until a page is redrawn in the new design its panels are the old ones, and their colour
-combinations are not measured.
+A test holds every colour pair the design declares (56 in each theme: each text colour on the grounds it is used on,
+each status's ink on its tint and its text on its solid colour, the focus ring on the canvas and every surface) to WCAG
+AA contrast in both themes. A status mark's own colour is exempt (the amber attention mark is 2:1 against a card in the
+light theme), because a mark is not what tells a state: every status badge is an icon and a word; the kit's coloured dot
+is, by its rule, drawn only beside what it marks (given a label, it also carries a name for a screen reader): the
+overview's Hosts card draws one per host, beside the host's name and the age of its last beat (amber once the beat is
+late), named "beating" or "beat late", or in the neutral tone and named "beat not read" while the host registry could
+not be read; and every state of the live pill is a word beside its mark, except on a phone, where the pill is one mark
+whose shape says the state (a dot for Live, a retry arrow for Reconnecting, a stop square for Not live, the sign-out
+arrow for Signed out), each at 3:1 or more against the bar in both themes, its word kept for screen readers. Until a
+page is redrawn in the new design its panels are the old ones, and their colour combinations are not measured.
 
 Every page is checked in CI at a phone's width, 375 pixels, where it must not scroll sideways: wide tables, the
 navigation and the charts scroll inside their own box. So are the sign-in pages, the 404, 400, 403, 421 and 503
@@ -712,7 +722,9 @@ Four cards come first, in a row:
   counting runs an operator cancelled.", each count linked to those runs on the runs list, and "at least" when the run
   history the console read does not reach back a day; when that history holds neither, the line says so ("Last 24
   hours: no failed or refused run among the runs read, but the run history read does not reach back a day."), since
-  it is why the card is not All clear.
+  it is why the card is not All clear. A durable run that was lost and could not be continued (`recovery-cap`,
+  `recovery-checkpoint-absent`, `recovery-unsafe-extensions`) counts as failed, as the console calls it, though its
+  record says `policy` ([durable-runs.md](durable-runs.md)).
 
   A number is a whole count, and 0 means none, only when everything behind it was read: the questions need the parked
   runs, and "to fix" the failed jobs, the doctor results and the host registry. When one could not be read, the card
@@ -794,7 +806,8 @@ Under them, on the left, the [timeline](#the-overviews-timeline) and the caps; o
   looks staler than it is. While the queue still sees more workers connected than check in (a count with no clock in
   it), the card says "Host beats look stale (clock skew?), but the queue still sees its workers connected" instead. When
   the host registry cannot be read, it says it shows the fleet as last seen and judges nothing. Then a row per host: how
-  long ago it beat (amber past a minute), its venues (its default first), its slots (no dots for a host whose slots are
+  long ago it beat (amber past a minute; while the registry cannot be read, "as last seen", with a dot that judges
+  nothing, named "beat not read"), its venues (its default first), its slots (no dots for a host whose slots are
   not known, as on Running: one that has not checked in within the last minute, and every host while the registry could
   not be read), its last doctor result in one line (the first failing check and how old the result is, how many warn,
   how many pass, or "No doctor result yet"), its own queue's waiting and running counts, and the pause of its own queue
@@ -859,7 +872,8 @@ reads the run history at most that often. The key under it names each kind, so a
   you" is written over the tail where it ends before the now line, else with the id before the pill; neither ever
   reaches now, since right of it is what is in line, which a question is not. A question older than the window is
   still drawn, as the tail alone.
-- **Failed**: a run that failed, or whose outcome this console does not know.
+- **Failed**: a run that failed, a durable run that was lost and could not be continued (recorded `policy`, but a
+  failure in the console's words), or one whose outcome this console does not know.
 - **Refused**: a circle at the instant the run was refused: a refusal spends nothing and takes no time.
 - **Slot held**: a job that is gone while its container still holds a slot on its host ("still holds a build3 slot"),
   from when it took the slot to now.
@@ -1074,7 +1088,11 @@ cent reads `$0.00`); a cap or a price is rounded to the nearest cent. The overvi
 Times written out on a console page (the run lists, the run page, the fleet's schedules and failed jobs, the parked
 inbox, the audit log, the overview's waiting jobs and schedules, the instants in the Spend page's budget split and
 capacity text, and the lines of a preview bar, such as a waiting job's "Held until <time>") are in your browser's time
-zone, with its UTC offset (`2026-10-08 17:39 UTC+2`); hover one for the UTC time. The console sends UTC (the same page
+zone, with its UTC offset and your date (`2026-10-08 17:39 UTC+2`); hover one for the UTC time. One kind of time is
+shown without its date: a run's Ended time under the runs table's day heading, which names the day. It stays without
+one when your date is the UTC date (`17:39 UTC+2`), and shows your date when it is not (`2026-10-09 01:30 UTC+2`
+under the heading "2026-10-08 UTC"), so it is never read against the wrong day. Every other time shows your date,
+"Drawn at" on a page drawn once included. The console sends UTC (the same page
 for every reader), and the page's script turns it into local time, so with scripts off a page reads UTC. Some times
 stay UTC on purpose: the overview timeline's axis, its marks' tooltips (they say UTC) and the times on its pills, the
 hours under the Spend today card's dots (plain `HH:00`, under a chart of UTC hours), the live transcript's entry
@@ -1084,24 +1102,35 @@ the panel's words.
 
 ### Outcomes and reasons
 
-The console and the `/dispatch` panel use the same words for how a run ended. The run record's `outcome` is
-`completed`, `policy` or `failed`; both surfaces say completed, refused (for `policy`) and failed. Two reasons change
-the word: a completed run with `awaiting-input` is **awaiting input**, and a run with `operator-cancel` is
-**cancelled**. The record's `backend` is the **Venue**, the spend page is **Spend** (its insights are the page's
-content, still at `/insights`), and the jobs held on a wait are **Held**. The query and field names stay the
-record's (`outcome=policy`, `backend=`); `outcome=refused` is refused with a message naming the three values.
+The console and the `/dispatch` panel use the same words for how a run ended. The run record's `outcome` is `completed`,
+`policy` or `failed`; both surfaces say completed, refused (for `policy`) and failed. Some reasons change the word: a
+completed run with `awaiting-input` is **awaiting input**, a run with `operator-cancel` is **cancelled**, and a durable
+run that was lost and could not be continued (`recovery-cap`, `recovery-checkpoint-absent`,
+`recovery-unsafe-extensions`, recorded as `policy`) is **failed** ([durable-runs.md](durable-runs.md)). The record's
+`backend` is the **Venue**, the spend page is **Spend** (its insights are the page's content, still at `/insights`), and
+the jobs held on a wait are **Held**. The runs page filters and counts by those words: `outcome=` takes `completed`,
+`refused`, `failed`, `awaiting-input` and `cancelled`, so `outcome=failed` finds the lost durable runs too and
+`outcome=completed` leaves out the runs awaiting input, and it still takes the record's own `policy`, which lists every
+refused, cancelled and lost run, so an older link keeps working ([Finding runs](#finding-runs)). The field names stay
+the record's (`outcome`, `backend`).
 
-In the runs list, a refused or failed run shows its reason as a short sentence after the word, for example
-`refused · This project's run cap for the window was already reached…`. The sentence is the reason catalog's
-explanation ([reasons.md](reasons.md)), cut to fit a row: the leading verdict ("Refused:") is dropped, the first
-sentence is kept, and a longer one first loses its asides (a part in parentheses, a ", which ...," clause) and is then
-cut at a word with an ellipsis: never on a word like "so" or "the" (except where backing off would leave fewer than 24
-characters), never on a "not" or "no" without the word before it, and never inside a parenthesis. Hover it for the reason's word itself; click it to list every run with the same outcome and
-reason. A reason this console does not know (from a newer worker) is shown as its word with "no explanation yet".
-Only the record's reason word is ever shown in a list, never a job's own failure text. In pi, the panel's list row
-says the word and puts the reason's word last (`✘ failed · 3t · 12.3k · container-never-started`), so a narrow
-terminal cuts the reason before the counts, and its run detail prints the whole sentence and the next step under the
-reason. `/dispatch runs` says the same word in its OUTCOME column and the reason's word in REASON.
+In the runs list, a run that did not complete shows its reason as a short sentence after its badge, for example
+"Refused" and `This project's run cap for the window was already reached…`, except where the word already says why
+(awaiting input, cancelled); a completed run shows a quiet badge alone, so the runs that need you stand out. The
+sentence is the reason catalog's explanation ([reasons.md](reasons.md)), cut to fit a row: the leading verdict
+("Refused:") is dropped, the first sentence is kept, and a longer one first loses its asides (a part in parentheses, a
+", which ...," clause) and is then cut at a word with an ellipsis: never on a word like "so" or "the" (except where
+backing off would leave fewer than 24 characters), never on a "not" or "no" without the word before it, and never inside
+a parenthesis. Hover it for the reason's word itself; click it to list every run with the same outcome and reason. A
+reason this console does not know (from a newer worker) is shown as its word with "no explanation yet". A run whose
+record names no reason word says "No reason was recorded": a record written by a worker older than the reasons for
+infrastructure exits may name none, or may keep an error's own words where the reason belongs, which the runs list does
+not show ([reasons.md](reasons.md)); the run page still shows such a record's reason as it was recorded. Only the
+record's reason word is ever shown in a list, never a job's own failure text. In pi, the panel's list row says the word
+and puts the reason's word last (`✘ failed · 3t · 12.3k · container-never-started`), so a narrow terminal cuts the
+reason before the counts, and its run detail prints the whole sentence and the next step under the reason.
+`/dispatch runs` says the same word in its OUTCOME column and the reason's word in REASON. The panel's row, its run
+detail and that REASON column leave out a reason that is not a reason word, as the runs list does.
 
 **The Venues panel** on `/fleet` lists every venue this release knows, and any venue a newer worker blesses that it does
 not. For each one: the hosts that bless it and the ones whose default it is, each host's
@@ -1119,20 +1148,25 @@ Venue column, and in pi, `/dispatch` shows the same view: `u` for the hosts, the
 `FORGEJO_URL`, `AZURE_ORG_URL`). When that URL is not set, or the run's target does not look like a repository and a
 number on that forge, the page shows the target without a link.
 
-**A parked run** is one that ended asking a person a question (see [sessions](sessions.md)). It shows as answered
-once a later run on the same issue exists, because an answer is a new delivery on that issue. "The same issue" ignores
-the case of the repository path and leading zeros in the number. Until that later run ends it has no record, so the
-console also looks in the queue: a park with a run queued or running on its issue is **being answered**, its Answer
-column links that run, and it gets no answer form. The console reads the queue for this at most every 15 seconds
-while something is parked, up to 10,000 queued and running jobs in all (it reads each job's kind and issue, never its
-text). When that look cannot see everything, the column says unknown and the park gets no answer form, as the run
-page's Chat panel draws none: a queue too deep to check says so ("answer it on the forge, or wait until the queue is
-shorter"), because on such a queue an answer already sent can wait longer than the ten minutes in which a second one
-would be dropped as a duplicate. The overview's Needs you leaves the parks being answered out of its questions and
-says how many more are being answered now. The count of resumes
-comes from the session store, so the console can read it only when `PI_SESSIONS_DIR` is on its own host; anywhere
-else, and for a pull request (whose session the record cannot name), it shows as unknown rather than as 0.
-An operator can answer an issue's parked run from this page ([Answering a parked run](#answering-a-parked-run)).
+**A parked run** is one that ended asking a person a question (see [sessions](sessions.md)). The parked page shows each
+one nobody has answered as a card: who asked, how long it has waited, its project, a link to its issue, its forge and
+how many times its session was resumed, and where to read the question: on its issue or pull request, or on its run page
+while its live transcript is kept (24 hours after the run). The card never shows the question itself, for either role,
+because the question is the run's own words, which only a run page's transcript shows. A park leaves the page once a
+later run on the same issue exists, because an answer is a new delivery on that issue. "The same issue" ignores the case
+of the repository path and leading zeros in the number. Until that later run ends it has no record, so the console also
+looks in the queue: a park with a run queued or running on its issue is **being answered**, its card links that run, and
+it gets no answer form. The console reads the queue for this at most every 15 seconds while something is parked, up to
+10,000 queued and running jobs in all (it reads each job's kind and issue, never its text). When that look cannot see
+everything, the card says so and the park gets no answer form, as the run page's Chat panel draws none: a queue too deep
+to check says so ("answer it on the forge, or wait until the queue is shorter"), because on such a queue an answer
+already sent can wait longer than the ten minutes in which a second one would be dropped as a duplicate. The overview's
+Needs you leaves the parks being answered out of its questions and says how many more are being answered now. The count
+of resumes comes from the session store, so the console can read it only when `PI_SESSIONS_DIR` is on its own host;
+anywhere else, and for a pull request (whose session the record cannot name), the card leaves it out rather than showing
+zero. An operator can answer an issue's parked run from this page
+([Answering a parked run](#answering-a-parked-run)). On a wide screen the cards stand beside a short note on how
+answers work; below 1,200 pixels and on a phone they are one column.
 
 **A failed job's reason** (BullMQ's message for the attempt that failed) is the one free text the screens show. It
 is the worker's own message, trimmed and cleaned, but it can still carry a fragment of something a job touched, so
@@ -1151,7 +1185,17 @@ outcome word it does not know is shown as it is, cut at 64 characters.
 
 When the page has no record to show, the Outcome panel says why, once: the id is not a run id, the run is still going
 (a record is written when a run ends), the job is queued, the job ended but its record is on another host with no run
-mirror, or no such run is known. The record's panels are then left out rather than each saying the same thing. A
+mirror, or no such run is known; or that its record could not be read (this host's record file is there but is not one
+it can read, or the fleet's run mirror did not answer), which it names, with Reload to try again, rather than say there
+is no such run; or, when neither holds a record and something else the console looks in could not be read (the queues,
+the live transcript or the run's progress), which of those it could not read, so it cannot say whether the run exists.
+The record's panels are then left out rather than each saying the same thing. A page that cannot say whether the run
+exists answers with status 503; a run the console finds anywhere, a queued job included, is a 200; and an id it looked
+for everywhere and found nowhere opens the run-not-found page instead ([Error pages](#error-pages)). Before it calls a
+job gone, the console looks for the fleet's queues again, once for everything the page asks, so a job queued a moment
+ago on a queue it had not seen yet (a host that started, took a run onto its own queue and stopped) is found. Only
+opening or reloading the page looks again: its live updates do not, and keep what the page was told when it opened
+about a job it did not find. A
 queued or running job's sentence is a grey note (nothing is wrong, the record comes at its end); the others are
 amber. A queued job's page has no live transcript section either: reload once it runs, and the section is there.
 
@@ -1265,29 +1309,52 @@ The `/dispatch` panel's live tail (`l`) reads the same transcript.
 
 ## Finding runs
 
-The runs page takes these filters in its query string. Each one is matched exactly, except `q`:
+The runs page starts with its filters, a plain form that works without JavaScript. First the search, which finds a run
+by any part of its target or its job id, ignoring case (`web#12`, `acme/api`, `gh-2f6a`); the Search button in the top
+bar opens the page with the cursor in it. Then a chip per project (All, then the projects that ran in the last 24 hours,
+the busiest first), a list for each field (outcome, forge, reason, flow, trigger, host, venue and model; the outcome and
+forge lists name every value, the others the values the last 24 hours' runs carry, and each keeps the one you chose),
+and the repository as text; Apply. With JavaScript the address Apply opens names only the filters you set
+(`/runs?outcome=failed`); without it every field is sent, and an empty one means no filter. The filters you applied show
+under the form as chips, each with a link that removes it, and Clear filters removes them all. On a phone everything but
+the search folds behind a Filters button, which says how many filters are applied.
+
+Under the filters, the last 24 hours: how many runs completed, were refused, failed, are awaiting input and were
+cancelled (a phone leaves out the completed count), each number a link to those runs, and what they settled in
+dollars. With a project chosen the counts are that project's. A count says "at least" when the console could not read
+every run of the day (a busy day past the newest 1,000 runs, or a host's history it could not read). **Only problems**
+lists every run the page does not call completed: the refused, failed and cancelled runs, the runs awaiting input
+(which wait on you, though their record says completed) and any outcome this console does not know. The counts are of
+the runs that ended in the last 24 hours; the list below them goes back through the whole history.
+
+The same filters can be written in the query string. Each one is matched exactly, except `q`:
 
 | Filter | Matches the run's |
 |---|---|
 | `repo` | repository, such as `acme/web` |
 | `kind` | forge: `github`, `gitlab`, `forgejo`, `azure`, or `local` |
 | `flow` | flow name |
-| `trigger` | trigger: its position in the triggers file, or a schedule's id |
+| `trigger` | trigger: its position in the triggers file, counted from 0 (the list shows it as "row 1" for 0), or a schedule's id |
 | `project` | project id |
 | `host` | worker name |
 | `backend` | venue, as the Venues panel on `/fleet` names it (a run recorded before venues were recorded counts as `local`) |
-| `outcome` | outcome: `completed`, `policy` or `failed` (a refused or cancelled run is `policy`; any other value is refused) |
+| `outcome` | outcome, as the page words it: `completed`, `refused`, `failed`, `awaiting-input` or `cancelled`, or the record's own `policy` (every refused, cancelled and lost durable run); any other value is refused |
 | `reason` | reason, such as `awaiting-input` or `over-budget` |
 | `model` | model id |
-| `q` | target, any part of it, ignoring case (`web#12`) |
+| `q` | target or job id, any part of it, ignoring case (`web#12`, `gh-2f6a`) |
+| `problems` | `1`: every run the page does not call completed, a run awaiting input included |
 
-For example, `/runs?kind=gitlab&outcome=failed` or `/runs?q=web%2312` (a `#` in a query is written `%23`). A value
-is checked against the characters that field can hold and refused by name if it does not fit; the page never repeats
-the refused value back.
+For example, `/runs?kind=gitlab&outcome=failed`, `/runs?q=web%2312` (a `#` in a query is written `%23`) or
+`/runs?problems=1`. A value is checked against the characters that field can hold and refused by name if it does not
+fit; the page never repeats the refused value back.
 
-**Paging** goes by time, not by position. The "older" link carries `before`, the moment of the last run on the page,
-so runs that finish while you page do not shift anything or show a run twice. A page holds up to 50 runs. To keep a filter that matches almost nothing from reading the whole history in one request, one page
-examines at most 2000 runs; when it stops there it says so, and its "older" link carries on from where it stopped.
+**Paging** goes by time, not by position. The Older link carries `before`, the moment of the last run on the page, so
+runs that finish while you page do not shift anything or show a run twice; Newest goes back to the start. A page holds
+up to 50 runs, a heading for each day (UTC) between them, and each run under its day's heading shows when it ended as
+the time alone ([Money and times](#money-and-times)). To keep a filter that matches almost nothing from reading the
+whole history in one request, one page examines at most 2000 runs; when it stops there it says so, and its Older link
+carries on from where it stopped. Under the table the page says how many runs it shows and, when the fleet's run
+mirror was read, from how many hosts.
 
 The runs come from two places, merged as the panel merges them: this host's run records, and the fleet's run mirror
 in Valkey, which holds every host's recent runs (see [multi-host](multi-host.md)). When the mirror cannot be reached,
@@ -1310,9 +1377,9 @@ is refused here with the same words, and every action lands in the [audit log](#
 | Fleet | Cancel | Stops a running job on whichever host runs it, or removes a held one. A running job that no worker acknowledges is reported as not cancelled, never as done. A held job whose removal was asked for and not answered within the time limit, or whose hold was cleared while the job itself could not be removed, is reported as a change that did not finish, never as nothing changed. A held job's preview comes within 10 seconds whatever Valkey does (past that it says the fleet did not answer within 10 seconds, and that nothing was changed), and its answer within its own time limit. |
 | Fleet | Retry | Puts a failed job back in the queue. The worker runs it again from the start, through every budget check, so it can cost money. The job keeps the attempts it made, so it has no Undo: Cancel stops it once it runs. |
 | Fleet | Remove | Deletes a failed job from the queue. Its run record stays. |
-| Fleet | Pause, Resume | The whole fleet, as `p` and `r` do in the panel, or one queue. A fleet resume is refused while the console's environment and the deployment's `.env` name different Valkeys, as in the panel and the tools. A queue's preview waits for the fleet at most 10 seconds, then says it did not answer and that nothing was changed; a fleet resume's preview then leaves out how many jobs wait to start, and says it could not read them. |
+| Fleet | Pause, Resume | The whole fleet, as `p` and `r` do in the panel, or one queue. A fleet resume is refused while the console's environment and the deployment's `.env` name different Valkeys, as in the panel and the tools. A queue's preview waits for the fleet at most 10 seconds, then says it did not answer and that nothing was changed; a fleet resume's preview then leaves out how many jobs wait to start, and says whether the fleet did not answer in time or could not be read. A preview reads at most 200 of the fleet's queues and names at most 20 in a line, then says how many more; when it could not read them all it says so, its counts are "at least", and its Undo is by hand. The pause and resume themselves still reach every queue. |
 | Fleet | Retry all, Remove all, Cancel all held | The bulk actions (below). |
-| Parked | Answer | Sends your answer to a run that is waiting on an issue ([below](#answering-a-parked-run)). Costs money. |
+| Parked | Answer | Sends your answer to a run that is waiting on an issue, where the console has checked it can build the answer ([below](#answering-a-parked-run)). Costs money. |
 | Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. Its banner's Undo cancels the new run before it starts. |
 | After a re-run | Cancel a queued job | Takes the job the re-run queued out of its queue before it starts ([below](#cancelling-a-queued-job)). |
 | Run | Steer, Follow-up, Withdraw | Sends a message to a running, steer-armed job, or takes one back ([below](#steering-a-running-job)). Spends from the run's own reservation. |
@@ -1349,10 +1416,15 @@ the fleet at most 10 seconds, as a held job's cancel does, then says the fleet d
 
 ### Answering a parked run
 
-On the parked page, an operator can type an answer under a run that is waiting on an issue and send it. The console
-does not comment on the issue itself: it queues the same job a reply on the issue would have queued, through your
-comment trigger, with your answer as the reply text. The run resumes from where it stopped, and reads your answer as
-data, exactly as it reads a comment.
+On the parked page, an operator can type an answer under a run that is waiting on an issue and send it. The page offers
+the answer box only where the console has checked, as it will before it queues anything, that it can build the answer
+(for the first 20 parked runs on the page, each check kept 15 seconds; the run page checks the rest): a park it cannot
+answer from here (a pull request, expired data, a comment trigger that would not route a reply) says why under "This
+question cannot be answered here", and one whose check could not be read sends you to its run page, whose Chat panel
+takes the answer too. A viewer, and a read-only console, see the cards without a box. The console does not comment on
+the issue itself: it queues the same job a reply on the issue would have queued, through your comment trigger, with your
+answer as the reply text. The run resumes from where it stopped, and reads your answer as data, exactly as it reads a
+comment.
 
 What the issue shows: once the worker has checked that the issue really is waiting, and before anything is spent, it
 posts one comment as the deployment:
@@ -1366,14 +1438,17 @@ from an operator's /dispatch panel" instead, so a token named `panel` is refused
 `@name` in your answer is changed so it does not notify anyone. That comment is
 the record of what the agent was told, for anyone who reads the issue later.
 
-An answer is at most 8 KiB of text; control characters are removed, and an empty answer or a longer one is refused,
-never cut. The console refuses, before queueing anything, a run that is not waiting any more (answered already, or a
-later run on the same issue), a run being answered right now (an answer or another run on the same issue is queued or
-running), a run for which that could not be told (the queue could not be read, try again; or it holds more than
-10,000 queued and running jobs, answer on the forge or wait), a run that parked on
-a pull request (answer it on the forge, with your trigger phrase),
-a run whose queue data has expired (31 days), and a deployment whose comment trigger would not route a reply (none for
-that forge, a command, or no `run.resume`). The audit log records the run and a hash of your answer, never the text.
+An answer is at most 8 KiB of text (8,192 bytes, counted after control characters are removed), and an empty answer or
+a longer one is refused, never cut. The box stops you at 8,192 characters, which is the same limit only for plain
+ASCII: an answer with accented letters, other scripts or emoji can be shorter than that and still over 8 KiB, and the
+preview then refuses it, saying how many bytes it is. The console refuses, before queueing anything, a run that is not
+waiting any more (answered already, or a later run on the same issue), a run being answered right now (an answer or
+another run on the same issue is queued or running), a run for which that could not be told (the queue could not be
+read, try again; or it holds more than 10,000 queued and running jobs, answer on the forge or wait), a run that parked
+on a pull request (answer it on the forge, with your trigger phrase),
+a run whose queue data has expired (31 days), a deployment whose comment trigger would not route a reply (none for
+that forge, a command, or no `run.resume`), and a run whose record could not be read (it says which, and that nothing
+was queued: try again). The audit log records the run and a hash of your answer, never the text.
 Answering needs a worker of the same release as the console: an older worker runs the answer but posts no comment.
 
 ### Re-running a run
@@ -1396,8 +1471,11 @@ for one of them, or for a kind the console cannot re-run, the page says "Not off
 the same words the preview would give. The page asks the queue for the run's data at most every 15 seconds; when it
 cannot, it judges from the record alone, and then only says the data is gone once the run ended more than 8 days ago (a local run:
 a week and a day) or 31 days and a day ago (a forge run, or a recovery of either kind). It looks in the same queues the
-preview does, including the queue of a host that has stopped and left the host registry; when the registry or the
-list of queues cannot be read, it does not conclude the data is gone, and judges from the record alone. The rest (the triggers file, the folder, the trigger now) is
+preview does, including the queue of a host that has stopped and left the host registry, and looks for the fleet's
+queues again before it calls the data gone (when the page opens; its live updates keep what it found then); when the
+registry or the list of queues cannot be read, it does not
+conclude the data is gone, and judges from the record alone. A run whose record could not be read is refused with
+which read failed: nothing is queued, try again. The rest (the triggers file, the folder, the trigger now) is
 checked when you press it, as before. The same issue and flow run or queued within the last 10 minutes take a forge re-run as a
 duplicate, and a local or scheduled re-run within the same minute likewise; the console says so and nothing is
 queued.
@@ -1446,15 +1524,18 @@ is answered as cleared (below), since after a dropped connection a refusal can b
 that had already gone through. And a job a worker took and finished, or that failed back to the delayed set, in that
 same moment is removed.
 
-Once the removal is asked for, any answer but those refusals is a change that did not finish: the bar says so and
-offers Look again, never that nothing was changed. That covers a removal that was asked for and not answered within
-the time limit (it says only that the removal may or may not have landed, and for a held job that its hold, or the
-job, may or may not be gone: look at the fleet to see whether the job is still queued), one answered in a way the
-console cannot read, and a held job whose hold was cleared while the job itself could not be removed: the bar says the
-hold was cleared and the job was not removed, so it may still be queued without its hold (cancel it again if it is),
-or that the job started while its hold was being cleared. An error's own words appear only with their control
-characters made spaces and at most 200 characters of them. The preview and the confirm answer within their time limit
-whatever Valkey does. The audit log's line has the kind `cancel-queued`.
+Once the removal is asked for, any answer but those refusals is a change that did not finish: the bar says so and offers
+Look again, never that nothing was changed. That covers a removal that was asked for and not answered within the time
+limit (it says only that the job may or may not have been removed, and for a held job that the job or its hold may or
+may not be gone: look at the fleet), one answered in a way the console cannot read, a removal the queue refused whose
+job could not be read back, and a held job whose hold was cleared while the job itself could not be removed: the bar
+says the hold was cleared and the job was not removed, so it may still be queued without its hold (cancel it again if
+it is), or that the job started while its hold was being cleared. These say it in the console's own words, never an
+error's. Every answer of a cancel, its refusals included, says what happened first and names the job once, last, as
+"(job gh-2f6a)", so its audit line, whose reason is cut at 200 characters, keeps what happened even for a job with a
+very long id. An error's own words appear only with their control characters made spaces and at most 200 characters of
+them, the job they name said as "the job", before the job is named. The preview and the confirm answer within their time
+limit whatever Valkey does. The audit log's line has the kind `cancel-queued`.
 
 ### Steering a running job
 
@@ -1517,8 +1598,9 @@ would put an interactive shell one stolen session away from anyone.
 The overview, runs, parked, fleet and run pages update themselves while open; the run page reads its data about
 every 2 seconds, for its progress ([Run progress](#run-progress)), and its live transcript streams on its own
 ([The live transcript](#the-live-transcript)). Insights, configuration and the audit log are drawn once per load:
-their title bar says when ("Drawn at" and the time, in your own time zone once the page's script has run) and that
-they are not live, beside **Reload**, which opens the same page again. The live pill in the top bar says:
+their title bar says when ("Drawn at" and the time, with your date and in your own time zone once the page's script
+has run) and that they are not live, beside **Reload**, which opens the same page again. The live pill in the top bar
+says:
 
 - **Live** while updates arrive.
 - **Reconnecting** while the connection is down (the console was killed or crashed, or the network dropped): the page
@@ -1554,10 +1636,14 @@ read its tokens file, and then the note says so: the console could not read its 
 
 **A panel you are using is kept still.** While a preview is open for a panel, or you have typed into or focused one of
 its fields, or its editor is open, updates to that panel wait: it says "Updates paused while you edit" and "Newer data
-is waiting. It shows when you close the preview or leave the field.", and the newest update lands when you do. A
+is waiting. It shows when you are done here: once you leave a field you did not change, apply or set back what you
+changed, and close what you opened.", and the newest update lands when you do. A
 button is not a field: the one you pressed to open a preview, which has the focus again once the bar closes, keeps
 nothing still. When a panel is redrawn under your keyboard focus, the focus stays on the same button in the new
-panel, so Tab carries on from where you were.
+panel, so Tab carries on from where you were. The runs page's filters are kept still the same way, with the same note,
+for a viewer and on a read-only console too: while a field has the focus, and once you have typed a search or picked
+from a list, until you press Apply or set it back as it was, even after you leave the field, the counts wait rather
+than wipe what you chose, and filters you opened on a phone stay open when they update.
 
 Each state is a word as well as a colour, and only Live pulses; Signed out shows the sign-out mark in place of the
 dot. On a phone the pill never changes size: it is one small mark whose shape says the state, a dot for Live, a retry
@@ -1566,7 +1652,8 @@ hears the word, so neither the first load (drawn Not live, then Live) nor a reco
 Valkey once a second for every open page together,
 and only while a page is open, so ten open tabs cost the deployment what one does; the overview's timeline choices
 (`rows`, `zoom`, `project`) only regroup that one read, so every overview tab shares it, while the runs page, whose
-filters make each view its own read, refreshes every 5 seconds. Only the parts of the page that changed are sent,
+filters make each view its own read, refreshes every 5 seconds, a run's page every 2 seconds, and the parked page, which
+checks up to 20 answers on each read, every 5 seconds. Only the parts of the page that changed are sent,
 the line under the overview's title included.
 
 A live page holds one connection open. Each token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all
@@ -1600,6 +1687,7 @@ or a value you sent.
 | Status | When | What it offers |
 |---|---|---|
 | 404 | no page at that address | Go to Runs, Go to Overview |
+| 404 | a run page (`/run?id=`) for an id that this host's run history, the fleet's run mirror, every queue (a stopped host's included, looked for again after you asked), the live transcript and the progress were each read for and found none of (when the console could not read one of those, or it did not answer in time, the run page itself answers 503 and says what it could not read) | the runs search filled with that id (only an id the search takes, and nowhere else on the page), Go to Runs, Go to Overview, with Runs marked as the page you are on |
 | 405 | an address that takes requests from the console's own buttons, not a page | Go to Overview |
 | 400 | a page refused its address (a filter or a cursor it cannot use); the sentence names the parameter and its rule | that page without its query (Runs, for a run page), and Overview |
 | 403 | the audit log, for a viewer | Go to Overview |
@@ -1664,18 +1752,19 @@ curl -sS -b ~/.pdc-cookies -X POST -H 'Content-Type: application/json' \
 rm ~/.pdc-cookies
 ```
 
-Each parked run in `parked` carries its `jobId` as well, so a script can open it or answer it without a second
-lookup. `refusals24h` is the refused count beside `failures24h` (the two the overview's Needs you counts in its last
-line): `{count, top: [{reason, count}]}`, the runs refused in the last 24 hours (a run an operator cancelled is not
-counted) and the five most frequent reasons, which no console page lists any more, or null when the run history
-could not be read; `failures24hFloor` marks both counts as a floor. Whether a worker is online is
-`hosts[].lastBeatAgeMs` with `workers`: the overview's Hosts card counts a host whose last beat is at most 60,000 ms
-old, and says no worker is online only when none is and `workers` (BullMQ's connected workers on the shared queue,
-which holds no clock; null, read as 0, when unknown) is not above zero either. With `fleetDegraded` true it judges
-neither way. `lastBeatAgeMs` is the age the card judges by: when Valkey last refreshed the host's row where the
-console read it, so a host whose clock runs behind reads as beating to a script as it does to the card. A scheduler's
-`name` in `schedulers` is its cron trigger's id, or null for a schedule whose id the console does not take (never its
-job name).
+Each parked run in `parked` carries its `jobId` as well, so a script can open it or answer it without a second lookup.
+`refusals24h` is the refused count beside `failures24h` (the two the overview's Needs you counts in its last line):
+`{count, top: [{reason, count}]}`, the runs refused in the last 24 hours (a run an operator cancelled is not counted)
+and the five most frequent reasons, which no console page lists any more, or null when the run history could not be
+read; `failures24hFloor` marks both counts as a floor. Both count by the console's words, so a durable run that was lost
+and could not be continued (recorded `policy`, called failed) is in `failures24h` and not in `refusals24h`. Whether a
+worker is online is `hosts[].lastBeatAgeMs` with `workers`: the overview's Hosts card counts a host whose last beat is
+at most 60,000 ms old, and says no worker is online only when none is and `workers` (BullMQ's connected workers on the
+shared queue, which holds no clock; null, read as 0, when unknown) is not above zero either. With `fleetDegraded` true
+it judges neither way. `lastBeatAgeMs` is the age the card judges by: when Valkey last refreshed the host's row where
+the console read it, so a host whose clock runs behind reads as beating to a script as it does to the card. A
+scheduler's `name` in `schedulers` is its cron trigger's id, or null for a schedule whose id the console does not take
+(never its job name).
 Whether a park is being answered is not in `/api/state`; `/api/run` says it per run (`pendingRunOnTarget`).
 
 `GET /api/run?id=<job id>` (or `?url=<issue or pull request link>`, which finds the newest run on that target) returns
@@ -1686,7 +1775,12 @@ its target that takes its answer (`pendingRunOnTarget`). `steer.armed` is null w
 (unknown, not "off"). A link finds the same run whatever the case of the repository path or leading zeros in the
 number, among the newest 2000 runs it searches. Both roles may read it: it carries ids, fixed
 words, times and numbers only, never a record's free text, a job's data, transcript text or a session key. This is what
-`pi-dispatch chat` asks. The fields are `INT-CONSOLE-STATE-API`'s.
+`pi-dispatch chat` asks. The fields are `INT-CONSOLE-STATE-API`'s. A run id is a `404` only when everywhere a run is
+kept was read and holds none of it, the run page's run-not-found rule; when one of those could not be read, the answer
+is a `503` whose sentence names what the console could not read ("whether a run with that id exists could not be
+told: this console could not read every queue; try again"), so a script should ask again rather than read it as no
+such run. A run the console does find, but whose queue it could not read, is a `503` too: "the queue could not be
+read, so this run's chat cannot be judged; try again".
 
 Without a session, `/api/state` answers 401 with a JSON error, never a redirect to the sign-in page:
 `{"error": "sign in first", "ended": "idle"}`, where `ended` says why the session behind your cookie ended (one of the
@@ -1699,7 +1793,8 @@ it and a revoke ends only its access.
 
 The `/dispatch` panel in pi shows the same parked runs: press `k` in the list to open the PARKED
 view, with each run's target, forge, age and resume count (`?` when this host cannot see the session store). Enter
-opens the run's detail. The panel and the console read the deployment
+opens the run's detail; when the run's record cannot be read it says so, and it says there is no record only when this
+host and the run mirror were both read and hold none. The panel and the console read the deployment
 through the same code, so the two never disagree about what is waiting.
 
 ## Reference

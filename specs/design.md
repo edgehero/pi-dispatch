@@ -2946,7 +2946,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   and the console its own, but the word is one. The words come from the record made readable: `policy` reads as
   refused, and two reasons change the word because the outcome alone misstates them (`awaiting-input`: a completed
   run waiting on a person; `operator-cancel`: stopped by an operator, not refused by a rule), each tied to the one
-  outcome it qualifies so a malformed record cannot borrow it. An outcome the release does not know prints as itself,
+  outcome it qualifies so a malformed record cannot borrow it. AMENDED 2026-10-26 (#737 PR 4a): five reasons, since the
+  three recovery ends the worker records as `policy` (`recovery-cap`, `recovery-checkpoint-absent`,
+  `recovery-unsafe-extensions`) read failed, a run lost and not continued being no rule's refusal; each entry says
+  whether its word says why (`says`), and a row adds its reason where the word does not, which `qualified` (any reason
+  that changed the word) decided before, so a recovery end keeps its token at the row's end; and a record reason that
+  is not a token, an older worker's error text, is no reason to the panel's row or run detail (`recordReason`), nor to
+  a model: `dispatch_runs`, by id and as a list, hands a record's reason only when it is a token (`modelRunRecord`,
+  which keeps a record whose reason is a token or none as it is). An
+  outcome the release does not know prints as itself,
   as a failure, as the panel always did. The list row reads `⚠ refused · 3t · 12.3k · scope-cap`: the word in the
   outcome cell, and a reason the word does not say as the row's LAST cell, so a narrow frame clips the token before the
   turns and the tokens (CORRECTED in review round 1: the first draft put the token in parentheses beside the word, and
@@ -11910,7 +11918,12 @@ a tunnel.
   overview in the Pulse markup with its timeline, waitlists and first run (the bullet "The overview in the Pulse
   markup" below, the amended "The screens", "One fleet reader", "The live hub", "Run progress", "Run chat", "A
   truthful overview", "The Venues view", "The kit", "A panel element carries only `id` and `data-panel`", "The legacy
-  layer" and "Two checks hold the look", and the rejected options marked #737 PR 3b). This entry
+  layer" and "Two checks hold the look", and the rejected options marked #737 PR 3b); issue #737 PR 4a, the runs and
+  parked pages in the Pulse markup and the reasons for infrastructure exits (the bullet "The runs and parked pages in
+  the Pulse markup, and the reasons for infrastructure exits" below, the amended "Every query is judged before anything
+  is read", "The live hub", "Refusals beside failures", "The run page leads with its outcome", the time rule of "A
+  truthful overview, readable numbers and local times", "The legacy layer" and the timeline, and the rejected options
+  marked #737 PR 4a). This entry
   supersedes three of the rejected options of `DES-ADMIN-VIA-PI-EXTENSION` (a served graph page, the web panel with Bull
   Board) where they
   stand, and keeps its fourth: mounting admin on the receiver stays rejected.
@@ -12184,7 +12197,13 @@ a tunnel.
     ledger's allowlist (`MODEL_REF_PATTERN`) admits. `/api/run`'s `safeRunOf` and the what-if form's model part use the
     same pattern rather than a copy each: the copy `/api/run` held duplicated the filter's (both refused those ids),
     and the what-if's own extension admitted a leading `@` or `~` followed by anything other than a letter or digit
-    (`provider/@`, `provider/~`, `@.x`, `~/x`; none of them a priced id) that the filter did not.
+    (`provider/@`, `provider/~`, `@.x`, `~/x`; none of them a priced id) that the filter did not. AMENDED 2026-10-26
+    (#737 PR 4a): twelve fields, `backend` (#712) and `problems` (`1`, every run whose word is not completed, so a run
+    awaiting input is one, though its record says completed) among them; `q` is a fragment of the target or the job id,
+    since the runs page's one search pill takes either, of at most 200 characters, the run id's own bound, so every id
+    the run page takes is a search the runs page takes whole; and `outcome` takes
+    the five words a row's badge says (`OUTCOME_KEYS`, matched by `outcomeKey`) and the record's own `policy`, where it
+    took the record's three values ("One word for filtering, counting and drawing", below).
   - **No inline style.** The CSP's `style-src 'self'` blocks an inline `<style>` and every `style=` attribute, so the
     stylesheet is a served file (`admin/src/console/style.mjs`, `CONSOLE_CSS`) built from the insights page's own CSS
     (`INSIGHTS_CSS`, now exported), the panel's theme tokens (`PAGE_THEME`) and the console's layout rules; the one
@@ -12292,7 +12311,13 @@ a tunnel.
 - **The live hub** (`admin/src/console/live.mjs`): live updates are server-rendered panels over Server-Sent Events
   (`INT-CONSOLE-EVENT-STREAM`). One poll loop in the console process, every second (the panel's cadence), and only
   while at least one stream is open, so a console nobody watches reads nothing and N open tabs cost Valkey one poll,
-  not N; a runs view, whose filters make every distinct query its own read, reloads at most every 5 seconds. Each tick
+  not N; a runs view, whose filters make every distinct query its own read, reloads at most every 5 seconds (AMENDED
+  2026-10-26, #737 PR 4a: `pageMinMs` holds the runs page to 5 s, the run page to 2 s and the Parked page to 5 s, which
+  reads a snapshot and up to twenty planner checks per load and draws what the reader refreshes at most every 15 s;
+  each load is told who will see it, `{ readOnly, live: true }` and `role: "viewer"` where no operator's stream shows
+  the page, never an operator's role since one load serves every role watching it, and a load made for viewers alone
+  is not reused for an operator's stream, so the Parked page reads no check that no form is drawn from; `live` marks
+  the load as the hub's, whose by-id job lookups start no keyspace scan, "Only the actions that can work"). Each tick
   it loads each distinct page and query once (AMENDED 2026-10-25, #737 PR 3b: each distinct page and DATA query,
   `dataQueryOf`, so every overview grouping, window and project shares one load; "The overview in the Pulse markup"
   below), renders that page's panels, digests each, and writes
@@ -12462,7 +12487,9 @@ a tunnel.
     `forgeLinkOf`'s own shapes it accepts the request URLs a person copies, GitHub's `/pull/<n>` and Forgejo's
     `/pulls/<n>`. An Azure work item names no repository, so its runs decide, and several repositories are a 409
     with candidates, never a guess. A queue that cannot be read is a 503: a mode judged on half the facts is worse
-    than none.
+    than none. AMENDED 2026-10-26 (#737 PR 4a): for a run no place shows, that 503 is `runNotTold`'s, "every queue"
+    among the places it could not read ("The run-id 404 offers the search"); for a run a place shows, it is
+    `RUN_UNREADABLE`, which names no cause, since the queue lookup's failure is not always Valkey's.
   - **`format=json` on `/api/transcript`** (`INT-CONSOLE-EVENT-STREAM`): the terminal's structured entry, on the same
     route, role and slots; the hub renders once per format per tick. The browser keeps the server-rendered HTML (the
     rejection of browser-side rendering below stands).
@@ -12490,7 +12517,9 @@ a tunnel.
   - **Only the actions that can work.** The re-run's cheap refusals are `rerunRefusalOf`, the planner's first step, so
     the page and the click cannot disagree on them. The run page asks it over the retained job's data through the
     fleet reader (`rerunCheck`, one `getJob` per queue, the `parkedAnswerCheck` pattern) and caches the answer 15 s per
-    run id and record (`rerunCheckOf`, `parkedAnswerCheckOf`'s cache). The record alone (no check, or an unreadable one)
+    run id and record (`rerunCheckOf`, `parkedAnswerCheckOf`'s cache; AMENDED 2026-10-26, #737 PR 4a: an answer that
+    could not be read is kept as long as a good one, since one read again on every tick sent a Valkey that was already
+    failing a queue lookup per run per tick). The record alone (no check, or an unreadable one)
     can infer only that the data is gone, past the kind's longest retention plus a day: a local record does not say
     which of BullMQ's two ends its job met, the record's `endedAt` can precede `finishedOn`, and BullMQ removes by age
     only when a later job finishes. REJECTED: a record-only `/command` or parked-answer check (the record carries
@@ -12508,7 +12537,51 @@ a tunnel.
     discovery, `fleetQueuesOn` (`readFleetQueues` is it over a client of its own), so they ask the same queues by
     construction; a degraded discovery makes not-found unreadable (uncached, the record alone decides), never "the data
     is gone". REJECTED: the per-tick registry set (a host stopped more than ~90 s drops out of it while its queue holds
-    the job). The bundle: the predicates the verdict needs moved into the worker's leaf `sandbox-policy.mjs`
+    the job). AMENDED 2026-10-26 (#737 PR 4a): the retained-job read, the run page's job status and the Parked page's
+    checks ask the fleet reader's by-id lookup instead (`lookUp` over `lookupSetOf`: the registry's queues, read now and
+    never cut, then the queues the waiting read's kept discovery names that the registry does not, in name order, as
+    many as fit beside the registry's in `WAITING_QUEUES_MAX`, so none when the registry alone names that many), which
+    is the kill switch's set and the planners' but for the discovery's age (a live host's queue is in the registry at
+    once), read once for the callers that overlap (`jobQueues`): `fleetQueuesOn` ran a keyspace scan per call, and the
+    Parked page's twenty checks made twenty a tick. A JOB IS ABSENT ONLY FROM A SET READ AFTER THE QUESTION WAS ASKED,
+    AND A KEYSPACE SCAN FOR AN ABSENCE IS A REQUEST'S, NEVER THE LIVE HUB'S. A request's lookup (a page GET's,
+    `/api/run`'s): the kept discovery serves every hit at once, but a miss over one whose scan started before the
+    question (`scans`, each scan's `seq`; for a page load, the load's one question, `lookupQuestion`, read once in
+    `loadPageData`) is asked again over a scan that started after it (`scanSince`: the last set when its scan did, else
+    the scan in flight when it did, else one started now, after the one in flight, one at a time), beside the registry
+    already read; the questions that overlap share that scan, and so do one load's lookups, which ask that one question
+    and run together (the chat facts and their answer check beside the re-run check), so a load that misses waits for
+    one scan and costs one in all, the discovery's own window scan (at most once per `WAITING_DISCOVERY_TTL_MS`)
+    included, since a scan it starts is one after the question. A queue made after a scan is in no set it settled into
+    (a local run onto a new host's queue, or a stopped one's, whose registry row is gone at once), and an idle
+    console's kept set may be hours old, since a caller with a set never waits for the next one: taken as whole, a kept
+    set would make such a job's run page the run-not-found page, `/api/run` a 404 and its Parked check say the queue no
+    longer holds it. The new scan is waited for at most twice the read timeout (the one in flight, then its own); one
+    that does not settle in it, or does not read the whole keyspace, leaves the miss not whole. A caller to which an
+    absence makes no difference asks for none (`tellAbsent: false`: `chatFactsOf` for a run with a record, which the
+    record shows whatever the queue says). A live load's lookup (the hub's, `who.live`, every tick for every open page
+    and id) starts no scan, the discovery's window one included: it asks the registry read now and the last discovery
+    as it is, of any age, and makes no absence of its own, its set whole only for an id a request's lookup last found
+    absent (`toldAbsent`, oldest first, at most `LOOKUP_TOLD_MAX`, 256, so made-up ids push out only the oldest, and an
+    id leaves once a request finds its job), so a page's live loop keeps what its request was told and a miss over any
+    other id is `found: null`; a job a queue in that set holds is found either way. So a run page's 2 s loop scans
+    nothing, whatever its record, and nor do the Parked page's live loads: in a probe whose scan took about 180 ms, one
+    hub pass over 24 made-up run ids took 4,330 ms while each live lookup scanned, and takes 71 ms. What a request still
+    costs, measured and accepted: a GET of an ended run's page whose job is gone costs one scan for either role (the
+    re-run check, which page data reads for both roles, asks for an absence), and the 15 s check cache
+    (`parkCheckCached`) is shared by requests and live loads, so a request inside a live load's window reads its answer,
+    which is never an absence no request was told. A set that is not whole (the registry unread now, the discovery not
+    whole, the set cut, no scan since the question in time, or a set that could not be built) still makes not-found
+    unreadable, now kept for the 15 s window as every answer is, the record alone deciding meanwhile. REJECTED: a kept
+    set taken as whole while it is fresh (inside its 60 s a queue made after its scan is still in no set it names, so
+    the run page of a job just queued there would still be the run-not-found page); a scan per question (the Parked
+    page's twenty checks would make twenty again; a scan is asked for only on a miss, and the misses of one request's
+    load share it); a scan for a live load's miss (every open page and id paid one on every tick: a mistyped id's page
+    made 21 scans in 40 s, and 24 such ids held a hub pass for over four seconds); and keeping a request's absence for
+    `PARK_CHECK_CACHE_MS` alone (past those 15 s a page still open would turn what its request was told into unreadable,
+    its re-run or answer check flipping from a refusal to one that could not be read with nothing changed, so the
+    absence is kept by count instead, for as long as a page could show it). The bundle: the predicates the verdict needs
+    moved into the worker's leaf `sandbox-policy.mjs`
     (`@edgehero/pi-dispatch/sandbox-policy`), re-exported by `sandbox.mjs` under the same names; importing
     `/sandbox` had pulled the container env builder and the provider SDKs into the console (3.08 MB to 6.90 MB; 3.13 MB
     now), and `admin/test/console-bundle.test.mjs` holds the bundle free of them. REJECTED: a seam that defers the
@@ -12558,7 +12631,9 @@ a tunnel.
     a `policy` record the console calls "cancelled", is not counted. REJECTED: counting every `policy` record (an
     overview that counted cancels would send the operator looking for a rule to change, where someone chose to stop a
     run). The top five reasons by count, then token, so two reads list the same rows; a token outside the record's
-    charset is counted and never listed. The same window, so the same floor.
+    charset is counted and never listed. The same window, so the same floor. AMENDED 2026-10-26 (#737 PR 4a):
+    `failures24h` counts by the word too, so a recovery end recorded `policy`, which both surfaces now call "failed",
+    is a failure and not a refusal, and the overview's count, the runs page's and the timeline's pill agree.
   - **A failed job's record reason.** The failed list gains `reason`, the job's newest record's closed enum in the wide
     window (null without one), so the fleet page names why in the row and links the run. BullMQ's `failedReason` stays
     the operator's free text, in the details (`REQ-CONSOLE-SECURITY` (l)); the Job projection itself is unchanged (five
@@ -12596,7 +12671,16 @@ a tunnel.
     times read as the page's do. An element whose `datetime` is not an ISO instant is left as drawn. Without the script
     a page reads UTC. No inline script or style: the CSP is unchanged. REJECTED: formatting a zone on the server (it
     does not know the reader's, and a cookie or header carrying it would make a page differ per reader); `Intl` zone
-    names (long, and not on every engine the same).
+    names (long, and not on every engine the same). AMENDED 2026-10-26 (#737 PR 4a): the script writes the reader's
+    date before every time, so no time is read against the wrong day, but for one the server marks `data-day`
+    (`localTime`): a time whose row names its UTC day, the runs table's Ended cell under its day's row (`endedHtml`),
+    which stays alone where the reader's date of the instant is its UTC date ("17:39 UTC+2") and carries the reader's
+    date where it is not: the Ended cell under "2026-10-08 UTC" at 23:30 UTC reads "2026-10-09 01:30 UTC+2" two hours
+    east. Every other time, drawn with its date or alone (a page drawn once's "Drawn at"), carries the reader's date,
+    as before. The form is the mark's and the `datetime`'s, never the
+    text's, so a second run keeps the first's. REJECTED: keeping alone every time the server drew alone, judged by its
+    text: a time no row dates is a time of no day, which a reader takes for today's (a page drawn once and left open
+    past midnight would still say "Drawn at 17:30 UTC+2" the next day).
 - **Doctor results** (AMENDED 2026-10-21, #712 PR C, `DES-DOCTOR-RESULTS-PUBLISHED`, `INT-DOCTOR-RESULTS-KEY`): the
   fleet reader's snapshot carries `doctor`, each host's last published doctor run, read for the index's hosts and the
   live ones at most every 15 s (a host publishes daily, so a per-tick MGET would be load for nothing), never pruning
@@ -13151,7 +13235,11 @@ a tunnel.
     margin inside a legacy panel. The audit page, both sign-in pages and the operators-only page left the layer (Pulse markup;
     `LEGACY_PAGES` is the seven other screens; since #737 PR 3b the six, the overview drawn in the Pulse markup, and
     no rule of the layer went with it, since every class its old panels drew is still drawn by another old page or by
-    `panels/common.mjs`), and the rules nothing emits any more went with them (the old preview
+    `panels/common.mjs`; since #737 PR 4a the four, run, insights, fleet and config, the runs and parked pages drawn in
+    the Pulse markup, the old pager's two rules and its `.pager` collision going with them, since the runs table's Newer
+    and Older links were the last old markup to draw it, and `.code` joining `NEUTRALISED`, since `panels/common.mjs`,
+    read as old markup while any page is legacy, now writes `outcomeCell`'s code span), and the rules nothing emits any
+    more went with them (the old preview
     area's summary, reserve and confirm, `pre.diff`, every `#login-form` rule), `.confirm` and `.diff`
     leaving `NEUTRALISED` once the derivation agreed. REJECTED: one wrapper with the slot drawn inside it and its
     classes restyled back (a second copy of the bar's look under the legacy layer, for a slot that moves anyway).
@@ -13971,7 +14059,9 @@ a tunnel.
     Running (`REGISTRY_UNREAD_TEXT`, under the rows last seen or in their place) and on Hosts (its banner), never that
     no host is registered; with no host row, Running says jobs that run as "4 jobs running, slots not published" (a
     worker from before the registry, or a registry that could not be read).
-  - **The timeline** (`timeline.mjs`, pure, importing `html.mjs` and `kit.mjs` only): `timelineModel` turns the
+  - **The timeline** (`timeline.mjs`, pure, importing `html.mjs` and `kit.mjs` only; since #737 PR 4a `words.mjs` too,
+    so an ended run's word and pill are `outcomeWord`'s status, `endedWord`, and a recovery end is a failure's pill
+    where a map of the raw values called every `policy` record but a cancel refused): `timelineModel` turns the
     snapshot's `runsDay`, `active`, the registry rows' jobs, `waiting` and `parked` and an instant into rows, lanes and
     percent positions (`svgNum`, since the CSP forbids `style=`), and `timelineHtml` draws them; the same parts and the
     same `now` draw the same bytes. Zooms `1h`, `3h` (the default) and `24h` (`TIMELINE_ZOOMS`, now at two thirds of
@@ -13999,7 +14089,14 @@ a tunnel.
     character each, the sans sub line by the class of each character (`SANS_CLASSES`, each the widest Chrome draws of
     its class at either weight), since one average was wrong both ways there ("pause window" touched its pill's dashed
     end while a high enough average pushed narrow words out of pills they fit), and a waiting label keeps `WAIT_END_PX`
-    (6) clear of its pill's end. A row's head (a project's tag, a host's name) is cut with an ellipsis by the page's
+    (6) clear of its pill's end. An item of any kind draws its label only when it has one (`LABEL_HTML`, one drawer a
+    kind, called by `itemHtml` only for an item with a label; AMENDED 2026-10-26, #737 PR 4a): packing leaves an item
+    with no label where its row is crowded, and a refused item's markup read its label's side with no label there, so
+    refusals seconds apart in one crowded row threw and the overview answered 500 for every role, on main since #737
+    PR 3b; such an item is now its shape alone, whatever its kind, as an ended run's and a failure's already were. An
+    item of a kind `LABEL_HTML` does not name throws `RangeError` in `itemHtml`, with a label or without, before
+    anything is drawn: a kind no drawer knows is a defect, never drawn as another kind. A
+    row's head (a project's tag, a host's name) is cut with an ellipsis by the page's
     rules, 8 px short of the 124 px column, and is whole in its `title` (`ptag`'s `title`) and in the row's accessible
     name: the browser measures the cut, which no estimate on the server could match on every font. A park's "waiting for
     you" goes over its tail where it ends before now, else with its id before the pill, in the parked ink
@@ -14106,7 +14203,279 @@ a tunnel.
     admin/test/graph-model.test.mjs, admin/test/hosts-view.test.mjs, admin/test/setup-wizard.test.mjs (the scheduler key
     and the cron id bound), worker/test/triggers.test.mjs, worker/test/host-registry.test.mjs, and the overview's
     ledgers in admin/test/fixtures/console-ledger/.
+- **The runs and parked pages in the Pulse markup, and the reasons for infrastructure exits (ADDED 2026-10-26, #737 PR
+  4a, `REQ-OPERATOR-CONSOLE-SCREENS` (b), (d) and (p), `REQ-CONSOLE-SECURITY` (l) and (n); the RunsScreen, RunsPhone,
+  DataTable and ParkedPhone cards).** The two screens left the legacy layer: `LEGACY_PAGES` is run, insights, fleet and
+  config.
+  - **The filters are the first panel, never the title bar.** The RunsScreen card draws its filters in the page's title
+    bar, and the title bar is the frame's static markup (`shell.mjs`), which no live swap reaches, while the project
+    chips and the closed lists are drawn from the last 24 hours and change while the page is open. So they are
+    `p-filters`, the first panel, directly under the title bar. A plain GET form to the page (`form.filterbar`), so a
+    filtered view is a link and every control works without the script; the script only folds it on a phone
+    (`data-collapsible`, the toggle drawn `hidden data-reveal`), holds it as a form in use while a field is focused,
+    typed in or a list is chosen, for either role and on a read-only console, since the panel is swapped whenever its
+    counts change, and on a submit leaves out the fields that are empty (each disabled while the browser reads the
+    form, enabled a tick later), so the address names only the filters in use. A changed field holds its panel until
+    it is applied or set back, not only while it has the focus: a search typed and left would otherwise be wiped by the
+    next count. Its template (`<template id="held-note">`) is on every live page for every role, where it was drawn
+    only for an operator who can write, whose write forms were then the only ones a panel could be held for; a page
+    drawn once is never updated and draws none. So the kept-still note is one sentence true wherever a panel can be
+    held (`HELD_NOTE_TEXT`: "Newer data is waiting. It shows when you are done here: once you leave a field you did
+    not change, apply or set back what you changed, and close what you opened."), naming what ends a hold in words
+    that fit a field, a filter, a preview and an editor alike, never a control a reader may not have: the template is
+    one for the page, and a viewer's or a read-only console's filter bar has no preview to close. Apply is the controls'
+    height, `--control-h`, and the row stands on its bottom edge,
+    where bundle.css centred it and drew the button 38 px high, 8 px above the lists' pills.
+  - **The runs table on a desktop is the card's, one line a cell, with one breakpoint** (`runs-css.mjs`,
+    `RUNS_TABLE`). The RunsScreen card draws every cell on one line, and bundle.css let a model or a flow break at its
+    hyphens ("claude-/sonnet-/5-5" stood three lines high in a 71 px column), so on a desktop every cell but the
+    outcome's sentence and the target's stays on one line. A value of no fixed length is a box of its own, as wide as
+    the value up to a bound and broken inside itself past it (at a hyphen first), so a long one grows its own row and no
+    other: a scheduler's `repeat:<trigger>:<slot>` made the Job column 282 px wide for every row, and a 64-character
+    host on one line widened the table by 221 px at 1,440. A job id's box is at most `RUNS_TABLE.idMaxCh` (22)
+    characters of the code face, not the card's Job column of about 12: 22 hold a forge delivery's id (`gh-` and a GUID,
+    39 to 42 characters, `-r2` for a replica) in two lines, where 12 broke it into four or five and made its row about
+    103 px high for 66. A host, a flow or a model is a `.val` box (`panels/runs.mjs` `valueCell`) of at most
+    `RUNS_TABLE.valueMaxCh` (20) characters, which holds the card's values (`build3`, `claude-sonnet-5-5`) on their
+    line. The Ended cell is the time alone (`endedHtml`, "15:13 UTC") under its day's row, as the card writes it, the
+    whole instant in its `<time>`'s `datetime` and the element marked `data-day`, the one mark the script keeps a time
+    alone by ("A truthful overview, readable numbers and local times"): the date and the zone repeated on every row made
+    the cell 179 px for the card's 69, and it, not the id, made the rows high; with it, the fixture's runs at 1,440 px
+    stand in one-line rows but a few (45 of a page's 50 at 22 characters, 46 at 12), a median of 47 px. With every
+    column the fixture's runs need a table of about 1,365 px in the macOS font and 1,404 px in DejaVu Sans, which
+    scrolled sideways by 136 px in a
+    1,280 px window, so below the card's own width (`RUNS_TABLE.allMin`, 1,440 px) a desktop leaves out the five columns
+    a phone does (flow, venue, model, tokens and job cap, which the kit marks `hide-phone` on the head as on the cells,
+    and the run page shows), and the table is about 935 px. ONE breakpoint, the card's own width, with the phone's set
+    of columns below it, so a desktop draws one of the two tables the cards draw. What it leaves, measured and accepted:
+    in DejaVu Sans, CI's font, at exactly 1,440 px with every column shown, the table scrolls 12 px sideways inside its
+    own box (`tbl-wrap`), while the page itself does not scroll; and a 60-character host, broken inside its `.val`
+    box, still widens the Host column for every row (to 188 px), so there the table scrolls 21 px inside the same box,
+    the page again not scrolling. On a phone the RunsPhone card labels the host and the
+    cost alone, so a column whose phone label is "" writes no `data-l` (`kit.tbl`), and no page rule
+    switches a label off.
+  - **The last 24 hours cost no read** (`runsWindow()`, `runsWindowOf`): one fold of the wide window the fleet reader
+    already caches for `parkedCount` and the snapshot (`wideRuns`, 15 s), so the summary, the project chips and the
+    lists' values add nothing to a tick; the list itself still pages through the whole history (`readRunsPage`). What it
+    cannot see is that window's: the newest `WIDE_RUNS` runs, so a busier day ends inside the window and `floor` says
+    "at least". A list offers only values its field's filter takes (`windowValuesOf` through `parseRunFilter`), the most
+    frequent 50, so a select never offers a link the page would refuse and another host's text never reaches one.
+  - **One word for filtering, counting and drawing** (`words.mjs` `outcomeKey`, `OUTCOME_KEYS`, `OUTCOME_KEY_WORDS`). A
+    record's outcome and reason map to the word its badge says, and the filter, the summary's counts and links, the
+    outcome list, the chips and the row's reason link all read that one key, so a count is always a link to the runs it
+    counts. `policy` stays a value of the filter, meaning the record's own value, so a link written before the keys
+    still finds its rows. This reverses #710's choice, which took the record's three values and refused the console's
+    words so that a filter matched exactly what the record held: with the counts drawn by word, a filter by value could
+    not find what the page counted (a recovery end counted failed would be found only under `policy`, and `completed`
+    would count the runs awaiting input).
+  - **The recovery ends read failed** (`REASON_WORDS`). `recovery-cap`, `recovery-checkpoint-absent` and
+    `recovery-unsafe-extensions` are recorded `policy` (never retried, commented "Failed:"), but the run was lost and
+    could not be continued, which no person reads as a rule's refusal. They join the two reasons that change the word,
+    each tied to `policy`, with a flag of their own, `says: false`: "awaiting input" and "cancelled" say why, so a row
+    adds no sentence; "failed" does not, so the row keeps the reason's sentence (`outcomeWord`'s `qualified` hid it).
+    Every surface that reads the reason with the outcome follows: the runs list, the summary, `failures24h` (counted by
+    word, as `refusalsIn` counts refusals), the timeline's pill (`endedWord`), the run detail's Outcome row and the
+    `/dispatch` panel. The browser script's transcript end and the topology's tip are handed the outcome alone
+    (`OUTCOME_WORD_OF`) and still say refused for any `policy` end.
+  - **A reason is drawn only when it is a token.** The worker closes the door at the write (`recordReasonOf`,
+    `INT-RUN-HISTORY-FILE-CONTRACT`: an error with no token records `worker-error`, a result's non-token reason null),
+    and the readers hold the same charset for the records an older worker wrote (`recordReason`, `RECORD_REASON_RE` from
+    the worker's import-free leaf, which the console and the panel both bundle): such a record reads as having no reason
+    and the runs row says "No reason was recorded" (`NO_REASON_SHORT`, derived from `NO_REASON_FAILED`), where it once
+    printed the text cut to 64 characters. Every reader holds the leaf's one pattern, not a copy of it (the state
+    document's and `/api/run`'s too), and the panel's `/dispatch runs` table shows a token alone in its REASON column.
+    The run page keeps its old banner until it is redrawn.
+  - **Parked: a card per question, and no question text** (`parkedQuestions`, `ui.questionCard`). The question is the
+    run's last assistant message, transcript text, which `REQ-CONSOLE-SECURITY` (l) shows only in the run page's
+    transcript section, and a parked row carries none by construction; so each card says where the question is read
+    (`PARKED_QUESTION_WHERE`), for both roles; the ParkedPhone card draws the question in large text, and the page does
+    not. The desktop page is the Parked frame the ApprovalRequest card draws, with its Questions tab alone and no
+    Approvals tab: approvals are #649's, and ApprovalRequest is a planned card, which may carry no element ledger.
+  - **The answer form follows the planner's own check.** A box that refuses after the answer is typed wastes the typing,
+    and a pull request's park, expired job data and a comment trigger that would not route a reply are refused by the
+    planner whatever the page draws. So the page reads `parkedAnswerCheckOf` (the predicate `planParkedAnswer` asks
+    first, cached per run for 15 s, an answer that could not be read as long as a good one) for the parks whose verdict
+    is reply, at most `PARKED_CHECKS_MAX` (20) a page, each a read of one job's data and the triggers file, every one of
+    a load sharing one registry read and the queue discovery the waiting read keeps (`jobQueues`, 60 s); on a request,
+    the checks whose job that discovery does not find share one scan started after the load's question (`lookUp`,
+    `lookupQuestion`, "Only the actions that can work"), so a job on a newer queue is never refused as gone, and on the
+    live hub's loads they start none, each keeping what the page's request was told of its job; it reads none
+    for a load no form is drawn from (`formsDrawn`: a viewer's, a read-only console's), and the live hub loads the page
+    at most every 5 s (each check had run a keyspace scan of its own, for every role and on every tick, and an
+    unreadable one was read again on the next: up to twenty scans a second). An ok draws `ui.answerForm` (the fields
+    `parkedAnswerForm` has always posted, so the script and the action read it as before), a refusal the planner's
+    sentence whole under "This question cannot be answered here" (each sentence already says what to do where something
+    can be done), and an unread or skipped check leaves the answer to the run page, whose Chat panel checks again and
+    keeps its form open when it cannot.
+  - **The Search button is a link** (`shell.mjs` `SEARCH_HREF`, `/runs#q`): it works without the script, which on the
+    runs page puts the focus in the field when the page opens at the fragment, when the fragment changes to it and when
+    the button is pressed while the address already ends with it, since a fragment scrolls but focuses nothing; a page
+    that took the focus on load would move a screen reader's place. The field's id `q` is reserved in the kit and
+    `searchPill` the one helper that writes it. Off a phone's bar (the runs page's search stays in view there), and off
+    a desktop bar for its own width past each width where the bar's end is tightest (`TOP_BAR.searchRoom`, 56 px:
+    761 to 816 px read-only, 1,440 to 1,495 px, and 1,600 to 1,655 px read-only), measured in DejaVu Sans with
+    Reconnecting: the button left the avatar 17 px under Sign out at 761 px read-only, 5 px at 1440 and 15 px at 1600
+    read-only. Those numbers are for a one-digit Parked count; three digits push the one-row navigation 17 px further
+    (the button then 21 px short at 1440 and 32 at 1600 read-only), and the bands are the button's width, which holds
+    both. The bands stay, against the Shell card, which draws the button at 1440: the other way, letting the signed-in
+    name give way down to the avatar alone, was measured and rejected ("Rejected", below).
+  - **The run-id 404 offers the search, and names the id only as its value** (`error-pages.mjs` `no-run`).
+    `error-pages.mjs`' rule is that a 404 names no path, so a crafted link cannot make a console page say words of its
+    choosing; the ErrorPage card's search pill filled with the id keeps that rule because the id is the person's own
+    query there, in a field, never a sentence, and only when the runs page's `q` rule takes it as it is (never cut or
+    cleaned into one that passes). The page says where the console looked. ONE RULE gives the run page its status and
+    `/api/run` its answer (`runPlaces`, over what each place a run is kept says of the id, `{ shown, unread }`;
+    `pages.mjs` `runPlacesOf`, `run-api.mjs` `runDocument`): a run that a place shows is a run (200, a queued job's
+    page included, which was a 404 with every page that held no record, transcript or progress); one that no place
+    shows while a place is unread could not be told (the run page, 503, as `/api/run` answers it, naming the places);
+    and only one that no place shows with every place read, each saying its own none, is absent (`runAbsent`, the
+    run-not-found page, 404; the one rule both 404s are answered by, `renderPage`'s and `runDocument`'s). The places:
+    this host's record file and the fleet's run mirror (`readRunById`'s `missing`, which it answers only when both were
+    read: a file that is there and is no record, and a mirror that did not answer or holds no record, are `unreadable`,
+    `readMirroredRecord`'s `tellUnread` telling an unread GET from an absent key), every queue the kill switch flips
+    (the by-id lookup's whole answer, `chatFactsOf`'s: `found: false` with no `activeJobId` and no `queuedJobId`, since
+    a base run whose job is gone while its recovery runs or
+    waits is a run, which `found` alone would call absent while `/api/run` calls it active; `null` where its set was
+    not whole or read before the question, so a job waiting on a stopped host's queue, or on a queue made since the
+    kept discovery, is found rather than called gone, "The run page leads with its outcome"), the live transcript
+    (`exists: false`, as read) and the progress key (`absent`). Anything else, a read that failed or timed out, a
+    lookup over a part of the set or one that failed, or a reader with no lookup for a source, keeps the run page,
+    whose banner says what it could not read (`runUnreadText` for a record that could not be read, `RUN_RECORD_UNREAD`
+    where the read answered neither a record nor `missing`; `runUntoldText` for a record both sides said they do not
+    hold while another place was not read, for both roles, the places in `RUN_PLACES`' words joined by
+    `runPlacesText`), since a 404 there would claim a run that may exist is gone; `/api/run` answers it 503 with
+    `runNotTold`'s sentence, which names the same places and no cause (Valkey's would be wrong for a record file on
+    this host), a queue lookup that failed among them as "every queue", and a run some place shows whose queue state
+    could not be read 503 with `RUN_UNREADABLE`, which names no cause either. 503 and not 404 for the kept page, since
+    the page could not answer what was asked, as `/api/run` already said; and not 200, which a script would read as a
+    run. The search field holds the asked id when the runs `q` rule takes it, and `q` takes 200 characters, the run id's
+    bound, so it holds any id the run page took.
+  - **What the earlier pages carried.** Every held or queued cancel answer that names its job says its outcome first
+    and the job once, last (`jobLast`), the worker's own refusals included (`heldRefused`), and a partial one carries no
+    error's words, since the sentence is the audit row's `reason`, cut at 200 code points, and a 200-character id once
+    pushed what happened past the cut (the row's `target` names the job); one test drives `cancelQueuedJob` and
+    `cancelHeldJob` through every answer, held to every path by V8's block coverage of the two and of every
+    `job-actions.mjs` helper on their paths that names the job through `jobLast` or `cancelQueuedRefusal` (found in the
+    source, so one added later is walked too), rather than a hand list of sentences, which had missed one; and since a
+    walk sees only what its cases drive, a second test reads the source: of every top-level function of
+    `job-actions.mjs` and `read-model.mjs` a cancel can reach, only `jobLast` (the id last) and `theirWords` (the id
+    taken out) write the job's id into a template's text, so a helper that names the job any other way fails whether
+    or not a case drives it and whichever of the two modules it is in; another module's words are said with the job as
+    "the job" before they are cut, so no cut piece of a long id is left in them (`theirWords`). The re-run's and the
+    parked answer's planners say a run has no record only where the reader says both places were read and hold none, and
+    otherwise what could not be read and that nothing was queued (`recordReadRefusal`), as the run page's banner does;
+    the answer's refusal for a run that is not parked names its
+    outcome and reason as tokens only (`notParkedRefusal`, `recordReason`), since a mirrored record can hold any value;
+    and the `/dispatch` panel's parked view says the same of a record it could not read. The fleet snapshot's bound
+    refuses with a state of its own, `timeout` ("The fleet did not answer in time"), chosen by the refusal's `state` and
+    never by matching its sentence, so a timeout no longer blames Valkey; the bound is a sentinel of its own, so a
+    reader that answers null is a failed read. A switch preview reads at most `SWITCH_PREVIEW_QUEUES_MAX` (200) queues
+    and names at most `SWITCH_QUEUES_NAMED` (20) in a sentence (2,000 planted queues had made 2,003 connections and a
+    134,000-character line), while the switch still flips every queue; a short read (the keyspace scan unfinished, or
+    more queues than it reads) says so, counts floors and builds no exact Undo, since it cannot tell "every queue was
+    paused" from what it saw; its floor rides no ticket or audit row as a count, which carries exact counts alone, and
+    its line names how many it read of how many the switch flips (`switchReadLine`). Which 200 it reads goes by what
+    they are: the shared queue and the registry's first, then the queues only the keyspace scan names, in name order, so
+    a planted `bull:pi-jobs@<name>:meta` key per name cannot push the live queues out of the preview. The overview's
+    Hosts row under an unread registry draws no beat judgement (the idle dot, "beat not read", and "as last seen"), the
+    rule its slots keep.
+  - **Code evidence**: worker/src/record-reason.mjs, worker/src/run-history.mjs (`buildRecord`),
+    worker/src/processor.mjs (the two `InfraRetry` sites), worker/src/reason-catalog.mjs (the three rows);
+    admin/src/words.mjs (`REASON_WORDS`' `says`, `outcomeWord`, `OUTCOME_KEYS`, `outcomeKey`, `OUTCOME_KEY_WORDS`,
+    `recordReason`, `NO_REASON_FAILED`, `RECORD_REASON_RE`, `capitalised`), admin/src/run-filter.mjs
+    (`RUN_FILTER_FIELDS`, `RUN_OUTCOME_VALUES`, `runMatches`, `runVenueOf`, `triggerValueOf`),
+    admin/src/console/panels/runs.mjs (`runsFilters`, `runsSummary`, `runsTable`, their models and sentences,
+    `endedHtml` and its `data-day`, `valueCell`),
+    admin/src/console/panels/parked.mjs (`parkedQuestions`, `parkedCheckRows`, `PARKED_CHECKS_MAX` and the sentences),
+    admin/src/console/panels/common.mjs (`outcomeCell`, `NO_REASON_SHORT`), admin/src/render.mjs (`RUN_COLUMNS`'
+    REASON), admin/src/console/live.mjs and admin/src/console/run-api.mjs (the leaf's pattern),
+    admin/src/console/kit.mjs (`searchPill`, `filterToggle`, `fpill`, `fchip`, `chipRow`, `sumStrip`, `questionCard`,
+    `answerForm`, `textarea`'s `maxlength`, `tbl`'s group rows, `SEARCH_ID`, `RESERVED_IDS`),
+    admin/src/console/runs-css.mjs (`RUNS_CSS`, `RUNS_TABLE`, its `idMaxCh` and `valueMaxCh`),
+    admin/src/console/parked-css.mjs (`PARKED_CSS`,
+    `QCARD_CSS`),
+    admin/src/console/page-css.mjs (`PAGE_CSS`, `TOP_BAR.searchRoom`, `ERROR_CSS`), admin/src/console/shell.mjs
+    (`SEARCH_HREF`, the Search button, `frameHtml`'s `here`, the held note's template on every live page),
+    admin/src/console/script.mjs (the search focus, `foldBars`, `inUse` and `picked`, `keepFocus`'s toggle, a filter
+    bar's submit, `localTime`'s `data-day` rule), admin/src/console/error-pages.mjs (`no-run`),
+    admin/src/console/pages.mjs (`PAGE_PANELS`, `LEGACY_PAGES`, `PAGE_READS`, `loadPageData`'s `runsWindow`,
+    `parkedChecks`, one lookup question and its reads run together, `formsDrawn`, `runPlacesOf`, `renderPage`),
+    admin/src/console/panels/run.mjs (`runUnreadText`, `runUntoldText`), admin/src/console/live.mjs (`LIVE_DEFAULTS`'
+    `pageMinMs.parked`, the load's `who` and its `live`), admin/src/console/run-api.mjs (`runDocument`, `runNotTold`,
+    `RUN_UNREADABLE`, `chatFactsOf`'s `tellAbsent` and `lookup`, `parkCheckCached`), admin/src/console/compat-css.mjs
+    (`NEUTRALISED`), admin/src/console/timeline.mjs (`endedWord`, `LABEL_HTML`), admin/src/console/panels/overview.mjs
+    (`BEAT_NOT_READ_WORDS`, the Hosts rows), admin/src/console/actions.mjs (`snapshotOf`, `SNAPSHOT_UNREAD_SENTENCE`,
+    `SWITCH_QUEUES_NAMED`,
+    `SWITCH_SHORT_LINES`, `switchReadLine`, `queueUnreadRefusal`, `RESUME_WAITING_UNKNOWN`, `resumeBack`,
+    `resumeManyUndo`, `UNDO_SENTENCES`), admin/src/console/confirm-view.mjs (`REFUSAL_STATES.timeout`, `heldNoteHtml`,
+    `HELD_NOTE_CHIP`, `HELD_NOTE_TEXT`),
+    admin/src/job-actions.mjs (`jobLast`, `theirWords`, `heldClearedAnswer`, `heldRefused`, `removalUnknown`,
+    `heldRemovalUnanswered`, `recordReadRefusal`, `notParkedRefusal`), admin/src/read-model.mjs (`runsWindow`,
+    `runsWindowOf`, `RUNS_WINDOW_PROJECTS_MAX`,
+    `RUNS_WINDOW_VALUES_MAX`, `readParkedRuns`' `project`, `failures24h`, `SWITCH_PREVIEW_QUEUES_MAX`,
+    `SWITCH_SCAN_INCOMPLETE`, the switch preview's read, `readRunById`, `RUN_FILE_UNREADABLE`, `RUN_MIRROR_UNREAD`,
+    `RUN_RECORD_UNREAD`, `RUN_PLACES`, `runPlaces`, `runPlacesText`, `runAbsent`, `readJobStatus`' `whole`,
+    `jobQueues`, `lookupSetOf`, `scanSince`, `lookUp`, `toldAbsent`, `LOOKUP_TOLD_MAX`, the fleet reader's `jobStatus`,
+    `lookupQuestion` and `retainedJob`, `modelRunRecord`), worker/src/run-mirror.mjs (`readMirroredRecord`'s
+    `tellUnread`, `UNREAD_RECORD`), admin/src/dashboard.ts
+    (`reasonToken`, `renderRunDetail`, the parked view's note);
+    admin/test/console-runs.test.mjs, admin/test/console-parked.test.mjs, admin/test/read-model-pages.test.mjs,
+    admin/test/words.test.mjs, admin/test/console-kit.test.mjs, admin/test/console-shell.test.mjs,
+    admin/test/console-client-states.test.mjs, admin/test/console-static-pages.test.mjs,
+    admin/test/console-stylesheet.test.mjs, admin/test/console-contrast.test.mjs, admin/test/console-compat.test.mjs,
+    admin/test/console-timeline.test.mjs, admin/test/console-overview.test.mjs, admin/test/console-actions.test.mjs,
+    admin/test/console-confirm.test.mjs, admin/test/held.test.mjs, admin/test/console-chat.test.mjs,
+    admin/test/dashboard.test.mjs, admin/test/render.test.mjs, admin/test/console-pages.test.mjs,
+    admin/test/console-panel-goldens.test.mjs, admin/test/console-ledger.test.mjs, admin/test/console-bundle.test.mjs,
+    admin/test/console-doc-tables.test.mjs, admin/test/console-live.test.mjs, admin/test/console-run-api.test.mjs,
+    admin/test/console-run-outcome.test.mjs, admin/test/record-reason-out.test.mjs, admin/test/cancel-queued.test.mjs,
+    admin/test/console-panels.test.mjs, admin/test/console-server.test.mjs, admin/test/console-cli.test.mjs,
+    admin/test/job-actions.test.mjs, admin/test/dashboard-parked.test.mjs,
+    admin/test/helpers/panel-goldens.mjs, the four new ledgers in admin/test/fixtures/console-ledger/,
+    worker/test/run-mirror.test.mjs,
+    worker/test/run-history.test.mjs, worker/test/processor.test.mjs, worker/test/session-reasons.test.mjs,
+    worker/test/reason-catalog.test.mjs, worker/test/on-failure.test.mjs.
 - **Rejected**:
+  - **Keeping the Search button at the bar's tightest widths by letting the signed-in name give way** (2026-10-26,
+    #737 PR 4a; the Shell card draws the button at 1440 px). Cutting the name down to the avatar alone, in a round pill
+    the buttons' size, frees 20 px (the name's column, its gap and the pill's padding), and the button needs 56:
+    measured in DejaVu Sans with Reconnecting, the theme button shown and a three-digit Parked count, the end was still
+    15 px short at 1440, 11 at 761 read-only and 26 at 1600 read-only, so the avatar ran under Sign out. The button
+    is left out for its own width past each of those widths instead (`TOP_BAR.searchRoom`).
+  - **The runs filters in the title bar** (2026-10-26, #737 PR 4a; the RunsScreen card draws them there). The title bar
+    is static markup that no swap reaches, and the chips and lists are live; drawn there they would be the first load's
+    until a reload. They are the first panel under it.
+  - **Question text on a Parked card** (2026-10-26, #737 PR 4a; the ParkedPhone card draws it). It is transcript text,
+    which only the run page's transcript section shows, and the parked fold reads records, which hold none; reading the
+    transcript for each card would put a run's model output on a list page every role opens.
+  - **Keeping the outcome filter to the record's three values** (2026-10-26, #737 PR 4a; #710's choice). It matched
+    exactly what the record held, but the page now counts and links by the console's words, and a count whose link finds
+    other runs (a recovery end counted failed and found only under `policy`, a run awaiting input counted apart and
+    found under `completed`) is a page that disagrees with itself. `policy` is kept as the record's value instead.
+  - **An answer box on every parked card, judged at the preview** (2026-10-26, #737 PR 4a). The preview refuses what the
+    planner refuses, after the answer is typed; the page reads the planner's own check first, bounded at 20 a page and
+    cached 15 s per run, and draws the box only where it said ok.
+  - **Choosing the timeout's bar by its sentence** (2026-10-26, #737 PR 4a). A sentence is words for a person, and a
+    planner's refusal could come to say the same words for something else; the refusal names its state, and only a state
+    the slot knows is taken.
+  - **Reading every queue the switch flips for its preview, and naming them all** (2026-10-26, #737 PR 4a). A keyspace
+    anything with the Valkey URL can fill made a preview of 2,003 connections and a 134,000-character line; the preview
+    reads 200 and names 20, says when it read short, and builds no exact Undo from a part. The switch itself is not
+    bounded: a kill switch that left a queue running would not be one.
+  - **Keeping an error's message as a record's reason and cutting it where it is shown** (2026-10-26, #737 PR 4a). The
+    record is read by every console role, the `/dispatch` panel and the portfolio snapshot, and a forge host's message
+    names an API path and a repository; a cut keeps the part that leaks. The worker records a token at the write, and
+    the readers refuse what an older worker wrote.
+  - **A job id box of the card's Job column, about 12 characters** (2026-10-26, #737 PR 4a; the RunsScreen card's
+    column fits its own short ids). A forge delivery's id, `gh-` and a GUID of 39 to 42 characters, broke into four or
+    five lines and made its row about 103 px high, where 22 characters hold it in two (about 66 px); the rows of the
+    card's height came from the Ended cell drawn as the time alone, which leaves 45 of a page's 50 rows on one line at
+    22 characters (46 at 12).
+  - **Taking a kept queue discovery as whole while it is fresh** (2026-10-26, #737 PR 4a). A queue made after its scan
+    is in no set it names for as long as it is kept, so a local run queued onto a new or a stopped host's own queue
+    would read as gone: the run page the run-not-found page, `/api/run` a 404, its Parked check refused. A request's
+    miss is asked again over a scan started after the question instead, which the misses of one request's load share
+    (`lookupQuestion`); a live load's starts none and keeps what the request was told.
   - **A setup page of its own, or a setup title** (2026-10-25, #737 PR 3b; the SetupScreen card titles its page "Set up
     pi-dispatch"). A second route is a page the stream cannot move a reader off: the deployment that gets its first run
     would sit on a checklist until someone reloads. One route keeps the h1 "Overview", draws the checklist as three of
@@ -14761,9 +15130,11 @@ a tunnel.
        30 s per run id (`NEWER_CACHE_MS`; an unknown answer is not kept); `/api/run` never does. Review round 2: the
        loop reuses the pending scan and the planner check (`parkedAnswerCheckOf`) for 15 s per run id
        (`PARK_CHECK_CACHE_MS`, the snapshot's own rescan window; an unreadable one is not kept, a new record reads
-       afresh), and when a scan finds the answer it saw before gone, the cached newer-run answer is dropped and
-       searched again, so a finished answer's record is seen at once rather than after up to 30 s of a reply offered
-       to an answered park. The planner still reads both afresh before anything is queued.
+       afresh; AMENDED 2026-10-26, #737 PR 4a: an unreadable answer is kept for the window as a good one is, since one
+       read again every tick sent a failing Valkey a queue lookup per run per tick), and when a scan finds the answer it
+       saw before gone, the cached newer-run answer is dropped and searched again, so a finished answer's record is seen
+       at once rather than after up to 30 s of a reply offered to an answered park. The planner still reads both afresh
+       before anything is queued.
   2. **The console's auth model, unchanged.** The client (`worker/src/console-client.mjs`) signs in with `POST /login`
      and holds the `pdc_session` cookie in memory for the life of the process; it is never written anywhere. Every
      request carries `Host` (the address dialled; `localhost` over a unix socket, the one loopback name a socket has)
@@ -15646,3 +16017,4 @@ a tunnel.
 | 2026-10-25 | The maintainer notes moved from `CLAUDE.md` to `AGENTS.md` (pi loads either as a job's context file, `AGENTS.md` first), so the two sentences that point at them (why the recovery reset is mandatory, and the console tokens' pin rule) name `AGENTS.md`. Words only, no decision changes; where a sentence lists the context files pi loads, `CLAUDE.md` stays, since pi still loads it. |
 | 2026-10-25 (#737, PR 3a) | Issue #737, PR 3a: why a job waits, and cancelling one that never started. **NEW `DES-WAITING-REASONS`**: the worker records why it defers a job as it defers it (`deferTo`, the one deferral, writing `defer:job:<id>` before the move; `noteRetry` before an infrastructure retry's throw), and the console's `readWaiting` lists the jobs that have not started from the queue's own sets, their scores and those records, and the `cancel-queued` preview and confirm load the one job they act on by id; it reverses the need for the per-job classifier this file refused in `DES-ADMIN-VIA-PI-EXTENSION` and `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`, whose two grounds (a guess, and a job's data) do not hold, since the worker says why and no reader of the waiting set reads a job's data; the write, which a deferral never fails for and waits for at most 2 s; the buckets, `due` and `unknown` among them (`due` a delayed job more than `WAITING_DUE_GRACE_MS`, 10 s, past its due, whatever its record says, `DEFER_DUE_SENTENCE`; `unknown` a recorded reason this console does not know, a newer worker's, so no bucket's title is false of a job in it); how a job is classified (the due rule first, an overdue scheduler's next run then a row in line marked `schedulerNext`; the scheduler's current next run is scheduled, a gate-deferred `repeat:` run is in line, a record whose `until` disagrees with the due time is none, a reason the table does not hold is `unknown`, a reason outside the charset is no record, the paused flag is the field's presence, as BullMQ 5.80.4 reads it, asked by `HEXISTS`, never its value); what it reads and never reads, 200 from each of the four lists (`WAITING_PER_LIST_MAX`), at most 64 queues (`WAITING_QUEUES_MAX`) with the rest counted as `queuesCut` and the rows then a floor, every instant it hands on at most `DEFER_TIME_MAX_MS` (`instantOf`), `{ unreachable: true }` and never a client's words; the queues it reads, the registry's first, then the others a keyspace discovery found, in name order, so a queue the registry names is read before any the scan alone found and a live host's queue is never the one cut while the registry names at most 64, past which one can be cut too and the read still counts every queue it did not read, the discovery kept 60 s by the fleet reader (`WAITING_DISCOVERY_TTL_MS`), one scan at a time, and a snapshot that has a set never waiting for one, `readWaiting` itself never walking the keyspace; the 5 s cache, which keeps an unreachable read for the window as it keeps a good one, the console not reading it yet and `/api/state` unchanged; rejected, a classifier from data or timing, the lease horizon as a hold's end, reading `opts`, the host budget's dimension, a plain `DEL` and an unbounded write; the residuals (a failed write leaves the previous record until it expires; a job BullMQ delays by itself has no record, a raw gate rejection retried among them; a record whose `until` disagrees with the score's due time reads as no reason; a timed-out write that lands later is never read; `due` judged on the reader's clock against the worker's due, and unable to say why no worker took the job; the `cancel-queued` confirm's fresh read right before the removal, leaving one round trip, and a held job's `removeHeldJob` steps, in which a job a worker takes and finishes, or fails back to the delayed set, would be removed, a held job taken after that state read answers that its hold was cleared, unless the first delete failed and the hold was read back in place (`holdInPlace`), which changed nothing, a hold not read back keeping the mark since a refusal can be the answer to ioredis's resend of a delete that already ran, and a bound that fires during the removal says only that it was asked for and may have landed, naming the hold for a held job, `removalUnknown`). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the FAILED surface's rejected classifier: its grounds do not hold for the worker's record. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**, the delayed count bullet: the panel's line is unchanged, and the console's reader can enumerate the delayed set's ids and scores (turned on by no page in this pull request), never hydrating the set and never guessing, and a job past its due says so from its own score. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED**, one clause: the endpoint re-check's instant was the only trace of why a job is delayed, and the move records `endpoint` now. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the CLI's held and queued branches are `removeQueuedJob`, shared with the console's `cancel-queued`, which deletes the defer record after a successful remove (bounded, best effort), each door keeping its own rule of who may be removed; the CLI's output has one new line, for a held job whose removal failed after its hold was cleared, and every line that carries another module's words (the registry's, a removal's, the error under the could-not-reach line) carries them bounded (each C0, DEL and C1 character a space, at most 200 characters, `boundedText`), so a line whose words hold none of those characters and are at most 200 characters long is byte for byte what it was; the residual of that held partial failure keeps its direction, and every door now says the hold was cleared (`removeHeldJob`'s `cleared`, `heldClearedAnswer`), except after a first delete that failed with the hold then read back in place (`HEXISTS` of its `since`, `holdInPlace`), which answers `{ invalid }`, a hold not read back, or a read that fails, keeping the mark. **`DES-DOCTOR-RESULTS-PUBLISHED` AMENDED**, the ids bullet: `egress.proxy` and `provider.key`, the one repeated id and why no id names a forge's credentials. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names PR 3a; the fleet reader's snapshot gains three folds of its wide window that no page draws yet (`runsDay`, `spendByHour`, `softHoldToday`) and `hostsReadAt`; the action table's `atConfirm` and the rule functions' `result`, 38 actions; the action groups gain cancelling a job that never started; the ticket's `meta` gains `undoable`; the Undo rule (a retry has no Undo and says `retried`, since BullMQ's retry keeps its attempts; a re-run's Undo is decided at the confirm, the bar saying `rerunBefore`, the banner offering a `cancel-queued` form for the job the enqueue minted, and an Undo that cannot be decided costing the banner its button, never the answer, with `rerunUnnamed`; the old `queued` sentence gone), which replaces the sentence that said retry, re-run and retry-all had no Undo and the inverse for a queued job was decided later; the probe's one question that settles every caller, with its two rejected shapes; the write 401's `CONFIRM_SIGNED_OUT` in the slot; the tokens bar in the `setup` state with Close; a `seq` page whose row was not found draws no rows; the audit page's marked row at 375 px as one block; the Copy button's secure-context sentence; a bulk job whose answer was partial keeps that mark, its line reading "did not finish" (`resultRow`, `bulkResultsHtml`); a preview that reads the fleet snapshot waits for it at most `SNAPSHOT_TIMEOUT_MS` (10 s, not the cancel funnels' 2.5 s, which would refuse a slow but healthy fleet's first snapshot) and then refuses 503 in `SNAPSHOT_TIMEOUT_SENTENCE`'s words, a snapshot that fails keeping its own sentence (`snapshotOf`); the time rule's `utcText` draws only 0 to `DEFER_TIME_MAX_MS` and says "unknown" outside it, before 1970 too, and the script shows the times of every bar it writes into the confirm slot in the reader's zone (`fillSlot`); traces and code evidence. **`DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` UNCHANGED, checked**: the pause gate's position and its window-end move are the same, now through `deferTo`, and a rejection still escapes raw. **`DES-HOST-REGISTRY` UNCHANGED, checked**: the writer and its beat are untouched; the reader's three expiry fields are `INT-HOST-REGISTRY-CONTRACT`'s. **Code evidence**: worker/src/defer-reasons.mjs, worker/src/defer-write.mjs, worker/src/index.mjs (`makeProcessor`), worker/src/wait-state.mjs, worker/src/cancel-state.mjs (`removeQueuedJob`, `removeHeldJob`, `holdInPlace`), worker/src/cancel-cli.mjs (`runCancel`, `boundedText`), worker/src/doctor.mjs, worker/src/doctor-results.mjs (`REPEATED_CHECK_IDS`), admin/src/read-model.mjs (`readWaiting`, `readWaitingRow`, `cancelHeldJob`), admin/src/job-actions.mjs (`planCancelQueued`, `cancelQueuedJob`, `heldClearedAnswer`), admin/src/console/actions.mjs, confirm-view.mjs, script.mjs, server.mjs, audit-view.mjs, page-css.mjs, panels/common.mjs (`utcText`). |
 | 2026-10-25 (#737, PR 3b) | Issue #737, PR 3b: the overview in the Pulse markup, with its timeline, its waitlists and its first run. **`DES-OPERATOR-CONSOLE` AMENDED**: the Status names PR 3b; a NEW bullet, "The overview in the Pulse markup": eleven panels, each on the page in both states so the stream moves a first run to the overview by swapping panels; the layout (`PAGE_LAYOUT`, checked as `pages.mjs` loads, `.cards-4` the one wrapper marked `data-slot-after`); the headline as a shell span panel (`p-headline`, `SHELL_PANEL_IDS`); one read rule for every panel (`UNREAD`: a whole count, an empty sentence or All clear only over reads made whole, each read that failed or was cut said in its own sentence: Caps' unread counters, the overlay's caps and soft hold only from a settings read made whole and the empty sentence `CAPS_EMPTY_TEXT` naming its source, Spend today's note naming its number's source and its empty sentence only over the day read whole, the timeline's empty sentence over both reads made whole, no calm Waitlists line over a cut read; an empty state over a failed read rejected); one rule for what needs the person (`needsOf`, read by the headline and Needs you: All clear only with every read behind Needs you made, the host registry's own read among them, which BullMQ's list of connected workers never stands in for since it answers only whether a worker is online (that stand-in rejected), so no failing doctor is counted over a registry not read, a worker online, nothing to answer or fix and the day read whole with no failure, refusal or floor; the headline's four lines, never All clear and led by `NO_WORKER_TEXT` with no worker online; a partial count a floor and an unread one a dash with "not known", never 0; a failing doctor counted only for a host in the registry; Answer only where the console takes changes, else Open; All clear over a failed read rejected); one load per data query (`dataQueryOf` in `pages.mjs` and `live.mjs`, `dataKeyOf`: every overview grouping, window and project shares one load, each view still drawn with its whole query); the confirm slot lifted out of a marked grid (`slotAnchor`), a column keeping it under its card, scrolled into view by the least move and its title given the focus when a preview opens it and again at every fill while it is open, an answer moving the focus only from inside the slot, every other change the script makes outside the open slot bringing it into view again where it showed (`outside`, `slotShows`), and a close giving the focus back to the button that opened it, else to the same form's button in a card a swap redrew (`formKey`, `sameButton`), else to the card that asked, when the focus was in the slot or on nothing (`slotInView`, `focusTitle`, `refill`, `closeSlot`, `focusBack`); a button no field, so a focused one holds no panel (`isField`), and a swap never dropping the focus (`focusIn`, `keepFocus`); the bar breaking every name in it and a button's label wrapping inside the button, two panel goldens of its longest names in the width check; empty layout wrappers that keep one grid gap, since only `:has()` could hide them and it is past the browser floor; the old panels re-homed (`overviewState`, `overviewParked` and `overviewFailures` gone; the Workers fact in the hosts panel's head, `workersText`; a partial pause counted there and never named, `pausedText`); the panels' role and link rules (a reason this console has no words for shown as recorded to every role, the bucket's title for a viewer rejected as false; a wait check's profiles an operator's, and the timeline reading no hold's label or answers at all; Pause fleet and Resume fleet as Fleet offers them, both on a fleet partly paused; the Caps naming every scope by its last folder, `shownPath`, their key naming projects and models alone); the worker's own sentence for why a job waits, `due` and `unknown` rows included; a held slot as a sentence with an Open Fleet link and no button, since the registry names no venue or container for a job; a scheduler's overdue next run in line, with its cron trigger's Edit and no Cancel, its long id wrapping in its row; every surface naming and matching a scheduler by its `key` alone (Scheduled, Fleet's Schedules with "-" for a refused key's id and stall count, `/api/state`, the schedulers block of `/dispatch triggers`, the TRIGGERS pane's rows and drill-in, the topology graph), never by BullMQ's `name` or by a pattern, and the reader bounding `key` and `name` to the cron id charset and `SCHEDULER_NAME_MAX`, the triggers loader's `CRON_ID_MAX` (176), null and never cut, a bound per surface rejected; a scheduler's run named by its trigger and run time on every row and on its pill, the raw id in the `title` (`schedulerRunOf`); a row in the queue of a host the registry does not name saying so, and that queue in the Queues line (`byQueue`); the rest of a reason said as not listed, and a row without a project tag said once, only where a shown row has none, in each panel's own words; the cut read's floor line (`floorText`), a list member that is no run id a cut too; In line drawing every number under a cut read as a floor (its label, each reason's count, `floorEnd`, and the longest wait) with `WAITING_CUT_TEXT`, the timeline's constant, under every cut read, and for a cut read that found none a dash (`inLineOf`), never "nothing is waiting", a whole count beside a floor rejected; the soft hold on the count windows only; the hosts' clock and expiry sentences, a beat's age by `beatAgeOf` (Valkey's measure of the row's last refresh where read, else `staleMs`) for the online rule, Running, the hosts' rows, the first run, the fleet page's hosts table, `/api/state`'s `lastBeatAgeMs` and the `/dispatch` panel's HOSTS view, every name in running text breaking anywhere and a row pill's name alone giving way, a card head's end group and its chip wrapping, a host that does not beat, whose running jobs could not be read or whose registry was not read this tick ("as last seen") drawn with no slot free, by one rule on Running and Hosts, and Running with no host row ("slots not published", `REGISTRY_UNREAD_TEXT`); the timeline (pure, its zooms, groupings, lane cap, label fitting, a park's words never past now, a pill's word per bucket, a glyph per bucket with the bell for `due` and the tag for `unknown`, the UTC axis; no packing pass opening a lane past the cap and the waits drawn the next to start, at most `TIMELINE_ROWS_MAX` rows and `TIMELINE_CHIPS_MAX` chips with the rest counted (the rows in a card's sentence under the scroll box, the chips wrapping above a phone's width), a sans label's width by the class of each character and `WAIT_END_PX` 6, a waiting pill at its due or at its bucket's start, whichever is earlier (`WAIT_START_X`, one start for every pill of a bucket, so the one due later never stands left of one due before it; a start per pill rejected), one moved left of its due saying its word and due time (`dueLine`), its word always held and its name what gives way, a row head cut by the page with its name in `title`, an ended run up to `DOLLAR_RECORDS_TTL_MS` late, a phone's timeline opened at now, `ready`'s word "not ready"); the first run (`firstRunState`, its `applies`, the role-only token step, the address-free queue step, the worst-level doctor steps, the commands pinned to the CLIs' usage; a check quoted as a failing check or a warning, never as what doctor says is so; a step without the fields each surface's own rule decides; each placeholder's hint, `FIRST_RUN_COMMAND_HINTS`; the preview's In line, Running and Hosts from the live rows; the folder by `deploymentOf`); the overview's load asking for the waiting jobs per call (`PAGE_READS`' `waiting`, `snapshot({ waiting: true })`), the reader option rejected, since one reader serves every page and `/api/state`; and its code evidence. Four rejected options: a setup page of its own, keying the overview's load by its whole query, a Free slot command or button, and hiding an empty wrapper with `:has()`. Amended in place: "What a write takes, and how it is undone" (a fleet resume's Undo pauses again exactly what was paused, read over the queues the resume flips, `snapshot({ switchQueues: true })`, which a queue's pause or resume previews from too, `resumeBack`; `fleet-pause` for a part, and a preview over the registry's queues alone, rejected), "The screens" (the overview's query), "One fleet reader" (PR 3a's three folds are drawn now; the waiting jobs a per-call option, and `switchQueues` a second one), "The live hub" (one load per page and data query), "Run progress" (the active table is the fleet page's alone), "Run chat" (the parks being answered leave Needs you's questions), "A truthful overview" (the Order bullet; the no-worker warning now leads the hosts panel and the never-green state is the fleet page's; the age on Valkey's clock is read now, a skew is said, and the online rule judges by the beats and BullMQ's list with a beat's age by `beatAgeOf`, so the earlier rejection of that measure gives way, and the fleet page's hosts table, `/api/state` and the `/dispatch` panel's HOSTS view read it too; the time rule adds the timeline's axis, now cap, pill titles and pill times and Spend today's hour axis), "The Venues view" (the overview names each host's venues), "The kit" (the overview's marks, `schedulerRunOf`, `ptag`'s `title`, `waitBar`'s least room and rows) and "Two checks hold the look" (a page draws the dot now), "A panel element carries only `id` and `data-panel`" (the headline span), "The legacy layer" (six screens remain, and no rule went with the overview), and the Traces. **`DES-WAITING-REASONS` AMENDED**: the Decision now says what PR 3a built and that PR 3b's overview asks its snapshot for the waiting jobs, per call, and draws them in the cancel preview's sentence, for every role (a reason token this console has no words for with "no explanation yet", a job past its due "Due since <time>; no worker has taken it"); "When it is read, and which queues" says the read is a per-call option (`snapshot({ waiting: true })`; PR 3a's reader option is gone), asked by the overview's load alone and shared by every call inside `WAITING_TTL_MS`, while the fleet, parked and config pages and `/api/state` read none; the project rule says a `due` row whose record expired reads as not known unless its dedup id or its cron trigger names one, and that the overview's note on it is drawn only beside such a row; "What it reads" says a list member that is no run id is no row and makes its queue's read a floor (`idsOf`); the code evidence names `snapshot({ waiting })` and `PAGE_READS`. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**, one parenthesis of PR 3a's amendment: the waiting read is built in PR 3a and turned on in PR 3b, whose overview's load asks for it, per call, and draws it. **`DES-DOCTOR-RESULTS-PUBLISHED`, `DES-HOST-REGISTRY` and `DES-RUN-PROGRESS` UNCHANGED, checked**: the first run reads the named ids PR 3a added as that entry says; no routing, capacity or doctor decision reads a registry row's expiry fields, the console's beat age being `DES-OPERATOR-CONSOLE`'s (the reader's name rule is `INT-HOST-REGISTRY-CONTRACT`'s); and the progress rules are the fleet table's as before. **`DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked**: a scheduled trigger is still a BullMQ Job Scheduler whose jobs are `repeat:<schedulerId>:<nextMillis>`; the loader's new longest id, `CRON_ID_MAX`, is `INT-TRIGGERS-FILE-CONTRACT`'s. |
+| 2026-10-26 (#737, PR 4a) | Issue #737, PR 4a: the runs and parked pages in the Pulse markup, and the reasons for infrastructure exits. **`DES-OPERATOR-CONSOLE` AMENDED**: Status names PR 4a and the bullets it amends; NEW bullet, "The runs and parked pages in the Pulse markup, and the reasons for infrastructure exits", with the decisions behind `REQ-OPERATOR-CONSOLE-SCREENS` (b), (d) and (p): the filters are the first panel, a plain GET form under the static title bar, folded by the script on a phone and held while in use for every role and on a read-only console, a changed field until it is applied or set back, under the kept-still note whose template every live page now draws, in one sentence true for every role (`HELD_NOTE_TEXT`), its GET carrying only the fields in use; the runs table on a desktop one line a cell but the outcome's and the target's, a job id in a box of at most 22 characters (a forge delivery's id in two lines, where the card's 12 broke it into four or five) and a host, a flow or a model in one of 20 (`.val`), so a long value grows its own row and never the table, the Ended cell the time alone under its day's row (`endedHtml`, marked `data-day`), which leaves the fixture's rows on one line but a few, and one breakpoint, the card's 1,440 px, below which the phone's five columns are left out (in CI's font a 12 px scroll inside the table's own box at exactly 1,440, and 21 px with a 60-character host, the page not scrolling, measured and accepted); the last 24 hours are one fold of the cached wide window (`runsWindow()`), and a list offers only values its filter takes; one key for filtering, counting and drawing (`outcomeKey`), `policy` kept as the record's value, which reverses #710's choice of the record's three values; the three recovery ends read failed (`REASON_WORDS`' `says`), `failures24h` and the timeline's pill following; a reason drawn only when it is a token, the worker's door and the readers' one pattern, `/dispatch runs`' REASON column included; Parked as a card per question with no question text, the desktop frame the ApprovalRequest card's with its Questions tab alone (approvals are #649's, and a planned card carries no ledger); the answer form only where the planner's own check said ok, at most 20 checks a page, read only for a load a form is drawn from (`formsDrawn`), each kept 15 s readable or not, every check of a load sharing one registry read and the kept queue discovery (`jobQueues`), a request's misses one scan started after its question (`lookUp`, `lookupQuestion`) and a live load's none, the page loaded at most every 5 s; the Search button a link the script focuses on the runs page, off a phone and off the desktop bar's tightest widths, measured for a one-digit Parked count, the bands kept against the Shell card; the run-id 404 holding the asked id only as its search field's value, and ONE status rule for the run page and `/api/run` (`runPlaces`): a run a place shows is a run (200, a queued job's page included), one no place shows while a place is unread could not be told (the run page, 503, naming the places, `runUntoldText` on the page and `runNotTold` on `/api/run`, which names no cause), and only one no place shows with every place read and saying its own none is absent (`runAbsent`, the run-not-found page, 404: `readRunById` tells an unread record from an absent one, `readMirroredRecord`'s `tellUnread` an unread GET from an absent key, and the by-id queue lookup's whole answer, a recovery that runs or waits included, asks every queue the kill switch flips, saying null over a part), the banner for a record that could not be read, or whose read answered neither a record nor `missing`, being `runUnreadText`, and `/api/run`'s 503 for a queue lookup that failed `runNotTold`'s, its `RUN_UNREADABLE` kept for a run a place shows and naming no cause; and the carried fixes (every held and queued cancel answer outcome first and its job once, last, the worker's refusals included and no error's words in a partial one, one test driving every path of both and of the `job-actions.mjs` helpers on their paths that name the job through `jobLast` or `cancelQueuedRefusal`, and one reading the source of every function of `job-actions.mjs` and `read-model.mjs` a cancel reaches for a job id written into text by any but `jobLast` and `theirWords`, another module's words naming the job as the job before they are cut, for the audit row's cut, the planners' refusals for a record that could not be read (`recordReadRefusal`) and a run that is not parked in tokens only (`notParkedRefusal`), the snapshot bound's own `timeout` state chosen by state, the switch preview's 200-queue read, the shared and the registry's queues first, and 20-name sentences with no exact Undo over a short read, its floor carried as no count and its line naming how many it read, the Hosts row's beat under an unread registry). Ten NEW Rejected items: the Search button kept by letting the signed-in name give way (it frees 20 of the 56 px the button needs), the filters in the title bar, question text on a card, the outcome filter kept to the record's values, an answer box judged only at the preview, the timeout's bar chosen by its sentence, every queue read and named in a switch preview, an error's message kept as the reason and cut where shown, a job id box of the card's 12 characters, and a kept queue discovery taken as whole while it is fresh. Amended in place: "Every query is judged before anything is read" (twelve fields, `problems` every run not completed by word, `q` over the target or the job id up to 200 characters, `outcome` by the word); "The live hub" (`pageMinMs` for the Parked page, and a load told who will see it, never an operator's role, and marked `live`, its lookups scanning nothing); "`GET /api/run`" (a run no place shows whose queue lookup failed is `runNotTold`'s 503, and `RUN_UNREADABLE`, for a run a place shows, names no cause); "Only the actions that can work" (an unreadable check kept for its 15 s) and the retained-job read's queues (the by-id lookup, `lookUp`, the registry's queues never cut and the kept discovery's beside them, read once for a page's checks rather than a keyspace scan each, and a job absent only from a scan started after the question, `scanSince`; a keyspace scan for an absence a request's and never the live hub's: a request's load asks one question, `lookupQuestion`, its chat facts and checks running together, so its misses share one scan, and a run with a record's chat facts ask for none, while a live load's lookup starts no scan and keeps what a request was told, `toldAbsent`, at most `LOOKUP_TOLD_MAX` ids; what a request still costs measured and accepted; with REJECTED a kept set taken as whole while fresh, a scan per question, a scan for a live load's miss and a request's absence kept for `PARK_CHECK_CACHE_MS` alone); the time rule (the script writes the reader's date before every time but one marked `data-day`, whose row names its UTC day, which stays alone on the reader's day when it is the UTC day and gains the reader's date when it is not, with a REJECTED keeping alone every time drawn alone, judged by its text); "Refusals beside failures" (`failures24h` by the word); the legacy layer (`LEGACY_PAGES` the four, the old pager's rules and `.pager` collision gone, `.code` joining `NEUTRALISED`, since `panels/common.mjs` now writes `outcomeCell`'s code span); the timeline (it imports `words.mjs`, `endedWord`, and draws an item's label only when it has one, `LABEL_HTML`, which FIXES a 500 on main since #737 PR 3b: a refused item packing left without a label threw, so the overview failed for every role over refusals seconds apart in one crowded row, while an item of a kind it does not draw throws `RangeError`, with a label or without). The rest of `DES-OPERATOR-CONSOLE` UNCHANGED, checked: the stream lifecycle, the role and run-text rule, the action table and its pipeline, and the run page's panels and its Chat panel's modes are untouched, but for its status and the banners of a record or a place that could not be read. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: no comment table is keyed by `container-infra-exit`, `container-exit-unknown` or `worker-error`, so a final failure with one posts the generic failure comment from start.mjs's failed listener as before, and the hook's reason is still guarded at the spawn, its one door, now by the record's own token rule (`RECORD_REASON_RE`, so a token up to 64 characters arrives as itself); the reason the two exits throw and that guard are `INT-ON-FAILURE-HOOK-CONTRACT`'s. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, one sentence in its #710 vocabulary paragraph: five reasons change the word (the three recovery ends read failed), `says` decides where a row adds its reason, and a reason that is not a token is no reason to the panel, nor to a model through `dispatch_runs` (`modelRunRecord`); no tool, key or view changed. **`DES-TERMINAL-CHAT` AMENDED**, one clause: the run page's loop keeps an unreadable pending scan or planner check for its 15 s as it keeps a good one. **`DES-WAITING-REASONS` UNCHANGED, checked**: the defer record and its readers are untouched. |

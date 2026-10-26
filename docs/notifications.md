@@ -79,9 +79,16 @@ arguments:
   `mcp-secret-missing`, `mcp-command-missing`, `mcp-shadowed` (a job's MCP server stopped it before its prompt, above;
   the pickup's free `mcp-config-invalid` never reaches it), `await-input-shadowed`, `await-input-without-session` (a job
   armed with `run.awaitInput` stopped before its prompt, below), `report-progress-shadowed` (a job armed with
-  `run.progress` stopped before its prompt, above), `oom-killed` (the job ran out of memory, above), `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
-  carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
-  reach your argv.
+  `run.progress` stopped before its prompt, above), `oom-killed` (the job ran out of memory, above), `container-never-started`, `container-detached`, `secret-resolver-unreachable`,
+  `container-infra-exit` (the job's container ended on the runner's infrastructure exit: a provider error or rate
+  limit, a lost network, a crash inside the container), `container-exit-unknown` (it ended with an exit code the
+  runner never uses), any other fixed token a failure legitimately carries, or `infra` when it carried no token (a
+  forge call that failed, or a fault in the worker: the run record says `worker-error` for those). A reason reaches
+  your argv only as a run record's reason token (lowercase letters, digits and `-`, starting with a letter or digit, at
+  most 64 characters), so every reason the run record keeps arrives as itself; anything else, a message included, is
+  flattened to `infra` first. A script that matched `infra` for a container that ended on exit 1 or an unknown code now
+  sees one of those two tokens instead, and one that matched `infra` for a token longer than 40 characters (which was
+  flattened before) now sees the token.
 - `host` is the worker's declared name, possibly empty.
 
 It fires for: the 30-minute kill, an in-container policy stop (exit 2, including a provider's refusal of

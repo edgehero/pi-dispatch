@@ -402,19 +402,31 @@ The threat model, and what answers each part:
   nothing costs a bounded read of the mirror, not a walk of its whole history. This host's own run files are read
   into one shared index at most every 15 seconds, whatever the filter, and the newest 5000 kept; a live runs page
   refreshes every few seconds rather than every second, and one token's streams share one budget, so distinct
-  filters cannot multiply the load past a fixed bound. The overview's timeline choices (`rows`, `zoom`, `project`, each
-  a closed value) only regroup one read, so every overview stream shares it whatever they say. A run id outside the
-  shapes the worker mints is
+  filters cannot multiply the load past a fixed bound. The parked page reads whether each run can be answered here
+  for at most 20 runs a load, each answer kept 15 seconds whether or not it could be read, all of them sharing one
+  look for the fleet's queues that is itself kept a minute, and the ones that do not find their job in it sharing one
+  more look, made after they asked, so a job on a newer queue is not called gone; it refreshes at most every 5
+  seconds, and reads no such check at all for a viewer or a read-only console, which draw no answer form. The
+  overview's timeline choices (`rows`, `zoom`, `project`, each a closed value) only regroup one read, so every overview
+  stream shares it whatever they say. A
+  run id outside the shapes the worker mints is
   refused before any file path or Valkey key is built from it. No page read writes: the console's reader is built
   read-only, so it reads the run mirror without pruning it and leaves the held-jobs set as it finds it (the panel's
   own reader still tidies both, as it always did), and a test records every Valkey command a snapshot sends. The one
   write left is BullMQ's own: opening a queue client sets that queue's metadata (its library version and event cap)
   to the values every worker already writes, so it changes nothing a reader sees.
 - **Who sees what.** Run records hold no attacker-chosen text by construction, so both roles see them; their job id,
-  target and parent job id can still be shaped by whoever opened an issue, and are escaped like every value. The one
-  free text the screens show, a failed job's reason from BullMQ, is shown to the operator role alone, on a detail
-  page alone, never in a list, and is absent from a viewer's `/api/state`. The audit page is the operator's alone.
-  Secret profiles appear by name; no page shows a resolver, a reference or a value. No page shows a job's `.log`.
+  target and parent job id can still be shaped by whoever opened an issue, and are escaped like every value. **Since
+  #737 a record's reason is a fixed word by construction too**: an older worker recorded an infrastructure error's own
+  message there, which can name a forge API path and a repository, and the worker now records a fixed word for every
+  failure (`worker-error` where it has none of its own). The runs list and the `/dispatch` panel's list, run detail
+  and `/dispatch runs` table show a reason only when it is such a word, for both roles, and so do `/api/run`,
+  `/api/state` and the model's `dispatch_runs` tool, so an older record's text reaches no script and no model; the
+  console's run page still shows its own record's reason as it was recorded, escaped. The parked page shows no question
+  text: the question is the run's own words, which the console shows only in the run page's transcript, to operators.
+  The one free text the screens show, a failed job's reason from BullMQ, is shown to the operator role alone, on a
+  detail page alone, never in a list, and is absent from a viewer's `/api/state`. The audit page is the operator's
+  alone. Secret profiles appear by name; no page shows a resolver, a reference or a value. No page shows a job's `.log`.
   **Since #737 the overview says why each job that has not started waits**, from the worker's own record of it in
   Valkey, which anything holding the Valkey URL could also write: so it is said only in the worker's vocabulary, a
   reason word this console has no words for shown as that word (it passes the reason charset, at most 32 lowercase
@@ -447,10 +459,16 @@ The threat model, and what answers each part:
   everything else, every script, stream and write included, gets the JSON it always got. Every error page carries the
   same security headers as every response, its CSP included, is built by the same escaping template, and holds no
   inline script or style. It says only its kind's fixed sentences: a 404 never repeats the path it was asked for, so a
-  crafted link cannot make a console page show words of its choosing; a 400 names the parameter it refused, never the
-  value; a 500 never shows the error's text. A 421 (a Host the console does not answer to) reads no session and draws
-  no navigation, names the refused hostname escaped and cut to 64 characters, and gives an SSH tunnel command for the
-  address and port that connection reached, which the requester already knows; it never lists the extra names
+  crafted link cannot make a console page show words of its choosing, and the run-not-found 404 (a run page for an id
+  that this host's history, the run mirror, every queue, the live transcript and the progress were each read for and
+  found none of, the queues over a scan started after the question; anything that could not be read keeps the run
+  page, answered 503 and naming the places it could not read, never a cause, so a run is never called gone because a
+  read failed or a kept list of queues was older than the run) puts the asked id only in its search field, as the
+  value of the person's own search, and only when the runs search takes it whole, never in a sentence; a 400 names
+  the parameter it refused, never the value; a 500 never shows the error's text. A 421 (a Host the console does not
+  answer to) reads no session and draws no navigation, names the refused hostname escaped and cut to 64 characters,
+  and gives an SSH tunnel command for the address and port that connection reached, which the requester already
+  knows; it never lists the extra names
   `PI_CONSOLE_ALLOWED_HOSTS` allows, nor anything else of where the console listens. A 404's navigation reads the
   session without counting it as activity, so a 404 neither extends nor ends one.
 - **Forge links are never guessed.** A run's link points at `github.com` for GitHub and, for GitLab, Forgejo and
