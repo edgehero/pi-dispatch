@@ -11,7 +11,9 @@ import { ICON_NAMES, SPRITE } from "../src/console/pulse-icons.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
-import { loginCodePage, loginPage } from "../src/console/shell.mjs";
+import { DEFER_BUCKETS, DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
+import { ACTIONS } from "../src/console/actions.mjs";
+import { HEADLINE_ID, SHELL_PANEL_IDS, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
 import { forgeLinkOf } from "../src/read-model.mjs";
 import { DOCS_ROOT, OUTCOME_WORDS, REASON_WORDS, STATUS_KINDS, docsHref, outcomeWord } from "../src/words.mjs";
 import { assertOwnReferences } from "./helpers/console-pages-harness.mjs";
@@ -158,6 +160,9 @@ test("outcomeBadge: words.mjs's word and status for a record's outcome and reaso
 test("ptag and vtag: the Status card's project and venue tags", () => {
   const card = `<span class="ptag">web</span><span class="ptag">api</span><span class="ptag">billing</span><span class="ptag">ops</span><span class="vtag">local</span><span class="vtag">podman</span><span class="vtag">openshell</span><span class="vtag">openshell-bind</span>`;
   assert.equal([...["web", "api", "billing", "ops"].map(ui.ptag), ...["local", "podman", "openshell", "openshell-bind"].map(ui.vtag)].map(out).join(""), card);
+  // Where a page's rules cut a tag to its column (the timeline's row heads), the tag carries its name whole in a title.
+  assert.equal(out(ui.ptag("frontend-platform-team-eu", { title: "frontend-platform-team-eu" })), `<span class="ptag" title="frontend-platform-team-eu">frontend-platform-team-eu</span>`);
+  assert.equal(out(ui.ptag(`a"><b>`, { title: `a"><b>` })), `<span class="ptag" title="a&quot;&gt;&lt;b&gt;">a&quot;&gt;&lt;b&gt;</span>`);
 });
 
 test("chip, count, dot and tile: the Status card's row, the Shell's nav count and ConfirmStates' small tile", () => {
@@ -175,6 +180,8 @@ test("chip, count, dot and tile: the Status card's row, the Shell's nav count an
   const tiles = `<span class="tile tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg></span><span class="tile tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg></span><span class="tile tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg></span><span class="tile tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg></span><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg></span><span class="tile tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></span>`;
   assert.equal([ui.tile("parked"), ui.tile("failed"), ui.tile("refused"), ui.tile("attention", { icon: "fleet" }), ui.tile("ok", { icon: "spend" }), ui.tile("idle")].map(out).join(""), fromCard(tiles));
   assert.equal(out(ui.tile("attention", { icon: "spend", sm: true })), fromCard(`<span class="tile tile--sm tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg></span>`));
+  // The OverviewScreen card's waitlist head: the small tile with the small icon.
+  assert.equal(out(ui.tile("idle", { icon: "slot", sm: true, iconSm: true })), fromCard(`<span class="tile tile--sm tone-idle"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg></span>`));
 });
 
 // ---- actions -----------------------------------------------------------------------------------------------------------------
@@ -557,6 +564,10 @@ test("outLink: a link out of the console, rel and target stamped as the page rul
   assert.equal(out(ui.outLink({ href: "https://github.com/acme/web/issues/415", label: "acme/web#415" })), `<a class="link" href="https://github.com/acme/web/issues/415" rel="noreferrer noopener" target="_blank">acme/web#415</a>`);
   assert.equal(out(ui.outLink({ href: "http://gitlab.internal:8080/g/p/-/issues/3", label: "g/p#3", code: true })), `<a class="link code" href="http://gitlab.internal:8080/g/p/-/issues/3" rel="noreferrer noopener" target="_blank">g/p#3</a>`);
   assert.equal(out(ui.outLink({ href: "https://x.example/?a=1&b=%22#f", label: HOSTILE })), `<a class="link" href="https://x.example/?a=1&amp;b=%22#f" rel="noreferrer noopener" target="_blank">${ESCAPED}</a>`);
+  // Drawn as a button (the SetupScreen card's ghost "What triggers can do"), the same link: rel and target as ever.
+  assert.equal(out(ui.outLink({ href: "https://github.com/edgehero/pi-dispatch/blob/main/docs/triggers.md", label: "What triggers can do", btn: "ghost" })), `<a class="btn btn--ghost" href="https://github.com/edgehero/pi-dispatch/blob/main/docs/triggers.md" rel="noreferrer noopener" target="_blank">What triggers can do</a>`);
+  assert.equal(out(ui.outLink({ href: "https://x.example/", label: "x", btn: ["sm", "ghost"] })), `<a class="btn btn--sm btn--ghost" href="https://x.example/" rel="noreferrer noopener" target="_blank">x</a>`);
+  assert.throws(() => ui.outLink({ href: "https://x.example/", label: "x", btn: "bogus" }), RangeError);
   // Whatever forgeLinkOf and docsHref build, every forge and an instance URL with a port, a path, upper case and an
   // IPv6 literal, is a link outLink draws: the console's own builders and the kit's rule agree.
   const env = { GITLAB_URL: "http://[::1]:8080/gl/", FORGEJO_URL: "https://Forge.Example.COM:3000", AZURE_ORG_URL: "http://azure_devops:8080/acme" };
@@ -663,6 +674,286 @@ test("pageHref: a page's path with its query, from a PAGES-shaped table, null fo
 
 // ---- refusals ---------------------------------------------------------------------------------------------------------------------
 
+// ---- the overview's marks (PR 3 of issue #737) ---------------------------------------------------------------------------
+
+/** The card's slot dots as the kit writes them: an image with a name. The card's are a bare span, its hosts' named without a role. */
+const slotsOf = (s, name) => s.replace(/<span class="sls"(?: aria-label="slots")?>/, `<span class="sls" role="img" aria-label="${name}">`);
+
+test("slots: the Status card's dots, running, held and free in that order, as a named image", () => {
+  const status = `<span class="sls"><i class="sl sl--run"></i><i class="sl sl--hold"></i><i class="sl"></i></span>`;
+  assert.equal(out(ui.slots({ run: 1, hold: 1, free: 1 })), slotsOf(status, "1 running, 1 held, 1 free"), "by default the name says the three counts");
+  // OverviewScreen's host rows name theirs "slots" without a role, which a span may not carry; the kit's is an image.
+  const host = `<span class="sls" aria-label="slots"><i class="sl sl--run"></i><i class="sl sl--run"></i><i class="sl"></i><i class="sl"></i></span>`;
+  assert.equal(out(ui.slots({ run: 2, free: 2, label: "mini1: 2 running, 2 free" })), slotsOf(host, "mini1: 2 running, 2 free"));
+  assert.equal(out(ui.slots({ label: "no slots" })), `<span class="sls" role="img" aria-label="no slots"></span>`);
+  // At most SLOTS_MAX dots, then the rest as a count; the held are kept first, then the running, then the free.
+  assert.equal(ui.SLOTS_MAX, 32);
+  const dotsOf = (s) => ({ run: (s.match(/sl--run/g) ?? []).length, hold: (s.match(/sl--hold/g) ?? []).length, free: (s.match(/<i class="sl"><\/i>/g) ?? []).length, more: /\+([\d,]+)<\/span>$/.exec(s)?.[1] ?? null });
+  assert.deepEqual(dotsOf(out(ui.slots({ run: 30, hold: 3, free: 12 }))), { run: 29, hold: 3, free: 0, more: "13" });
+  assert.deepEqual(dotsOf(out(ui.slots({ run: 2, hold: 40, free: 1 }))), { run: 0, hold: 32, free: 0, more: "11" }, "a held slot is never the dot cut");
+  assert.deepEqual(dotsOf(out(ui.slots({ run: 10, hold: 2, free: 20 }))), { run: 10, hold: 2, free: 20, more: null }, "32 exactly is drawn whole");
+  assert.deepEqual(dotsOf(out(ui.slots({ run: 10, hold: 2, free: 2000 }))), { run: 10, hold: 2, free: 20, more: "1,980" });
+  assert.match(out(ui.slots({ run: 33 })), /^<span class="sls" role="img" aria-label="33 running, 0 held, 0 free">(?:<i class="sl sl--run"><\/i>){32}\+1<\/span>$/, "the name keeps every count");
+  for (const bad of [-1, 1.5, Number.NaN, Infinity, "2", null]) {
+    assert.throws(() => ui.slots({ run: bad }), TypeError, `run ${String(bad)}`);
+    assert.throws(() => ui.slots({ hold: bad }), TypeError, `hold ${String(bad)}`);
+    assert.throws(() => ui.slots({ free: bad }), TypeError, `free ${String(bad)}`);
+  }
+});
+
+test("rowPill: CardsAndBanners' Needs you and In line rows, OverviewScreen's Running rows, and a write as a row's action", () => {
+  const needs = `<ul class="rows">
+    <li class="rowpill tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><span class="ptag">api</span><span class="code">gh-2f6a</span><a class="rowpill__act" href="#">Answer</a></li>
+    <li class="rowpill tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><span class="ptag">web</span><span class="code">gh-f0c2</span><a class="rowpill__act" href="#">Re-run</a></li>
+    <li class="rowpill tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg><span class="ptag">billing</span><span class="code">gh-e9a0</span><a class="rowpill__act" href="#">Open</a></li>
+    <li class="rowpill tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-hourglass"/></svg><span class="ptag">api</span><span class="code">gh-5d10</span><a class="rowpill__act" href="#">Retry</a></li>
+  </ul>`;
+  const id = (s) => html`<span class="code">${s}</span>`;
+  const needRows = [
+    ["parked", "parked", "api", "gh-2f6a", "Answer"],
+    ["failed", "failed", "web", "gh-f0c2", "Re-run"],
+    ["refused", "refused", "billing", "gh-e9a0", "Open"],
+    ["hourglass", "failed", "api", "gh-5d10", "Retry"],
+  ].map(([icon, status, project, job, label]) => ui.rowPill({ icon, status, items: [ui.ptag(project), id(job)], action: { label, href: `/run?id=${job}` } }));
+  assert.equal(`<ul class="rows">${needRows.map(out).join("")}</ul>`, tight(hrefs(needs, "/run?id=gh-2f6a", "/run?id=gh-f0c2", "/run?id=gh-e9a0", "/run?id=gh-5d10")));
+  const inLine = `<ul class="rows"><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg><span>Free slot</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"/></svg><span>Another run</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg><span>Time or check</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg><span>Retry backoff</span><span class="end"><b>2</b></span></li></ul>`;
+  const lineRows = [["slot", "Free slot", 1], ["chain", "Another run", 1], ["clock", "Time or check", 1], ["rerun", "Retry backoff", 2]].map(([icon, label, n]) => ui.rowPill({ icon, items: [label], end: n }));
+  assert.equal(`<ul class="rows">${lineRows.map(out).join("")}</ul>`, fromCard(inLine));
+  // Running's rows: a host's name in bold, its slot dots (the kit's are a named image), and the held or the free.
+  const running = `<ul class="rows">
+    <li class="rowpill"><b>build3</b><span class="sls"><i class="sl sl--run"></i><i class="sl sl--hold"></i><i class="sl"></i></span><span class="end tinted tone-attention"><b class="tinted">1 held</b></span></li>
+    <li class="rowpill"><b>mini1</b><span class="sls"><i class="sl sl--run"></i><i class="sl sl--run"></i><i class="sl"></i><i class="sl"></i></span><span class="end faint">2 free</span></li>
+    <li class="rowpill"><b>mini2</b><span class="sls"><i class="sl sl--run"></i><i class="sl"></i></span><span class="end faint">1 free</span></li>
+  </ul>`;
+  const runRows = [
+    ui.rowPill({ items: [html`<b>build3</b>`, ui.slots({ run: 1, hold: 1, free: 1, label: "build3" })], end: { text: "1 held", status: "attention" } }),
+    ui.rowPill({ items: [html`<b>mini1</b>`, ui.slots({ run: 2, free: 2, label: "mini1" })], end: { text: "2 free", faint: true } }),
+    ui.rowPill({ items: [html`<b>mini2</b>`, ui.slots({ run: 1, free: 1, label: "mini2" })], end: { text: "1 free", faint: true } }),
+  ];
+  const named = tight(running).split("<li").map((li, i) => (i === 0 ? li : slotsOf(li, ["build3", "mini1", "mini2"][i - 1]))).join("<li");
+  assert.equal(`<ul class="rows">${runRows.map(out).join("")}</ul>`, named);
+  // An end as text or a fragment, and a write as the action: the form as it is, after the end.
+  assert.equal(out(ui.rowPill({ items: ["x"], end: "longest 4m" })), `<li class="rowpill"><span>x</span><span class="end">longest 4m</span></li>`);
+  assert.equal(out(ui.rowPill({ items: [], end: { text: "plain" } })), `<li class="rowpill"><span class="end">plain</span></li>`);
+  const retry = ui.actForm({ action: "retry-failed", hidden: [["jobId", "gh-5d10"], ["queue", "pi-jobs"]], label: "Retry", kind: ["sm", "paid"] });
+  assert.equal(out(ui.rowPill({ icon: "hourglass", status: "failed", items: [ui.ptag("api"), id("gh-5d10")], end: 3, action: retry })), `<li class="rowpill tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-hourglass"></use></svg><span class="ptag">api</span><span class="code">gh-5d10</span><span class="end"><b>3</b></span>${retry}</li>`);
+  assert.throws(() => ui.rowPill({ items: "x" }), TypeError);
+  assert.throws(() => ui.rowPill({ items: [], action: "Retry" }), TypeError, "a bare string is no action");
+  assert.throws(() => ui.rowPill({ items: [], action: { label: "x", href: "/x", kind: "paid" } }), TypeError);
+  assert.throws(() => ui.rowPill({ items: [], action: { label: "x", href: "javascript:alert(1)" } }), RangeError);
+  assert.throws(() => ui.rowPill({ items: [], end: { text: "x", status: "attention", faint: true } }), RangeError);
+  assert.throws(() => ui.rowPill({ items: [], end: { text: "x", tone: "attention" } }), RangeError);
+  assert.throws(() => ui.rowPill({ items: [], end: { text: "x", status: "warning" } }), RangeError);
+  assert.throws(() => ui.rowPill({ items: [], end: Number.NaN }), TypeError);
+  assert.throws(() => ui.rowPill({ items: [], end: [1] }), TypeError);
+  assert.throws(() => ui.rowPill({ items: [], status: "warning" }), RangeError);
+  assert.throws(() => ui.rowPill({ items: [], icon: "nope" }), RangeError);
+});
+
+test("capsule: the overview's Caps (FactsAndLevels' capsules), its tone where the printed percent reads it", () => {
+  // OverviewScreen's eight. The card prints whole percents of levels it does not give; these are levels that give its
+  // heights (a pill is round(150 * level / 100) high, its percent 21 below its top).
+  const card = `<div class="capbars"><div class="cap" title="Jobs today: 63%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="Jobs today: 63 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="56" width="32" height="94" rx="16"/>
+    <text class="cap__v" x="20" y="77" text-anchor="middle">63</text></svg>
+  <p class="cap__l"><b>Jobs</b>today</p></div><div class="cap" title="Jobs week: 50%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="Jobs week: 50 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="76" width="32" height="74" rx="16"/>
+    <text class="cap__v" x="20" y="97" text-anchor="middle">50</text></svg>
+  <p class="cap__l"><b>Jobs</b>week</p></div><div class="cap" title="Jobs month: 28%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="Jobs month: 28 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="108" width="32" height="42" rx="16"/>
+    <text class="cap__v" x="20" y="130" text-anchor="middle">28</text></svg>
+  <p class="cap__l"><b>Jobs</b>month</p></div><div class="cap" title="Tokens today: 39%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="Tokens today: 39 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="92" width="32" height="58" rx="16"/>
+    <text class="cap__v" x="20" y="113" text-anchor="middle">39</text></svg>
+  <p class="cap__l"><b>Tokens</b>today</p></div><div class="cap" title="Deploy $ today: 60%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="Deploy $ today: 60 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="60" width="32" height="90" rx="16"/>
+    <text class="cap__v" x="20" y="81" text-anchor="middle">60</text></svg>
+  <p class="cap__l"><b>Deploy $</b>today</p></div><div class="cap" title="Deploy $ week: 28%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="Deploy $ week: 28 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="109" width="32" height="41" rx="16"/>
+    <text class="cap__v" x="20" y="130" text-anchor="middle">28</text></svg>
+  <p class="cap__l"><b>Deploy $</b>week</p></div><div class="cap" title="web $ week: 26%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="web $ week: 26 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="111" width="32" height="39" rx="16"/>
+    <text class="cap__v" x="20" y="132" text-anchor="middle">26</text></svg>
+  <p class="cap__l"><b>web $</b>week</p></div><div class="cap" title="sonnet $ week: 41%">
+  <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="sonnet $ week: 41 percent of cap">
+    <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
+    <rect class="cap__pill tone-ok" x="4" y="89" width="32" height="61" rx="16"/>
+    <text class="cap__v" x="20" y="110" text-anchor="middle">41</text></svg>
+  <p class="cap__l"><b>sonnet $</b>week</p></div></div>`;
+  // The kit's changes to the card, each on purpose:
+  //   - the tone is on the <svg>, not on the pill: bundle.css paints the pill `--tone` and the percent `--on-tone`, and
+  //     the percent is the pill's sibling, so on the card it read no tone and was drawn in SVG's default black;
+  //   - the card prints the one capsule at 28% of the month 22 below its pill's top; the kit keeps every one at 21.
+  const kitOf = (s) => {
+    const t = tight(s);
+    const tone = /class="cap__pill (tone-[a-z]+)"/.exec(t)[1];
+    return t.replace(` ${tone}"`, `"`).replace("<svg width", `<svg class="${tone}" width`);
+  };
+  const caps = /<div class="capbars">([^]*)<\/div>$/.exec(card)[1].split(/(?=<div class="cap")/);
+  assert.equal(caps.length, 8);
+  const levels = [["Jobs", "today", 62.5], ["Jobs", "week", 49.5], ["Jobs", "month", 28], ["Tokens", "today", 38.8], ["Deploy $", "today", 60], ["Deploy $", "week", 27.5], ["web $", "week", 26], ["sonnet $", "week", 40.8]];
+  for (const [i, [name, window, pct]] of levels.entries()) {
+    const want = kitOf(caps[i]).replace(`y="130" text-anchor="middle">28</text></svg><p class="cap__l"><b>Jobs</b>month`, `y="129" text-anchor="middle">28</text></svg><p class="cap__l"><b>Jobs</b>month`);
+    assert.equal(out(ui.capsule({ name, window, pct, hold: 80 })), want, `${name} ${window}`);
+  }
+  // The card draws the soft-hold ring on every capsule; a dollar window has no soft hold, so the console passes none
+  // and none is drawn.
+  assert.doesNotMatch(out(ui.capsule({ name: "Deploy $", window: "today", pct: 60 })), /cap__hold/);
+  assert.match(out(ui.capsule({ name: "Jobs", window: "today", pct: 10, hold: 75 })), /<circle class="cap__hold" cx="20" cy="38" r="4"\/>/, "the ring at 150 * (1 - 75/100), whole");
+  // The meter rule: ok under the hold, attention from it, failed at the cap; a given status wins.
+  const toneOf = (s) => /<svg class="tone-([a-z]+)"/.exec(s)[1];
+  assert.equal(toneOf(out(ui.capsule({ name: "Jobs", window: "today", pct: 79.9, hold: 80 }))), "ok");
+  assert.equal(toneOf(out(ui.capsule({ name: "Jobs", window: "today", pct: 80, hold: 80 }))), "attention");
+  assert.equal(toneOf(out(ui.capsule({ name: "Jobs", window: "today", pct: 100, hold: 80 }))), "failed");
+  assert.equal(toneOf(out(ui.capsule({ name: "Deploy $", window: "today", pct: 99 }))), "ok", "no hold: ok up to the cap");
+  assert.equal(toneOf(out(ui.capsule({ name: "Jobs", window: "today", pct: 10, status: "attention" }))), "attention");
+  // The pill is at least 32 high and stops at the top; the printed percent is whole and says a window past its cap.
+  assert.match(out(ui.capsule({ name: "ops $", window: "month", pct: 2 })), /<rect class="cap__pill" x="4" y="118" width="32" height="32" rx="16"\/><text class="cap__v" x="20" y="139" text-anchor="middle">2<\/text>/);
+  assert.match(out(ui.capsule({ name: "api $", window: "week", pct: 112.4 })), /title="api \$ week: 112%".*aria-label="api \$ week: 112 percent of cap".*<rect class="cap__pill" x="4" y="0" width="32" height="150" rx="16"\/><text class="cap__v" x="20" y="21" text-anchor="middle">112<\/text>/);
+  assert.match(out(ui.capsule({ name: "Jobs", window: "today", pct: -3 })), /height="32" rx="16"\/><text class="cap__v" x="20" y="139" text-anchor="middle">0<\/text>/);
+  assert.match(out(ui.capsule({ name: "Jobs", window: "today", pct: 50, label: "Jobs started today: 20 of 40" })), /role="img" aria-label="Jobs started today: 20 of 40"/);
+  for (const bad of [Number.NaN, Infinity, "50", null, undefined]) assert.throws(() => ui.capsule({ name: "Jobs", window: "today", pct: bad }), TypeError, String(bad));
+  assert.throws(() => ui.capsule({ name: html`<b>x</b>`, window: "today", pct: 1 }), TypeError, "a name is text: it is written into the title too");
+  assert.throws(() => ui.capsule({ name: "Jobs", window: 7, pct: 1 }), TypeError);
+  assert.throws(() => ui.capsule({ name: "Jobs", window: "today", pct: 1, status: "warning" }), RangeError);
+});
+
+test("spendDots: CardsAndBanners' Spend today, one column of 7 dots per hour, lit from the bottom, and its axis", () => {
+  const card = `<div class="sd" role="img" aria-label="Metered spend by hour today"><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div><p class="axis"><span>00:00</span><span>08:00</span><span>15:00</span></p>`;
+  // The kit writes an unlit dot without the card's empty class attribute.
+  const hours = [0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 2, 1, 4, 2, 6, 3];
+  assert.equal(out(ui.spendDots({ hours, max: 7, label: "Metered spend by hour today" })), card.replace(/<i class=""><\/i>/g, "<i></i>"));
+  assert.equal(ui.SPEND_DOTS, 7);
+  const litOf = (s) => Array.from(s.matchAll(/<span class="sd__c">(.*?)<\/span>/g), (m) => (m[1].match(/class="on"/g) ?? []).length);
+  // By default the largest hour is a full column; an hour that spent anything lights one at least; the rest none.
+  assert.deepEqual(litOf(out(ui.spendDots({ hours: [100, 50, 1, 0, -4, Number.NaN, "9"], label: "x" }))), [7, 4, 1, 0, 0, 0, 0]);
+  assert.deepEqual(litOf(out(ui.spendDots({ hours: [0, 0], label: "x" }))), [0, 0], "nothing spent, nothing lit");
+  assert.deepEqual(litOf(out(ui.spendDots({ hours: [30, 10], max: 20, label: "x" }))), [7, 4], "over the scale is a full column");
+  // The axis is the first, middle and last hours, from startHour, round the clock.
+  const axisOf = (s) => Array.from(/<p class="axis">(.*)<\/p>$/.exec(s)[1].matchAll(/<span>([^<]*)<\/span>/g), (m) => m[1]);
+  assert.deepEqual(axisOf(out(ui.spendDots({ hours: [1, 2, 3, 4], startHour: 22, label: "x" }))), ["22:00", "00:00", "01:00"]);
+  assert.deepEqual(axisOf(out(ui.spendDots({ hours: [1], label: "x" }))), ["00:00"]);
+  assert.deepEqual(axisOf(out(ui.spendDots({ hours: [1, 2], label: "x" }))), ["00:00", "01:00"]);
+  assert.equal(litOf(out(ui.spendDots({ hours: Array(24).fill(1), label: "x" }))).length, 24);
+  assert.equal(out(ui.spendDots({ hours: [], label: "x" })), "", "no hours, nothing drawn");
+  assert.throws(() => ui.spendDots({ hours: Array(25).fill(1), label: "x" }), RangeError, "a day has 24 hours");
+  assert.throws(() => ui.spendDots({ hours: "1,2", label: "x" }), RangeError);
+  assert.throws(() => ui.spendDots({ hours: [1] }), TypeError, "the chart is named");
+  for (const bad of [24, -1, 1.5, "0", null]) assert.throws(() => ui.spendDots({ hours: [1], label: "x", startHour: bad }), RangeError, String(bad));
+});
+
+test("schedulerRunOf: a cron trigger's run from its id, BullMQ's repeat:<trigger>:<slot>, and nothing else", () => {
+  const slot = Date.UTC(2026, 9, 8, 15, 0);
+  assert.deepEqual(ui.schedulerRunOf(`repeat:hourly-sync:${slot}`), { scheduler: "hourly-sync", at: slot });
+  assert.deepEqual(ui.schedulerRunOf("repeat:nightly.tidy_2-a:0"), { scheduler: "nightly.tidy_2-a", at: 0 }, "a trigger id with dots, an underscore and a hyphen");
+  // A slot past the latest instant a date can show names the trigger and no time.
+  assert.deepEqual(ui.schedulerRunOf(`repeat:hourly-sync:${DEFER_TIME_MAX_MS}`), { scheduler: "hourly-sync", at: DEFER_TIME_MAX_MS });
+  assert.deepEqual(ui.schedulerRunOf(`repeat:hourly-sync:${DEFER_TIME_MAX_MS + 1}`), { scheduler: "hourly-sync", at: null });
+  assert.deepEqual(ui.schedulerRunOf("repeat:hourly-sync:9999999999999999"), { scheduler: "hourly-sync", at: null }, "past a safe integer too");
+  // Any other id is no run of a trigger's.
+  for (const id of ["gh-71b2", "local-aa01", "repeat:hourly-sync", "repeat::1", `repeat:a b:${slot}`, "repeat:x:01", "repeat:x:-1", "repeat:x:99999999999999999", `repeat:${"a".repeat(201)}:1`, `xrepeat:x:1`, null, 7, undefined]) {
+    assert.equal(ui.schedulerRunOf(id), null, String(id));
+  }
+});
+
+test("waitBar: the Waitlists card's bar, a segment per reason in proportion, alternating greys, every segment wide enough to read", () => {
+  const card = `<svg class="wbar" height="30" role="img" aria-label="In line by reason"><rect class="wb wb--0" x="0.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-slot" x="0.00%" width="14" height="14"/></g><text class="wb-t" x="0.00%" dx="30" y="20">1</text><rect class="wb wb--1" x="20.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-chain" x="20.00%" width="14" height="14"/></g><text class="wb-t" x="20.00%" dx="30" y="20">1</text><rect class="wb wb--2" x="40.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-clock" x="40.00%" width="14" height="14"/></g><text class="wb-t" x="40.00%" dx="30" y="20">1</text><rect class="wb wb--3" x="60.00%" y="0" width="40.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-rerun" x="60.00%" width="14" height="14"/></g><text class="wb-t" x="60.00%" dx="30" y="20">2</text></svg>`;
+  // The kit closes `<use>` with `</use>`, as it writes every icon.
+  const kitOf = (s) => s.replace(/(<use class="wb-g"[^>]*?)\/>/g, "$1></use>");
+  const segments = [{ icon: "slot", count: 1 }, { icon: "chain", count: 1 }, { icon: "clock", count: 1 }, { icon: "rerun", count: 2 }];
+  assert.equal(out(ui.waitBar(segments, { label: "In line by reason" })), kitOf(card));
+  const bar = (counts) => {
+    const s = out(ui.waitBar(counts.map((count, i) => ({ icon: ICON_NAMES[i], count })), { label: "x" }));
+    return Array.from(s.matchAll(/<rect class="wb wb--(\d)" x="([\d.]+)%" y="(\d+)" width="([\d.]+)%"[^>]*\/><g transform="translate\(10 (\d+)\)">.*?<text class="wb-t" x="[\d.]+%" dx="30" y="(\d+)">([\d,]+)<\/text>/g), (m) => ({ cls: Number(m[1]), x: m[2], y: Number(m[3]), w: Number(m[4]), gy: Number(m[5]), ty: Number(m[6]), text: m[7] }));
+  };
+  const heightOf = (counts) => Number(/<svg class="wbar" height="(\d+)"/.exec(out(ui.waitBar(counts.map((count, i) => ({ icon: ICON_NAMES[i], count })), { label: "x" })))[1]);
+  // What a segment's glyph and count need on the narrowest bar (310 px, the card's at 375): the glyph 10 px in and 14
+  // wide, 6 px, the count at 13 px, 800 (Chrome draws a tabular digit 8.8 px wide), and 10 px before the end.
+  assert.equal(ui.WAIT_BAR_PX, 310);
+  const needPx = (text) => 30 + text.length * 8.8 + 10;
+  // A share under a segment's least is raised to it and the others share the rest; a row's widths always add up to 100.
+  assert.deepEqual(bar([30, 1]).map((s) => s.w), [84.19, 15.81]);
+  assert.deepEqual(bar([60, 1, 1, 2]).map((s) => s.w), [52.58, 15.81, 15.8, 15.81]);
+  assert.deepEqual(bar([1, 1, 1]).map((s) => s.w), [33.33, 33.34, 33.33]);
+  for (const counts of [[1, 1, 1], [7, 3], [100, 1, 1, 1, 1, 1], [5, 9, 13, 2, 1], [1, 2, 3, 4, 5, 6, 7, 8], [120, 1, 1, 1, 1, 1, 1, 1, 1, 1], [1204, 999, 88, 7, 1, 1, 1, 1, 1, 1], DEFER_BUCKETS.map(() => 120)]) {
+    const segs = bar(counts);
+    assert.equal(segs.length, counts.length, counts.join(" "));
+    const rows = Map.groupBy(segs, (s) => s.y);
+    for (const [y, row] of rows) {
+      assert.equal(Math.round(row.reduce((a, s) => a + s.w, 0) * 100), 10000, `${counts.join(" ")}: the row at ${y}`);
+      assert.equal(row.at(-1).x, (100 - row.at(-1).w).toFixed(2), "a row's last segment ends at 100%");
+      for (const s of row) {
+        assert.ok((s.w / 100) * ui.WAIT_BAR_PX >= needPx(s.text), `${counts.join(" ")}: ${s.text} has ${((s.w / 100) * ui.WAIT_BAR_PX).toFixed(1)} px`);
+        assert.deepEqual([s.gy, s.ty], [y + 8, y + 20], "its glyph and its count in its own row");
+      }
+    }
+    assert.equal(heightOf(counts), rows.size * 30 + (rows.size - 1) * 6, "a row 30 px high, 6 px apart");
+  }
+  // Every bucket the worker's leaf has, one job each: ten segments need more than one bar holds, so two rows of five,
+  // each even, the card's four greys in turn across both.
+  const all = bar(DEFER_BUCKETS.map(() => 1));
+  assert.deepEqual(all.map((s) => s.cls), DEFER_BUCKETS.map((_, i) => i % 4));
+  assert.deepEqual(all.map((s) => s.y), DEFER_BUCKETS.map((_, i) => (i < 5 ? 0 : 36)));
+  for (const s of all) assert.ok(Math.abs(s.w - 20) <= 0.01, `an even share: ${s.w}`);
+  assert.equal(heightOf(DEFER_BUCKETS.map(() => 1)), 66);
+  // A three-digit count's segment is wider than a one-digit count's, and never cut ("1:" for 120 was a cut "120").
+  const wide = bar([120, 1, 1, 1, 1, 1]);
+  assert.equal(wide[0].text, "120");
+  assert.ok(wide[0].w > wide[1].w);
+  // A reason with no jobs is not drawn, and the greys still alternate across the ones that are.
+  assert.deepEqual(bar([2, 0, 3]).map((s) => [s.cls, s.w]), [[0, 40], [1, 60]]);
+  assert.equal(out(ui.waitBar([{ icon: "slot", count: 0 }], { label: "x" })), "", "nothing waits: no bar");
+  assert.equal(out(ui.waitBar([], { label: "x" })), "");
+  assert.match(out(ui.waitBar([{ icon: "slot", count: 1204 }], { label: "x" })), /<text class="wb-t" x="0\.00%" dx="30" y="20">1,204<\/text>/);
+  assert.equal(heightOf([Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]), 66, "the largest count still fits a row of its own");
+  assert.throws(() => ui.waitBar([{ icon: "nope", count: 1 }], { label: "x" }), RangeError);
+  assert.throws(() => ui.waitBar([{ icon: "slot", count: -1 }], { label: "x" }), TypeError);
+  assert.throws(() => ui.waitBar([{ icon: "slot", count: 1.5 }], { label: "x" }), TypeError);
+  assert.throws(() => ui.waitBar([{ icon: "slot", count: 1 }]), TypeError, "the bar is named");
+  assert.throws(() => ui.waitBar("slot", { label: "x" }), TypeError);
+});
+
+test("actForm: a write's form, its hidden fields typed as the script reads them, then the kit's button; no preview area", () => {
+  // Needs you's Retry, a paid act (the card's plain link is the console's two-step write).
+  assert.equal(out(ui.actForm({ action: "retry-failed", hidden: [["jobId", "gh-5d10"], ["queue", "pi-jobs"]], label: "Retry", kind: ["sm", "paid"] })), `<form class="act" data-action="retry-failed" autocomplete="off"><input type="hidden" name="jobId" value="gh-5d10"><input type="hidden" name="queue" value="pi-jobs"><button class="btn btn--sm btn--paid" type="submit">Retry</button></form>`);
+  // OverviewScreen's Pause fleet, the card's link as the form's button, and a host's round pause, destructive both.
+  const fleet = fromCard(`<a class="btn btn--sm btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Pause fleet</a>`).replace(`<a `, `<button `).replace(` href="#"`, ` type="submit"`).replace(`</a>`, `</button>`);
+  assert.equal(out(ui.actForm({ action: "fleet-pause", label: "Pause fleet", kind: ["sm", "danger"], icon: "pause" })), `<form class="act" data-action="fleet-pause" autocomplete="off">${fleet}</form>`);
+  const host = fromCard(`<button class="btn btn--sm btn--round" type="button" aria-label="Pause build3"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg></button>`).replace(`btn--round"`, `btn--round btn--danger"`).replace(`type="button"`, `type="submit"`);
+  assert.equal(out(ui.actForm({ action: "queue-pause", hidden: [{ name: "queue", value: "pi-jobs@build3" }], label: "Pause build3", kind: ["sm", "round", "danger"], icon: "pause" })), `<form class="act" data-action="queue-pause" autocomplete="off"><input type="hidden" name="queue" value="pi-jobs@build3">${host}</form>`);
+  assert.equal(out(ui.actForm({ action: "cancel-queued", hidden: [["jobId", "gh-c9e1"], ["queue", "pi-jobs@build3"]], label: "Cancel" })), `<form class="act" data-action="cancel-queued" autocomplete="off"><input type="hidden" name="jobId" value="gh-c9e1"><input type="hidden" name="queue" value="pi-jobs@build3"><button class="btn btn--sm" type="submit">Cancel</button></form>`, "small by default");
+  // A field's type is one the browser script reads (`bodyOf`'s `data-type`), and an action's name passes its check.
+  const scriptTypes = [...new Set(Array.from(CONSOLE_SCRIPT.matchAll(/\bt === "([a-z]+)"/g), (m) => m[1]))];
+  assert.deepEqual(scriptTypes, ["int", "json", "list"]);
+  for (const type of scriptTypes) assert.match(out(ui.actForm({ action: "x", hidden: [["index", "3", type]], label: "x" })), new RegExp(`<input type="hidden" name="index" value="3" data-type="${type}">`));
+  assert.equal(out(ui.actForm({ action: "x", hidden: [{ name: "index", value: 3, type: "int" }, ["on", true]], label: "x" })), `<form class="act" data-action="x" autocomplete="off"><input type="hidden" name="index" value="3" data-type="int"><input type="hidden" name="on" value="true"><button class="btn btn--sm" type="submit">x</button></form>`);
+  assert.ok(CONSOLE_SCRIPT.includes(`!/^[a-z0-9-]{1,40}$/.test(action)`), "the script's own check on an action's name");
+  for (const name of ["retry-failed", "fleet-pause", "queue-pause", "cancel-queued"]) assert.ok(ACTIONS.some((a) => a.name === name), `${name} is an action`);
+  assert.ok(ACTIONS.every((a) => /^[a-z0-9-]{1,40}$/.test(a.name)), "every action's name is one actForm takes");
+  assert.doesNotMatch(String(ui.actForm({ action: "x", label: "x" })), /preview-area|data-preview/, "the page's one confirm slot previews it");
+  for (const bad of ["Retry", "retry_failed", "a/b", "", "x".repeat(41), null]) assert.throws(() => ui.actForm({ action: bad, label: "x" }), RangeError, String(bad));
+  for (const bad of [["job id", "x"], ["", "x"], ["1st", "x"], ["a-b", "x"], [null, "x"]]) assert.throws(() => ui.actForm({ action: "x", hidden: [bad], label: "x" }), RangeError, String(bad[0]));
+  assert.throws(() => ui.actForm({ action: "x", hidden: [["n", "1", "number"]], label: "x" }), RangeError, "an unknown field type");
+  for (const bad of [null, undefined, {}, [1], Number.NaN, Infinity]) assert.throws(() => ui.actForm({ action: "x", hidden: [["n", bad]], label: "x" }), TypeError, String(bad));
+  assert.throws(() => ui.actForm({ action: "x", hidden: "jobId=1", label: "x" }), TypeError);
+  assert.throws(() => ui.actForm({ action: "x", label: "x", kind: "huge" }), RangeError);
+  assert.throws(() => ui.actForm({ action: "x", label: "Pause", kind: ["sm", "round"] }), TypeError, "a round button is its icon");
+});
+
 test("an unknown status, icon, kind, size, tag, type, option or link THROWS: those come from code, never from a record", () => {
   const throwsRange = (fn, label) => assert.throws(fn, RangeError, label);
   for (const bad of ["warn", "success", "Running", "", "__proto__", "constructor", null, undefined, 1]) {
@@ -735,6 +1026,11 @@ test("hostile text is escaped and its control bytes scrubbed in every helper tha
     ui.select({ id: "s", name: H, options: [H, { value: H, label: H }], value: H }), ui.textarea({ id: "t", name: H, value: H, placeholder: H }),
     ui.cmd(["pi-dispatch", H], { host: H }), ui.outLink({ href: "https://x.example/", label: H }), ui.tabs([{ href: "/?x=\"'<>", label: H, current: true }], { label: H }), ui.seg([{ label: H, on: true }, { label: H, href: "/?q=<a>" }], { label: H }),
     ui.btn({ label: H, href: "/runs?q=<x>" }), ui.btn({ kind: "round", icon: "pause", label: H }), ui.btn({ label: H, name: H, value: H }),
+    // PR 3's marks.
+    ui.slots({ run: 1, label: H }), ui.capsule({ name: H, window: H, pct: 50, hold: 80 }), ui.capsule({ name: "x", window: "y", pct: 50, label: H }),
+    ui.spendDots({ hours: [1], label: H }), ui.waitBar([{ icon: "slot", count: 1 }], { label: H }),
+    ui.rowPill({ items: [H], end: { text: H, status: "attention" }, action: { label: H, href: "/run?id=\"><script>" } }), ui.rowPill({ items: [], end: H }), ui.rowPill({ items: [], end: { text: H, faint: true } }),
+    ui.actForm({ action: "x", hidden: [["n", H]], label: H }),
   ];
   for (const f of frags) {
     const s = out(f);
@@ -759,6 +1055,7 @@ test("every link form the kit writes passes the page reference rule (assertOwnRe
     ui.pager({ newer: runs, older: ui.pageHref(PAGES, "audit", { before: "2026-10:41" }) }),
     ui.outLink({ href: forgeLinkOf({ kind: "github", target: "acme/web#415" }), label: "acme/web#415" }),
     ui.outLink({ href: docsHref("docs/reasons.md#scope-cap"), label: "the reasons docs", code: true }),
+    ui.outLink({ href: docsHref("docs/triggers.md"), label: "What triggers can do", btn: "ghost" }),
     ui.field({ label: "Answer", id: "answer", control: ui.textarea({ id: "answer" }), hint: "h", error: "e" }),
   ].map(String);
   // A page around them: the sprite every icon names, the skip link's target, and the element `#why` names.
@@ -830,10 +1127,15 @@ test("RESERVED_IDS is every id the page frame draws and the script finds by name
     }
   }
   for (const kind of ERROR_KINDS) pages.push(String(errorPage({ kind, session: { name: "ops", role: "operator" } }).html));
+  // The frame's headline panel, as the shell draws it for a page that has one (PR 3: the overview's).
+  pages.push(String(shellHtml("overview", { session: { name: "ops", role: "operator" }, data: { now: 0, env: {} }, query: {} }, html``, { headline: "All clear." })));
   for (const page of pages) for (const m of frameOf(page).matchAll(/\sid="([^"]+)"/g)) frameIds.add(m[1]);
-  assert.ok(frameIds.has("main") && frameIds.has("p-nav-parked") && frameIds.has("i-runs"), [...frameIds].slice(0, 12).join(", "));
+  assert.ok(frameIds.has("main") && frameIds.has("p-nav-parked") && frameIds.has(HEADLINE_ID) && frameIds.has("i-runs"), [...frameIds].slice(0, 12).join(", "));
   // PR 2's: the live notes' region, the one confirm slot and the held note's template, found by the script by id.
   for (const id of ["live-note", "confirm-slot", "held-note"]) assert.ok(frameIds.has(id), `the frame draws #${id}`);
+  // The frame's own panels (the Parked count, the headline) are named here although their family is refused too: the
+  // list is where a reader looks for the ids the frame owns.
+  for (const id of SHELL_PANEL_IDS) assert.ok(ui.RESERVED_IDS.includes(id) && frameIds.has(id), `#${id} is listed and drawn`);
   for (const id of [...scriptIds, ...frameIds]) assert.ok(reserved(id), id);
   // And the list holds nothing else: each entry is still drawn by the frame or found by the script.
   for (const id of ui.RESERVED_IDS) assert.ok(frameIds.has(id) || scriptIds.has(id), `RESERVED_IDS lists #${id}, which neither the frame draws nor the script finds: drop it`);

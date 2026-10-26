@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { colorOf, PULSE_TOKENS, PULSE_TOKENS_SHA256, tokenCss } from "../src/console/pulse-tokens.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
+import { LEGACY_CSS, specificity } from "../src/console/compat-css.mjs";
+import { capsule } from "../src/console/kit.mjs";
+import { PAGE_CSS, SHELL_CSS, cssBlocks, pageCss, splitSelectors } from "../src/console/page-css.mjs";
+import { CONSOLE_CSS } from "../src/console/style.mjs";
 
 // The Pulse tokens (issue #737): the copy is the pinned design file, its two functions keep their contract, and every
 // foreground the design system puts on a ground passes WCAG 2 contrast in both themes.
@@ -380,4 +384,58 @@ test("the status mark ratios recorded beside NO_PAIR are measured", () => {
       assert.equal(measured, recorded[theme], `${mark} on surface, ${theme}`);
     }
   }
+});
+
+// ---- placement: where a page draws a pair the tokens hold only when the stylesheet puts it there -----------------------
+
+/** `fg` laid over `bg` at `alpha`, channel by channel in sRGB, as a browser composites a fill's opacity. */
+function over(fg, alpha, bg) {
+  const ch = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const [f, b] = [ch(fg), ch(bg)];
+  return `#${f.map((c, i) => Math.round(alpha * c + (1 - alpha) * b[i]).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Every rule of `css` (inside `@media` too) as `[selector, body]`, one selector each. */
+function rulesIn(css) {
+  return cssBlocks(css).flatMap(({ prelude, body }) => (prelude.startsWith("@") ? (/^@media[\s(]/.test(prelude) ? rulesIn(body) : []) : splitSelectors(prelude).map((sel) => [sel, body])));
+}
+
+test("on the overview a running pill's host is at full opacity, so its label is the on-running on running pair (a placement check)", () => {
+  // bundle.css draws a pill's second word (`.tp-sub`, the host a run is on) at 85% opacity, inside the running pill's
+  // label: on its fill that is 3.94:1 in the light theme, under AA.
+  assert.match(PULSE_CSS, /\n\.tp-sub \{[^}]*fill-opacity: \.85; \}/);
+  assert.match(PULSE_CSS, /\n\.tp-l--run \{ fill: var\(--on-running\); \}/);
+  assert.match(PULSE_CSS, /\n\.tp--run \{ fill: var\(--running\); \}/);
+  const dimmed = contrast(over(colorOf("on-running", "light"), 0.85, colorOf("running", "light")), colorOf("running", "light"));
+  assert.equal(dimmed.toFixed(2), "3.94");
+  // The overview's page CSS, where the timeline is drawn, sets it to 1: served under the overview's body, after
+  // bundle.css, and more specific than `.tp-sub`, so it wins wherever both apply on that page.
+  const rule = 'body[data-page="overview"] .tp-l--run .tp-sub{fill-opacity:1}';
+  assert.match(PAGE_CSS.overview, /\n\.tp-l--run \.tp-sub\{fill-opacity:1\}\n/);
+  assert.ok(pageCss().split("\n").includes(rule));
+  assert.ok(CONSOLE_CSS.indexOf(rule) > CONSOLE_CSS.indexOf(PULSE_CSS) + PULSE_CSS.length - 1, "after bundle.css");
+  assert.ok(specificity('body[data-page="overview"] .tp-l--run .tp-sub') > specificity(".tp-sub"));
+  // Nothing else in the console's own rules touches that opacity, so the effective one there is 1.
+  const others = [SHELL_CSS, pageCss(), LEGACY_CSS].flatMap(rulesIn).filter(([sel, body]) => /\.tp-sub(?![\w-])/.test(sel) && /fill-opacity/.test(body));
+  assert.deepEqual(others.map(([sel]) => sel), ['body[data-page="overview"] .tp-l--run .tp-sub']);
+  // At full opacity the label is a pinned pair, which holds in both themes.
+  assert.ok(PAIRS.includes("on-running on running 4.5"));
+  for (const theme of THEMES) assert.ok(contrast(colorOf("on-running", theme), colorOf("running", theme)) >= 4.5, theme);
+});
+
+test("a capsule's percent is the on-status on status pair: its tone is on the svg the percent is drawn in (a placement check)", () => {
+  // bundle.css paints the pill `--tone` and the percent `--on-tone`; the percent is the pill's sibling, not its child.
+  assert.match(PULSE_CSS, /\n\.cap__pill \{ fill: var\(--tone\); \}/);
+  assert.match(PULSE_CSS, /\n\.cap__v \{[^}]*fill: var\(--on-tone\); \}/);
+  for (const [pct, tone] of [[10, "ok"], [85, "attention"], [100, "failed"]]) {
+    const s = String(capsule({ name: "Jobs", window: "today", pct, hold: 80 }));
+    // The tone class is on the <svg>, an ancestor of both the pill and the percent.
+    assert.match(s, new RegExp(`<svg class="tone-${tone}"[^>]*>(?:(?!</svg>).)*<rect class="cap__pill"(?:(?!</svg>).)*<text class="cap__v"`), tone);
+    assert.doesNotMatch(s, /class="cap__pill tone-/, "not on the pill alone, where the percent would not read it");
+    assert.ok(PAIRS.includes(`on-${tone} on ${tone} 4.5`), tone);
+    for (const theme of THEMES) assert.ok(contrast(colorOf(`on-${tone}`, theme), colorOf(tone, theme)) >= 4.5, `${tone} ${theme}`);
+  }
+  // On the pill alone (the card's markup) the percent read no tone and was SVG's default black: under AA in light.
+  assert.equal(contrast("#000000", colorOf("ok", "light")).toFixed(2), "4.16");
+  assert.equal(contrast("#000000", colorOf("failed", "light")).toFixed(2), "4.42");
 });

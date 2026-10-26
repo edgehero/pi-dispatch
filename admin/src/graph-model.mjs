@@ -673,13 +673,15 @@ function selectorLabel(t) {
   return parts.join(" ") || "(no selector)";
 }
 
-/** Match a cron display trigger to its resident scheduler: by key/name (the id), else by pattern. */
+/**
+ * Match a cron display trigger to its resident scheduler: by the scheduler's KEY alone, which is the trigger's id (the
+ * worker upserts each under its `on.id`), or none. Never by BullMQ's `name`, the job name the runs are minted with
+ * (`local` for every one the worker upserts, so a trigger with that id matched every scheduler), and never by pattern,
+ * which two triggers can share: either drew another trigger's next fire on this one.
+ */
 function matchScheduler(schedulers, t) {
-  if (typeof t?.id === "string") {
-    const byId = schedulers.find((s) => s?.key === t.id || s?.name === t.id);
-    if (byId) return byId;
-  }
-  return typeof t?.pattern === "string" ? (schedulers.find((s) => s?.pattern === t.pattern) ?? null) : null;
+  if (typeof t?.id !== "string" || t.id === "") return null;
+  return schedulers.find((s) => s?.key === t.id) ?? null;
 }
 
 /** Basename without importing node:path (this module is pure); both separators, trailing-sep safe. */

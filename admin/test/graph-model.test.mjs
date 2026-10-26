@@ -129,6 +129,21 @@ const CANNED = () => ({
   nowMs: 1770000000000,
 });
 
+test("buildGraphModel: a cron trigger takes its scheduler by key alone, never by BullMQ's job name or a shared pattern", () => {
+  // The worker upserts every scheduler under its trigger's id and names its runs "local": a trigger with that id matched
+  // every scheduler by name, and one whose own scheduler is not registered took another's next fire by its pattern.
+  const base = CANNED();
+  const own = { key: "nightly", name: "local", pattern: "0 3 * * *", every: null, next: "2026-08-12T03:00:00.000Z", overdueMs: null };
+  const other = { key: "weekly", name: "local", pattern: "0 4 * * *", every: null, next: "2026-08-13T04:00:00.000Z", overdueMs: 5000 };
+  const triggers = { triggers: [{ ...base.triggers.triggers[0] }, { ...base.triggers.triggers[2], id: "local" }] };
+  const m = buildGraphModel({ ...base, triggers, schedulers: [own, other], nowMs: base.nowMs });
+  assert.equal(m.nodes.find((n) => n.id === "trigger:0").next, own.next, "its own key");
+  const local = m.nodes.find((n) => n.id === "trigger:2");
+  assert.deepEqual([local.next, local.overdueMs], [null, null], "no scheduler's key is local, whatever its job name");
+  const shared = buildGraphModel({ ...base, triggers: { triggers: [{ ...base.triggers.triggers[2] }] }, schedulers: [other], nowMs: base.nowMs });
+  assert.deepEqual([shared.nodes.find((n) => n.id === "trigger:2").next], [null], "gone's pattern is weekly's, its key is not");
+});
+
 test("buildGraphModel: config edges always, cron joins by id, forge joins by persisted index", () => {
   const m = buildGraphModel(CANNED());
   const configs = m.edges.filter((e) => e.kind === "config");

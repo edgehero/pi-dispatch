@@ -27,15 +27,21 @@
  * THE MODULES (issue #737). The renderers live in `panels/<screen>.mjs`, one module per screen (`overview`, `runs`,
  * `run`, `parked`, `insights`, `fleet`, `config`, `audit`), and what more than one screen uses in `panels/common.mjs`.
  * This file re-exports exactly what it exported before the split, so no importer changed, except `navHtml`: the
- * navigation is the shell's since the Pulse frame (`shell.mjs`). The rules above hold for every one of them.
+ * navigation is the shell's since the Pulse frame (`shell.mjs`), and the overview's old panels (`overviewState`,
+ * `overviewParked`, `overviewFailures`), which its Pulse panels replaced (`panels/overview.mjs`'s header says where each
+ * part went). The rules above hold for every one of them.
  */
 export {
   ageText, utcText, timeHtml, usdText, moneyHtml, shownPath, RUN_ID_RE, canAct, runCost, BEAT_FRESH_MS,
   workersOnline, staleText, progressText
 } from "./panels/common.mjs";
 export {
-  NO_WORKER_TEXT, STALE_BEATS_TEXT, overviewState, overviewHosts, COUNT_WINDOWS_UTC_TEXT, overviewSpend, overviewParked,
-  overviewFailures, overviewActive
+  NO_WORKER_TEXT, STALE_BEATS_TEXT, REGISTRY_UNREAD_TEXT, COUNT_WINDOWS_UTC_TEXT, OVERVIEW_UNREAD_TEXT, NEEDS_DEFINITION,
+  NEEDS_EMPTY, WAITING_EMPTY, RUNNING_EMPTY, SPEND_EMPTY, HOSTS_EMPTY, WAITLISTS_CALM, SOFT_HOLD_TEXT,
+  SOFT_HOLD_REFUSED_TEXT, FREE_SLOT_TEXT, HOST_NO_EXPIRY_TEXT, NO_DOCTOR_TEXT, SPEND_HOURS_TEXT, OVERVIEW_LINKS,
+  NEEDS_ROWS_MAX, WAITING_MAIN_BUCKETS, WAITLIST_ROWS_MAX, hostSkewText, waitingSentence, overviewHeadline,
+  overviewSetup, overviewSetupPi, overviewSetupEmpty, overviewNeeds, overviewWaiting, overviewActive, overviewSpend,
+  overviewTimeline, overviewCaps, overviewWaitlists, overviewHosts
 } from "./panels/overview.mjs";
 export { runsFilter, runsTable } from "./panels/runs.mjs";
 export {

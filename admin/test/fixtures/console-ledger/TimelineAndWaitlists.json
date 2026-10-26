@@ -1,0 +1,23 @@
+{
+  "card": "TimelineAndWaitlists",
+  "pr": 3,
+  "panels": [],
+  "elements": [
+    {"el":"p-timeline","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"]},
+    {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"]},
+    {"el":"Runs grouped by project","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#TIMELINE_DEFAULTS","holds":"project","golden":["overview.operator"],"shows":"Runs by project"},
+    {"el":"Host as the other grouping","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#TIMELINE_ROWS","holds":"host","golden":["overview-host.operator","overview-host.viewer"],"shows":"Runs by host"},
+    {"el":"Waiting jobs after now as dashed pills beside their blocker","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["overview.operator","overview.viewer"],"shows":"tp--wait"},
+    {"el":"Completed runs quiet grey; only running, parked and failed in colour","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["overview.operator","overview.viewer"],"shows":"tp--run"},
+    {"el":"The violet waiting for you tail","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["overview.operator","overview.viewer"],"shows":"class=\"tail"},
+    {"el":"The refused marker","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineModel"},
+    {"el":"The slot-held pill","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineModel","golden":["overview.operator","overview.viewer"],"shows":"still holds a build3 slot"},
+    {"el":"The waitlist bar","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/kit.mjs#waitBar","golden":["overview.operator","overview.viewer"],"shows":"class=\"wbar\""},
+    {"el":"Due, and no worker has taken it","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#waitingSentence","holds":"DEFER_DUE_SENTENCE","sentence":"worker/src/defer-reasons.mjs#DEFER_BUCKET_WORDS.due.title","golden":["panels/waitlist-due.operator"],"shows":"; no worker has taken it","reason":"a kind of wait the card does not draw, the reader's own: a delayed job past its due by more than the grace that no worker has taken, whatever it recorded; Cancel for a job that never started, and for a cron trigger's next run its trigger's Edit, since the queue will not remove that run"},
+    {"el":"A reason this console does not know","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#waitingSentence","holds":"Recorded reason: ","sentence":"worker/src/defer-reasons.mjs#DEFER_BUCKET_WORDS.unknown.title","golden":["panels/waitlist-unknown.operator"],"shows":"Recorded reason: <span class=\"code\">brand-new-why</span>","reason":"a kind of wait the card does not draw, the reader's own: a recorded reason this console has no words for (a newer worker's), said by its token for every role, never as no reason recorded"},
+    {"el":"The Reason and Queue toggle","kind":"readme","status":"illustrative","reason":"one grouping, by reason; the queues are its counts row"},
+    {"el":"1h, 3h, 24h","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#TIMELINE_ZOOMS","holds":"24h","golden":["overview.operator","overview.viewer"],"shows":">24h<"},
+    {"el":"The axis times","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["overview.operator","overview.viewer"],"shows":"UTC","reason":"UTC text inside the SVG, which the browser's script cannot localize as it does a <time>; the axis says UTC"},
+    {"el":"Sample rows","kind":"sample","status":"illustrative","reason":"sample values"}
+  ]
+}

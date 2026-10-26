@@ -36,7 +36,7 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
 import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
-import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { CRON_ID_MAX, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
 // `revert`, so the ladder, the step and the compare-and-set are one implementation.
@@ -2307,16 +2307,40 @@ export async function readSchedulers({
 }
 
 /**
+ * The longest scheduler id or name the snapshot carries (`mapSchedulers`): the triggers loader's longest cron id
+ * (`CRON_ID_MAX`), so every id the loader takes is one this read keeps, and a scheduler the worker upserts is never
+ * read as one with no id.
+ */
+export const SCHEDULER_NAME_MAX = CRON_ID_MAX;
+const SCHEDULER_NAME_RE = new RegExp(`^[A-Za-z0-9._-]{1,${SCHEDULER_NAME_MAX}}$`);
+
+/**
+ * A scheduler's id (`key`) or job name as the snapshot carries it: the triggers loader's cron id charset
+ * (`[A-Za-z0-9._-]`, its `ID_CHARSET`) at most `SCHEDULER_NAME_MAX` characters, else null. BOUNDED WHERE IT IS READ,
+ * because nothing writes a scheduler only through the worker: anything holding the Valkey's URL can add one, and every
+ * surface prints the id in running text (the overview's Scheduled line, the Fleet's Schedules table, the TUI, the
+ * status tool), so a planted 3,000-character id widened the overview to 23,512 px. Bounding each surface instead would
+ * be one rule per printer, and the next printer would forget it. Null, never a cut: a cut id would name a scheduler
+ * that does not exist, and could match a trigger that is not its own. A refused value keeps its entry (its pattern, its
+ * next fire and its overdue time still say a schedule is there), and each surface draws it as it draws a scheduler
+ * BullMQ answered without that field.
+ */
+const schedulerNameOf = (v) => (typeof v === "string" && SCHEDULER_NAME_RE.test(v) ? v : null);
+
+/**
  * Map raw BullMQ job-scheduler entries to the PII-free display shape, computing per-entry `overdueMs`
  * against `nowMs`. Pure, so the live dashboard can map the entries it reads off its own held queue
- * without re-opening a connection per tick. A non-array input maps to an empty list.
+ * without re-opening a connection per tick. A non-array input maps to an empty list. `key` is the scheduler's id (the
+ * cron trigger's `on.id`), `name` the job name it mints its runs with (the worker's is `local` for every one), each
+ * through `schedulerNameOf`. The key is BullMQ's `key` alone (issue #737): an entry with none has no key, never its
+ * name standing in, since every surface names and matches a scheduler by its key.
  */
 export function mapSchedulers(list, nowMs) {
   return (Array.isArray(list) ? list : []).map((s) => {
     const next = typeof s?.next === "number" ? s.next : null;
     return {
-      key: s?.key ?? s?.id ?? s?.name ?? null,
-      name: s?.name ?? null,
+      key: schedulerNameOf(s?.key),
+      name: schedulerNameOf(s?.name),
       pattern: s?.pattern ?? null,
       every: s?.every ?? null,
       next,
@@ -3753,13 +3777,17 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *     `makeQueue` does not let a caller turn off; and `pause`, `resume` and `cancelActive` are writes by definition.
  *   - `activeLimit` (default 1, at most `ACTIVE_PER_QUEUE_MAX`): how many active jobs each queue is asked for. One is
  *     the TUI's old cost (it shows the first id); the console passes 50 to list them all.
- *   - `waiting` (default false, issue #737): `snapshot()` adds `waiting`, the fleet's waiting jobs and why each waits
- *     (`readWaiting`), read at most once per `WAITING_TTL_MS` for the same queues and caught as a unit (`{ unreachable:
- *     true }`, no error text, kept for the window as a good read is). Its queues are every queue that EXISTS, not only
- *     the registry's: the registry's first, then the keyspace discovery the planners use (kept for
- *     `WAITING_DISCOVERY_TTL_MS`, and served while the next scan runs), so a stopped host's queued jobs are read, at
- *     most `WAITING_QUEUES_MAX` queues. Read-only whatever `readOnly` says: it reads ids, scores, a job hash's short
- *     scalar fields and the worker's own hashes.
+ *
+ * The waiting jobs are asked for per call, never per reader (issue #737): `snapshot({ waiting: true })` adds `waiting`,
+ * the fleet's waiting jobs and why each waits (`readWaiting`), and `snapshot()` reads none and has no such field. One
+ * reader serves every page of the console and its `/api/state`, and only the overview draws a waiting job, so a reader
+ * built to read them would make the fleet, parked and config pages and every `/api/state` pay for a read none of them
+ * draws. The read is shared by every call that asks: at most once per `WAITING_TTL_MS` for the same queues, caught as
+ * a unit (`{ unreachable: true }`, no error text, kept for the window as a good read is), so a second overview tab
+ * inside the window reads nothing. Its queues are every queue that EXISTS, not only the registry's: the registry's
+ * first, then the keyspace discovery the planners use (kept for `WAITING_DISCOVERY_TTL_MS`, and served while the next
+ * scan runs), so a stopped host's queued jobs are read, at most `WAITING_QUEUES_MAX` queues. Read-only whatever
+ * `readOnly` says: it reads ids, scores, a job hash's short scalar fields and the worker's own hashes.
  */
 export function createFleetReader(
   paths,
@@ -3790,9 +3818,6 @@ export function createFleetReader(
     // imported by modules held to a small graph (insights-assembly, write-plans). Null: `sandboxCheck` cannot tell, so
     // the run page keeps the command. The console passes the real one.
     sandboxRetentionFn = null,
-    // Issue #737: whether `snapshot()` also reads the waiting jobs (`readWaiting`) into `waiting`, at most once per
-    // WAITING_TTL_MS for the same queues. Off by default, so a surface that draws no waiting job pays no read for one.
-    waiting = false,
   } = {},
 ) {
   const prune = readOnly !== true;
@@ -3876,11 +3901,19 @@ export function createFleetReader(
     return unionQueueNames(lastNames, existing).map((n) => pool.get(n));
   };
 
+  // The queues a fleet pause or resume flips, read now: the registry afresh (so `lastNames` is this read's), then the
+  // keyspace unioned onto it. ONE function for the switch (`poolSet`) and for the snapshot that previews a fleet or a
+  // queue write (`snapshot({ switchQueues: true })`, issue #737), so a preview names, and its Undo pauses again, the
+  // queues the write reaches: a stopped host's queue the registry no longer names included.
+  const switchQueues = async () => {
+    await fleetQueues();
+    return killSwitchQueues();
+  };
+
   // Flip every kill-switch queue on THIS reader's Valkey through the held pool, `setQueuePaused`'s result shape.
   const poolSet = async (paused) => {
-    await fleetQueues(); // refresh `lastNames` from the registry before unioning the keyspace onto it
     const done = [];
-    for (const q of await killSwitchQueues()) {
+    for (const q of await switchQueues()) {
       try {
         if (paused) await q.pause();
         else await q.resume();
@@ -4029,8 +4062,14 @@ export function createFleetReader(
   };
 
   return {
-    async snapshot() {
-      const queues = await fleetQueues();
+    // `waiting` (issue #737): true reads the waiting jobs into the snapshot's `waiting` (see the header); anything else
+    // reads none, so a caller that draws no waiting job pays nothing for one.
+    // `switchQueues` (issue #737): true reads every per-queue field over the queues the kill switch flips (`switchQueues`:
+    // the registry's and every queue that exists), for a preview of a write that reaches them; anything else reads the
+    // registry's queues, the set every surface draws.
+    async snapshot(opts = {}) {
+      const waiting = opts?.waiting === true;
+      const queues = opts?.switchQueues === true ? await switchQueues() : await fleetQueues();
       // Awaited alongside the queue reads rather than before them: it is two Valkey round trips and the panel already
       // pays for several, so it costs no extra tick.
       const merged = await mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD, prune }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
@@ -4049,7 +4088,7 @@ export function createFleetReader(
       // waiting read (issue #737) can name a waiting job's project from it.
       const projectsView = readProjects({ projectsPath: paths.projectsFile });
       // Issue #737: the waiting jobs, started now beside the queue reads and awaited at the end (cached, so at most one
-      // read per WAITING_TTL_MS). Null when this reader was not asked for them.
+      // read per WAITING_TTL_MS). Null when this call did not ask for them.
       const waitingRead = waiting === true ? waitingOf(queues, Array.isArray(projectsView?.projects) ? projectsView.projects : null, Array.isArray(triggersView?.triggers) ? triggersView.triggers : null) : null;
       const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
         Promise.all(queues.map((q) => q.isPaused())),
@@ -4311,7 +4350,7 @@ export function createFleetReader(
         softHoldToday: fold.softHoldToday,
         // Issue #737: when the registry rows in `hostBudgets` were read (the reader's clock), null before any read.
         hostsReadAt: lastHostsAt,
-        // Issue #737: the waiting jobs (`readWaiting`'s shape, or `{ unreachable: true }`), only on a reader built `waiting`.
+        // Issue #737: the waiting jobs (`readWaiting`'s shape, or `{ unreachable: true }`), only on a call that asked.
         ...(waitingRead !== null ? { waiting: await waitingRead } : {}),
       };
     },
@@ -4788,7 +4827,13 @@ async function batched(redis, commands) {
   );
 }
 
-/** The ids of a list read, `ZRANGE` (with or without scores) or `LRANGE`, with the scores when there are any. */
+/**
+ * The ids of a list read, `ZRANGE` (with or without scores) or `LRANGE`, with the scores when there are any: `{ ids,
+ * refused }`, `refused` how many members are no run id (`RUN_ID_RE`). A refused member is no row, since an id outside the
+ * charset is no name a page may print, but it is a job the read could not show, so it makes its queue's read a floor
+ * (`truncated`), never a whole count that misses it: a cron trigger's run id is `repeat:<id>:<ms>`, past 200 for an id
+ * over 179 characters, and anything with the Valkey's URL can push a member of its own.
+ */
 function idsOf(got, { withScores = false } = {}) {
   const raw = Array.isArray(got?.value) ? got.value : [];
   const out = [];
@@ -4797,7 +4842,8 @@ function idsOf(got, { withScores = false } = {}) {
   } else {
     for (const id of raw) out.push({ jobId: id, score: null });
   }
-  return out.filter((e) => typeof e.jobId === "string" && RUN_ID_RE.test(e.jobId));
+  const ids = out.filter((e) => typeof e.jobId === "string" && RUN_ID_RE.test(e.jobId));
+  return { ids, refused: out.length - ids.length };
 }
 
 /** A job's attempts as BullMQ reads them (`attemptsMade || atm || 0`): 0 when neither is written, null when malformed. */
@@ -4990,7 +5036,7 @@ function triggerListOf(triggers) {
  * next fire (`{ jobId, queue, schedulerId, dueAt }`), which are not in line; `byBucket` the rows per `DEFER_BUCKETS`
  * bucket; `byQueue` per queue read `{ queue, inLine, scheduled, truncated }`; `queuesCut` how many of `queues` were not
  * read, past the first `WAITING_QUEUES_MAX`; `truncated` whether the rows are a floor (a queue truncated, or a queue
- * cut).
+ * cut). A queue is truncated when a list holds more than the read takes, or a member the read refuses as no run id.
  *
  * WHY A JOB WAITS is the worker's own record of it (`defer:job:<id>`, written as it defers: `INT-DEFER-REASON-KEY`),
  * never a guess from the job:
@@ -5016,7 +5062,8 @@ function triggerListOf(triggers) {
  * Then `ZSCORE` of each named scheduler. Never a job's `data`, `opts`, `stacktrace` or `returnvalue`, never
  * `getJob`/`getJobs` (each hydrates the data), never a keyspace walk, and no write of any kind: a stale `wait:held`
  * member is skipped, not pruned. One read past
- * `perList` in any of the four lists marks the queue truncated; its rows are then a floor. `perList` (at most
+ * `perList` in any of the four lists marks the queue truncated, and so does a member of one that is no run id (`idsOf`);
+ * its rows are then a floor. `perList` (at most
  * `WAITING_PER_LIST_MAX`, which a larger one is cut to) bounds each list, so one queue gives at most four times it, and
  * `WAITING_QUEUES_MAX` bounds the queues, the first of `queues` in the caller's order: a SCAN finds any meta key a
  * writer plants, so the queue count is a Valkey's to grow, and each costs five commands and four lists of rows.
@@ -5050,12 +5097,11 @@ export async function readWaiting(redis, { queues, now = () => Date.now(), perLi
     const perQueueInfo = [];
     list.forEach((q, qi) => {
       const base = qi * 5;
-      const delayed = idsOf(got[base], { withScores: true });
-      const prioritized = idsOf(got[base + 1]);
-      const wait = idsOf(got[base + 2]);
-      const paused = idsOf(got[base + 3]);
+      const lists = [idsOf(got[base], { withScores: true }), idsOf(got[base + 1]), idsOf(got[base + 2]), idsOf(got[base + 3])];
+      const [delayed, prioritized, wait, paused] = lists.map((l) => l.ids);
       const queuePaused = isPausedFlag(cmds[base + 4][0], got[base + 4]?.value);
-      let truncated = false;
+      // A member that is no run id is a job this read cannot show (`idsOf`): the queue's rows are then a floor.
+      let truncated = lists.some((l) => l.refused > 0);
       // The delayed and prioritized sets are read from their head (soonest due, next to run): the extra is the last.
       // The lists from their tail (oldest): the extra is the first.
       const cut = (items, fromHead) => {

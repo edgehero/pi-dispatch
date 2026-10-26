@@ -13,8 +13,8 @@
  * WHAT IT IS NOT. It parses what `html.mjs` writes (well-formed, quoted attributes, the five entities it emits and
  * numeric ones), not arbitrary HTML; it has no layout (no `getBoundingClientRect`, which the script checks for before
  * using, so the navigation and More placement stay out of it: `console-live-pill.test.mjs` drives those with boxes of
- * its own); and a selector it does not understand throws, so a script change that needs more of CSS says so here
- * instead of matching nothing.
+ * its own; `scrollIntoView` only records what it was asked, in `document.scrolls`); and a selector it does not
+ * understand throws, so a script change that needs more of CSS says so here instead of matching nothing.
  */
 
 const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
@@ -159,8 +159,11 @@ class Node {
   after(...nodes) {
     const p = this.parentNode;
     if (!p) return;
-    const next = this.nextSibling;
-    for (const n of nodes) p.insertBefore(n, next && next.parentNode === p ? next : null);
+    // The DOM's viable next sibling: the first one after this that is not being moved, so a node that already follows
+    // this one stays where it is (the slot asked for twice after the same card).
+    let next = this.nextSibling;
+    while (next && nodes.includes(next)) next = next.nextSibling;
+    for (const n of nodes) p.insertBefore(n, next);
   }
 
   before(...nodes) {
@@ -456,6 +459,11 @@ class Element extends Node {
     this.ownerDocument.moveFocus(this);
   }
 
+  /** No layout here, so a scroll is recorded, not made: the element and the options it was asked with. */
+  scrollIntoView(options) {
+    this.ownerDocument.scrolls.push({ el: this, options });
+  }
+
   blur() {
     if (this.ownerDocument.activeElement === this) this.ownerDocument.moveFocus(this.ownerDocument.body);
   }
@@ -477,6 +485,8 @@ class Document extends Node {
     this.nodeType = 9;
     this.cookies = [];
     this.activeElement = null;
+    // Each `scrollIntoView` asked of an element, in order.
+    this.scrolls = [];
   }
 
   get documentElement() {
@@ -893,15 +903,16 @@ export function fakeEventSource() {
  * Every name the script may reach beyond the language: each is a parameter of the function it runs in, so none is
  * ever Node's own.
  */
-export const GLOBALS = Object.freeze(["document", "location", "history", "fetch", "EventSource", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame", "navigator", "isSecureContext", "Date", "URLSearchParams", "getComputedStyle", "ResizeObserver", "MouseEvent", "window"]);
+export const GLOBALS = Object.freeze(["document", "location", "history", "fetch", "EventSource", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame", "navigator", "isSecureContext", "Date", "URLSearchParams", "getComputedStyle", "ResizeObserver", "MouseEvent", "window", "innerHeight"]);
 
 /**
  * Run `script` (the console's `CONSOLE_SCRIPT`) over `markup` (a whole page) at `url` (its path, query and fragment).
  * Returns the world: `document`, `location` (with `assigned`, `replaced` and `reloads` recorded), `history`, `fetch`,
  * `EventSource` (and `streams`), `timers`, and the helpers `submit(form, submitter)`, `type(field, value)`, `tick` and
- * `hash(fragment)`.
+ * `hash(fragment)`. `innerHeight` is the window's height for a test that gives an element a box of its own
+ * (`getBoundingClientRect`); left out, the script has no measure, as with no layout.
  */
-export function runConsoleScript(script, markup, { url = "/", fetch = fakeFetch(), timers = fakeTimers(), navigator = {}, secure = false } = {}) {
+export function runConsoleScript(script, markup, { url = "/", fetch = fakeFetch(), timers = fakeTimers(), navigator = {}, secure = false, innerHeight = undefined } = {}) {
   const document = parseDocument(markup);
   const at = new URL(url, "http://127.0.0.1:4790");
   const location = {
@@ -959,6 +970,7 @@ export function runConsoleScript(script, markup, { url = "/", fetch = fakeFetch(
     ResizeObserver: undefined,
     MouseEvent: undefined,
     window,
+    innerHeight,
   };
   new Function(...GLOBALS, script)(...GLOBALS.map((k) => values[k]));
   return {

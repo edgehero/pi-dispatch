@@ -314,6 +314,21 @@ test("a row with no beat time is no evidence of life: its slots are ?, and it sa
   assert.match(out, /its row carries no beat time, so it is no evidence the host runs: its jobs are not counted/);
 });
 
+test("a row's freshness is Valkey's measure where the reader had it, the host's own beat time only where not", async () => {
+  // behind: a host whose clock runs four minutes behind, beating now; late: a host whose clock runs ahead, silent for
+  // four minutes; plain: no Valkey measure, its own beat time; neither: nothing to age it by.
+  const row = (name, staleMs, ttlAgeMs) => ({ name, routes: "true", concurrency: "2", budgetMemMiB: "off", budgetCpuCenti: "off", budgetRunning: "0", waiters: "0", staleMs, ttlAgeMs, jobs: [], jobsMore: 0, jobsUnreadable: false });
+  const rows = [row("behind", 4 * 60_000, 2000), row("late", 1000, 4 * 60_000), row("plain", 4 * 60_000, null), row("neither", null, null)];
+  const comp = await openHosts({ fetchSnapshot: async () => ({ ...SNAP, hostBudgets: rows }), capacityInfo: async () => ({ unwired: true }) });
+  const out = body(comp, 140);
+  await comp.dispose();
+  assert.match(out, /behind 0 of 2 slots/, "beating, so no stale mark and its slots counted");
+  assert.doesNotMatch(out.split("late")[0], /stale/, "nothing before late is stale");
+  assert.match(out, /late {2}stale 4m/);
+  assert.match(out, /plain {2}stale 4m/);
+  assert.match(out, /neither {2}no beat time/);
+});
+
 test("hidden orphans are counted apart from hidden running jobs, and hold no slot", async () => {
   const run = (i) => ({ id: `gh-${i}`, p: "web", m: 1024, c: 100, at: AT - (20 - i) * 60_000, o: false });
   const orphan = (i) => ({ id: `container:pi-job-${i}`, p: "ops", m: 1024, c: 100, at: AT - (5 - i) * 60_000, o: true });

@@ -327,6 +327,7 @@ test("readWaiting: hostile values in the record, the job hash, the hold and the 
   v.lpush("bull:pi-jobs:wait", "x".repeat(201));
   const got = await readWaiting(v.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
   assert.deepEqual(got.rows.map((r) => r.jobId).sort(), ["gh-bad", "gh-badwhy"], "an id outside the job-id charset is no row");
+  assert.equal(got.truncated, true, "and the read that met one is a floor");
   const bad = got.rows.find((r) => r.jobId === "gh-bad");
   assert.deepEqual(
     [bad.kind, bad.attemptsMade, bad.stalled, bad.queuedAt, bad.recordedAt, bad.untilAt, bad.project, bad.host, bad.holder, bad.endpoint, bad.budgetWhy, bad.trigger, bad.attempt, bad.attempts],
@@ -367,6 +368,25 @@ test("readWaiting: each list is read to its bound, one more marks the queue trun
   const full = await readWaiting(exact.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
   assert.equal(full.rows.length, WAITING_PER_LIST_MAX);
   assert.equal(full.truncated, false, "exactly the bound is whole");
+});
+
+test("readWaiting: a member that is no run id is no row, and makes its queue's read a floor, never a whole count that misses it", async () => {
+  // A cron trigger's run id is repeat:<id>:<ms>, so a legal 190-character id mints a 211-character one; anything with the
+  // Valkey's URL can push a member of its own. Each of the four lists, one queue each, beside a queue read whole.
+  const v = fakeValkey();
+  const queues = ["pi-jobs", "pi-jobs@a", "pi-jobs@b", "pi-jobs@c", "pi-jobs@whole"];
+  for (const q of queues) addJob(v, q, `gh-ok-${q.length}`, { state: "waiting" });
+  v.zadd("bull:pi-jobs:delayed", `repeat:report-${"m".repeat(176)}-weekly:1791460800000`, (AT - 60_000) * 4096);
+  v.zadd("bull:pi-jobs@a:prioritized", "bad key!", 1);
+  v.lpush("bull:pi-jobs@b:wait", "x".repeat(3000));
+  v.lpush("bull:pi-jobs@c:paused", "<b>x</b>");
+  const got = await readWaiting(v.redis, { queues: queues.map((q) => fakeQueue(q)), now: () => AT });
+  assert.equal(got.rows.length, queues.length, "only the run ids are rows");
+  assert.deepEqual(got.byQueue.map((q) => [q.queue, q.truncated]), [["pi-jobs", true], ["pi-jobs@a", true], ["pi-jobs@b", true], ["pi-jobs@c", true], ["pi-jobs@whole", false]]);
+  assert.equal(got.truncated, true);
+  assert.equal(got.queuesCut, 0, "no queue was cut: the floor is the refused members'");
+  const whole = await readWaiting(v.redis, { queues: [fakeQueue("pi-jobs@whole")], now: () => AT });
+  assert.equal(whole.truncated, false, "a queue whose every member is a run id is read whole");
 });
 
 test("readWaiting never throws: an exec that fails or hangs is unreachable, a client without a pipeline is asked direct, no queues read nothing", async () => {
@@ -598,13 +618,16 @@ function snapshotValkey(v) {
   });
 }
 
-const readerOf = (logsDir, redis, { now, waiting = true, hosts = [] } = {}) =>
+const readerOf = (logsDir, redis, { now, hosts = [] } = {}) =>
   createFleetReader(
     { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 },
-    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => [], nowFn: now, waiting },
+    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => [], nowFn: now },
   );
 
-test("createFleetReader({ waiting: true }): the waiting jobs once per 5 s for the same queues, on the reader's clock; off by default", async () => {
+/** What the overview's load asks the snapshot for (`pages.mjs` `PAGE_READS`): the waiting jobs too. */
+const ASK = Object.freeze({ waiting: true });
+
+test("snapshot({ waiting: true }): the waiting jobs once per 5 s for the same queues, on the reader's clock; a call that does not ask reads none", async () => {
   const logsDir = tempDir("pd-737-waiting-cache-");
   const v = fakeValkey();
   addJob(v, "pi-jobs", "gh-1", { record: rec("host-slot") });
@@ -612,27 +635,34 @@ test("createFleetReader({ waiting: true }): the waiting jobs once per 5 s for th
   let t = AT;
   const reader = readerOf(logsDir, redis, { now: () => t });
   const reads = () => v.redis.log.filter(([cmd, key]) => cmd === "zrange" && key === "bull:pi-jobs:delayed").length;
-  const first = await reader.snapshot();
+  const first = await reader.snapshot(ASK);
   assert.deepEqual(first.waiting.rows.map((r) => r.jobId), ["gh-1"]);
   assert.equal(reads(), 1);
   t += WAITING_TTL_MS - 1;
-  assert.equal((await reader.snapshot()).waiting, first.waiting, "inside the window: the same read");
+  assert.equal((await reader.snapshot(ASK)).waiting, first.waiting, "inside the window: the same read");
   assert.equal(reads(), 1);
   t += 1;
-  await reader.snapshot();
+  await reader.snapshot(ASK);
   assert.equal(reads(), 2, "the window passed: read again");
   // A different set of queues is a different read, inside the window.
   const fleet = readerOf(logsDir, redis, { now: () => t, hosts: [{ name: "mini1", routes: "true" }] });
-  const both = await fleet.snapshot();
+  const both = await fleet.snapshot(ASK);
   assert.deepEqual(both.waiting.byQueue.map((q) => q.queue), ["pi-jobs", "pi-jobs@mini1"]);
+  // A call that does not ask (every screen but the overview, /api/state, the TUI) has no waiting field and pays no read
+  // for one, on the same reader, inside the window and past it; asking with anything but true is not asking.
   const ranges = () => v.redis.log.filter(([cmd]) => cmd === "zrange" || cmd === "lrange").length;
   const before = ranges();
-  const off = await readerOf(logsDir, redis, { now: () => t, waiting: false }).snapshot();
-  assert.equal(Object.hasOwn(off, "waiting"), false, "a reader not asked for them has no waiting field");
-  assert.equal(ranges(), before, "and pays no read for them");
+  for (const opts of [undefined, null, {}, { waiting: false }, { waiting: "true" }, { waiting: 1 }]) {
+    assert.equal(Object.hasOwn(await fleet.snapshot(opts), "waiting"), false, `asked ${JSON.stringify(opts)}: no waiting field`);
+  }
+  assert.equal(ranges(), before, "and no read for them");
+  assert.equal((await fleet.snapshot(ASK)).waiting, both.waiting, "a call that asks inside the window still shares the one read");
+  t += WAITING_TTL_MS;
+  assert.equal(Object.hasOwn(await fleet.snapshot(), "waiting"), false);
+  assert.equal(ranges(), before, "past the window a call that does not ask reads none either");
 });
 
-test("createFleetReader({ waiting: true }): an unreachable read is kept for the window like a good one, so a Valkey that times out is not sent the whole pipeline on every snapshot", async () => {
+test("snapshot({ waiting: true }): an unreachable read is kept for the window like a good one, so a Valkey that times out is not sent the whole pipeline on every snapshot", async () => {
   const logsDir = tempDir("pd-737-waiting-down-");
   const v = fakeValkey();
   const redis = snapshotValkey(v);
@@ -651,19 +681,19 @@ test("createFleetReader({ waiting: true }): an unreachable read is kept for the 
   };
   let t = AT;
   const reader = readerOf(logsDir, redis, { now: () => t });
-  assert.deepEqual((await reader.snapshot()).waiting, { unreachable: true });
+  assert.deepEqual((await reader.snapshot(ASK)).waiting, { unreachable: true });
   assert.equal(sent, 1);
   down = false;
   addJob(v, "pi-jobs", "gh-1", { state: "waiting" });
   t += WAITING_TTL_MS - 1;
-  assert.deepEqual((await reader.snapshot()).waiting, { unreachable: true }, "inside the window: the same answer");
+  assert.deepEqual((await reader.snapshot(ASK)).waiting, { unreachable: true }, "inside the window: the same answer");
   assert.equal(sent, 1, "and no pipeline sent for it");
   t += 1;
-  assert.deepEqual((await reader.snapshot()).waiting.rows.map((r) => r.jobId), ["gh-1"], "the window passed: asked again");
+  assert.deepEqual((await reader.snapshot(ASK)).waiting.rows.map((r) => r.jobId), ["gh-1"], "the window passed: asked again");
   assert.equal(sent, 3, "the queues' round and the jobs' round");
 });
 
-test("createFleetReader({ waiting: true }): a client error, markup and all, is unreachable: true in the snapshot and its words are nowhere in it", async () => {
+test("snapshot({ waiting: true }): a client error, markup and all, is unreachable: true in the snapshot and its words are nowhere in it", async () => {
   const logsDir = tempDir("pd-737-waiting-words-");
   const v = fakeValkey();
   const redis = snapshotValkey(v);
@@ -676,13 +706,13 @@ test("createFleetReader({ waiting: true }): a client error, markup and all, is u
     };
     return p;
   };
-  const snap = await readerOf(logsDir, redis, { now: () => AT }).snapshot();
+  const snap = await readerOf(logsDir, redis, { now: () => AT }).snapshot(ASK);
   assert.deepEqual(snap.waiting, { unreachable: true });
   const text = JSON.stringify(snap);
   for (const part of ["10.9.8.7", "<script>", "ECONNREFUSED"]) assert.ok(!text.includes(part), `${part} is not in the snapshot`);
 });
 
-test("createFleetReader({ waiting: true }): a queue no registry row names is read too, by the keyspace discovery, kept for a minute", async () => {
+test("snapshot({ waiting: true }): a queue no registry row names is read too, by the keyspace discovery, kept for a minute", async () => {
   const logsDir = tempDir("pd-737-waiting-stopped-");
   const v = fakeValkey();
   // A host that stopped: no registry row, and its queue still holds a job.
@@ -701,24 +731,23 @@ test("createFleetReader({ waiting: true }): a queue no registry row names is rea
       readLiveHostsFn: async () => ({ hosts: [] }),
       discoverHostQueuesFn: async (_r, opts) => (scans.push(opts), typeof answer === "function" ? answer() : answer),
       nowFn: () => t,
-      waiting: true,
     },
   );
-  const first = await reader.snapshot();
+  const first = await reader.snapshot(ASK);
   assert.deepEqual(first.waiting.rows.map((r) => [r.jobId, r.queue]).sort(), [["gh-left", "pi-jobs@stopped"], ["gh-shared", "pi-jobs"]]);
   assert.deepEqual(first.waiting.byQueue.map((q) => q.queue), ["pi-jobs", "pi-jobs@stopped"]);
   assert.deepEqual(first.queueCounts.map((c) => c.queue), ["pi-jobs"], "the per-tick reads stay the registry's");
   assert.equal(scans.length, 1);
   // Inside the minute the discovery is not asked again, though the waiting read is.
   t += WAITING_TTL_MS;
-  await reader.snapshot();
+  await reader.snapshot(ASK);
   t += WAITING_DISCOVERY_TTL_MS - WAITING_TTL_MS - 1;
-  await reader.snapshot();
+  await reader.snapshot(ASK);
   assert.equal(scans.length, 1, "one keyspace scan per minute, never one per tick");
   assert.equal(WAITING_DISCOVERY_TTL_MS, 60_000);
   // Past it, asked again: the snapshot that starts the scan is handed the last set, the next one the scan's. A scan
   // that did not finish adds what it read and drops nothing it found before.
-  const queuesOf = async () => (await reader.snapshot()).waiting.byQueue.map((q) => q.queue);
+  const queuesOf = async () => (await reader.snapshot(ASK)).waiting.byQueue.map((q) => q.queue);
   t += 1;
   answer = { names: ["pi-jobs@other"], incomplete: "the queue scan ran out of time" };
   assert.deepEqual(await queuesOf(), ["pi-jobs", "pi-jobs@stopped"], "the last set while the scan runs");
@@ -739,7 +768,7 @@ test("createFleetReader({ waiting: true }): a queue no registry row names is rea
   assert.equal(scans.length, 4);
 });
 
-test("createFleetReader({ waiting: true }): the cached read is the same queues' only, on a clock that moves forward", async () => {
+test("snapshot({ waiting: true }): the cached read is the same queues' only, on a clock that moves forward", async () => {
   const logsDir = tempDir("pd-737-waiting-key-");
   const v = fakeValkey();
   addJob(v, "pi-jobs", "gh-1", { state: "waiting" });
@@ -748,20 +777,20 @@ test("createFleetReader({ waiting: true }): the cached read is the same queues' 
   let hosts = [];
   const reader = createFleetReader(
     { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 },
-    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => [], nowFn: () => t, waiting: true },
+    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => [], nowFn: () => t },
   );
   const reads = () => v.redis.log.filter(([cmd, key]) => cmd === "zrange" && key === "bull:pi-jobs:delayed").length;
-  await reader.snapshot();
+  await reader.snapshot(ASK);
   assert.equal(reads(), 1);
   // A host joined inside the window: another set of queues, read now, in the same reader.
   hosts = [{ name: "mini1", routes: "true" }];
   t += 1;
-  const joined = await reader.snapshot();
+  const joined = await reader.snapshot(ASK);
   assert.equal(reads(), 2);
   assert.deepEqual(joined.waiting.byQueue.map((q) => q.queue), ["pi-jobs", "pi-jobs@mini1"]);
   // A clock that went back is no proof the read is fresh: read again.
   t -= 2;
-  await reader.snapshot();
+  await reader.snapshot(ASK);
   assert.equal(reads(), 3);
 });
 
@@ -779,23 +808,23 @@ test("readWaiting reads at most WAITING_QUEUES_MAX queues, the first it is given
   assert.deepEqual([exact.queuesCut, exact.truncated], [0, false]);
 });
 
-test("createFleetReader({ waiting: true }): the registry's queues first, then the discovered ones in name order, so a live host's queue is never the one cut", async () => {
+test("snapshot({ waiting: true }): the registry's queues first, then the discovered ones in name order, so a live host's queue is never the one cut", async () => {
   const logsDir = tempDir("pd-737-waiting-many-");
   const v = fakeValkey();
   addJob(v, "pi-jobs@zz", "gh-live", { state: "waiting" });
   const found = Array.from({ length: WAITING_QUEUES_MAX + 4 }, (_, i) => `pi-jobs@a${String(i).padStart(3, "0")}`);
   const reader = createFleetReader(
     { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 },
-    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => snapshotValkey(v), readLiveHostsFn: async () => ({ hosts: [{ name: "zz", routes: "true" }] }), discoverHostQueuesFn: async () => ["pi-jobs@zz", ...[...found].reverse()], nowFn: () => AT, waiting: true },
+    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => snapshotValkey(v), readLiveHostsFn: async () => ({ hosts: [{ name: "zz", routes: "true" }] }), discoverHostQueuesFn: async () => ["pi-jobs@zz", ...[...found].reverse()], nowFn: () => AT },
   );
-  const { waiting } = await reader.snapshot();
+  const { waiting } = await reader.snapshot(ASK);
   assert.deepEqual(waiting.byQueue.map((q) => q.queue), ["pi-jobs", "pi-jobs@zz", ...found.slice(0, WAITING_QUEUES_MAX - 2)]);
   assert.deepEqual(waiting.rows.map((r) => r.jobId), ["gh-live"], "the live host's job is read");
   assert.deepEqual([waiting.queuesCut, waiting.truncated], [6, true]);
   await reader.dispose();
 });
 
-test("createFleetReader({ waiting: true }): a snapshot that has a set of queues never waits for the keyspace scan; it is handed the last set while the next one runs", async () => {
+test("snapshot({ waiting: true }): a snapshot that has a set of queues never waits for the keyspace scan; it is handed the last set while the next one runs", async () => {
   const logsDir = tempDir("pd-737-waiting-slow-scan-");
   const v = fakeValkey();
   addJob(v, "pi-jobs@a", "gh-a", { state: "waiting" });
@@ -814,21 +843,20 @@ test("createFleetReader({ waiting: true }): a snapshot that has a set of queues 
       // The first scan answers at once; the next takes longer than any bound, until the test lets it go.
       discoverHostQueuesFn: async () => (scans.push(t), scans.length === 1 ? ["pi-jobs@a"] : (await gate, ["pi-jobs@a", "pi-jobs@b"])),
       nowFn: () => t,
-      waiting: true,
     },
   );
   const queuesOf = (snap) => snap.waiting.byQueue.map((q) => q.queue);
-  assert.deepEqual(queuesOf(await reader.snapshot()), ["pi-jobs", "pi-jobs@a"], "the first read waits for its set");
+  assert.deepEqual(queuesOf(await reader.snapshot(ASK)), ["pi-jobs", "pi-jobs@a"], "the first read waits for its set");
   t += WAITING_DISCOVERY_TTL_MS;
   const alive = setInterval(() => {}, 1000);
   let timer;
   try {
-    const snap = await Promise.race([reader.snapshot(), new Promise((resolve) => (timer = setTimeout(() => resolve("hung"), 2_000)))]);
+    const snap = await Promise.race([reader.snapshot(ASK), new Promise((resolve) => (timer = setTimeout(() => resolve("hung"), 2_000)))]);
     assert.notEqual(snap, "hung", "the scan in flight held the snapshot");
     assert.deepEqual(queuesOf(snap), ["pi-jobs", "pi-jobs@a"], "the last set");
     assert.equal(scans.length, 2, "while the next scan runs");
     t += WAITING_TTL_MS;
-    assert.deepEqual(queuesOf(await reader.snapshot()), ["pi-jobs", "pi-jobs@a"]);
+    assert.deepEqual(queuesOf(await reader.snapshot(ASK)), ["pi-jobs", "pi-jobs@a"]);
     assert.equal(scans.length, 2, "one scan at a time");
   } finally {
     clearTimeout(timer);
@@ -837,23 +865,23 @@ test("createFleetReader({ waiting: true }): a snapshot that has a set of queues 
   release();
   await gate;
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(queuesOf(await reader.snapshot()), ["pi-jobs", "pi-jobs@a", "pi-jobs@b"], "the scan's set once it settles");
+  assert.deepEqual(queuesOf(await reader.snapshot(ASK)), ["pi-jobs", "pi-jobs@a", "pi-jobs@b"], "the scan's set once it settles");
   await reader.dispose();
 });
 
-test("createFleetReader({ waiting: true }): a clock that went back asks the keyspace again, and two snapshots in the same instant share one scan", async () => {
+test("snapshot({ waiting: true }): a clock that went back asks the keyspace again, and two snapshots in the same instant share one scan", async () => {
   const logsDir = tempDir("pd-737-waiting-scan-clock-");
   const v = fakeValkey();
   let t = AT;
   const scans = [];
   const reader = createFleetReader(
     { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 },
-    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => snapshotValkey(v), readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => (scans.push(t), await new Promise((resolve) => setTimeout(resolve, 30)), []), nowFn: () => t, waiting: true },
+    { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => snapshotValkey(v), readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => (scans.push(t), await new Promise((resolve) => setTimeout(resolve, 30)), []), nowFn: () => t },
   );
-  await Promise.all([reader.snapshot(), reader.snapshot()]);
+  await Promise.all([reader.snapshot(ASK), reader.snapshot(ASK)]);
   assert.equal(scans.length, 1, "the second snapshot shared the first one's scan");
   t -= 60 * 60 * 1000;
-  await reader.snapshot();
+  await reader.snapshot(ASK);
   assert.equal(scans.length, 2, "a step back an hour is not an hour of a fresh set");
   await reader.dispose();
 });
@@ -893,7 +921,7 @@ test("/api/state is unchanged by the waiting jobs: the state document names none
   const logsDir = tempDir("pd-737-waiting-state-");
   const v = fakeValkey();
   addJob(v, "pi-jobs", "gh-waiting-secret-id", { record: rec("host-slot", { project: "shop" }) });
-  const withWaiting = await readerOf(logsDir, snapshotValkey(v), { now: () => AT }).snapshot();
+  const withWaiting = await readerOf(logsDir, snapshotValkey(v), { now: () => AT }).snapshot(ASK);
   assert.equal(withWaiting.waiting.rows.length, 1);
   const without = { ...withWaiting };
   delete without.waiting;
@@ -902,5 +930,57 @@ test("/api/state is unchanged by the waiting jobs: the state document names none
     assert.deepEqual(doc, stateOf(without, role, { now: AT }), `${role}: byte for byte the document without them`);
     assert.equal(Object.hasOwn(doc, "waiting"), false);
     assert.ok(!JSON.stringify(doc).includes("gh-waiting-secret-id"));
+  }
+});
+
+test("only the overview's load reads the waiting jobs: a fleet, parked or config load reads none, and a second overview load inside the window reads none either", async () => {
+  const { loadPageData } = await import("../src/console/pages.mjs");
+  const logsDir = tempDir("pd-737-waiting-pages-");
+  const v = fakeValkey();
+  addJob(v, "pi-jobs", "gh-1", { state: "waiting" });
+  let t = AT;
+  // One reader for every screen, as serve holds it.
+  const deps = { fleet: readerOf(logsDir, snapshotValkey(v), { now: () => t }), now: () => t, env: {} };
+  const reads = () => v.redis.log.filter(([cmd]) => cmd === "zrange" || cmd === "lrange").length;
+  const others = async () => {
+    for (const name of ["fleet", "parked", "config"]) {
+      const data = await loadPageData(name, {}, deps);
+      assert.equal(Object.hasOwn(data.snapshot, "waiting"), false, `${name}: no waiting jobs in its data`);
+    }
+  };
+  await others();
+  assert.equal(reads(), 0, "the other screens' loads read no waiting job");
+  const first = await loadPageData("overview", {}, deps);
+  assert.deepEqual(first.snapshot.waiting.rows.map((r) => r.jobId), ["gh-1"], "the overview's load reads them");
+  const once = reads();
+  assert.ok(once > 0);
+  await others();
+  t += WAITING_TTL_MS - 1;
+  const second = await loadPageData("overview", {}, deps);
+  assert.equal(second.snapshot.waiting, first.snapshot.waiting, "a second overview inside the window: the same read");
+  assert.equal(reads(), once, "and nothing more read for it, nor for the other screens between");
+  t += 1;
+  await loadPageData("overview", {}, deps);
+  assert.ok(reads() > once, "past the window the overview's load reads again");
+});
+
+test("the switch's queues come from the registry read at the time: a host registered since the last read is in the preview's counts and in the pause", async () => {
+  const NOW = Date.UTC(2026, 9, 26, 12, 0);
+  const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, async del() { return 1; }, disconnect() {} };
+  const paused = [];
+  const queue = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return {}; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async pause() { paused.push(opts?.name ?? "pi-jobs"); }, async resume() {}, async close() {} });
+  let hosts = [];
+  const logsDir = tempDir("pd-737-switch-");
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => ({ names: [], incomplete: null }), nowFn: () => NOW });
+  try {
+    assert.deepEqual((await reader.snapshot()).queueCounts.map((q) => q.queue), ["pi-jobs"]);
+    // gamma registers before its worker has made its queue, so the keyspace does not name it yet.
+    hosts = [{ name: "gamma", routes: "true", t: String(NOW) }];
+    assert.deepEqual((await reader.snapshot({ switchQueues: true })).queueCounts.map((q) => q.queue), ["pi-jobs", "pi-jobs@gamma"], "the preview's set");
+    hosts = [{ name: "gamma", routes: "true", t: String(NOW) }, { name: "delta", routes: "true", t: String(NOW) }];
+    await reader.pause();
+    assert.deepEqual(paused.sort(), ["pi-jobs", "pi-jobs@delta", "pi-jobs@gamma"], "the pause's set");
+  } finally {
+    await reader.dispose();
   }
 });

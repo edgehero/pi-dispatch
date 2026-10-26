@@ -9,7 +9,8 @@
  *      uses for its filters). A refusal names the parameter and its rule, never the value.
  *   2. `loadPageData(name, query, deps)` is the ONLY function here that reads. It calls the fleet reader's `snapshot()`
  *      at most once, and nothing else on a screen that needs only the snapshot. The live hub calls it once per tick for
- *      each distinct screen and query, and hands the result to every stream showing that screen.
+ *      each distinct screen and data query (`dataQueryOf`: the overview's timeline query only regroups one read), and
+ *      hands the result to every stream showing that screen.
  *   3. `renderPage(name, ctx)` and `pagePanels(name, ctx)` draw from that data and nothing else: pure, with `now` taken
  *      from the data, so the same data draws the same bytes. `renderPage` places each panel in
  *      `<section id="p-…" data-panel>`; `pagePanels` returns the same panels' inner HTML for the stream to swap in.
@@ -20,12 +21,16 @@
  *
  * THE FRAME (issue #737) is `shell.mjs`'s: the top bar, the navigation and the title bar, around a page's panels. A page
  * whose panels are still the old markup is in `LEGACY_PAGES`, and its panels are drawn inside `<div class="legacy">`
- * (`legacyWrap`), byte for byte as before, until that page's own pull request converts it.
+ * (`legacyWrap`), byte for byte as before, until that page's own pull request converts it. A converted page may lay its
+ * panels out in the kit's grids (`PAGE_LAYOUT`) and have a line under its title that the stream swaps
+ * (`PAGE_HEADLINES`).
  */
 import { FORGES } from "@edgehero/pi-dispatch/forges";
+import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
 import { html, page } from "./html.mjs";
-import { legacyWrap, NAV_PARKED_ID, navParkedHtml, shellHtml } from "./shell.mjs";
+import { HEADLINE_ID, legacyWrap, NAV_PARKED_ID, navParkedHtml, shellHtml } from "./shell.mjs";
+import { TIMELINE_ROWS, TIMELINE_ZOOMS } from "./timeline.mjs";
 import { auditAbout, auditChain, auditFilter } from "./panels/audit.mjs";
 import { AUDIT_PARAMS, auditQueryString, parseAuditQuery, readAuditView } from "./audit-view.mjs";
 import { forbiddenContent } from "./error-pages.mjs";
@@ -55,11 +60,17 @@ import {
   insightsWhatIf,
   WHATIF_FLOW_RE,
   overviewActive,
-  overviewFailures,
+  overviewCaps,
+  overviewHeadline,
   overviewHosts,
-  overviewParked,
+  overviewNeeds,
+  overviewSetup,
+  overviewSetupEmpty,
+  overviewSetupPi,
   overviewSpend,
-  overviewState,
+  overviewTimeline,
+  overviewWaiting,
+  overviewWaitlists,
   parkedInbox,
   runChain,
   runChat,
@@ -114,12 +125,15 @@ export const PAGES = Object.freeze({
  * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
  * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
  */
-export const LEGACY_PAGES = Object.freeze(["overview", "runs", "run", "parked", "insights", "fleet", "config"]);
+export const LEGACY_PAGES = Object.freeze(["runs", "run", "parked", "insights", "fleet", "config"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
-  // Issue #710: what needs a person first (the running jobs, then the parked ones), the fleet's state and spend after.
-  overview: [["p-active", overviewActive], ["p-parked", overviewParked], ["p-state", overviewState], ["p-spend", overviewSpend], ["p-hosts", overviewHosts], ["p-failures", overviewFailures]],
+  // Issue #737: the first run's checklist (empty once the deployment runs), then what needs a person first, what waits,
+  // what runs and what it costs, the timeline and the caps, then the waitlists and the hosts. Every one of the eleven is
+  // on the page in both states (`panels/overview.mjs`'s header), so the stream moves a first run to the overview by
+  // swapping panels; on a phone, where the layout is one column, Needs you comes first once the checklist is gone.
+  overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
   runs: [["p-filter", runsFilter], ["p-runs", runsTable]],
   run: [["p-outcome", runOutcome], ["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
   parked: [["p-parked", parkedInbox]],
@@ -130,20 +144,56 @@ const PAGE_PANELS = Object.freeze({
 });
 
 /**
+ * Each screen's line under its title (issue #737), a renderer like a panel's: the shell draws it as its headline panel
+ * (`shell.mjs` `HEADLINE_ID`), and the stream swaps it like any panel, since what it says changes while the page is
+ * open ("All clear. 4 jobs running, nothing needs you."). A screen with none draws no line.
+ */
+const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline });
+
+/**
+ * How a screen's panels are laid out (issue #737), for a screen whose cards stand in a grid rather than one under
+ * another: a list of wrappers, each `{ cls, items, slotAfter }`, an item a panel id or a wrapper inside it. `cls` is the
+ * bundle's layout class (`cols`, two columns, the second the side column; `stack`, a column of cards; `cards-4`, four
+ * cards in a row). `slotAfter` marks a wrapper that is a GRID of cards: the script puts the confirm slot after the
+ * wrapper rather than after the card whose form opened it, since a slot inside the grid would take one of its cells
+ * (`data-slot-after`, `script.mjs` `slotAnchor`). A `stack` is no such grid: there the slot stays under its card.
+ *
+ * A screen without a layout draws its panels one under another in `PAGE_PANELS`' order. A layout names every panel of
+ * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
+ */
+const PAGE_LAYOUT = Object.freeze({
+  overview: Object.freeze([
+    Object.freeze({ cls: "cols", items: Object.freeze(["p-setup", Object.freeze({ cls: "stack", items: Object.freeze(["p-setup-pi", "p-setup-empty"]) })]) }),
+    Object.freeze({ cls: "cards-4", slotAfter: true, items: Object.freeze(["p-needs", "p-waiting", "p-active", "p-spend"]) }),
+    Object.freeze({ cls: "cols", items: Object.freeze([Object.freeze({ cls: "stack", items: Object.freeze(["p-timeline", "p-caps"]) }), Object.freeze({ cls: "stack", items: Object.freeze(["p-waitlists", "p-hosts"]) })]) }),
+  ]),
+});
+
+/** The panel ids a layout places, in the order it draws them. */
+const layoutIds = (items) => items.flatMap((it) => (typeof it === "string" ? [it] : layoutIds(it.items)));
+
+for (const [name, layout] of Object.entries(PAGE_LAYOUT)) {
+  const placed = layoutIds(layout);
+  const own = PAGE_PANELS[name].map(([id]) => id);
+  if (placed.length !== own.length || own.some((id) => !placed.includes(id))) throw new Error(`pages: the ${name} layout places ${placed.join(", ")}, not its panels ${own.join(", ")}`);
+}
+
+/**
  * The panel ids of a screen, in page order (for the stream's tests and the hub), then on a live screen the shell's
- * Parked count (issue #737), which sits in the navigation above them but is listed last so a screen's first panel is
- * still its first.
+ * panels (issue #737): the Parked count, which sits in the navigation above them, and the headline, under the title,
+ * listed last (`SHELL_PANEL_IDS`' order) so a screen's first panel is still its first.
  */
 export function panelIds(name) {
   const ids = (PAGE_PANELS[name] ?? []).map(([id]) => id);
-  return PAGES[name]?.live === true ? [...ids, NAV_PARKED_ID] : ids;
+  if (PAGES[name]?.live !== true) return ids;
+  return Object.hasOwn(PAGE_HEADLINES, name) ? [...ids, NAV_PARKED_ID, HEADLINE_ID] : [...ids, NAV_PARKED_ID];
 }
 
 // ---- the query -------------------------------------------------------------------------------------------------------
 
 /** The parameters each screen takes; any other refuses the request. */
 const PAGE_PARAMS = Object.freeze({
-  overview: [],
+  overview: ["rows", "zoom", "project"],
   runs: [...RUN_FILTER_FIELDS, "before"],
   run: ["id"],
   parked: [],
@@ -183,6 +233,9 @@ function asParams(searchParams) {
  *   - insights: `range`, one of 7d, 30d, mtd, default 30d; `whatif` (`<provider>/<model>`, `WHATIF_MODEL_RE`) and `flow`
  *     (the skill-name charset), together or not at all; `paths`, only `full`; `{ range, whatif, flow, paths }`, each
  *     absent one null. `paths=full` is ACCEPTED from anyone, and honoured for an operator alone (`insightsFullPaths`).
+ *   - overview (issue #737): the timeline's grouping, `rows`, one of `TIMELINE_ROWS`; its window, `zoom`, a key of
+ *     `TIMELINE_ZOOMS`; and its project filter, `project`, a project id (`PROJECT_ID_RE`); `{ rows, zoom, project }`,
+ *     each absent one null (the timeline's default). Closed values, so the timeline is never handed one it refuses.
  *   - audit: `before` (an audit position, `YYYY-MM:<line>`, `readConsoleAudit`'s cursor), `who`, `action`, `outcome`,
  *     `q` and `seq` (not with `before`), each judged by `audit-view.mjs` `parseAuditQuery`; `{ before, who, action,
  *     outcome, q, seq }`, each absent one null.
@@ -241,6 +294,17 @@ export function parsePageQuery(name, searchParams) {
       if (paths !== null && paths !== "full") return { refusal: "paths must be full (or left out for folder names)" };
       return { query: Object.freeze({ range, whatif, flow, paths }) };
     }
+    case "overview": {
+      // Issue #737: the timeline's three, each a closed value. The refusal names the parameter and what it takes, never
+      // what was sent.
+      const rows = one("rows");
+      if (rows !== null && !TIMELINE_ROWS.includes(rows)) return { refusal: `rows must be one of ${TIMELINE_ROWS.join(", ")}` };
+      const zoom = one("zoom");
+      if (zoom !== null && !Object.hasOwn(TIMELINE_ZOOMS, zoom)) return { refusal: `zoom must be one of ${Object.keys(TIMELINE_ZOOMS).join(", ")}` };
+      const project = one("project");
+      if (project !== null && !PROJECT_ID_RE.test(project)) return { refusal: "project must be a project id (lowercase letters, digits and '-', at most 32 characters)" };
+      return { query: Object.freeze({ rows, zoom, project }) };
+    }
     case "audit":
       // Issue #737: the audit page's own parser (audit-view.mjs) judges every parameter, the cursor exactly as
       // `readConsoleAudit` takes it, so a refused cursor or filter never reaches a read.
@@ -265,7 +329,21 @@ export function pageQueryString(name, query) {
     for (const k of ["range", "whatif", "flow", "paths"]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
   }
   else if (name === "audit") return auditQueryString(q);
+  else if (name === "overview") {
+    for (const k of ["rows", "zoom", "project"]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
+  }
   return p.toString();
+}
+
+/**
+ * The query screen `name`'s DATA is read with (issue #737), for the live hub, which reads each screen once per tick
+ * for each distinct data query (`live.mjs` `dataQueryOf`) and draws each stream with its own whole query. The
+ * overview's query only chooses how the same snapshot is drawn (the timeline's grouping, window and project), so its
+ * data query is `{}`: one read per tick however many groupings are open, where its whole query would read the snapshot
+ * once for each. Every other screen reads what its query names, so its data query is its query.
+ */
+export function dataQueryOf(name, query) {
+  return name === "overview" ? Object.freeze({}) : query;
 }
 
 // ---- where a sign-in lands ------------------------------------------------------------------------------------------
@@ -304,9 +382,13 @@ export function returnPathOf(raw) {
 /**
  * What each screen reads beside the clock. A screen that reads no snapshot reads `parkedCount` for the navigation's
  * Parked count (issue #737); one that reads the snapshot takes the count from it, so no screen reads both.
+ *
+ * `waiting` (issue #737) asks the same snapshot for the waiting jobs and why each waits (`snapshot({ waiting: true })`),
+ * which only the overview draws. It is the page's to ask, not the reader's: one reader serves every screen and
+ * `/api/state`, and a reader built to read them would make every other screen pay for a read it never draws.
  */
 const PAGE_READS = Object.freeze({
-  overview: ["snapshot"],
+  overview: ["snapshot", "waiting"],
   runs: ["runsPage", "subscriptions", "parkedCount"],
   run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
   parked: ["snapshot"],
@@ -392,7 +474,8 @@ async function childrenOf(fleet, record) {
  * Read what screen `name` shows for `query` (a `parsePageQuery` result's `query`). `deps`:
  *
  *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`, and `parkedCount` for the screens that
- *     read no snapshot). `snapshot()` is called at most once.
+ *     read no snapshot). `snapshot()` is called at most once, asked for the waiting jobs only by a screen that draws
+ *     them (`PAGE_READS`' `waiting`).
  *   - `insights(window, { fullPaths })`: the assembled insights payload for a window (the caller caches it: it is the
  *     expensive read). `fullPaths` is true only for an operator's `paths=full`.
  *   - `whatIf({ model, flow })` (optional): the what-if answer (`whatif.mjs`'s reader, cached and bounded by the caller).
@@ -401,6 +484,7 @@ async function childrenOf(fleet, record) {
  *   - `subscriptions()` (optional): the subscriptions file's entries, for the cost class of a plan-covered run.
  *   - `env`: the deployment's env, of which only the forge instance variables are kept (`forgeEnvOf`).
  *   - `now`: the clock (a function or a number), read ONCE; every panel draws from this instant.
+ *   - `deployment` (optional, issue #737): `{ folder }`, the deployment directory's last folder, kept as `data.deployment`.
  *
  * `who` is the session asking (`{ role }`): only the spend screen's `paths=full` reads by role, and only an operator's
  * request reads full paths, so a viewer's page data never holds them. The live hub passes none (insights is not live).
@@ -411,11 +495,13 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const now = typeof deps.now === "function" ? deps.now() : Number.isFinite(deps.now) ? deps.now : Date.now();
   const q = query ?? {};
-  const data = { page: name, now, env: forgeEnvOf(deps.env) };
+  // Issue #737: the deployment the console serves, by its folder's last part (`cli.mjs`'s `pageDeps.deployment`), for
+  // the first run's checklist; null where the caller passes none.
+  const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
   const reads = PAGE_READS[name];
   if (reads.includes("snapshot")) {
     try {
-      data.snapshot = await deps.fleet.snapshot();
+      data.snapshot = await (reads.includes("waiting") ? deps.fleet.snapshot({ waiting: true }) : deps.fleet.snapshot());
     } catch {
       data.snapshot = null;
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
@@ -543,10 +629,14 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
 
-/** What a panel renderer is handed. */
+/**
+ * What a panel renderer is handed. `pages` is `PAGES` (issue #737), the table a panel links by name (`kit.mjs`
+ * `pageHref`), handed down because a panel module cannot import this one, which imports it. The session is reduced to
+ * its role: no panel is handed the token's name.
+ */
 function viewOf(name, ctx) {
   const data = ctx?.data ?? {};
-  return { page: name, data, role: ctx?.session?.role ?? null, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now };
+  return { page: name, data, role: ctx?.session?.role ?? null, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now, pages: PAGES };
 }
 
 /** Each panel of screen `name` as `{ id, fragment }`. */
@@ -558,12 +648,25 @@ function panelFragments(name, ctx) {
 /**
  * The panels of screen `name`, `[{ id, html }]`: the inner HTML of each `<section id="<id>" data-panel>` that
  * `renderPage` draws, from the same renderers, for the live stream to swap in, and on a live screen last the shell's
- * `<span id="p-nav-parked" data-panel>` (`panelIds`' order). `ctx` is `renderPage`'s.
+ * spans: `<span id="p-nav-parked" data-panel>`, then the screen's headline `<span id="p-headline" data-panel>` where it
+ * has one (`panelIds`' order). `ctx` is `renderPage`'s.
  */
 export async function pagePanels(name, ctx) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const panels = panelFragments(name, ctx).map(({ id, fragment }) => ({ id, html: String(fragment) }));
-  return PAGES[name].live ? [...panels, { id: NAV_PARKED_ID, html: String(navParkedHtml(ctx?.data)) }] : panels;
+  if (!PAGES[name].live) return panels;
+  const headline = headlineOf(name, ctx);
+  return [...panels, { id: NAV_PARKED_ID, html: String(navParkedHtml(ctx?.data)) }, ...(headline === null ? [] : [{ id: HEADLINE_ID, html: String(headline) }])];
+}
+
+/** Screen `name`'s headline (`PAGE_HEADLINES`), or null for a screen with none. */
+function headlineOf(name, ctx) {
+  return Object.hasOwn(PAGE_HEADLINES, name) ? PAGE_HEADLINES[name](viewOf(name, ctx)) : null;
+}
+
+/** A layout's markup (`PAGE_LAYOUT`): its wrappers in order, each panel's section where the layout names it. */
+function layoutHtml(items, sections) {
+  return html`${items.map((it) => (typeof it === "string" ? sections.get(it) : html`<div class="${it.cls}"${it.slotAfter ? html` data-slot-after` : null}>${layoutHtml(it.items, sections)}</div>`))}`;
 }
 
 /**
@@ -607,7 +710,10 @@ export async function renderPage(name, ctx) {
   // Issue #710: none for a run that never had one to show: refused before it started, or no record of a run that is not
   // running (not a run id, queued, or unknown), which the outcome banner says once.
   const extra = name === "run" && runHasTranscript(ctx?.data) ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
-  const body = shellHtml(name, ctx, html`${panels.map(({ id, fragment }) => legacyWrap(name, html`<section id="${id}" data-panel>${fragment}</section>`))}${extra === null ? null : legacyWrap(name, extra)}`);
+  const sections = new Map(panels.map(({ id, fragment }) => [id, legacyWrap(name, html`<section id="${id}" data-panel>${fragment}</section>`)]));
+  const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
+  const headline = headlineOf(name, ctx);
+  const body = shellHtml(name, ctx, html`${inner}${extra === null ? null : legacyWrap(name, extra)}`, headline === null ? {} : { headline });
   // A run with no record yet but a live transcript or progress snapshot is a running job (its record is written at its
   // end): 200, not 404.
   const progressing = ctx?.data?.progress !== null && typeof ctx?.data?.progress === "object" && ctx.data.progress.v === 1;

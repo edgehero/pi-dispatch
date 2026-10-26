@@ -14,8 +14,8 @@
  *   - `preview` builds the change through the SAME planner the tool or the TUI uses (`write-plans.mjs`, or
  *     `job-actions.mjs` through the read model), so a refusal is the tool's sentence, and returns `{ refusal }`,
  *     `{ unchanged }`, or `{ summary, diff, expect, payload, target, targets, reserve, beforeDigest, afterDigest }`,
- *     which may also carry `plan` and `beforeText` (the planner's plan, the file as it was) for the three below; those
- *     two are never sent to the browser.
+ *     which may also carry `plan` and `beforeText` (the planner's plan, the file as it was) for the three below, and a
+ *     fleet resume's `pausedBefore` for its Undo (`resumeBack`); those are never sent to the browser.
  *   - `apply` runs the read model's funnel with the ticket's stored `payload` and `expect`, and answers `{ ok, ... }`,
  *     `{ invalid }` (refused, nothing done: the file or the job changed since the preview, a dedup window, ...),
  *     `{ invalid, partial: true }` (refused after part of it was done: the kill switch reached some queues), or
@@ -408,8 +408,20 @@ export const SNAPSHOT_TIMEOUT_MS = 10_000;
 /** The refusal when the snapshot did not answer within `SNAPSHOT_TIMEOUT_MS`: what happened, nothing more. */
 export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed";
 
-/** The fleet snapshot, or the refusal when it fails or does not answer within `SNAPSHOT_TIMEOUT_MS`. */
-async function snapshotOf(ctx) {
+/**
+ * The snapshot a fleet or queue switch previews from (issue #737): its per-queue rows (`queueCounts`) over the queues the
+ * kill switch flips, the registry's and every queue that exists (the reader's `switchQueues`), not the registry's alone.
+ * Resume fleet resumes a stopped host's queue too, so a preview over the registry's queues hid that queue's jobs, and
+ * its Undo left it running when it had been paused; and `setQueuePausedOne` takes any queue of that union, so a queue
+ * preview over the registry's alone refused, as "not a queue this deployment drains", the one-queue Undo of a resume.
+ */
+const SWITCH_READ = Object.freeze({ switchQueues: true });
+
+/**
+ * The fleet snapshot, or the refusal when it fails or does not answer within `SNAPSHOT_TIMEOUT_MS`. `opts` are the
+ * snapshot's own (`createFleetReader`): a fleet or queue switch asks `SWITCH_READ`.
+ */
+async function snapshotOf(ctx, opts = {}) {
   let timer;
   try {
     const late = new Promise((resolve) => {
@@ -417,7 +429,7 @@ async function snapshotOf(ctx) {
       timer.unref?.();
     });
     // A snapshot that settles after the bound settles into the race, which has handled it: never an unhandled rejection.
-    const s = await Promise.race([Promise.resolve().then(() => ctx.a.fleet.snapshot()), late]);
+    const s = await Promise.race([Promise.resolve().then(() => ctx.a.fleet.snapshot(opts)), late]);
     if (s) return { snapshot: s };
     if (s === null) return { refusal: SNAPSHOT_TIMEOUT_SENTENCE, status: 503 };
   } catch {
@@ -1321,11 +1333,16 @@ function fleetSwitch({ name, kind, paused }) {
       if (plan?.refused) return { refusal: String(plan.refused) };
       const shown = (plan?.urls ?? []).map((u) => (typeof ctx.a.urlShown === "function" ? ctx.a.urlShown(u) : "the deployment's Valkey"));
       let waiting = null;
+      // A resume's Undo re-pauses what was paused before it (`resumeBack`): how many queues the switch flips and which of
+      // them were paused (`SWITCH_READ`), or null when the snapshot could not be read.
+      let pausedBefore = null;
       if (!paused) {
-        const s = await snapshotOf(ctx);
+        const s = await snapshotOf(ctx, SWITCH_READ);
         if (s.snapshot) {
-          const rows = (Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : []).filter((q) => q?.paused);
+          const all = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
+          const rows = all.filter((q) => q?.paused);
           waiting = resumeWaiting(rows, "the paused queues");
+          pausedBefore = Array.isArray(s.snapshot.queueCounts) ? { queues: all.length, paused: rows.map((q) => String(q?.queue ?? "-")) } : null;
         } else {
           waiting = { count: null, line: "How many jobs wait to start could not be read (the fleet did not answer); each reserves up to its own per-job dollar cap when a worker picks it up" };
         }
@@ -1333,6 +1350,7 @@ function fleetSwitch({ name, kind, paused }) {
       return {
         target: "fleet",
         payload: {},
+        ...(paused ? {} : { pausedBefore }),
         ...(waiting ? { count: waiting.count } : {}),
         summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : [])],
       };
@@ -1368,7 +1386,7 @@ function queueSwitch({ name, kind, paused }) {
     needs: FLEET_NEEDS,
     async preview(body, ctx) {
       const queue = str(body, "queue", { required: true, max: 200 });
-      const s = await snapshotOf(ctx);
+      const s = await snapshotOf(ctx, SWITCH_READ);
       if (!s.snapshot) return s;
       const rows = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
       const row = rows.find((q) => q?.queue === queue);
@@ -1496,6 +1514,23 @@ function settingBack(out, key) {
   const sendable = (typeof old === "string" && old.trim() !== "") || (typeof old === "number" && Number.isFinite(old));
   if (!sendable) return { undo: `Set ${key} back by hand: its old value is not one this form can send.`, inverse: null };
   return { undo: `Set ${key} back to ${String(old)}`, inverse: { action: "setting-set", body: { key, value: String(old) } } };
+}
+
+/**
+ * A fleet resume's way back (issue #737): pause again exactly what was paused before it, by the preview's read of the
+ * fleet (`pausedBefore`: how many queues the resume flips, the snapshot's `queueCounts` read over `SWITCH_READ`, and
+ * which were paused). The whole fleet is `fleet-pause` and one queue `queue-pause`; any other set is one no write
+ * carries (`fleet-pause` takes no list), so it has no inverse and the sentence names the queues to pause by hand.
+ * NEVER `fleet-pause` FOR A PART: Resume fleet is offered on a fleet partly paused, and an Undo that paused every queue
+ * stopped the hosts the operator had left running, the opposite of a way back. An unread fleet names no set at all.
+ */
+function resumeBack(out) {
+  const b = out.pausedBefore;
+  if (!b || !Number.isSafeInteger(b.queues) || !Array.isArray(b.paused)) return { undo: "Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known.", inverse: null };
+  if (b.paused.length === 0) return { undo: "No queue of the fleet was paused, so there is nothing to pause again.", inverse: null };
+  if (b.paused.length === b.queues) return { undo: "Pause the fleet again", inverse: { action: "fleet-pause", body: {} } };
+  if (b.paused.length === 1) return { undo: `Pause queue ${b.paused[0]} again`, inverse: { action: "queue-pause", body: { queue: b.paused[0] } } };
+  return { undo: `Pause queues ${b.paused.join(", ")} again by hand, one at a time: no single write pauses only those.`, inverse: null };
 }
 
 /**
@@ -1634,7 +1669,7 @@ const WRITE_RULES = {
   },
   "steer-withdraw": { fields: ["jobId", "id"], danger: false, undo: say(UNDO_SENTENCES.withdrawn), inverse: none, confirmLabel: confirmWord, done: (out) => `Withdrew message ${out.payload.plan.id} from job ${out.payload.plan.jobId}` },
   "fleet-pause": { fields: [], danger: true, undo: say("Resume the fleet"), inverse: () => ({ action: "fleet-resume", body: {} }), confirmLabel: () => "Pause the fleet", done: say("Paused the fleet") },
-  "fleet-resume": { fields: [], danger: false, undo: say("Pause the fleet again"), inverse: () => ({ action: "fleet-pause", body: {} }), confirmLabel: () => "Resume", done: say("Resumed the fleet") },
+  "fleet-resume": { fields: [], danger: false, undo: (out) => resumeBack(out).undo, inverse: (out) => resumeBack(out).inverse, confirmLabel: () => "Resume", done: say("Resumed the fleet") },
   "queue-pause": { fields: ["queue"], danger: true, undo: (out) => `Resume queue ${out.payload.queue}`, inverse: (out) => ({ action: "queue-resume", body: { queue: out.payload.queue } }), confirmLabel: (out) => `Pause queue ${out.payload.queue}`, done: (out) => `Paused queue ${out.payload.queue}` },
   "queue-resume": { fields: ["queue"], danger: false, undo: (out) => `Pause queue ${out.payload.queue} again`, inverse: (out) => ({ action: "queue-pause", body: { queue: out.payload.queue } }), confirmLabel: () => "Resume", done: (out) => `Resumed queue ${out.payload.queue}` },
   "pause-windows": { fields: ["windows"], danger: false, undo: (out) => pauseListBack(out).undo, inverse: (out) => pauseListBack(out).inverse, confirmLabel: confirmWord, done: say("Replaced the pause windows") },

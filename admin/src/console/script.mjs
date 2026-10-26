@@ -126,8 +126,17 @@
  *     `/api/act/<data-action>/preview`. THE CONFIRM SLOT (`#confirm-slot`, `confirm-view.mjs`): one per page, drawn
  *     by the server after the content, hidden, holding the previewing skeleton (read once, `skeleton`). A submit moves
  *     it after the card that asked (`slotAnchor`: the form's panel, else its banner, lifted out of the panel's
- *     `.legacy` wrapper so the Pulse bar never sits under the legacy rules), never inside a panel or a table cell,
- *     titles it "Previewing: <the button's words>" with Confirm disabled, and shows it. The answer's `html`
+ *     `.legacy` wrapper so the Pulse bar never sits under the legacy rules, then out of every layout grid marked
+ *     `data-slot-after`, so it is never a grid's cell), never inside a panel or a table cell,
+ *     titles it "Previewing: <the button's words>" with Confirm disabled, and shows it, scrolled into view by the least
+ *     move (`scrollIntoView`, block nearest), the focus on its title (issue #737: the slot can sit a screen away from
+ *     the button); every fill while it is open scrolls it into view again, since an answer is taller than the skeleton
+ *     it replaces and its Confirm would otherwise land below the fold, and so does every other change this script
+ *     makes to the page while the slot shows (a panel swapped, the kept-still note, a live note, the sign-out banner:
+ *     `outside`); an answer that replaces what held the focus gives it to the new title, and takes none that was
+ *     elsewhere; and closing it gives the focus back to the button that opened it, else, where a swap replaced that
+ *     button, to the button of the form with the same action and the same hidden fields in the swapped card, else to
+ *     the card that asked, when the focus was in the slot. The answer's `html`
  *     (server-rendered and escaped, like a panel: the preview, no-change or refusal bar) is put in the slot and nowhere
  *     else. Its buttons are one delegated listener: `[data-confirm]` posts the ticket (held in this closure only) to
  *     `/api/act/<name>/confirm`; `[data-cancel]` and `[data-close]` put the skeleton back and hide the slot;
@@ -139,11 +148,12 @@
  *     no answer says `CONFIRM_NO_ANSWER` and is never sent again, since a ticket is single use and the change may have
  *     been made. A confirm with jobs refused shows the bulk results bar; any other success reloads the page, whose
  *     banner then names the change.
- *   - while a form is in use (the slot open for its panel, a field typed into or focused, its editor open), a live panel
- *     holding it is NOT swapped, so an update cannot wipe a half-made change. The newest html waits (`pending`), the
- *     panel gets the server's kept-still note once (a copy of `<template id="held-note">`, as its first child), and the
- *     update is applied when the hold ends: Cancel or Close, or focus leaving a field (a tick later, once focus has
- *     landed).
+ *   - while a form is in use (the slot open for its panel, a field, never a button, focused or changed, its editor
+ *     open), a live panel holding it is NOT swapped, so an update cannot wipe a half-made change. The newest html waits
+ *     (`pending`), the panel gets the server's kept-still note once (a copy of `<template id="held-note">`, as its
+ *     first child), and the update is applied when the hold ends: Cancel or Close, or focus leaving a field (a tick
+ *     later, once focus has landed). A swap never drops the focus: one that held it goes to the same form's button in
+ *     the new markup, else a link to the same place, else the panel.
  *   - the run page's LIVE TRANSCRIPT (issue #643; `[data-transcript]`, drawn for an operator only): opens
  *     `/api/transcript?id=<data-job>` with `EventSource`. Each `event: entry` carries `{html}`, server-rendered and
  *     escaped, which is APPENDED to that one element (`insertAdjacentHTML("beforeend")`) and nowhere else. The view
@@ -513,8 +523,10 @@ export const CONSOLE_SCRIPT = `"use strict";
     words.appendChild(s);
     outNote.appendChild(words);
     var bar = typeof main.querySelector === "function" ? main.querySelector(".titlebar") : null;
-    if (bar && typeof bar.after === "function") bar.after(outNote);
-    else main.insertBefore(outNote, main.firstChild);
+    outside(function () {
+      if (bar && typeof bar.after === "function") bar.after(outNote);
+      else main.insertBefore(outNote, main.firstChild);
+    });
   }
   // The newest press, and its timer: a press clears the one before it, so an earlier press's timer or late answer never
   // says "not confirmed" (and stops the signing out) under a later press still waiting for its own.
@@ -969,6 +981,11 @@ ${FIT_JS}
   var skeleton = slot ? slot.innerHTML : "";
   var slotOwner = null;
   var slotForm = null;
+  // The button that opened the slot and the card that asked (slotCard), where closing it gives the focus back, and how
+  // to find that button again in the card once a swap has replaced it (slotFind, from formKey).
+  var slotOpener = null;
+  var slotCardEl = null;
+  var slotFind = null;
   var slotAction = null;
   var slotLabel = "";
   var slotTicket = null;
@@ -988,10 +1005,66 @@ ${FIT_JS}
     slot.innerHTML = markup;
     try { localTimes(slot); } catch (e) { /* the times stay UTC */ }
   }
+  // The slot's title takes the focus (issue #737): wherever slotAnchor put the slot, which on a page of laid-out cards
+  // can be a screen away from the button that asked, a keyboard and a screen reader go on from the slot, never from the
+  // page's top. The skeleton's title, else a bar's heading, else the results banner's; a heading is no control, so it
+  // is made focusable by script alone (tabindex -1) and never enters the tab order. The scroll is slotInView's.
+  function focusTitle() {
+    var t = inSlot("[data-slot-title]") || inSlot(".confirm__h") || inSlot(".banner__t");
+    if (!t || typeof t.focus !== "function") return;
+    if (typeof t.hasAttribute === "function" && typeof t.setAttribute === "function" && !t.hasAttribute("tabindex")) t.setAttribute("tabindex", "-1");
+    try { t.focus({ preventScroll: true }); } catch (e) { /* focus stays where it was */ }
+  }
+  // The slot brought into view by the least scroll that shows it (block: nearest), where the browser has the call.
+  function slotInView() {
+    if (typeof slot.scrollIntoView === "function") {
+      try { slot.scrollIntoView({ block: "nearest" }); } catch (e) { /* the page stays where it is */ }
+    }
+  }
+  // Whether the slot is open and some part of it is inside the window, where the browser can say; one that cannot is
+  // taken to show it.
+  function slotShows() {
+    if (!slot || slot.hidden) return false;
+    if (typeof slot.getBoundingClientRect !== "function" || typeof innerHeight !== "number") return true;
+    var r = slot.getBoundingClientRect();
+    return r.bottom > 0 && r.top < innerHeight;
+  }
+  // EVERY CHANGE THIS SCRIPT MAKES OUTSIDE THE OPEN SLOT BRINGS IT INTO VIEW AGAIN (issue #737), as every fill does: a
+  // panel swapped (above the slot, its height is the slot's place), the kept-still note put into the panel the slot
+  // holds, a live note shown or hidden, the stale note's words, the sign-out banner. Each moves what is under it, and
+  // the slot with its Confirm went below the fold a moment after the answer: at 1440 px the Hosts card, which changes
+  // every tick, took its kept-still note about 200 ms after the answer and pushed Pause's Confirm from 956 to 1020 px
+  // of a 1000 px window. Only where the slot showed before the change: a reader who scrolled it wholly out of view to
+  // read another card keeps their place (on the overview the Hosts card changes every tick, and every tick would pull
+  // them back). What changes no one's place is left out: the live pill's word and the transcript's status line (one
+  // line each), a countdown inside the slot, and the transcript, which is drawn after every card that opens the slot.
+  var changing = 0;
+  function outside(change) {
+    if (changing > 0) return change();
+    var shows = slotShows();
+    changing += 1;
+    try { change(); } finally { changing -= 1; }
+    if (shows) slotInView();
+  }
+  // A fill replaces what held the focus, and a browser then hands it to the page's body: focus that was in the slot
+  // goes to its new title, so an answer arriving never takes the reader's place away. edit is what the caller writes
+  // into the new markup (slotSays' sentence) before either is decided.
+  //
+  // EVERY FILL WHILE THE SLOT IS OPEN BRINGS IT INTO VIEW AGAIN (issue #737). The scroll at open measured the skeleton;
+  // an answer is taller (a list, a diff, a reserve line), and with the slot near the fold its Confirm landed below it
+  // (on a phone, Retry's Confirm sat wholly under the screen's edge), so the reader saw a slot with nothing to press. The
+  // least scroll (block nearest) moves nothing when the answer already shows whole.
+  function refill(markup, edit) {
+    var had = typeof slot.contains === "function" && document.activeElement ? slot.contains(document.activeElement) : false;
+    fillSlot(markup);
+    if (typeof edit === "function") edit();
+    if (had) focusTitle();
+    if (!slot.hidden) slotInView();
+  }
   // An answer's bar into the slot, and whether its Look again leads to sign-in (slotEnded, above).
   function answerBar(b) {
     slotEnded = own(b, "ended") && isReason(b.ended) ? b.ended : null;
-    fillSlot(b.html);
+    refill(b.html);
   }
   // A write answered 401 was not refused by its action: the session behind the page ended. It is asked about as a closed
   // stream is (probe): sign-in with the reason (the console's answer's, else this one's), another person's sign-in as
@@ -1018,14 +1091,20 @@ ${FIT_JS}
   }
   // Where the slot goes: after the card that asked. That is the form's panel (a section the stream may swap, so the
   // slot is never inside it), else the banner it sits in (the done banner's Undo), else the form itself; lifted out of
-  // the panel's own .legacy wrapper, whose rules would restyle the Pulse bar's buttons and lists.
+  // the panel's own .legacy wrapper, whose rules would restyle the Pulse bar's buttons and lists; then lifted out of
+  // every layout grid it sits in that says so (data-slot-after: a row of cards, where the slot would be one more
+  // cell), to after the outermost. A column with no such mark keeps the slot right under its card.
+  function slotCard(form) {
+    return (typeof form.closest === "function" && (form.closest("section[data-panel]") || form.closest(".banner"))) || form;
+  }
   function slotAnchor(form) {
-    var anchor = (typeof form.closest === "function" && (form.closest("section[data-panel]") || form.closest(".banner"))) || form;
+    var anchor = slotCard(form);
     var up = anchor.parentElement;
     if (up && up.classList && up.classList.contains("legacy")) anchor = up;
+    for (var at = anchor.parentElement; at; at = at.parentElement) if (typeof at.hasAttribute === "function" && at.hasAttribute("data-slot-after")) anchor = at;
     return anchor;
   }
-  function openSlot(form, action, label) {
+  function openSlot(form, action, label, opener) {
     stopCountdown();
     slotGen += 1;
     fillSlot(skeleton);
@@ -1035,9 +1114,14 @@ ${FIT_JS}
     var anchor = slotAnchor(form);
     if (typeof anchor.after === "function") anchor.after(slot);
     slot.hidden = false;
+    slotInView();
+    focusTitle();
     var was = slotOwner;
     slotOwner = typeof form.closest === "function" ? form.closest("section[data-panel]") : null;
     slotForm = form;
+    slotOpener = opener || null;
+    slotCardEl = slotCard(form);
+    slotFind = formKey(form, action, slotOpener);
     slotAction = action;
     slotLabel = label;
     slotTicket = null;
@@ -1046,38 +1130,91 @@ ${FIT_JS}
     if (was && was !== slotOwner) release();
     return slotGen;
   }
+  // Whether el is still in the page: a panel the stream swapped has new nodes, and its old button is in none.
+  function inPage(el) {
+    return Boolean(el) && typeof document.contains === "function" && document.contains(el);
+  }
+  // A form as the slot can find it again: its action, its hidden fields as drawn (name and value, in order), and which
+  // of its submit buttons opened the slot (-1 for none of them).
+  function formKey(form, action, opener) {
+    var fields = [];
+    var hidden = typeof form.querySelectorAll === "function" ? form.querySelectorAll("input[type=hidden]") : [];
+    for (var i = 0; i < hidden.length; i++) fields.push([hidden[i].name, hidden[i].value]);
+    var buttons = typeof form.querySelectorAll === "function" ? form.querySelectorAll("button[type=submit]") : [];
+    var at = -1;
+    for (var j = 0; j < buttons.length; j++) if (buttons[j] === opener) at = j;
+    return { action: action, fields: JSON.stringify(fields), at: at };
+  }
+  // The button in the card that does what the opener did: in the form with the opener's action and the same hidden
+  // fields, the button at the opener's place (else its first submit button); null where the card holds no such form.
+  function sameButton(card, find) {
+    if (!find || typeof card.querySelectorAll !== "function" || !/^[a-z0-9-]{1,40}$/.test(find.action)) return null;
+    var forms = card.querySelectorAll('form[data-action="' + find.action + '"]');
+    for (var i = 0; i < forms.length; i++) {
+      var key = formKey(forms[i], find.action, null);
+      if (key.fields !== find.fields) continue;
+      var buttons = forms[i].querySelectorAll("button[type=submit]");
+      return buttons[find.at] || buttons[0] || null;
+    }
+    return null;
+  }
+  // The focus back where the reader was before the slot opened (issue #737): the button that opened it; else, when the
+  // stream swapped that button's panel while the slot held it, the same button in the swapped card (sameButton: on
+  // the overview the Hosts card is drawn anew on every tick, so its button was always replaced and the focus always
+  // fell to the card); else the card that asked, focusable by script alone as the slot's title is. Without it, Close
+  // and Cancel removed the control that held the focus and the browser gave it to the page's body, so the next Tab
+  // started from the top of the page, in another panel.
+  function focusBack(opener, card, find) {
+    var to = inPage(opener) ? opener : inPage(card) ? sameButton(card, find) || card : null;
+    if (!to || typeof to.focus !== "function") return;
+    if (to === card && typeof to.hasAttribute === "function" && typeof to.setAttribute === "function" && !to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
+    try { to.focus(); } catch (e) { /* the focus stays on the page */ }
+  }
   function closeSlot() {
+    // Asked before the fill takes what holds it. In the slot, or on nothing (a browser that does not focus a button on
+    // a click, Safari's, leaves the body focused when Cancel is pressed): never focus the reader put elsewhere.
+    var active = document.activeElement;
+    var had = !active || active === document.body || (typeof slot.contains === "function" && slot.contains(active));
+    var opener = slotOpener;
+    var card = slotCardEl;
+    var find = slotFind;
     stopCountdown();
     slotGen += 1;
     fillSlot(skeleton);
     slot.hidden = true;
     slotOwner = null;
     slotForm = null;
+    slotOpener = null;
+    slotCardEl = null;
+    slotFind = null;
     slotAction = null;
     slotTicket = null;
     slotEnded = null;
+    // The held panels first: the release decides whether the button is still in the page, or which one replaced it.
     release();
+    if (had) focusBack(opener, card, find);
   }
   // A sentence of this script's own (or a refusal's text with no bar to show it in) in the skeleton's message line: the
   // bar's title is the button's words, its grey lines and busy mark go, Confirm stays disabled and Cancel closes it.
   function slotSays(text) {
     stopCountdown();
-    fillSlot(skeleton);
-    var title = inSlot("[data-slot-title]");
-    if (title) title.textContent = slotLabel;
-    var busy = inSlot("[aria-busy]");
-    if (busy) {
-      busy.removeAttribute("aria-busy");
-      if (busy.classList) busy.classList.remove("confirm--busy");
-    }
-    var ghost = inSlot(".confirm__ghost");
-    if (ghost) ghost.hidden = true;
-    var line = inSlot("[data-slot-message]");
-    if (line) {
-      line.textContent = text;
-      line.hidden = false;
-    }
-    slotDisable("[data-confirm]", true);
+    refill(skeleton, function () {
+      var title = inSlot("[data-slot-title]");
+      if (title) title.textContent = slotLabel;
+      var busy = inSlot("[aria-busy]");
+      if (busy) {
+        busy.removeAttribute("aria-busy");
+        if (busy.classList) busy.classList.remove("confirm--busy");
+      }
+      var ghost = inSlot(".confirm__ghost");
+      if (ghost) ghost.hidden = true;
+      var line = inSlot("[data-slot-message]");
+      if (line) {
+        line.textContent = text;
+        line.hidden = false;
+      }
+      slotDisable("[data-confirm]", true);
+    });
   }
   // The ticket's life, counted down in the bar from when the bar arrived (its [data-expires], in ms): a browser's clock
   // is not the server's, so the bar carries a span, not an instant. At 0 Confirm is disabled; the server refuses an
@@ -1100,13 +1237,19 @@ ${FIT_JS}
     tick();
     countdown = setInterval(tick, 1000);
   }
+  // The button that sent the form: the event's submitter when it is the form's own, else the form's submit button.
+  function submitterOf(form, ev) {
+    return ev && ev.submitter && typeof form.contains === "function" && form.contains(ev.submitter) ? ev.submitter : form.querySelector("button[type=submit]");
+  }
   function submitText(form, ev) {
-    var b = ev && ev.submitter && typeof form.contains === "function" && form.contains(ev.submitter) ? ev.submitter : form.querySelector("button[type=submit]");
+    var b = submitterOf(form, ev);
     var t = b ? String(b.textContent || "").replace(/\\s+/g, " ").trim() : "";
+    // A round button is its icon: its name is its aria-label, never the action's machine name.
+    if (!t && b && typeof b.getAttribute === "function") t = String(b.getAttribute("aria-label") || "").trim();
     return t || form.getAttribute("data-action") || "";
   }
-  function preview(form, action, label) {
-    var mine = openSlot(form, action, label);
+  function preview(form, action, label, opener) {
+    var mine = openSlot(form, action, label, opener);
     var body;
     try { body = bodyOf(form); } catch (e) { slotSays(e.message + "; nothing was sent."); return; }
     post("/api/act/" + action + "/preview", body, true).then(function (r) {
@@ -1141,7 +1284,7 @@ ${FIT_JS}
       if (c.ok) {
         var refused = false;
         if (b.results && b.results.length) for (var i = 0; i < b.results.length; i++) if (b.results[i] && b.results[i].ok === false) refused = true;
-        if (refused && typeof b.html === "string") fillSlot(b.html);
+        if (refused && typeof b.html === "string") refill(b.html);
         else location.reload();
         return;
       }
@@ -1158,16 +1301,29 @@ ${FIT_JS}
     var t = e && e.target && typeof e.target.closest === "function" ? e.target.closest("[data-confirm], [data-cancel], [data-close], [data-again], [data-reload]") : null;
     if (!t || t.disabled || (typeof slot.contains === "function" && !slot.contains(t))) return;
     if (t.hasAttribute("data-confirm")) confirmNow();
-    else if (t.hasAttribute("data-again")) { if (slotForm) preview(slotForm, slotAction, slotLabel); }
+    else if (t.hasAttribute("data-again")) { if (slotForm) preview(slotForm, slotAction, slotLabel, slotOpener); }
     else if (t.hasAttribute("data-reload")) { if (!t.hasAttribute("href")) { if (slotEnded !== null) toLogin(slotEnded); else location.reload(); } }
     else closeSlot();
   });
   // ---- held panels: a form in use is never swapped away under the person using it ----
+  // A control a person types into or picks from (a text field, a text area, a list), never a button: a button holds
+  // nothing half made. A focused button held its panel, and since closing the slot gives the focus back to the button
+  // that opened it, the panel took no update after Cancel and said "Updates paused while you edit" over a card no one
+  // was editing, until a click elsewhere moved the focus.
+  function isField(el) {
+    var tag = String(el.tagName || "").toLowerCase();
+    if (tag === "textarea" || tag === "select") return true;
+    if (tag !== "input") return false;
+    var t = String(el.type || "text").toLowerCase();
+    return t !== "hidden" && t !== "submit" && t !== "button" && t !== "reset" && t !== "image";
+  }
+  // In use, and so held: the slot open for this panel, an editor open in it, or one of its forms' fields focused or
+  // changed from what the server drew. Nothing else.
   function inUse(panel) {
     if (slot && !slot.hidden && slotOwner === panel) return true;
     if (panel.querySelector("details[open] form[data-action]")) return true;
     var active = document.activeElement;
-    if (active && panel.contains(active) && active.closest && active.closest("form[data-action]")) return true;
+    if (active && panel.contains(active) && isField(active) && active.closest && active.closest("form[data-action]")) return true;
     var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea");
     for (var i = 0; i < fields.length; i++) if (fields[i].value !== fields[i].defaultValue) return true;
     return false;
@@ -1179,15 +1335,46 @@ ${FIT_JS}
     heldNoted[el.id] = true;
     var tpl = document.getElementById("held-note");
     var copy = tpl && tpl.content && typeof tpl.content.cloneNode === "function" ? tpl.content.cloneNode(true) : null;
-    if (copy && typeof el.insertBefore === "function") el.insertBefore(copy, el.firstChild);
+    if (copy && typeof el.insertBefore === "function") outside(function () { el.insertBefore(copy, el.firstChild); });
   }
-  // The ONE panel swap, for a stream's panel and a held one's update alike.
+  // The ONE panel swap, for a stream's panel and a held one's update alike. IT NEVER DROPS THE FOCUS (issue #737): a
+  // focused button holds no panel, so the swap replaces it and the browser hands the focus to the page's body. On the
+  // overview the Hosts card is drawn anew on every tick, so a keyboard reader on its Pause buttons was sent back to the
+  // top of the page each tick and never reached the rows past the first.
   function swapPanel(el, markup) {
     delete pending[el.id];
     delete heldNoted[el.id];
-    el.innerHTML = markup;
-    try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
-    try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
+    var keep = focusIn(el);
+    outside(function () {
+      el.innerHTML = markup;
+      try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
+      try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
+    });
+    if (keep) keepFocus(el, keep);
+  }
+  // What holds the focus inside el, as new markup can find it again: a form's control by its form (formKey), else a
+  // link by its href; null when the focus is elsewhere or on el itself.
+  function focusIn(el) {
+    var active = document.activeElement;
+    if (!active || active === el || typeof el.contains !== "function" || !el.contains(active)) return null;
+    var form = typeof active.closest === "function" ? active.closest("form[data-action]") : null;
+    var href = !form && typeof active.getAttribute === "function" ? active.getAttribute("href") : null;
+    return { el: active, find: form ? formKey(form, form.getAttribute("data-action") || "", active) : null, href: href };
+  }
+  // focusBack's rule after a swap: the same form's button, else a link to the same place, else the panel itself,
+  // focusable by script alone. Without scrolling: the reader's place is theirs.
+  function keepFocus(el, keep) {
+    if (inPage(keep.el)) return;
+    var to = keep.find ? sameButton(el, keep.find) : keep.href !== null ? sameLink(el, keep.href) : null;
+    to = to || el;
+    if (typeof to.focus !== "function") return;
+    if (to === el && typeof to.hasAttribute === "function" && typeof to.setAttribute === "function" && !to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
+    try { to.focus({ preventScroll: true }); } catch (e) { /* the focus stays on the page */ }
+  }
+  function sameLink(el, href) {
+    var links = typeof el.querySelectorAll === "function" ? el.querySelectorAll("a[href]") : [];
+    for (var i = 0; i < links.length; i++) if (links[i].getAttribute("href") === href) return links[i];
+    return null;
   }
   // Every held panel no longer in use takes its newest update.
   function release() {
@@ -1229,7 +1416,7 @@ ${FIT_JS}
     ev.preventDefault();
     var action = form.getAttribute("data-action") || "";
     if (!/^[a-z0-9-]{1,40}$/.test(action) || !slot) return;
-    preview(form, action, submitText(form, ev));
+    preview(form, action, submitText(form, ev), submitterOf(form, ev));
   });
   // ---- the live stream (issue #641) and how a page says what it is showing (issue #737) ----
   var live = document.body ? document.body.getAttribute("data-live") : null;
@@ -1259,7 +1446,9 @@ ${FIT_JS}
     noteShown = state;
     if (!liveNote || typeof liveNote.querySelectorAll !== "function") return;
     var all = liveNote.querySelectorAll("[data-live-note]");
-    for (var i = 0; i < all.length; i++) all[i].hidden = all[i].getAttribute("data-live-note") !== state;
+    outside(function () {
+      for (var i = 0; i < all.length; i++) all[i].hidden = all[i].getAttribute("data-live-note") !== state;
+    });
   }
   function unnote(state) {
     if (noteShown === state) note(null);
@@ -1488,11 +1677,13 @@ ${FIT_JS}
       } catch (e) { at = null; }
       // A stale with no time while this page is already dimmed (a lone tab's reconnect: the hub let the view go with its
       // last stream) keeps the time it was told: the panels it holds are still the ones last seen then.
-      if (at !== null || !staleShown) since(at);
-      staleShown = true;
-      if (mainEl && mainEl.classList) mainEl.classList.add("stale");
-      if (staleBody) sayWithCode(staleBody, tokens ? STALE_TOKENS_BODY : staleData);
-      note("stale");
+      outside(function () {
+        if (at !== null || !staleShown) since(at);
+        staleShown = true;
+        if (mainEl && mainEl.classList) mainEl.classList.add("stale");
+        if (staleBody) sayWithCode(staleBody, tokens ? STALE_TOKENS_BODY : staleData);
+        note("stale");
+      });
     });
     es.addEventListener("fresh", function () {
       if (staleShown) unstale();

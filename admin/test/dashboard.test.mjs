@@ -980,6 +980,36 @@ test("Enter on a cron trigger opens a detail with next/health/stalls from the sc
   assert.match(d, /stalls 1\/2/, "surfaces the stall count against the threshold");
 });
 
+test("a cron trigger's detail takes its scheduler by key alone: never by BullMQ's job name, never by a pattern another shares", async () => {
+  // The worker names every run "local", so a trigger with that id matched every scheduler by name; a pattern two
+  // triggers share drew the other's next fire and health on this one.
+  const detail = async (trigger) => {
+    const snap = {
+      queue: { pausedState: false, counts: { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }, workers: 1 },
+      budget: { day: 0, week: 0, month: 0 },
+      settings: { path: "/s", overlay: {} },
+      triggers: { triggers: [trigger] },
+      schedulers: [{ key: "nightly", name: "local", pattern: "0 3 * * *", next: Date.UTC(2030, 0, 1, 3, 0, 0), overdueMs: null }],
+      schedulerStalls: { nightly: "1" },
+      schedulerStallMax: 2,
+      runs: [],
+    };
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const d = comp.render(80).join("\n");
+    await comp.dispose();
+    return d;
+  };
+  assert.match(await detail({ type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv", flow: "tidy" }), /2030-01-01 03:00/, "its own key");
+  for (const t of [{ type: "cron", id: "local", pattern: "0 5 * * *", folder: "/srv", flow: "tidy" }, { type: "cron", id: "other", pattern: "0 3 * * *", folder: "/srv", flow: "tidy" }]) {
+    const d = await detail(t);
+    assert.match(d, /trigger · cron/);
+    assert.doesNotMatch(d, /2030-01-01 03:00|healthy|stalls 1\/2/, `${t.id}: no other scheduler's next, health or stalls`);
+  }
+});
+
 test("Enter on the ACTIVE row tails its live log inside the overlay", async () => {
   const calls = [];
   const comp = makeDashboard({

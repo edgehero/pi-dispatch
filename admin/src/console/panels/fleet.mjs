@@ -9,7 +9,7 @@ import { formatCpus } from "@edgehero/pi-dispatch/job-size";
 import { HELD_LABEL, NO_EXPLANATION, reasonWords } from "../../words.mjs";
 import { html } from "../html.mjs";
 import { DOCTOR_CHECKS_SHOWN, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "../../doctor-view.mjs";
-import { cell, ageText, timeHtml, count, RUN_ID_RE, runLink, canAct, actForm, field, editor, table, facts, fromSnapshot, pausedState, workersOnline, beatCell, blessedText, activeTable, bannerCut } from "./common.mjs";
+import { cell, ageText, timeHtml, count, RUN_ID_RE, runLink, canAct, actForm, field, editor, table, facts, fromSnapshot, pausedState, workersOnline, beatAgeOf, beatCell, blessedText, activeTable, bannerCut } from "./common.mjs";
 
 // ---- fleet -----------------------------------------------------------------------------------------------------------
 
@@ -82,7 +82,7 @@ export const fleetHosts = fromSnapshot("Hosts", (s, view) => {
     hosts.map((h) => {
       const jobs = Array.isArray(h.jobs) ? h.jobs : null;
       const list = jobs === null ? (h.jobsUnreadable ? "unreadable" : "-") : jobs.length === 0 ? "none" : html`${jobs.map((j, i) => html`${i > 0 ? ", " : ""}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? html` <span class="note">${ageText(view.now - j.at)}</span>` : null}`)}${h.jobsMore > 0 ? ` and ${h.jobsMore} more` : ""}`;
-      return html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td>${budgetText(h.usedMemMiB, h.budgetMemMiB, "MiB")}</td><td>${cpuBudgetText(h.usedCpuCenti, h.budgetCpuCenti)}</td><td class="num">${cell(h.waiters)}</td><td>${list}</td><td>${blessedText(h)}</td><td>${h.routes === false || h.routes === "false" ? "no" : "yes"}</td>${beatCell(h.staleMs)}</tr>`;
+      return html`<tr><td>${cell(h.name)}</td><td class="num">${cell(h.concurrency)}</td><td>${budgetText(h.usedMemMiB, h.budgetMemMiB, "MiB")}</td><td>${cpuBudgetText(h.usedCpuCenti, h.budgetCpuCenti)}</td><td class="num">${cell(h.waiters)}</td><td>${list}</td><td>${blessedText(h)}</td><td>${h.routes === false || h.routes === "false" ? "no" : "yes"}</td>${beatCell(beatAgeOf(h))}</tr>`;
     }),
     "No host is registered.",
   );
@@ -168,9 +168,13 @@ export const fleetSchedulers = fromSnapshot("Schedules", (s, view) => {
     "Schedules",
     ["Schedule", "Pattern", "Next", "Overdue", { num: "Stalls" }],
     list.map((x) => {
-      const id = x.name ?? x.key;
-      const n = Number(stalls[id] ?? 0);
-      return html`<tr><td class="mono">${cell(id)}</td><td class="mono">${cell(x.pattern ?? (x.every ? `every ${x.every} ms` : null))}</td><td>${x.next !== null && x.next !== undefined ? timeHtml(x.next) : "-"}</td><td${x.overdueMs ? html` class="warn"` : null}>${x.overdueMs ? ageText(x.overdueMs) : "no"}</td><td class="num${n > 0 ? " warn" : ""}">${n}${Number.isInteger(max) ? ` / ${max}` : ""}</td></tr>`;
+      // The trigger's id is the scheduler's `key`, which the stall counts are kept under; BullMQ's `name` is the job's,
+      // so it never stands in for a key the reader refused. A scheduler with no key has no stall count to read (issue
+      // #737): its cell is "-", never a whole 0 read under no key.
+      const id = typeof x.key === "string" ? x.key : null;
+      const n = id === null ? null : Number(stalls[id] ?? 0);
+      const stallCell = n === null ? html`<td class="num">-</td>` : html`<td class="num${n > 0 ? " warn" : ""}">${n}${Number.isInteger(max) ? ` / ${max}` : ""}</td>`;
+      return html`<tr><td class="mono">${cell(id)}</td><td class="mono">${cell(x.pattern ?? (x.every ? `every ${x.every} ms` : null))}</td><td>${x.next !== null && x.next !== undefined ? timeHtml(x.next) : "-"}</td><td${x.overdueMs ? html` class="warn"` : null}>${x.overdueMs ? ageText(x.overdueMs) : "no"}</td>${stallCell}</tr>`;
     }),
     "No schedule is registered.",
   );

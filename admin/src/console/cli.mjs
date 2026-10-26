@@ -23,7 +23,7 @@
 import * as nodeFs from "node:fs";
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
@@ -197,6 +197,14 @@ export function readSideOf({ m, env, dir, fs, platform, uid }) {
   const sessions = typeof merged.PI_SESSIONS_DIR === "string" ? merged.PI_SESSIONS_DIR.trim() : "";
   if (sessions !== "") paths.sessionsDir = isAbsolute(sessions) ? sessions : resolvePath(dir, sessions);
   return { env: merged, paths, notice: panel.notice };
+}
+
+/**
+ * The deployment the pages name (issue #737: the first run's steps), from the folder serve was given: its last folder
+ * alone, never the path, since every page (a viewer's too) is drawn from the same data and a page carries no host path.
+ */
+export function deploymentOf(dir) {
+  return { folder: basename(dir) };
 }
 
 /** The pricing facade `assembleInsights` takes, from the worker's pricing module. */
@@ -437,6 +445,10 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // Issue #642: the same reader carries the console's kill switch (`pause`/`resume`) and the cancel request. Its pause
     // goes through `killSwitchPlan` over THIS deployment's folder (`killSwitchPlanFn`), so the two-Valkey refusal of a
     // resume holds here exactly as it does for the tools and the TUI. `readOnly` covers `snapshot()` alone.
+    //
+    // Issue #737: the waiting jobs and why each waits are NOT turned on here: the reader serves every page and
+    // `/api/state`, so the overview's load asks for them per call (`pages.mjs` `PAGE_READS`), and a page that draws no
+    // waiting job pays no read for one.
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const pricing = pricingOf(m.pricing);
@@ -453,12 +465,18 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // The subscriptions file, for a run's cost class (a plan-covered run is not a dollar run).
       subscriptions: () => m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs }),
       env: side.env,
+      // Issue #737: the deployment the first run's steps name, by its last folder alone (`deploymentOf`).
+      deployment: deploymentOf(config.dir),
       now,
     };
     hub = m.live.makeLiveHub({
       loadPageData: (page, query) => m.pages.loadPageData(page, query, pageDeps),
       pagePanels: (page, ctx) => m.pages.pagePanels(page, ctx),
       queryKeyOf: (page, query) => m.pages.pageQueryString(page, query),
+      // Issue #737: one load per page whatever its query's view-only parameters (pages.mjs's `dataQueryOf`: the
+      // overview's grouping and zoom regroup one snapshot), keyed by the canonical text of what it returns. A pages
+      // module without it loads once per distinct query, as before.
+      ...(typeof m.pages.dataQueryOf === "function" ? { dataQueryOf: (page, query) => m.pages.dataQueryOf(page, query) } : {}),
       peekSession: (id, file) => sessions.peek(id, file),
       // Issue #737: why a stream's session ended, from the store's pure verdict (never `get`, which would delete it).
       endedReason: (id, file) => sessions.verdict(id, file).ended ?? null,

@@ -7,8 +7,12 @@ import { ENDED_REASONS } from "../src/console/session-ends.mjs";
 import { LIVE_NOTES, READ_ONLY_TITLE } from "../src/console/shell.mjs";
 import { UNDO_SENTENCES } from "../src/console/actions.mjs";
 import { PERSON_CHANGED } from "../src/console/server.mjs";
+import { DEFER_BUCKETS, DEFER_BUCKET_WORDS } from "@edgehero/pi-dispatch/defer-reasons";
+import { FREE_SLOT_TEXT, HOST_NO_EXPIRY_TEXT, NEEDS_EMPTY, WAITLISTS_CALM } from "../src/console/panels/overview.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
-import { PANELS, PANEL_STATES, renderPanelStates } from "./helpers/panel-goldens.mjs";
+import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
+import { LONG_NAMES, PANELS, PANEL_STATES, renderPanelStates } from "./helpers/panel-goldens.mjs";
+import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 
 /**
  * The panel goldens (issue #737): every state of a page the fixture deployment cannot reach (each confirm state,
@@ -26,12 +30,15 @@ const update = process.env.UPDATE_CONSOLE_FIXTURES === "1";
 const rendered = renderPanelStates();
 
 test("the panel goldens are the states the cards name, by name: the ledgers and the width check read them so", () => {
-  const confirm = ["previewing", "preview", "preview-paid", "preview-danger", "unchanged", "bulk-preview", "bulk-results", "refused-preview", "refused-confirm", "preview-long-line", "refused-partial", "refused-person", "preview-cancel-queued", "refused-started", "done", "done-rerun", "done-no-undo"].map((s) => `confirm-${s}.operator`);
+  const confirm = ["previewing", "preview", "preview-paid", "preview-danger", "unchanged", "bulk-preview", "bulk-results", "refused-preview", "refused-confirm", "preview-long-line", "preview-long-names", "preview-long-queue", "refused-partial", "refused-person", "preview-cancel-queued", "refused-started", "done", "done-rerun", "done-no-undo"].map((s) => `confirm-${s}.operator`);
   const live = ["reconnecting", "not-live", "signed-out", "stale", "kept-still"].map((s) => `live-${s}.operator`);
   const signIn = [...ENDED_REASONS.map((r) => `login-ended-${r}.anonymous`), ...["wrong", "rate", "tokens", "audit", "other"].map((k) => `login-refused-${k}.anonymous`), "login-unreachable.anonymous"];
   // The link page: its two states the script switches to, then each notice it can show (signin.mjs LINK_NOTICES).
   const link = ["login-code-used.anonymous", "login-code-nocode.anonymous", ...["rate", "tokens", "audit", "other"].map((k) => `login-code-refused-${k}.anonymous`), "login-code-unreachable.anonymous"];
-  assert.deepEqual([...PANEL_STATES], [...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...signIn, ...link]);
+  // The overview's states (issue #737): all clear and the first run for both roles where the role changes the page, the
+  // waitlists with each kind of wait alone (`DEFER_BUCKETS`), and the two hosts the registry has something to say of.
+  const overview = ["overview-all-clear.operator", "overview-all-clear.viewer", "setup-nothing-ready.operator", "setup-partial.operator", "setup-partial.viewer", ...DEFER_BUCKETS.map((b) => `waitlist-${b}.operator`), "overview-host-skew.operator", "overview-host-no-expiry.operator", "overview-host-long-names.operator"];
+  assert.deepEqual([...PANEL_STATES], [...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });
@@ -93,6 +100,24 @@ test("the confirm states: the slot open right after the wrapper of the card that
     assert.ok(slot.closesWrapper, `${state}: right after the panel's .legacy wrapper, outside it`);
     assert.equal(page.split(`id="${CONFIRM_SLOT_ID}"`).length, 2, `${state}: one slot`);
     assert.ok(slot.body.slice(0, slot.body.indexOf("<template")).includes(shows), `${state}: the slot holds ${shows}`);
+  }
+  // The bars that carry the longest names (`LONG_NAMES`), asked from the overview's Hosts card: the slot right after
+  // that card, in its column (no grid there is marked `data-slot-after`), so the width check measures each bar where the
+  // script puts it. Resume fleet over two such host queues paused names both in its waiting line and its Undo; one such
+  // queue's Pause names it in the summary, the Undo and the Confirm label.
+  const { host, peer } = LONG_NAMES;
+  for (const [state, shows] of [
+    ["confirm-preview-long-names", [`(pi-jobs@${host}, pi-jobs@${peer}): each reserves`, `Pause queues pi-jobs@${host}, pi-jobs@${peer} again by hand, one at a time`]],
+    ["confirm-preview-long-queue", [`Pause queue pi-jobs@${peer}: nothing new starts there`, `<b>Resume queue pi-jobs@${peer}</b>`, `data-confirm>Pause queue pi-jobs@${peer}</button>`]],
+  ]) {
+    const page = pages[`${state}.operator`];
+    const slot = slotOf(page);
+    assert.ok(slot?.open, `${state}: the slot is open`);
+    assert.equal(slot.panel, "p-hosts", `${state}: after the Hosts card`);
+    assert.ok(page.slice(0, slot.at).endsWith("</section>") && !slot.closesWrapper, `${state}: right after the card, inside its column`);
+    assert.equal(page.split(`id="${CONFIRM_SLOT_ID}"`).length, 2, `${state}: one slot`);
+    const bar = slot.body.slice(0, slot.body.indexOf("<template"));
+    for (const text of shows) assert.ok(bar.includes(text), `${state}: the bar says ${text.slice(0, 60)}`);
   }
   // What the bars say, from the real action table: the paid retry's reserve and its Undo. A retry keeps the job's
   // attempts, so the cancel of a queued job never takes it back: the ConfirmStates ledger names the design's "Cancel
@@ -165,6 +190,72 @@ test("the read-only banner for both roles, with no form and no slot; the damaged
   assert.equal(after.split("Not verified: it follows the damaged row.").length - 1, 2, "both rows written after it say so");
   assert.equal(after.split("Not verified: the link to the row after it does not hold.").length - 1, 1, "and the row before it");
   assert.ok(after.includes('<tr id="line-2026-10-4" class="row--failed">') && after.includes('<tr id="seq-6">') && after.includes('<tr id="seq-5">') && after.includes('<tr id="seq-3">'), "the damaged row, then the two after it and the one before it by their seq");
+});
+
+/** A panel's section in a page, its inner HTML, or null. */
+const panelOf = (page, id) => new RegExp(`<section id="${id}" data-panel>([^]*?)</section>`).exec(page)?.[1] ?? null;
+
+/** The headline's text in a page. */
+const headlineOf = (page) => /<span id="p-headline" data-panel>([^<]*)<\/span>/.exec(page)?.[1] ?? null;
+
+test("the overview's states: all clear, the first run for each role, each kind of wait alone, and the hosts' registry notes", async () => {
+  const pages = await rendered;
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/'/g, "&#39;");
+  for (const role of ["operator", "viewer"]) {
+    const page = pages[`overview-all-clear.${role}`];
+    assert.equal(headlineOf(page), "All clear. 4 jobs running, nothing needs you.", role);
+    assert.ok(panelOf(page, "p-needs").includes(`<b>All clear</b><span>${NEEDS_EMPTY.body}</span>`), `${role}: Needs you's empty state`);
+    // The same panels as the problem state, so nothing jumps; the first run's three are empty.
+    for (const id of ["p-setup", "p-setup-pi", "p-setup-empty"]) assert.equal(panelOf(page, id), "", `${role}: ${id} is empty`);
+    assert.ok(panelOf(page, "p-waitlists").includes(esc(WAITLISTS_CALM)), `${role}: the calm line`);
+    assert.ok(!page.includes("data-action=") || role === "operator", `${role}: a viewer has no form`);
+  }
+  // The first run: the checklist, and the eight empty; a viewer reads the steps without a command or Add.
+  for (const state of ["setup-nothing-ready.operator", "setup-partial.operator", "setup-partial.viewer"]) {
+    const page = pages[state];
+    assert.match(panelOf(page, "p-setup"), /<h2>Getting ready<\/h2>/, state);
+    for (const id of ["p-needs", "p-waiting", "p-active", "p-spend", "p-timeline", "p-caps", "p-waitlists", "p-hosts"]) assert.equal(panelOf(page, id), "", `${state}: ${id} is empty`);
+    assert.match(headlineOf(page), /^The console is up\. /, state);
+  }
+  assert.match(panelOf(pages["setup-partial.operator"], "p-setup"), /<b class="su-big">3<\/b> of 8 ready/);
+  assert.match(panelOf(pages["setup-partial.operator"], "p-setup"), /from doctor on build3, 2 minutes ago/);
+  assert.match(panelOf(pages["setup-partial.operator"], "p-setup"), /Add a trigger/);
+  for (const absent of ['class="cmd"', "Add a trigger"]) assert.ok(!pages["setup-partial.viewer"].includes(absent), `a viewer: no ${absent}`);
+  // Each waitlist state holds its kind of wait alone, under the bucket's title, with the row's one action.
+  // What each kind of wait's rows offer, by bucket; the buckets themselves are the leaf's (DEFER_BUCKETS), so one it gains
+  // fails here by name until its actions are written down.
+  const actions = { slot: ["Open Fleet", "Cancel"], run: ["Chain"], check: ["Edit"], retry: [], pause: ["Cancel"], ready: ["Cancel"], paused: ["Cancel"], due: ["Cancel", "Edit"], unknown: ["Cancel"], none: ["Cancel"] };
+  for (const b of DEFER_BUCKETS) {
+    assert.ok(Object.hasOwn(actions, b), `the waitlist state of bucket ${b} has its actions written down here`);
+    const list = panelOf(pages[`waitlist-${b}.operator`], "p-waitlists");
+    const titles = DEFER_BUCKETS.filter((x) => list.includes(`<b>${esc(DEFER_BUCKET_WORDS[x].title)}</b>`));
+    assert.deepEqual(titles, [b], `waitlist-${b}: its bucket alone`);
+    const drawn = [...list.matchAll(/<(?:a class="btn[^"]*" href="[^"]*"|button class="btn[^"]*" type="submit")>([A-Za-z ]+)<\/(?:a|button)>/g)].map((m) => m[1]).filter((w) => w !== "Spend");
+    assert.deepEqual([...new Set(drawn)].sort(), [...actions[b]].sort(), `waitlist-${b}: its actions`);
+  }
+  assert.ok(panelOf(pages["waitlist-slot.operator"], "p-waitlists").includes(esc(FREE_SLOT_TEXT)), "the free slot's sentence");
+  assert.ok(panelOf(pages["waitlist-unknown.operator"], "p-waitlists").includes('<span class="code">brand-new-why</span>'), "an operator reads a reason this console has no words for as its token");
+  // A scheduler's overdue next run, named by its trigger and its run time (the raw id in its title): its cron trigger's
+  // Edit, and no Cancel, which the queue would refuse.
+  const due = panelOf(pages["waitlist-due.operator"], "p-waitlists");
+  assert.match(due, /<span class="code" title="repeat:hourly-sync:\d+">hourly-sync, <time[^>]*>[^<]+<\/time> run<\/span><span class="wl__t">Due since <time[^>]*>[^<]+<\/time>; no worker has taken it<\/span><a class="btn btn--sm btn--ghost" href="\/config">Edit<\/a><\/li>/);
+  assert.equal((due.match(/data-action="cancel-queued"/g) ?? []).length, 1, "Cancel for the job that never started alone");
+  // The registry's notes on a host.
+  assert.ok(panelOf(pages["overview-host-skew.operator"], "p-hosts").includes(esc("build3's clock is about 1m 48s behind this console's: its beat says 2m ago, and Valkey last refreshed its row 12s ago.")), "the skew");
+  assert.ok(panelOf(pages["overview-host-no-expiry.operator"], "p-hosts").includes(esc(HOST_NO_EXPIRY_TEXT)), "no expiry");
+  // The long names, each legal and each drawn where running text holds it, so the width check measures every one.
+  const { host, gone, cron } = LONG_NAMES;
+  for (const name of [host, gone]) assert.ok(WORKER_NAME_RE.test(name) && name.length === 64, `${name}: the longest name a worker can declare`);
+  assert.ok(/^[A-Za-z0-9._-]+$/.test(cron) && cron.length === CRON_ID_MAX, "a cron trigger id, the longest the triggers file takes, with no place to break");
+  const long = pages["overview-host-long-names.operator"];
+  const hosts = panelOf(long, "p-hosts");
+  assert.ok(hosts.includes("Partly paused: 1 host queue</span>"), "the head counts the paused queue, never names it");
+  assert.ok(hosts.includes(`<b>${host}</b>`) && hosts.includes(`<span class="code">@${host}</span> paused, `) && hosts.includes(`aria-label="Resume ${host}"`), "the host, its paused queue and its resume");
+  const waitlists = panelOf(long, "p-waitlists");
+  assert.ok(waitlists.includes(`<span class="wl__t">${host} has no free job slot. <span class="code">gh-4a7e</span> still holds one of its slots</span>`), "a job waiting for the long host's slot");
+  assert.ok(waitlists.includes(`. It is in <span class="code">pi-jobs@${gone}</span>, whose host is not in the registry`), "a job in a gone host's queue");
+  assert.ok(waitlists.includes(`<span class="qp"><b class="code">@${host}</b>paused, 1 delayed</span>`) && waitlists.includes(`<span class="qp"><b class="code">@${gone}</b>1 in line, its host not in the registry</span>`), "both queues in the Queues line");
+  assert.ok(waitlists.includes(`Scheduled: <span class="code">${cron}</span> <time`), "the cron trigger next in Scheduled");
 });
 
 test("the sign-in states: exactly one notice each, the reason's or the refusal's; the link page in each state", async () => {

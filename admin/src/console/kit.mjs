@@ -2,8 +2,8 @@
  * The console's kit (issue #737): the Pulse design's components as pure functions, each returning a fragment built with
  * `html`, so a page says `ui.badge("failed", "Failed")` and gets the design's markup and class names, never its own copy
  * of them. Imported as `import * as ui from "./kit.mjs"`. The markup is the component cards' (Shell, Status, Actions,
- * CardsAndBanners, DataTable, FactsAndLevels, FieldsDiffCommand), pinned helper by helper in
- * `admin/test/console-kit.test.mjs` against each card's own sample.
+ * CardsAndBanners, DataTable, FactsAndLevels, FieldsDiffCommand, and since PR 3 TimelineAndWaitlists), pinned helper by
+ * helper in `admin/test/console-kit.test.mjs` against each card's own sample.
  *
  * THE RULES EVERY HELPER KEEPS.
  *   - Every value is escaped: it goes through `html`, which scrubs control bytes and escapes markup, and only a
@@ -30,6 +30,7 @@
  *   - A card is an `<article class="card">` or a `<div class="card">`, never the `section[data-panel]` the live script
  *     swaps: a panel element carries only its `id` and `data-panel`, and the card is drawn inside it.
  */
+import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { html, isSafeHtml } from "./html.mjs";
 import { ICON_NAMES, SPRITE } from "./pulse-icons.mjs";
 import { STATUS_KINDS, outcomeWord } from "../words.mjs";
@@ -38,16 +39,17 @@ const ICONS = new Set(ICON_NAMES);
 
 /**
  * The ids the page frame draws and the browser script finds by name, which no kit helper may write: the shell's
- * (`shell.mjs`: `#main`, `#logout`, `#live-status`, the Parked count `#p-nav-parked`, and since PR 2 of issue #737 the
+ * (`shell.mjs`: `#main`, `#logout`, `#live-status`, the Parked count `#p-nav-parked`, since PR 2 of issue #737 the
  * live notes `#live-note`, the write flow's one `#confirm-slot` and the `#held-note` template the script clones into a
- * panel it keeps still), the sign-in pages' (`#login-form`, `#token`, `#notice`, which `signin.mjs` draws by hand with
- * the kit's class names, since a kit helper may not write them), and the spend screen's chart hooks the script reads
+ * panel it keeps still, and since PR 3 the headline panel `#p-headline` in a page's title bar), the sign-in pages'
+ * (`#login-form`, `#token`, `#notice`, which `signin.mjs` draws by hand with the kit's class names, since a kit helper
+ * may not write them), and the spend screen's chart hooks the script reads
  * (`#tip`, `#wrap`, `#graph`, `#root`, `#insights-tips`, `#graph-nodes`). Hand-listed because the kit cannot import the
  * shell (the shell imports the kit), so the kit test pins it both ways: every id the frame draws outside a page's
  * panels and every id the script names in a `getElementById("...")` is refused (listed here, the sprite's, or one of
  * the families below), and each one listed here is still one of those.
  */
-export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes"]);
+export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "p-headline", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes"]);
 
 /**
  * The ordinal id families the spend topology mints (`graph-html.mjs`: `n<k>` for a chip, `w<k>` for a wire, `sg<k>`
@@ -112,6 +114,17 @@ const ID_RE = /^[a-z][a-z0-9-]*$/;
 /** A copy-box argument written as it is: nothing a POSIX shell reads as more than a word's letters (see `shellWord`). */
 const SHELL_SAFE_RE = /^[A-Za-z0-9._/:@%+=-]+$/;
 const GROUPED = new Intl.NumberFormat("en-US");
+/** An action's name as the browser script posts it (`/api/act/<name>/preview`), held to the script's own check. */
+const ACTION_RE = /^[a-z0-9-]{1,40}$/;
+/** A hidden field's name: a key of the body the action reads (`jobId`, `queue`, `index`). */
+const FIELD_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+/**
+ * How the browser script reads a hidden field (`script.mjs` `bodyOf`, its `data-type`): a whole number, a JSON value or
+ * a list of words. A field with no type is text.
+ */
+const FIELD_TYPES = new Set(["int", "json", "list"]);
+/** A row's end with a look of its own (`rowPill`): its text, in a status's ink or the faint ink. */
+const END_KEYS = new Set(["text", "status", "faint"]);
 
 /** A status kind's entry, or a throw: the closed set of `STATUS_KINDS`. */
 function statusOf(status, who) {
@@ -272,9 +285,12 @@ export function chip(text, { status = null, icon: glyph = null } = {}) {
   return html`<span class="${classes("chip", toneOrNull(status, "chip"))}">${glyph === null ? null : icon(glyph)}${text}</span>`;
 }
 
-/** A project tag: the project's name on a neutral pill. */
-export function ptag(project) {
-  return html`<span class="ptag">${project}</span>`;
+/**
+ * A project tag: the project's name on a neutral pill. `title` is the name whole where a page's rules cut the tag to
+ * its column (the timeline's row heads).
+ */
+export function ptag(project, { title = null } = {}) {
+  return html`<span class="ptag"${given(title) ? html` title="${title}"` : null}>${project}</span>`;
 }
 
 /** A venue tag: the venue's name, outlined. */
@@ -301,10 +317,41 @@ export function dot(status, { label = null } = {}) {
   return html`<span class="dot tone-${statusOf(status, "dot").tone}"${label === null ? null : html` role="img" aria-label="${label}"`}></span>`;
 }
 
-/** An icon tile: the status's icon (or `icon`) on its tint; `sm` is the small tile. */
-export function tile(status, { icon: glyph = null, sm = false } = {}) {
+/**
+ * An icon tile: the status's icon (or `icon`) on its tint; `sm` is the small tile. `iconSm` draws the small icon in it,
+ * as the overview's cards draw a waitlist's head (OverviewScreen, TimelineAndWaitlists); the ConfirmStates card's small
+ * tile keeps the full-size icon, so the two are separate choices.
+ */
+export function tile(status, { icon: glyph = null, sm = false, iconSm = false } = {}) {
   const s = statusOf(status, "tile");
-  return html`<span class="${classes("tile", sm && "tile--sm", `tone-${s.tone}`)}">${icon(glyph ?? s.icon)}</span>`;
+  return html`<span class="${classes("tile", sm && "tile--sm", `tone-${s.tone}`)}">${icon(glyph ?? s.icon, iconSm ? { size: "sm" } : {})}</span>`;
+}
+
+/** The most slot dots `slots` draws; past it the rest is a count. */
+export const SLOTS_MAX = 32;
+
+/** A count a mark draws one of per unit, or a throw: a whole number of 0 or more. */
+function wholeOf(n, what, who) {
+  if (!Number.isSafeInteger(n) || n < 0) throw new TypeError(`kit.${who}: ${what} is a whole count of 0 or more, not ${JSON.stringify(n)}`);
+  return n;
+}
+
+/**
+ * A host's slots as dots (the Status card's): filled blue for each running job (`sl--run`), a yellow ring for each slot
+ * held by a job that is gone (`sl--hold`), an empty ring for each free one, in that order. An image, named by `label`
+ * ("build3: 1 running, 1 held, 1 free"; by default the three counts), since the dots are drawn instead of the numbers.
+ * At most `SLOTS_MAX` dots, then "+N" for the rest; the dots kept are the held ones first, then the running, then the
+ * free, so a held slot, the one the overview calls out, is never the dot that is cut.
+ */
+export function slots({ run = 0, hold = 0, free = 0, label = null } = {}) {
+  const [r, h, f] = [wholeOf(run, "run", "slots"), wholeOf(hold, "hold", "slots"), wholeOf(free, "free", "slots")];
+  const held = Math.min(h, SLOTS_MAX);
+  const running = Math.min(r, SLOTS_MAX - held);
+  const open = Math.min(f, SLOTS_MAX - held - running);
+  const more = r + h + f - held - running - open;
+  const dots = (n, cls) => Array.from({ length: n }, () => html`<i class="${cls}"></i>`);
+  const name = given(label) ? label : `${r} running, ${h} held, ${f} free`;
+  return html`<span class="sls" role="img" aria-label="${name}">${dots(running, "sl sl--run")}${dots(held, "sl sl--hold")}${dots(open, "sl")}${more > 0 ? `+${grouped(more, "slots")}` : null}</span>`;
 }
 
 // ---- containers ----------------------------------------------------------------------------------------------------------
@@ -335,6 +382,38 @@ export function big({ n, label, status = null, href = null, trend = null }) {
   const cls = classes("big", toneOrNull(status, "big"));
   const inner = html`<span class="big__n">${tri}${n}</span><span class="big__l">${label}</span>`;
   return href === null ? html`<span class="${cls}">${inner}</span>` : html`<a class="${cls}" href="${hrefOf(href, "big")}">${inner}</a>`;
+}
+
+/** A row's end (`rowPill`): a count in bold, text or a fragment as it is, or `{ text, status | faint }` in that ink. */
+function rowEnd(end) {
+  if (typeof end === "number") return html`<span class="end"><b>${grouped(end, "rowPill")}</b></span>`;
+  if (typeof end === "string" || isSafeHtml(end)) return html`<span class="end">${end}</span>`;
+  if (end === null || typeof end !== "object" || Array.isArray(end)) throw new TypeError(`kit.rowPill: an end is a count, text, a fragment or { text, status | faint }, not ${JSON.stringify(end)}`);
+  for (const k of Object.keys(end)) if (!END_KEYS.has(k)) throw new RangeError(`kit.rowPill: unknown end option ${JSON.stringify(k)}`);
+  const { text, status = null, faint = false } = end;
+  if (status !== null && faint) throw new RangeError("kit.rowPill: an end is in a status's ink or the faint one, not both");
+  if (status !== null) return html`<span class="end tinted ${toneOrNull(status, "rowPill")}"><b class="tinted">${text}</b></span>`;
+  return faint ? html`<span class="end faint">${text}</span>` : html`<span class="end">${text}</span>`;
+}
+
+/**
+ * One row of a KPI card's list (the CardsAndBanners card's rows: Needs you's, In line's, Running's): a pill holding an
+ * optional small icon in the status's ink (`status`, none for a neutral row), then `items` (text in a `<span>` each, a
+ * fragment as it is: a `ptag`, an id in the code face, a host's name in bold, its `slots`), then `end` at the row's
+ * right (`rowEnd`: In line's count, Running's "1 held" in the attention ink or "2 free" in the faint one), then
+ * `action`: a link, `{ label, href }`, drawn as the row's small pill button (`rowpill__act`), or a fragment as it is
+ * (an `actForm` for a write, which the shell's rules put at the row's right as they do the link).
+ */
+export function rowPill({ icon: glyph = null, status = null, items, action = null, end = null }) {
+  if (!Array.isArray(items)) throw new TypeError("kit.rowPill: items is a list");
+  const parts = items.map((it) => (isSafeHtml(it) ? it : html`<span>${it}</span>`));
+  let act = null;
+  if (action !== null) {
+    if (isSafeHtml(action)) act = action;
+    else if (typeof action === "object" && !Array.isArray(action) && Object.keys(action).every((k) => k === "label" || k === "href")) act = html`<a class="rowpill__act" href="${hrefOf(action.href, "rowPill")}">${action.label}</a>`;
+    else throw new TypeError(`kit.rowPill: an action is { label, href } or a fragment (an actForm), not ${JSON.stringify(action)}`);
+  }
+  return html`<li class="${classes("rowpill", toneOrNull(status, "rowPill"))}">${glyph === null ? null : icon(glyph, { size: "sm" })}${parts}${end === null ? null : rowEnd(end)}${act}</li>`;
 }
 
 /** A fact grid: `pairs` of `[term, value]` in one, two (the default) or three columns; an absent value reads "-". */
@@ -438,6 +517,179 @@ export function ring({ value, max, label, status = null, hold = null, size = 96,
     tick = html`<line class="ring__hold" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
   }
   return html`<svg class="ring ${tone}" width="${s}" height="${s}" viewBox="0 0 ${s} ${s}" role="meter" aria-valuenow="${svgNum(pct, 0, 100, 0)}" aria-valuemin="0" aria-valuemax="100" aria-label="${label}"><circle class="ring__track" ${geo}/><circle class="ring__arc" ${geo} pathLength="100" stroke-dasharray="${svgNum(pct, 0, 100, 1)} 100" transform="rotate(-90 ${c} ${c})"/>${tick}</svg>`;
+}
+
+/**
+ * A capsule's drawing, the FactsAndLevels card's: 40 by 150, the pill 32 wide and never lower than 32 (so it is a
+ * round-ended pill at 0%, as the card draws a small level), its value 21 below the pill's top, which centres it in the
+ * pill's round top (and in the whole pill at the minimum).
+ */
+const CAP = Object.freeze({ w: 40, h: 150, pillMin: 32, valueDy: 21 });
+
+/** Text a helper writes into an attribute as well as the page, or a throw: a fragment's markup would show in a title. */
+function plainOf(text, what, who) {
+  if (typeof text !== "string") throw new TypeError(`kit.${who}: ${what} is text, not ${JSON.stringify(text)}`);
+  return text;
+}
+
+/**
+ * A cap's level as a capsule (the FactsAndLevels card's, the overview's Caps): a rail, the soft-hold line as a ring at
+ * `hold` percent from the bottom (none where `hold` is null: a dollar window has no soft hold), the level as a pill
+ * rising from the bottom, at least 32 high, its percent printed in it, and the window's name under it (`name` in bold,
+ * then `window`). Its status follows the meter rule unless given (ok, attention from the hold, failed at the cap), and
+ * its tone class is on the `<svg>`, not on the pill as the card writes it: bundle.css paints the pill `--tone` and the
+ * printed percent `--on-tone`, and the percent is the pill's sibling, so on the card it inherited no tone and was drawn
+ * in SVG's default black, 4.16:1 on the light theme's `ok` and 4.42:1 on its `failed`. On the `<svg>` both read it, and
+ * the percent is the `on-<status>` on `<status>` pair (4.5:1 in both themes, `console-contrast.test.mjs`). The
+ * capsule's `title` and its image's name (`label`, by default "Jobs today: 63 percent of cap") say the percent, whole;
+ * the pill stops at the top, the printed percent does not (a window past its cap says so). `pct` is a finite number, or
+ * a throw: a level that is not known is not drawn. A `unit` ("$") follows the name joined by a no-break space, written
+ * here because `html` turns one in a value into a plain space (a blank a reader cannot tell from a space is scrubbed):
+ * the label is a quarter of a phone's card, where a long model name wraps, and a unit alone on a line names nothing.
+ */
+export function capsule({ name, window, pct, hold = null, status = null, label = null, unit = null }) {
+  if (!Number.isFinite(pct)) throw new TypeError(`kit.capsule: a level is a finite percentage, not ${JSON.stringify(pct)}`);
+  const named = unit === null ? plainOf(name, "a name", "capsule") : `${plainOf(name, "a name", "capsule")} ${plainOf(unit, "a unit", "capsule")}`;
+  const what = `${named} ${plainOf(window, "a window", "capsule")}`;
+  const tone = `tone-${statusOf(status ?? levelStatus(pct, hold), "capsule").tone}`;
+  const shown = String(Math.max(0, Math.round(pct)));
+  const pill = Math.max(CAP.pillMin, Math.round((CAP.h * Math.min(100, Math.max(0, pct))) / 100));
+  const top = CAP.h - pill;
+  const ring = Number.isFinite(hold) ? html`<circle class="cap__hold" cx="20" cy="${svgNum(CAP.h * (1 - hold / 100), 0, CAP.h, 0)}" r="4"/>` : null;
+  return html`<div class="cap" title="${`${what}: ${shown}%`}"><svg class="${tone}" width="${CAP.w}" height="${CAP.h}" viewBox="0 0 ${CAP.w} ${CAP.h}" role="img" aria-label="${given(label) ? label : `${what}: ${shown} percent of cap`}"><line class="cap__rail" x1="20" x2="20" y1="0" y2="${CAP.h}"/>${ring}<rect class="cap__pill" x="4" y="${svgNum(top, 0, CAP.h, 0)}" width="32" height="${svgNum(pill, 0, CAP.h, 0)}" rx="16"/><text class="cap__v" x="20" y="${svgNum(top + CAP.valueDy, 0, CAP.h, 0)}" text-anchor="middle">${shown}</text></svg><p class="cap__l"><b>${name}${unit === null ? null : html`&nbsp;${unit}`}</b>${window}</p></div>`;
+}
+
+/** How many dots a spend column has, the CardsAndBanners card's: one hour's spend is drawn as 0 to 7 of them lit. */
+export const SPEND_DOTS = 7;
+
+/**
+ * Spend by hour as a dot matrix (the CardsAndBanners card's Spend today): one column per hour of `hours` (a list of
+ * amounts, any unit, the first at `startHour`, 0 to 23, UTC; at most a day's 24), each of `SPEND_DOTS` dots lit from the
+ * bottom, `round(7 * value / max)` of them, `max` the top of the scale (by default the largest hour, which is then a
+ * full column). An hour that spent anything lights at least one dot, so a small hour never reads as one with none; an
+ * amount that is not a positive number is none. An image named by `label`; under it the axis, the first, middle and
+ * last hours. No hours draw nothing.
+ */
+export function spendDots({ hours, max = null, label, startHour = 0 }) {
+  if (!Array.isArray(hours) || hours.length > 24) throw new RangeError("kit.spendDots: hours is a list of at most a day's 24");
+  if (!given(label)) throw new TypeError("kit.spendDots: the chart is named");
+  if (!Number.isSafeInteger(startHour) || startHour < 0 || startHour > 23) throw new RangeError(`kit.spendDots: startHour is an hour, 0 to 23, not ${JSON.stringify(startHour)}`);
+  if (hours.length === 0) return html``;
+  const values = hours.map((v) => (Number.isFinite(v) && v > 0 ? v : 0));
+  const scale = Number.isFinite(max) && max > 0 ? max : Math.max(...values);
+  const lit = (v) => (v === 0 || !(scale > 0) ? 0 : Math.min(SPEND_DOTS, Math.max(1, Math.round((SPEND_DOTS * v) / scale))));
+  const columns = values.map((v) => {
+    const on = lit(v);
+    return html`<span class="sd__c">${Array.from({ length: SPEND_DOTS }, (_, i) => (i < on ? html`<i class="on"></i>` : html`<i></i>`))}</span>`;
+  });
+  const marks = [...new Set([0, Math.floor(values.length / 2), values.length - 1])];
+  const hourAt = (i) => `${String((startHour + i) % 24).padStart(2, "0")}:00`;
+  return html`<div class="sd" role="img" aria-label="${label}">${columns}</div><p class="axis">${marks.map((i) => html`<span>${hourAt(i)}</span>`)}</p>`;
+}
+
+/** A scheduler's run's id as BullMQ names it, `repeat:<scheduler>:<slot>`; a cron trigger's scheduler is its id. */
+const SCHEDULER_RUN_RE = /^repeat:([A-Za-z0-9._-]{1,200}):(0|[1-9][0-9]{0,15})$/;
+
+/**
+ * A cron trigger's run, from its id alone: `{ scheduler, at }`, the scheduler's (the trigger's) id and the instant of
+ * the run, its slot in ms (null for one no date can show, past `DEFER_TIME_MAX_MS`), or null for any other id. The id
+ * is a key and a number, which says nothing to a person: the overview's waitlist and timeline name the run by its
+ * trigger and its time, and keep the id for its title. One copy, here, since the timeline (which imports the kit
+ * alone) and the overview's panels both read it.
+ */
+export function schedulerRunOf(jobId) {
+  const m = typeof jobId === "string" ? SCHEDULER_RUN_RE.exec(jobId) : null;
+  if (m === null) return null;
+  const at = Number(m[2]);
+  return { scheduler: m[1], at: Number.isSafeInteger(at) && at <= DEFER_TIME_MAX_MS ? at : null };
+}
+
+/** The narrowest wait bar, px: the Waitlists card's at 375 px, against which a segment's room is judged. */
+export const WAIT_BAR_PX = 310;
+
+/** A wait bar row's height and the gap between two rows, px. */
+const WAIT_ROW = Object.freeze({ h: 30, gap: 6 });
+
+/**
+ * The least share of the narrowest bar a segment showing `text` takes, in percent: its glyph (10 px in, 14 wide, 6
+ * before the count), its count at 13 px, 800 (each character taken as a tabular digit, 8.8 px in Chrome, so 9; a group
+ * comma is narrower), and 10 px before the segment's end.
+ */
+const segmentPct = (text) => ((30 + text.length * 9 + 10) / WAIT_BAR_PX) * 100;
+
+/**
+ * Each count's share of 100, in proportion, except that a share under its `floors[i]` is raised to it and the others
+ * share what is left in proportion again, until none is under (so a bar of 1, 1, 1 and 2 is 20, 20, 20 and 40, the
+ * card's). The floors add up to at most 100, so what is left is never negative.
+ */
+function sharesOf(counts, floors) {
+  const out = counts.map(() => null);
+  let room = 100;
+  let left = counts.reduce((a, b) => a + b, 0);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [i, n] of counts.entries()) {
+      if (out[i] === null && (room * n) / left < floors[i]) {
+        out[i] = floors[i];
+        room -= floors[i];
+        left -= n;
+        changed = true;
+      }
+    }
+  }
+  return out.map((w, i) => w ?? (room * counts[i]) / left);
+}
+
+/**
+ * The bar's rows: the segments in order, cut into the fewest rows, as even in number as they can be, whose segments'
+ * least shares each fit in one row (`[[from, to], ...]`). One segment's least share is under a row's whole (its count
+ * at most 16 digits and 5 commas is 229 px of 310), so there is always a cut.
+ */
+function waitRowsOf(floors) {
+  for (let k = 1; ; k += 1) {
+    const size = Math.ceil(floors.length / k);
+    const rows = [];
+    for (let from = 0; from < floors.length; from += size) rows.push([from, Math.min(floors.length, from + size)]);
+    if (rows.every(([from, to]) => floors.slice(from, to).reduce((a, b) => a + b, 0) <= 100)) return rows;
+  }
+}
+
+/**
+ * The waiting jobs by reason as one bar (the TimelineAndWaitlists card's Waitlists): a segment per reason with jobs,
+ * each `{ icon, count }`, its width its share of them (`sharesOf`), its icon and its count in it, the segments
+ * alternating their two greys (`wb--0` to `wb--3`, as the card's four, then again). A segment of 0 jobs is not drawn,
+ * and a bar with none draws nothing. An image named by `label`. Each segment's edge is placed from the running total,
+ * so a row's widths add up to exactly 100%.
+ *
+ * NO SEGMENT IS NARROWER THAN ITS GLYPH AND ITS COUNT. A segment takes at least what they need on the narrowest bar
+ * (`WAIT_BAR_PX`), sized to its count's digits; when the segments' least shares add up to more than the bar, it wraps
+ * into rows (`waitRowsOf`), each row a bar of its own, `WAIT_ROW.gap` apart. One least share for every segment, 100% /
+ * n with seven reasons or more, had drawn every count out of sight at 375 px and cut a three-digit count to "1:".
+ */
+export function waitBar(segments, { label } = {}) {
+  if (!Array.isArray(segments)) throw new TypeError("kit.waitBar: segments is a list");
+  if (!given(label)) throw new TypeError("kit.waitBar: the bar is named");
+  for (const s of segments) {
+    if (typeof s?.icon !== "string" || !ICONS.has(s.icon)) throw new RangeError(`kit.waitBar: unknown icon ${JSON.stringify(s?.icon)}`);
+    wholeOf(s.count, "a segment's count", "waitBar");
+  }
+  const drawn = segments.filter((s) => s.count > 0).map((s) => ({ ...s, text: grouped(s.count, "waitBar") }));
+  if (drawn.length === 0) return html``;
+  const floors = drawn.map((s) => segmentPct(s.text));
+  const rows = waitRowsOf(floors);
+  const parts = rows.map(([from, to], r) => {
+    const y = r * (WAIT_ROW.h + WAIT_ROW.gap);
+    const row = drawn.slice(from, to);
+    const shares = sharesOf(row.map((s) => s.count), floors.slice(from, to));
+    let total = 0;
+    const edges = [0, ...shares.map((w) => Number(svgNum((total += w), 0, 100, 2)))];
+    return row.map((s, i) => {
+      const x = svgNum(edges[i], 0, 100, 2);
+      return html`<rect class="wb wb--${(from + i) % 4}" x="${x}%" y="${y}" width="${svgNum(edges[i + 1] - edges[i], 0, 100, 2)}%" height="${WAIT_ROW.h}" rx="8"/><g transform="translate(10 ${y + 8})"><use class="wb-g" href="#i-${s.icon}" x="${x}%" width="14" height="14"></use></g><text class="wb-t" x="${x}%" dx="30" y="${y + 20}">${s.text}</text>`;
+    });
+  });
+  const height = rows.length * WAIT_ROW.h + (rows.length - 1) * WAIT_ROW.gap;
+  return html`<svg class="wbar" height="${height}" role="img" aria-label="${label}">${parts}</svg>`;
 }
 
 // ---- notices -----------------------------------------------------------------------------------------------------------------
@@ -579,16 +831,45 @@ export function btn({ kind = null, label, href = null, icon: glyph = null, type 
   return html`<button class="${cls}" type="${type}"${named}${name === null ? null : html` name="${name}"`}${value === null ? null : html` value="${value}"`}${disabled ? html` disabled` : null}>${content}</button>`;
 }
 
+/** One hidden field of an `actForm`: `[name, value, type]` or `{ name, value, type }`, each held to its rule. */
+function hiddenOf(f) {
+  const [name, value, type = null] = Array.isArray(f) ? f : f !== null && typeof f === "object" ? [f.name, f.value, f.type ?? null] : [];
+  if (typeof name !== "string" || !FIELD_NAME_RE.test(name)) throw new RangeError(`kit.actForm: a field's name is a body key, not ${JSON.stringify(name)}`);
+  if (type !== null && !FIELD_TYPES.has(type)) throw new RangeError(`kit.actForm: unknown field type ${JSON.stringify(type)} (one of ${[...FIELD_TYPES].join(", ")}, or none for text)`);
+  const plain = typeof value === "string" || typeof value === "boolean" || Number.isFinite(value);
+  if (!plain) throw new TypeError(`kit.actForm: ${name}'s value is text, a finite number or a boolean, not ${JSON.stringify(value)}`);
+  return html`<input type="hidden" name="${name}" value="${String(value)}"${type === null ? null : html` data-type="${type}"`}>`;
+}
+
+/**
+ * A write's button (issue #642's action forms, in the kit's look): `<form class="act" data-action>`, its `hidden` fields
+ * (`[name, value, type]` or `{ name, value, type }`; `type`, `int`, `json` or `list`, says how the browser script reads
+ * the value, text by default), then the submit button, `btn`'s with `kind` (small by default; a paid act adds `paid`, a
+ * destructive one `danger`, a round button `round` with its `icon` and `label` as its name). The browser script
+ * previews it in the page's one confirm slot (`confirm-view.mjs`), so the form holds no preview area of its own, and
+ * nothing is written until its Confirm. The attributes are the console's other action forms' (`panels/common.mjs`
+ * `actForm`), `autocomplete="off"` included, so the script's one delegated handler reads both alike.
+ */
+export function actForm({ action, hidden = [], label, kind = ["sm"], icon: glyph = null }) {
+  if (typeof action !== "string" || !ACTION_RE.test(action)) throw new RangeError(`kit.actForm: an action is a name the script posts, [a-z0-9-]{1,40}, not ${JSON.stringify(action)}`);
+  if (!Array.isArray(hidden)) throw new TypeError("kit.actForm: hidden is a list of fields");
+  return html`<form class="act" data-action="${action}" autocomplete="off">${hidden.map(hiddenOf)}${btn({ type: "submit", kind, label, icon: glyph })}</form>`;
+}
+
 /**
  * A link out of the console (a run's issue on its forge, a reasons docs page): `href` an http(s) URL in its own
  * canonical form with no user name (`outHrefOf`; every link `forgeLinkOf` and `docsHref` build is one), drawn as the
  * design's link (`code` sets it in the code face), opening in a new tab that gets no handle on this window and no
  * Referer. The attributes are written in exactly the order `console-pages-harness.mjs`'s outbound-link rule reads
  * (`href`, then `rel="noreferrer noopener"`, then `target="_blank"`, last), the one shape of reference to another host
- * a page may carry.
+ * a page may carry. `btn` (a `btn` kind or a list of them, as `btn` takes) draws the link as that button instead, as
+ * the SetupScreen card draws "What triggers can do" beside its primary: a ghost button, the same link otherwise.
  */
-export function outLink({ href, label, code = false }) {
-  return html`<a class="${classes("link", code && "code")}" href="${outHrefOf(href, "outLink")}" rel="noreferrer noopener" target="_blank">${label}</a>`;
+export function outLink({ href, label, code = false, btn: kind = null }) {
+  const kinds = kind === null ? [] : Array.isArray(kind) ? kind : [kind];
+  for (const k of kinds) if (!BTN_KINDS.includes(k)) throw new RangeError(`kit.outLink: unknown button kind ${JSON.stringify(k)} (one of ${BTN_KINDS.join(", ")})`);
+  const cls = kind === null ? classes("link", code && "code") : classes("btn", ...kinds.map((k) => `btn--${k}`), code && "code");
+  return html`<a class="${cls}" href="${outHrefOf(href, "outLink")}" rel="noreferrer noopener" target="_blank">${label}</a>`;
 }
 
 /**

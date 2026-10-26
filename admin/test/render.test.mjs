@@ -170,6 +170,13 @@ test("renderTriggers lists schedulers with next + overdue drift and a label trig
   assert.match(out, /label {2}any\[pi:frontend\] none\[wontfix\] → frontend-fix/);
 });
 
+test("renderTriggers names a scheduler by its key alone: one whose key the reader refused is -, never BullMQ's job name", () => {
+  const out = renderTriggers({ schedulers: [{ key: null, name: "local", next: Date.UTC(2026, 6, 21, 3, 0, 0), overdueMs: null }, { key: "nightly-tidy", name: "local", next: Date.UTC(2026, 6, 21, 4, 0, 0), overdueMs: null }], triggers: { triggers: [] } });
+  assert.match(out, /^ {2}- {2}next 2026-07-21T03:00:00\.000Z$/m);
+  assert.match(out, /^ {2}nightly-tidy {2}next 2026-07-21T04:00:00\.000Z$/m);
+  assert.doesNotMatch(out, /local/);
+});
+
 test("renderTriggers renders each of the four on.types", () => {
   const out = renderTriggers({
     schedulers: [],

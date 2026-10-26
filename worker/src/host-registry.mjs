@@ -43,6 +43,7 @@
  */
 
 import { parseJobsMore, parseLiveJobs } from "./live-jobs.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
 
 /** The index. A SET cannot expire its members, so the leak is handled by the reader, as `wait:held` does. */
 export const HOST_SET = "host:live";
@@ -318,6 +319,13 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 	const hosts = [];
 	const withTtl = typeof redis?.pttl === "function";
 	for (const member of names ?? []) {
+		// A name outside the worker name charset (`WORKER_NAME_RE`: a letter or a digit, then letters, digits, `.`, `_` and
+		// `-`, at most 64 in all) is no host's: anything with the Valkey's URL can SADD one, and a reader that took it would
+		// print it wherever rows are drawn (a 3,000-character member widened the console's page to 43,000 px). The charset
+		// alone, looser than the boot rule, which also refuses a `.json` or `.log` tail on `PI_WORKER_NAME` (`config.mjs`).
+		// Skipped before its row is even read, and never pruned: removing what someone else wrote is not a reader's call,
+		// and the member costs only its place in the set.
+		if (typeof member !== "string" || !WORKER_NAME_RE.test(member)) continue;
 		try {
 			const key = hostKey(member);
 			// Both issued before either is awaited. The PTTL's own failure (a throw, a rejection, a hang past its bound)
@@ -337,6 +345,9 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 			// The running jobs through the allowlist (issue #599, phase 2): an array, or null where the row publishes none (a
 			// worker from before the field) or none that parses. A listed entry that does not read is a running job not
 			// counted, so it joins `jobsMore` rather than vanishing.
+			// The row's own `name` stands for the member only when it holds to the same rule, else the row is no host's.
+			const name = row.name || member;
+			if (typeof name !== "string" || !WORKER_NAME_RE.test(name)) continue;
 			const live = parseLiveJobs(row.jobs);
 			const more = parseJobsMore(row.jobsMore);
 			hosts.push({
@@ -346,7 +357,7 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 				// A row that HAS a `jobs` value that is not a list: how many it runs is unknown, which a reader must say
 				// rather than read as a worker from before the field.
 				jobsUnreadable: live.jobs === null && typeof row.jobs === "string" && row.jobs !== "",
-				name: row.name || member,
+				name,
 				// Derived rather than stored, so the panel can say "stale 2m" about a row that still lives.
 				// A row whose clock is AHEAD of ours reads as 0 rather than negative: the difference is the
 				// skew between two machines, which is its own signal and not this field's to report (`skewMs` is).

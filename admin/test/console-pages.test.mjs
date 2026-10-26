@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { confirmSlotHtml, heldNoteHtml } from "../src/console/confirm-view.mjs";
+import { SHELL_PANEL_IDS } from "../src/console/shell.mjs";
 import { ESC, FIXTURES, ROLES, SHOTS, STATIC_SHOTS, assertClean, assertPanelsMatch, renderAll, skip } from "./helpers/console-pages-harness.mjs";
 
 /**
@@ -171,6 +172,21 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["overview.viewer"].html, /<nav class="pillnav" aria-label="Console screens">/);
   assert.ok(!first["overview.viewer"].html.includes('href="/audit"'), "a viewer's nav has no audit link");
   assert.ok(overview.includes('<details class="more">') && overview.includes('href="/audit"'), "an operator's has, under More");
+  // Issue #737: the overview in the Pulse markup, its title's headline a panel, and its jobs in line the worker's own
+  // (the harness's WAITING_SEEDS, deferred through BullMQ and `makeDeferTo`), read by the real `readWaiting`: each kind
+  // of wait counted, each row's sentence the worker's (`DEFER_WHYS`), and each row's one action.
+  for (const key of ["overview.operator", "overview.viewer", "overview-host.operator", "overview-host.viewer"]) {
+    assert.ok(!first[key].html.includes('class="legacy"'), `${key}: out of the legacy layer`);
+    assert.match(first[key].html, /<span id="p-headline" data-panel>Needs you: 1 question and 2 to fix\. 4 jobs running\.<\/span>/, key);
+    assert.match(first[key].html, /<p class="kpi"><b>5<\/b><span>jobs waiting to start<\/span><\/p>/, `${key}: five in line`);
+    for (const [word, n] of [["Free slot", 1], ["Another run", 1], ["Time or check", 1], ["Retry backoff", 2]]) assert.ok(first[key].html.includes(`<span>${word}</span><span class="end"><b>${n}</b></span>`), `${key}: ${word} ${n}`);
+  }
+  assert.ok(overview.includes('<span class="code">gh-c9e1</span><span class="wl__t">build3 has no free job slot. <span class="code">gh-4a7e</span> still holds one of its slots</span><a class="btn btn--sm btn--ghost" href="/fleet">Open Fleet</a>'), "the slot gh-4a7e still holds");
+  assert.ok(overview.includes('<span class="code">gh-d4f0</span><span class="wl__t">Chained after gh-b3d7; starts when its folder is free</span><a class="btn btn--sm btn--ghost" href="/run?id=gh-b3d7">Chain</a>'), "the chained job");
+  assert.ok(overview.includes('<span class="code">gh-71b2</span><span class="wl__t">Attempt 2 of 3 at <time datetime="2026-10-08T15:43:08.000Z">'), "the retry, its backoff from the worker's record");
+  assert.ok(!first["overview.viewer"].html.includes('btn--ghost" href="/fleet">Open Fleet</a>') && !first["overview.viewer"].html.includes(">Edit</a>"), "a viewer is offered no action");
+  assert.match(first["overview-host.operator"].html, /<h2>Runs by host<\/h2>/, "the other grouping, through the query");
+  assert.match(first["overview-host.operator"].html, /<body data-page="overview" data-live="overview" data-query="rows=host&amp;zoom=24h">/);
   // Issue #737: the shell's Parked count, the same on every page, from the snapshot or the reader's own count.
   const parkedPill = /<a href="\/parked"(?: aria-current="page")?><svg class="ic" aria-hidden="true"><use href="#i-parked"><\/use><\/svg>Parked<span id="p-nav-parked" data-panel><span class="count tone-parked"><span aria-hidden="true">1<\/span><span class="sr">1 unanswered<\/span><\/span><\/span><\/a>/;
   for (const [key, page] of Object.entries(first)) assert.match(page.html, parkedPill, `${key}: the fixture's one parked run`);
@@ -189,7 +205,9 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   for (const key of ["run.operator", "run.viewer"]) assert.doesNotMatch(first[key].html, /data-transcript/, `${key}: no stream for an ended run without one`);
   // Issue #644: the active tables carry each job's progress as integers and a tool name, the remote host's job too; the
   // running job's detail shows its counters to everyone and its phase names, bar and note to the operator alone.
-  for (const key of ["overview.viewer", "fleet.operator"]) {
+  // Since issue #737 the overview counts the running jobs in each host's slots, and the table with their progress is
+  // Fleet's alone, for both roles.
+  for (const key of ["fleet.viewer", "fleet.operator"]) {
     assert.match(first[key].html, /<th scope="col">Progress<\/th>/, key);
     assert.match(first[key].html, /<td>turn 7, 12 steps \(1 failed\), bash running 40s, phase 2\/4<\/td>/, `${key}: the phased run`);
     assert.match(first[key].html, /<td>turn 31, 58 steps<\/td>/, `${key}: the remote host's job`);
@@ -275,7 +293,7 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
   assert.ok(Object.values(PAGES).filter((p) => p.auth !== "operator").every((p) => p.auth === "viewer"));
   assert.match(q("nope", "").refusal, /no such page/);
   assert.match(q("__proto__", "").refusal, /no such page/);
-  for (const name of ["overview", "parked", "fleet", "config"]) {
+  for (const name of ["parked", "fleet", "config"]) {
     assert.deepEqual(q(name, "").query, {});
     assert.match(q(name, "x=1").refusal, /takes no query parameters/);
   }
@@ -307,6 +325,39 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
     const r = q("runs", qs);
     assert.match(r.refusal ?? "", re, qs.slice(0, 60));
     assert.ok(!r.refusal.includes("<script") && !r.refusal.includes(ESC), "a refusal never echoes the value");
+  }
+  // overview (issue #737): the timeline's grouping, window and project, each a closed value, each null when not given
+  // (the timeline's default), and written back only when given.
+  const ov = (over) => ({ rows: null, zoom: null, project: null, ...over });
+  assert.deepEqual(q("overview", "").query, ov({}));
+  assert.equal(pageQueryString("overview", q("overview", "").query), "", "the default overview carries no query");
+  assert.ok(Object.isFrozen(q("overview", "").query));
+  for (const rows of ["project", "host"]) assert.deepEqual(q("overview", `rows=${rows}`).query, ov({ rows }));
+  for (const zoom of ["1h", "3h", "24h"]) assert.deepEqual(q("overview", `zoom=${zoom}`).query, ov({ zoom }));
+  const grouped = q("overview", "rows=host&zoom=24h&project=web");
+  assert.deepEqual(grouped.query, ov({ rows: "host", zoom: "24h", project: "web" }));
+  assert.equal(pageQueryString("overview", grouped.query), "rows=host&zoom=24h&project=web");
+  assert.deepEqual(q("overview", pageQueryString("overview", grouped.query)).query, grouped.query, "the string round-trips");
+  assert.deepEqual(q("overview", "rows=&zoom=").query, ov({}), "an empty value is the default");
+  for (const [qs, re] of [
+    [`rows=${encodeURIComponent(hostile)}`, /^rows must be one of project, host$/],
+    ["rows=Host", /^rows must be one of project, host$/],
+    ["rows=queue", /^rows must be one of project, host$/],
+    [`zoom=${encodeURIComponent(hostile)}`, /^zoom must be one of 1h, 3h, 24h$/],
+    ["zoom=2h", /^zoom must be one of 1h, 3h, 24h$/],
+    ["zoom=24H", /^zoom must be one of 1h, 3h, 24h$/],
+    // A name every object answers to is no zoom: the windows are the table's own keys, never what it inherits.
+    ...["toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"].map((z) => [`zoom=${z}`, /^zoom must be one of 1h, 3h, 24h$/]),
+    [`project=${encodeURIComponent(hostile)}`, /^project must be a project id/],
+    ["project=Web", /^project must be a project id/],
+    [`project=${"a".repeat(33)}`, /^project must be a project id/],
+    ["project=-web", /^project must be a project id/],
+    ["rows=host&rows=project", /rows is given more than once/],
+    ["x=1", /the overview page takes only rows, zoom, project/],
+  ]) {
+    const r = q("overview", qs);
+    assert.match(r.refusal ?? "", re, qs);
+    assert.ok(!r.refusal.includes("<script") && !r.refusal.includes(ESC), `${qs}: a refusal never echoes the value`);
   }
   // run: an id in the read model's charset, required.
   assert.deepEqual(q("run", "id=repeat:nightly-tidy:1760000000000").query, { id: "repeat:nightly-tidy:1760000000000" });
@@ -372,10 +423,15 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
 test("loadPageData reads only what a screen shows, the snapshot at most once, and keeps no env but the forge hosts", async () => {
   const { loadPageData, parsePageQuery, PAGES } = await import("../src/console/pages.mjs");
   for (const name of Object.keys(PAGES)) {
-    const calls = { snapshot: 0, runsPage: 0, runById: 0, transcriptMeta: 0, insights: 0, audit: 0, subscriptions: 0, parkedCount: 0 };
+    // `waiting` counts the snapshots asked for the waiting jobs too (issue #737), which the overview alone draws.
+    const calls = { snapshot: 0, waiting: 0, runsPage: 0, runById: 0, transcriptMeta: 0, insights: 0, audit: 0, subscriptions: 0, parkedCount: 0 };
     const deps = {
       fleet: {
-        snapshot: async () => (calls.snapshot++, { parked: [] }),
+        snapshot: async (opts) => {
+          calls.snapshot++;
+          if (opts?.waiting === true) calls.waiting++;
+          return { parked: [] };
+        },
         runsPage: async () => (calls.runsPage++, { runs: [], next: null, mirror: "off" }),
         runById: async () => (calls.runById++, { record: { jobId: "gh-1", startedAt: "2026-10-08T00:00:00Z" }, source: "local" }),
         transcriptMeta: async () => (calls.transcriptMeta++, { exists: true, ended: false, outcome: null, length: 3, firstId: "1-0", lastId: "3-0" }),
@@ -394,7 +450,7 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
     assert.ok(calls.snapshot <= 1, `${name}: snapshot at most once`);
     // Issue #737: a screen that reads no snapshot reads the navigation's Parked count, once; one that does takes it from
     // the snapshot, so no screen reads both.
-    const expected = { overview: ["snapshot"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot"], config: ["snapshot"], audit: ["audit", "parkedCount"] }[name];
+    const expected = { overview: ["snapshot", "waiting"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot"], config: ["snapshot"], audit: ["audit", "parkedCount"] }[name];
     assert.deepEqual(Object.keys(calls).filter((k) => calls[k] > 0).sort(), [...expected].sort(), `${name} reads ${expected.join(", ")}`);
     assert.ok(calls.parkedCount <= 1, `${name}: the count at most once`);
     assert.equal(data.parkedCount, expected.includes("parkedCount") ? 2 : undefined, `${name}: the count is in the data where it was read`);
@@ -419,6 +475,32 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
     const fleet = { ...broken.fleet, parkedCount: answer };
     assert.equal((await loadPageData("insights", { range: "7d" }, { ...broken, fleet })).parkedCount, null, String(answer));
   }
+});
+
+test("the overview's query draws, never reads: every overview query has one data query, and loadPageData reads the same for each", async () => {
+  // Issue #737: the live hub reads a screen once per tick for each distinct DATA key (`live.mjs` `dataQueryOf`, wired in
+  // `cli.mjs` to this module's), so the timeline's groupings, windows and projects must share one read: three open
+  // groupings would otherwise read the snapshot three times a tick.
+  const { dataQueryOf, loadPageData, pageQueryString, parsePageQuery } = await import("../src/console/pages.mjs");
+  const queries = ["", "rows=host", "zoom=1h", "zoom=24h", "project=web", "rows=host&zoom=24h&project=billing", "rows=project&zoom=3h"].map((qs) => parsePageQuery("overview", qs).query);
+  const snap = { parked: [], hostBudgets: [{ name: "mini1" }] };
+  const reads = [];
+  const deps = { fleet: { snapshot: async () => (reads.push("snapshot"), snap) }, now: () => 1234, env: {}, deployment: { folder: "acme-prod" } };
+  const first = await loadPageData("overview", dataQueryOf("overview", queries[0]), deps);
+  assert.equal(first.deployment.folder, "acme-prod", "the deployment's folder is in the data");
+  for (const q of queries) {
+    assert.deepEqual(dataQueryOf("overview", q), {}, JSON.stringify(q));
+    assert.equal(pageQueryString("overview", dataQueryOf("overview", q)), "", `${JSON.stringify(q)}: one data key`);
+    assert.deepEqual(await loadPageData("overview", q, deps), first, `${JSON.stringify(q)}: the same data, whatever the query`);
+  }
+  assert.deepEqual(reads, Array(queries.length + 1).fill("snapshot"), "each load reads the snapshot once, and nothing else");
+  // Every other screen reads what its query names: its data query is its query, the same object.
+  for (const [name, qs] of [["runs", "project=web"], ["run", "id=gh-1"], ["insights", "range=7d"], ["audit", "who=ops"], ["fleet", ""]]) {
+    const q = parsePageQuery(name, qs).query;
+    assert.equal(dataQueryOf(name, q), q, name);
+  }
+  // A caller that passes no deployment gets null, never a folder of this machine.
+  assert.equal((await loadPageData("overview", {}, { ...deps, deployment: undefined })).deployment, null);
 });
 
 test("the run page says the transcript could not be read when transcriptMeta is unreachable, never that it has not started", async () => {
@@ -522,7 +604,7 @@ test("renderPage answers 404 for a run that does not exist, and the stream's pan
   assert.match(html, /Read-only console<\/span>/);
   assert.match(html, /<body data-page="run" data-live="run" data-query="id=gh-404">/, "the run detail is live (issue #644: its progress panel moves)");
   for (const { id, html: inner } of await pagePanels("run", ctx)) {
-    const tag = id === "p-nav-parked" ? "span" : "section";
+    const tag = SHELL_PANEL_IDS.includes(id) ? "span" : "section";
     assert.ok(html.includes(`<${tag} id="${id}" data-panel>${inner}</${tag}>`), id);
   }
 });
