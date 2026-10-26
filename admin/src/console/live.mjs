@@ -22,10 +22,12 @@
  *      between ends then, with its reason);
  *   2. a stream whose socket buffer holds more than `maxBufferBytes` (a reader that stopped reading) is cut, so one
  *      stalled browser cannot grow this process's memory; it reconnects to a fresh snapshot;
- *   3. `loadPageData` runs ONCE per distinct page + query, however many streams show it, and for a page with a
- *      `pageMinMs` (the runs page) at most once per that many ms;
- *   4. `pagePanels` renders each view (page + query + the viewer's role and name: the role rule makes a viewer's panels
- *      differ from an operator's), and only the panels whose digest changed are written, each as
+ *   3. `loadPageData` runs ONCE per distinct page + data key, however many streams show it, and for a page with a
+ *      `pageMinMs` (the runs page) at most once per that many ms. The data key is the part of the query the page's data
+ *      depends on (`dataQueryOf`, issue #737): the overview's grouping, zoom and project only regroup one snapshot, so
+ *      every overview query shares one load; any other page's is its whole query;
+ *   4. `pagePanels` renders each view (page + whole query + the viewer's role and name: the role rule makes a viewer's
+ *      panels differ from an operator's), and only the panels whose digest changed are written, each as
  *      `id: <seq>`, `event: panel`, `data: {"id","html"}`.
  *
  * A NEW STREAM gets every panel of its view after its state (below), unless its `Last-Event-ID` is the view's current
@@ -84,6 +86,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { beatAgeOf } from "../doctor-view.mjs";
 import { scrubControls } from "../panel.mjs";
 import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
@@ -124,8 +127,9 @@ export const TOKENS_HELD_LINE = "console: the tokens file cannot be read; live s
 export const TOKENS_BACK_LINE = "console: the tokens file is read again; live streams are judged and drawn again";
 
 /**
- * The hub. `loadPageData(page, query)` resolves the page's data (the CLI binds its deps); `pagePanels(page, ctx)`
- * resolves `[{id, html}]` with `ctx = {query, session: {name, role}, data, readOnly}`; `peekSession(id, file)` and
+ * The hub. `loadPageData(page, query)` resolves the page's data (the CLI binds its deps), called with
+ * `dataQueryOf(page, query)`; `pagePanels(page, ctx)` resolves `[{id, html}]` with `ctx = {query, session: {name, role},
+ * data, readOnly}`, `query` the view's whole query; `peekSession(id, file)` and
  * `readTokens()` are the session store's `peek` and the server's token reader. `endedReason(id, file)` says why a
  * session that failed `peekSession` ended (the CLI binds the store's `verdict`); without it every end says null.
  *
@@ -157,6 +161,12 @@ export function makeLiveHub({
   // The canonical text of a page's query (the CLI passes pages.mjs's `pageQueryString`), so the hub and the page's
   // links agree on when two queries are the same view.
   queryKeyOf = (page, query) => queryKey(query),
+  // Issue #737: the part of a page's query its DATA depends on (the CLI passes pages.mjs's `dataQueryOf`: the
+  // overview's rows, zoom and project only regroup one snapshot, so its load takes `{}`), and that part's canonical
+  // text. Streams whose data keys agree share one load per tick; each view is still keyed, and rendered, by its whole
+  // query. The defaults are the whole query: one load per distinct page and query.
+  dataQueryOf = (page, query) => query,
+  dataKeyOf = (page, query) => queryKeyOf(page, dataQueryOf(page, query)),
   random = randomBytes,
   log = () => {},
 }) {
@@ -188,6 +198,8 @@ export function makeLiveHub({
   };
 
   const viewKeyOf = (sub) => `${sub.page}\n${sub.qkey}\n${sub.session.role}\n${sub.session.name}`;
+  /** The stream's data key: its page and the canonical text of the part of its query the load reads (`dataKeyOf`). */
+  const dataKeyOfSub = (sub) => `${sub.page}\n${sub.dkey}`;
   const isPage = (sub) => sub.kind === "page";
   const pageSubs = () => [...subs].filter(isPage);
   const nextSeq = () => `${epoch}-${(counter += 1)}`;
@@ -283,7 +295,7 @@ export function makeLiveHub({
    * Whether `sub`'s page data or its view's render failed at their last attempt: the subscribe's judgment (see the
    * header). Never the tokens file: the stream's own request has just read it.
    */
-  const failingNow = (sub) => failing.has(`data\n${sub.page}\n${sub.qkey}`) || failing.has(`view\n${viewKeyOf(sub)}`);
+  const failingNow = (sub) => failing.has(`data\n${dataKeyOfSub(sub)}`) || failing.has(`view\n${viewKeyOf(sub)}`);
 
   /**
    * `stale` to a page stream, saying `what` failed (issue #737: the page words the two apart, since a tokens file it
@@ -363,7 +375,7 @@ export function makeLiveHub({
     if (file !== null) await drawTick(t);
     // A key nobody shows any more is forgotten, failing or not, so a long-running console holds only what is open. The
     // tokens file's failure is the console's, not a key's: it is kept until the file reads again, so it is said once.
-    const shown = new Set(["tokens", ...[...subs].flatMap((sub) => (isPage(sub) ? [`data\n${sub.page}\n${sub.qkey}`, `view\n${viewKeyOf(sub)}`] : [`transcript\n${sub.jobId}`]))]);
+    const shown = new Set(["tokens", ...[...subs].flatMap((sub) => (isPage(sub) ? [`data\n${dataKeyOfSub(sub)}`, `view\n${viewKeyOf(sub)}`] : [`transcript\n${sub.jobId}`]))]);
     for (const key of [...failing]) if (!shown.has(key)) failing.delete(key);
     for (const dk of [...loaded.keys()]) if (!shown.has(`data\n${dk}`)) loaded.delete(dk);
     // The keep-alive, so a proxy or the browser does not take a quiet stream for a dead one.
@@ -375,11 +387,12 @@ export function makeLiveHub({
 
   /** Steps 3 to 5, on a tick whose tokens file was read: every page view drawn, every transcript fanned out. */
   async function drawTick(t) {
-    // 3 and 4. one load per data key, one render per view.
+    // 3 and 4. one load per data key (with the part of the query the data depends on), one render per view (with the
+    // view's whole query).
     const byData = new Map();
     for (const sub of pageSubs()) {
-      const dk = `${sub.page}\n${sub.qkey}`;
-      if (!byData.has(dk)) byData.set(dk, { page: sub.page, query: sub.query, subs: [] });
+      const dk = dataKeyOfSub(sub);
+      if (!byData.has(dk)) byData.set(dk, { page: sub.page, query: sub.dquery, subs: [] });
       byData.get(dk).subs.push(sub);
     }
     for (const [dk, { page, query, subs: group }] of byData) {
@@ -419,7 +432,7 @@ export function makeLiveHub({
         if (live.length === 0) continue;
         let rendered;
         try {
-          rendered = await pagePanels(page, { query, session: { name: live[0].session.name, role: live[0].session.role }, data, readOnly });
+          rendered = await pagePanels(page, { query: live[0].query, session: { name: live[0].session.name, role: live[0].session.role }, data, readOnly });
         } catch (e) {
           failed(`view\n${vk}`, `console: live panels for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);
           // A render is one view's (a role's, a name's): only its streams were not drawn, so only they are told.
@@ -560,7 +573,9 @@ export function makeLiveHub({
       // `holds`: this stream's browser holds panels a failed load must not draw over (a Last-Event-ID says it does; a good
       // render sent to it, or a stale told it, makes it so); `said`: the state it was last told, null before its first;
       // `degraded`: what it was last drawn from a failed load, while it holds nothing (see the header).
-      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), needsFull: true, holds: typeof lastEventId === "string", said: null, degraded: null };
+      // `dquery`/`dkey`: the part of the query the page's data depends on and its canonical text (`dataQueryOf`,
+      // `dataKeyOf`), which the load is shared by; `qkey` keys the view.
+      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), dquery: dataQueryOf(page, query), dkey: String(dataKeyOf(page, query)), needsFull: true, holds: typeof lastEventId === "string", said: null, degraded: null };
       subs.add(sub);
       startTimer();
       const view = views.get(viewKeyOf(sub));
@@ -742,7 +757,8 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     fleetDegraded: Boolean(q.fleetDegraded),
     hosts: (Array.isArray(s.hostBudgets) ? s.hostBudgets : []).map((h) => ({
       name: str(h?.name),
-      lastBeatAgeMs: num(h?.staleMs),
+      // How long ago the host last beat, by the overview's rule: Valkey's measure of the row's last refresh where known.
+      lastBeatAgeMs: num(beatAgeOf(h)),
       capacity: { memMiB: intOf(h?.budgetMemMiB), cpuCenti: intOf(h?.budgetCpuCenti), concurrency: intOf(h?.concurrency) },
       running: Array.isArray(h?.jobs) ? h.jobs.length + (num(h?.jobsMore) ?? 0) : intOf(h?.budgetRunning),
     })),
@@ -775,7 +791,8 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     failures24hFloor: Boolean(s.failures24hFloor),
     active: (Array.isArray(s.active) ? s.active : []).map((a) => ({ jobId: str(a?.jobId), queue: str(a?.queue), startedAt: num(a?.startedAt), host: str(a?.host), progress: progressOf(a?.progress), steer: a?.steer === true, inbox: inboxOf(a) })),
     schedulers: (Array.isArray(s.schedulers) ? s.schedulers : []).map((x) => {
-      const name = x?.key ?? x?.name ?? null;
+      // The trigger's id, the scheduler's key; BullMQ's `name` is the job's ("local"), never a stand-in for a refused key.
+      const name = x?.key ?? null;
       return {
         name: str(name),
         next: num(x?.next),

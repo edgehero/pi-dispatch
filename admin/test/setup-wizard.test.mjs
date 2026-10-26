@@ -1094,6 +1094,44 @@ test("wizard: an invalid cron id refuses at the dialog and skips the trigger", a
   assert.equal(triggerWrites.length, 0, "nothing was written");
 });
 
+test("wizard: a cron id longer than the triggers loader takes refuses at the dialog too, without echoing it", async () => {
+  const { CRON_ID_MAX } = await import("@edgehero/pi-dispatch/triggers");
+  const repo = tempDir("admin-setup-repo-");
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const long = "n".repeat(CRON_ID_MAX + 1);
+  const { ui, notes } = wizardUi({
+    select: ["Guided setup", "Skip", "Skip", "A cron trigger for this repo"],
+    input: [dir, "tidy", long],
+    confirm: [false, false, false],
+  });
+  const triggerWrites = [];
+  const { deps } = wizardDeps({ writeTriggersFn: (args) => { triggerWrites.push(args); return { ok: true }; } });
+  await mod.runSetupWizard({}, tuiCtx(ui, repo), ui.notify, deps);
+  const refusal = notes.find((n) => n.t === "error" && /invalid cron id/.test(n.m));
+  assert.ok(refusal && refusal.m.includes(`at most ${CRON_ID_MAX} characters`) && !refusal.m.includes(long), refusal?.m);
+  assert.equal(triggerWrites.length, 0, "nothing was written");
+});
+
+test("wizard: a cron id of exactly the triggers loader's longest is taken and written", async () => {
+  const { CRON_ID_MAX } = await import("@edgehero/pi-dispatch/triggers");
+  const repo = tempDir("admin-setup-repo-");
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const longest = "n".repeat(CRON_ID_MAX);
+  const { ui, notes } = wizardUi({
+    select: ["Guided setup", "Skip", "Skip", "A cron trigger for this repo"],
+    input: [dir, "tidy", longest, "", ""],
+    confirm: [false, false, false],
+  });
+  const triggerWrites = [];
+  const { deps } = wizardDeps({ writeTriggersFn: ({ triggersPath, mutate }) => { triggerWrites.push({ triggersPath, list: mutate([]) }); return { ok: true }; } });
+  await mod.runSetupWizard({}, tuiCtx(ui, repo), ui.notify, deps);
+  assert.ok(!notes.some((n) => n.t === "error" && /invalid cron id/.test(n.m)), "not refused");
+  assert.equal(triggerWrites.length, 1, "written");
+  assert.equal(triggerWrites[0].list[0].on.id, longest);
+});
+
 test("wizard: no first-trigger offer when ctx.cwd is unset or missing on disk", async () => {
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);

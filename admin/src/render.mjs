@@ -482,8 +482,10 @@ function schedulerLine(s) {
   // THROUGH `cell`, because a scheduler key is read back from Valkey and nothing re-validates it on read
   // (issue #382, item 2). Defence in depth, not a live leak: the worker restricts a cron `on.id` to
   // `[A-Za-z0-9._-]+` before the upsert, so a key that arrives here with a control byte in it came from a
-  // writer that is not the worker.
-  const id = cell(s?.key ?? s?.name ?? "-");
+  // writer that is not the worker. By its KEY alone (issue #737): BullMQ's `name` is the job name it mints runs
+  // with, `local` for every one the worker upserts, so a key the reader refused printed as "local", a trigger
+  // id the file may not have.
+  const id = cell(s?.key ?? "-");
   const next = typeof s?.next === "number" ? new Date(s.next).toISOString() : "no next";
   const drift =
     typeof s?.overdueMs === "number" && s.overdueMs > 0 ? `  overdue by ${Math.round(s.overdueMs / 1000)}s` : "";

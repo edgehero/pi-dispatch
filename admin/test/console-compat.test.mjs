@@ -266,6 +266,14 @@ test("the pages PR 2 converted are not legacy: the audit log, the sign-in pages 
   assert.ok(!legacySources().includes("console/actions.mjs"));
 });
 
+test("the overview PR 3 converted is not legacy: its panels are read as old markup no more, and no rule of the layer went with them", () => {
+  assert.ok(!LEGACY_PAGES.includes("overview"));
+  assert.ok(!legacySources().includes("console/panels/overview.mjs"), "the overview's panels are Pulse markup");
+  // Its old panels drew only classes another old page or the shared helpers still draw: the dead-rule check and the
+  // neutraliser's derived set (above) hold with them gone, so the layer kept every rule.
+  for (const c of ["big", "note", "warn", "plain", "num"]) assert.ok(EMITTED.classes.has(c), `.${c} is still old markup`);
+});
+
 test("an empty LEGACY_PAGES leaves no legacy layer: the last converted page deletes it", () => {
   assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "LEGACY_PAGES is a frozen list of page names");
   // The shell names the wrapper in one rule alone, a stale page's flat panels (page-css.mjs: a legacy panel is its own

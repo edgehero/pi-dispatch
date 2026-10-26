@@ -6,7 +6,8 @@ import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { FORGE_HOST_VARS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "../src/forges.mjs";
 import { PROVIDER_STEERING_VARS } from "../src/provider-steering.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
-import { PR_ACTIONS, parseTriggers } from "../src/triggers.mjs";
+import { DEFER_ID_RE } from "../src/defer-reasons.mjs";
+import { CRON_ID_MAX, PR_ACTIONS, parseTriggers } from "../src/triggers.mjs";
 
 // parseTriggers is pure over the file TEXT -- no fs, no bullmq. `parse` serializes triggers and feeds
 // them through with a stable path for the "names the path" assertions.
@@ -165,6 +166,19 @@ test('cron id containing ":" is a config error (would corrupt repeat:<id>:<milli
 test("cron id with an out-of-charset character is a config error", () => {
 	assert.throws(() => parse([{ ...CRON, on: { ...CRON.on, id: "night tidy" } }]), isConfigError);
 	assert.throws(() => parse([{ ...CRON, on: { ...CRON.on, id: "night/tidy" } }]), isConfigError);
+});
+
+test("a cron id is at most CRON_ID_MAX (176) characters, so every run its scheduler mints is a job id the readers take", () => {
+	assert.equal(CRON_ID_MAX, 176);
+	// The longest id's run, at the latest slot BullMQ can write, is a job id the readers take.
+	assert.ok(DEFER_ID_RE.test(`repeat:${"n".repeat(CRON_ID_MAX)}:${"9".repeat(16)}`));
+	assert.ok(!DEFER_ID_RE.test(`repeat:${"n".repeat(CRON_ID_MAX + 1)}:${"9".repeat(16)}`));
+	const [t] = parse([{ ...CRON, on: { ...CRON.on, id: "n".repeat(CRON_ID_MAX) } }]);
+	assert.equal(t.on.id.length, CRON_ID_MAX);
+	assert.throws(
+		() => parse([{ ...CRON, on: { ...CRON.on, id: "n".repeat(CRON_ID_MAX + 1) } }]),
+		(e) => isConfigError(e) && e.message.includes(`${CRON_ID_MAX + 1} characters, more than ${CRON_ID_MAX}`) && !e.message.includes("n".repeat(CRON_ID_MAX + 1)),
+	);
 });
 
 test("duplicate cron id is a config error", () => {

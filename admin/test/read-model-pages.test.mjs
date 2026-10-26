@@ -9,6 +9,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { REFUSALS_TOP, createFleetReader, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
 import { parseRunFilter, runMatches, RUN_FILTER_FIELDS } from "../src/run-filter.mjs";
+import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { makeRunMirror } from "@edgehero/pi-dispatch/run-mirror";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { sessionKeyFor } from "@edgehero/pi-dispatch/session-key";
@@ -1063,6 +1064,18 @@ test("createFleetReader: each host row carries the registry's ttlAgeMs, skewMs a
   const later = await reader.snapshot();
   assert.equal(later.hostsReadAt, AT, "the rows kept from the last good read say when that was");
   assert.deepEqual(later.hostBudgets.map((h) => h.name), ["mini1", "mini2", "mini3", "mini4"]);
+});
+
+test("createFleetReader: a registry member no worker could be named is no host: a 3,000-character name reaches no part of the snapshot a page draws from (#737)", async () => {
+  const logsDir = tempDir("pd-737-hosts-names-");
+  const long = `h${"x".repeat(3000)}`;
+  const rows = { mini1: { name: "mini1", routes: "true", beatAt: String(AT) }, [long]: { name: long, routes: "true", beatAt: String(AT) }, mini2: { name: `mini2${"y".repeat(80)}`, routes: "true", beatAt: String(AT) } };
+  const redis = { ...emptyRedis(), async smembers(key) { return key === "host:live" ? Object.keys(rows) : []; }, async hgetall(key) { return rows[key.replace(/^host:h:/, "")] ?? {}; } };
+  // The worker's own registry reader, as serve's reader uses it: only the seam that names the queues is a fake.
+  const snap = await fleetOf(logsDir, redis, { seams: { readLiveHostsFn: readLiveHosts } }).snapshot();
+  assert.deepEqual(snap.hostBudgets.map((h) => h.name), ["mini1"]);
+  const text = JSON.stringify(snap);
+  assert.ok(!text.includes("xxxxxxxx") && !text.includes("yyyyyyyy"), "neither name is anywhere in the snapshot");
 });
 
 // --- git reads keep git's words to themselves ------------------------------------------------------------------------

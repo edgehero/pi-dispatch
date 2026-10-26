@@ -7,6 +7,7 @@ import { STREAM_SHUTDOWN as CLIENT_STREAM_SHUTDOWN } from "@edgehero/pi-dispatch
 import { LIVE_DEFAULTS, makeLiveHub, queryKey, stateOf, TOKENS_BACK_LINE, TOKENS_HELD_LINE } from "../src/console/live.mjs";
 import * as realPages from "../src/console/pages.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
+import { SHELL_PANEL_IDS } from "../src/console/shell.mjs";
 import { STREAM_ENDS, STREAM_SHUTDOWN } from "../src/console/session-ends.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
 
@@ -246,6 +247,97 @@ test("the canonical query key is the injected one (pages.mjs's pageQueryString):
   await hub.tick();
   assert.equal(loads.length, 1);
   hub.close();
+});
+
+/** The data's part of a query as pages.mjs words it (issue #737): the overview's parameters only regroup one load. */
+const OVERVIEW_DATA = (pageName, query) => (pageName === "overview" ? {} : query);
+const OVERVIEW_QUERIES = Object.freeze([{ rows: "project", zoom: "3h" }, { rows: "host", zoom: "24h" }, { rows: "project", zoom: "1h", project: "web" }]);
+
+test("the data key (issue #737): an overview's three queries share one load per tick, made with dataQueryOf's query; each view is drawn with its own whole query", async () => {
+  const loads = [];
+  const renders = [];
+  const h = hubOn({ content: {} });
+  const hub = makeLiveHub({
+    loadPageData: async (pageName, query) => (loads.push([pageName, queryKey(query)]), { pageName, load: loads.length }),
+    pagePanels: async (pageName, ctx) => (renders.push([pageName, queryKey(ctx.query), ctx.data.load]), [{ id: "p-main", html: `${pageName} ${queryKey(ctx.query)}` }]),
+    peekSession: (id) => ({ id }),
+    readTokens: () => ({ file: FILE }),
+    timers: h.timers,
+    pageMinMs: {},
+    dataQueryOf: OVERVIEW_DATA,
+  });
+  const resps = OVERVIEW_QUERIES.map((query, i) => {
+    const res = fakeRes();
+    hub.subscribe({ res, sessionId: `s${i + 1}`, session: OP, page: "overview", query });
+    return res;
+  });
+  hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "runs", query: { repo: "a/b" } });
+  hub.subscribe({ res: fakeRes(), sessionId: "s2", session: OP, page: "runs", query: { repo: "c/d" } });
+  await hub.tick();
+  loads.length = 0;
+  renders.length = 0;
+  await hub.tick();
+  assert.deepEqual(loads.sort(), [["overview", "{}"], ["runs", '{"repo":"a/b"}'], ["runs", '{"repo":"c/d"}']], "one overview load for its three queries, asked with {}; another page's queries still load apart");
+  const overview = renders.filter(([p]) => p === "overview");
+  assert.deepEqual(overview.map(([, q]) => q).sort(), OVERVIEW_QUERIES.map(queryKey).sort(), "one render per view, each with its whole query");
+  assert.equal(new Set(overview.map(([, , load]) => load)).size, 1, "every overview view drawn from the one load");
+  resps.forEach((res, i) => assert.deepEqual(panelsIn(res.text()).map((p) => p.html), [`overview ${queryKey(OVERVIEW_QUERIES[i])}`], `stream ${i + 1} holds its own query's panels`));
+  hub.close();
+});
+
+test("the data key carries a failure (issue #737): an overview load that fails is logged once for all its queries, and a stream joining a held view of it is told stale first", async () => {
+  let fail = false;
+  const loads = [];
+  const h = hubOn({
+    dataQueryOf: OVERVIEW_DATA,
+    load: async (pageName, query) => {
+      loads.push(queryKey(query));
+      if (fail) throw Object.assign(new Error("x"), { code: "ECONNREFUSED" });
+      return { pageName };
+    },
+  });
+  const a = fakeRes();
+  const b = fakeRes();
+  h.hub.subscribe({ res: a, sessionId: "s1", session: OP, page: "overview", query: OVERVIEW_QUERIES[1] });
+  h.hub.subscribe({ res: b, sessionId: "s2", session: OP, page: "overview", query: OVERVIEW_QUERIES[0] });
+  await h.hub.tick();
+  assert.deepEqual([namesIn(a.take()), namesIn(b.take())], [["fresh", "panel"], ["fresh", "panel"]]);
+  fail = true;
+  for (let i = 0; i < 3; i++) await h.hub.tick();
+  assert.deepEqual(h.logs, ["console: live data for page overview failed (ECONNREFUSED); its streams keep their last panels"], "one key, said once while it lasts, whatever the queries");
+  assert.deepEqual([namesIn(a.take()), namesIn(b.take())], [["stale"], ["stale"]]);
+  // Another tab of a's view (the same person and query): the view is held, and its key still fails.
+  const c = fakeRes();
+  h.hub.subscribe({ res: c, sessionId: "s1", session: OP, page: "overview", query: OVERVIEW_QUERIES[1] });
+  assert.deepEqual(namesIn(c.take()), ["stale", "panel"], "told stale before the held view, never fresh");
+  fail = false;
+  loads.length = 0;
+  await h.hub.tick();
+  assert.deepEqual(loads, ["{}"], "one load again for the three streams");
+  assert.deepEqual(h.logs.slice(1), ["console: live data for page overview is read again"]);
+  assert.deepEqual([a, b, c].map((res) => namesIn(res.take())), [["fresh"], ["fresh"], ["fresh"]]);
+});
+
+test("the data key carries a page's cadence (issue #737): a pageMinMs load is reused across the page's queries, and a new query is drawn at once from it", async () => {
+  const now = clock();
+  const h = hubOn({ now, dataQueryOf: OVERVIEW_DATA, pageMinMs: { overview: 5000 } });
+  h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "overview", query: OVERVIEW_QUERIES[0] });
+  await h.hub.tick();
+  assert.equal(h.loads.length, 1);
+  now.advance(1000);
+  const late = fakeRes();
+  h.hub.subscribe({ res: late, sessionId: "s2", session: VIEW, page: "overview", query: OVERVIEW_QUERIES[2] });
+  await h.hub.tick();
+  assert.equal(h.loads.length, 1, "another query of the page: the held load");
+  assert.deepEqual(panelsIn(late.text()).map((p) => p.html), ["<p>overview</p>|viewer"], "and drawn at once");
+  for (let i = 0; i < 3; i++) {
+    now.advance(1000);
+    await h.hub.tick();
+  }
+  assert.equal(h.loads.length, 1, "inside 5 s: still the one load");
+  now.advance(1000);
+  await h.hub.tick();
+  assert.deepEqual(h.loads, [["overview", "{}"], ["overview", "{}"]], "5 s after it, one new load for both queries");
 });
 
 test("Last-Event-ID equal to the view's current id sends no panel at subscribe, only its state; any other id gets the whole view again", async () => {
@@ -1041,6 +1133,10 @@ test("stateOf: the named fields only, numbers as numbers, no error text, no host
   assert.deepEqual(op.counts, { waiting: 3, active: 1, paused: 0, delayed: 2, failed: 4 });
   assert.equal(op.fleetDegraded, true);
   assert.deepEqual(op.hosts, [{ name: "h1", lastBeatAgeMs: 1200, capacity: { memMiB: 4096, cpuCenti: null, concurrency: 2 }, running: 2 }]);
+  // A host's beat age is Valkey's measure of its row's last refresh where the reader had it, as the overview judges it.
+  assert.equal(stateOf({ ...SNAPSHOT, hostBudgets: [{ ...SNAPSHOT.hostBudgets[0], staleMs: 120_000, ttlAgeMs: 4_000 }] }, "operator", { now: T0 }).hosts[0].lastBeatAgeMs, 4_000);
+  // A scheduler is named by its key, the trigger's id; one whose key was refused is not named by BullMQ's job name.
+  assert.equal(stateOf({ ...SNAPSHOT, schedulers: [{ key: null, name: "local", next: T0 + 1000, overdueMs: 0 }] }, "operator", { now: T0 }).schedulers[0].name, null);
   assert.deepEqual(op.dollars.windows.map((w) => w.scope), [null, "openai/gpt"], "a folder scope's host path is dropped");
   assert.deepEqual(op.parked, [{ target: "o/r#12", kind: "github", jobId: "j1", ageMs: 3600000, chainCount: 2 }]);
   assert.deepEqual(op.active, [{ jobId: "j9", queue: "pi", startedAt: T0 - 1000, host: "h1", progress: null, steer: false, inbox: null }]);
@@ -1479,8 +1575,9 @@ test("integration: every real page renders through the server, and a real live s
     assert.equal(/<script(?![^>]*src=)/.test(res.text), false, `${path}: no inline script`);
     assert.equal(/ style=/.test(res.text), false, `${path}: no inline style`);
     for (const id of (await realPages.pagePanels(name, { query: name === "run" ? { id: "job-1" } : {}, session: { name: "alice", role: "operator" }, data: await realPages.loadPageData(name, name === "run" ? { id: "job-1" } : {}, pageDeps), readOnly: false })).map((p) => p.id)) {
-      // A screen's panels are sections; the shell's Parked count (issue #737) is a span inside its navigation pill.
-      assert.match(res.text, new RegExp(`<${id === "p-nav-parked" ? "span" : "section"} id="${id}" data-panel>`), `${path}: panel ${id} is a live region`);
+      // A screen's panels are sections; the frame's (issue #737: the Parked count inside its navigation pill, the
+      // overview's headline under its title) are spans.
+      assert.match(res.text, new RegExp(`<${SHELL_PANEL_IDS.includes(id) ? "span" : "section"} id="${id}" data-panel>`), `${path}: panel ${id} is a live region`);
     }
   }
   assert.equal((await send({ path: "/run?id=nope", headers: { cookie: op } })).status, 404, "an unknown run id");

@@ -43,7 +43,7 @@ import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimit
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
 import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords, rowNumber } from "./words.mjs";
-import { doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
+import { beatAgeOf, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
@@ -3255,9 +3255,12 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
   const liveLines = (r: any): string[] => {
     const out: string[] = [];
     // A row with no readable beat time is no evidence the host runs (capabilities.mjs, and the report counts none of its
-    // jobs), so its slots in use are `?`, never its list's count; a row older than the report trusts is stale.
-    const undated = !Number.isSafeInteger(r?.staleMs);
-    const stale = undated ? "no beat time" : r.staleMs > LIVE_FRESH_MS ? `stale ${durationText(r.staleMs)}` : "";
+    // jobs), so its slots in use are `?`, never its list's count; a row older than the report trusts is stale. Its age
+    // is `beatAgeOf`'s, the console's (issue #737): Valkey's measure of the row's last refresh where the reader had it,
+    // else the host's own beat time, so a host whose clock runs behind reads as beating when it beats, never stale.
+    const age = beatAgeOf(r);
+    const undated = age === null;
+    const stale = undated ? "no beat time" : age > LIVE_FRESH_MS ? `stale ${durationText(age)}` : "";
     const nameWidth = Math.max(8, iw - (stale ? styler.visibleLen(stale) + 2 : 0));
     out.push(fitLine(styler.bold(styler.fg("accent", clip(hostName(r?.name), nameWidth))) + (stale ? "  " + styler.fg("warning", stale) : ""), iw, styler));
     const listed: any[] | null = Array.isArray(r?.jobs) ? r.jobs : null;
@@ -4571,14 +4574,16 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
 
 /**
  * Join a cron trigger to its resident scheduler + stall counter for the drill-in's next/health fields. Matches
- * by scheduler key/name === the cron id, else by pattern. Returns null for a non-cron trigger or no match, so
+ * by the scheduler's KEY alone, which is the cron id (issue #737): never by BullMQ's `name`, the job name its runs
+ * are minted with (`local` for every one the worker upserts, so a trigger with that id matched every scheduler),
+ * and never by pattern, which two triggers can share. Returns null for a non-cron trigger or no match, so
  * the detail view renders only real schedule data (`next` is the BullMQ scheduler's; `stalls` the money
  * backstop's). `last` is not stored on the scheduler and is deliberately not shown rather than faked.
  */
 function cronSchedInfo(t: any, snapshot: any): any {
-  if (t?.type !== "cron") return null;
+  if (t?.type !== "cron" || typeof t?.id !== "string" || t.id === "") return null;
   const schedulers = Array.isArray(snapshot?.schedulers) ? snapshot.schedulers : [];
-  const s = schedulers.find((x: any) => (t.id && (x.key === t.id || x.name === t.id)) || (t.pattern && x.pattern === t.pattern));
+  const s = schedulers.find((x: any) => x?.key === t.id);
   if (!s) return null;
   const stalls = Number(snapshot?.schedulerStalls?.[t.id] ?? 0) || 0;
   const stallMax = Number.isFinite(snapshot?.schedulerStallMax) ? snapshot.schedulerStallMax : 2;

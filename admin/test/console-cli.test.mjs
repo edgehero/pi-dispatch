@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, readSideOf, RESERVE_ENV_KEYS, runCli, USAGE } from "../src/console/cli.mjs";
+import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, readSideOf, RESERVE_ENV_KEYS, runCli, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -28,8 +28,11 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
     built: [],
     disposed: 0,
     snapshots: 0,
-    async snapshot() {
+    // What each snapshot was asked for (issue #737: the waiting jobs are asked per call), null for nothing.
+    asked: [],
+    async snapshot(opts) {
       fleet.snapshots += 1;
+      fleet.asked.push(opts ?? null);
       return { queue: { pausedState: false, pausedPartial: false, counts: { waiting: 2, active: 1 } }, failed: { rows: [{ jobId: "j1", queue: "pi", attemptsMade: 1, endedAt: 1, failedReason: "boom" }], more: 0 } };
     },
     async dispose() {
@@ -454,6 +457,8 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   assert.equal(typeof seams.dollarEnvFn, "function");
   assert.equal(seams.readOnly, true, "the console's reader is read-only");
   assert.equal(seams.activeLimit, 50, "the console reads at most 50 active jobs per snapshot");
+  // Issue #737: the waiting jobs are not the reader's to read on every snapshot: the overview's load asks for them.
+  assert.equal(Object.hasOwn(seams, "waiting"), false, "the reader is not built to read the waiting jobs");
   const installed = modules.calls.filter((c) => c[0] === "valkey-context");
   assert.deepEqual(installed.map((c) => c[1]), ["function"]);
   assert.equal(modules.calls.some((c) => c[0] === "panel-context"), false, "the context is read per client, not at install");
@@ -464,17 +469,28 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   assert.equal(login.status, 200, login.text);
   const cookie = login.headers["set-cookie"][0].split(";")[0];
 
+  const askedBefore = modules.fleet.asked.length;
   const state = await http(port, { path: "/api/state", headers: { cookie } });
   assert.equal(state.status, 200);
   const body = JSON.parse(state.text);
   assert.equal(body.counts.waiting, 2);
   assert.equal(body.failed.rows[0].failedReason, "boom", "alice is an operator");
+  assert.deepEqual(modules.fleet.asked.slice(askedBefore), [null], "/api/state reads one snapshot and asks it for no waiting job");
 
   // The page deps the CLI built: the reader, a 30 s insights cache over the real assembler's call shape, the audit read.
   const page = await http(port, { path: "/fleet", headers: { cookie } });
   assert.equal(page.status, 200);
   const deps = modules.pageDepsSeen.at(-1);
   assert.equal(deps.fleet, modules.fleet);
+  // The deployment the first run names (issue #737): its last folder alone, never the path.
+  assert.deepEqual(deps.deployment, { folder: basename(dep.dir) });
+  assert.deepEqual(deploymentOf("/srv/pi-dispatch/acme-prod"), { folder: "acme-prod" }, "the last folder, none of the path before it");
+  // Over the deps serve built, pages.mjs's own load asks the reader for the waiting jobs on the overview alone.
+  for (const name of ["overview", "fleet", "parked", "config"]) {
+    const from = modules.fleet.asked.length;
+    await realPages.loadPageData(name, {}, deps);
+    assert.deepEqual(modules.fleet.asked.slice(from), [name === "overview" ? { waiting: true } : null], name);
+  }
   await deps.insights("7d");
   await deps.insights("7d");
   await deps.insights("30d");
@@ -567,6 +583,46 @@ test("serve wires the hub's endedReason to the store's pure verdict, and a unix 
   assert.equal(out.length, 3);
   stop();
   assert.equal(await running, 0);
+});
+
+test("serve shares one page load across the queries pages.mjs's dataQueryOf says draw from the same data (issue #737); a pages module without it loads per query", async (t) => {
+  const QUERIES = [{ rows: "host", zoom: "24h" }, { rows: "project", zoom: "1h" }];
+  const nullRes = () => ({ writableLength: 0, write: () => true, end() {}, destroy() {} });
+  // One serve on its own deployment, its hub driven by hand: two overview streams of one operator, two queries.
+  async function loadsOf(pages) {
+    const dep = deployment();
+    let stop;
+    const until = new Promise((resolve) => (stop = resolve));
+    t.after(() => stop());
+    let listening;
+    const up = new Promise((resolve) => (listening = resolve));
+    const modules = fakeModules();
+    const loads = [];
+    modules.pages = { ...pages, loadPageData: async (name, query) => (loads.push([name, query]), {}), pagePanels: async () => [{ id: "p-main", html: "<p>x</p>" }] };
+    modules.sessions = { ...modules.sessions, makeSessionStore: () => ({ ...fakeModules().sessions.makeSessionStore(), peek: (id) => ({ id }) }) };
+    let hub = null;
+    let hubOpts = null;
+    modules.live = { ...live, makeLiveHub: (opts) => ((hubOpts = opts), (hub = live.makeLiveHub(opts))) };
+    const err = [];
+    const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
+    await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+    for (const [i, query] of QUERIES.entries()) hub.subscribe({ res: nullRes(), sessionId: `s${i}`, session: { name: "alice", role: "operator" }, page: "overview", query });
+    await hub.tick();
+    loads.length = 0;
+    await hub.tick();
+    stop();
+    assert.equal(await running, 0);
+    return { loads, hubOpts };
+  }
+  const asked = [];
+  const withIt = await loadsOf({ ...realPages, dataQueryOf: (name, query) => (asked.push([name, query]), name === "overview" ? {} : query) });
+  assert.deepEqual(withIt.loads, [["overview", {}]], "one load for both queries, asked with the data's query");
+  assert.ok(asked.some(([name, query]) => name === "overview" && query === QUERIES[0]) && asked.some(([, query]) => query === QUERIES[1]), "pages.mjs's own dataQueryOf, asked of each stream's query");
+  assert.equal(withIt.hubOpts.dataKeyOf, undefined, "the hub keys the load by queryKeyOf over the data's query");
+  const without = Object.fromEntries(Object.entries(realPages).filter(([name]) => name !== "dataQueryOf"));
+  const before = await loadsOf(without);
+  assert.equal(Object.hasOwn(before.hubOpts, "dataQueryOf"), false, "without it the hub keeps its default");
+  assert.ok(before.loads.length >= 1 && before.loads.every(([name, query]) => name === "overview" && QUERIES.includes(query)), "each load asked with a stream's whole query, as before");
 });
 
 test("cachedFor: one call within the TTL on the injected clock, a new one after, a rejection not kept, a clock gone backwards a miss", async () => {

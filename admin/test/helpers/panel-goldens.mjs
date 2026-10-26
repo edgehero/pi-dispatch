@@ -3,6 +3,8 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
+import { DEFER_BUCKETS } from "@edgehero/pi-dispatch/defer-reasons";
+import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { actionNamed, confirmAction, previewAction } from "../../src/console/actions.mjs";
 import { makeConfirmTickets } from "../../src/console/confirm.mjs";
@@ -86,7 +88,7 @@ const SNAPSHOT = Object.freeze({
     ],
     more: 0,
   },
-  schedulers: [{ key: "nightly-tidy", name: "nightly-tidy", pattern: "0 3 * * *", next: NOW + 11 * HOUR, overdueMs: 0 }],
+  schedulers: [{ key: "nightly-tidy", name: "local", pattern: "0 3 * * *", next: NOW + 11 * HOUR, overdueMs: 0 }],
   schedulerStalls: {},
   schedulerStallMax: 3,
   doctor: { hosts: [], more: 0 },
@@ -380,6 +382,300 @@ async function auditPage(deps) {
   return String(page.html);
 }
 
+// ---- the overview's states ---------------------------------------------------------------------------------------------
+
+/** An instant of the fixture's day, `hh:mm` UTC. */
+const at = (hh, mm) => Date.UTC(2026, 9, 8, hh, mm, 0);
+
+/**
+ * The day's runs the overview's states draw (issue #737), as the fleet reader's `runsDay` rebuilds them: the
+ * OverviewScreen card's own, around the fixture's instant. `CALM_RUNS` are the completed ones; the problem state adds a
+ * failure, a refusal, a parked question and the cancelled run whose container still holds a build3 slot.
+ */
+const CALM_RUNS = Object.freeze([
+  { jobId: "gh-9575", kind: "github", target: "acme/web#490", project: "web", host: "mini1", outcome: "completed", reason: null, startedAt: at(14, 35), endedAt: at(14, 57) },
+  { jobId: "gh-0b11", kind: "github", target: "acme/web#486", project: "web", host: "mini1", outcome: "completed", reason: null, startedAt: at(13, 22), endedAt: at(13, 40) },
+  { jobId: "gh-0b12", kind: "github", target: "acme/web#487", project: "web", host: "mini2", outcome: "completed", reason: null, startedAt: at(13, 51), endedAt: at(14, 8) },
+  { jobId: "gh-03a9", kind: "github", target: "acme/api#118", project: "api", host: "mini2", outcome: "completed", reason: null, startedAt: at(14, 20), endedAt: at(14, 41) },
+  { jobId: "gh-ebd7", kind: "github", target: "acme/billing#288", project: "billing", host: "build3", outcome: "completed", reason: null, startedAt: at(14, 18), endedAt: at(14, 44) },
+  { jobId: "gh-0b13", kind: "github", target: "acme/billing#286", project: "billing", host: "build3", outcome: "completed", reason: null, startedAt: at(13, 25), endedAt: at(13, 38) },
+].map((r) => Object.freeze({ ...r, parentJobId: null })));
+const PROBLEM_RUNS = Object.freeze([
+  ...CALM_RUNS,
+  { jobId: "gh-f0c2", kind: "github", target: "acme/web#433", project: "web", host: "mini1", outcome: "failed", reason: null, startedAt: at(15, 6), endedAt: at(15, 10), parentJobId: null },
+  { jobId: "gh-2f6a", kind: "github", target: "acme/api#131", project: "api", host: "mini1", outcome: "completed", reason: "awaiting-input", startedAt: at(14, 52), endedAt: at(15, 13), parentJobId: null },
+  { jobId: "gh-e9a0", kind: "github", target: "acme/billing#295", project: "billing", host: null, outcome: "policy", reason: "scope-cap", startedAt: at(15, 2), endedAt: at(15, 2), parentJobId: null },
+  { jobId: "gh-4a7e", kind: "github", target: "acme/billing#290", project: "billing", host: "build3", outcome: "cancelled", reason: "cancelled", startedAt: at(10, 39), endedAt: at(10, 59), parentJobId: null },
+]);
+
+/** A waiting row as `readWaiting` answers it, every field present; `over` sets what the row is about. */
+const waitRow = (over) => ({ queue: "pi-jobs", state: "delayed", bucket: "none", why: null, known: false, dueAt: NOW + 5_000, queuedAt: NOW - 10 * MIN, recordedAt: NOW, untilAt: null, project: null, projectFrom: null, host: null, holder: null, endpoint: null, budgetWhy: null, trigger: null, attempt: null, attempts: null, attemptsMade: 0, stalled: 0, kind: "github", recovery: false, schedulerNext: false, held: null, ...over });
+
+/**
+ * The jobs in line of each kind of wait, each a list of rows; the waitlist states draw one each. The kinds are the
+ * worker leaf's `DEFER_BUCKETS`, never a list of this file's: a bucket the leaf gains with no rows here fails as this
+ * module loads, naming it, so its waitlist state is drawn the day it exists rather than silently missing.
+ */
+const WAITING_BY_BUCKET = Object.freeze({
+  slot: [
+    waitRow({ jobId: "gh-c9e1", bucket: "slot", why: "host-slot", known: true, project: "billing", projectFrom: "record", host: "build3", queuedAt: NOW - 3 * MIN }),
+    waitRow({ jobId: "gh-c9e2", bucket: "slot", why: "scope-repo", known: true, project: "web", projectFrom: "record", host: "mini1", queuedAt: NOW - 2 * MIN }),
+  ],
+  run: [
+    waitRow({ jobId: "gh-d4f0", bucket: "run", why: "chained", known: true, project: "web", projectFrom: "record", host: "mini1", holder: "gh-b3d7", queuedAt: NOW - 6 * MIN }),
+    waitRow({ jobId: "gh-e802.r1", bucket: "run", why: "recovery-wait", known: true, project: "billing", projectFrom: "record", host: "build3", holder: "gh-e802", recovery: true, dueAt: NOW + 30_000, untilAt: NOW + 30_000, queuedAt: NOW - MIN }),
+  ],
+  check: [
+    waitRow({ jobId: "gh-77c1", bucket: "check", why: "wait-after", known: true, project: "web", projectFrom: "record", host: "mini1", trigger: 2, dueAt: Date.UTC(2026, 9, 9, 7), untilAt: Date.UTC(2026, 9, 9, 7), queuedAt: NOW - (2 * HOUR + 14 * MIN), held: { since: NOW - (2 * HOUR + 14 * MIN), label: "after 2026-10-09T07:00Z + ci-green", checks: 3, after: Date.UTC(2026, 9, 9, 7), answers: [{ profile: "ci-green", answer: "hold", at: NOW - 4 * MIN }] } }),
+  ],
+  retry: [
+    waitRow({ jobId: "gh-71b2", bucket: "retry", why: "retry", known: true, project: "api", projectFrom: "record", host: "mini1", attempt: 2, attempts: 3, attemptsMade: 1, dueAt: NOW + 4 * MIN, untilAt: NOW + 4 * MIN, queuedAt: NOW - 21 * MIN }),
+    waitRow({ jobId: "gh-38aa", bucket: "retry", why: "retry", known: true, project: "web", projectFrom: "record", host: "mini2", attempt: 2, attempts: 3, attemptsMade: 1, dueAt: NOW + 9 * MIN, untilAt: NOW + 9 * MIN, queuedAt: NOW - 16 * MIN }),
+  ],
+  pause: [
+    waitRow({ jobId: "local-aa01", bucket: "pause", why: "pause-window", known: true, project: "web", projectFrom: "record", host: "mini1", kind: "local", dueAt: at(20, 0), untilAt: at(20, 0), queuedAt: NOW - 30 * MIN }),
+  ],
+  ready: [
+    waitRow({ jobId: "gh-bb02", bucket: "ready", why: "podman-restart", known: true, project: "billing", projectFrom: "record", host: "build3", dueAt: NOW + 20_000, untilAt: NOW + 20_000, queuedAt: NOW - 4 * MIN }),
+  ],
+  paused: [
+    waitRow({ jobId: "gh-cc03", bucket: "paused", state: "paused", queue: "pi-jobs@mini2", project: "api", projectFrom: "deid", dueAt: null, recordedAt: null, queuedAt: NOW - 12 * MIN }),
+  ],
+  // Past its due by more than the reader's grace with no worker taking it, whatever it recorded (its record expired a
+  // minute after the due); and a cron trigger's next run, overdue, so in line, which the queue refuses to remove.
+  due: [
+    waitRow({ jobId: "gh-f1a0", bucket: "due", project: "api", projectFrom: "deid", dueAt: NOW - 3 * MIN, recordedAt: null, queuedAt: NOW - 11 * MIN }),
+    waitRow({ jobId: `repeat:hourly-sync:${at(15, 0)}`, bucket: "due", kind: "local", project: "web", projectFrom: "trigger", schedulerNext: true, dueAt: at(15, 0), recordedAt: null, queuedAt: at(15, 0) }),
+  ],
+  unknown: [
+    waitRow({ jobId: "gh-ee05", bucket: "unknown", why: "brand-new-why", known: false, project: "web", projectFrom: "deid", queuedAt: NOW - 7 * MIN }),
+  ],
+  none: [
+    waitRow({ jobId: "gh-dd04", bucket: "none", project: null, recordedAt: null, queuedAt: NOW - 8 * MIN }),
+  ],
+});
+
+for (const b of DEFER_BUCKETS) assert.ok(Array.isArray(WAITING_BY_BUCKET[b]) && WAITING_BY_BUCKET[b].length > 0, `panel goldens: the bucket ${b} (DEFER_BUCKETS) needs its sample rows in WAITING_BY_BUCKET`);
+for (const b of Object.keys(WAITING_BY_BUCKET)) assert.ok(DEFER_BUCKETS.includes(b), `panel goldens: ${b} is no bucket of DEFER_BUCKETS`);
+
+/**
+ * `rows` as `readWaiting`'s answer (`{ at, rows, scheduled, byBucket, byQueue, truncated }`): a count for every bucket of
+ * `DEFER_BUCKETS`, and a `byQueue` entry for the shared queue and each queue a row is in.
+ */
+function waitingOf(rows) {
+  const byBucket = Object.fromEntries(DEFER_BUCKETS.map((b) => [b, rows.filter((r) => r.bucket === b).length]));
+  const queues = [...new Set(["pi-jobs", ...rows.map((r) => r.queue)])];
+  return { at: NOW, rows, scheduled: [], byBucket, byQueue: queues.map((queue) => ({ queue, inLine: rows.filter((r) => r.queue === queue).length, scheduled: 0, truncated: false })), truncated: false };
+}
+
+/** A host's registry row as the fleet reader answers it. */
+const hostRow = (name, over) => ({ name, jobsMore: 0, staleMs: 4_000, ttlAgeMs: 4_000, skewMs: 0, noExpiry: false, budgetMemMiB: "off", budgetCpuCenti: "off", waiters: "0", routes: "true", ...over });
+
+/** A doctor run as the fleet reader answers it, `ageMs` old, with `checks` its problems and `ok` passes. */
+const doctorRow = (name, ageMs, { ok = 40, checks = [] } = {}) => ({ name, ageMs, at: NOW - ageMs, version: "4.3.1", openshell: false, every: 24, by: { uid: 1001, worker: true }, counts: { ok, warn: checks.filter((c) => c.level === "warn").length, fail: checks.filter((c) => c.level === "fail").length }, checks, more: 0 });
+
+/**
+ * The overview's canned snapshot (issue #737), the OverviewScreen card's deployment in the fixture's names: three hosts
+ * (build3 with the slot the cancelled gh-4a7e still holds), four running jobs, caps with the soft hold at 80%, the day's
+ * spend by hour, a parked question, a failed job and build3's failing doctor. `over` replaces whole fields.
+ */
+function overviewSnapshot(over = {}) {
+  const s = {
+    queue: { pausedState: false, pausedPartial: false, counts: { waiting: 0, active: 4, delayed: 3, failed: 1 }, workers: 3, queues: 4, fleetDegraded: null },
+    queueCounts: [
+      { queue: "pi-jobs", paused: false, counts: { waiting: 0, active: 0, delayed: 3, paused: 0, failed: 1 } },
+      { queue: "pi-jobs@build3", paused: false, counts: { waiting: 0, active: 1, delayed: 0, paused: 0, failed: 0 } },
+      { queue: "pi-jobs@mini1", paused: false, counts: { waiting: 0, active: 2, delayed: 0, paused: 0, failed: 0 } },
+      { queue: "pi-jobs@mini2", paused: false, counts: { waiting: 0, active: 1, delayed: 0, paused: 0, failed: 0 } },
+    ],
+    hostBudgets: [
+      hostRow("build3", { concurrency: "3", jobs: [{ id: "gh-4a7e", p: "billing", at: at(10, 39), o: true }, { id: "gh-e802", p: "billing", at: at(14, 19), o: false }], staleMs: 12_000, backends: { blessed: ["podman"] } }),
+      hostRow("mini1", { concurrency: "4", jobs: [{ id: "gh-c41f", p: "api", at: at(14, 58), o: false }, { id: "gh-b3d7", p: "web", at: at(15, 27), o: false }], staleMs: 22_000, backends: { blessed: ["local"] } }),
+      hostRow("mini2", { concurrency: "2", jobs: [{ id: "local-9e20", p: "ops", at: at(15, 33), o: false }], staleMs: 22_000, backends: { blessed: ["local", "openshell"] } }),
+    ],
+    active: [
+      { jobId: "gh-e802", queue: "pi-jobs@build3", startedAt: at(14, 19), host: "build3" },
+      { jobId: "gh-c41f", queue: "pi-jobs@mini1", startedAt: at(14, 58), host: "mini1" },
+      { jobId: "gh-b3d7", queue: "pi-jobs@mini1", startedAt: at(15, 27), host: "mini1" },
+      { jobId: "local-9e20", queue: "pi-jobs@mini2", startedAt: at(15, 33), host: "mini2" },
+    ],
+    budget: { day: 25, week: 100, month: 168, tokensToday: 3_120_000 },
+    settings: { overlay: { dailyCap: 40, weeklyCap: 200, monthlyCap: 600, dailyTokenCap: 8_000_000, softHoldPct: 80 } },
+    dollars: { rows: [
+      { ledger: "deployment", name: null, window: "day", capMicros: 25_000_000, counterMicros: 15_040_000, full: false },
+      { ledger: "deployment", name: null, window: "week", capMicros: 100_000_000, counterMicros: 28_400_000, full: false },
+      { ledger: "scope", name: "project:web", window: "week", capMicros: 40_000_000, counterMicros: 10_400_000, full: false },
+      { ledger: "model", name: "anthropic/claude-sonnet-5-5", window: "week", capMicros: 60_000_000, counterMicros: 24_600_000, full: false },
+    ] },
+    spendByHour: { hours: Array.from({ length: 24 }, (_, i) => (i > 15 ? null : i >= 9 ? 380_000 * (i - 8) : 0)), unpriced: 0, floor: false, partial: false },
+    softHoldToday: { count: 0, floor: false, partial: false },
+    parked: [{ target: "acme/api#131", kind: "github", jobId: "gh-2f6a", parkedAt: at(15, 13), ageMs: NOW - at(15, 13), answered: false, chainCount: null, answering: false }],
+    parkedUnreachable: null,
+    failures24h: 1,
+    refusals24h: { count: 1, top: [{ reason: "scope-cap", count: 1 }] },
+    failures24hFloor: false,
+    failed: { rows: [{ jobId: "gh-5d10", attemptsMade: 3, failedReason: "clone failed: remote rejected the token (403)", queue: "pi-jobs", endedAt: NOW - 3 * HOUR, reason: null }], more: 0 },
+    doctor: { hosts: [
+      doctorRow("build3", 72 * HOUR, { ok: 38, checks: [{ id: "docker.39", level: "fail", label: "Docker daemon unreachable" }] }),
+      doctorRow("mini1", HOUR, { ok: 41, checks: [{ id: "fleet.42", level: "warn", label: "this host's worker admits no job on the podman venue" }] }),
+    ], more: 0 },
+    runsDay: { runs: PROBLEM_RUNS, floor: false, partial: false },
+    runs: PROBLEM_RUNS.map((r) => ({ ...r, startedAt: new Date(r.startedAt).toISOString(), endedAt: new Date(r.endedAt).toISOString() })),
+    waiting: waitingOf([...WAITING_BY_BUCKET.slot.slice(0, 1), ...WAITING_BY_BUCKET.run.slice(0, 1), ...WAITING_BY_BUCKET.check, ...WAITING_BY_BUCKET.retry]),
+    schedulers: [
+      { key: "nightly-tidy", name: "local", pattern: "0 3 * * *", next: Date.UTC(2026, 9, 9, 3, 0), overdueMs: 0 },
+      { key: "pm-weekly", name: "pm-weekly", pattern: "0 6 * * 1", next: Date.UTC(2026, 9, 12, 6, 0), overdueMs: 0 },
+    ],
+    // Each with its file position, as `readTriggers` gives it.
+    triggers: { triggers: [{ type: "cron", id: "nightly-tidy", folder: "/srv/site", index: 0 }, { type: "label", any: ["pi:frontend"], forge: "github", index: 1 }, { type: "comment", phrase: "@pi", forge: "github", index: 2 }] },
+    ...over,
+  };
+  // Each queue's counts agree with what waits in it: its delayed jobs in line, plus the shared queue's two cron triggers'
+  // next runs, and its paused list.
+  const rows = Array.isArray(s.waiting?.rows) ? s.waiting.rows : [];
+  const inQueue = (q, state) => rows.filter((r) => r.queue === q && r.state === state).length;
+  const delayed = (q) => inQueue(q, "delayed") + (q === "pi-jobs" ? s.schedulers.length : 0);
+  s.queueCounts = s.queueCounts.map((q) => ({ ...q, counts: { ...q.counts, delayed: delayed(q.queue), paused: inQueue(q.queue, "paused") } }));
+  s.queue = { ...s.queue, counts: { ...s.queue.counts, delayed: s.queueCounts.reduce((a, q) => a + q.counts.delayed, 0) } };
+  return s;
+}
+
+/** Nothing needs a person (the OverviewAllClear card): no question, no failure or refusal, every doctor passing. */
+const CALM = Object.freeze({
+  parked: [],
+  failed: { rows: [], more: 0 },
+  failures24h: 0,
+  refusals24h: { count: 0, top: [] },
+  runsDay: { runs: CALM_RUNS, floor: false, partial: false },
+  runs: CALM_RUNS.map((r) => ({ ...r, startedAt: new Date(r.startedAt).toISOString(), endedAt: new Date(r.endedAt).toISOString() })),
+  hostBudgets: [
+    hostRow("build3", { concurrency: "3", jobs: [{ id: "gh-e802", p: "billing", at: at(14, 19), o: false }], staleMs: 12_000, backends: { blessed: ["podman"] } }),
+    hostRow("mini1", { concurrency: "4", jobs: [{ id: "gh-c41f", p: "api", at: at(14, 58), o: false }, { id: "gh-b3d7", p: "web", at: at(15, 27), o: false }], staleMs: 22_000, backends: { blessed: ["local"] } }),
+    hostRow("mini2", { concurrency: "2", jobs: [{ id: "local-9e20", p: "ops", at: at(15, 33), o: false }], staleMs: 22_000, backends: { blessed: ["local", "openshell"] } }),
+  ],
+  doctor: { hosts: [doctorRow("build3", 2 * HOUR), doctorRow("mini1", HOUR, { ok: 41, checks: [{ id: "fleet.42", level: "warn", label: "this host's worker admits no job on the podman venue" }] })], more: 0 },
+  waiting: waitingOf(WAITING_BY_BUCKET.retry.slice(0, 1)),
+});
+
+/**
+ * A deployment before its first job (the SetupScreen card): read, with no run on record and no trigger. `doctor` is the
+ * hosts' published doctor runs (none: nothing has run doctor yet).
+ */
+const firstRun = (doctor = []) => overviewSnapshot({
+  queue: { pausedState: false, pausedPartial: false, counts: {}, workers: 0, queues: 1, fleetDegraded: null },
+  queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 0, active: 0, delayed: 0, paused: 0, failed: 0 } }],
+  hostBudgets: [],
+  active: [],
+  budget: { day: 0, week: 0, month: 0, tokensToday: 0 },
+  dollars: { rows: [] },
+  spendByHour: { hours: Array.from({ length: 24 }, (_, i) => (i > 15 ? null : 0)), unpriced: 0, floor: false, partial: false },
+  parked: [],
+  failed: { rows: [], more: 0 },
+  failures24h: 0,
+  refusals24h: { count: 0, top: [] },
+  doctor: { hosts: doctor, more: 0 },
+  runsDay: { runs: [], floor: false, partial: false },
+  runs: [],
+  waiting: waitingOf([]),
+  schedulers: [],
+  triggers: { triggers: [] },
+});
+
+/**
+ * The SetupScreen card's own moment: no worker registered yet, and build3's doctor two minutes ago found no egress
+ * proxy (a failure) and no provider key in the deployment's env (a warning).
+ */
+const SETUP_PARTIAL_DOCTOR = Object.freeze([
+  doctorRow("build3", 2 * MIN, { ok: 30, checks: [{ id: "egress.proxy", level: "fail", label: "the egress proxy is not running" }, { id: "provider.key", level: "warn", label: "no provider key in the deployment's .env" }] }),
+]);
+
+/**
+ * The overview over `snapshot`, as serve draws it for `session` with the stream open (the pill Live): the deployment
+ * its folder's last part, as `cli.mjs` passes it.
+ */
+async function overviewLive(snapshot, { session = OPERATOR, query = "" } = {}) {
+  const parsed = parsePageQuery("overview", query);
+  assert.ok(parsed.query, parsed.refusal);
+  const data = await loadPageData("overview", parsed.query, { fleet: { snapshot: async () => snapshot }, now: () => NOW, deployment: { folder: "pi-dispatch" } });
+  const ctx = { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS };
+  const page = await renderPage("overview", ctx);
+  assert.equal(page.status, 200);
+  for (const { id, html: inner } of await pagePanels("overview", ctx)) assert.ok(String(page.html).includes(`id="${id}" data-panel>${inner}</`), `overview: panel ${id}`);
+  return markLive(String(page.html), "on");
+}
+
+/** The overview's problem state with only bucket `bucket`'s jobs in line. */
+const waitlist = (bucket) => overviewLive(overviewSnapshot({
+  waiting: waitingOf(WAITING_BY_BUCKET[bucket]),
+  // The due bucket's scheduler run is the hourly-sync cron trigger's (its scheduler's next run is that row).
+  ...(bucket === "due" ? { triggers: { triggers: [...overviewSnapshot().triggers.triggers, { type: "cron", id: "hourly-sync", folder: "/srv/web", index: 3 }] } } : {}),
+  // The paused bucket's queue is paused, as BullMQ keeps a paused queue's jobs in its paused list.
+  ...(bucket === "paused" ? { queue: { pausedState: false, pausedPartial: true, counts: { waiting: 0, active: 4, delayed: 3, failed: 1 }, workers: 3, queues: 4, fleetDegraded: null }, queueCounts: overviewSnapshot().queueCounts.map((q) => (q.queue === "pi-jobs@mini2" ? { ...q, paused: true, counts: { ...q.counts, paused: 1 } } : q)) } : {}),
+}));
+
+/** The hosts as the registry sees them, one host's row changed by `over`. */
+const hostsWith = (name, over) => overviewSnapshot().hostBudgets.map((h) => (h.name === name ? { ...h, ...over } : h));
+
+/**
+ * The longest names the overview draws in running text, each one a worker or the triggers file could hold: `host`, a
+ * registered host with the longest name a worker can declare (`WORKER_NAME_RE`, 64 characters), standing in for build3;
+ * `gone`, another such name, a host gone from the registry whose queue still holds a job; `peer`, a second registered
+ * host of that length, standing in for mini2, so a confirm bar names two such queues; `cron`, a cron trigger's id
+ * (`[A-Za-z0-9._-]`), the longest the triggers file takes (`CRON_ID_MAX`), with no place to break.
+ */
+export const LONG_NAMES = Object.freeze({
+  host: `build-${"x".repeat(51)}-gpu-03`,
+  gone: `gone-${"y".repeat(51)}-node-07`,
+  peer: `peer-${"w".repeat(51)}-node-11`,
+  cron: `report-${"z".repeat(CRON_ID_MAX - "report--weekly".length)}-weekly`,
+});
+
+/**
+ * The long names' overview: build3 renamed `LONG_NAMES.host` in the registry and in `queueCounts` (where a host's own
+ * queue is read), that queue paused (so the Hosts head's chip, the host's row and the Queues line draw it), a job in it
+ * waiting for its slot (gh-4a7e still holds one there, so the row names the host twice), a job in `LONG_NAMES.gone`'s
+ * queue (the stray-queue sentence and its Queues entry), a long doctor label, and `LONG_NAMES.cron` next in Scheduled.
+ */
+function longNamesSnapshot() {
+  const { host, gone, cron } = LONG_NAMES;
+  const base = overviewSnapshot();
+  const label = `Job image ghcr.io/edgehero/pi-dispatch-job@sha256:${"a".repeat(64)} is not pulled on this host`;
+  return overviewSnapshot({
+    queue: { ...base.queue, pausedPartial: true },
+    queueCounts: base.queueCounts.map((q) => (q.queue === "pi-jobs@build3" ? { ...q, queue: `pi-jobs@${host}`, paused: true } : q)),
+    hostBudgets: base.hostBudgets.map((h) => (h.name === "build3" ? { ...h, name: host } : h)),
+    doctor: { hosts: [doctorRow(host, HOUR, { ok: 39, checks: [{ id: "image.1", level: "fail", label }] })], more: 0 },
+    waiting: waitingOf([
+      waitRow({ jobId: "gh-c9e1", queue: `pi-jobs@${host}`, bucket: "slot", why: "host-slot", known: true, project: "billing", projectFrom: "record", host, queuedAt: NOW - 3 * MIN }),
+      waitRow({ jobId: "gh-z7a0", queue: `pi-jobs@${gone}`, bucket: "slot", why: "host-slot", known: true, project: "web", projectFrom: "record", host: gone, queuedAt: NOW - 9 * MIN }),
+    ]),
+    schedulers: [{ key: cron, name: cron, pattern: "0 6 * * 1", next: NOW + 2 * HOUR, overdueMs: 0 }, ...base.schedulers],
+  });
+}
+
+/**
+ * The overview with two hosts of the longest names (`LONG_NAMES.host` for build3, `LONG_NAMES.peer` for mini2), in the
+ * registry and in `queueCounts`, the queues of those named in `paused` paused (the fleet partly paused, so the Hosts
+ * card offers Resume fleet beside each host's own pause), the shared queue and mini1's running. The confirm bars over
+ * it name those queues: a fleet resume's Undo both paused ones, a host queue's pause its one.
+ */
+function longQueuesSnapshot(paused) {
+  const { host, peer } = LONG_NAMES;
+  const base = overviewSnapshot();
+  const renamed = { build3: host, mini2: peer };
+  const name = (n) => renamed[n] ?? n;
+  return overviewSnapshot({
+    queue: { ...base.queue, pausedPartial: paused.length > 0 },
+    queueCounts: base.queueCounts.map((q) => {
+      const at = q.queue.indexOf("@");
+      if (at < 0) return q;
+      const of = name(q.queue.slice(at + 1));
+      return { ...q, queue: `pi-jobs@${of}`, paused: paused.includes(of) };
+    }),
+    hostBudgets: base.hostBudgets.map((h) => ({ ...h, name: name(h.name) })),
+  });
+}
+
 // ---- the states ----------------------------------------------------------------------------------------------------------
 
 /**
@@ -432,6 +728,20 @@ const DRAW = {
     const answer = await actionWorld().preview("pause-window-add", { scope: "github:acme/api", from: "01:00", to: "02:00", tz: "UTC", days: "mon" });
     assert.match(answer.body.html ?? "", /<li>\{&quot;scope&quot;:&quot;github:acme\/api&quot;/, "the window's JSON is one of the bar's lines");
     return openSlotAfter(await screen("config"), "p-pause-windows", { inner: answerHtml(answer, 200, "pause-window-add") });
+  },
+  // The longest names a bar draws (`LONG_NAMES`), on the overview, after the Hosts card that asked (in its column, so
+  // under the card): Resume fleet over a fleet with two such host queues paused and the rest running, whose Undo and
+  // waiting line name both; then one such host queue's Pause, its name in the summary, the Undo and the Confirm label.
+  // The width check measures each bar at 375 px and in the side column.
+  "confirm-preview-long-names.operator": async () => {
+    const snap = longQueuesSnapshot([LONG_NAMES.host, LONG_NAMES.peer]);
+    const answer = await actionWorld({ fleet: { snapshot: async () => snap } }).preview("fleet-resume");
+    return openSlotAfter(await overviewLive(snap), "p-hosts", { inner: answerHtml(answer, 200, "fleet-resume, long names") });
+  },
+  "confirm-preview-long-queue.operator": async () => {
+    const snap = longQueuesSnapshot([LONG_NAMES.host]);
+    const answer = await actionWorld({ fleet: { snapshot: async () => snap } }).preview("queue-pause", { queue: `pi-jobs@${LONG_NAMES.peer}` });
+    return openSlotAfter(await overviewLive(snap), "p-hosts", { inner: answerHtml(answer, 200, "queue-pause, long name") });
   },
   // The kill switch reached one Valkey and not the other: the one refusal that never says nothing was changed.
   "confirm-refused-partial.operator": async () => {
@@ -499,6 +809,22 @@ const DRAW = {
   // AuditScreen: the newest row's link to the one before does not hold; then a damaged row with two written after it.
   "audit-damaged.operator": async () => auditPage(auditDeps({ rows: 5, tamper: (lines) => relink(lines, 4) })),
   "audit-not-verified.operator": async () => auditPage(auditDeps({ rows: 6, tamper: (lines) => relink(lines, 3) })),
+  // OverviewAllClear: nothing needs a person, the same panels as the problem state; SetupScreen: the first run's
+  // checklist with nothing ready but the console itself, then the card's own moment, for both roles; the waitlists
+  // with each kind of wait alone (TimelineAndWaitlists, the OverviewScreen card's Waitlists); a host whose clock is out
+  // of step, and one whose registry row has no expiry (the OverviewScreen card's Hosts).
+  "overview-all-clear.operator": async () => overviewLive(overviewSnapshot(CALM)),
+  "overview-all-clear.viewer": async () => overviewLive(overviewSnapshot(CALM), { session: VIEWER }),
+  "setup-nothing-ready.operator": async () => overviewLive(firstRun()),
+  "setup-partial.operator": async () => overviewLive(firstRun(SETUP_PARTIAL_DOCTOR)),
+  "setup-partial.viewer": async () => overviewLive(firstRun(SETUP_PARTIAL_DOCTOR), { session: VIEWER }),
+  ...Object.fromEntries(DEFER_BUCKETS.map((b) => [`waitlist-${b}.operator`, () => waitlist(b)])),
+  "overview-host-skew.operator": async () => overviewLive(overviewSnapshot({ hostBudgets: hostsWith("build3", { staleMs: 120_000, ttlAgeMs: 12_000, skewMs: 108_000 }) })),
+  "overview-host-no-expiry.operator": async () => overviewLive(overviewSnapshot({ hostBudgets: hostsWith("mini2", { noExpiry: true, ttlAgeMs: null }) })),
+  // The longest names in running text (`LONG_NAMES`): a host's, its paused queue's, a gone host's queue's and a cron
+  // trigger's, in the Hosts card, the Waitlists' sentences, the Queues line and Scheduled, with a long doctor label: the
+  // page holds them at 375 px and in the side column, so the width check covers them.
+  "overview-host-long-names.operator": async () => overviewLive(longNamesSnapshot()),
   // SignIn: why the last session ended, each reason; each refusal, and one no notice names (the server's sentence, as
   // the script sets it); the console out of reach.
   ...Object.fromEntries(ENDED_REASONS.map((r) => [`login-ended-${r}.anonymous`, () => loginPage({ theme: null, notice: r, limits: LIMITS, listen: "tcp" })])),

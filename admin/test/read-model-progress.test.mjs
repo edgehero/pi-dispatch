@@ -210,7 +210,9 @@ test("the fleet snapshot's active rows carry integers and a tool name only, a re
         const panels = await pagePanels(page, { query: {}, session: { name: "x", role }, data: { page, now: AT, env: {}, snapshot: snap }, readOnly: false });
         const text = panels.map((p) => p.html).join("");
         leaks(text, `the ${page} panels for ${role}`);
-        assert.match(text, /turn 2, 1 step, bash running, phase 1\/1/, `the ${page} panels show the integers (a since after now shows no age)`);
+        // Since issue #737 the active table with its progress is Fleet's alone: the overview counts the running jobs in
+        // each host's slots.
+        if (page === "fleet") assert.match(text, /turn 2, 1 step, bash running, phase 1\/1/, `the ${page} panels show the integers (a since after now shows no age)`);
       }
     }
     // The single read (the run page's and the TUI's) carries the whole snapshot, names included: an operator surface's.

@@ -38,7 +38,9 @@
  * the transcript, the insights renderers), so a class only those emit always counts as emitted, and its rule can never
  * fail as dead. The empty-set rule is the backstop: the last converted page deletes this whole file, dead rules and
  * all. (The action previews left that list in PR 2: their bars are `confirm-view.mjs`'s Pulse markup, outside every
- * wrapper, and the rules that drew the old ones went with them.)
+ * wrapper, and the rules that drew the old ones went with them. The overview left it in PR 3, and no rule went with
+ * it: every class its old panels drew is still drawn by another old page or by `common.mjs`, and the ratchet holds the
+ * neutraliser and the dead-rule check to that.)
  */
 import { PAGE_THEME } from "../graph-html.mjs";
 import { INSIGHTS_CSS } from "../insights-html.mjs";

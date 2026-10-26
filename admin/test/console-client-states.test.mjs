@@ -39,6 +39,23 @@ function fleetPage({ flash = null, maxStreams = 4 } = {}) {
   return String(page({ title: "pi-dispatch console: Fleet", name: "fleet", body, live: "fleet", query: "" }));
 }
 
+/**
+ * A page laid out as the overview is (issue #737), with no `.legacy` wrapper: a row of cards in a grid marked
+ * `data-slot-after`, then two columns of stacked cards, which carry no mark; and, past the overview's own layout, a
+ * marked grid inside another.
+ */
+function gridPage() {
+  const card = (id, form) => html`<section id="${id}" data-panel><h2>${id}</h2>${form}</section>`;
+  const retry = actForm("retry-failed", { hidden: [["jobId", "gh-1"], ["queue", "jobs"]], label: "Retry" });
+  const cancel = actForm("cancel-queued", { hidden: [["jobId", "gh-2"], ["queue", "jobs"]], label: "Cancel" });
+  const hostPause = actForm("queue-pause", { hidden: [["queue", "pi-jobs@build3"]], label: "Pause build3" });
+  const row = html`<div class="cards-4" data-slot-after>${card("p-needs", retry)}${card("p-waiting", cancel)}${card("p-active", "")}${card("p-spend", "")}</div>`;
+  const columns = html`<div class="cols"><div class="stack">${card("p-timeline", "")}</div><div class="stack">${card("p-hosts", hostPause)}</div></div>`;
+  const nested = html`<div class="cols" data-slot-after><div class="cards-4" data-slot-after>${card("p-inner", actForm("fleet-pause", { label: "Pause the fleet" }))}</div></div>`;
+  const ctx = { session: OPERATOR, readOnly: false, data: { parkedCount: 0, now: NOW }, query: {}, theme: null, maxStreams: 4 };
+  return String(page({ title: "pi-dispatch console: Overview", name: "overview", body: shellHtml("overview", ctx, html`${row}${columns}${nested}`), live: "overview", query: "" }));
+}
+
 /** A run page with its live transcript section, as `renderPage` draws one for an operator. */
 function runPage() {
   const view = { role: "operator", query: { id: "gh-1" }, data: { transcript: { exists: true, ended: false } } };
@@ -108,7 +125,306 @@ stateTest(T.previewing, async () => {
   assert.equal(text(slot.querySelector("[data-slot-title]")), "Previewing: Retry");
   assert.equal(slot.querySelector("[data-confirm]").disabled, true);
   assert.ok(skeleton.includes("data-slot-title"), "the skeleton was read as the server drew it");
+
+  // A layout grid (issue #737): the slot is never one of its cells. A card in the overview's row of cards puts it after
+  // the row; a card in a column, which is no grid, keeps it right under the card; marked grids one inside another put
+  // it after the outermost.
+  const g = boot(gridPage());
+  const gslot = slotOf(g);
+  const el = (id) => g.document.getElementById(id);
+  g.submit(formOf(g, "cancel-queued"));
+  const row = el("p-waiting").parentElement;
+  assert.ok(row.hasAttribute("data-slot-after") && row.classList.contains("cards-4"));
+  assert.ok(row.nextElementSibling === gslot, "the slot goes after the row of cards, not in it after the card");
+  assert.equal(gslot.parentElement.id, "main");
+  assert.deepEqual(["[data-panel]", ".cards-4", "[data-slot-after]"].map((q) => gslot.closest(q) === null), [true, true, true], "never inside a panel or a marked grid");
+  assert.equal(text(gslot.querySelector("[data-slot-title]")), "Previewing: Cancel");
+  assert.ok(shown(gslot));
+  g.submit(formOf(g, "retry-failed"));
+  assert.ok(row.nextElementSibling === gslot, "any card of the row: the same place");
+  g.submit(formOf(g, "queue-pause"));
+  assert.ok(el("p-hosts").nextElementSibling === gslot, "a column keeps the slot right after its card");
+  assert.ok(gslot.parentElement === el("p-hosts").parentElement);
+  assert.equal(gslot.parentElement.className, "stack");
+  g.submit(formOf(g, "fleet-pause"));
+  assert.ok(el("p-inner").parentElement.parentElement.nextElementSibling === gslot, "nested marked grids: after the outermost");
+  assert.equal(gslot.parentElement.id, "main");
+  assert.deepEqual(g.fetch.calls.map((c) => c.url), ["/api/act/cancel-queued/preview", "/api/act/retry-failed/preview", "/api/act/queue-pause/preview", "/api/act/fleet-pause/preview"]);
+  // A round button is its icon: the slot names its preview by the button's aria-label, never the action's machine name.
+  const round = formOf(g, "fleet-pause");
+  const icon = round.querySelector("button[type=submit]");
+  icon.textContent = "";
+  icon.setAttribute("aria-label", "Pause queue pi-jobs@build3");
+  g.submit(round);
+  assert.equal(text(gslot.querySelector("[data-slot-title]")), "Previewing: Pause queue pi-jobs@build3");
 });
+
+test("a preview brings the slot into view and gives its title the focus, wherever the slot was put; an answer keeps the focus in the slot, and never takes it from elsewhere", () => trapGlobalFetch(async () => {
+  // The overview's row of cards puts the slot after the whole row, which on a phone is a screen or more below the button
+  // that asked: without the scroll and the focus the bar opens out of sight and the keyboard stays on the button.
+  const g = boot(gridPage());
+  const gslot = slotOf(g);
+  const title = () => gslot.querySelector("[data-slot-title]");
+  for (const action of ["cancel-queued", "queue-pause", "fleet-pause"]) {
+    const from = g.document.scrolls.length;
+    const button = formOf(g, action).querySelector("button[type=submit]");
+    button.focus();
+    g.submit(formOf(g, action), button);
+    assert.deepEqual(g.document.scrolls.slice(from).map((x) => [x.el === gslot, x.options]), [[true, { block: "nearest" }]], `${action}: the slot is scrolled into view, by the least move`);
+    assert.ok(g.document.activeElement === title(), `${action}: the focus is on the slot's title`);
+    assert.equal(title().getAttribute("tabindex"), "-1", `${action}: focusable by script, never in the tab order`);
+  }
+  // The answer replaces the title that held the focus: the focus goes to the bar's heading, never to the page's body.
+  await g.fetch.open("/api/act/fleet-pause/preview").answer(200, { ok: true, ticket: "tk-1", action: "fleet-pause", html: bar({ title: "Pause the fleet" }) });
+  const heading = gslot.querySelector(".confirm__h");
+  assert.equal(text(heading), "Pause the fleet");
+  assert.ok(g.document.activeElement === heading, "the bar's heading holds the focus");
+  assert.equal(heading.getAttribute("tabindex"), "-1");
+  // A reader who moved on before the answer keeps their place: an answer takes no focus it did not have.
+  g.submit(formOf(g, "retry-failed"));
+  const elsewhere = formOf(g, "cancel-queued").querySelector("button[type=submit]");
+  elsewhere.focus();
+  await g.fetch.open("/api/act/retry-failed/preview").answer(200, { ok: true, ticket: "tk-2", action: "retry-failed", html: bar() });
+  assert.equal(text(gslot.querySelector(".confirm__h")), "Retry gh-1");
+  assert.ok(g.document.activeElement === elsewhere, "the focus stays where the reader put it");
+  // The legacy pages' slot (after a panel's wrapper) is brought into view the same way.
+  const w = boot(fleetPage());
+  w.submit(formOf(w, "retry-failed"));
+  assert.ok(w.document.scrolls.length === 1 && w.document.scrolls[0].el === slotOf(w));
+  assert.ok(w.document.activeElement === slotOf(w).querySelector("[data-slot-title]"));
+}));
+
+test("every fill while the slot is open brings it into view again (the answer, a refusal, the script's own sentence), and a closed slot is never scrolled", () => trapGlobalFetch(async () => {
+  // The scroll at open measured the skeleton; the answer is taller, and with the slot near the fold its Confirm landed
+  // below it. Each fill asks for the least scroll again, after the new markup is in, so its size is the answer's.
+  const g = boot(gridPage());
+  const gslot = slotOf(g);
+  const scrolled = (from) => g.document.scrolls.slice(from).map((x) => [x.el === gslot, x.options]);
+  const once = [[true, { block: "nearest" }]];
+  let from = g.document.scrolls.length;
+  g.submit(formOf(g, "retry-failed"));
+  assert.deepEqual(scrolled(from), once, "at open");
+  from = g.document.scrolls.length;
+  await g.fetch.open("/api/act/retry-failed/preview").answer(200, { ok: true, ticket: "tk-1", action: "retry-failed", html: bar({ lines: ["queue jobs", "attempt 2 of 3", "its trigger's model"], reserve: "The job holds up to $2.00 of the budget while it runs.", paid: true }) });
+  assert.ok(gslot.querySelector("[data-confirm]") && gslot.querySelector(".confirm__note"), "the answer is in");
+  assert.deepEqual(scrolled(from), once, "after the answer, once its size is known");
+  // A refused confirm's bar replaces the answer: in view again.
+  gslot.querySelector("[data-confirm]").click();
+  from = g.document.scrolls.length;
+  const moved = "the job changed since the preview, so nothing was changed";
+  await g.fetch.open("/api/act/retry-failed/confirm").answer(409, { error: moved, html: String(refusalHtml({ where: "confirm", sentence: moved, status: 409 })) });
+  assert.deepEqual(scrolled(from), once, "after a refusal");
+  // The script's own sentence in the skeleton (an answer with no html), and a field it cannot read: in view again.
+  g.submit(formOf(g, "cancel-queued"));
+  from = g.document.scrolls.length;
+  await g.fetch.open("/api/act/cancel-queued/preview").answer(502, "<html>Bad gateway</html>");
+  assert.equal(text(gslot.querySelector("[data-slot-message]")), "The console refused the request (502).");
+  assert.deepEqual(scrolled(from), once, "after the script's own sentence, with the sentence in");
+  // Closed: no fill scrolls it, and an answer for a slot since closed is dropped unscrolled.
+  g.submit(formOf(g, "queue-pause"));
+  gslot.querySelector("[data-cancel]").click();
+  assert.equal(gslot.hidden, true);
+  from = g.document.scrolls.length;
+  await g.fetch.open("/api/act/queue-pause/preview").answer(200, { ok: true, ticket: "tk-2", action: "queue-pause", html: bar({ title: "Pause queue pi-jobs@build3" }) });
+  assert.deepEqual(scrolled(from), [], "a closed slot is never scrolled");
+}));
+
+test("closing the slot gives the focus back to the button that opened it, else to the card that asked, only when the focus was in the slot", () => trapGlobalFetch(async () => {
+  // Close and Cancel put the skeleton back, which removes the control that held the focus: the browser then gave it to
+  // the page's body, and the next Tab started from the top of the page, in another panel.
+  const g = boot(gridPage());
+  const gslot = slotOf(g);
+  const el = (id) => g.document.getElementById(id);
+  const opener = (action) => formOf(g, action).querySelector("button[type=submit]");
+  // Cancel on the preview's bar: the button that opened the slot.
+  opener("cancel-queued").focus();
+  g.submit(formOf(g, "cancel-queued"), opener("cancel-queued"));
+  await g.fetch.open("/api/act/cancel-queued/preview").answer(200, { ok: true, ticket: "tk-1", action: "cancel-queued", html: bar({ title: "Cancel gh-2" }) });
+  assert.ok(gslot.contains(g.document.activeElement), "the focus is in the slot");
+  gslot.querySelector("[data-cancel]").click();
+  assert.equal(gslot.hidden, true);
+  assert.ok(g.document.activeElement === opener("cancel-queued"), "Cancel: back on the button that opened it");
+  // Close on a no-change bar, from a column's card: the same.
+  g.submit(formOf(g, "queue-pause"));
+  await g.fetch.open("/api/act/queue-pause/preview").answer(200, { ok: true, unchanged: true, action: "queue-pause", summary: ["pi-jobs@build3 is already paused"], html: String(unchangedBarHtml({ summary: ["pi-jobs@build3 is already paused"] })) });
+  gslot.querySelector("[data-close]").click();
+  assert.ok(g.document.activeElement === opener("queue-pause"), "Close: back on the button that opened it");
+  // Close after an answer, when Preview again opened it a second time: still the button the reader pressed.
+  g.submit(formOf(g, "retry-failed"));
+  await g.fetch.open("/api/act/retry-failed/preview").answer(200, { ok: true, ticket: "tk-2", action: "retry-failed", html: bar() });
+  gslot.querySelector("[data-confirm]").click();
+  const expired = "this confirmation has expired. Preview the change again and confirm the new preview";
+  await g.fetch.open("/api/act/retry-failed/confirm").answer(409, { error: expired, html: String(refusalHtml({ where: "confirm", sentence: expired, status: 409 })) });
+  gslot.querySelector("[data-again]").click();
+  await g.fetch.open("/api/act/retry-failed/preview").answer(400, { error: "it is no longer failed", html: String(refusalHtml({ where: "preview", sentence: "it is no longer failed", status: 400 })) });
+  gslot.querySelector("[data-close]").click();
+  assert.ok(g.document.activeElement === opener("retry-failed"), "after an answer: back on the button that opened it");
+  // A browser that does not focus a button on a click leaves the body focused when Cancel is pressed: given back too.
+  g.submit(formOf(g, "fleet-pause"));
+  g.document.activeElement.blur();
+  assert.ok(g.document.activeElement === g.document.body);
+  gslot.querySelector("[data-cancel]").click();
+  assert.ok(g.document.activeElement === opener("fleet-pause"), "from the body: back on the button");
+  // The reader moved on before closing: the focus stays where they put it.
+  g.submit(formOf(g, "cancel-queued"));
+  opener("retry-failed").focus();
+  gslot.querySelector("[data-cancel]").click();
+  assert.ok(g.document.activeElement === opener("retry-failed"), "focus elsewhere is never taken");
+  assert.equal(el("p-waiting").hasAttribute("tabindex"), false, "and no card was made focusable");
+  // The stream swapped the button's panel while the slot held it: Cancel lands the update, the button is gone, and the
+  // focus goes to the card that asked, focusable by script alone.
+  const w = boot(fleetPage());
+  const wslot = slotOf(w);
+  const panel = w.document.getElementById("p-fleet-state");
+  w.submit(formOf(w, "fleet-pause"));
+  w.streams[0].emit("panel", { id: "p-fleet-state", html: "<h2>Fleet</h2><p>paused</p>" });
+  wslot.querySelector("[data-cancel]").click();
+  assert.equal(panel.innerHTML, "<h2>Fleet</h2><p>paused</p>", "the update landed");
+  assert.ok(w.document.activeElement === panel, "the card that asked");
+  assert.equal(panel.getAttribute("tabindex"), "-1", "focusable by script, never in the tab order");
+  // The done banner's Undo: back on the Undo button.
+  const change = { summary: "Paused the fleet", by: "ops", auditSeq: 44, count: 1, undo: "Resume it with the button here.", inverse: { action: "fleet-resume", body: {} }, kind: "fleet", at: NOW };
+  const b = boot(fleetPage({ flash: change }));
+  const undo = b.document.querySelector('main > .banner form[data-action="fleet-resume"] button');
+  undo.click();
+  slotOf(b).querySelector("[data-cancel]").click();
+  assert.ok(b.document.activeElement === undo, "the Undo button");
+}));
+
+test("where a swap replaced the button that opened the slot, closing it gives the focus to the same form's button in the swapped card, else to the card", () => trapGlobalFetch(async () => {
+  // On the overview the Hosts card is drawn anew on every tick, so while the slot held it its button was always
+  // replaced, and the focus always fell to the card.
+  const g = boot(gridPage());
+  const gslot = slotOf(g);
+  const panel = g.document.getElementById("p-hosts");
+  const opener = formOf(g, "queue-pause").querySelector("button[type=submit]");
+  opener.focus();
+  g.submit(formOf(g, "queue-pause"), opener);
+  await g.fetch.open("/api/act/queue-pause/preview").answer(200, { ok: true, ticket: "tk-1", action: "queue-pause", html: bar({ title: "Pause queue pi-jobs@build3" }) });
+  // The card drawn again while the slot held it: a form of the same action for another queue first, then the opener's.
+  const pause = (queue, label) => actForm("queue-pause", { hidden: [["queue", queue]], label });
+  g.streams[0].emit("panel", { id: "p-hosts", html: String(html`<h2>p-hosts</h2>${pause("pi-jobs@mini2", "Pause mini2")}${pause("pi-jobs@build3", "Pause build3")}`) });
+  gslot.querySelector("[data-cancel]").click();
+  assert.equal(panel.querySelectorAll(".held").length, 0, "the update landed");
+  assert.equal(g.document.contains(opener), false, "the opener is gone");
+  const forms = panel.querySelectorAll('form[data-action="queue-pause"]');
+  assert.ok(g.document.activeElement === forms[1].querySelector("button[type=submit]"), "the swapped card's button that does what the opener did");
+  assert.equal(panel.hasAttribute("tabindex"), false, "and the card was not made focusable");
+  // A swapped card with no form of that action and those hidden fields: the card.
+  forms[1].querySelector("button[type=submit]").focus();
+  g.submit(forms[1], forms[1].querySelector("button[type=submit]"));
+  g.streams[0].emit("panel", { id: "p-hosts", html: String(html`<h2>p-hosts</h2>${pause("pi-jobs@mini2", "Pause mini2")}`) });
+  gslot.querySelector("[data-cancel]").click();
+  assert.ok(g.document.activeElement === panel, "the card that asked");
+  assert.equal(panel.getAttribute("tabindex"), "-1");
+}));
+
+test("a focused button never holds its panel: after Cancel gives the focus back to the button that opened the slot, the panel's next update lands", () => trapGlobalFetch(async () => {
+  const g = boot(gridPage());
+  const gslot = slotOf(g);
+  const panel = g.document.getElementById("p-waiting");
+  const opener = formOf(g, "cancel-queued").querySelector("button[type=submit]");
+  opener.focus();
+  g.submit(formOf(g, "cancel-queued"), opener);
+  await g.fetch.open("/api/act/cancel-queued/preview").answer(200, { ok: true, ticket: "tk-1", action: "cancel-queued", html: bar({ title: "Cancel gh-2" }) });
+  gslot.querySelector("[data-cancel]").click();
+  assert.ok(g.document.activeElement === opener, "the focus is back on the opener");
+  g.streams[0].emit("panel", { id: "p-waiting", html: "<h2>p-waiting</h2><p>NEW</p>" });
+  assert.equal(panel.innerHTML, "<h2>p-waiting</h2><p>NEW</p>", "the update landed, with no kept-still note");
+  // A button focused with no slot open holds nothing either; a field focused in the same panel's form still does.
+  const f = boot(fleetPage());
+  const failed = f.document.getElementById("p-fleet-failed");
+  formOf(f, "retry-failed").querySelector("button[type=submit]").focus();
+  f.streams[0].emit("panel", { id: "p-fleet-failed", html: String(html`<h2>Failed jobs</h2>${editor("Retry failed jobs in bulk", actForm("retry-all-failed", { fields: field("repo", "Repository"), label: "Preview retry of all" }))}`) });
+  assert.equal(failed.querySelectorAll(".held").length, 0, "a button: the update landed");
+  f.document.querySelector('input[name="repo"]').focus();
+  f.streams[0].emit("panel", { id: "p-fleet-failed", html: "<p>fresh</p>" });
+  assert.equal(failed.firstElementChild.className, "held", "a field: held");
+}));
+
+test("a swap never drops the focus: a focused button goes to the same form's button in the new markup, a link to the same link, else to the panel", () => trapGlobalFetch(async () => {
+  // On the overview the Hosts card is drawn anew on every tick; a swap that let the focus fall to the page's body sent
+  // a keyboard reader back to the card's first control each tick, so its later rows could not be reached.
+  const g = boot(gridPage());
+  const panel = g.document.getElementById("p-hosts");
+  const pause = (queue, label) => actForm("queue-pause", { hidden: [["queue", queue]], label });
+  const tick = (markup) => g.streams[0].emit("panel", { id: "p-hosts", html: String(markup) });
+  formOf(g, "queue-pause").querySelector("button[type=submit]").focus();
+  tick(html`<h2>p-hosts</h2>${pause("pi-jobs@mini2", "Pause mini2")}${pause("pi-jobs@build3", "Pause build3")}<a href="/fleet">Open Fleet</a>`);
+  const forms = panel.querySelectorAll('form[data-action="queue-pause"]');
+  assert.ok(g.document.activeElement === forms[1].querySelector("button[type=submit]"), "the same form's button");
+  assert.equal(panel.querySelectorAll(".held").length, 0, "and nothing was held");
+  assert.equal(panel.hasAttribute("tabindex"), false);
+  panel.querySelector("a[href]").focus();
+  tick(html`<h2>p-hosts</h2>${pause("pi-jobs@mini2", "Pause mini2")}<a href="/fleet">Open Fleet</a>`);
+  assert.ok(g.document.activeElement === panel.querySelector('a[href="/fleet"]'), "the same link");
+  tick(html`<h2>p-hosts</h2><p>No host beats.</p>`);
+  assert.ok(g.document.activeElement === panel, "else the panel");
+  assert.equal(panel.getAttribute("tabindex"), "-1");
+  tick(html`<h2>p-hosts</h2>${pause("pi-jobs@mini2", "Pause mini2")}`);
+  assert.ok(g.document.activeElement === panel, "a focused panel keeps it");
+  // Focus outside the swapped panel is never taken.
+  const elsewhere = formOf(g, "retry-failed").querySelector("button[type=submit]");
+  elsewhere.focus();
+  tick(html`<h2>p-hosts</h2>${pause("pi-jobs@build3", "Pause build3")}`);
+  assert.ok(g.document.activeElement === elsewhere, "the focus stays where the reader put it");
+}));
+
+test("every change the script makes while the slot shows brings it into view again, never a slot scrolled away or closed", () => trapGlobalFetch(async () => {
+  // At 1440 px the Hosts card took its kept-still note about 200 ms after the answer and pushed Pause's Confirm below
+  // the fold; a panel swapped above the slot, a live note shown or hidden and the sign-out banner move it the same way.
+  const g = boot(gridPage());
+  const gslot = slotOf(g);
+  const scrolled = (from) => g.document.scrolls.slice(from).map((x) => [x.el === gslot, x.options]);
+  const once = [[true, { block: "nearest" }]];
+  g.submit(formOf(g, "queue-pause"));
+  await g.fetch.open("/api/act/queue-pause/preview").answer(200, { ok: true, ticket: "tk-1", action: "queue-pause", html: bar({ title: "Pause queue pi-jobs@build3" }) });
+  const es = g.streams[0];
+  let from = g.document.scrolls.length;
+  es.emit("panel", { id: "p-hosts", html: "<h2>p-hosts</h2><p>one</p>" });
+  assert.equal(g.document.getElementById("p-hosts").firstElementChild.className, "held");
+  assert.deepEqual(scrolled(from), once, "the kept-still note");
+  from = g.document.scrolls.length;
+  es.emit("panel", { id: "p-hosts", html: "<h2>p-hosts</h2><p>two</p>" });
+  assert.deepEqual(scrolled(from), [], "an update that waits changes nothing on the page");
+  from = g.document.scrolls.length;
+  es.emit("panel", { id: "p-needs", html: "<h2>p-needs</h2><p>a row more</p>" });
+  assert.deepEqual(scrolled(from), once, "a panel swapped");
+  from = g.document.scrolls.length;
+  es.emit("stale", { since: NOW });
+  assert.deepEqual(notes(g), ["stale"]);
+  assert.deepEqual(scrolled(from), once, "the stale note, once for its words and its showing");
+  from = g.document.scrolls.length;
+  es.emit("fresh");
+  assert.deepEqual(scrolled(from), once, "the stale note hidden");
+  from = g.document.scrolls.length;
+  g.document.getElementById("logout").click();
+  await g.fetch.open("/logout").answer(500, {});
+  assert.ok(g.document.querySelector('[data-signout="unconfirmed"]'));
+  assert.deepEqual(scrolled(from), once, "the sign-out banner");
+  // The reader scrolled the slot wholly out of view to read another card: their place stands; a slot partly in view
+  // is brought in whole.
+  const h = boot(gridPage(), { innerHeight: 800 });
+  const hslot = slotOf(h);
+  h.submit(formOf(h, "queue-pause"));
+  let box = { top: 900, bottom: 1100 };
+  hslot.getBoundingClientRect = () => box;
+  from = h.document.scrolls.length;
+  h.streams[0].emit("panel", { id: "p-needs", html: "<p>x</p>" });
+  assert.equal(h.document.scrolls.length, from, "below the window: not scrolled");
+  box = { top: -300, bottom: -20 };
+  h.streams[0].emit("panel", { id: "p-needs", html: "<p>y</p>" });
+  assert.equal(h.document.scrolls.length, from, "above the window: not scrolled");
+  box = { top: 700, bottom: 900 };
+  h.streams[0].emit("panel", { id: "p-needs", html: "<p>z</p>" });
+  assert.ok(h.document.scrolls.length === from + 1 && h.document.scrolls[from].el === hslot, "partly in view: brought in");
+  // Closed: no change scrolls it.
+  hslot.querySelector("[data-cancel]").click();
+  from = h.document.scrolls.length;
+  h.streams[0].emit("panel", { id: "p-needs", html: "<p>w</p>" });
+  h.streams[0].emit("stale", { since: NOW });
+  assert.equal(h.document.scrolls.length, from, "a closed slot is never scrolled");
+}));
 
 test("a bar's times are shown as the page's are: each <time> the answer drew gets the reader's zone and the UTC title", async () => {
   const w = boot(fleetPage());

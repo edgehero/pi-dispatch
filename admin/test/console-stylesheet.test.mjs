@@ -3,12 +3,12 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { LEGACY_CSS, NEUTRALISED, SVG_EXTRA, insightsFont, specificity } from "../src/console/compat-css.mjs";
-import { AUDIT_LAYOUT, PAGE_CSS, SECONDARY_BTN, SHELL_CSS, TOP_BAR, cssBlocks, pageCss, scopeCss, selectorsOf, splitSelectors, stackRules } from "../src/console/page-css.mjs";
+import { AUDIT_LAYOUT, OVERVIEW_LAYOUT, PAGE_CSS, SECONDARY_BTN, SHELL_CSS, TOP_BAR, cssBlocks, pageCss, scopeCss, selectorsOf, splitSelectors, stackRules } from "../src/console/page-css.mjs";
 import { PULSE_CSS, PULSE_CSS_SHA256 } from "../src/console/pulse-css.mjs";
 import { PULSE_TOKENS, PULSE_TOKENS_SHA256, colorOf, tokenCss } from "../src/console/pulse-tokens.mjs";
 import { renderPage } from "../src/console/pages.mjs";
 import { SPRITE } from "../src/console/pulse-icons.mjs";
-import { BTN_KINDS } from "../src/console/kit.mjs";
+import { BTN_KINDS, SPEND_DOTS } from "../src/console/kit.mjs";
 import { CONFIRM_CLASSES } from "../src/console/confirm-view.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { LIVE_GLYPHS, LIVE_STATES } from "../src/console/shell.mjs";
@@ -80,15 +80,15 @@ test("the shell's rules and the legacy layer's declarations hold no colour liter
   assert.match(SHELL_CSS, /details\.more>summary\{/, "the More menu");
 });
 
-test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit), each served only under its own body", () => {
+test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR 3: the overview), each served only under its own body", () => {
   assert.ok(Object.isFrozen(PAGE_CSS));
-  assert.deepEqual(Object.keys(PAGE_CSS), ["login", "login-code", "error", "audit"]);
+  assert.deepEqual(Object.keys(PAGE_CSS), ["login", "login-code", "error", "audit", "overview"]);
   assert.equal(PAGE_CSS.login, PAGE_CSS["login-code"], "the two sign-in pages are one card's rules");
   // The audit log's viewer refusal draws the error card inside the signed-in frame, on the audit page's body.
   assert.ok(PAGE_CSS.audit.endsWith(PAGE_CSS.error), "the audit page carries the error card's rules too");
   const served = pageCss();
   assert.ok(CONSOLE_CSS.includes(served));
-  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:login|login-code|error|audit)"\](?:$|[ >])/, sel);
+  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:login|login-code|error|audit|overview)"\](?:$|[ >])/, sel);
   for (const name of Object.keys(PAGE_CSS)) assert.ok(served.includes(`body[data-page="${name}"] `), name);
   assert.equal(scopeCss('body[data-page="runs"]', ".x .y{color:var(--ink)}\nbody{gap:0}"), 'body[data-page="runs"] .x .y{color:var(--ink)}\nbody[data-page="runs"]{gap:0}');
 });
@@ -543,6 +543,18 @@ test("every class the write flow's markup names has a rule: bundle.css's or the 
   assert.deepEqual(SHELL.top[".confirm__undo"], { "align-items": "flex-start" });
   assert.deepEqual(SHELL.top[".confirm__undo>.ic"], { "margin-top": `${(lineHeight - icon) / 2}px` });
   assert.equal(SHELL.top[".confirm__undo>.ic"]["margin-top"], "3px");
+  // The bar breaks every name in it as the page does: its title, its Undo line and that line's sentence, and its note
+  // shrink and break anywhere (bundle.css breaks none of them, and the Undo's sentence is a flex item, which shrinks
+  // below its content only when told); Resume fleet's Undo naming two 64-character queues ran to 624 px at 375 px.
+  for (const sel of [".confirm__h", ".confirm__undo"]) assert.equal(bundleRule(sel)["overflow-wrap"], undefined, sel);
+  assert.doesNotMatch(PULSE_CSS, /\.confirm__note/);
+  assert.deepEqual(SHELL.top[".confirm__h,.confirm__undo,.confirm__undo>span,.confirm__note"], { "min-width": "0", "overflow-wrap": "anywhere" });
+  // A button's label in the bar wraps inside the button (Confirm's names what it changes, a long host's queue
+  // included): bundle.css keeps a button on one line 38 px high, and the button grows down from that one line.
+  assert.match(CONFIRM_VIEW_SOURCE, /<div class="confirm__act">\$\{actBtn\(/, "the bar's buttons are its act row's children");
+  assert.equal(bundleRule(".btn")["white-space"], "nowrap");
+  assert.equal(bundleRule(".btn").height, "38px");
+  assert.deepEqual(SHELL.top[".confirm__act>.btn"], { "max-width": "100%", height: "auto", "min-height": "38px", "padding-top": `${(38 - lineHeight) / 2}px`, "padding-bottom": `${(38 - lineHeight) / 2}px`, "white-space": "normal", "overflow-wrap": "anywhere", "text-align": "center" });
 });
 
 test("the theme button keeps its space while hidden: laid out but not drawn, focusable or clickable, so showing it moves nothing", () => {
@@ -648,6 +660,255 @@ test("the charts' colours are re-pointed to the right tokens: status keeps its s
   for (const hex of ["#999", "#a6bbcf"]) assert.deepEqual(LEGACY.top[`.legacy svg text[fill="${hex}"],.legacy svg tspan[fill="${hex}"]`], { fill: "var(--ink-muted)" }, hex);
   assert.ok(LEGACY_CSS.indexOf('.legacy svg text[fill="#a6bbcf"]') > LEGACY_CSS.indexOf('.legacy svg [fill="#a6bbcf"]'));
   assert.deepEqual(LEGACY.top[`.legacy svg rect[fill="none"][stroke="${PAGE_THEME.border}"]`], { fill: "var(--dot-off)", stroke: "none" }, "a meter's outlined track is a filled bed");
+});
+
+/** A declaration's value with the space after each comma dropped, as the console writes them and the cards do not. */
+const tightDecls = (d) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, v.replace(/,\s+/g, ",")]));
+
+/** bundle.css's one rule for `selector` (outside its phone block unless `phone`), as `{property: value}`. */
+function bundleRule(selector, { phone = false } = {}) {
+  const at = PULSE_CSS.indexOf("@media (max-width: 760px) {");
+  const text = phone ? PULSE_CSS.slice(at) : PULSE_CSS.slice(0, at);
+  const m = new RegExp(`(?:^|\\n|\\} )\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{ ([^}]*) \\}`).exec(text);
+  assert.ok(m, `bundle.css has a rule for ${selector}`);
+  return declsOf(m[1]);
+}
+
+test("the overview's page rules: the first run's checklist as SetupScreen writes it, the running label at full ink, the chip row, the widths below the cards'", () => {
+  assert.deepEqual(OVERVIEW_LAYOUT, { stackMax: 1199 });
+  assert.ok(Object.isFrozen(OVERVIEW_LAYOUT));
+  const O = rulesOf(PAGE_CSS.overview);
+  const STACK = `@media (max-width: ${OVERVIEW_LAYOUT.stackMax}px)`;
+  assert.deepEqual(Object.keys(O.media), [STACK, PHONE]);
+  // The SetupScreen card's own style block, every rule as it writes it (the space after a comma aside), su- names kept.
+  const SETUP = `.su-prog { display: grid; gap: 10px; padding: var(--space-4) var(--space-5); margin-bottom: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); }
+.su-prog p { font-size: 14px; color: var(--ink-muted); }
+.su-prog p b { color: var(--ink); }
+.su-big { font-size: 40px; line-height: 44px; font-weight: 800; letter-spacing: -0.02em; margin-right: 4px; font-variant-numeric: tabular-nums; }
+.su-bar { width: 100%; display: block; overflow: visible; }
+.su-seg { fill: var(--tone); }
+.su-seg--todo { fill: var(--surface-3); }
+.su-steps { display: grid; gap: 8px; }
+.su-step { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-4); padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); }
+.su-step--done { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.su-step__b { display: grid; gap: 8px; min-width: 0; }
+.su-step__t { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 15px; font-weight: 700; }
+.su-step__t .chip { margin-left: auto; }
+.su-n { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: var(--surface); color: var(--ink-muted); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.su-step--done .su-n { background: var(--surface-2); }
+.su-step__s { font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.su-step__s b { color: var(--ink); }
+.su-step .cmd { background: var(--surface); }
+.su-step--done .cmd { background: var(--surface-2); }
+.su-alt { font-size: 12px; color: var(--ink-muted); }
+.su-act { display: flex; gap: 8px; flex-wrap: wrap; }
+.su-p { font-size: 13px; margin-bottom: var(--space-3); }
+.su-empties { gap: 8px; }
+.su-empties .collapsed { background: var(--surface-2); }
+@media (max-width: 760px) { .su-step { grid-template-columns: minmax(0, 1fr); gap: 10px; } .su-step__t .chip { margin-left: 0; } }`;
+  const card = rulesOf(SETUP);
+  assert.equal(Object.keys(card.top).length, 24);
+  for (const [sel, decls] of Object.entries(card.top)) assert.deepEqual(O.top[sel], tightDecls(decls), sel);
+  for (const [sel, decls] of Object.entries(card.media[PHONE])) assert.deepEqual(O.media[PHONE][sel], tightDecls(decls), `phone ${sel}`);
+  // The timeline at least as wide as bundle.css holds it on a phone, at every width: its labels are fitted to lanes at
+  // that width, and its box scrolls inside the card at every width.
+  assert.deepEqual(O.top[".tl-wrap .tl"], bundleRule(".tl-wrap .tl", { phone: true }));
+  assert.deepEqual(O.top[".tl-wrap .tl"], { "min-width": "720px" });
+  assert.equal(bundleRule(".tl-wrap")["overflow-x"], "auto");
+  // A running pill's host in full ink (console-contrast.test.mjs measures why, and holds this rule to winning).
+  assert.deepEqual(O.top[".tp-l--run .tp-sub"], { "fill-opacity": "1" });
+  // The four KPI cards one height: the grid stretches each panel's section, and the card inside fills it.
+  assert.deepEqual(O.top["main>.cards-4>section>.card"], { height: "100%" });
+  // The project chips: links drawn as bundle.css draws the card's buttons (less a button's own border, ground and
+  // cursor), the current one as its pressed one, and the row scrolling inside itself as bundle.css lets it on a phone.
+  const { border, background, cursor, ...look } = bundleRule(".projseg button");
+  assert.deepEqual([border, background, cursor], ["0", "transparent", "pointer"]);
+  for (const [k, v] of Object.entries(look)) assert.equal(O.top[".projseg a"][k], v, `.projseg a ${k}`);
+  assert.deepEqual(O.top[".projseg a b"], bundleRule(".projseg button b"));
+  assert.deepEqual(O.top['.projseg a[aria-current="page"]'], bundleRule('.projseg [aria-pressed="true"]'));
+  assert.deepEqual(O.top['.projseg a[aria-current="page"] b'], bundleRule('.projseg [aria-pressed="true"] b'));
+  // Grounded on the inset, as the card's segmented controls beside it are: bundle.css grounds the row on the card's
+  // own colour, for the title bar over the canvas; in a card it was invisible and its 16 px lead read as an indent.
+  assert.equal(bundleRule(".projseg").background, "var(--surface)");
+  assert.equal(bundleRule(".seg").background, "var(--surface-2)");
+  // Above a phone the row wraps onto as many lines as its chips need (scrolling with no scrollbar, a 1440 px card showed
+  // four and a half chips and left the rest to a trackpad), one line as high as bundle.css's row, its corners the card's
+  // (a pill's on one line). On a phone it is one line that scrolls inside itself, as bundle.css draws it there.
+  const controlH = Number(/(?:^|;)--control-h:(\d+)px/.exec(tokenCss())[1]);
+  const chipH = Number(/^(\d+)px$/.exec(bundleRule(".projseg button").height)[1]);
+  assert.equal(bundleRule(".projseg").height, "var(--control-h)");
+  assert.equal(bundleRule(".projseg").display, "inline-flex");
+  assert.deepEqual(O.top["#p-timeline .projseg"], { "max-width": "100%", height: "auto", "min-height": "var(--control-h)", "padding-top": `${(controlH - chipH) / 2}px`, "padding-bottom": `${(controlH - chipH) / 2}px`, "flex-wrap": "wrap", "border-radius": "var(--radius-lg)", background: "var(--surface-2)" });
+  assert.ok(Number(/(?:^|;)--radius-lg:(\d+)px/.exec(tokenCss())[1]) >= controlH / 2, "one line's corners are a pill's");
+  assert.deepEqual(bundleRule(".projseg", { phone: true }), { "max-width": "100%", "overflow-x": "auto", "scrollbar-width": "none", flex: "none" });
+  assert.deepEqual(O.media[PHONE]["#p-timeline .projseg"], { "flex-wrap": "nowrap" });
+  assert.deepEqual(O.top["#p-timeline .projseg::-webkit-scrollbar"], { display: "none" });
+  // The "+N more" after the chips is one word that never wraps ("+10" over "more" at 375 px), a chip's padding clear.
+  assert.deepEqual(O.top["#p-timeline .projseg>.muted"], { flex: "none", "white-space": "nowrap", padding: `0 ${/^0 (\d+px)$/.exec(bundleRule(".projseg button").padding)[1]}` });
+  // The focus ring (bundle.css's 2 px outline 2 px out) of a chip at the row's end or edge stays inside the scroll box
+  // on a phone: the row is control-h high around its 38 px chips and padded 5 px at its right.
+  const ring = /\n:focus-visible \{ outline: (\d+)px solid var\(--focus\); outline-offset: (\d+)px; \}/.exec(PULSE_CSS).slice(1).map(Number);
+  assert.match(bundleRule(".projseg").padding, /^0 5px 0 /);
+  assert.ok((controlH - chipH) / 2 >= ring[0] + ring[1] && 5 >= ring[0] + ring[1]);
+  // Below stackMax the two-column rows are one column and the KPI cards two to a row; on a phone one to a row again
+  // (this page's rule outweighs bundle.css's), and the layout's wrappers 12 px apart, as main stands them apart there.
+  assert.deepEqual(O.media[STACK], { "main>.cols": { "grid-template-columns": "minmax(0,1fr)" }, "main>.cards-4": { "grid-template-columns": "repeat(2,minmax(0,1fr))" } });
+  assert.equal(O.media[PHONE]["main>.cards-4"]["grid-template-columns"], "minmax(0,1fr)");
+  assert.ok(PAGE_CSS.overview.indexOf(PHONE) > PAGE_CSS.overview.indexOf(STACK), "the phone's rule comes later, at the same weight");
+  const phoneGap = /\n {2}\.page \{[^}]*gap: (\d+px); \}/.exec(PULSE_CSS)[1];
+  assert.equal(phoneGap, "12px");
+  assert.equal(SHELL.media[PHONE].main.gap, phoneGap);
+  assert.deepEqual(O.media[PHONE]["main>.cards-4,main>.cols,main>.cols>.stack"], { gap: phoneGap });
+  // Above a phone the wrappers' gap is main's, bundle.css's card gap, so the confirm slot the script puts after the
+  // KPI cards' grid stands one card gap under it, as between any two cards; nothing sets a margin of the slot's own.
+  for (const w of [".cards-4", ".cols", ".stack"]) assert.equal(bundleRule(w).gap, SHELL.top.main.gap, w);
+  for (const css of [SHELL_CSS, pageCss()]) {
+    const { top, media } = rulesOf(css);
+    for (const rules of [top, ...Object.values(media)]) for (const [sel, d] of Object.entries(rules)) if (/\.cslot(?![\w-])/.test(sel)) assert.ok(!Object.keys(d).some((k) => k.startsWith("margin")), sel);
+  }
+  assert.deepEqual(SHELL.top[".cslot"], { display: "grid", gap: "var(--space-3)", "min-width": "0" });
+  // The arithmetic stackMax stands on (OVERVIEW_LAYOUT): the page's 24 px sides, the 16 px gaps, the cards' 20 px
+  // padding, --side-w beside the timeline; Needs you's rows measured 188 to 205 px over the cards' sample.
+  const sideW = Number(/(?:^|;)--side-w:(\d+)px/.exec(tokenCss())[1]);
+  const kpiInside = (w) => (w - 48 - 3 * 16) / 4 - 40;
+  assert.ok(kpiInside(OVERVIEW_LAYOUT.stackMax + 1) >= 205 && kpiInside(1024) < 205);
+  assert.ok(OVERVIEW_LAYOUT.stackMax + 1 - 48 - 16 - sideW >= 600, "the timeline's column from stackMax");
+  assert.ok(OVERVIEW_LAYOUT.stackMax > TOP_BAR.phoneMax);
+  assert.doesNotMatch(PAGE_CSS.overview, /@container|:has\(/, "nothing past the browser floor in the overview's layout");
+});
+
+test("the overview's spacing: notes 6 px apart, a banner a row gap above what follows, a host note's glyph on its first line, a waitlist's notes and rows", () => {
+  const O = rulesOf(PAGE_CSS.overview);
+  // A card's sentences one under another, and one under the key row, 6 px apart: bundle.css gives a sentence no
+  // margin, and the key row space above it alone.
+  assert.ok(!Object.keys(bundleRule(".card__sub")).some((k) => k.startsWith("margin")));
+  assert.ok(!Object.keys(bundleRule(".keyrow")).some((k) => k.startsWith("margin-bottom")));
+  assert.deepEqual(O.top[".card>.card__sub+.card__sub,.card>.keyrow+.card__sub"], { "margin-top": "6px" });
+  // A banner in a card stands one row gap above what follows it, as a card's rows stand above its sentences.
+  assert.ok(!Object.keys(bundleRule(".banner")).some((k) => k.startsWith("margin")));
+  assert.deepEqual(O.top[".card>.banner+*"], { "margin-top": "var(--space-3)" });
+  // A card's sentence under its rows, its dots or its big numbers, one row gap below them (Needs you with no row drew its
+  // notes on its big numbers' words).
+  assert.ok(!Object.keys(bundleRule(".bigpair")).some((k) => k.startsWith("margin")));
+  assert.deepEqual(O.top[".card>.rows+.card__sub,.card>.axis+.card__sub,.card>.bigpair+.card__sub"], { "margin-top": "var(--space-3)" });
+  // A host's tinted note keeps its glyph beside its first line when it wraps (bundle.css centres it on the whole note),
+  // centred on that line: bundle.css's 20 px line, its 14 px small glyph.
+  assert.equal(bundleRule(".hostrow__x > span")["align-items"], "center");
+  assert.deepEqual(O.top[".hostrow__x>.tinted"], { "align-items": "flex-start" });
+  const line = Number(/^(\d+)px$/.exec(bundleRule("body")["line-height"])[1]);
+  const glyph = Number(/^(\d+)px$/.exec(bundleRule(".ic--sm").height)[1]);
+  assert.equal(bundleRule(".hostrow__x")["line-height"], undefined, "the note's line is the body's");
+  assert.deepEqual(O.top[".hostrow__x>.tinted>.ic"], { "margin-top": `${(line - glyph) / 2}px` });
+  // A waitlist's notes under its rows indented as bundle.css indents the rows, on a phone too.
+  assert.deepEqual(O.top[".wl__g>.card__sub"], { "padding-left": bundleRule(".wl__l")["padding-left"] });
+  assert.deepEqual(O.media[PHONE][".wl__g>.card__sub"], { "padding-left": bundleRule(".wl__l", { phone: true })["padding-left"] });
+  // Above a phone a row's sentence keeps 10em beside the tag and the id, else it wraps under them with the action:
+  // bundle.css gives it what is left (flex 1 from nothing), and beside a cron run's id that was about 50 px. An id
+  // wider than the row breaks (bundle.css keeps a code span on one line) rather than pushing the row out of its card.
+  assert.equal(bundleRule(".wl__t").flex, "1");
+  assert.equal(bundleRule(".code")["white-space"], "nowrap");
+  assert.deepEqual(O.top[".wl__l li"], { "flex-wrap": "wrap" });
+  assert.deepEqual(O.top[".wl__l li>.wl__t"], { flex: "1 1 10em", "min-width": "0" });
+  assert.deepEqual(O.top[".wl__l li>.code"], { "min-width": "0", "white-space": "normal", "overflow-wrap": "anywhere" });
+  // On a phone a waitlist row wraps (bundle.css), and its sentence takes a line of its own under the tag, the id and
+  // the action. The action is at the row's right at every width, on a line of its own too: the rule was the phone's
+  // alone, and a wrapped action sat at the left above a phone.
+  assert.deepEqual(bundleRule(".wl__l li", { phone: true }), { "flex-wrap": "wrap" });
+  assert.deepEqual(O.media[PHONE][".wl__l li>.wl__t"], { flex: "1 1 100%", order: "2" });
+  assert.deepEqual(O.top[".wl__l li>.btn,.wl__l li>.act"], { "margin-left": "auto" });
+  assert.equal(O.media[PHONE][".wl__l li>.btn,.wl__l li>.act"], undefined, "one rule, not a phone's copy");
+});
+
+test("the overview's long names: a host's, a queue's and a doctor note's break, a timeline row's name is cut, and a phone's timeline opens at now", () => {
+  const O = rulesOf(PAGE_CSS.overview);
+  // Every name in running text breaks anywhere, in the code face too: a host row's name and notes, a waitlist row's
+  // sentence (a host, a stray host queue, the job holding a slot, a wait check's profiles), a card's sentence
+  // (Scheduled's trigger ids) and a first run's step (the host its worker step names). bundle.css breaks none of them
+  // and keeps a code span on one line, so a 64-character host name pushed a phone's page sideways (the worker step's to
+  // 584 px), and a stray queue's sentence a 375 px page to 568 px.
+  assert.equal(bundleRule(".code")["white-space"], "nowrap");
+  for (const sel of [".hostrow__n", ".hostrow__x", ".qp", ".wl__t", ".card__sub"]) assert.equal(bundleRule(sel)["overflow-wrap"], undefined, sel);
+  assert.equal(O.top[".su-step__s"]["overflow-wrap"], undefined, "the step's own rule is its type");
+  assert.deepEqual(O.top[".hostrow__n,.hostrow__x,.wl__t,.card__sub,.su-step__s"], { "overflow-wrap": "anywhere" });
+  // A name is a box of its own, as wide as its line at most: it moves whole to the next line where it fits there, and
+  // breaks only where it is longer than a line. As text, "nightly-tidy" broke after its dash at the end of a line.
+  assert.deepEqual(O.top[".hostrow__x .code,.qp .code,.wl__t .code,.card__sub .code,.su-step__s .code"], { display: "inline-block", "max-width": "100%", "white-space": "normal", "overflow-wrap": "anywhere" });
+  // A queue's pill breaks its name alone, never its counts' words: anywhere on the whole pill let its flex items shrink
+  // below their words ("paus/ed", "delaye/d"). The counts go under a name too long for the line, and the pill, 30 px
+  // high in bundle.css, grows with its lines and keeps that height for one.
+  assert.deepEqual(O.top[".hostrow__n,.hostrow__x,.qp"], { "min-width": "0" });
+  assert.equal(bundleRule(".qp").display, "inline-flex");
+  for (const [sel, d] of Object.entries(O.top)) if (/(?:^|,)\.qp(?:,|$)/.test(sel)) assert.equal(d["overflow-wrap"], undefined, sel);
+  // A card head's end group (the Hosts head: a pause chip, Pause fleet and Resume fleet) wraps within the head, which
+  // bundle.css wraps, rather than running past a phone's edge in one line.
+  assert.equal(bundleRule(".card__head .end")["flex-wrap"], undefined);
+  assert.deepEqual(O.top[".card__head>.end"], { "flex-wrap": "wrap", "justify-content": "flex-end", "min-width": "0" });
+  // A name too long for its line takes it, and what follows goes under it (the venues beside the name, a queue line's
+  // counts beside its queue), rather than being squeezed a letter a line beside it; a tinted note does not wrap, so its
+  // glyph stays beside its text.
+  assert.deepEqual(O.top[".hostrow__n,.hostrow__x>span:not(.tinted)"], { "flex-wrap": "wrap" });
+  assert.equal(bundleRule(".qp").height, "30px");
+  const line = Number(/^(\d+)px$/.exec(bundleRule("body")["line-height"])[1]);
+  assert.deepEqual(O.top[".qp"], { height: "auto", "min-height": "30px", "padding-top": `${(30 - line) / 2}px`, "padding-bottom": `${(30 - line) / 2}px`, "flex-wrap": "wrap" });
+  // A card head's chip (the Hosts head's pause state) is as wide as the head's end group at most, its words wrapping
+  // inside it, one line keeping bundle.css's 26 px: a chip wider than the card ran out of it on the left.
+  assert.equal(bundleRule(".chip")["white-space"], "nowrap");
+  assert.equal(bundleRule(".chip").height, "26px");
+  const chipLine = Number(/^(\d+)px$/.exec(bundleRule("body")["line-height"])[1]);
+  assert.deepEqual(O.top[".card__head>.end>.chip"], { "min-width": "0", "max-width": "100%", height: "auto", "min-height": "26px", "padding-top": `${(26 - chipLine) / 2}px`, "padding-bottom": `${(26 - chipLine) / 2}px`, "white-space": "normal", "overflow-wrap": "anywhere" });
+  // A timeline row's name is cut with an ellipsis 8 px short of the heads' column (bundle.css keeps a tag on one line,
+  // and a long one ran over the lane), its repositories broken where they must; the name is whole in its title.
+  assert.equal(/^(\d+px) /.exec(bundleRule(".tl")["grid-template-columns"])?.[1], "124px");
+  assert.equal(bundleRule(".ptag")["white-space"], "nowrap");
+  assert.deepEqual(O.top[".tl__h>.ptag,.tl__h>.code"], { display: "block", "max-width": "calc(100% - 8px)", overflow: "hidden", "text-overflow": "ellipsis" });
+  assert.deepEqual(O.top[".tl__h>.tl__repo"], { "max-width": "calc(100% - 8px)", "overflow-wrap": "anywhere" });
+  // The sentence that counts the rows left out is a card's, after the scroll box (timeline.mjs), with no rule here.
+  assert.equal(O.top[".tl__cut"], undefined);
+  // On a phone the timeline's scroll box runs right to left, so it opens at its end, where now and what is in line
+  // are; the timeline inside it is drawn left to right.
+  assert.equal(bundleRule(".tl-wrap")["overflow-x"], "auto");
+  assert.deepEqual(O.media[PHONE][".tl-wrap"], { direction: "rtl" });
+  assert.deepEqual(O.media[PHONE][".tl-wrap>.tl"], { direction: "ltr" });
+  assert.equal(O.top[".tl-wrap"], undefined, "above a phone it opens at its start, the row heads in view");
+});
+
+test("the overview's kit marks in the shell's rules: a stack column, slot dots that wrap, an hour a column, a write in a row, an empty headline", () => {
+  // A stack is one column that may shrink, as main is, so a card's timeline (720 px on a phone) scrolls in its card.
+  assert.deepEqual(SHELL.top[".stack"], { "grid-template-columns": "minmax(0,1fr)" });
+  assert.equal(SHELL.top.main["grid-template-columns"], "minmax(0,1fr)");
+  assert.deepEqual(bundleRule(".tl-wrap .tl", { phone: true }), { "min-width": "720px" });
+  // Slot dots wrap; a host row's eight to a line (the width of eight of bundle.css's dots and their gaps); a KPI row's
+  // with room above and below once they wrap, which a one-line row's 32 px still holds.
+  assert.deepEqual(SHELL.top[".sls"], { "flex-wrap": "wrap" });
+  const dot = Number(/^(\d+)px$/.exec(bundleRule(".sl").width)[1]);
+  const gap = Number(/^(\d+)px$/.exec(bundleRule(".sls").gap)[1]);
+  assert.deepEqual(SHELL.top[".hostrow>.sls,.rowpill>.sls"], { "max-width": `${8 * dot + 7 * gap}px` });
+  assert.equal(SHELL.top[".hostrow>.sls,.rowpill>.sls"]["max-width"], "132px");
+  assert.deepEqual(SHELL.top[".rowpill>.sls"], { padding: "6px 0" });
+  assert.ok(dot + 2 * 6 <= Number(/^(\d+)px$/.exec(bundleRule(".rowpill")["min-height"])[1]), "a row of one line keeps the card's height");
+  // The spend dots: as many columns as hours, each the others' width; a column's 7 dots fit bundle.css's fixed height.
+  assert.equal(bundleRule(".sd")["grid-template-columns"], "repeat(16, 1fr)");
+  assert.deepEqual(SHELL.top[".sd"], { "grid-template-columns": "none", "grid-auto-flow": "column", "grid-auto-columns": "minmax(0,1fr)" });
+  const sdDot = Number(/^(\d+)px$/.exec(bundleRule(".sd__c i").height)[1]);
+  const sdGap = Number(/^(\d+)px$/.exec(bundleRule(".sd__c").gap)[1]);
+  assert.ok(SPEND_DOTS * sdDot + (SPEND_DOTS - 1) * sdGap <= Number(/^(\d+)px$/.exec(bundleRule(".sd").height)[1]));
+  // A write as a row's action: at the row's right, its button the card's 24 px action pill (a round button keeps its own).
+  assert.deepEqual(SHELL.top[".rowpill>form.act"], { "margin-left": "auto" });
+  const act = bundleRule(".rowpill__act");
+  assert.deepEqual(SHELL.top[".rowpill>form.act .btn:not(.btn--round)"], { height: act.height, padding: act.padding, "font-size": act["font-size"] });
+  assert.equal(act.height, "24px");
+  // In a row pill only a name gives way: an id or a host's name is cut with an ellipsis where the row is short of room;
+  // its words, its slot dots, its tag, its end and its action keep their width. When the words and the dots shrank
+  // with the name, a 64-character host squeezed "doctor fails" to "d…" and stacked its dots one to a line.
+  assert.deepEqual(SHELL.top[".rowpill>.code,.rowpill>b"], { "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+  assert.deepEqual(SHELL.top[".rowpill>span:not([class]),.rowpill>.sls"], { flex: "none" });
+  assert.deepEqual(SHELL.top[".rowpill>span:not([class])"], { "white-space": "nowrap" });
+  for (const [sel, d] of Object.entries(SHELL.top)) if (/\.rowpill>(?:span|\.sls)/.test(sel)) assert.equal(d["min-width"], undefined, sel);
+  assert.equal(bundleRule(".ptag").flex, "none");
+  assert.equal(bundleRule(".rowpill .end").flex, "none");
+  // The headline's line is not drawn while its panel is empty (where :has() is known; elsewhere it costs a 4 px gap).
+  assert.deepEqual(SHELL.top[".titlebar__sub:has(>[data-panel]:empty)"], { display: "none" });
+  assert.equal(bundleRule(".titlebar__lead").gap, "4px");
 });
 
 test("pageCss confines each page's rules to its own body, and refuses a key that is not a page name", () => {

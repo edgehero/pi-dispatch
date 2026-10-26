@@ -15,7 +15,7 @@
     {"el":"Counts","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#count"},
     {"el":"Status dots, beside the word they mark","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#dot"},
     {"el":"Icon tiles","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#tile"},
-    {"el":"Slot dots: filled blue for running, yellow ring for held, empty ring for free","kind":"readme","status":"illustrative","reason":"the slot-dot helper is PR 3's (TimelineAndWaitlists; Status is in its card list too); kit.dot is a status dot beside a word, not a slot"},
+    {"el":"Slot dots: filled blue for running, yellow ring for held, empty ring for free","kind":"readme","status":"new","source":"admin/src/console/kit.mjs#slots","golden":["panels/waitlist-slot.operator"],"shows":"class=\"sl sl--hold\"","reason":"PR 3's helper (the overview's Running and Hosts); kit.dot stays a status dot beside a word, not a slot"},
     {"el":"Tags and chips with sample values (web, api, billing, ops; local, podman, openshell, openshell-bind; 60% of cap; longest 2h 14m)","kind":"sample","status":"illustrative","reason":"sample values"}
   ]
 }

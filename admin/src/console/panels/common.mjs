@@ -9,6 +9,7 @@
 import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { classifyRow } from "../../costs.mjs";
+import { beatAgeOf } from "../../doctor-view.mjs";
 import { fmtCost, usd2 } from "../../panel.mjs";
 import { resolveWorkerCount, forgeLinkOf, progressStaleFor } from "../../read-model.mjs";
 // The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
@@ -264,11 +265,13 @@ export const BEAT_FRESH_MS = MIN;
  * way round is kept: a fresh beat with no BullMQ worker is online, because `getWorkers` rests on
  * CLIENT SETNAME, which some providers do not support (`resolveWorkerCount`'s reason for preferring the registry).
  *
- * REJECTED, for now: measuring a beat's age on Valkey's clock, as the row's TTL minus its PTTL (each beat PEXPIREs the
- * row to the full `HOST_TTL_MS`). That number is clock-free, but it belongs to `readLiveHosts` in the worker, which
- * routing (`capabilities.mjs`), capacity and doctor read too, and doctor's skew check needs `staleMs` to stay the
- * wall-clock difference it is; a second field would be one more round trip per host on a read the console makes every
- * second. BullMQ's list already answers the one question this page asks, without either.
+ * A ROW'S AGE ON VALKEY'S CLOCK (issue #737) is now `readLiveHosts`' too: `ttlAgeMs`, the row's TTL minus its PTTL,
+ * and `skewMs`, the console's clock against the host's measured from it, beside `staleMs`, which stays the wall-clock
+ * difference doctor's skew check needs. The overview's hosts panel says a host's clock is out of step from those
+ * (`hostSkewText`, past `HOST_SKEW_CLAIM_MS`). This rule still judges by the beats and BullMQ's list, a beat's age
+ * taken as `beatAgeOf` gives it: Valkey's own measure of the row's last refresh where the reader had it (every beat
+ * refreshes the row, so it is how long ago the host last beat, whatever the host's clock says), else the wall-clock
+ * `staleMs`. A host whose clock runs behind is then beating when it beats, and says so, never "late".
  */
 export function workersOnline(s) {
   const q = s?.queue ?? {};
@@ -277,8 +280,16 @@ export function workersOnline(s) {
   const connected = Number.isSafeInteger(q.workers) && q.workers > 0 ? q.workers : 0;
   if (q.fleetDegraded) return { count: n, online: null, connected, staleBeats: false, none: false };
   if (hosts.length === 0) return { count: n, online: connected, connected, staleBeats: false, none: connected === 0 };
-  const online = hosts.filter((h) => Number.isSafeInteger(h?.staleMs) && h.staleMs <= BEAT_FRESH_MS).length;
+  const online = hosts.filter((h) => beatFresh(h)).length;
   return { count: n, online, connected, staleBeats: connected > online, none: online === 0 && connected === 0 };
+}
+
+export { beatAgeOf };
+
+/** Whether a host row beat within `BEAT_FRESH_MS`, by `beatAgeOf` (doctor-view.mjs). */
+export function beatFresh(h) {
+  const age = beatAgeOf(h);
+  return age !== null && age <= BEAT_FRESH_MS;
 }
 
 /** A host's last beat as an age, with a warning class once it is older than `BEAT_FRESH_MS`. */

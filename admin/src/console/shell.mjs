@@ -26,6 +26,12 @@
  * page). It is drawn only from a count that is known: an unreadable or partial parked list draws no bubble, never a 0
  * that reads as "nobody is waiting".
  *
+ * SO IS A PAGE'S HEADLINE (PR 3 of issue #737). The overview's line under its title ("All clear. 4 jobs running,
+ * nothing needs you.") changes while the page is open, and the title bar is the frame's static markup, so the line is
+ * `<span id="p-headline" data-panel>` inside the title bar's `p.titlebar__sub`, drawn only for a page that has one
+ * (`shellHtml`'s `headline`). The span carries its `id` and `data-panel` and nothing else, as every panel element does;
+ * the paragraph around it is the frame's.
+ *
  * EVERY STATE THE SCRIPT CAN SWITCH TO IS DRAWN HERE, HIDDEN (PR 2 of issue #737). The live notes (`LIVE_NOTES`: the
  * console out of reach, the stream refused, the session over, the data shown as last seen) are all in `#live-note`,
  * each hidden; the write flow's one slot (`#confirm-slot`) and the note a panel kept still carries (`<template
@@ -59,6 +65,15 @@ export const NAV_MORE = Object.freeze(["audit"]);
 
 /** The Parked count's panel id (see the header). */
 export const NAV_PARKED_ID = "p-nav-parked";
+
+/** The headline's panel id (see the header): the line under a page's title that says what needs the person. */
+export const HEADLINE_ID = "p-headline";
+
+/**
+ * The panels the frame draws, not a page: each a `<span id data-panel>` the live stream swaps like a page's
+ * `<section>`. The pages' panel lists (`pages.mjs`) and the panel checks take the span ids from here.
+ */
+export const SHELL_PANEL_IDS = Object.freeze([NAV_PARKED_ID, HEADLINE_ID]);
 
 /**
  * The live pill's states (the LiveStates card): its classes, its word, and the sentence in its tooltip. `start` is the
@@ -260,8 +275,11 @@ const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(
  * it: a viewer refused the audit log is not offered its address), the read-only banner on a read-only console, the done
  * banner, the live notes on a live page, `inner`, and for an operator on a console that takes changes the confirm slot
  * and the held note's template.
+ *
+ * `headline` is the page's headline panel's first content (text or a fragment, an empty one included, which the stream
+ * fills later), drawn under the title as `#p-headline` (see the header); null, the default, draws no line.
  */
-export function shellHtml(name, ctx, inner) {
+export function shellHtml(name, ctx, inner, { headline = null } = {}) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const meta = PAGES[name];
   const role = roleOf(ctx?.session);
@@ -281,12 +299,13 @@ export function shellHtml(name, ctx, inner) {
   const flash = ctx?.flash !== null && typeof ctx?.flash === "object" ? doneBannerHtml(ctx.flash) : null;
   const notes = meta.live ? liveNoteHtml({ maxStreams: ctx?.maxStreams, reload }) : null;
   const writes = role === "operator" && !readOnly && ctx?.slot !== false ? html`${confirmSlotHtml()}<template id="held-note">${heldNoteHtml()}</template>` : null;
+  const sub = headline === null ? null : html`<p class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></p>`;
   return html`<a class="skip" href="#main">Skip to content</a>
 ${SPRITE}
 <div class="page">
 ${signedInBar({ here, role, parked, live: liveHtml, theme: ctx?.theme, readOnly, session: ctx?.session })}
 <main id="main" tabindex="-1">
-<div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1></div>${drawn}</div>
+<div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1>${sub}</div>${drawn}</div>
 ${ro}${flash}${notes}${inner}${writes}
 </main>
 </div>`;

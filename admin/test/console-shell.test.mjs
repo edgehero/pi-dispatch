@@ -9,7 +9,7 @@ import { html } from "../src/console/html.mjs";
 import { STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
 import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "../src/console/session-ends.mjs";
 import { LINK_NOTICES, LINK_STATES, LISTEN_FOOTERS, NO_SCRIPT_TEXT, linkContent, signInContent } from "../src/console/signin.mjs";
-import { LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, frameHtml, legacyWrap, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
+import { HEADLINE_ID, LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, SHELL_PANEL_IDS, frameHtml, legacyWrap, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "../src/console/theme.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
 
@@ -109,7 +109,9 @@ test("every page, both roles: one h1, one sprite, a skip link to the focusable m
 });
 
 test("the title bar: the page's title, and the run detail's back link to Runs with the run named", async () => {
-  assert.match((await draw("overview")).html, /<div class="titlebar"><div class="titlebar__lead"><h1>Overview<\/h1><\/div><\/div>/);
+  assert.match((await draw("runs")).html, /<div class="titlebar"><div class="titlebar__lead"><h1>Runs<\/h1><\/div><\/div>/);
+  // The overview's title has its headline under it (PR 3), a panel the stream fills; see the headline's own test.
+  assert.match((await draw("overview")).html, /<div class="titlebar"><div class="titlebar__lead"><h1>Overview<\/h1><p class="titlebar__sub"><span id="p-headline" data-panel>[^<]*(?:<(?!\/span>)[^<]*)*<\/span><\/p><\/div><\/div>/);
   // A viewer refused the audit log: its title, the operators-only card, no wrapper, no audit panel, and no Reload to it.
   const refused = (await draw("audit", { role: "viewer" })).html;
   assert.match(refused, /<h1>Audit log<\/h1><\/div><\/div>\n/);
@@ -118,6 +120,29 @@ test("the title bar: the page's title, and the run detail's back link to Runs wi
   const run = (await draw("run")).html;
   assert.match(run, /<div class="titlebar__lead"><a class="back" href="\/runs"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"><\/use><\/svg>Runs<\/a><h1>Run gh-1<\/h1><\/div>/);
   for (const name of Object.keys(PAGES).filter((n) => n !== "run")) assert.ok(!(await draw(name)).html.includes('class="back"'), `${name} has no back link`);
+});
+
+test("the headline: a panel span in the title bar's sub line, drawn for a page that has one, its id and data-panel alone", () => {
+  assert.equal(HEADLINE_ID, "p-headline");
+  assert.deepEqual(SHELL_PANEL_IDS, [NAV_PARKED_ID, HEADLINE_ID]);
+  assert.ok(Object.isFrozen(SHELL_PANEL_IDS));
+  const ctx = { session: { name: "ops", role: "operator" }, data: { now: 0, env: {} }, query: {} };
+  const lead = (page) => /<div class="titlebar"><div class="titlebar__lead">([^]*?)<\/div>(?:<div class="titlebar__end">|<\/div>)/.exec(String(page))[1];
+  assert.equal(lead(shellHtml("overview", ctx, html``, { headline: "All clear. 4 jobs running, nothing needs you." })), `<h1>Overview</h1><p class="titlebar__sub"><span id="p-headline" data-panel>All clear. 4 jobs running, nothing needs you.</span></p>`);
+  assert.equal(lead(shellHtml("overview", ctx, html``, { headline: html`<b>1</b> question` })), `<h1>Overview</h1><p class="titlebar__sub"><span id="p-headline" data-panel><b>1</b> question</span></p>`, "a fragment as it is");
+  // Empty, it is still drawn, for the stream to fill (the stylesheet hides the empty line); without one, no line.
+  assert.equal(lead(shellHtml("overview", ctx, html``, { headline: html`` })), `<h1>Overview</h1><p class="titlebar__sub"><span id="p-headline" data-panel></span></p>`);
+  assert.equal(lead(shellHtml("overview", ctx, html``)), "<h1>Overview</h1>");
+  assert.equal(lead(shellHtml("overview", ctx, html``, { headline: null })), "<h1>Overview</h1>");
+  // Text is escaped; the run detail keeps its back link before the title; a page drawn once keeps its end.
+  const hostile = String(shellHtml("overview", ctx, html``, { headline: HOSTILE }));
+  assert.ok(hostile.includes(`<span id="p-headline" data-panel>&lt;img src=x onerror=alert(1)&gt;&quot;&#39; </span>`), hostile.slice(0, 200));
+  assert.match(lead(shellHtml("run", { ...ctx, query: { id: "gh-1" } }, html``, { headline: "x" })), /^<a class="back" href="\/runs">[^]*<\/a><h1>Run gh-1<\/h1><p class="titlebar__sub"><span id="p-headline" data-panel>x<\/span><\/p>$/);
+  assert.match(String(shellHtml("config", ctx, html``, { headline: "x" })), /<h1>Configuration<\/h1><p class="titlebar__sub"><span id="p-headline" data-panel>x<\/span><\/p><\/div><div class="titlebar__end">/);
+  // One per page, its element carrying exactly its id and data-panel (a panel element is the stream's to swap).
+  const page = String(shellHtml("overview", ctx, html``, { headline: "x" }));
+  assert.equal(page.split('id="p-headline"').length - 1, 1);
+  assert.deepEqual(Array.from(page.matchAll(/<span ([^>]*\bdata-panel\b[^>]*)>/g), (m) => m[1]), ['id="p-nav-parked" data-panel', 'id="p-headline" data-panel']);
 });
 
 test("the live pill: drawn not live until the script connects, its states the LiveStates card's words, every state's mark drawn once", async () => {
@@ -215,13 +240,16 @@ test("the Parked count: from the snapshot or the reader's count, drawn only when
   for (const name of Object.keys(PAGES)) {
     const ids = panelIds(name);
     assert.equal(ids.includes(NAV_PARKED_ID), PAGES[name].live, name);
-    if (PAGES[name].live) assert.equal(ids.at(-1), NAV_PARKED_ID, `${name}: listed last, so a screen's first panel stays its first`);
+    // The frame's panels (the Parked count, the overview's headline) are listed after the screen's own, so a screen's
+    // first panel stays its first.
+    const shell = ids.filter((id) => SHELL_PANEL_IDS.includes(id));
+    assert.deepEqual(ids.slice(ids.length - shell.length), shell, `${name}: the frame's panels are listed last`);
     const ctx = { query: parsePageQuery(name, name === "run" ? "id=gh-1" : "").query, session: { name: "ops", role: "operator" }, data: { now: 0, env: {}, parkedCount: 3 } };
     const panels = await pagePanels(name, ctx);
     assert.deepEqual(panels.map((p) => p.id), ids, `${name}: pagePanels lists panelIds`);
     const page = String((await renderPage(name, ctx)).html);
     for (const p of panels) {
-      const tag = p.id === NAV_PARKED_ID ? "span" : "section";
+      const tag = SHELL_PANEL_IDS.includes(p.id) ? "span" : "section";
       assert.ok(page.includes(`<${tag} id="${p.id}" data-panel>${p.html}</${tag}>`), `${name}: ${p.id} is the page's own`);
     }
   }
@@ -230,15 +258,16 @@ test("the Parked count: from the snapshot or the reader's count, drawn only when
 
 test("LEGACY_PAGES is a written-out frozen list: a page added to PAGES later is not legacy by default", () => {
   // The list as written: a copy derived from PAGES would make every new page start in the old markup. PR 2
-  // converted the audit log, the two sign-in pages and the operators-only refusal.
-  assert.deepEqual(LEGACY_PAGES, ["overview", "runs", "run", "parked", "insights", "fleet", "config"]);
+  // converted the audit log, the two sign-in pages and the operators-only refusal; PR 3 the overview.
+  assert.deepEqual(LEGACY_PAGES, ["runs", "run", "parked", "insights", "fleet", "config"]);
   assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "an array, frozen: a frozen Set still takes .add()");
   assert.throws(() => LEGACY_PAGES.push("models"), TypeError);
   assert.equal(new Set(LEGACY_PAGES).size, LEGACY_PAGES.length);
   for (const name of LEGACY_PAGES) assert.ok(Object.hasOwn(PAGES, name), `${name} is a screen`);
-  // A page PAGES does not hold is not legacy, however it is spelled; nor are the pages PR 2 converted.
-  for (const name of ["audit", "login", "login-code", "forbidden", "error", "models", "watch", "secrets", "connections", "project", "host", "Overview", "", "__proto__", "constructor"]) assert.equal(LEGACY_PAGES.includes(name), false, name);
+  // A page PAGES does not hold is not legacy, however it is spelled; nor are the pages PR 2 and PR 3 converted.
+  for (const name of ["overview", "audit", "login", "login-code", "forbidden", "error", "models", "watch", "secrets", "connections", "project", "host", "Overview", "", "__proto__", "constructor"]) assert.equal(LEGACY_PAGES.includes(name), false, name);
   assert.equal(String(legacyWrap("audit", html`<p>x</p>`)), "<p>x</p>", "a converted page's content is as it is");
+  assert.equal(String(legacyWrap("overview", html`<p>x</p>`)), "<p>x</p>");
   assert.equal(String(legacyWrap("fleet", html`<p>x</p>`)), '<div class="legacy"><p>x</p></div>');
 });
 

@@ -222,6 +222,17 @@ export function mcpServerToolPattern(name) {
 const ID_CHARSET = /^[A-Za-z0-9._-]+$/;
 
 /**
+ * The longest cron `on.id` (issue #737). The id is its scheduler's key, which every admin surface reads back from
+ * Valkey (the panel, the console, the status tool) and bounds there, since anything holding the Valkey's URL can plant
+ * a scheduler and a surface prints the key in running text; and each run the scheduler mints is the job
+ * `repeat:<id>:<slot>`, the slot the run's instant in ms (at most 16 digits), which every reader of a job id takes at
+ * most 200 characters long (`DEFER_ID_RE`, the console's `RUN_ID_RE`). So the id is at most 200 less the run id's
+ * frame: every run of every legal id is a job id the readers take, and a longer id, a schedule whose runs no surface
+ * could name, is refused here. The admin's bound is this constant (`SCHEDULER_NAME_MAX`, admin/src/read-model.mjs).
+ */
+export const CRON_ID_MAX = 200 - "repeat::".length - 16;
+
+/**
  * The ceiling on `run.replicas` (REQ-REPLICA-RUNS). Three, because `PI_CONCURRENCY` defaults to 3
  * (config.mjs) and replicas above the default concurrency would queue rather than race -- a cap that
  * promised a comparison the deployment could not deliver. A literal here rather than a read of the
@@ -400,6 +411,9 @@ function normalizeCron(on, run, index, path, state) {
 	}
 	if (!ID_CHARSET.test(id)) {
 		throw configError(`cron trigger "${id}": on.id must match [A-Za-z0-9._-]+: ${path}`);
+	}
+	if (id.length > CRON_ID_MAX) {
+		throw configError(`${at}: cron on.id is ${id.length} characters, more than ${CRON_ID_MAX}: a scheduler's id is read back at most that long, so a longer one would run with no surface naming it: ${path}`);
 	}
 	if (state.seenCronIds.has(id)) {
 		throw configError(`cron trigger "${id}": duplicate on.id (cron ids must be unique): ${path}`);

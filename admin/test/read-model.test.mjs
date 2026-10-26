@@ -12,6 +12,8 @@ import {
   DEPLOYMENT_SCAFFOLD_FILES,
   readQueueState,
   readSchedulers,
+  mapSchedulers,
+  SCHEDULER_NAME_MAX,
   readBudget,
   listRuns,
   scanRunRecords,
@@ -55,6 +57,7 @@ import {
   listRunsMerged,
 } from "../src/read-model.mjs";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 
 // In-memory fs for the triggers write tests, extended with the lock methods the shared writer took on
 // in #231 (openSync "wx" + statSync mtime + unlinkSync): the fake models the lock as a file entry with
@@ -487,6 +490,50 @@ test("readSchedulers computes overdueMs for a next in the past", async () => {
   assert.equal(res[1].overdueMs, null, "a future next is not overdue");
   assert.equal(res[2].next, null);
   assert.equal(res[2].overdueMs, null);
+});
+
+test("a scheduler's id and job name are read in the cron id charset and at most SCHEDULER_NAME_MAX characters, else null, and the entry stays", async () => {
+  // Anything holding the Valkey's URL can add a scheduler, and every surface prints its id in running text: a planted
+  // 3,000-character one is no id the triggers loader takes, so it is read as no id, never cut to one that names nothing.
+  assert.equal(SCHEDULER_NAME_MAX, CRON_ID_MAX);
+  const now = 1_000_000;
+  const at = (n) => "n".repeat(n);
+  const raw = [
+    { key: at(3000), name: at(3000), pattern: "0 3 * * *", next: now - 5000 },
+    { key: at(SCHEDULER_NAME_MAX), name: "local", pattern: "0 4 * * *", next: now + 5000 },
+    { key: at(SCHEDULER_NAME_MAX + 1), name: "local", pattern: "0 5 * * *", next: now + 5000 },
+    { key: "nightly<b>tidy</b>", name: "lo cal", pattern: "0 6 * * *", next: now + 5000 },
+    { key: "nightly.tidy_2-a", name: "local", every: 60000, next: now + 5000 },
+    { key: 42, name: { a: 1 }, next: now + 5000 },
+    // An entry without BullMQ's `key` has no key: neither another field nor its job name stands in for one.
+    { id: "by-id", name: "local", next: now + 5000 },
+    { name: "only-name", next: now + 5000 },
+    // The cron id charset is letters, digits and . _ - alone: a colon (a legacy repeat key's separator), a slash, an @,
+    // a letter outside ASCII and a control byte are each outside it.
+    { key: "repeat:nightly", name: "lo:cal", next: now + 5000 },
+    { key: "acme/nightly", name: "local@h", next: now + 5000 },
+    { key: "nachtl\u00e9", name: "lo\u0007cal", next: now + 5000 },
+  ];
+  const makeQueueFn = () => ({ async getJobSchedulers() { return raw; }, async close() {} });
+  const read = await readSchedulers({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], disconnect() {} }), now: () => now });
+  const mapped = mapSchedulers(raw, now);
+  for (const res of [read, mapped]) {
+    assert.deepEqual(res.map((s) => [s.key, s.name]), [
+      [null, null],
+      [at(SCHEDULER_NAME_MAX), "local"],
+      [null, "local"],
+      [null, null],
+      ["nightly.tidy_2-a", "local"],
+      [null, null],
+      [null, "local"],
+      [null, "only-name"],
+      [null, null],
+      [null, null],
+      [null, null],
+    ]);
+    assert.equal(res.length, raw.length, "a refused id keeps its entry: a schedule is there");
+    assert.deepEqual([res[0].pattern, res[0].next, res[0].overdueMs], ["0 3 * * *", now - 5000, 5000], "with its pattern, its next fire and its overdue time");
+  }
 });
 
 test("readSchedulers returns { unreachable } on a connection error", async () => {

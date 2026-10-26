@@ -435,6 +435,26 @@ test("a reader that writes nothing (prune: false) skips a dead member and leaves
 	assert.ok(!redis.sets.get(HOST_SET).has("ghost"), "the default still prunes");
 });
 
+test("a member or a row name no worker can have is no host: skipped, its row never read for a bad member, never pruned (#737)", async () => {
+	const redis = fakeRedis();
+	const long = `a${"b".repeat(3000)}`;
+	const members = ["mini1", long, "bad name", "-flag", "mini2", "mini3"];
+	redis.sets.set(HOST_SET, new Set(members));
+	for (const m of members) redis.hashes.set(hostKey(m), { name: m, beatAt: String(NOW) });
+	// A member that holds to the rule, whose row names itself something that does not: the row is no host's either.
+	redis.hashes.set(hostKey("mini2"), { name: "<b>mini2</b>", beatAt: String(NOW) });
+	// A row with no name of its own is named by its member, as before.
+	redis.hashes.set(hostKey("mini3"), { beatAt: String(NOW) });
+	assert.ok(!WORKER_NAME_RE.test(long) && !WORKER_NAME_RE.test("bad name") && !WORKER_NAME_RE.test("-flag"));
+	const { hosts } = await readLiveHosts(redis, { now: () => NOW });
+	assert.deepEqual(hosts.map((h) => h.name), ["mini1", "mini3"]);
+	assert.ok(!JSON.stringify(hosts).includes("bbbb") && !JSON.stringify(hosts).includes("<b>"), "nothing of a skipped row is handed on");
+	const read = redis.calls.filter((c) => c[0] === "hgetall").map((c) => c[1]);
+	assert.deepEqual(read, ["mini1", "mini2", "mini3"].map(hostKey), "a member that fails the rule is not even read");
+	assert.ok(!redis.calls.some((c) => c[0] === "srem"), "and nothing is removed: what someone else wrote is not the reader's to delete");
+	assert.deepEqual([...redis.sets.get(HOST_SET)], members);
+});
+
 // ---- issue #737: the row's age on Valkey's clock, the clock skew, and a row with no expiry ------------------------------
 
 /**

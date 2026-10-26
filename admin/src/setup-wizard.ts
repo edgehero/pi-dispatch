@@ -30,6 +30,7 @@ import { join } from "node:path";
 // The single source of truth for skill-directory names -- the same regex the worker's flow gate applies
 // at job time, so the wizard can never offer a flow the gate would refuse on shape.
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
+import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 import {
   POINTER_ENV_ALLOWLIST,
   POINTER_VERSION,
@@ -1453,8 +1454,8 @@ async function offerFirstTrigger(
   const id = idAnswer.trim() === "" ? "nightly" : idAnswer.trim();
   // The triggers validator's own charset (triggers.mjs:144-151), checked here so a bad id fails at the
   // dialog instead of surfacing as a rejected write three questions later.
-  if (!CRON_ID_RE.test(id)) {
-    notify?.(`invalid cron id '${id}' — letters, digits, dot, dash, underscore only (no ':') — skipping the trigger`, "error");
+  if (!CRON_ID_RE.test(id) || id.length > CRON_ID_MAX) {
+    notify?.(`invalid cron id: letters, digits, dot, dash, underscore only (no ':'), at most ${CRON_ID_MAX} characters; skipping the trigger`, "error");
     return;
   }
   const patternAnswer = await ui.input("schedule — cron pattern, 5 or 6 fields (min hour day month weekday)", "0 3 * * *");

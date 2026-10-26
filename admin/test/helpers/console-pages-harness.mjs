@@ -23,6 +23,14 @@ import { tempDir } from "./temp-dir.mjs";
  * failed one, which only a running fleet produces. The pricing façade is the real one with its `piAiVersion` pinned to
  * the version the fixture's records carry, so a pi bump does not rewrite the spend footer.
  *
+ * THE JOBS IN LINE (issue #737) are real: `WAITING_SEEDS`, added to the shared queue with BullMQ's own `add` and handed
+ * to a real BullMQ Worker whose processor is the worker's own deferral (`defer-write.mjs` `makeDeferTo`): each job is
+ * deferred with its reason (`deferTo`, which writes the record and moves the job to the delayed set) or fails once and
+ * is retried on its backoff (`noteRetry`, then a throw), exactly as the processor does. So the overview's In line,
+ * timeline and Waitlists read records and delayed jobs the shipped worker writes, through the real `readWaiting`. The
+ * shared queue's waiting, delayed and paused counts are then read from it, so its counts agree with what waits. The
+ * held job the fixture seeds (`gh-77c1`, held on `run.waitFor`) is one of them, deferred until its hold's instant.
+ *
  * VALKEY: `VALKEY_TEST_URL`, database 8. Not render-images' 7: without a server binary on PATH that test seeds
  * database 7 of the same server, and the two files run concurrently. The database must be empty and is emptied again
  * when done. Without `VALKEY_TEST_URL` the render tests are skipped.
@@ -34,6 +42,9 @@ import { tempDir } from "./temp-dir.mjs";
  */
 
 const SELF = fileURLToPath(import.meta.url);
+// The frame's panels (`shell.mjs` `SHELL_PANEL_IDS`), for the parent's panel check. Imported in the parent alone: the
+// child runs this file too, and there no project module may load before its clock is frozen.
+const { SHELL_PANEL_IDS } = process.env.CONSOLE_PAGES_CHILD ? { SHELL_PANEL_IDS: [] } : await import("../../src/console/shell.mjs");
 export const FIXTURES = fileURLToPath(new URL("../fixtures/console/", import.meta.url));
 const BASE = process.env.VALKEY_TEST_URL;
 const URL_8 = BASE ? `${BASE.replace(/\/\d*$/, "")}/8` : null;
@@ -43,6 +54,8 @@ const run = promisify(execFile);
 /** The screens and the query each is rendered with. */
 export const SHOTS = Object.freeze([
   ["overview", "overview", ""],
+  // Issue #737: the timeline by host over its widest window, the overview's other grouping, through its query.
+  ["overview-host", "overview", "rows=host&zoom=24h"],
   ["runs", "runs", ""],
   ["runs-filtered", "runs", "project=web&outcome=completed"],
   ["run", "run", "id=gh-2f6a"],
@@ -129,6 +142,81 @@ const HOSTILE = Object.freeze({
   phase: `<script>alert(6)</script>${ESC}[2J`,
   note: `PHASE-NOTE-TEXT <img src=x onerror=alert(7)>${ESC}]8;;x${String.fromCharCode(7)}`,
 });
+
+/**
+ * The jobs waiting to start (issue #737), the OverviewScreen card's own: one per kind of wait the card draws. `host` is
+ * the worker that deferred it (the record's host), `queuedMs` how long before `NOW` it was enqueued, and either `why`
+ * with its `untilMs` after `NOW` (and the record's extras), or `retryMs`, the backoff of a job that fails its first of
+ * three attempts. The fixture's own names: build3's slot is held by the cancelled gh-4a7e (an orphan of the registry),
+ * gh-b3d7 runs on mini1, and gh-77c1 is the job the fixture holds on `run.waitFor` until 07:00 the next day.
+ */
+export const WAITING_SEEDS = Object.freeze([
+  Object.freeze({ id: "gh-77c1", project: "web", repo: "acme/web", number: 415, host: "mini1", queuedMs: (2 * 3600 + 14 * 60) * 1000, why: "wait-after", untilMs: Date.UTC(2026, 9, 9, 7), trigger: 2 }),
+  Object.freeze({ id: "gh-c9e1", project: "billing", repo: "acme/billing", number: 301, host: "build3", queuedMs: 3 * 60_000, why: "host-slot", untilMs: 5_000 }),
+  Object.freeze({ id: "gh-d4f0", project: "web", repo: "acme/web", number: 455, host: "mini1", queuedMs: 6 * 60_000, why: "chained", untilMs: 5_000, holder: "gh-b3d7" }),
+  Object.freeze({ id: "gh-71b2", project: "api", repo: "acme/api", number: 137, host: "mini1", queuedMs: 21 * 60_000, retryMs: 4 * 60_000 }),
+  Object.freeze({ id: "gh-38aa", project: "web", repo: "acme/web", number: 448, host: "mini2", queuedMs: 16 * 60_000, retryMs: 9 * 60_000 }),
+]);
+
+/**
+ * Put `WAITING_SEEDS` in line on the shared queue at `url`, through BullMQ and the worker's deferral (see the header):
+ * add each, run a Worker whose processor defers or fails each as its seed says, and close it once all of them are in
+ * the delayed set. `W` is the worker modules, `NOW` the frozen instant (an absolute `untilMs` is kept, a small one is
+ * an offset from it).
+ */
+async function seedWaiting({ url, W, NOW }) {
+  const { DelayedError, Worker } = await import("bullmq");
+  const { makeDeferTo } = await import("../../../worker/src/defer-write.mjs");
+  const redis = W.connection.makeRedisClient(url);
+  const queue = W.queue.makeQueue(W.connection.parseConnection(url));
+  const writers = new Map();
+  // The writer's nonce is never shown; a counter keeps two renders' records alike.
+  let n = 0;
+  const nonce = () => (n += 1).toString(16).padStart(16, "0");
+  // One deferral writer per host, as each host's processor builds its own, so the record names the host that deferred.
+  const writerOf = (host) => {
+    if (!writers.has(host)) writers.set(host, makeDeferTo({ redis, DelayedError, now: () => NOW, hostName: host, nonce }));
+    return writers.get(host);
+  };
+  const seeds = new Map(WAITING_SEEDS.map((s) => [s.id, s]));
+  let worker = null;
+  try {
+    for (const s of WAITING_SEEDS) {
+      const data = { kind: "github", repo: s.repo, target: { type: "issue", number: s.number }, flow: "fix", ...(s.holder ? { parentJobId: s.holder } : {}), ...(s.trigger !== undefined ? { trigger: { matched: { index: s.trigger } } } : {}) };
+      // No stack trace kept for the seeded failure: a trace names this machine's paths, and nothing reads it.
+      const retry = s.retryMs ? { attempts: 3, backoff: { type: "fixed", delay: s.retryMs } } : {};
+      await queue.add("github", data, { jobId: s.id, timestamp: NOW - s.queuedMs, stackTraceLimit: 0, ...retry });
+    }
+    worker = new Worker(
+      W.queue.QUEUE,
+      async (job, token) => {
+        const s = seeds.get(job.id);
+        const d = writerOf(s.host);
+        if (s.retryMs) {
+          await d.noteRetry(job, { project: s.project });
+          throw new Error("seeded: the clone timed out");
+        }
+        const until = s.untilMs > NOW ? s.untilMs : NOW + s.untilMs;
+        await d.deferTo(job, token, until, s.why, { project: s.project, ...(s.holder ? { holder: s.holder } : {}) });
+      },
+      { connection: W.connection.parseConnection(url) },
+    );
+    worker.on("error", () => {});
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // A real deadline (`performance`, which the frozen `Date` does not touch), generous for a loaded CI runner.
+    const deadline = performance.now() + 60_000;
+    for (;;) {
+      const states = await Promise.all(WAITING_SEEDS.map((s) => queue.getJobState(s.id)));
+      if (states.every((st) => st === "delayed")) break;
+      if (performance.now() > deadline) throw new Error(`the waiting seeds did not all reach the delayed set: ${states.join(", ")}`);
+      await sleep(25);
+    }
+  } finally {
+    await worker?.close().catch(() => {});
+    await queue.close().catch(() => {});
+    redis.disconnect();
+  }
+}
 
 /** The progress snapshots the child seeds (issue #644): a phased run on mini1, a phaseless one on the remote build3. */
 function progressSeeds(NOW, hostile) {
@@ -234,6 +322,8 @@ async function renderInChild() {
     Object.assign(process.env, env);
     // Issue #712: records naming a real venue, so the goldens are a normal local run's pages.
     await seedDeployment({ url, paths, mods: { W, RM, DW, version }, venue: "local" });
+    // Issue #737: the jobs in line, through BullMQ and the worker's own deferral.
+    await seedWaiting({ url, W, NOW });
 
     // The parked run's session chain counter, as the session store keeps it, so the inbox shows a known count.
     const sessionsDir = join(deployment, "sessions");
@@ -269,10 +359,12 @@ async function renderInChild() {
       const host = name.includes("@") ? name.slice(name.indexOf("@") + 1) : null;
       const active = host ? [...(RUNNING[host] ?? [])].sort((a, b) => a.at - b.at).map((e) => ({ id: e.id, processedOn: e.at })) : [];
       if (hostile && host === "mini1") active.push({ id: HOSTILE.activeId, processedOn: NOW - 60_000 });
+      const canned = { ...(QUEUE_STATE[name]?.counts ?? { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }) };
       return {
         name,
         isPaused: async () => false,
-        getJobCounts: async () => ({ ...(QUEUE_STATE[name]?.counts ?? { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }) }),
+        // Issue #737: what waits in the shared queue is real (`seedWaiting`), so its counts are the queue's own.
+        getJobCounts: async () => (real ? { ...canned, ...(await real.getJobCounts("waiting", "paused", "delayed")) } : canned),
         getWorkers: async () => WORKERS.map((w) => ({ name: w })),
         getJobSchedulers: (...a) => (real ? real.getJobSchedulers(...a) : Promise.resolve([])),
         getActive: async () => active,
@@ -288,7 +380,20 @@ async function renderInChild() {
       };
     };
     const fleetPaths = { ...RM.resolvePaths(env), sessionsDir };
-    reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW });
+    // The registry's rows as read the moment they were written (issue #737): a row's age is Valkey's own clock (its
+    // PTTL against the TTL its beat set), which no frozen `Date` reaches, so a render a second slower would read its
+    // rows a second older and draw another clock-skew sentence. Every live row reads its TTL whole, as at the beat; a
+    // row with no expiry, or none at all, reads as it is. build3's beat, stamped 150 s before `NOW` on a row Valkey
+    // keeps for 90 s, is then what the reader calls a clock out of step, which it is.
+    const atBeat = (redis) => new Proxy(redis, {
+      get(target, key) {
+        if (key === "pttl") return async (k) => ((n) => (Number.isSafeInteger(n) && n > 0 ? W.hostRegistry.HOST_TTL_MS : n))(await target.pttl(k));
+        const v = Reflect.get(target, key, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    // As serve builds it (`cli.mjs`); the overview's load asks it for the waiting jobs (issue #737, `PAGE_READS`).
+    reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW, readLiveHostsFn: (redis, opts) => W.hostRegistry.readLiveHosts(atBeat(redis), opts) });
     const deps = {
       fleet: reader,
       insights: (window) => assembleInsights(fleetPaths, window, { pricing: { ...pricing, piAiVersion: () => "0.99.1" }, nowMs: NOW, envFn: () => env }),
@@ -512,14 +617,15 @@ export function assertClean(key, html) {
 }
 
 /**
- * Each panel `pagePanels` returns is exactly the inner HTML of its element in the page: a screen's `<section>`, or the
- * shell's Parked count, a `<span>` in the navigation (issue #737).
+ * Each panel `pagePanels` returns is exactly the inner HTML of its element in the page: a screen's `<section>`, or one
+ * of the frame's panels (`SHELL_PANEL_IDS`, issue #737), a `<span>`: the Parked count in the navigation, the headline
+ * under the title.
  */
 export function assertPanelsMatch(key, page) {
   assert.ok(page.panels.length > 0, `${key} has panels`);
   for (const { id, html } of page.panels) {
     assert.match(id, /^p-[a-z-]+$/, `${key}: panel id ${id}`);
-    const tag = id === "p-nav-parked" ? "span" : "section";
+    const tag = SHELL_PANEL_IDS.includes(id) ? "span" : "section";
     assert.ok(page.html.includes(`<${tag} id="${id}" data-panel>${html}</${tag}>`), `${key}: panel ${id} is the page's ${tag}, byte for byte`);
   }
 }

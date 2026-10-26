@@ -436,7 +436,13 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["steer", { payload: { plan: { id, jobId: "gh-s", mode: "followUp" } } }, twice(`Withdraw message ${id} before the agent reads it`), { action: "steer-withdraw", body: { jobId: "gh-s", id } }, "Send follow-up", "Sent a follow-up to running job gh-s"],
     ["steer-withdraw", { payload: { plan: { id, jobId: "gh-s" } } }, twice(U.withdrawn), null, "Confirm", `Withdrew message ${id} from job gh-s`],
     ["fleet-pause", { payload: {} }, twice("Resume the fleet"), { action: "fleet-resume", body: {} }, "Pause the fleet", "Paused the fleet"],
-    ["fleet-resume", { payload: {} }, twice("Pause the fleet again"), { action: "fleet-pause", body: {} }, "Resume", "Resumed the fleet"],
+    // A resume's way back is exactly what was paused before it: the whole fleet, one queue, or a set no write carries.
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 3, paused: ["pi-jobs", "pi-jobs@alpha", "pi-jobs@beta"] } }, twice("Pause the fleet again"), { action: "fleet-pause", body: {} }, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 3, paused: ["pi-jobs@beta"] } }, twice("Pause queue pi-jobs@beta again"), { action: "queue-pause", body: { queue: "pi-jobs@beta" } }, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 7, paused: ["pi-jobs@alpha", "pi-jobs@beta"] } }, twice("Pause queues pi-jobs@alpha, pi-jobs@beta again by hand, one at a time: no single write pauses only those."), null, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {}, pausedBefore: { queues: 3, paused: [] } }, twice("No queue of the fleet was paused, so there is nothing to pause again."), null, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {}, pausedBefore: null }, twice("Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known."), null, "Resume", "Resumed the fleet"],
+    ["fleet-resume", { payload: {} }, twice("Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known."), null, "Resume", "Resumed the fleet"],
     ["queue-pause", { payload: { queue: "pi-jobs" } }, twice("Resume queue pi-jobs"), { action: "queue-resume", body: { queue: "pi-jobs" } }, "Pause queue pi-jobs", "Paused queue pi-jobs"],
     ["queue-resume", { payload: { queue: "pi-jobs" } }, twice("Pause queue pi-jobs again"), { action: "queue-pause", body: { queue: "pi-jobs" } }, "Resume", "Resumed queue pi-jobs"],
     ["pause-windows", { beforeText: json({ windows: [windows] }), extra: { before: [windows] } }, twice("Put the previous pause windows back"), { action: "pause-windows", body: { windows: [windows] } }, "Confirm", "Replaced the pause windows"],
@@ -1684,6 +1690,83 @@ test("fleet-pause and fleet-resume: the kill switch's decision refuses a resume 
   assert.equal(c.audit.rows.at(-1).outcome, "failed");
 });
 
+test("a fleet resume's Undo pauses again exactly what was paused before it, never every queue: the fleet, one queue, or the queues named to pause by hand", async () => {
+  // From a fleet partly paused (one host's queue), Resume fleet and then its Undo paused all seven queues: the hosts
+  // the operator had left running stopped too.
+  const { paths } = deployment();
+  const names = ["pi-jobs", "pi-jobs@alpha", "pi-jobs@beta", "pi-jobs@gamma", "pi-jobs@delta", "pi-jobs@eps", "pi-jobs@zeta"];
+  let pausedNow = new Set(["pi-jobs@beta"]);
+  let answers = true;
+  const acted = [];
+  const fleet = {
+    snapshot: async () => (answers ? { queueCounts: names.map((queue) => ({ queue, paused: pausedNow.has(queue), counts: { waiting: 1 } })) } : null),
+    resume: async () => (acted.push(["resume"]), (pausedNow = new Set()), { results: [{ shown: "redis://h/0", res: { ok: true, queues: names } }] }),
+    pause: async () => (acted.push(["pause"]), (pausedNow = new Set(names)), { results: [{ shown: "redis://h/0", res: { ok: true, queues: names } }] }),
+    pauseQueue: async ({ queue, paused }) => (acted.push([paused ? "pause" : "resume", queue]), paused ? pausedNow.add(queue) : pausedNow.delete(queue), { ok: true }),
+  };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  // One queue paused: the Undo is that queue's pause, and previewing then confirming it pauses that queue alone.
+  const one = await c.both("fleet-resume", {});
+  assert.match(one.preview.html, /Undo: <b>Pause queue pi-jobs@beta again<\/b>/);
+  const change = one.confirm.json().change;
+  assert.deepEqual([change.undo, change.inverse], ["Pause queue pi-jobs@beta again", { action: "queue-pause", body: { queue: "pi-jobs@beta" } }]);
+  await c.both(change.inverse.action, change.inverse.body);
+  assert.deepEqual(acted, [["resume"], ["pause", "pi-jobs@beta"]], "the Undo paused the one queue that was paused, never the fleet");
+  assert.deepEqual([...pausedNow], ["pi-jobs@beta"]);
+  // Two of seven: no one write carries the set, so there is no inverse, and the sentence names them.
+  pausedNow = new Set(["pi-jobs@alpha", "pi-jobs@gamma"]);
+  const two = await c.both("fleet-resume", {});
+  assert.match(two.preview.html, /No undo: Pause queues pi-jobs@alpha, pi-jobs@gamma again by hand, one at a time: no single write pauses only those\./);
+  assert.deepEqual([two.confirm.json().change.inverse, two.confirm.json().change.undo], [null, "Pause queues pi-jobs@alpha, pi-jobs@gamma again by hand, one at a time: no single write pauses only those."]);
+  // The whole fleet: the fleet's pause, as before.
+  pausedNow = new Set(names);
+  const all = await c.both("fleet-resume", {});
+  assert.deepEqual(all.confirm.json().change.inverse, { action: "fleet-pause", body: {} });
+  // A fleet that did not answer names no set: no inverse, never every queue.
+  answers = false;
+  const blind = await c.both("fleet-resume", {});
+  assert.deepEqual([blind.confirm.json().change.inverse, blind.confirm.json().change.undo], [null, "Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known."]);
+  assert.ok(!acted.slice(2).some(([what]) => what === "pause"), "no Undo paused anything by itself");
+});
+
+test("a fleet or queue switch previews over the queues the switch flips: a stopped host's paused queue is named, counted, and paused again by the Undo", async () => {
+  // The registry names alpha and beta; zeta's host left it, while its queue, its paused flag and its two jobs stay. The
+  // resume flips zeta too, so a preview over the registry's queues hid zeta's jobs and its Undo left zeta running.
+  const { paths } = deployment();
+  const registry = ["pi-jobs", "pi-jobs@alpha", "pi-jobs@beta"];
+  const flipped = [...registry, "pi-jobs@zeta"];
+  let pausedNow = new Set(["pi-jobs@beta", "pi-jobs@zeta"]);
+  const asked = [];
+  const acted = [];
+  const rows = (names) => names.map((queue) => ({ queue, paused: pausedNow.has(queue), counts: { paused: queue === "pi-jobs@zeta" && pausedNow.has(queue) ? 2 : 0, waiting: 0 } }));
+  const fleet = {
+    snapshot: async (opts) => (asked.push(opts?.switchQueues === true), { queueCounts: rows(opts?.switchQueues === true ? flipped : registry) }),
+    resume: async () => (acted.push(["resume"]), (pausedNow = new Set()), { results: [{ shown: "redis://h/0", res: { ok: true, queues: flipped } }] }),
+    pauseQueue: async ({ queue, paused }) => (acted.push([paused ? "pause" : "resume", queue]), paused ? pausedNow.add(queue) : pausedNow.delete(queue), { ok: true }),
+  };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  const two = await c.both("fleet-resume", {});
+  assert.equal(two.preview.count, 2, "zeta's jobs are counted: the resume lets them start");
+  assert.match(two.preview.html, /2 jobs wait to start in the paused queues \(pi-jobs@beta, pi-jobs@zeta\)/, "the preview names what it resumes");
+  assert.deepEqual([two.confirm.json().change.inverse, two.confirm.json().change.undo], [null, "Pause queues pi-jobs@beta, pi-jobs@zeta again by hand, one at a time: no single write pauses only those."]);
+  // Zeta alone: its queue's pause is the Undo, and that queue's own preview takes it (the write does: setQueuePausedOne).
+  pausedNow = new Set(["pi-jobs@zeta"]);
+  const one = await c.both("fleet-resume", {});
+  const change = one.confirm.json().change;
+  assert.deepEqual([change.undo, change.inverse], ["Pause queue pi-jobs@zeta again", { action: "queue-pause", body: { queue: "pi-jobs@zeta" } }]);
+  const undo = await c.both(change.inverse.action, change.inverse.body);
+  assert.equal(undo.confirm.status, 200, undo.confirm.text);
+  assert.deepEqual([...pausedNow], ["pi-jobs@zeta"], "the Undo paused zeta again, and nothing else");
+  assert.deepEqual(acted, [["resume"], ["resume"], ["pause", "pi-jobs@zeta"]]);
+  assert.ok(asked.length > 0 && asked.every(Boolean), "every switch preview read the switch's queues");
+  // The fleet's pause only when every queue the switch flips was paused: the registry's three of four is a set no write
+  // carries, since Pause fleet would stop zeta, which was running.
+  pausedNow = new Set(registry);
+  assert.equal((await c.both("fleet-resume", {})).confirm.json().change.inverse, null);
+  pausedNow = new Set(flipped);
+  assert.deepEqual((await c.both("fleet-resume", {})).confirm.json().change.inverse, { action: "fleet-pause", body: {} });
+});
+
 test("retry-all-failed shows each job's reserve and the sum; a job whose data cannot be read is 'reserve unknown', never $0", async () => {
   const { paths } = deployment();
   const acted = [];
@@ -2173,6 +2256,38 @@ test("queue-pause, cancel-held and cancel-all-held on Valkey, through the real f
     const res = await c.confirm("cancel-all-held", all.ticket);
     assert.equal(res.json().done, 1);
     assert.equal(await shared.getJob("gh-h2"), undefined);
+  } finally {
+    await fleet.dispose();
+    await v.done();
+  }
+});
+
+test("fleet-resume on Valkey, through the real fleet reader: a paused queue whose host left the registry is named, counted, resumed and paused again by the Undo", live, async () => {
+  const v = await freshValkey();
+  const { paths } = deployment(URL13);
+  // The registry names beta alone; zeta's host is gone, its queue and its jobs are not.
+  const fleet = RM.createFleetReader(paths, { readOnly: true, readLiveHostsFn: async () => ({ hosts: [{ name: "beta", routes: "true" }] }) });
+  try {
+    await v.q("pi-jobs");
+    const beta = await v.q("pi-jobs@beta");
+    const zeta = await v.q("pi-jobs@zeta");
+    for (const id of ["gh-z1", "gh-z2"]) await zeta.add("github", { kind: "github" }, { jobId: id });
+    await beta.pause();
+    await zeta.pause();
+    const c = await start({ paths, a: { fleet } });
+    const both = await c.both("fleet-resume", {});
+    assert.equal(both.preview.count, 2, both.preview.html);
+    assert.match(both.preview.html, /2 jobs wait to start in the paused queues \(pi-jobs@beta, pi-jobs@zeta\)/);
+    assert.equal(both.confirm.status, 200, both.confirm.text);
+    assert.deepEqual([await beta.isPaused(), await zeta.isPaused()], [false, false], "the resume reached zeta");
+    assert.deepEqual([both.confirm.json().change.inverse, both.confirm.json().change.undo], [null, "Pause queues pi-jobs@beta, pi-jobs@zeta again by hand, one at a time: no single write pauses only those."]);
+    await zeta.pause();
+    const one = await c.both("fleet-resume", {});
+    const change = one.confirm.json().change;
+    assert.deepEqual(change.inverse, { action: "queue-pause", body: { queue: "pi-jobs@zeta" } });
+    const undo = await c.both(change.inverse.action, change.inverse.body);
+    assert.equal(undo.confirm.status, 200, undo.confirm.text);
+    assert.deepEqual([await beta.isPaused(), await zeta.isPaused()], [false, true], "the Undo paused zeta again, and beta stays running");
   } finally {
     await fleet.dispose();
     await v.done();
