@@ -153,9 +153,10 @@ Two consequences worth internalising before you design anything:
   could not see four spellings and could go false red on a comment); and every spec revision row, which
   must split into exactly two cells on unescaped pipes, because such a row is CUT on the rendered page
   while looking whole in the diff, and four had silently lost between 1,100 and 2,800 characters each; and the
-  console's four hand-written lists in `admin/test/console-doc-tables.test.mjs`: `docs/console.md`'s `ended` table
+  console's five hand-written lists in `admin/test/console-doc-tables.test.mjs`: `docs/console.md`'s `ended` table
   against `ENDED_REASONS` and the sign-in page's titles, its error-page table against `ERROR_KINDS` and their statuses,
-  the requirements' destructive actions against the actions whose write rules set `danger`, and `docs/triggers.md`'s
+  its runs filter table against `RUN_FILTER_FIELDS` and `RUN_OUTCOME_VALUES`, the requirements' destructive actions
+  against the actions whose write rules set `danger`, and `docs/triggers.md`'s
   `pull_request` fields against the trigger add's `TRIGGER_ADD_FIELDS.pull_request`; and `INT-DEFER-REASON-KEY`'s
   reason table, fields block and bucket lists against `worker/src/defer-reasons.mjs`, both ways, in
   `worker/test/defer-reasons.test.mjs`.

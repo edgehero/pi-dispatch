@@ -236,8 +236,9 @@ One command puts a live terminal view over the whole deployment:
 **A web console as well.** The same package installs `pi-dispatch-console`, a separate process that serves a live web
 console for the deployment on loopback or on a private unix socket, behind a named token per person. It shows the
 whole fleet as it changes: an overview of what needs you, what waits and why, and the last hours as a timeline (on a
-deployment that has not run yet, what stands before its first job), every run with filters and paging, the runs
-waiting for an answer, spend and insights by range, queues, hosts and schedules, the configuration and its own audit
+deployment that has not run yet, what stands before its first job), every run with filters, one search by
+repository, target or job id, the last 24 hours counted by outcome and paging, a card for each run waiting for an
+answer, spend and insights by range, queues, hosts and schedules, the configuration and its own audit
 log, plus `/api/state` as JSON for scripts. It reads through the same code as the panel, so the two never disagree;
 the panel shows the waiting runs too.
 It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
