@@ -280,7 +280,7 @@ const CASES = [
     name: "dispatch_wait_cancel",
     kind: "cancel-held",
     outcomes: ["ok", "failed"],
-    reason: /^job wiring-held-\d+ is no longer in the queue$/,
+    reason: /^the job is no longer in the queue \(job wiring-held-\d+\)$/,
     live: true,
     prepare: async (fx) => {
       fx.jobId = `wiring-held-${process.pid}`;
@@ -289,7 +289,7 @@ const CASES = [
     run: async (fx) => {
       try {
         const res = await tool("dispatch_wait_cancel", { jobId: fx.jobId });
-        assert.equal(res.threw, `rejected: job ${fx.jobId} is no longer in the queue`, "the tool found the held row and reached the cancel");
+        assert.equal(res.threw, `rejected: the job is no longer in the queue (job ${fx.jobId})`, "the tool found the held row and reached the cancel");
       } finally {
         await dropHeld(fx.jobId);
       }

@@ -140,15 +140,16 @@ test("the post-mortem longer than the inner width renders in full, inside the fr
 });
 
 test("fitLine's overflow keeps the line's colour, and under no theme is byte-identical to the plain clip (#482)", async () => {
-  // A reason long enough to overflow the header: the outcome's green and the reason's dim must both survive.
-  const reason = "the forge refused the push because the branch protection requires a signed commit on every ref";
+  // A reason long enough to overflow the header (a token near the record's longest, 64 characters): the outcome's colour
+  // and the reason's dim must both survive.
+  const reason = "branch-protection-requires-a-signed-commit-on-every-pushed-ref";
   const lines = await renderRunDetail(80, THEME, { outcome: "failed", reason });
-  const head = lines.find((l) => stripAnsi(l).includes("the forge refused"));
+  const head = lines.find((l) => stripAnsi(l).includes("branch-protection"));
   assert.equal(visibleLen(stripAnsi(head).trim()), 70, "the clipped line still fits its frame");
   assert.match(stripAnsi(head).trim(), /^│ .* │$/);
   assert.match(stripAnsi(head), /…/, "it was clipped");
   assert.ok(head.includes(`\x1b[38;5;${COL.error}m`), "the outcome keeps its colour on a clipped line");
-  assert.ok(head.includes(`\x1b[38;5;${COL.dim}m · the forge refused`), "the reason keeps its dim");
+  assert.ok(head.includes(`\x1b[38;5;${COL.dim}m · branch-protection`), "the reason keeps its dim");
   assert.ok(head.includes("…\x1b[0m"), "the cut run is closed, so its colour cannot bleed into the border");
 
   // The helper itself: with no escape in the input it IS `cell`, for every width and a wide character.

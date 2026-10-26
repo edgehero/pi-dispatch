@@ -7,6 +7,8 @@ import { LEGACY_CSS, specificity } from "../src/console/compat-css.mjs";
 import { capsule } from "../src/console/kit.mjs";
 import { PAGE_CSS, SHELL_CSS, cssBlocks, pageCss, splitSelectors } from "../src/console/page-css.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
+import { PARKED_CSS } from "../src/console/parked-css.mjs";
+import { RUNS_CSS } from "../src/console/runs-css.mjs";
 
 // The Pulse tokens (issue #737): the copy is the pinned design file, its two functions keep their contract, and every
 // foreground the design system puts on a ground passes WCAG 2 contrast in both themes.
@@ -421,6 +423,61 @@ test("on the overview a running pill's host is at full opacity, so its label is 
   // At full opacity the label is a pinned pair, which holds in both themes.
   assert.ok(PAIRS.includes("on-running on running 4.5"));
   for (const theme of THEMES) assert.ok(contrast(colorOf("on-running", theme), colorOf("running", theme)) >= 4.5, theme);
+});
+
+/** Each tone's ink, as bundle.css's tone classes set `--tone-ink` (the idle tone's is `ink-muted`). */
+const TONE_INKS = [...new Set(Object.values(TONE_RULES_PINNED).map((rule) => rule.ink))];
+
+/**
+ * Where the runs and parked pages' own rules (PR 4: `runs-css.mjs`, `parked-css.mjs`) put a colour, and on what: every
+ * declaration that sets a colour, by selector, property and value, with the pairs it draws (the ink on the ground it
+ * sits on, or the inks drawn on a ground it sets). A `--tone-ink` ink is each tone's (`TONE_INKS`). The filter bar is on
+ * the page's canvas, the strip and the question card on a card's `surface` (the strip's items on `surface-2` when a
+ * pointer is over one), a chip on its `surface-2`.
+ */
+const PAGE_COLOURS = Object.freeze({
+  runs: [
+    [".filterbar .search:focus-within", "outline", "2px solid var(--focus)", ["focus on canvas"]],
+    [".filterbar .select", "background-color", "var(--surface)", ["ink on surface"]],
+    [".filterbar>.field>.input", "background", "var(--surface)", ["ink on surface", "ink-faint on surface"]],
+    [".filterbar>.field>.input:focus-visible", "outline", "2px solid var(--focus)", ["focus on canvas"]],
+    [".chip__x", "color", "var(--ink-muted)", ["ink-muted on surface-2"]],
+    [".chip__x:hover", "color", "var(--ink)", ["ink on surface-2"]],
+    ["a.sumstrip__i:hover", "background", "var(--surface-2)", ["ink on surface-2", "ink-muted on surface-2", ...TONE_INKS.map((ink) => `${ink} on surface-2`)]],
+    [".sumstrip__i>b", "color", "var(--tone-ink,var(--ink))", ["ink on surface", "ink on surface-2", ...TONE_INKS.flatMap((ink) => [`${ink} on surface`, `${ink} on surface-2`])]],
+    [".sumstrip__i.tone-idle>b", "color", "var(--ink)", ["ink on surface", "ink on surface-2"]],
+    [".sumstrip__i>b>small", "color", "var(--ink-muted)", ["ink-muted on surface", "ink-muted on surface-2"]],
+    [".sumstrip__i>span", "color", "var(--ink-muted)", ["ink-muted on surface", "ink-muted on surface-2"]],
+    [".sumstrip__i>span>.ic", "color", "var(--tone-ink,var(--ink-muted))", ["ink-muted on surface", "ink-muted on surface-2", ...TONE_INKS.flatMap((ink) => [`${ink} on surface`, `${ink} on surface-2`])]],
+    [".tbl .tbl-group>th", "background", "var(--surface-2)", ["ink-muted on surface-2"]],
+    [".tbl .tbl-group>th", "color", "var(--ink-muted)", ["ink-muted on surface-2"]],
+  ],
+  parked: [
+    [".qcard__wait", "color", "var(--parked-ink)", ["parked-ink on surface"]],
+    [".qcard__meta", "color", "var(--ink-muted)", ["ink-muted on surface"]],
+    [".qcard__body", "background", "var(--parked-tint)", ["ink on parked-tint"]],
+    [".qcard__body", "color", "var(--ink)", ["ink on parked-tint"]],
+  ],
+});
+
+test("the runs and parked pages' own colours are pinned pairs: each colour rule placed, each pair passing in both themes (a placement check)", () => {
+  const COLOUR_PROPS = new Set(["color", "background", "background-color", "outline", "fill", "stroke", "box-shadow", "border", "border-color"]);
+  for (const [page, css] of [["runs", RUNS_CSS], ["parked", PARKED_CSS]]) {
+    // Every declaration of the page's rules that names a colour token, as `selector property value`.
+    const found = rulesIn(css).flatMap(([sel, body]) => body.split(";").filter((d) => d.includes(":")).map((d) => [sel, d.slice(0, d.indexOf(":")).trim(), d.slice(d.indexOf(":") + 1).trim()]))
+      .filter(([, prop, value]) => COLOUR_PROPS.has(prop) && /var\(--(?!space-|radius-|control-h|side-w|font-)/.test(value));
+    const listed = PAGE_COLOURS[page];
+    assert.deepEqual(found.map((d) => d.join(" ")).sort(), listed.map(([sel, prop, value]) => `${sel} ${prop} ${value}`).sort(), `${page}: every colour rule is placed, and only those`);
+    for (const [sel, , , pairs] of listed) {
+      assert.ok(pairs.length > 0, sel);
+      for (const pair of pairs) {
+        const m = /^(\S+) on (\S+)$/.exec(pair);
+        assert.ok(PAIRS.some((p) => p.startsWith(`${pair} `)), `${page} ${sel}: ${pair} is a pinned pair`);
+        const ratio = Number(PAIRS.find((p) => p.startsWith(`${pair} `)).split(" ").pop());
+        for (const theme of THEMES) assert.ok(contrast(colorOf(m[1], theme), colorOf(m[2], theme)) >= ratio, `${page} ${sel}: ${pair} in ${theme}`);
+      }
+    }
+  }
 });
 
 test("a capsule's percent is the on-status on status pair: its tone is on the svg the percent is drawn in (a placement check)", () => {

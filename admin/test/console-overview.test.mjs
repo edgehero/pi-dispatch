@@ -10,7 +10,7 @@ import {
   hostSkewText, overviewActive, overviewCaps, overviewHeadline, overviewHosts, overviewNeeds, overviewSetup,
   overviewSetupEmpty, overviewSetupPi, overviewSpend, overviewTimeline, overviewWaiting, overviewWaitlists,
   JOBS_UNREAD_TEXT, JOBS_UNREAD_WORDS, NOT_BEATING_WORDS, SPEND_SUM_TEXT, WAITING_CUT_TEXT, waitingSentence,
-  CAPS_EMPTY_TEXT, LAST_SEEN_WORDS,
+  CAPS_EMPTY_TEXT, LAST_SEEN_WORDS, BEAT_NOT_READ_WORDS,
 } from "../src/console/panels/overview.mjs";
 import { BEAT_FRESH_MS } from "../src/console/panels/common.mjs";
 import { schedulerRunOf } from "../src/console/kit.mjs";
@@ -293,7 +293,7 @@ test("Needs you: questions, failed jobs and failing doctors, each with its proje
   assert.ok(!op.includes("REASON-TEXT"));
   // The failing doctor: the host, Open on Fleet (no host page yet).
   assert.match(op, /<b title="build3">build3<\/b><span>doctor fails<\/span><a class="rowpill__act" href="\/fleet">Open<\/a>/, "the host's name whole in its title, as a long one gives way to the row's words");
-  assert.match(op, /Last 24 hours: <a href="\/runs\?outcome=failed">2 failed<\/a> and <a href="\/runs\?outcome=policy">1 refused<\/a>, not counting runs an operator cancelled\./);
+  assert.match(op, /Last 24 hours: <a href="\/runs\?outcome=failed">2 failed<\/a> and <a href="\/runs\?outcome=refused">1 refused<\/a>, not counting runs an operator cancelled\./);
   assert.ok(op.includes(NEEDS_DEFINITION));
   // A viewer: the same counts and ids, no write, no Answer.
   const viewer = draw(overviewNeeds, snapshot(), { role: "viewer" });
@@ -805,7 +805,7 @@ test("Waitlists: every reason's jobs in the worker's order, each with its projec
   // A scheduler whose key the reader refused is left out, never named by BullMQ's job name ("local").
   const refused = draw(overviewWaitlists, snapshot({ schedulers: [{ key: null, name: "local", pattern: "0 3 * * *", next: Date.UTC(2026, 9, 9, 3, 0), overdueMs: 0 }] }));
   assert.ok(!refused.includes('<span class="code">local</span>'), "never local");
-  assert.match(out, new RegExp(`${SOFT_HOLD_REFUSED_TEXT} <a href="/runs\\?outcome=policy&amp;reason=soft-hold">3 today</a>\\.`));
+  assert.match(out, new RegExp(`${SOFT_HOLD_REFUSED_TEXT} <a href="/runs\\?outcome=refused&amp;reason=soft-hold">3 today</a>\\.`));
   assert.ok(out.includes(WAITING_UNKNOWN_PROJECT_TEXT));
 });
 
@@ -1089,6 +1089,25 @@ test("Hosts: no worker online leads; stale beats are the softer note; an unread 
   assert.match(blind, /<span class="card__sub">as last seen<\/span>/);
   const empty = draw(overviewHosts, snapshot({ hostBudgets: [], queue: { ...snapshot().queue, fleetDegraded: "registry unreadable" } }));
   assert.ok(empty.includes(REGISTRY_UNREAD_TEXT) && !empty.includes(HOSTS_EMPTY.body), "no row read: not known, never no host registered");
+});
+
+// Issue #737: the Hosts row follows Running's rule over a registry that could not be read this tick.
+test("Hosts over an unread registry: every row's dot judges nothing and its age is as last seen, as Running's slots are", () => {
+  const late = snapshot().hostBudgets.map((h, i) => (i === 0 ? { ...h, staleMs: BEAT_FRESH_MS + 15_000, ttlAgeMs: BEAT_FRESH_MS + 15_000 } : h));
+  const read = draw(overviewHosts, snapshot({ hostBudgets: late }));
+  assert.match(read, /aria-label="beat late"/, "a registry read this tick judges the beat");
+  assert.match(read, /hostrow__beat tone-attention/);
+  const blind = draw(overviewHosts, snapshot({ hostBudgets: late, queue: { ...snapshot().queue, fleetDegraded: "registry unreadable" } }));
+  const rows = blind.match(/<li class="hostrow">[^]*?<\/li>/g) ?? [];
+  assert.equal(rows.length, late.length, "the rows last seen are drawn");
+  assert.equal(BEAT_NOT_READ_WORDS, "beat not read");
+  for (const row of rows) {
+    assert.ok(row.startsWith(`<li class="hostrow"><span class="dot tone-idle" role="img" aria-label="${BEAT_NOT_READ_WORDS}"></span>`), row);
+    assert.match(row, new RegExp(`<span class="hostrow__beat"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-beat"></use></svg>${LAST_SEEN_WORDS}</span>`), row);
+  }
+  assert.doesNotMatch(blind, /aria-label="(?:beating|beat late)"|hostrow__beat tone-attention/, "no beat judged fresh or late from a read that did not happen");
+  // Running says the same of the same rows.
+  assert.ok(draw(overviewActive, snapshot({ hostBudgets: late, queue: { ...snapshot().queue, fleetDegraded: "registry unreadable" } })).includes(`: ${LAST_SEEN_WORDS}`));
 });
 
 test("a hostile value from another host is text: a doctor label, a host name and a venue are escaped", () => {

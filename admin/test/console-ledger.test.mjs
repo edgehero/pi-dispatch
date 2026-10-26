@@ -54,6 +54,10 @@ const IN_SCOPE_CARDS = Object.freeze({
   OverviewPhone: 3,
   SetupScreen: 3,
   TimelineAndWaitlists: 3,
+  RunsScreen: 4,
+  RunsPhone: 4,
+  DataTable: 4,
+  ParkedPhone: 4,
 });
 
 /** The cards outside #737, with the issues that build them (decided 2026-10-23): no ledger here. */
@@ -67,14 +71,25 @@ const PLANNED_CARDS = Object.freeze({
 /**
  * THE REVERSE CHECK: every panel a golden draws is named by some card's ledger, so no screen grows a panel that no card
  * accounts for. It runs over the goldens whose screens are drawn from cards that have their ledgers (the audit log, the
- * sign-in and link pages, the error pages, and since PR 3 the overview); the other screens' cards land with their own
- * pull requests, and PR 8 makes this list every golden, page and panel alike.
+ * sign-in and link pages, the error pages, since PR 3 the overview, and since PR 4 the runs list and the parked inbox);
+ * the other screens' cards land with their own pull requests, and PR 8 makes this list every golden, page and panel
+ * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
   "overview.operator",
   "overview.viewer",
   "overview-host.operator",
   "overview-host.viewer",
+  "runs.operator",
+  "runs.viewer",
+  "runs-filtered.operator",
+  "runs-filtered.viewer",
+  "runs-problems.operator",
+  "runs-problems.viewer",
+  "runs-search.operator",
+  "runs-search.viewer",
+  "parked.operator",
+  "parked.viewer",
   "audit.operator",
   "audit.viewer",
   "login.anonymous",

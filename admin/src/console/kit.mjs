@@ -2,8 +2,15 @@
  * The console's kit (issue #737): the Pulse design's components as pure functions, each returning a fragment built with
  * `html`, so a page says `ui.badge("failed", "Failed")` and gets the design's markup and class names, never its own copy
  * of them. Imported as `import * as ui from "./kit.mjs"`. The markup is the component cards' (Shell, Status, Actions,
- * CardsAndBanners, DataTable, FactsAndLevels, FieldsDiffCommand, and since PR 3 TimelineAndWaitlists), pinned helper by
- * helper in `admin/test/console-kit.test.mjs` against each card's own sample.
+ * CardsAndBanners, DataTable, FactsAndLevels, FieldsDiffCommand, since PR 3 TimelineAndWaitlists, and since PR 4
+ * RunsScreen, RunsPhone and ParkedPhone), pinned helper by helper in `admin/test/console-kit.test.mjs` against each
+ * card's own sample.
+ *
+ * WHERE A HELPER'S LOOK LIVES. Most classes the kit writes are bundle.css's. A few are the console's own, for parts the
+ * bundle has no rule for (it draws them in a card's own style block): the summary strip and a table's day rows
+ * (`runs-css.mjs` `RUNS_CSS`, served on the runs page), the question card and its answer form (`parked-css.mjs`
+ * `QCARD_CSS`, served on the parked page, the one page that draws them). The kit test holds every class a helper
+ * writes to one of those stylesheets.
  *
  * THE RULES EVERY HELPER KEEPS.
  *   - Every value is escaped: it goes through `html`, which scrubs control bytes and escapes markup, and only a
@@ -30,6 +37,7 @@
  *   - A card is an `<article class="card">` or a `<div class="card">`, never the `section[data-panel]` the live script
  *     swaps: a panel element carries only its `id` and `data-panel`, and the card is drawn inside it.
  */
+import { ANSWER_TEXT_MAX_BYTES } from "@edgehero/pi-dispatch/console-answer";
 import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { html, isSafeHtml } from "./html.mjs";
 import { ICON_NAMES, SPRITE } from "./pulse-icons.mjs";
@@ -44,12 +52,21 @@ const ICONS = new Set(ICON_NAMES);
  * panel it keeps still, and since PR 3 the headline panel `#p-headline` in a page's title bar), the sign-in pages'
  * (`#login-form`, `#token`, `#notice`, which `signin.mjs` draws by hand with the kit's class names, since a kit helper
  * may not write them), and the spend screen's chart hooks the script reads
- * (`#tip`, `#wrap`, `#graph`, `#root`, `#insights-tips`, `#graph-nodes`). Hand-listed because the kit cannot import the
- * shell (the shell imports the kit), so the kit test pins it both ways: every id the frame draws outside a page's
- * panels and every id the script names in a `getElementById("...")` is refused (listed here, the sprite's, or one of
- * the families below), and each one listed here is still one of those.
+ * (`#tip`, `#wrap`, `#graph`, `#root`, `#insights-tips`, `#graph-nodes`), and since PR 4 the runs search field `#q`
+ * (`SEARCH_ID`), which the top bar's Search button opens and the script focuses. Hand-listed because the kit cannot
+ * import the shell (the shell imports the kit), so the kit test pins it both ways: every id the frame draws outside a
+ * page's panels and every id the script names in a `getElementById("...")` is refused (listed here, the sprite's, or
+ * one of the families below), and each one listed here is still one of those.
  */
-export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "p-headline", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes"]);
+export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "p-headline", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes", "q"]);
+
+/**
+ * The runs search field's id (the RunsScreen card's search pill): the top bar's Search button links to `/runs#q`
+ * (`shell.mjs` `SEARCH_HREF`) and the browser script focuses the field it names. It is reserved (`RESERVED_IDS`), so no
+ * other helper can write it, and `searchPill` is the one helper that may: the runs page's filter bar and the run-id 404
+ * each draw one such field, the one the button and the script mean.
+ */
+export const SEARCH_ID = "q";
 
 /**
  * The ordinal id families the spend topology mints (`graph-html.mjs`: `n<k>` for a chip, `w<k>` for a wire, `sg<k>`
@@ -103,7 +120,7 @@ const BUTTON_TYPES = new Set(["button", "submit"]);
 const CELL_FLAGS = Object.freeze({ id: "id", when: "when", tgt: "tgt", num: "num", act: "act", wide: "wide", hidePhone: "hide-phone" });
 const CELL_KEYS = new Set([...Object.keys(CELL_FLAGS), "html"]);
 const HEAD_KEYS = new Set(["label", "num", "hidePhone", "l"]);
-const ROW_KEYS = new Set(["cells", "mark", "id"]);
+const ROW_KEYS = new Set(["cells", "mark", "id", "group"]);
 const CONTROL_KEYS = new Set(["required", "disabled", "invalid", "describedBy"]);
 /**
  * A console link: a path (one `/`, never `//host`, then printable ASCII with no backslash, which a browser reads as a
@@ -125,6 +142,8 @@ const FIELD_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 const FIELD_TYPES = new Set(["int", "json", "list"]);
 /** A row's end with a look of its own (`rowPill`): its text, in a status's ink or the faint ink. */
 const END_KEYS = new Set(["text", "status", "faint"]);
+/** A summary strip item's options (`sumStrip`). */
+const SUM_KEYS = new Set(["n", "label", "status", "href", "floor", "hidePhone"]);
 
 /** A status kind's entry, or a throw: the closed set of `STATUS_KINDS`. */
 function statusOf(status, who) {
@@ -431,14 +450,18 @@ function headOf(h) {
   return { label: h.label, num: h.num === true, hidePhone: h.hidePhone === true, l: typeof h.l === "string" ? h.l : typeof h.label === "string" ? h.label : "" };
 }
 
-/** One `<td>`: the column's flags and the cell's own, the phone label in a stacked table, an id in the no-wrap code face. */
+/**
+ * One `<td>`: the column's flags and the cell's own, the phone label in a stacked table, an id in the no-wrap code face.
+ * A column with no phone label ("") writes no `data-l` at all, so bundle.css's `td[data-l]::before` draws nothing before
+ * its cells: an empty label is never a rule each page must remember to switch off.
+ */
 function cellOf(c, col, stack) {
   const own = c !== null && typeof c === "object" && !isSafeHtml(c) && !Array.isArray(c) ? c : { html: c };
   for (const k of Object.keys(own)) if (!CELL_KEYS.has(k)) throw new RangeError(`kit.tbl: unknown cell option ${JSON.stringify(k)}`);
   const flags = { ...own, num: own.num === true || col.num, hidePhone: own.hidePhone === true || col.hidePhone };
   const cls = classes(...Object.entries(CELL_FLAGS).map(([k, name]) => flags[k] === true && name));
   const content = own.id === true ? html`<span class="code">${own.html}</span>` : own.html;
-  return html`<td${cls ? html` class="${cls}"` : null}${stack ? html` data-l="${col.l}"` : null}>${content}</td>`;
+  return html`<td${cls ? html` class="${cls}"` : null}${stack && col.l !== "" ? html` data-l="${col.l}"` : null}>${content}</td>`;
 }
 
 /**
@@ -446,24 +469,42 @@ function cellOf(c, col, stack) {
  * reads) or an `aria-label`, and one of them is required; every head is `<th scope="col">`. `rows` are lists of cells,
  * or `{ cells, mark, id }` where `mark` (attention, failed) tints the row and `id` names it, so a link elsewhere can
  * open the page at it (the audit log's `#seq-41`); a row id is held to the kit's id rule like any other (`idOf`). A
- * cell is a value or `{ html, id, num, wide, hidePhone, when, tgt, act }`; an `id` cell's text never breaks. `stack`
- * turns the rows into stacked blocks on a phone, each cell labelled from its column's head (`data-l`). With no rows,
- * `empty` is drawn instead: a fragment as it is, text as a note.
+ * cell is a value or `{ html, id, num, wide, hidePhone, when, tgt, act }`; bundle.css never breaks an `id` cell's text
+ * (the runs page lets a long id wrap inside a box of its own, `runs-css.mjs`). A column's `num` and `hidePhone` mark
+ * its head as well as its cells, so a page's stylesheet can leave a whole column out. `stack` turns the rows into
+ * stacked blocks on a phone, each cell labelled from its column's head (`data-l`), or not labelled where the head's
+ * `l` is "". With no rows, `empty` is drawn instead: a fragment as it is, text as a note.
+ *
+ * A row may be `{ group: label }` instead (the RunsScreen card's day rows, "Thursday 8 October"): a header across every
+ * column, `<tr class="tbl-group"><th scope="rowgroup" colspan="N">`, for the rows under it. Each group is a `<tbody>` of
+ * its own, opened at its header, so `scope="rowgroup"` names exactly its own rows and not the whole table's; the rows
+ * before the first header (none, as the runs page draws them) keep a body of their own. A group row carries nothing
+ * else, and a group with no rows under it is the caller's to leave out.
  */
 export function tbl({ label = null, caption = null, heads, rows, stack = false, empty = null }) {
   if (!given(label) && !given(caption)) throw new TypeError("kit.tbl: a table is named by a caption or an aria-label");
   if (rows.length === 0 && given(empty)) return isSafeHtml(empty) ? empty : html`<p class="note">${empty}</p>`;
   const cols = heads.map(headOf);
-  const head = html`<thead><tr>${cols.map((c) => html`<th scope="col"${c.num ? html` class="num"` : null}>${c.label}</th>`)}</tr></thead>`;
-  const body = rows.map((r) => {
+  // A head carries its column's `num` (right-aligned, as its cells are) and `hide-phone`, in the cells' order.
+  const headClass = (c) => (c.num && c.hidePhone ? html` class="num hide-phone"` : c.num ? html` class="num"` : c.hidePhone ? html` class="hide-phone"` : null);
+  const head = html`<thead><tr>${cols.map((c) => html`<th scope="col"${headClass(c)}>${c.label}</th>`)}</tr></thead>`;
+  const bodies = [[]];
+  for (const r of rows) {
     const row = Array.isArray(r) ? { cells: r, mark: null, id: null } : r;
     for (const k of Object.keys(row)) if (!ROW_KEYS.has(k)) throw new RangeError(`kit.tbl: unknown row option ${JSON.stringify(k)}`);
+    if (Object.hasOwn(row, "group")) {
+      if (Object.keys(row).length !== 1 || !given(row.group)) throw new TypeError("kit.tbl: a group row is { group: label } and nothing else");
+      bodies.push([html`<tr class="tbl-group"><th scope="rowgroup" colspan="${String(cols.length)}">${row.group}</th></tr>`]);
+      continue;
+    }
     const mark = row.mark === null || row.mark === undefined ? null : pick(ROW_CLASS, row.mark, "row mark", "tbl");
     const id = row.id === null || row.id === undefined ? null : idOf(row.id, "tbl");
     if (row.cells.length !== cols.length) throw new RangeError(`kit.tbl: a row has ${row.cells.length} cells for ${cols.length} columns`);
-    return html`<tr${id ? html` id="${id}"` : null}${mark ? html` class="${mark}"` : null}>${row.cells.map((c, i) => cellOf(c, cols[i], stack))}</tr>`;
-  });
-  return html`<div class="tbl-wrap"><table class="${classes("tbl", stack && "tbl--stack")}"${given(label) ? html` aria-label="${label}"` : null}>${given(caption) ? html`<caption class="sr">${caption}</caption>` : null}${head}<tbody>${body}</tbody></table></div>`;
+    bodies.at(-1).push(html`<tr${id ? html` id="${id}"` : null}${mark ? html` class="${mark}"` : null}>${row.cells.map((c, i) => cellOf(c, cols[i], stack))}</tr>`);
+  }
+  // The rows before the first group's header are the first body; it is left out when there are none and a group follows.
+  const drawn = bodies.length > 1 && bodies[0].length === 0 ? bodies.slice(1) : bodies;
+  return html`<div class="tbl-wrap"><table class="${classes("tbl", stack && "tbl--stack")}"${given(label) ? html` aria-label="${label}"` : null}>${given(caption) ? html`<caption class="sr">${caption}</caption>` : null}${head}${drawn.map((b) => html`<tbody>${b}</tbody>`)}</table></div>`;
 }
 
 /** A table's foot line: what the table shows, then the pager at its right. */
@@ -759,11 +800,14 @@ export function select({ id, name = null, options, value = null, ...rest }) {
 /**
  * A textarea. Its text keeps its line breaks (each value is scrubbed line by line, so a newline is the only control
  * that survives), and a text that opens with one keeps it: the parser drops the first newline after the tag.
+ * `maxlength` is the most characters the field takes (a whole number of 1 or more, or a throw), as the action that
+ * reads it bounds its text (a parked answer's 8,192).
  */
-export function textarea({ id, name = null, value = "", placeholder = null, rows = null, ...rest }) {
+export function textarea({ id, name = null, value = "", placeholder = null, rows = null, maxlength = null, ...rest }) {
+  if (maxlength !== null && (!Number.isSafeInteger(maxlength) || maxlength < 1)) throw new RangeError(`kit.textarea: maxlength is a whole number of 1 or more, not ${JSON.stringify(maxlength)}`);
   const lines = String(value ?? "").split(/\r?\n/);
   const text = lines.map((line, i) => (i === 0 ? html`${line}` : html`\n${line}`));
-  return html`<textarea id="${idOf(id, "textarea")}" class="textarea"${name === null ? null : html` name="${name}"`}${rows === null ? null : html` rows="${svgNum(rows, 1, 40, 0)}"`}${placeholder === null ? null : html` placeholder="${placeholder}"`}${controlAttrs(rest, "textarea")}>${lines[0] === "" && lines.length > 1 ? html`\n` : null}${text}</textarea>`;
+  return html`<textarea id="${idOf(id, "textarea")}" class="textarea"${name === null ? null : html` name="${name}"`}${rows === null ? null : html` rows="${svgNum(rows, 1, 40, 0)}"`}${maxlength === null ? null : html` maxlength="${String(maxlength)}"`}${placeholder === null ? null : html` placeholder="${placeholder}"`}${controlAttrs(rest, "textarea")}>${lines[0] === "" && lines.length > 1 ? html`\n` : null}${text}</textarea>`;
 }
 
 /**
@@ -810,6 +854,91 @@ export function seg(items, { label }) {
   })}</div>`;
 }
 
+// ---- filters and summaries ----------------------------------------------------------------------------------------------------
+
+/**
+ * A search pill (the RunsScreen and ErrorPage cards'): the search icon and a search field in one pill, the field named
+ * by `label` in visually hidden text inside the `<label>`. `id` is the field's: `SEARCH_ID` for the runs search (the one
+ * reserved id a helper may write, see there), else any kit id. `name` is its query parameter and `value` what it holds
+ * (null for none). The field is a bare `<input>`, as the cards draw it, not the kit's `.input`, whose ring and ground
+ * would draw a second field inside the pill.
+ */
+export function searchPill({ id, name, value = null, label = "Search runs", placeholder = "Repository, target or job id" }) {
+  const fid = id === SEARCH_ID ? id : idOf(id, "searchPill");
+  if (typeof name !== "string" || !FIELD_NAME_RE.test(name)) throw new RangeError(`kit.searchPill: a field's name is a query parameter, not ${JSON.stringify(name)}`);
+  if (!given(label)) throw new TypeError("kit.searchPill: a search field is named");
+  return html`<label class="search">${icon("search")}<span class="sr">${label}</span><input id="${fid}" type="search" name="${name}"${value === null ? null : html` value="${value}"`}${placeholder === null ? null : html` placeholder="${placeholder}"`} autocomplete="off" spellcheck="false"></label>`;
+}
+
+/**
+ * The Filters button that folds a filter bar on a phone (the RunsPhone card's): an `fpill` with the settings icon, its
+ * label and, where filters are applied, their number in bold. Drawn `hidden` with `data-reveal`, `data-filter-toggle`
+ * and `aria-expanded="false"`: the browser script shows it and folds the bar (`.filterbar[data-collapsible]`,
+ * `script.mjs`), so a page without the script shows every filter and no button that does nothing. bundle.css draws the
+ * button on a phone alone (`.filterbar__toggle`).
+ */
+export function filterToggle({ count = null, label = "Filters" } = {}) {
+  const n = count === null ? 0 : wholeOf(count, "count", "filterToggle");
+  return html`<button class="fpill filterbar__toggle" type="button" data-filter-toggle aria-expanded="false" hidden data-reveal>${icon("config", { size: "sm" })}${label}${n === 0 ? null : html` <b>(${grouped(n, "filterToggle")})</b>`}</button>`;
+}
+
+/**
+ * A filter pill (the RunsScreen card's project chips): a link drawn as a pill, its `label` (text, or a fragment such as a
+ * project's `ptag`), then its `count` in bold where one is given. `on` marks the filter in force (`fpill--on`, the
+ * primary fill) and says so with `aria-current="page"`, since the link leads to the page shown, so the state is never
+ * the colour alone.
+ */
+export function fpill({ label, count = null, href, on = false }) {
+  const n = count === null ? null : grouped(count, "fpill");
+  return html`<a class="${classes("fpill", on && "fpill--on")}" href="${hrefOf(href, "fpill")}"${on ? html` aria-current="page"` : null}>${label}${n === null ? null : html` <b>${n}</b>`}</a>`;
+}
+
+/**
+ * An applied filter as a removable chip (the RunsScreen card's): "label:", its `value` in the code face, and a link that
+ * removes it (`href`: the page's query without that filter), an icon named for what it removes ("Remove Outcome"). A
+ * link, not a button: removing a filter is opening the page without it, which needs no script.
+ */
+export function fchip({ label, value, href }) {
+  const name = plainOf(label, "a label", "fchip");
+  return html`<span class="chip">${name}: <span class="code">${value}</span><a class="chip__x" href="${hrefOf(href, "fchip")}" aria-label="${`Remove ${name}`}">${icon("failed", { size: "sm" })}</a></span>`;
+}
+
+/**
+ * A row of pills or chips (the project pills, the applied filters and Clear filters), named for what it holds
+ * (`role="group"`, `label`). `items` are fragments. It wraps above a phone and scrolls inside itself on one
+ * (`runs-css.mjs`), so many projects or a long filter value never widen the page.
+ */
+export function chipRow(items, { label }) {
+  if (!Array.isArray(items)) throw new TypeError("kit.chipRow: items is a list");
+  if (!given(label)) throw new TypeError("kit.chipRow: a row of chips is named");
+  return html`<div class="chiprow" role="group" aria-label="${label}">${items}</div>`;
+}
+
+/**
+ * A summary strip (the RunsScreen card's counts by outcome): a named list (`label`) of items, each `{ n, label, status,
+ * href, floor, hidePhone }`: its number in bold over its label, in a status's tone with the status's icon (`status`
+ * null for a neutral item), a link where `href` is given (the runs filtered to it). `n` is a count (grouped, "1,204") or
+ * text ("$6.13"); `floor` says the count is a lower bound, in words ("at least 2,000"), where the read stopped short.
+ * `hidePhone` leaves an item off a phone's strip, which shows the counts that matter (the RunsPhone card's four).
+ */
+export function sumStrip(items, { label }) {
+  if (!Array.isArray(items)) throw new TypeError("kit.sumStrip: items is a list");
+  if (!given(label)) throw new TypeError("kit.sumStrip: a strip is named");
+  const drawn = items.map((it) => {
+    if (it === null || typeof it !== "object" || Array.isArray(it)) throw new TypeError("kit.sumStrip: an item is { n, label, status, href, floor, hidePhone }");
+    for (const k of Object.keys(it)) if (!SUM_KEYS.has(k)) throw new RangeError(`kit.sumStrip: unknown item option ${JSON.stringify(k)}`);
+    const { n, label: what, status = null, href = null, floor = false, hidePhone = false } = it;
+    const shown = typeof n === "number" ? grouped(n, "sumStrip") : n;
+    if (typeof shown !== "string" && !isSafeHtml(shown)) throw new TypeError(`kit.sumStrip: a value is a count, text or a fragment, not ${JSON.stringify(n)}`);
+    const s = status === null ? null : statusOf(status, "sumStrip");
+    const inner = html`<b>${floor ? html`<small>at least</small> ` : null}${shown}</b><span>${s === null ? null : icon(s.icon, { size: "sm" })}${what}</span>`;
+    const cls = classes("sumstrip__i", s !== null && `tone-${s.tone}`);
+    const item = href === null ? html`<span class="${cls}">${inner}</span>` : html`<a class="${cls}" href="${hrefOf(href, "sumStrip")}">${inner}</a>`;
+    return html`<li${hidePhone ? html` class="hide-phone"` : null}>${item}</li>`;
+  });
+  return html`<ul class="sumstrip" aria-label="${label}">${drawn}</ul>`;
+}
+
 /**
  * A button, or a link drawn as one (`href`). `kind` is one of `BTN_KINDS` or a list of them (`["sm", "ghost"]`):
  * primary is the one step forward, answer is for a parked run, paid and danger are outlined until their confirm
@@ -854,6 +983,47 @@ export function actForm({ action, hidden = [], label, kind = ["sm"], icon: glyph
   if (typeof action !== "string" || !ACTION_RE.test(action)) throw new RangeError(`kit.actForm: an action is a name the script posts, [a-z0-9-]{1,40}, not ${JSON.stringify(action)}`);
   if (!Array.isArray(hidden)) throw new TypeError("kit.actForm: hidden is a list of fields");
   return html`<form class="act" data-action="${action}" autocomplete="off">${hidden.map(hiddenOf)}${btn({ type: "submit", kind, label, icon: glyph })}</form>`;
+}
+
+// ---- a parked run's question ----------------------------------------------------------------------------------------------------
+
+/**
+ * A parked run's question as a card (the ParkedPhone card's): the parked tile, "<id> asks" with the run's id in the code
+ * face linked to its page (`runHref`), how long it has waited (`waited`, text), a meta line (the project's tag, the
+ * `target`, and `where`: text or a fragment each, such as the forge and the chain's count), the `body` on the parked
+ * tint, then `answer` (an `answerForm`, or a banner saying why it cannot be answered here). An `<article>`, a card
+ * ringed in the parked tone and named "<id> asks"; the panel element around it stays bare.
+ *
+ * THE CARD HOLDS NO QUESTION TEXT unless a caller puts it in `body`, and the console's callers never do: a parked row
+ * carries none, and transcript text is shown only in a run page's transcript (REQ-CONSOLE-SECURITY (l)). Their body
+ * says where the question is read.
+ */
+export function questionCard({ jobId, runHref = null, waited = null, project = null, target = null, where = null, body = null, answer = null }) {
+  const id = plainOf(jobId, "a job id", "questionCard");
+  const part = (v) => (isSafeHtml(v) ? v : html`<span>${v}</span>`);
+  const meta = [given(project) ? ptag(project) : null, given(target) ? part(target) : null, given(where) ? part(where) : null].filter((m) => m !== null);
+  const wait = given(waited) ? html`<span class="qcard__wait"><span class="sr">waiting </span>${waited}</span>` : null;
+  return html`<article class="card card--ring tone-parked qcard" aria-label="${`${id} asks`}"><p class="qcard__top">${tile("parked", { sm: true, iconSm: true })}<b>${runHref === null ? html`<span class="code">${id}</span>` : html`<a class="code" href="${hrefOf(runHref, "questionCard")}">${id}</a>`} asks</b>${wait}</p>${meta.length === 0 ? null : html`<p class="qcard__meta">${meta}</p>`}${given(body) ? html`<div class="qcard__body">${body}</div>` : null}${given(answer) ? answer : null}</article>`;
+}
+
+/** The most characters an answer's field takes: the worker's bound on an answer (`console-answer.mjs`, in bytes). */
+export const ANSWER_MAX = ANSWER_TEXT_MAX_BYTES;
+
+/**
+ * A parked run's answer form (the ParkedPhone card's answer box), drawn where the console can build the answer, which
+ * the caller has checked: `<form class="act qform" data-action="parked-answer">` with the run's id as its `jobId` field
+ * and the answer as `text`, the names `panels/common.mjs` `parkedAnswerForm` has always posted, so the browser script
+ * and the action read it as before. The field's label is visually hidden (the card above it says what is asked); it
+ * takes at most `ANSWER_MAX` characters, is required, and names `hint` (the line under the buttons) as its description.
+ * Then Preview the answer, in the answer act's fill, and an Open run link where `runHref` is given. `id` is the field's,
+ * a kit id unique on the page. Nothing is posted until the preview's Confirm (`confirm-view.mjs`).
+ */
+export function answerForm({ jobId, id, hint, runHref = null }) {
+  const fid = idOf(id, "answerForm");
+  const field = html`<label class="sr" for="${fid}">Your answer, as the reply on the issue</label>${textarea({ id: fid, name: "text", rows: 3, maxlength: ANSWER_MAX, placeholder: "Write your answer", required: true, describedBy: given(hint) ? `${fid}-hint` : null })}`;
+  const open = runHref === null ? null : btn({ kind: "ghost", label: "Open run", href: runHref });
+  const said = given(hint) ? html`<p class="field__hint" id="${idOf(`${fid}-hint`, "answerForm")}">${hint}</p>` : null;
+  return html`<form class="act qform" data-action="parked-answer" autocomplete="off">${hiddenOf(["jobId", plainOf(jobId, "a job id", "answerForm")])}${field}<div class="qform__act">${btn({ type: "submit", kind: "answer", icon: "comment", label: "Preview the answer" })}${open}</div>${said}</form>`;
 }
 
 /**

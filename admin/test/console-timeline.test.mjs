@@ -186,10 +186,10 @@ test("the words are words.mjs's and the waiting buckets the worker leaf's, each 
   assert.deepEqual(TIMELINE_KINDS, ["run", "held", "parked", "failed", "refused", "wait", "ok"]);
 });
 
-test("the module is pure: it imports html.mjs and kit.mjs only, and reads no clock", () => {
+test("the module is pure: it imports html.mjs, kit.mjs and words.mjs only, and reads no clock", () => {
   const src = readFileSync(new URL("../src/console/timeline.mjs", import.meta.url), "utf8");
   const imports = [...src.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]);
-  assert.deepEqual(imports, ["./html.mjs", "./kit.mjs"]);
+  assert.deepEqual(imports, ["./html.mjs", "./kit.mjs", "../words.mjs"]);
   assert.doesNotMatch(src, /Date\.now\(|new Date\(\)|performance\.now|Math\.random/);
 });
 
@@ -326,6 +326,15 @@ test("each kind: completed, cancelled and answered are quiet; failed, refused, r
   assert.deepEqual(rowOf(m, "web").counts, { completed: 2, cancelled: 1, failed: 2, refused: 1, parked: 1, running: 1, held: 1, waiting: 0 });
 });
 
+test("a recovery end the worker records as policy is a failure's pill, said failed, as every surface says it (issue #737)", () => {
+  const ends = ["recovery-cap", "recovery-checkpoint-absent", "recovery-unsafe-extensions"];
+  const m = timelineModel({ now: NOW, runs: [...ends.map((reason, i) => rec(`rc-${i}`, { outcome: "policy", reason, from: -150 + 30 * i, to: -140 + 30 * i })), rec("ref-2", { outcome: "policy", reason: "scope-cap", from: -20, to: -20 })] });
+  const kinds = Object.fromEntries(itemsOf(m).map((i) => [i.jobId, [i.kind, i.word]]));
+  assert.deepEqual(kinds, { "rc-0": ["failed", "failed"], "rc-1": ["failed", "failed"], "rc-2": ["failed", "failed"], "ref-2": ["refused", "refused"] });
+  for (const id of ["rc-0", "rc-1", "rc-2"]) assert.match(itemOf(m, id).title, /: failed, /, id);
+  assert.deepEqual(rowOf(m, "web").counts, { completed: 0, cancelled: 0, failed: 3, refused: 1, parked: 0, running: 0, held: 0, waiting: 0 });
+});
+
 test("a held slot folds in its own record, and a running job is never also held", () => {
   const m = timelineModel({
     now: NOW,
@@ -422,6 +431,40 @@ for (const zoom of Object.keys(TIMELINE_ZOOMS)) {
     assert.equal((out.match(/class="tp-l tp-l--out-parked"/g) ?? []).length, itemsOf(m).filter((it) => it.label?.side === "before").length);
   });
 }
+
+test("an item of any kind left without a label is drawn as its shape alone, never a throw: refusals seconds apart in one crowded row", () => {
+  const now = Date.UTC(2026, 9, 8, 16, 0);
+  const r = (jobId, outcome, reason, endAgoS) => ({ jobId, kind: "github", target: "acme/web#1", project: "web", host: "mini1", outcome, reason, startedAt: now - endAgoS * 1000 - 30_000, endedAt: now - endAgoS * 1000, parentJobId: null });
+  for (const runs of [
+    [r("gh-a001", "policy", "dollar-cap", 137), r("gh-a002", "policy", "dollar-cap", 159)],
+    [r("gh-a001", "policy", "dollar-cap", 137), r("gh-a002", "policy", "dollar-cap", 159), r("gh-a003", "policy", "soft-hold", 879)],
+    [r("gh-a001", "policy", "dollar-cap", 137), r("gh-a002", "policy", "dollar-cap", 159), r("gh-a003", "policy", "soft-hold", 878), r("gh-a004", "policy", "soft-hold", 880), r("gh-a005", "failed", "worker-error", 883)],
+    [r("gh-a003", "policy", "soft-hold", 878), r("gh-a004", "policy", "soft-hold", 880), r("gh-a006", "policy", "soft-hold", 881), r("gh-a005", "failed", "worker-error", 883)],
+  ]) {
+    const m = timelineModel({ now, runs: { runs, floor: null, partial: false } });
+    const out = draw(m, "t");
+    for (const it of itemsOf(m).filter((i) => i.kind === "refused")) assert.ok(out.includes(`<title>${it.title}</title></circle>`), `${it.jobId}: its circle`);
+  }
+  // Every kind, each item's label taken away: each draws its shape and no label text.
+  const parts = cardSample();
+  const m = timelineModel({ ...parts, runs: [...parts.runs, rec("gh-f1", { outcome: "failed", reason: "worker-error", from: -40, to: -35 })] });
+  assert.deepEqual([...new Set(itemsOf(m).map((i) => i.kind))].sort(), [...TIMELINE_KINDS].sort(), "the sample holds every kind");
+  const bare = { ...m, rows: m.rows.map((row) => ({ ...row, lanes: row.lanes.map((lane) => lane.map((i) => ({ ...i, label: null }))) })) };
+  const out = draw(bare);
+  assert.doesNotMatch(out, /<text class="tp-l/, "no label is drawn");
+  for (const cls of ["tp--ok", "tp--failed", "tp--run", "tp--parked", "tp--held", "tp--wait"]) assert.ok(out.includes(`<rect class="${cls}"`), cls);
+  assert.ok(out.includes(`<circle class="tp-ref"`), "the refusal's circle");
+});
+
+test("an item of a kind the timeline does not draw is a programming error, with a label and without one, never drawn as another kind", () => {
+  for (const label of [null, { text: "x", sub: null, side: "in" }]) {
+    const m = timelineModel({ now: NOW, runs: [rec("gh-a1", { from: -40, to: -35 })] });
+    const item = itemsOf(m)[0];
+    item.kind = "zz";
+    item.label = label;
+    assert.throws(() => timelineHtml(m, { label: "t" }), RangeError, JSON.stringify(label));
+  }
+});
 
 test("waiting jobs: from now or their due time to the end, a glyph and words per bucket", () => {
   // Each waiting job runs to the window's end, so each takes a lane of its own: one project each keeps them all drawn.

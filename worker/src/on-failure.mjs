@@ -14,8 +14,9 @@
  *     (CONST-RETRY-INFRA-ONLY). Its exit code is logged and unread -- OQ-027's residual, inherited.
  *   - **The reason is shape-guarded HERE, the single normalizing door.** `InfraRetry.reason` defaults to
  *     the whole message when no token was given, and messages carry things like a library's own words --
- *     so anything that does not look like a fixed token (`/^[a-z0-9-]{1,40}$/`) flattens to "infra"
- *     before it can become an argv element. Id-only argv is the contract
+ *     so anything that is not a record reason token (`RECORD_REASON_RE`, the run record's own rule, from
+ *     its leaf: so a reason the record keeps reaches the hook as itself, never as "infra") flattens to
+ *     "infra" before it can become an argv element. Id-only argv is the contract
  *     (`INT-ON-FAILURE-HOOK-CONTRACT`), and one guard at the spawn is worth ten at the call sites.
  *
  * What transfers unchanged: the executable resolved at CALL time (an operator who fixes the path
@@ -26,12 +27,10 @@
 
 import { realpathSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { RECORD_REASON_RE } from "./record-reason.mjs";
 
 /** SIGTERM, then SIGKILL after this. secrets.mjs's grace, for its reason. */
 const KILL_GRACE_MS = 2000;
-
-/** A reason that may ride argv: a fixed lowercase token, never a message. */
-const REASON_SHAPE = /^[a-z0-9-]{1,40}$/;
 
 /**
  * Build the hook runner. Returns `fire({ jobId, outcome, reason })` -> void: spawns the operator's
@@ -58,7 +57,8 @@ export function makeOnFailure({ command, timeoutMs = 10_000, spawnFn = spawn, re
 		}
 		if (!path) return note(typeof jobId === "string" ? jobId : null, null, "unresolvable");
 
-		const safeReason = typeof reason === "string" && REASON_SHAPE.test(reason) ? reason : "infra";
+		// A reason rides argv only as a record reason token (the record's own rule), never as a message.
+		const safeReason = typeof reason === "string" && RECORD_REASON_RE.test(reason) ? reason : "infra";
 		// Argv must be non-empty id-only strings, and none may start with a dash -- this is argv where a
 		// dash parses as a flag, and the option parser is the operator's. `host` may honestly be "".
 		const argv = [jobId, outcome, safeReason, host];

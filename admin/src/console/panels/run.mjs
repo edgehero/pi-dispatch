@@ -7,9 +7,9 @@
 import { refusedBeforeSpend } from "../../costs.mjs";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
-import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleReceivedText, checkpointsText, isProgressSnapshot, progressStaleFor, recordBundle, recordRecovery, recoveredText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile } from "../../read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleReceivedText, checkpointsText, isProgressSnapshot, progressStaleFor, recordBundle, recordRecovery, recoveredText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile, RUN_RECORD_UNREAD, runPlaces, runPlacesText } from "../../read-model.mjs";
 import { coresText } from "@edgehero/pi-dispatch/size-suggest";
-import { NO_EXPLANATION, TONE_CLASS, VENUE_LABEL, docsHref, outcomeWord } from "../../words.mjs";
+import { NO_EXPLANATION, TONE_CLASS, VENUE_LABEL, capitalised, docsHref, outcomeWord } from "../../words.mjs";
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { rerunRefusalOf } from "../../job-actions.mjs";
@@ -98,14 +98,31 @@ function answerRefusedHere(view) {
   return chat !== null && typeof chat === "object" && !chat.unreachable && typeof chat.mode === "string" && chat.mode !== "reply";
 }
 
+/** The banner for a run whose record could not be read (`readRunById`'s `unreadable`, what could not be read). */
+export function runUnreadText(why) {
+  return `${capitalised(String(why))}, so this page cannot say what the run did. Reload to try again.`;
+}
+
+/**
+ * The banner for a run whose record both sides said they do not hold while no other place shows a run and some could
+ * not be read (`runPlaces`' `unread`, in `RUN_PLACES`' words): the page names what it could not read rather than say
+ * there is no run.
+ */
+export function runUntoldText(unread) {
+  return `No record of this run is in this host's history or the fleet's run mirror, but this page could not read ${runPlacesText(unread)}, so it cannot say whether the run exists. Reload to try again.`;
+}
+
 /**
  * Why the page has no record, said ONCE (issue #710): not a run id, a running job (a record is written at its end), a
- * queued job, a job the queue holds as ended whose record this host cannot read, or no such run. `{ cls, text }`.
+ * queued job, a record that could not be read (`runUnreadText`), a job the queue holds as ended whose record this host
+ * cannot read, a run no place shows while some could not be read (`runUntoldText`, issue #737: the places, the queues
+ * and the live transcript included, for both roles), or no such run. `{ cls, text }`.
  *
  * THE TONE IS THE JOB'S, DELIBERATELY, and none of these prints an outcome word (there is no outcome yet, or none this
  * page can read). A job that exists and has not ended (queued, running) is a grey `note`: nothing is wrong, the record
  * comes at its end. What the page cannot show is an amber `warn`: an id that is not one, a run no history or mirror
- * holds, and an ended job whose record is not readable here. Never `bad`: no run failed that this page knows of.
+ * holds, a record or a place that could not be read, and an ended job whose record is not readable here. Never `bad`:
+ * no run failed that this page knows of.
  */
 function absentOutcome(view) {
   const got = view.data?.run;
@@ -117,7 +134,11 @@ function absentOutcome(view) {
   }
   const state = view.data?.chat?.jobState ?? null;
   if (typeof state === "string" && QUEUED_STATES.includes(state)) return { cls: "note", text: "This job is queued and has not started yet: a run's record is written when it ends, and its live transcript is on this page once it runs (reload then)." };
+  // A record neither side said it does not hold (`missing`) is one this page could not read, whatever it was handed.
+  if (got?.missing !== true) return { cls: "warn", text: runUnreadText(typeof got?.unreadable === "string" ? got.unreadable : RUN_RECORD_UNREAD) };
   if (state === "completed" || state === "failed") return { cls: "warn", text: "This job has ended, but its record is not in this host's history or the fleet's run mirror (another host's run, with the mirror off?)." };
+  const places = runPlaces({ run: got, lookup: view.data?.chat, transcript: view.data?.transcript, progress: view.data?.progress });
+  if (!places.shown && places.unread.length > 0) return { cls: "warn", text: runUntoldText(places.unread) };
   return { cls: "warn", text: "No run with that id is in this host's history or the fleet's run mirror." };
 }
 

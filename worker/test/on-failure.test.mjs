@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { makeOnFailure } from "../src/on-failure.mjs";
+import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "../src/record-reason.mjs";
 
 // Issue #288, the operator's failure hook. Driven through a fake spawnFn (wait-check.test.mjs's
 // harness, reduced with its subject): the contract is the argv shape, the never-throws posture and the
@@ -48,7 +49,7 @@ test("the hook receives exactly [jobId, outcome, reason, host], exec'd with no s
 });
 
 test("the provider-auth-refused policy reason crosses into argv as itself (issue #437)", async () => {
-	// It is the one runner-originated reason the hook names, so it must fit REASON_SHAPE rather than flatten to
+	// It is the one runner-originated reason the hook names, so it must be a record reason token rather than flatten to
 	// "infra": an operator's notifier that cannot tell a bad key from a flaky daemon pages the wrong fix.
 	const { fire, seen } = hook();
 	fire({ jobId: "gh-1", outcome: "policy", reason: "provider-auth-refused" });
@@ -66,6 +67,37 @@ test("a message-shaped reason flattens to the fixed token infra before it can be
 	shouty.fire({ jobId: "gh-1", outcome: "failed", reason: "Not-A-Token" });
 	await flush();
 	assert.equal(shouty.seen.args.args[2], "infra", "uppercase is not the fixed-token shape");
+});
+
+test("every reason the run record keeps crosses into argv as itself, up to its 64 characters; anything else reads infra (#737)", async () => {
+	// The hook's rule is the record's (`RECORD_REASON_RE`), so a reason the record and the console show is the reason the
+	// operator's notifier is handed, never `infra` for being longer than a narrower shape allowed.
+	for (const reason of ["a", "d".repeat(41), `x${"-".repeat(62)}y`, "z".repeat(64)]) {
+		const { fire, seen } = hook();
+		fire({ jobId: "gh-1", outcome: "failed", reason });
+		await flush();
+		assert.deepEqual(seen.args.args, ["gh-1", "failed", reason, "mini"], `${reason.length} characters`);
+	}
+	// Past 64, or not led by a letter or digit (a dash would parse as a flag), it is no token: the hook still fires, and
+	// no argv element starts with a dash.
+	for (const reason of ["z".repeat(65), "-rf", "--help", "-"]) {
+		const { fire, seen } = hook();
+		fire({ jobId: "gh-1", outcome: "failed", reason });
+		await flush();
+		assert.deepEqual(seen.args.args, ["gh-1", "failed", "infra", "mini"], JSON.stringify(reason));
+		assert.ok(!seen.args.args.some((a) => a.startsWith("-")));
+	}
+});
+
+test("a container's infrastructure exit and an unknown exit cross into argv as their tokens, where their messages read infra (#737)", async () => {
+	// An exit 1 and an unknown exit were InfraRetrys with no token, so the hook got their message and said `infra`. They
+	// carry their own token now, and the token passes the hook's shape, so an operator's notifier can tell the two apart.
+	for (const reason of [CONTAINER_INFRA_EXIT, CONTAINER_EXIT_UNKNOWN]) {
+		const { fire, seen } = hook();
+		fire({ jobId: "gh-1", outcome: "failed", reason });
+		await flush();
+		assert.deepEqual(seen.args.args, ["gh-1", "failed", reason, "mini"], reason);
+	}
 });
 
 test("unusable argv never spawns: a leading-dash jobId, an empty outcome, a missing jobId", async () => {

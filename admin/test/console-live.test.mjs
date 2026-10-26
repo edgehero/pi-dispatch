@@ -202,7 +202,7 @@ test("SECURITY: a viewer and an operator on the same page and query never share 
 
 test("a runs view is loaded at most every pageMinMs (5 s), not every tick; other pages load every tick; a new filter loads at once", async () => {
   // The run detail is held to 2 s since issue #644 made it live (its load reads a record and searches for children).
-  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { runs: 5000, run: 2000 });
+  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { runs: 5000, run: 2000, parked: 5000 });
   const now = clock();
   const h = hubOn({ now, pageMinMs: undefined });
   h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "runs", query: { q: "zz1" } });
@@ -226,6 +226,36 @@ test("a runs view is loaded at most every pageMinMs (5 s), not every tick; other
   now.advance(1000);
   await h.hub.tick();
   assert.equal(count("runs"), 3, "5 s after its last load, zz1 is read again (zz2 is not yet)");
+});
+
+test("a load says who will see it and that it is the hub's: viewers alone are told as a viewer, a load an operator's stream shows names no role, every one is marked live, and the console's readOnly rides along (#737)", async () => {
+  const now = clock();
+  const whos = [];
+  const h = hubOn({ now, pageMinMs: { parked: 5000 }, load: async (pageName, query, who) => (whos.push([pageName, who]), { pageName }) });
+  h.hub.subscribe({ res: fakeRes(), sessionId: "s3", session: VIEW, page: "parked", query: {} });
+  h.hub.subscribe({ res: fakeRes(), sessionId: "s3", session: VIEW, page: "fleet", query: {} });
+  await h.hub.tick();
+  assert.deepEqual(whos.sort(), [["fleet", { role: "viewer", readOnly: false, live: true }], ["parked", { role: "viewer", readOnly: false, live: true }]]);
+  // An operator's stream joins inside the parked page's 5 s: the viewers' load is not reused for it, and the load it
+  // makes names no role (one load serves both, so it never reads as an operator's own).
+  const parkedLoads = () => whos.filter(([pageName]) => pageName === "parked").map(([, who]) => who);
+  whos.length = 0;
+  now.advance(1000);
+  h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "parked", query: {} });
+  await h.hub.tick();
+  assert.deepEqual(parkedLoads(), [{ readOnly: false, live: true }]);
+  // That load is reused for everyone within its window.
+  whos.length = 0;
+  now.advance(1000);
+  await h.hub.tick();
+  assert.deepEqual(parkedLoads(), []);
+  assert.ok(whos.every(([pageName, who]) => pageName === "fleet" && who.role === "viewer"), "the fleet page is still the viewer's alone");
+  // A read-only console says so on every load.
+  const ro = [];
+  const r = hubOn({ readOnly: true, load: async (pageName, query, who) => (ro.push(who), {}) });
+  r.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "parked", query: {} });
+  await r.hub.tick();
+  assert.ok(ro.length > 0 && ro.every((who) => JSON.stringify(who) === '{"readOnly":true,"live":true}'), JSON.stringify(ro));
 });
 
 test("the canonical query key is the injected one (pages.mjs's pageQueryString): queries it calls equal share one load", async () => {
@@ -1580,7 +1610,8 @@ test("integration: every real page renders through the server, and a real live s
       assert.match(res.text, new RegExp(`<${SHELL_PANEL_IDS.includes(id) ? "span" : "section"} id="${id}" data-panel>`), `${path}: panel ${id} is a live region`);
     }
   }
-  assert.equal((await send({ path: "/run?id=nope", headers: { cookie: op } })).status, 404, "an unknown run id");
+  // This fleet reads no queue, transcript or progress, so an id no record holds cannot be told absent: the run page, 503.
+  assert.equal((await send({ path: "/run?id=nope", headers: { cookie: op } })).status, 503, "an unknown run id");
   assert.equal((await send({ path: "/audit", headers: { cookie: viewer } })).status, 403);
 
   // The fleet page's failed reason: the operator's stream carries it, the viewer's never does.

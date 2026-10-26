@@ -135,7 +135,8 @@
     "./dollar-budget": "./src/dollar-budget.mjs",
     "./scheduler-stall-guard": "./src/scheduler-stall-guard.mjs",
     "./watch-closer": "./src/watch-closer.mjs",
-    "./defer-reasons": "./src/defer-reasons.mjs"
+    "./defer-reasons": "./src/defer-reasons.mjs",
+    "./record-reason": "./src/record-reason.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

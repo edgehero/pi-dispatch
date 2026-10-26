@@ -98,11 +98,14 @@
  * line" (plus the cancelled, refused, awaiting-input and slot-holding counts when there are any), counting every item,
  * drawn or not; the row's further lanes are `aria-hidden`, since naming each again would repeat the row.
  *
- * IMPORTS `html.mjs` AND `kit.mjs` ONLY, so the words below are this module's own: the outcome words are `words.mjs`'s
- * and the buckets the worker's `defer-reasons.mjs` leaf's, and the timeline test holds each table to its source.
+ * IMPORTS `html.mjs`, `kit.mjs` AND `words.mjs` ONLY (all three pure), so the words below are this module's own: the
+ * outcome words are `words.mjs`'s and the buckets the worker's `defer-reasons.mjs` leaf's, and the timeline test holds
+ * each table to its source. An ended run's word is read through `words.mjs` `outcomeWord` itself (issue #737), so a
+ * reason that changes a run's word changes it here too.
  */
 import { html } from "./html.mjs";
 import { icon, ptag, schedulerRunOf, svgNum } from "./kit.mjs";
+import { outcomeWord } from "../words.mjs";
 
 /**
  * The zooms (`?zoom=`): how far back the window reaches, how far ahead, and the axis's tick. Now sits at
@@ -517,7 +520,8 @@ function collect({ now, start, runs, active, hostJobs, waiting, parked }) {
     }
     if (endAt < start) continue;
     const word = endedWord(r);
-    const kind = r.outcome === "completed" || word === TIMELINE_WORDS.cancelled ? "ok" : r.outcome === "policy" ? "refused" : "failed";
+    // The pill's kind by the word, as its title says it: a recovery end is a failure's pill, not a refusal's circle.
+    const kind = word === TIMELINE_WORDS.completed || word === TIMELINE_WORDS.cancelled ? "ok" : word === TIMELINE_WORDS.refused ? "refused" : "failed";
     out.push({ kind, ...base, word, ...(kind === "refused" ? { startAt: endAt } : {}) });
   }
 
@@ -560,12 +564,18 @@ function collect({ now, start, runs, active, hostJobs, waiting, parked }) {
   return out;
 }
 
-/** An ended record's word: `TIMELINE_WORDS`'s, as `words.mjs` `outcomeWord` reads the outcome and the reason. */
+/** The console status `outcomeWord` gives an ended record, as the timeline says it (`TIMELINE_WORDS`). */
+const WORD_OF_STATUS = Object.freeze({ ok: TIMELINE_WORDS.completed, parked: TIMELINE_WORDS.parked, cancelled: TIMELINE_WORDS.cancelled, refused: TIMELINE_WORDS.refused, failed: TIMELINE_WORDS.failed });
+
+/**
+ * An ended record's word: `words.mjs` `outcomeWord`'s status for its outcome and reason, as `TIMELINE_WORDS` says it, so
+ * a recovery end (recorded `policy`) is failed here as everywhere; an outcome the record contract does not name is
+ * unknown. A map of the raw values instead would call every `policy` record but an operator's cancel refused, a
+ * recovery end included.
+ */
 function endedWord(r) {
-  if (r.outcome === "completed") return r.reason === "awaiting-input" ? TIMELINE_WORDS.parked : TIMELINE_WORDS.completed;
-  if (r.outcome === "policy") return r.reason === "operator-cancel" ? TIMELINE_WORDS.cancelled : TIMELINE_WORDS.refused;
-  if (r.outcome === "failed") return TIMELINE_WORDS.failed;
-  return TIMELINE_WORDS.unknown;
+  const w = outcomeWord(r.outcome, r.reason);
+  return w.known && Object.hasOwn(WORD_OF_STATUS, w.status) ? WORD_OF_STATUS[w.status] : TIMELINE_WORDS.unknown;
 }
 
 /** Each kind's packing rank (`TIMELINE_KINDS`' order). */
@@ -1051,36 +1061,51 @@ function labelAt(it, { inDx, outDx = 8 }) {
   return html`x="${it.x}%" dx="-${outDx}" y="${TEXT_Y}" text-anchor="end"`;
 }
 
+/**
+ * Each kind's label (`it.label`, `l`), drawn by `itemHtml` only for an item that has one: packing leaves an item with no
+ * label where its row is crowded, and a kind with no label to fit has none (`shape`), so any kind can come without one
+ * and is then its shape alone.
+ */
+const LABEL_HTML = Object.freeze({
+  ok: (it, l) => html`<text class="tp-l" ${labelAt(it, { inDx: 12 })}>${l.text}</text>`,
+  failed: (it, l) => html`<text class="tp-l tp-l--out-failed" ${labelAt(it, { inDx: 12 })}>${l.text}<tspan class="tp-sub3" dx="6">${l.sub}</tspan></text>`,
+  refused: (it, l) => {
+    const text = l.side === "before" ? html`x="${it.x}%" dx="-${REF_R + 6}" y="${TEXT_Y}" text-anchor="end"` : html`x="${it.x}%" dx="${REF_R + 6}" y="${TEXT_Y}"`;
+    return html`<text class="tp-l tp-l--ref" ${text}>${l.text}</text>`;
+  },
+  run: (it, l) =>
+    l.side === "in"
+      ? html`<text class="tp-l tp-l--run" ${labelAt(it, { inDx: 12 })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub" dx="8">${l.sub}</tspan>`}</text>`
+      : html`<text class="tp-l tp-l--out-run" ${labelAt(it, { inDx: 12 })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub2" dx="6">${l.sub}</tspan>`}</text>`,
+  // Outside its pill the label is in the parked ink, the id and the tail's words, as a failure's is drawn.
+  parked: (it, l) => (l.side === "in" ? html`<text class="tp-l tp-l--parked" ${labelAt(it, { inDx: 12 })}>${l.text}</text>` : html`<text class="tp-l tp-l--out-parked" ${labelAt(it, { inDx: 12 })}>${l.text}<tspan class="tp-sub3" dx="6">${l.sub}</tspan></text>`),
+  held: (it, l) => html`<text class="tp-l tp-l--hold" ${labelAt(it, { inDx: 14 })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub3" dx="8">${l.sub}</tspan>`}</text>`,
+  wait: (it, l) => html`<text class="tp-l" ${labelAt(it, { inDx: WAIT_GLYPH_PX })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub2" dx="6">${l.sub}</tspan>`}</text>`,
+});
+
 /** One item's SVG; `lead(it)` is a waiting job's line before its pill (`timelineHtml` draws it). */
 function itemHtml(it, nowX, lead) {
-  const l = it.label;
+  if (!Object.hasOwn(LABEL_HTML, it.kind)) throw new RangeError(`timeline: unknown item kind ${JSON.stringify(it.kind)}`);
+  const label = it.label === null || it.label === undefined ? null : LABEL_HTML[it.kind](it, it.label);
   switch (it.kind) {
     case "ok":
-      return html`${rect("tp--ok", it)}${l ? html`<text class="tp-l" ${labelAt(it, { inDx: 12 })}>${l.text}</text>` : null}`;
+      return html`${rect("tp--ok", it)}${label}`;
     case "failed":
-      return html`${rect("tp--failed", it)}${l ? html`<text class="tp-l tp-l--out-failed" ${labelAt(it, { inDx: 12 })}>${l.text}<tspan class="tp-sub3" dx="6">${l.sub}</tspan></text>` : null}`;
-    case "refused": {
-      const text = l.side === "before" ? html`x="${it.x}%" dx="-${REF_R + 6}" y="${TEXT_Y}" text-anchor="end"` : html`x="${it.x}%" dx="${REF_R + 6}" y="${TEXT_Y}"`;
-      return html`<circle class="tp-ref" cx="${it.x}%" cy="${MID_Y}" r="${REF_R}"><title>${it.title}</title></circle><g transform="translate(-7 15)"><use class="tp-ref-g" href="#i-refused" x="${it.x}%" width="14" height="14"></use></g><text class="tp-l tp-l--ref" ${text}>${l.text}</text>`;
-    }
+      return html`${rect("tp--failed", it)}${label}`;
+    case "refused":
+      return html`<circle class="tp-ref" cx="${it.x}%" cy="${MID_Y}" r="${REF_R}"><title>${it.title}</title></circle><g transform="translate(-7 15)"><use class="tp-ref-g" href="#i-refused" x="${it.x}%" width="14" height="14"></use></g>${label}`;
     case "run":
-      if (l === null) return rect("tp--run", it);
-      if (l.side === "in") return html`${rect("tp--run", it)}<text class="tp-l tp-l--run" ${labelAt(it, { inDx: 12 })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub" dx="8">${l.sub}</tspan>`}</text>`;
-      return html`${rect("tp--run", it)}<text class="tp-l tp-l--out-run" ${labelAt(it, { inDx: 12 })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub2" dx="6">${l.sub}</tspan>`}</text>`;
+      return html`${rect("tp--run", it)}${label}`;
     case "parked": {
       const tail = Number(it.tailX) < Number(nowX) ? (it.pill ? html`<line class="tail" x1="${it.tailX}%" x2="${nowX}%" y1="${TAIL_Y}" y2="${TAIL_Y}"/>` : html`<line class="tail" x1="${it.tailX}%" x2="${nowX}%" y1="${TAIL_Y}" y2="${TAIL_Y}"><title>${it.title}</title></line>`) : null;
-      // Outside its pill the label is in the parked ink, the id and the tail's words, as a failure's is drawn.
-      const label = l === null ? null : l.side === "in" ? html`<text class="tp-l tp-l--parked" ${labelAt(it, { inDx: 12 })}>${l.text}</text>` : html`<text class="tp-l tp-l--out-parked" ${labelAt(it, { inDx: 12 })}>${l.text}<tspan class="tp-sub3" dx="6">${l.sub}</tspan></text>`;
       const words = it.tailText === null ? null : html`<text class="tail-t" x="${it.tailX}%" dx="6" y="${TAIL_TEXT_Y}">${it.tailText}</text>`;
       return html`${it.pill ? rect("tp--parked", it) : null}${label}${tail}${words}`;
     }
     case "held":
-      return html`${rect("tp--held", it)}${l ? html`<text class="tp-l tp-l--hold" ${labelAt(it, { inDx: 14 })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub3" dx="8">${l.sub}</tspan>`}</text>` : null}`;
-    case "wait": {
-      return html`${lead(it)}${rect("tp--wait", it)}<g transform="translate(9 15)"><use class="tp-wait-g" href="#i-${it.glyph}" x="${it.x}%" width="14" height="14"></use></g>${l ? html`<text class="tp-l" ${labelAt(it, { inDx: WAIT_GLYPH_PX })}>${l.text}${l.sub === null ? null : html`<tspan class="tp-sub2" dx="6">${l.sub}</tspan>`}</text>` : null}`;
-    }
+      return html`${rect("tp--held", it)}${label}`;
     default:
-      throw new RangeError(`timeline: unknown item kind ${JSON.stringify(it.kind)}`);
+      // "wait", the one kind left of those `LABEL_HTML` names.
+      return html`${lead(it)}${rect("tp--wait", it)}<g transform="translate(9 15)"><use class="tp-wait-g" href="#i-${it.glyph}" x="${it.x}%" width="14" height="14"></use></g>${label}`;
   }
 }
 

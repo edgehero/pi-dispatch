@@ -178,6 +178,27 @@ test("Enter on a run older than the runs list reads it by id; a missing or unrea
   await unwired.dispose();
 });
 
+test("Enter on a run whose record could not be read says so, never that there is no record: only the reader's missing is no record", async () => {
+  for (const [answer, said] of [
+    [{ unreadable: "the fleet's run mirror could not be read" }, /the run could not be read \(the fleet's run mirror could not be/],
+    [{ unreadable: "this host's record of the run could not be read" }, /the run could not be read \(this host's record of the run/],
+    [{}, /the run could not be read \(no answer the panel can read\)/],
+    [null, /the run could not be read \(no answer the panel can read\)/],
+    [{ invalid: "a run id is letters, digits and . _ : -, at most 200 characters" }, /the run id is not readable \(a run id is letters/],
+  ]) {
+    const comp = dash({ ...SNAPSHOT, parked: PARKED }, { runById: async () => answer });
+    await flush();
+    comp.handleInput("k");
+    comp.handleInput(DOWN);
+    comp.handleInput("\r");
+    await flush();
+    const shown = text(comp);
+    assert.match(shown, said, JSON.stringify(answer));
+    assert.doesNotMatch(shown, /no record of this run/, JSON.stringify(answer));
+    await comp.dispose();
+  }
+});
+
 test("a by-id answer that lands after Esc is never drawn (the view check alone: Esc numbers no new read)", async () => {
   let release;
   const comp = dash({ ...SNAPSHOT, parked: PARKED }, { runById: () => new Promise((r) => { release = r; }) });

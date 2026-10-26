@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
-import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID, bulkResultsHtml, previewBarHtml, refusalHtml, unchangedBarHtml } from "../src/console/confirm-view.mjs";
+import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID, HELD_NOTE_CHIP, HELD_NOTE_TEXT, bulkResultsHtml, heldNoteHtml, previewBarHtml, refusalHtml, unchangedBarHtml } from "../src/console/confirm-view.mjs";
 import { html, page } from "../src/console/html.mjs";
 import { actForm, area, editor, field } from "../src/console/panels/common.mjs";
 import { CONSOLE_SCRIPT, RETRY_MS, SIGN_IN_GAVE_UP, SIGN_IN_RETRY_FOR_MS, SIGN_IN_TRIES_MAX, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_TOKENS_BODY } from "../src/console/script.mjs";
 import { PERSON_CHANGED } from "../src/console/server.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, SIGN_IN_NOTICES, STREAM_ENDS, STREAM_SHUTDOWN } from "../src/console/session-ends.mjs";
-import { LIVE_NOTES, LIVE_STATES, legacyWrap, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
+import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF, legacyWrap, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
+import { errorPage } from "../src/console/error-pages.mjs";
+import * as ui from "../src/console/kit.mjs";
 import { runTranscriptSection } from "../src/console/transcript.mjs";
 import { CLIENT_STATES, LEDGER_CARDS, T } from "./helpers/client-states.mjs";
-import { runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
+import { parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
 
 // Issue #737, PR 2: the browser script in every state a card names, run over the server's OWN markup (the shell, the
 // sign-in pages, the confirm slot and the bars confirm-view.mjs draws), so what is checked is that the script shows the
@@ -532,7 +534,7 @@ stateTest(T.refusedPreview, async () => {
   const sentence = "fleet-pause takes no fields; colour is not one of them, so nothing was changed";
   await w.fetch.open("/api/act/fleet-pause/preview").answer(400, { error: sentence, html: String(refusalHtml({ where: "preview", sentence, status: 400 })) });
   assert.equal(text(slot.querySelector(".banner__t")), "The change was refused");
-  assert.match(text(slot.querySelector(".banner__s")), /^Fleet-pause takes no fields; colour is not one of them, so nothing was changed\.$/);
+  assert.match(text(slot.querySelector(".banner__s")), /^fleet-pause takes no fields; colour is not one of them, so nothing was changed\.$/);
   assert.ok(slot.querySelector("[data-confirm]") === null);
   slot.querySelector("[data-close]").click();
   assert.equal(slot.hidden, true);
@@ -668,7 +670,7 @@ stateTest(T.held, async () => {
   es.emit("panel", { id: "p-fleet-state", html: "<h2>Fleet</h2><p>one</p>" });
   assert.ok(formOf(w, "fleet-pause"), "not swapped while its preview is open");
   assert.equal(panel.firstElementChild.className, "held", "the kept-still note, first in the panel");
-  assert.deepEqual([text(panel.querySelector(".held .chip")), text(panel.querySelector(".held__s"))], ["Updates paused while you edit", "Newer data is waiting. It shows when you close the preview or leave the field."]);
+  assert.deepEqual([text(panel.querySelector(".held .chip")), text(panel.querySelector(".held__s"))], [HELD_NOTE_CHIP, HELD_NOTE_TEXT]);
   es.emit("panel", { id: "p-fleet-state", html: "<h2>Fleet</h2><p>two</p>" });
   assert.equal(panel.querySelectorAll(".held").length, 1, "the note once, however many updates wait");
   es.emit("panel", { id: "p-fleet-failed", html: "<h2>Failed jobs</h2><p>none</p>" });
@@ -1359,6 +1361,153 @@ stateTest(T.link, async () => {
     assert.deepEqual([linkStates(held), calls(held, "/login/code").length], [[state], 1], `${state}: as drawn while its post is out`);
     assert.deepEqual(linkStates(boot(markup, { url: "/login/code" })), ["nocode"], `${state}: no code`);
   }
+});
+
+// ---- the runs page: the search field and the filter bar (RunsScreen, RunsPhone, Shell's Search) -----------------------
+
+/**
+ * The runs page's filter bar as the kit draws its parts (`panels/runs.mjs` `runsFilters` builds the real one): the
+ * search pill, the Filters toggle, a row of project pills, a closed list in a field and Apply, in a GET form marked
+ * `data-collapsible`.
+ */
+function filterBar({ q = null, outcome = "" } = {}) {
+  const list = ui.field({ label: "Outcome", id: "f-outcome", control: ui.select({ id: "f-outcome", name: "outcome", value: outcome, options: [{ value: "", label: "Any" }, { value: "failed", label: "failed" }] }) });
+  return html`<form class="filterbar" method="get" action="/runs" data-collapsible>${ui.searchPill({ id: ui.SEARCH_ID, name: "q", value: q })}${ui.filterToggle({ count: outcome === "" ? 0 : 1 })}${ui.chipRow([ui.fpill({ label: "All", count: 3, href: "/runs", on: true })], { label: "Project" })}${list}${ui.btn({ label: "Apply", type: "submit" })}</form>`;
+}
+
+/** The runs page in the shell, its filters a live panel above the table's, for `role`, on a read-only console or not. */
+function runsPage({ role = "operator", readOnly = false, bar = filterBar() } = {}) {
+  const session = role === "operator" ? OPERATOR : { name: "watcher", role: "viewer" };
+  const ctx = { session, readOnly, data: { parkedCount: 0, now: NOW }, query: {}, theme: null, maxStreams: 4 };
+  const inner = html`<section id="p-filters" data-panel>${bar}</section><section id="p-runs" data-panel><p>runs</p></section>`;
+  return String(page({ title: "pi-dispatch console: Runs", name: "runs", body: shellHtml("runs", ctx, inner), live: "runs", query: "" }));
+}
+
+stateTest("the runs page puts the focus in its search field when it opens at #q, when its address changes to #q, and when Search is pressed there", async () => {
+  const w = boot(runsPage(), { url: `/runs#${ui.SEARCH_ID}` });
+  assert.ok(w.document.activeElement === w.document.getElementById("q"), "opened at the Search button's address: the field has the focus");
+  // Opened plainly nothing moves; the Search button on the runs page itself only changes the fragment (no page loads).
+  const p = boot(runsPage(), { url: "/runs" });
+  const field = p.document.getElementById("q");
+  assert.ok(p.document.activeElement === p.document.body, "a page that opens focuses nothing of its own accord");
+  p.hash(`#${ui.SEARCH_ID}`);
+  assert.ok(p.document.activeElement === field, "the fragment changed to #q");
+  // Pressed again while the address already ends with #q, which fires no hashchange: the field again.
+  field.blur();
+  const search = p.document.querySelector(`a[href="${SEARCH_HREF}"]`);
+  assert.ok(search, "the top bar's Search button");
+  search.click();
+  assert.ok(p.document.activeElement === field, "Search pressed at #q");
+  // Any other fragment, a link that is not Search, and another page holding the field (the run-id 404) leave it alone.
+  p.hash("#p-runs");
+  field.blur();
+  p.document.querySelector('a[href="/runs"]').click();
+  assert.ok(p.document.activeElement !== field, "another link or fragment moves nothing");
+  const e = boot(String(errorPage({ kind: "no-run", session: OPERATOR, runId: "gh-1" }).html), { url: `/run?id=gh-1#${ui.SEARCH_ID}` });
+  assert.ok(e.document.getElementById("q") && e.document.activeElement !== e.document.getElementById("q"), "the 404's field is not the runs page's to focus");
+});
+
+stateTest("a filter bar folds on a phone behind its toggle, which the script shows and which opens and closes it; without the script every filter shows", async () => {
+  // As the server draws it, which is what a browser without the script shows: nothing folded, the toggle hidden.
+  const drawn = parseDocument(runsPage());
+  assert.ok(!drawn.querySelector(".filterbar").classList.contains("filterbar--collapsible"), "no fold without the script");
+  assert.ok(!shown(drawn.querySelector("[data-filter-toggle]")), "and no button that would do nothing");
+  const w = boot(runsPage());
+  const bar = w.document.querySelector(".filterbar");
+  const toggle = w.document.querySelector("[data-filter-toggle]");
+  assert.ok(bar.classList.contains("filterbar--collapsible") && shown(toggle), "folded, its toggle shown");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  toggle.click();
+  assert.ok(!bar.classList.contains("filterbar--collapsible") && toggle.getAttribute("aria-expanded") === "true", "opened");
+  toggle.click();
+  assert.ok(bar.classList.contains("filterbar--collapsible") && toggle.getAttribute("aria-expanded") === "false", "closed again");
+  // A live update swaps the panel (its counts changed): the new bar is as the person left it, open, and the toggle that
+  // had the focus has it again.
+  toggle.click();
+  toggle.focus();
+  w.streams[0].emit("panel", { id: "p-filters", html: String(filterBar({ outcome: "failed" })) });
+  const bar2 = w.document.querySelector(".filterbar");
+  const toggle2 = w.document.querySelector("[data-filter-toggle]");
+  assert.ok(bar2 !== bar && toggle2 !== toggle, "the panel was swapped");
+  assert.ok(!bar2.classList.contains("filterbar--collapsible") && toggle2.getAttribute("aria-expanded") === "true" && shown(toggle2), "still open");
+  assert.ok(w.document.activeElement === toggle2, "the focus on the new toggle");
+  toggle2.click();
+  w.document.body.focus();
+  w.streams[0].emit("panel", { id: "p-filters", html: String(filterBar()) });
+  assert.ok(w.document.querySelector(".filterbar").classList.contains("filterbar--collapsible"), "closed, it stays closed");
+  // A bar that is not marked foldable is left as drawn, and its toggle, if it had one, hidden.
+  const plain = boot(runsPage({ bar: html`<form class="filterbar" method="get" action="/runs">${ui.searchPill({ id: ui.SEARCH_ID, name: "q" })}${ui.filterToggle()}</form>` }));
+  assert.ok(!plain.document.querySelector(".filterbar").classList.contains("filterbar--collapsible") && !shown(plain.document.querySelector("[data-filter-toggle]")));
+});
+
+stateTest("a filter bar in use keeps its live panel still and says so, a viewer's and a read-only console's too: a field focused, a search half typed, a list chosen and not applied", async () => {
+  const fresh = String(filterBar({ outcome: "failed" }));
+  for (const [role, readOnly] of [["operator", false], ["viewer", false], ["operator", true]]) {
+    // Focused: held, saying so with the server's note, and taken once the focus has left (a tick later).
+    const f = boot(runsPage({ role, readOnly }));
+    const q = f.document.getElementById("q");
+    q.focus();
+    f.streams[0].emit("panel", { id: "p-filters", html: fresh });
+    assert.ok(f.document.getElementById("q") === q, `${role}: not swapped under the focused field`);
+    const note = f.document.getElementById("p-filters").firstElementChild;
+    assert.equal(note.className, "held", `${role} ${readOnly}: the kept-still note, first in the panel`);
+    assert.equal(text(note), String(heldNoteHtml()).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim(), `${role} ${readOnly}: the server's own note`);
+    q.blur();
+    f.tick(0);
+    assert.ok(f.document.getElementById("q") !== q && f.document.getElementById("f-outcome").value === "failed", `${role}: the update lands once the field is left`);
+    // Typed into: the half typed search is the reader's, after the focus leaves too.
+    const t = boot(runsPage({ role, readOnly }));
+    t.type(t.document.getElementById("q"), "gh-2f");
+    t.streams[0].emit("panel", { id: "p-filters", html: fresh });
+    t.document.getElementById("q").blur();
+    t.tick(0);
+    assert.equal(t.document.getElementById("q").value, "gh-2f", `${role}: the typed search kept`);
+    // A list chosen and not applied.
+    const s = boot(runsPage({ role, readOnly }));
+    const options = s.document.getElementById("f-outcome").querySelectorAll("option");
+    options[0].liveSelected = false;
+    options[1].liveSelected = true;
+    s.streams[0].emit("panel", { id: "p-filters", html: String(filterBar()) });
+    assert.equal(s.document.getElementById("f-outcome").value, "failed", `${role}: the chosen list kept`);
+    // Nothing in use: the update lands at once.
+    const n = boot(runsPage({ role, readOnly }));
+    n.streams[0].emit("panel", { id: "p-filters", html: fresh });
+    assert.equal(n.document.getElementById("f-outcome").value, "failed", `${role}: swapped`);
+  }
+  // A list whose markup marks no option chosen shows the browser's first: choosing another is a change, and holds.
+  const bare = (attr = "") => html`<form class="filterbar" method="get" action="/runs"><select id="f-kind" name="kind"><option value="">Any</option><option value="github"${attr ? html` selected` : null}>github</option></select></form>`;
+  const b = boot(runsPage({ bar: bare() }));
+  const kinds = b.document.getElementById("f-kind").querySelectorAll("option");
+  kinds[0].liveSelected = false;
+  kinds[1].liveSelected = true;
+  b.streams[0].emit("panel", { id: "p-filters", html: String(bare()) });
+  assert.equal(b.document.getElementById("f-kind").value, "github", "the chosen list kept");
+  // Left at the browser's first option, it is not in use, and the update lands.
+  const a = boot(runsPage({ bar: bare() }));
+  a.streams[0].emit("panel", { id: "p-filters", html: String(bare("on")) });
+  assert.equal(a.document.getElementById("f-kind").value, "github", "swapped: the server's new choice");
+});
+
+stateTest("a filter bar's GET carries only the fields in use: its empty fields are left out as the form is sent, and enabled again a tick later", async () => {
+  for (const [page, bar] of [["runs", filterBar({ q: "acme/web" })], ["audit", html`<form class="filterbar" method="get" action="/audit"><input type="search" name="q" value=""><select name="who"><option value="" selected>Who: all</option><option value="ops">Who: ops</option></select><select name="action"><option value="">Action: all</option><option value="fleet-pause" selected>Action: fleet-pause</option></select>${ui.btn({ label: "Filter", type: "submit" })}</form>`]]) {
+    const w = boot(runsPage({ bar }), { url: `/${page}` });
+    const form = w.document.querySelector("form.filterbar");
+    const named = () => [...form.elements].filter((el) => el.name);
+    // As the browser reads the form once every submit listener has run (this one is added after the script's, on the
+    // same document): a disabled control is not sent.
+    let sent = null;
+    w.document.addEventListener("submit", () => { sent = named().filter((el) => !el.disabled).map((el) => [el.name, el.value]); });
+    w.submit(form);
+    assert.deepEqual(sent, page === "runs" ? [["q", "acme/web"]] : [["action", "fleet-pause"]], `${page}: only what is set`);
+    assert.ok(named().filter((el) => el.value === "").every((el) => el.disabled), `${page}: each empty field disabled while the form is read`);
+    w.tick(0);
+    assert.ok(named().every((el) => !el.disabled), `${page}: and enabled again, so a page brought back by Back works as it was`);
+  }
+  // A write's form is the confirm slot's, untouched: its fields are the preview's to read.
+  const f = boot(fleetPage());
+  const repo = f.document.querySelector('input[name="repo"]');
+  f.submit(formOf(f, "retry-all-failed"));
+  assert.equal(repo.disabled, false, "a write's empty field is never disabled");
 });
 
 // ---- what the script is made of ------------------------------------------------------------------------------------

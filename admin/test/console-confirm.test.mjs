@@ -166,6 +166,23 @@ test("refusalHtml derives its state from where and the status, adds the clause o
   assert.deepEqual([0, 999, 1000, 59999, 60000, 300000, -5, Number.NaN].map(v.countdownText), ["0:00", "0:00", "0:01", "0:59", "1:00", "5:00", "0:00", "0:00"]);
 });
 
+// Issue #737: a preview whose fleet snapshot did not answer in time is not a Valkey that could not be reached.
+test("the timeout refusal names no cause: its own title, the attention tone and Try again, chosen only by its state, never derived from a 503", async () => {
+  const v = await import("../src/console/confirm-view.mjs");
+  const title = (h) => /<p class="banner__t">([^<]*)<\/p>/.exec(String(h))[1].replace(/&#39;/g, "'");
+  const sentence = "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed";
+  assert.deepEqual({ ...v.REFUSAL_STATES.timeout, act: { ...v.REFUSAL_STATES.timeout.act } }, { status: "attention", icon: "clock", title: "The fleet did not answer in time", act: { attr: "data-again", label: "Try again", kind: ["sm"] } });
+  const bar = String(v.refusalHtml({ where: "preview", status: 503, sentence, state: "timeout" }));
+  assert.equal(title(bar), "The fleet did not answer in time");
+  assert.match(bar, /^<div class="banner banner--sm tone-attention" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-clock"><\/use><\/svg><\/span>/);
+  assert.match(bar, /<p class="banner__s">The fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed\.<\/p>/, "its sentence says nothing changed already");
+  assert.match(bar, /<button class="btn btn--sm" type="button" data-again>Try again<\/button>/);
+  assert.doesNotMatch(bar, /Valkey/);
+  // The same 503 without the state is still Valkey's: the sentence is never read for it.
+  for (const where of ["preview", "confirm"]) assert.equal(title(v.refusalHtml({ where, status: 503, sentence })), "The deployment's Valkey could not be reached", where);
+  assert.ok(!v.REFUSAL_STATES.timeout.mayHaveChanged, "it comes before anything is written");
+});
+
 // Issue #737: the one refusal state that never says "Nothing was changed".
 test("a partial refusal says some of it may have been done and offers Look again, never nothing was changed; the others still add it", async () => {
   const v = await import("../src/console/confirm-view.mjs");
@@ -203,7 +220,8 @@ test("the bar's Undo line: one inline run, the act alone in bold, or a muted No 
   assert.ok(bar.includes("<li>maxTurns: <b>30</b> to <b>40</b></li><li>&lt;i&gt;</li>"), bar);
   const note = (h) => /<p class="confirm__note">([^]*?)<\/p>/.exec(String(h))[1];
   assert.equal(note(v.unchangedBarHtml({ summary: ["the file already says this"] })), "The file already says this.");
-  assert.equal(note(v.unchangedBarHtml({ summary: ["pi-jobs is already paused"] })), "Pi-jobs is already paused.");
+  // A sentence that opens with a name keeps the name as written: "Pi-jobs" names no queue.
+  assert.equal(note(v.unchangedBarHtml({ summary: ["pi-jobs is already paused"] })), "pi-jobs is already paused.");
   assert.equal(note(v.unchangedBarHtml({ summary: ["x"], sentenceHtml: html`The file already says this: <span class="code">maxTurns</span> is 40.` })), 'The file already says this: <span class="code">maxTurns</span> is 40.');
 });
 
@@ -211,6 +229,17 @@ test("the bar's Undo line: one inline run, the act alone in bold, or a muted No 
 test("the signed-out slot sentence says nothing was changed and that the console is being asked", async () => {
   const v = await import("../src/console/confirm-view.mjs");
   assert.equal(v.CONFIRM_SIGNED_OUT, "This session ended before the change was sent, so nothing was changed. The console is asked where it went.");
+});
+
+test("the kept-still note is one sentence true for every role: what ends a hold, naming no preview or Confirm a viewer or a read-only console has not", async () => {
+  const v = await import("../src/console/confirm-view.mjs");
+  assert.equal(v.HELD_NOTE_CHIP, "Updates paused while you edit");
+  assert.equal(v.HELD_NOTE_TEXT, "Newer data is waiting. It shows when you are done here: once you leave a field you did not change, apply or set back what you changed, and close what you opened.");
+  // The shell draws one template for the page, for every role: a viewer's and a read-only console's filter bar hold
+  // their panel too, and neither can open a preview.
+  assert.doesNotMatch(v.HELD_NOTE_TEXT, /preview|confirm|undo|operator/i);
+  const note = String(v.heldNoteHtml());
+  assert.ok(note.includes(`${v.HELD_NOTE_CHIP}</span> <span class="held__s">${v.HELD_NOTE_TEXT}</span>`), note);
 });
 
 // Issue #737: the banner after a write and the bulk results bar.

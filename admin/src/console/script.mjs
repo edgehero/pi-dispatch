@@ -82,6 +82,14 @@
  *     button keeps its space while hidden (`SHELL_CSS`), so showing it moves nothing. A command box's Copy button
  *     (`[data-copy]`, drawn hidden) is shown, on load and in each swapped panel, only where the clipboard can be
  *     written (`navigator.clipboard` in a secure context), and copies the text of its box's `<code>`.
+ *   - the RUNS page (issue #737, PR 4): the search field `#q` (`kit.mjs` `SEARCH_ID`) takes the focus when the page
+ *     opens at `#q`, when the fragment changes to it, and when the top bar's Search button (`shell.mjs` `SEARCH_HREF`)
+ *     is pressed while the address already ends with it. Every `.filterbar[data-collapsible]` (on any page, and in each
+ *     swapped panel) folds on a phone: the script adds `filterbar--collapsible` and shows its `[data-filter-toggle]`,
+ *     which opens and closes it and says so in `aria-expanded`; a bar's state is kept by its panel's id across a swap.
+ *     Without the script every filter shows and the toggle stays hidden. Every `form.filterbar` (the audit log's too)
+ *     sends only its fields in use: its empty fields are disabled while the browser reads the form and enabled a tick
+ *     later; without the script they are sent empty, which the page reads as no filter.
  *   - a LIVE page (issue #641; `data-live` on the body): opens `/api/events?page=<data-live>&<data-query>` with
  *     `EventSource`. An `event: panel` carries `{id, html}`, and its html replaces the inner HTML of the element with
  *     that id ONLY when that element carries `data-panel`: the server renders and escapes the fragment (the same
@@ -149,11 +157,14 @@
  *     been made. A confirm with jobs refused shows the bulk results bar; any other success reloads the page, whose
  *     banner then names the change.
  *   - while a form is in use (the slot open for its panel, a field, never a button, focused or changed, its editor
- *     open), a live panel holding it is NOT swapped, so an update cannot wipe a half-made change. The newest html waits
- *     (`pending`), the panel gets the server's kept-still note once (a copy of `<template id="held-note">`, as its
- *     first child), and the update is applied when the hold ends: Cancel or Close, or focus leaving a field (a tick
- *     later, once focus has landed). A swap never drops the focus: one that held it goes to the same form's button in
- *     the new markup, else a link to the same place, else the panel.
+ *     open; a write's form or, since PR 4 of issue #737, a filter bar, a list in it changed too), a live panel holding it
+ *     is NOT swapped, so an update cannot wipe a half-made change. The newest html waits
+ *     (`pending`), the panel gets the server's kept-still note once (a copy of `<template id="held-note">`, which the
+ *     shell draws on every live page for every role, as its first child), and the update is applied when the hold
+ *     ends: Cancel or Close, or focus leaving a field that holds no change (a tick later, once focus has landed); a
+ *     changed field holds its panel until it is applied (a filter bar's Apply loads the page anew), or set back as it
+ *     was drawn and left. A swap never drops the focus: one that held it goes to the same form's button in the new
+ *     markup, else a link to the same place, else the panel.
  *   - the run page's LIVE TRANSCRIPT (issue #643; `[data-transcript]`, drawn for an operator only): opens
  *     `/api/transcript?id=<data-job>` with `EventSource`. Each `event: entry` carries `{html}`, server-rendered and
  *     escaped, which is APPENDED to that one element (`insertAdjacentHTML("beforeend")`) and nowhere else. The view
@@ -166,7 +177,9 @@
  *     live" on that line alone.
  *   - every page's TIMES (issue #710): each `<time datetime>` the server drew (its text the UTC instant) is rewritten to
  *     the reader's local time with its UTC offset, its `title` set to the UTC text, on load and inside each panel a
- *     live update swaps in. Without the script a page reads UTC, as it always did.
+ *     live update swaps in, with the reader's date before it. A time the server marks `data-day`, whose row names its UTC
+ *     day (the runs table's Ended cell, `panels/runs.mjs` `endedHtml`), stays alone where the reader's day is that day
+ *     and gains the reader's date where it is not. Without the script a page reads UTC, as it always did.
  * Server text is shown with `textContent`, never as markup. The markup writes are exactly three, all of server-escaped
  * fragments into elements the server marked for them: the slot's (`fillSlot`: an answer's `html`, or the skeleton put
  * back), the panel swap (`swapPanel`, behind `data-panel`) and the transcript append.
@@ -179,7 +192,8 @@ import { FIT_JS } from "../graph-html.mjs";
 import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID } from "./confirm-view.mjs";
 import { PAGES } from "./pages.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, STREAM_ENDS, STREAM_SHUTDOWN } from "./session-ends.mjs";
-import { LIVE_NOTES, LIVE_STATES } from "./shell.mjs";
+import { SEARCH_ID } from "./kit.mjs";
+import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF } from "./shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "./theme.mjs";
 import { OUTCOME_WORD_OF } from "../words.mjs";
 
@@ -469,6 +483,10 @@ export const CONSOLE_SCRIPT = `"use strict";
   // Here, and only here, it becomes the reader's own time: the text is rewritten to local time with its offset, and the
   // UTC text goes in the title. The UTC text is rebuilt from the datetime (never read back from the text), so running
   // this twice over one element changes nothing. An element whose datetime is not an ISO instant is left as it is.
+  // The reader's date leads the time, so no time is read against the wrong day. Only a <time data-day>, whose row
+  // names its UTC day (the runs table's Ended cell under its day's row), stays a time alone, and only where the
+  // reader's day is that UTC day. The form is the attribute's and the datetime's, never the text's, so a second run
+  // keeps the first's.
   function pad2(n) { return (n < 10 ? "0" : "") + n; }
   function localTime(el) {
     var iso = el.getAttribute("datetime");
@@ -479,7 +497,9 @@ export const CONSOLE_SCRIPT = `"use strict";
     var off = -d.getTimezoneOffset();
     var abs = Math.abs(off);
     var zone = off === 0 ? "UTC" : "UTC" + (off > 0 ? "+" : "-") + Math.floor(abs / 60) + (abs % 60 ? ":" + pad2(abs % 60) : "");
-    el.textContent = d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + " " + zone;
+    var day = d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+    var alone = el.getAttribute("data-day") !== null && day === iso.slice(0, 10);
+    el.textContent = (alone ? "" : day + " ") + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + " " + zone;
     el.setAttribute("title", iso.slice(0, 16).replace("T", " ") + " UTC");
   }
   function localTimes(root) {
@@ -740,6 +760,73 @@ export const CONSOLE_SCRIPT = `"use strict";
     });
   }
   try { copyButtons(document); } catch (e) { /* the Copy buttons stay hidden */ }
+  // ---- the runs page (issue #737): the search field the Search button opens, and the filter bar's fold ----
+  // The top bar's Search button is a link to the runs page's search field (shell.mjs SEARCH_HREF): a fragment scrolls
+  // to the field but focuses nothing, so the runs page puts the focus in it when it opens at that fragment, when the
+  // fragment changes to it (the button pressed on the runs page itself, which loads nothing) and when the button is
+  // pressed while the address already ends with it (which fires no hashchange). Nothing is focused otherwise: a page
+  // that takes the focus on load moves a screen reader's place.
+  var SEARCH_HASH = ${JSON.stringify(`#${SEARCH_ID}`)};
+  var SEARCH_HREF = ${JSON.stringify(SEARCH_HREF)};
+  function focusSearch() {
+    var field = document.getElementById(${JSON.stringify(SEARCH_ID)});
+    if (field && typeof field.focus === "function") field.focus();
+  }
+  if (page === "runs") {
+    try { if (location.hash === SEARCH_HASH) focusSearch(); } catch (e) { /* the field stays unfocused */ }
+    if (typeof window !== "undefined" && window && typeof window.addEventListener === "function") window.addEventListener("hashchange", function () {
+      if (location.hash === SEARCH_HASH) focusSearch();
+    });
+    document.addEventListener("click", function (e) {
+      var a = e && e.target && typeof e.target.closest === "function" ? e.target.closest("a[href]") : null;
+      if (a && a.getAttribute("href") === SEARCH_HREF && location.hash === SEARCH_HASH) focusSearch();
+    });
+  }
+  // A filter bar marked data-collapsible folds on a phone: with filterbar--collapsible bundle.css shows only its search
+  // and its toggle there (and the whole bar above a phone, where it hides the toggle), and the toggle, drawn hidden
+  // (kit.mjs filterToggle), opens and closes it, saying which in aria-expanded. Without this script the class is never
+  // set and the toggle never shown, so every filter shows. Whether a bar is open is kept by its panel's id: a live
+  // update that swaps the panel (its counts changed) draws the bar folded, and swapPanel folds it again as the person
+  // left it.
+  var filtersOpen = Object.create(null);
+  function foldBars(root) {
+    var bars = root && typeof root.querySelectorAll === "function" ? root.querySelectorAll(".filterbar[data-collapsible]") : [];
+    for (var i = 0; i < bars.length; i++) foldBar(bars[i]);
+  }
+  function foldBar(bar) {
+    var toggle = typeof bar.querySelector === "function" ? bar.querySelector("[data-filter-toggle]") : null;
+    if (!toggle || !bar.classList || typeof toggle.addEventListener !== "function") return;
+    var panel = typeof bar.closest === "function" ? bar.closest("[data-panel]") : null;
+    var key = panel && panel.id ? panel.id : "";
+    var set = function (open) {
+      filtersOpen[key] = open;
+      if (open) bar.classList.remove("filterbar--collapsible");
+      else bar.classList.add("filterbar--collapsible");
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+    set(filtersOpen[key] === true);
+    toggle.hidden = false;
+    toggle.addEventListener("click", function () { set(filtersOpen[key] !== true); });
+  }
+  try { foldBars(document); } catch (e) { /* every filter stays shown */ }
+  // A filter bar's GET (the runs page's, the audit log's) carries only the fields in use: each named field that is
+  // empty, a list left at "Any" included, is disabled as the form is sent, and a disabled control is not sent, so the
+  // address reads /runs?outcome=failed rather than every field of the bar with no value. A tick later, once the browser
+  // has read the form, each is enabled again, so a page brought back by Back works as it was left. Without this script
+  // the empty fields are sent too, and the page reads an empty field as no filter.
+  document.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (ev.defaultPrevented || !form || typeof form.matches !== "function" || !form.matches("form.filterbar")) return;
+    var els = form.elements || [];
+    var off = [];
+    for (var i = 0; i < els.length; i++) {
+      if (els[i].name && !els[i].disabled && els[i].value === "") {
+        els[i].disabled = true;
+        off.push(els[i]);
+      }
+    }
+    if (off.length > 0) later(function () { for (var j = 0; j < off.length; j++) off[j].disabled = false; }, 0);
+  });
   // ---- the spend screen: chart tooltips and the interactive topology ----
   if (page === "insights") {
     try { fitInsightsLabels(); } catch (e) { /* the labels stay as drawn */ }
@@ -1318,15 +1405,28 @@ ${FIT_JS}
     return t !== "hidden" && t !== "submit" && t !== "button" && t !== "reset" && t !== "image";
   }
   // In use, and so held: the slot open for this panel, an editor open in it, or one of its forms' fields focused or
-  // changed from what the server drew. Nothing else.
+  // changed from what the server drew. Nothing else. A form is a write's (form[data-action]) or a page's filter bar
+  // (form.filterbar, issue #737: the runs filters are a live panel whose counts change, and a swap would wipe a search
+  // half typed or a list chosen and not yet applied, and take the focus out of the field).
+  var HELD_FORMS = "form[data-action], form.filterbar";
   function inUse(panel) {
     if (slot && !slot.hidden && slotOwner === panel) return true;
     if (panel.querySelector("details[open] form[data-action]")) return true;
     var active = document.activeElement;
-    if (active && panel.contains(active) && isField(active) && active.closest && active.closest("form[data-action]")) return true;
-    var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea");
+    if (active && panel.contains(active) && isField(active) && active.closest && active.closest(HELD_FORMS)) return true;
+    var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea, form.filterbar input:not([type=hidden])");
     for (var i = 0; i < fields.length; i++) if (fields[i].value !== fields[i].defaultValue) return true;
+    var lists = panel.querySelectorAll("form.filterbar select");
+    for (var j = 0; j < lists.length; j++) if (picked(lists[j])) return true;
     return false;
+  }
+  // Whether a list's choice is not the one the server drew (the option it marked selected, else the first).
+  function picked(list) {
+    var options = list.querySelectorAll("option");
+    var drawn = null;
+    for (var i = 0; i < options.length; i++) if (options[i].hasAttribute("selected")) drawn = options[i];
+    drawn = drawn || options[0] || null;
+    return drawn !== null && list.value !== (drawn.hasAttribute("value") ? drawn.getAttribute("value") : drawn.textContent);
   }
   // The newest update waits, and the panel says so once, with the server's own note.
   function hold(el, markup) {
@@ -1349,6 +1449,7 @@ ${FIT_JS}
       el.innerHTML = markup;
       try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
       try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
+      try { foldBars(el); } catch (e) { /* the swapped panel's filters stay shown */ }
     });
     if (keep) keepFocus(el, keep);
   }
@@ -1359,13 +1460,15 @@ ${FIT_JS}
     if (!active || active === el || typeof el.contains !== "function" || !el.contains(active)) return null;
     var form = typeof active.closest === "function" ? active.closest("form[data-action]") : null;
     var href = !form && typeof active.getAttribute === "function" ? active.getAttribute("href") : null;
-    return { el: active, find: form ? formKey(form, form.getAttribute("data-action") || "", active) : null, href: href };
+    var toggle = !form && typeof active.hasAttribute === "function" && active.hasAttribute("data-filter-toggle");
+    return { el: active, find: form ? formKey(form, form.getAttribute("data-action") || "", active) : null, href: href, toggle: toggle };
   }
-  // focusBack's rule after a swap: the same form's button, else a link to the same place, else the panel itself,
-  // focusable by script alone. Without scrolling: the reader's place is theirs.
+  // focusBack's rule after a swap: the same form's button, else a link to the same place, else (a filter bar's toggle)
+  // the new bar's toggle, else the panel itself, focusable by script alone. Without scrolling: the reader's place is
+  // theirs.
   function keepFocus(el, keep) {
     if (inPage(keep.el)) return;
-    var to = keep.find ? sameButton(el, keep.find) : keep.href !== null ? sameLink(el, keep.href) : null;
+    var to = keep.find ? sameButton(el, keep.find) : keep.href !== null ? sameLink(el, keep.href) : keep.toggle && typeof el.querySelector === "function" ? el.querySelector("[data-filter-toggle]") : null;
     to = to || el;
     if (typeof to.focus !== "function") return;
     if (to === el && typeof to.hasAttribute === "function" && typeof to.setAttribute === "function" && !to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
@@ -1384,8 +1487,9 @@ ${FIT_JS}
       else if (!inUse(el)) swapPanel(el, pending[id]);
     }
   }
-  // Focus leaving a field ends that hold once focus has landed (a tick later: during focusout it has not yet moved).
-  if (slot) document.addEventListener("focusout", function () { later(release, 0); });
+  // Focus leaving a field ends that hold once focus has landed (a tick later: during focusout it has not yet moved). On
+  // every page, the slot or none: a viewer's runs filters are held too.
+  document.addEventListener("focusout", function () { later(release, 0); });
   function bodyOf(form) {
     var out = {};
     var els = form.elements;

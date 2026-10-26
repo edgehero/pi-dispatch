@@ -30,7 +30,8 @@ import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
-import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUNS_PAGE_EXAMINE_MAX, targetKeyOf } from "../read-model.mjs";
+import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
+import { recordReason } from "../words.mjs";
 import { RUN_MODEL_RE, RUN_PROVIDER_RE } from "../run-filter.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 
@@ -57,14 +58,27 @@ export const PARK_CHECK_CACHE_MS = 15_000;
 /** The most candidates a 409 lists. */
 export const CANDIDATES_MAX = 10;
 
-/** What a fleet that cannot be read answers, 503: a fixed sentence, never the error's text. */
-export const RUN_UNREADABLE = "the queue could not be read (is Valkey reachable?), so this run's chat cannot be judged; try again";
+/**
+ * What `/api/run` answers, 503, for a run some place shows (its record, a transcript, a progress snapshot) whose queue
+ * state could not be read: a fixed sentence, never the error's text, and no cause it cannot know. A run no place shows
+ * is answered by `runPlaces`' rule instead (`runNotTold`, the queues among the places it names).
+ */
+export const RUN_UNREADABLE = "the queue could not be read, so this run's chat cannot be judged; try again";
 
 const NOT_FOUND = "no run with that id is in this host's history, the fleet's run mirror or the queue";
 
-// Each record field's shape: the worker's own where it exports one, the runs filter's otherwise (run-filter.mjs).
+/**
+ * What `/api/run` answers, 503, for an id no place shows a run for while one could not be read (`runPlaces`' `unread`,
+ * its record, every queue, the live transcript or its progress, named in `RUN_PLACES`' words): not "no run", which is a
+ * claim that every place was read. It names the places and no cause: one is a file on this host, the others Valkey's.
+ */
+export function runNotTold(unread) {
+  return `whether a run with that id exists could not be told: this console could not read ${runPlacesText(unread)}; try again`;
+}
+
+// Each record field's shape: the worker's own where it exports one, the runs filter's otherwise (run-filter.mjs). The
+// reason is the one every surface shows (words.mjs `recordReason`: a token, else null).
 const OUTCOME_RE = /^[a-z][a-z-]{0,31}$/;
-const REASON_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const TRIGGER_TYPE_RE = /^[a-z][a-z_]{0,39}$/;
 const BACKEND_RE = /^[a-z][a-z-]{0,31}$/;
 // A run target as the worker writes one: a repository path (GitLab subgroups, an Azure project with inner spaces) and
@@ -106,7 +120,7 @@ export function safeRunOf(id, record) {
     triggerIndex: count(r.triggerIndex),
     flow: str(r.flow, SKILL_NAME_RE),
     outcome: str(r.outcome, OUTCOME_RE),
-    reason: str(r.reason, REASON_RE),
+    reason: recordReason(r),
     startedAt: iso(r.startedAt),
     finishedAt: iso(r.endedAt),
     provider: str(r.provider, RUN_PROVIDER_RE),
@@ -246,22 +260,24 @@ const pendingCache = new WeakMap();
 const answerCheckCache = new WeakMap();
 
 /**
- * `read()`, reused for `PARK_CHECK_CACHE_MS` while the record is the same one, kept only when `keep(got)`: `{ got,
- * answerLeft }`, `answerLeft` true when an earlier read of this run saw a job id (`got.jobId`) and this fresh one reads
- * none (`jobId: null`), which is the moment the answer run has ended.
+ * `read()`, reused for `PARK_CHECK_CACHE_MS` while the record is the same one: `{ got, answerLeft }`, `answerLeft` true
+ * when an earlier read of this run saw a job id (`got.jobId`) and this fresh one reads none (`jobId: null`), which is
+ * the moment the answer run has ended. EVERY answer is kept for the window, an unreadable one as long as a good one
+ * (issue #737): one that was read again on every tick sent a Valkey that was already failing a queue lookup per run per
+ * tick, and the Parked page has twenty runs. The page says the check could not be read until the window ends.
  */
-async function parkCheckCached(cache, fleet, id, record, now, read, keep) {
+async function parkCheckCached(cache, fleet, id, record, now, read) {
   const at = typeof now === "function" ? now() : Date.now();
   const recordKey = recordKeyOf(record);
   let byId = cache.get(fleet);
   if (!byId) cache.set(fleet, (byId = new Map()));
   const hit = byId.get(id);
-  if (hit && hit.reuse && hit.recordKey === recordKey && at >= hit.at && at - hit.at < PARK_CHECK_CACHE_MS) return { got: hit.got, answerLeft: false };
+  if (hit && hit.recordKey === recordKey && at >= hit.at && at - hit.at < PARK_CHECK_CACHE_MS) return { got: hit.got, answerLeft: false };
   const got = await read();
   const seen = str(got?.jobId, RUN_ID_RE);
   const answerLeft = typeof hit?.sawJobId === "string" && got !== null && typeof got === "object" && Object.hasOwn(got, "jobId") && got.jobId === null;
   if (!hit && byId.size >= 256) byId.delete(byId.keys().next().value);
-  byId.set(id, { at, recordKey, got, reuse: keep(got), sawJobId: seen ?? (answerLeft ? null : (hit?.sawJobId ?? null)) });
+  byId.set(id, { at, recordKey, got, sawJobId: seen ?? (answerLeft ? null : (hit?.sawJobId ?? null)) });
   return { got, answerLeft };
 }
 
@@ -276,19 +292,21 @@ async function pendingRead(fleet, id, record) {
 
 /**
  * The planner's own check on whether parked run `id` can take a console answer (`fleet.parkedAnswerCheck`: `{ refusal }`,
- * `{ ok: true }` or `{ unreachable: true }`), reused by the run page loop for `PARK_CHECK_CACHE_MS` per run id while
- * `record` is the same one (`now` the clock); an unreadable check is read again on the next tick. Null without the reader.
+ * `{ ok: true }` or `{ unreachable: true }`), reused by the run page loop and the Parked page for `PARK_CHECK_CACHE_MS`
+ * per run id while `record` is the same one (`now` the clock), an unreadable answer as long as a good one. `lookup` is
+ * the load's question for the reader's by-id lookup (`{ live }` or `{ asked }`, pages.mjs `loadPageData`). Null without
+ * the reader.
  */
-export async function parkedAnswerCheckOf(fleet, id, record, { now = Date.now } = {}) {
+export async function parkedAnswerCheckOf(fleet, id, record, { now = Date.now, lookup = {} } = {}) {
   if (typeof fleet?.parkedAnswerCheck !== "function") return null;
   const read = async () => {
     try {
-      return await fleet.parkedAnswerCheck(id);
+      return await fleet.parkedAnswerCheck(id, lookup);
     } catch {
       return { unreachable: true };
     }
   };
-  return (await parkCheckCached(answerCheckCache, fleet, id, record, now, read, (got) => got !== null && typeof got === "object" && !got.unreachable)).got;
+  return (await parkCheckCached(answerCheckCache, fleet, id, record, now, read)).got;
 }
 
 // The run page's action checks (issue #710), per fleet reader, then per run id, `parkCheckCached`'s entries.
@@ -296,26 +314,27 @@ const rerunCheckCache = new WeakMap();
 const sandboxCheckCache = new WeakMap();
 
 /** A fleet check of run `id`, never throwing (an error reads as unreachable), reused as the parked answer's is. */
-async function actionCheckOf(cache, fleet, method, id, record, now) {
+async function actionCheckOf(cache, fleet, method, id, record, now, lookup = {}) {
   if (typeof fleet?.[method] !== "function") return null;
   const read = async () => {
     try {
-      return await fleet[method](id, record);
+      return await fleet[method](id, record, lookup);
     } catch {
       return { unreachable: true };
     }
   };
-  return (await parkCheckCached(cache, fleet, id, record, now, read, (got) => got !== null && typeof got === "object" && !got.unreachable)).got;
+  return (await parkCheckCached(cache, fleet, id, record, now, read)).got;
 }
 
 /**
  * Whether run `id` (with `record`) can be offered a re-run (issue #710): `fleet.rerunCheck`, the planner's own cheap
  * refusals over the record and the job's retained data (`rerunRefusalOf`), reused by the run page's live loop for
- * `PARK_CHECK_CACHE_MS` per run id while `record` is the same one, as `parkedAnswerCheckOf` is; an unreadable check is
- * read again on the next tick. `{ refusal }`, `{ ok: true }`, `{ unreachable: true }`, or null without the reader.
+ * `PARK_CHECK_CACHE_MS` per run id while `record` is the same one, as `parkedAnswerCheckOf` is (an unreadable answer
+ * too), and asked with the load's `lookup` as it is. `{ refusal }`, `{ ok: true }`, `{ unreachable: true }`, or null
+ * without the reader.
  */
-export async function rerunCheckOf(fleet, id, record, { now = Date.now } = {}) {
-  return actionCheckOf(rerunCheckCache, fleet, "rerunCheck", id, record, now);
+export async function rerunCheckOf(fleet, id, record, { now = Date.now, lookup = {} } = {}) {
+  return actionCheckOf(rerunCheckCache, fleet, "rerunCheck", id, record, now, lookup);
 }
 
 /**
@@ -329,7 +348,12 @@ export async function sandboxCheckOf(fleet, id, record, { now = Date.now } = {})
 
 /**
  * The chat facts of run `id` with `record` (its run record or null), read through `fleet`: `{ unreachable: true }` when
- * the queue cannot be read, else `{ found, jobState, activeJobId, queuedJobId, newer, answeringJobId, state, mode, says }`.
+ * the queue cannot be read, else `{ found, jobState, activeJobId, queuedJobId, newer, answeringJobId, state, mode,
+ * says }` (`found` true, false, or null for a lookup whose set of queues was not whole). Only a run with no record asks
+ * the lookup to tell an absence (`tellAbsent`): a record shows the run whatever the queue says, so `found` is then null
+ * for a miss over a set read before the question. `lookup` is the question the lookup is asked with (`{ live }` or
+ * `{ asked }`, pages.mjs `loadPageData`; none for `/api/run`, a request asked now): a request's miss costs at most one
+ * keyspace scan, shared by its load's other lookups, and a live load's costs none (the reader's `lookUp`).
  * The newer-run search is a runs-page read, so the run page's live loop asks for it only when the mode depends on it
  * (`searchNewer: "parked"`, a parked record) and reuses its answer for `NEWER_CACHE_MS` per run id (`now` the clock);
  * `/api/run` always searches afresh. A parked record that no later record answered is then looked for in the queue
@@ -340,11 +364,11 @@ export async function sandboxCheckOf(fleet, id, record, { now = Date.now } = {})
  * a reply to an answered park for the rest of `NEWER_CACHE_MS` (review round 2). Without a `jobStatus` reader (an older
  * fleet double) this answers null; without a `pendingAnswer` reader the queue is not looked in.
  */
-export async function chatFactsOf(fleet, id, record, { searchNewer = "always", now = Date.now } = {}) {
+export async function chatFactsOf(fleet, id, record, { searchNewer = "always", now = Date.now, lookup = {} } = {}) {
   if (typeof fleet?.jobStatus !== "function") return null;
   let status;
   try {
-    status = await fleet.jobStatus(id);
+    status = await fleet.jobStatus(id, { ...lookup, tellAbsent: !record });
   } catch {
     status = { unreachable: true };
   }
@@ -358,7 +382,7 @@ export async function chatFactsOf(fleet, id, record, { searchNewer = "always", n
   let parked = null;
   let answeringJobId = null;
   if (parkedRecord && newer.known && newer.jobId === null && activeJobId === null && typeof fleet.pendingAnswer === "function") {
-    const read = cached ? await parkCheckCached(pendingCache, fleet, id, record, now, () => pendingRead(fleet, id, record), (got) => got !== null && typeof got === "object" && !got.unreachable) : { got: await pendingRead(fleet, id, record), answerLeft: false };
+    const read = cached ? await parkCheckCached(pendingCache, fleet, id, record, now, () => pendingRead(fleet, id, record)) : { got: await pendingRead(fleet, id, record), answerLeft: false };
     if (read.answerLeft) {
       newerCache.get(fleet)?.delete(id);
       newer = await newerRunCached(fleet, id, record, now);
@@ -372,7 +396,9 @@ export async function chatFactsOf(fleet, id, record, { searchNewer = "always", n
   if (parked === null && parkedRecord && newer.known) parked = { answered: newer.jobId !== null };
   const facts = { state: jobState, record: record ?? null, activeJobId, queuedJobId, parked };
   const { mode, says } = chatModeOf(facts);
-  return { found: status.found === true, jobState, activeJobId, queuedJobId, newer, answeringJobId, state: runStateOf(facts), mode, says };
+  // `found` is the lookup's own: true, false (no queue holds the job, every queue asked), or null (none of the queues
+  // read holds it, and they were not all of them), so a run-not-found answer is drawn from a whole lookup alone.
+  return { found: status.found === true ? true : status.found === false ? false : null, jobState, activeJobId, queuedJobId, newer, answeringJobId, state: runStateOf(facts), mode, says };
 }
 
 /** The query: `{ id }`, `{ url }` or `{ refusal }`. Exactly one of the two, once, and nothing else. */
@@ -446,20 +472,23 @@ export async function getRun(ctx) {
 
 /**
  * The document for run `id`: `{ doc, record }` (`record` the run record the fleet read, or null; never in `doc`), or
- * `{ status, error }` (404 unknown, 503 unreadable).
+ * `{ status, error }`, by `runPlaces`' rule, the run page's too: 404 when no place a run is kept shows one and every
+ * one said it holds none (`runAbsent`), 503 when no place shows a run while one of them could not be read
+ * (`runNotTold`, naming them: a queue lookup that failed is "every queue"), and 503 for a run a place shows whose queue
+ * state could not be read (`RUN_UNREADABLE`).
  */
 export async function runDocument(fleet, id, env = {}) {
   let got;
   try {
     got = await fleet.runById(id);
   } catch {
-    got = { missing: true };
+    got = { unreadable: RUN_RECORD_UNREAD };
   }
   const record = got?.record ?? null;
   const facts = await chatFactsOf(fleet, id, record);
-  if (facts === null || facts.unreachable) return { status: 503, error: RUN_UNREADABLE };
+  const told = facts !== null && !facts.unreachable;
   // The live job's transcript and inbox (a recovery's, when the run goes on under another id), else this job's own.
-  const attachId = facts.activeJobId ?? id;
+  const attachId = (told ? facts.activeJobId : null) ?? id;
   const [meta, box, prog] = await Promise.all([
     typeof fleet.transcriptMeta === "function" ? fleet.transcriptMeta(attachId).catch(() => null) : null,
     typeof fleet.inbox === "function" ? fleet.inbox(attachId).catch(() => null) : null,
@@ -467,8 +496,11 @@ export async function runDocument(fleet, id, env = {}) {
   ]);
   const transcriptExists = meta?.exists === true;
   const boxRead = box !== null && typeof box === "object" && !box.unreachable && !box.invalid;
-  const progressing = isProgressSnapshot(prog?.progress);
-  if (!record && !facts.found && facts.activeJobId === null && facts.queuedJobId === null && !transcriptExists && !progressing) return { status: 404, error: NOT_FOUND };
+  const places = { run: got, lookup: facts, transcript: meta, progress: prog?.progress };
+  if (runAbsent(places)) return { status: 404, error: NOT_FOUND };
+  const { shown, unread } = runPlaces(places);
+  if (!shown) return { status: 503, error: runNotTold(unread) };
+  if (!told) return { status: 503, error: RUN_UNREADABLE };
   const doc = {
     version: RUN_API_VERSION,
     run: safeRunOf(id, record),

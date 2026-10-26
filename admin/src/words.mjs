@@ -5,16 +5,20 @@
  * (`admin/test/words.test.mjs`) holds that both import this module, and holds every table here to its source.
  *
  * THE WORDS COME FROM THE RECORD, MADE READABLE. The run record's `outcome` is `completed`, `policy` or `failed`
- * (INT-RUN-HISTORY-FILE-CONTRACT); `policy` reads as "refused", since that is what the worker did. Two reasons change the
- * word, because the outcome alone says the wrong thing about them: a completed run with `awaiting-input` is waiting on a
- * person (the panel's row once said "done" for it, issue #646's finding), and a policy run with `operator-cancel` was
- * stopped by an operator, not refused by a rule. Those two are `REASON_WORDS`, each tied to the outcome it qualifies: the
- * same token under another outcome keeps the outcome's word, so a malformed record cannot borrow one.
+ * (INT-RUN-HISTORY-FILE-CONTRACT); `policy` reads as "refused", since that is what the worker did. Some reasons change
+ * the word, because the outcome alone says the wrong thing about them: a completed run with `awaiting-input` is waiting
+ * on a person (the panel's row once said "done" for it, as issue #646 saw), a policy run with `operator-cancel` was
+ * stopped by an operator, not refused by a rule, and a policy run with one of the three recovery ends was lost and could
+ * not be continued, a failure (issue #737). Those are `REASON_WORDS`, each tied to the outcome it qualifies: the same
+ * token under another outcome keeps the outcome's word, so a malformed record cannot borrow one.
  *
  * The field and query names stay what the record calls them (`outcome`, `backend`): these are display words only.
  */
 
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
+import { RECORD_REASON_RE } from "@edgehero/pi-dispatch/record-reason";
+
+export { RECORD_REASON_RE };
 
 /**
  * The console's status kinds (issue #737): the closed set a Pulse badge, chip, tile or banner is drawn in. Each is one
@@ -44,17 +48,24 @@ export const OUTCOME_WORD_OF = Object.freeze(Object.fromEntries(Object.entries(O
  * completed glyph (it completed, its work is promoted, it is never retried) with a warning tone, since a person has to
  * act. `operator-cancel` keeps the refused glyph and tone: the run did not complete, and someone chose that. On the
  * console each has its own status: a run awaiting input is parked (a person answers it), a cancelled run is cancelled.
+ * The three recovery ends (issue #737) are recorded as `policy` but are failures: the run was lost and could not be
+ * resumed, so they read as failed. `says` is whether the word says why: "awaiting input" and "cancelled" do, so a row
+ * draws no reason sentence beside them; "failed" does not, so a recovery end keeps its sentence.
  */
 export const REASON_WORDS = Object.freeze({
-  "awaiting-input": Object.freeze({ outcome: "completed", word: "awaiting input", glyph: "✔", tone: "warning", status: "parked" }),
-  "operator-cancel": Object.freeze({ outcome: "policy", word: "cancelled", glyph: "⚠", tone: "warning", status: "cancelled" }),
+  "awaiting-input": Object.freeze({ outcome: "completed", word: "awaiting input", glyph: "✔", tone: "warning", status: "parked", says: true }),
+  "operator-cancel": Object.freeze({ outcome: "policy", word: "cancelled", glyph: "⚠", tone: "warning", status: "cancelled", says: true }),
+  "recovery-cap": Object.freeze({ outcome: "policy", word: "failed", glyph: "✘", tone: "error", status: "failed", says: false }),
+  "recovery-checkpoint-absent": Object.freeze({ outcome: "policy", word: "failed", glyph: "✘", tone: "error", status: "failed", says: false }),
+  "recovery-unsafe-extensions": Object.freeze({ outcome: "policy", word: "failed", glyph: "✘", tone: "error", status: "failed", says: false }),
 });
 
 /** The tone of a word that is not one of ours (an outcome value this release does not know): shown raw, as a failure. */
-const UNKNOWN = Object.freeze({ known: false, word: null, glyph: "✘", tone: "error", status: "failed" });
+const UNKNOWN = Object.freeze({ known: false, word: null, glyph: "✘", tone: "error", status: "failed", qualified: false, says: false });
 
 /**
- * The word for a record's outcome and reason: `{ known, word, glyph, tone, status }`. Compared against the RAW values, never a
+ * The word for a record's outcome and reason: `{ known, word, glyph, tone, status, qualified, says }` (`qualified`: a
+ * reason changed the word; `says`: the word itself says why, so a row adds no reason sentence). Compared against the RAW values, never a
  * scrubbed copy, so a control byte can change what a row looks like but never what it says a run did. `known: false`
  * (an outcome that is not an own key of `OUTCOME_WORDS`, `__proto__` included) has no word: the caller prints the value
  * itself, scrubbed or escaped, as a failure, which is what the panel always did with one.
@@ -63,11 +74,56 @@ export function outcomeWord(outcome, reason) {
   if (typeof outcome !== "string" || !Object.hasOwn(OUTCOME_WORDS, outcome)) return UNKNOWN;
   if (typeof reason === "string" && Object.hasOwn(REASON_WORDS, reason) && REASON_WORDS[reason].outcome === outcome) {
     const q = REASON_WORDS[reason];
-    return { known: true, word: q.word, glyph: q.glyph, tone: q.tone, status: q.status, qualified: true };
+    return { known: true, word: q.word, glyph: q.glyph, tone: q.tone, status: q.status, qualified: true, says: q.says };
   }
   const o = OUTCOME_WORDS[outcome];
-  return { known: true, word: o.word, glyph: o.glyph, tone: o.tone, status: o.status, qualified: false };
+  return { known: true, word: o.word, glyph: o.glyph, tone: o.tone, status: o.status, qualified: false, says: false };
 }
+
+/** The five outcomes a person filters and counts by (issue #737): each word `outcomeWord` gives, as a query value. */
+export const OUTCOME_KEYS = Object.freeze(["completed", "refused", "failed", "awaiting-input", "cancelled"]);
+const KEY_OF_WORD = Object.freeze({ completed: "completed", refused: "refused", failed: "failed", "awaiting input": "awaiting-input", cancelled: "cancelled" });
+
+/** A record's outcome key (`OUTCOME_KEYS`) from its outcome and reason; null for an outcome this release does not know. */
+export function outcomeKey(outcome, reason) {
+  const w = outcomeWord(outcome, reason);
+  return w.known && Object.hasOwn(KEY_OF_WORD, w.word) ? KEY_OF_WORD[w.word] : null;
+}
+
+/**
+ * Each outcome key's word and status, `{ word, status }`, as the runs page names a key in a list and a count: DERIVED
+ * from `OUTCOME_WORDS` and `REASON_WORDS` (the first entry that says the key's word), so a key never reads otherwise
+ * than the badge of a run it matches.
+ */
+export const OUTCOME_KEY_WORDS = Object.freeze(
+  Object.fromEntries(
+    OUTCOME_KEYS.map((key) => {
+      const w = [...Object.values(OUTCOME_WORDS), ...Object.values(REASON_WORDS)].find((v) => KEY_OF_WORD[v.word] === key);
+      return [key, Object.freeze({ word: w.word, status: w.status })];
+    }),
+  ),
+);
+
+/** A record's reason when it is a token (`RECORD_REASON_RE`), else null: a reason that is no token is shown to nobody. */
+export function recordReason(record) {
+  const r = record?.reason;
+  return typeof r === "string" && RECORD_REASON_RE.test(r) ? r : null;
+}
+
+/**
+ * A sentence's first letter in capitals: the planners write theirs in lower case, as the tools' errors read. Only when
+ * it opens with a plain word: one that opens with an id (a job id's `gh-2f6a`, a queue's `pi-jobs@build3`) keeps the
+ * id as it is written, since "Gh-2f6a" names no job.
+ */
+export function capitalised(s) {
+  const t = String(s ?? "");
+  // A word is letters up to a space or a sentence's own punctuation; a dash, an at sign, an underscore or a digit, or a
+  // colon or a full stop with no space after it, joins it into an id.
+  return /^[a-z]+(?![a-z0-9@_-]|[.:]\S)/.test(t) ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
+/** A failed record with no reason (an older worker's untagged failure, or one whose reason was free text). */
+export const NO_REASON_FAILED = "Failed: no reason was recorded. The worker that ran it predates the reasons for infrastructure exits.";
 
 /** The console's CSS class for each tone (style.mjs `.good`, `.warn`, `.bad`); a completed run takes none, as before. */
 export const TONE_CLASS = Object.freeze({ success: null, warning: "warn", error: "bad" });

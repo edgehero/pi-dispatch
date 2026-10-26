@@ -12,14 +12,17 @@
  *
  * PAGE CSS. A page PR adds `PAGE_CSS[<page>]`, the card's own small style, and `pageCss()` serves it under
  * `body[data-page="<page>"]`, the attribute every page's body carries. PR 1 added none; PR 2 added the sign-in pages',
- * the error pages' and the audit log's; PR 3 adds the overview's.
+ * the error pages' and the audit log's; PR 3 adds the overview's; PR 4 the runs page's and the parked page's (`runs-css.mjs`,
+ * `parked-css.mjs`).
  *
  * THE BROWSER FLOOR (`docs/console.md`: Chrome 88, Safari 14, Firefox 78). A rule that needs a newer feature (`:has()`,
  * a container query) must leave the page readable where it is not understood: a browser drops the whole rule, so the
  * rule may only add to a layout that already works without it.
  */
 import { BTN_KINDS } from "./kit.mjs";
+import { PARKED_CSS } from "./parked-css.mjs";
 import { PULSE_CSS } from "./pulse-css.mjs";
+import { RUNS_CSS } from "./runs-css.mjs";
 
 /** A selector's start that names the document itself: replaced by the scope. */
 const ROOT_START = /^(?:html|body|:root)(?![\w-])/;
@@ -189,8 +192,21 @@ export function scopeCss(prefix, css) {
  *   font, 163 in DejaVu Sans). At 1600 DejaVu Sans leaves 27 px for the name with Reconnecting.
  *
  * At 761 px a read-only console's first row is the tightest place: 25 px for the name with Reconnecting in DejaVu Sans.
+ *
+ * - `searchRoom`: what the Search button (`shell.mjs` `SEARCH_HREF`, PR 4) takes from the bar's end, its 48 px
+ *   (`--control-h`) and the end's 8 px gap. The name is the one part that gives way, and at the three places where the
+ *   end is tightest (just above a phone for a read-only console, `oneRowMin`, `oneRowReadOnlyMin`) it has less than
+ *   that: measured in DejaVu Sans with Reconnecting, the button left the avatar 17 px under Sign out at 761 px read-only,
+ *   5 px at 1440 and 15 px at 1600 read-only with a one-digit Parked count (21 and 32 px with three digits, which push
+ *   the one-row navigation 17 px further). So from each of those widths the button is drawn only `searchRoom` px
+ *   later (`SHELL_CSS`): until then the bar is exactly what it was without it, and from there the name has at least the
+ *   room it had at the breakpoint. Off a phone's bar altogether (bundle.css's `hide-phone`), as the Shell card draws it.
+ *   REJECTED: keeping the button and letting the name give way instead, down to the avatar alone in a round pill the
+ *   buttons' size. That frees 20 px (the name's column, its gap and the pill's padding), and the button needs 56:
+ *   measured in DejaVu Sans with Reconnecting, the theme button shown and a three-digit Parked count, the end was still
+ *   15 px short at 1440, 11 at 761 read-only and 26 at 1600 read-only, so the avatar ran under Sign out.
  */
-export const TOP_BAR = Object.freeze({ phoneMax: 760, navBreakMax: 939, oneRowMin: 1440, oneRowReadOnlyMin: 1600 });
+export const TOP_BAR = Object.freeze({ phoneMax: 760, navBreakMax: 939, oneRowMin: 1440, oneRowReadOnlyMin: 1600, searchRoom: 56 });
 
 /**
  * What the shell draws that `bundle.css` has no rule for, or draws in a way the console cannot use:
@@ -227,6 +243,10 @@ export const TOP_BAR = Object.freeze({ phoneMax: 760, navBreakMax: 939, oneRowMi
  *   - every pill contains its own visually hidden text (the count's `.sr`, positioned, would otherwise escape the scroll
  *     box and widen a phone page by its offset). The name's 160 px cap is on its column (the name and the role), so the
  *     column is never wider than what it shows;
+ * - the Search button (PR 4, `shell.mjs` `SEARCH_HREF`, first in the bar's end) is left off a desktop bar for
+ *   `TOP_BAR.searchRoom` px past each width where the end is tightest (see `TOP_BAR`), so the bar there is exactly what it
+ *   was before the button and the signed-in name never has less room than it had at a breakpoint; bundle.css leaves it
+ *   off a phone's bar (`hide-phone`);
  * - the Parked count is a panel inside its nav pill: drawn inline, and gone with no gap when it has nothing to count;
  * - the More menu (Audit, for operators) is a `<details class="more">` at the end of the navigation: its summary is a
  *   round nav pill. Above a phone the details is the list's containing block and CSS alone opens the list under its
@@ -421,6 +441,9 @@ section[data-panel]>.held{margin:0 0 var(--space-3)}
 @media ${DESKTOP}{@media (max-width: ${TOP_BAR.navBreakMax}px){.pillnav{row-gap:0}.pillnav>:nth-child(-n+4){order:1}.pillnav::after{content:"";order:2;flex-basis:100%;height:6px}.pillnav>:nth-child(n+5){order:3}}}
 @media (min-width: ${TOP_BAR.oneRowMin}px){.top:not(.top--ro){${ONE_ROW}}.top:not(.top--ro)>.pillnav{grid-row:1;grid-column:2}.top:not(.top--ro)>.top__end{grid-column:3}}
 @media (min-width: ${TOP_BAR.oneRowReadOnlyMin}px){.top--ro{${ONE_ROW}}.top--ro>.pillnav{grid-row:1;grid-column:2}.top--ro>.top__end{grid-column:3}}
+@media ${DESKTOP}{@media not all and (min-width: ${TOP_BAR.phoneMax + 1 + TOP_BAR.searchRoom}px){.top--ro .top__search{display:none}}}
+@media (min-width: ${TOP_BAR.oneRowMin}px){@media not all and (min-width: ${TOP_BAR.oneRowMin + TOP_BAR.searchRoom}px){.top:not(.top--ro) .top__search{display:none}}}
+@media (min-width: ${TOP_BAR.oneRowReadOnlyMin}px){@media not all and (min-width: ${TOP_BAR.oneRowReadOnlyMin + TOP_BAR.searchRoom}px){.top--ro .top__search{display:none}}}
 @media ${PHONE}{main{gap:12px}.titlebar__end>.drawn{flex-basis:100%}.titlebar__end>.drawn+.btn--ghost{margin-left:-10px}.pillnav{flex:0 0 auto;margin:-4px calc(var(--space-4) * -1);padding:4px var(--space-4);overflow-y:hidden}.pillnav::-webkit-scrollbar{display:none}details.more{position:static}details.more>summary{width:40px;height:40px}.top__end{flex:0 1 auto;min-width:0;flex-wrap:wrap;justify-content:flex-end;gap:6px}.top__end .live{display:inline-flex;position:relative;justify-content:center;width:16px;height:16px;padding:0;gap:0;background:transparent}.top__end .live>.ic{width:16px;height:16px}.top__end .live--retry>.dot,.top__end .live--off>.dot{display:none}.top__end .live--retry>.live__retry,.top__end .live--off:not(.live--out)>.live__off{display:block}.top__end .live [data-live-word]{${VISUALLY_HIDDEN}}.top__end .live>.dot{animation-name:live-phone}}
 `.trim();
 
@@ -464,6 +487,9 @@ main>section[data-panel]{width:100%;max-width:560px;margin-top:var(--space-6)}
  * a phone's page.
  * Served on the error pages and on the audit log's, whose refusal for a viewer (`pages.mjs` `renderPage`'s belt) draws
  * the same card in the signed-in frame.
+ * The run-id 404's search (`error-pages.mjs`, PR 4) is the ErrorPage card's: 420 px at most and never wider than the
+ * card, its pill on the inset's ground (bundle.css grounds a search pill on `surface`, the card's own, where it would
+ * have no edge), ringed when its bare field has the focus, which bundle.css draws with no outline.
  */
 const ERROR_CSS = `
 .er-card{display:flex;flex-direction:column;align-items:center;gap:var(--space-3);padding:56px var(--space-6);text-align:center}
@@ -478,6 +504,9 @@ const ERROR_CSS = `
 .er-421 h2{font-size:20px;line-height:26px;font-weight:750}
 .er-421 .muted{font-size:14px}
 .er-421 .code{white-space:normal;overflow-wrap:anywhere}
+.er-search{width:420px;max-width:100%;margin-top:var(--space-2)}
+.er-search .search{background:var(--surface-2)}
+.er-search .search:focus-within{outline:2px solid var(--focus);outline-offset:2px}
 @media ${PHONE}{.er-card{padding:var(--space-8) var(--space-4)}.er-h{font-size:28px;line-height:34px}.er-421{grid-template-columns:minmax(0,1fr)}}
 `;
 
@@ -726,7 +755,7 @@ main>.cards-4>section>.card{height:100%}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS });
+export const PAGE_CSS = Object.freeze({ login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, runs: RUNS_CSS, parked: PARKED_CSS });
 
 /**
  * Every page's rules, each confined to `body[data-page="<page>"]`, in the table's order. `table` is `PAGE_CSS`; a test

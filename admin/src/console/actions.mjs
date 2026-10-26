@@ -68,7 +68,7 @@ import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
 import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
-import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
+import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { html } from "./html.mjs";
 import { timeHtml, utcText } from "./panels/common.mjs";
 import { FLASH_MAX_BYTES } from "./sessions.mjs";
@@ -417,27 +417,38 @@ export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 sec
  */
 const SWITCH_READ = Object.freeze({ switchQueues: true });
 
+/** The refusal when the snapshot failed, or answered nothing: the read failed, which the timeout's words do not say. */
+export const SNAPSHOT_UNREAD_SENTENCE = "the fleet could not be read (is Valkey reachable?); nothing was changed";
+
+/** The bound's own answer in `snapshotOf`'s race, told apart from a snapshot that answers null. */
+const SNAPSHOT_LATE = Symbol("snapshot-late");
+
 /**
  * The fleet snapshot, or the refusal when it fails or does not answer within `SNAPSHOT_TIMEOUT_MS`. `opts` are the
  * snapshot's own (`createFleetReader`): a fleet or queue switch asks `SWITCH_READ`.
+ *
+ * The bound's refusal carries `timedOut: true` and `state: "timeout"` (issue #737): the caller that previews without
+ * the snapshot says which of the two happened (a fleet resume's count line), and the slot's bar takes its title from
+ * the state (`REFUSAL_STATES.timeout`, "The fleet did not answer in time"), where a bare 503 is titled for Valkey. The
+ * bound is a sentinel of its own, so a reader that answers null is a read that failed, never a timeout.
  */
 async function snapshotOf(ctx, opts = {}) {
   let timer;
   try {
     const late = new Promise((resolve) => {
-      timer = setTimeout(resolve, SNAPSHOT_TIMEOUT_MS, null);
+      timer = setTimeout(resolve, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_LATE);
       timer.unref?.();
     });
     // A snapshot that settles after the bound settles into the race, which has handled it: never an unhandled rejection.
     const s = await Promise.race([Promise.resolve().then(() => ctx.a.fleet.snapshot(opts)), late]);
+    if (s === SNAPSHOT_LATE) return { refusal: SNAPSHOT_TIMEOUT_SENTENCE, status: 503, state: "timeout", timedOut: true };
     if (s) return { snapshot: s };
-    if (s === null) return { refusal: SNAPSHOT_TIMEOUT_SENTENCE, status: 503 };
   } catch {
     // answered below
   } finally {
     clearTimeout(timer);
   }
-  return { refusal: "the fleet could not be read (is Valkey reachable?); nothing was changed", status: 503 };
+  return { refusal: SNAPSHOT_UNREAD_SENTENCE, status: 503 };
 }
 
 /** A funnel's answer in the pipeline's three shapes. */
@@ -1311,13 +1322,78 @@ function waitingIn(rows) {
  * itself, but every job it lets start reserves up to its own per-job cap at pickup, so the preview says how many wait
  * in the queues it resumes (the fleet reader's snapshot `queueCounts`). No single dollar figure applies, so none is
  * shown; the count rides the ticket and the audit row (`count`; INT-CONSOLE-AUDIT-LOG takes a positive count only, so
- * a resume with nothing waiting writes none). `{ count, line }`, count null when unreadable.
+ * a resume with nothing waiting writes none). `{ count, line }`, count null when unreadable, and null for a `floor`
+ * too (issue #737): a short read's number is at least that many, which its line says ("At least"), and the ticket and
+ * the audit row carry only an exact count, so a floor is never written as one.
  */
-function resumeWaiting(rows, what) {
+function resumeWaiting(rows, what, { floor = false } = {}) {
   const n = waitingIn(rows);
-  const names = rows.map((r) => String(r?.queue ?? "-")).join(", ");
-  return { count: n, line: `${plural(n, "job waits", "jobs wait")} to start in ${what}${names ? ` (${names})` : ""}: each reserves up to its own per-job dollar cap, and one job slot, when a worker picks it up, so no single reserve figure applies` };
+  const names = queuesNamed(rows.map((r) => String(r?.queue ?? "-")));
+  return { count: floor ? null : n, line: `${floor ? "At least " : ""}${plural(n, "job waits", "jobs wait")} to start in ${what}${names ? ` (${names})` : ""}: each reserves up to its own per-job dollar cap, and one job slot, when a worker picks it up, so no single reserve figure applies` };
 }
+
+/**
+ * The most queues a switch's preview, refusal or Undo names in one sentence (issue #737); past it the sentence names
+ * these and says how many more. A deployment whose keyspace held 2,000 queues made the resume's waiting line 134,000
+ * characters long, a bar nobody reads and a ticket and a banner that carry it whole.
+ */
+export const SWITCH_QUEUES_NAMED = 20;
+
+/** Queue names as one sentence says them: every one up to `SWITCH_QUEUES_NAMED`, else those and "and N more". */
+function queuesNamed(names) {
+  const shown = names.slice(0, SWITCH_QUEUES_NAMED).join(", ");
+  return names.length > SWITCH_QUEUES_NAMED ? `${shown}, and ${names.length - SWITCH_QUEUES_NAMED} more` : shown;
+}
+
+/**
+ * Why a switch preview's read of the queues the switch flips is short (issue #737), each a summary line the preview
+ * adds: the keyspace scan for the queues did not finish (the reader's `switchIncomplete`, its reason never shown: it
+ * can be a client's error naming a host), so a queue may be missing; or the fleet holds more queues than one preview
+ * reads (`switchTruncated`; the reader reads a bounded number of them, while the switch itself still flips every one).
+ * Either way the counts are floors and the queues read are not the set the switch flips, so no exact Undo is built.
+ * `truncated` is the line where the snapshot does not say how many the switch flips (`switchTotal`); where it does, the
+ * line names both numbers (`switchReadLine`).
+ */
+export const SWITCH_SHORT_LINES = Object.freeze({
+  incomplete: "The look for the fleet's queues did not finish, so a queue may be missing here and these counts are floors; the switch flips every queue it finds",
+  truncated: "The fleet holds more queues than one preview reads, so these counts are of the queues it read, and floors; the switch itself flips every queue",
+});
+
+/**
+ * The truncated line with its numbers: how many queues this preview read (`queueCounts`) of how many the switch flips
+ * (the reader's `switchTotal`), or `SWITCH_SHORT_LINES.truncated` when the two do not make a read of fewer than all.
+ */
+export function switchReadLine(read, total) {
+  if (!Number.isSafeInteger(read) || !Number.isSafeInteger(total) || read < 0 || total <= read) return SWITCH_SHORT_LINES.truncated;
+  return `This preview read ${read} of the ${total} queues the switch flips, so these counts are of those it read, and floors; the switch itself flips every queue`;
+}
+
+/** The keys of `SWITCH_SHORT_LINES` that hold for this switch snapshot, in that order; empty for a whole read. */
+function switchShortOf(snapshot) {
+  const truncated = snapshot?.switchTruncated === true || (Number.isSafeInteger(snapshot?.switchTruncated) && snapshot.switchTruncated > 0);
+  return [...(typeof snapshot?.switchIncomplete === "string" && snapshot.switchIncomplete !== "" ? ["incomplete"] : []), ...(truncated ? ["truncated"] : [])];
+}
+
+/** The summary line of each `switchShortOf` key for this snapshot: the truncated one with its numbers. */
+function switchShortLines(snapshot, keys) {
+  const read = Array.isArray(snapshot?.queueCounts) ? snapshot.queueCounts.length : null;
+  return keys.map((k) => (k === "truncated" ? switchReadLine(read, snapshot?.switchTotal) : SWITCH_SHORT_LINES[k]));
+}
+
+/**
+ * A one-queue switch's refusal for a queue a short read (`switchShortOf`) did not see: it cannot say the queue does not
+ * exist, so it says why it cannot tell.
+ */
+export const queueUnreadRefusal = (queue) => `${JSON.stringify(queue)} is not among the queues this preview read, and it did not read every queue, so whether this deployment drains it is not known here; nothing was changed`;
+
+/**
+ * A fleet resume's waiting line when the snapshot was not read (issue #737): the bound fired (`snapshotOf`'s
+ * `timedOut`) or the read failed, two different things the line once told alike as "the fleet did not answer".
+ */
+export const RESUME_WAITING_UNKNOWN = Object.freeze({
+  timeout: `How many jobs wait to start is not known: the fleet did not answer within ${SNAPSHOT_TIMEOUT_MS / 1000} seconds. Each reserves up to its own per-job dollar cap when a worker picks it up`,
+  unread: "How many jobs wait to start is not known: the fleet could not be read. Each reserves up to its own per-job dollar cap when a worker picks it up",
+});
 
 /** The fleet's pause or resume: the kill switch's decision at the preview, the fleet reader's funnel at the confirm. */
 function fleetSwitch({ name, kind, paused }) {
@@ -1334,17 +1410,22 @@ function fleetSwitch({ name, kind, paused }) {
       const shown = (plan?.urls ?? []).map((u) => (typeof ctx.a.urlShown === "function" ? ctx.a.urlShown(u) : "the deployment's Valkey"));
       let waiting = null;
       // A resume's Undo re-pauses what was paused before it (`resumeBack`): how many queues the switch flips and which of
-      // them were paused (`SWITCH_READ`), or null when the snapshot could not be read.
+      // them were paused (`SWITCH_READ`), or null when the snapshot could not be read. A read that was short
+      // (`switchShortOf`) marks it `short`: its queues are not the set the switch flips, so it names no exact Undo.
       let pausedBefore = null;
+      let short = [];
+      let shortLines = [];
       if (!paused) {
         const s = await snapshotOf(ctx, SWITCH_READ);
         if (s.snapshot) {
           const all = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
           const rows = all.filter((q) => q?.paused);
-          waiting = resumeWaiting(rows, "the paused queues");
-          pausedBefore = Array.isArray(s.snapshot.queueCounts) ? { queues: all.length, paused: rows.map((q) => String(q?.queue ?? "-")) } : null;
+          short = switchShortOf(s.snapshot);
+          shortLines = switchShortLines(s.snapshot, short);
+          waiting = resumeWaiting(rows, "the paused queues", { floor: short.length > 0 });
+          pausedBefore = Array.isArray(s.snapshot.queueCounts) ? { queues: all.length, paused: rows.map((q) => String(q?.queue ?? "-")), ...(short.length > 0 ? { short: true } : {}) } : null;
         } else {
-          waiting = { count: null, line: "How many jobs wait to start could not be read (the fleet did not answer); each reserves up to its own per-job dollar cap when a worker picks it up" };
+          waiting = { count: null, line: s.timedOut === true ? RESUME_WAITING_UNKNOWN.timeout : RESUME_WAITING_UNKNOWN.unread };
         }
       }
       return {
@@ -1352,7 +1433,7 @@ function fleetSwitch({ name, kind, paused }) {
         payload: {},
         ...(paused ? {} : { pausedBefore }),
         ...(waiting ? { count: waiting.count } : {}),
-        summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : [])],
+        summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : []), ...shortLines],
       };
     },
     async apply(_entry, ctx) {
@@ -1386,11 +1467,14 @@ function queueSwitch({ name, kind, paused }) {
     needs: FLEET_NEEDS,
     async preview(body, ctx) {
       const queue = str(body, "queue", { required: true, max: 200 });
-      const s = await snapshotOf(ctx, SWITCH_READ);
+      // The reader reads the named queue whatever its bound, so a queue past the first it reads is still found.
+      const s = await snapshotOf(ctx, { ...SWITCH_READ, queue });
       if (!s.snapshot) return s;
       const rows = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
       const row = rows.find((q) => q?.queue === queue);
-      if (!row) return { refusal: `${JSON.stringify(queue)} is not a queue this deployment drains (${rows.map((q) => q?.queue).join(", ")}); nothing was changed` };
+      // A read that was short (`switchShortOf`) cannot say a queue it did not read does not exist: it says why instead.
+      if (!row && switchShortOf(s.snapshot).length > 0) return { refusal: queueUnreadRefusal(queue) };
+      if (!row) return { refusal: `${JSON.stringify(queue)} is not a queue this deployment drains (${queuesNamed(rows.map((q) => String(q?.queue ?? "-")))}); nothing was changed` };
       if (Boolean(row.paused) === paused) return { unchanged: `${queue} is already ${paused ? "paused" : "running"}` };
       const waiting = paused ? null : resumeWaiting([row], "it");
       return { target: queue, payload: { queue }, ...(waiting ? { count: waiting.count } : {}), summary: [paused ? `Pause queue ${queue}: nothing new starts there; the rest of the fleet keeps running` : `Resume queue ${queue}: its queued jobs start again`, ...(waiting ? [waiting.line] : [])] };
@@ -1446,11 +1530,22 @@ export const UNDO_SENTENCES = Object.freeze({
   envelopeAfter: "Set it back with the envelope form: the console kept no copy of the old values.",
   tooBig: "Put the previous list back by hand: this preview showed it; the console keeps no copy.",
   tooBigAfter: "Put the previous list back by hand: the console kept no copy of it.",
+  resumeUnread: "Pause the queues that were paused again by hand: the fleet was not read before the resume, so which they were is not known.",
+  resumeShort: "Pause the queues that were paused again by hand: not every queue was read before the resume, so which they were is not fully known.",
 });
 
 /** An Undo said in the bar, and in the banner after the write without pointing at the preview that is gone by then. */
 const twice = (bar, after) => Object.freeze({ bar, after });
 const DELETED = twice(UNDO_SENTENCES.delete, UNDO_SENTENCES.deleteAfter);
+
+/**
+ * A fleet resume's Undo when more queues were paused than one sentence names (`SWITCH_QUEUES_NAMED`): by hand, the bar
+ * saying the preview names only the first of them and the banner after it that the console kept no list.
+ */
+export const resumeManyUndo = (n) => {
+  const lead = `Pause the ${n} queues that were paused again by hand, one at a time: no single write pauses only those`;
+  return twice(`${lead}, and this preview names only the first ${SWITCH_QUEUES_NAMED}.`, `${lead}, and the console kept no list of them.`);
+};
 
 /** A file's JSON as it was before the change (`beforeText`), or null when it was missing or does not parse. */
 function jsonOf(text) {
@@ -1523,13 +1618,20 @@ function settingBack(out, key) {
  * carries (`fleet-pause` takes no list), so it has no inverse and the sentence names the queues to pause by hand.
  * NEVER `fleet-pause` FOR A PART: Resume fleet is offered on a fleet partly paused, and an Undo that paused every queue
  * stopped the hosts the operator had left running, the opposite of a way back. An unread fleet names no set at all.
+ *
+ * NOR OVER A SHORT READ (issue #737): a preview whose scan for the queues did not finish, or that read only the first
+ * of more queues than it reads (`pausedBefore.short`), saw a part of the set and cannot tell "every queue was paused"
+ * or "only this one was" from what it saw; its Undo is the by-hand line. Past `SWITCH_QUEUES_NAMED` paused queues no
+ * sentence names them all, so that Undo is by hand too, and says the console has no list of them.
  */
 function resumeBack(out) {
   const b = out.pausedBefore;
-  if (!b || !Number.isSafeInteger(b.queues) || !Array.isArray(b.paused)) return { undo: "Pause the queues that were paused again by hand: the fleet did not answer, so which they were is not known.", inverse: null };
+  if (!b || !Number.isSafeInteger(b.queues) || !Array.isArray(b.paused)) return { undo: UNDO_SENTENCES.resumeUnread, inverse: null };
+  if (b.short === true) return { undo: UNDO_SENTENCES.resumeShort, inverse: null };
   if (b.paused.length === 0) return { undo: "No queue of the fleet was paused, so there is nothing to pause again.", inverse: null };
   if (b.paused.length === b.queues) return { undo: "Pause the fleet again", inverse: { action: "fleet-pause", body: {} } };
   if (b.paused.length === 1) return { undo: `Pause queue ${b.paused[0]} again`, inverse: { action: "queue-pause", body: { queue: b.paused[0] } } };
+  if (b.paused.length > SWITCH_QUEUES_NAMED) return { undo: resumeManyUndo(b.paused.length), inverse: null };
   return { undo: `Pause queues ${b.paused.join(", ")} again by hand, one at a time: no single write pauses only those.`, inverse: null };
 }
 
@@ -1843,7 +1945,9 @@ export async function previewAction(ctx, action) {
     deps.log(`console: the ${action.name} preview failed (${codeOf(e)})`);
     return refuse(ctx, "preview", 500, "the preview failed; the console's log has the reason; nothing was changed");
   }
-  if (out?.refusal) return refuse(ctx, "preview", out.status ?? 400, out.refusal);
+  // A refusal names its bar's state only where its status cannot (the snapshot's timeout, a 503 that is not Valkey's),
+  // and only one of the slot's own states: a planner's answer may carry a field of that name for something else.
+  if (out?.refusal) return refuse(ctx, "preview", out.status ?? 400, out.refusal, typeof out.state === "string" && Object.hasOwn(REFUSAL_STATES, out.state) ? out.state : null);
   if (out?.unchanged) {
     const summary = [String(out.unchanged)];
     return ctx.json(200, { unchanged: true, action: action.name, summary, ...(out.extra ?? {}), html: String(unchangedBarHtml({ summary, sentenceHtml: out.unchangedHtml ?? null })) });

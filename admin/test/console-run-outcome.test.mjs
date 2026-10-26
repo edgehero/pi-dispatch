@@ -8,7 +8,8 @@ import { loadPageData, pagePanels, panelIds, renderPage } from "../src/console/p
 import { refusedBeforeStart, runOutcome } from "../src/console/panels.mjs";
 import { rerunCheckOf, sandboxCheckOf } from "../src/console/run-api.mjs";
 import { makeLiveHub } from "../src/console/live.mjs";
-import { createFleetReader, fleetQueuesOn, readFleetQueues } from "../src/read-model.mjs";
+import { createFleetReader, fleetQueuesOn, readFleetQueues, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD } from "../src/read-model.mjs";
+import { runUnreadText, runUntoldText } from "../src/console/panels/run.mjs";
 import { sandboxRetentionOf } from "../src/sandbox-verdict.mjs";
 import { RERUN_DATA_KEPT_MS, RERUN_KEPT_SLACK_MS, rerunRefusalOf } from "../src/job-actions.mjs";
 import { DOCS_ROOT } from "../src/words.mjs";
@@ -101,6 +102,46 @@ test("a run with no record says why ONCE: not a run id, unknown, queued, running
     assert.ok(!banner.includes('class="big'), `${cases[i][0]}: no outcome word`);
   }
   for (const i of [0, 1]) assert.match(await tone(cases[i][1]), /^<h2>Outcome<\/h2><p class="warn">/, `${cases[i][0]}: amber`);
+});
+
+test("a record that could not be read is said so on the banner, which sentence for which read, for both roles, and never that no such run is known", async () => {
+  const base = { jobStatus: async () => ({ found: false, state: null, continuesAs: null, queuedAs: null }), transcriptMeta: async () => ({ exists: false }), progress: async () => ({ absent: true }), runsPage: async () => ({ runs: [], next: null, mirror: "ok" }) };
+  const cases = [
+    [RUN_FILE_UNREADABLE, async () => ({ unreadable: RUN_FILE_UNREADABLE })],
+    [RUN_MIRROR_UNREAD, async () => ({ unreadable: RUN_MIRROR_UNREAD })],
+    [RUN_RECORD_UNREAD, async () => { throw new Error("ECONNRESET"); }],
+  ];
+  assert.equal(runUnreadText(RUN_MIRROR_UNREAD), "The fleet's run mirror could not be read, so this page cannot say what the run did. Reload to try again.");
+  for (const [why, runById] of cases) {
+    for (const role of ["operator", "viewer"]) {
+      const session = { name: "u", role };
+      const data = await loadPageData("run", { id: "gh-1" }, { fleet: { ...base, runById } }, session);
+      const got = await renderPage("run", { query: { id: "gh-1" }, session, data, readOnly: false, theme: null });
+      const html = String(got.html);
+      const outcome = html.match(/<section id="p-outcome"[\s\S]*?<\/section>/)?.[0] ?? "";
+      assert.ok(outcome.includes(runUnreadText(why).replace(/'/g, "&#39;")), `${role}, ${why}: ${outcome.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")}`);
+      assert.ok(!/No run with (that|this) id/.test(html), `${role}, ${why}: says no such run`);
+      assert.equal(got.status, 503, `${role}, ${why}: a page that cannot say whether the run exists`);
+    }
+  }
+});
+
+test("a run with no record says what it could not read whenever a place is unread: a record read that gave no answer is unread, and only a record both sides said they do not hold, with every place read, is no such run (#737)", async () => {
+  const read = { chat: { found: false, jobState: null, state: "unknown", mode: null, says: CHAT_REFUSALS.unknown }, transcript: { exists: false }, progress: { absent: true } };
+  const banner = async (data) => (await panelsOf("viewer", data, "gh-x"))[0].html;
+  for (const run of [null, {}, { unreadable: 7 }]) {
+    const html = await banner({ ...read, run });
+    assert.ok(html.includes(runUnreadText(RUN_RECORD_UNREAD).replace(/'/g, "&#39;")), `${JSON.stringify(run)}: ${html}`);
+    assert.ok(!/No run with that id/.test(html), `${JSON.stringify(run)}: never no such run`);
+  }
+  for (const [what, over, unread] of [
+    ["the queues not all read", { chat: { unreachable: true } }, [RUN_PLACES.queues]],
+    ["the transcript and the progress unread", { transcript: { unreachable: true, exists: false }, progress: { unreachable: true } }, [RUN_PLACES.transcript, RUN_PLACES.progress]],
+  ]) {
+    const html = await banner({ ...read, run: { missing: true }, ...over });
+    assert.ok(html.includes(runUntoldText(unread).replace(/'/g, "&#39;")), `${what}: ${html}`);
+  }
+  assert.ok((await banner({ ...read, run: { missing: true } })).includes("No run with that id is in this host&#39;s history or the fleet&#39;s run mirror."));
 });
 
 test("a completed run: its word in the success tone, no reason sentence repeated, and the detail tokens with their catalog sentences", async () => {
@@ -311,18 +352,21 @@ test("the retained-job read asks the planner's queues: a host out of the registr
   assert.match((await reader.rerunCheck("gh-9", { jobId: "gh-9", kind: "github", endedAt: iso(NOW - DAY) })).refusal, /no longer holds gh-9's data/);
 });
 
-test("a degraded queue list makes not-found unreadable, never a refusal, and it is not cached (review round 1)", async () => {
+test("a degraded queue list makes not-found unreadable, never a refusal, kept for the window as any answer is", async () => {
   for (const [name, redis] of [["the registry unread", fleetRedis({ smembersThrows: true })], ["the keyspace scan unread", fleetRedis({ scanThrows: true })]]) {
     const { reader } = namedQueueReader(redis, {});
     const record = { jobId: "gh-9", kind: "github", endedAt: iso(NOW - DAY) };
     assert.deepEqual(await reader.rerunCheck("gh-9", record), { unreachable: true }, name);
     assert.deepEqual(await reader.parkedAnswerCheck("gh-9"), { unreachable: true }, name);
-    // Through the page's cache: read again on the next tick, and the record alone decides meanwhile (the form stays).
+    // Through the page's cache: kept for the window as a good answer is (issue #737: a failing Valkey is asked once per
+    // window, never once per tick), and the record alone decides meanwhile (the form stays).
     let reads = 0;
     const counting = { rerunCheck: async (...a) => ((reads += 1), reader.rerunCheck(...a)) };
     await rerunCheckOf(counting, "gh-9", record, { now: () => NOW });
     await rerunCheckOf(counting, "gh-9", record, { now: () => NOW + 1 });
-    assert.equal(reads, 2, `${name}: not cached`);
+    assert.equal(reads, 1, `${name}: kept`);
+    await rerunCheckOf(counting, "gh-9", record, { now: () => NOW + 15_000 });
+    assert.equal(reads, 2, `${name}: read again once its window passed`);
     assert.ok((await summaryOf({ ...COMPLETED, jobId: "gh-9" }, { rerunCheck: { unreachable: true } })).includes('data-action="rerun"'), `${name}: the form, from the record alone`);
   }
   // The planner's discovery reports the scan's state; the kill switch's list shape reads as complete.
@@ -350,15 +394,17 @@ test("the console never hides the sandbox command on a venue policy it cannot se
   assert.equal(o.why, "venue");
 });
 
-test("the checks are reused for 15 s per run id while the record is the same, and an unreadable one is read again", async () => {
+test("the checks are reused for 15 s per run id while the record is the same, an unreadable one as long as a good one", async () => {
   let reads = 0;
   const fleet = { rerunCheck: async () => ((reads += 1), reads === 1 ? { unreachable: true } : { ok: true }), sandboxCheck: async () => ({ retained: true, why: null }) };
   const record = { jobId: "gh-1", endedAt: iso(NOW) };
   assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW }), { unreachable: true });
-  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 1 }), { ok: true }, "an unreadable check is not kept");
-  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 10_000 }), { ok: true });
-  assert.equal(reads, 2, "the second answer is reused within the window");
-  await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 16_000 });
+  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 1 }), { unreachable: true }, "an unreadable check is kept for its window");
+  assert.equal(reads, 1);
+  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 15_000 }), { ok: true }, "and read again after it");
+  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 25_000 }), { ok: true });
+  assert.equal(reads, 2, "the second answer is reused within its window");
+  await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 31_000 });
   assert.equal(reads, 3, "and read again after it");
   assert.equal(await rerunCheckOf({}, "gh-1", record), null, "no reader: null");
   assert.deepEqual(await sandboxCheckOf(fleet, "gh-1", record, { now: () => NOW }), { retained: true, why: null });
