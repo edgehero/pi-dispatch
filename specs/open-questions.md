@@ -2494,7 +2494,7 @@ adversarial passes did.
   - it only attaches to an existing `pi-sandbox-*` container the console issued a ticket for;
   - each ticket is good once, for 60 seconds, bound to one operator session, and minted after the person signs in
     again;
-  - one window per sandbox, never on a phone, the CLI's idle logout;
+  - one window per sandbox, never on a phone, with the CLI's idle logout;
   - opening and ending are audited, and what is typed is not recorded.
 - **What it costs**:
   - The gateway still talks to Docker (or Podman), and the Docker socket is root on that host. Narrowing what the
@@ -2511,26 +2511,44 @@ adversarial passes did.
 - **Related**: `DES-OPERATOR-CONSOLE` (Rejected: a terminal in the browser; WebSockets), `REQ-SANDBOX-FROM-THE-CONSOLE`,
   `REQ-RESURRECTABLE-SANDBOX`.
 
-## OQ-051: An answerer's category is a model's judgment
+## OQ-051: Whether a model may answer a parked question with no person's confirm
 
-- **Status**: **OPEN** (2026-10-27, issue #753). Recorded with the proposal, before anything is built, so the bound
-  is decided before the first send.
-- **What it is**: `REQ-PARKED-ANSWERER` lets an answerer answer only in allowed categories (conventions, how-to,
-  decided matters) and never product decisions, security, money or scope. Which category a question is in is decided
-  by a decision model. A product decision worded like a convention question ("which limit should the export use?")
-  can be classified as a convention and answered from a source that does not decide it.
-- **What bounds it today, in the proposal**:
+- **Status**: **OPEN** (2026-10-27, issue #753). Recorded with the proposal, before anything is built, so neither half
+  is decided by a build.
+- **Position today**: `REQ-PARKED-ANSWERER` proposes a draft only: a draft job classifies and drafts, and a person
+  sends through the console's answer action. Two further modes were drawn in the design system and are **not**
+  proposed:
+  - sending after a wait unless a person steps in;
+  - sending when the model is sure, and telling the person after.
+
+  Both would take a run from parked to resumed with no person's say-so. That matters in two ways.
+- **1. The constitution has no door for it.** `CONST-TRIGGER-AUTHOR-GATE` admits a console job only when an operator
+  confirms a previewed change with a single-use ticket bound to their session. It says the audit log names the person,
+  and that is what makes the reply's GitHub association `OWNER`. A send with no confirm would be a third door:
+  - a model's answer under a hand-written rule;
+  - marked as such, and never as `OWNER` or as a person.
+
+  It needs that entry amended in the same pull request that builds it, with the association it carries and what the
+  audit row names instead of a person.
+- **2. Which category a question is in is a model's judgment.**
+  - **An honest mistake.** A product decision worded like a convention question ("which limit should the export
+    use?") can be classified as a convention and drafted from a source that does not decide it.
+  - **A steered one.** The question is written by the parked run's agent, which read issue text anyone could write.
+    Text that steers the agent's question can steer the classifier and the drafter that read it.
+
+  A person reading the draft catches both while a person sends. Once nobody does, only the bounds remain:
   - the closed allow list and the minimum confidence;
-  - the rule that a draft with no cited source is never sent;
-  - the wait, with the draft and its sources on the run page;
-  - the overturn bound, which drops a sending answerer back to `draft-and-wait`;
-  - the counting of its answers apart in `REQ-ZERO-TOUCH-RATE`.
-
-  None of these measures how often the classification is wrong before an answer is sent.
-- **What would close it**: a measured misclassification rate from the answerer run in shadow first (`ask` mode: it
-  classifies and drafts, a person answers, and the two are compared) over a stated number of questions per repository.
-  A mode above `ask` would be allowed only where that rate is under a bound this row will name.
-- **Related**: `REQ-PARKED-ANSWERER`, `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN`, `REQ-AWAIT-INPUT`.
+  - the rule that a draft with no cited source is never offered;
+  - an overturn rate that drops a sending rule back to drafts.
+- **What would close it**:
+  - A constitution amendment (part 1).
+  - A measured misclassification rate (part 2). It comes from rules run in `classify` and `draft` mode, comparing the
+    model's verdict and draft with what the person sent, over a stated number of questions per repository, adversarial
+    issue text included. A sending mode would be allowed only where that rate is under a bound this row names.
+  - Until both, a run answered with no person does not exist, and `REQ-ZERO-TOUCH-RATE` counts every answered run as
+    touched.
+- **Related**: `REQ-PARKED-ANSWERER`, `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN`, `REQ-AWAIT-INPUT`,
+  `CONST-TRIGGER-AUTHOR-GATE`, `CONST-ISSUE-TEXT-IS-DATA`, `OQ-014`.
 
 ## Revision History
 
@@ -2662,4 +2680,4 @@ adversarial passes did.
 | 2026-10-22 (#730) | Issue #730: OpenShell's connect broker reads the caller's memory, which a non-dumpable runner refuses, so the venue needs a readable runner. **`OQ-047` AMENDED**: a dated bullet that on both OpenShell venues the key holders run readable (`observableRunner`), the exit-line key then kept by the sandbox's workload seccomp and by Yama (the worker refusing below `ptrace_scope` 1), and measured: a tool reads a dumpable ancestor's environ (placeholders only) and, through the supervisor's fd-0 steer-frame pipe, can drop/delay/break a steered job's frames but never forge one nor read the key. **`OQ-049` NEW, OPEN**: an upstream ask for an OpenShell broker that can observe a non-dumpable workload (reading the `sockaddr` from the notification, or a broker-only `CAP_SYS_PTRACE`), which would let the exec-only runner return to the OpenShell venues and the `ptrace_scope` refusal be dropped; what it costs while open is `OQ-047`'s. **UNCHANGED, checked**: `OQ-048` (a manager through OpenShell itself is untouched). |
 | 2026-10-22 (#730, review round 1) | **`OQ-047` AMENDED**: the readable OpenShell runner's key is kept by THREE properties, not two: the sandbox's seccomp, Yama at EXACTLY 1 (0/unreadable `-unprotected`, 2/3 `-too-strict`), and `ulimit -c 0` suppressing core dumps (a `kill -ABRT` route that does not go through Yama); and a tool may reopen a holder's fd 0, 1 and 2 to break or garble but never forge a signed line. **`OQ-049` UNCHANGED, checked**: the upstream ask is unchanged. |
 | 2026-10-22 (#730, review round 2) | **`OQ-047` CORRECTED**, wording only: `prlimit64` on another pid is already refused by OpenShell's seccomp, a file `core_pattern` writes nothing and a pipe one goes to a host-root handler outside the sandbox. **`OQ-049` CORRECTED**: its cost line says the venue is refused unless Yama is exactly 1. |
-| 2026-10-27 (#753, #754) | **NEW `OQ-050`** (OPEN, issue #754): whether a sandbox shell may open in the browser through a separate gateway process; the proposal (its own address and tab, attach only to a ticketed `pi-sandbox-*` container, a one-use 60 second ticket after a fresh sign-in, off by default), what it costs (the Docker socket is still root on that host, a second listener with operator reach, a stolen session is enough while a ticket lives), and what would close it; `DES-OPERATOR-CONSOLE`'s rejection stands while it is open. **NEW `OQ-051`** (OPEN, issue #753): an answerer's category is a model's judgment, so a product decision worded as a convention can be answered; what bounds it in the proposal, that none of it measures the misclassification rate, and that a measured rate from `ask` mode in shadow would close it before any mode that sends. |
+| 2026-10-27 (#753, #754) | **NEW `OQ-050`** (OPEN, issue #754): whether a sandbox shell may open in the browser through a separate gateway process; the proposal (its own address and tab, attach only to a ticketed `pi-sandbox-*` container, a one-use 60 second ticket after a fresh sign-in, off by default), what it costs (the Docker socket is still root on that host, a second listener with operator reach, a stolen session is enough while a ticket lives), and what would close it; `DES-OPERATOR-CONSOLE`'s rejection stands while it is open. **NEW `OQ-051`** (OPEN, issue #753): whether a model may answer a parked question with no person's confirm, which `REQ-PARKED-ANSWERER` does not propose; it needs `CONST-TRIGGER-AUTHOR-GATE` amended (a third door, marked as a model's answer and never as `OWNER` or a person), and a measured misclassification rate, honest and steered by issue text, from rules run in `classify` and `draft` mode; until both, every answered run is a touch. |
