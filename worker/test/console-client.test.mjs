@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, request as nodeRequest } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { EventEmitter } from "node:events";
-import { askYesNo, backoffMs, consoleAddressOf, ConsoleError, consoleToken, dotenvTrustRefusal, isLoopbackAddress, makeConsoleClient, makeSseParser, oneLine, parseConsoleAddress, RELOGIN_WINDOW_MS, retryAfterMs, SSE_EVENT_MAX_BYTES } from "../src/console-client.mjs";
+import { askYesNo, backoffMs, consoleAddressOf, ConsoleError, consoleToken, dotenvTrustRefusal, endedOf, isLoopbackAddress, makeConsoleClient, makeSseParser, oneLine, parseConsoleAddress, RELOGIN_WINDOW_MS, retryAfterMs, SSE_EVENT_MAX_BYTES, STREAM_SHUTDOWN } from "../src/console-client.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #647: the terminal chat's console client, against a node:http fake of the console. Every request is recorded,
@@ -61,6 +61,21 @@ function fakeConsole({ routes = {}, cookieValue = () => "sess1" } = {}) {
 }
 
 const sse = (res) => res.writeHead(200, { "content-type": "text/event-stream" });
+
+/**
+ * node:http's request, except that a connection `down(opts)` names is refused (ECONNREFUSED, as from a console that
+ * is restarting) without reaching any server: the client's own `request` seam.
+ */
+function flakyRequest(down) {
+	return (opts) => {
+		if (!down(opts)) return nodeRequest(opts);
+		const req = new EventEmitter();
+		req.write = () => true;
+		req.end = () => setImmediate(() => req.emit("error", Object.assign(new Error("connect ECONNREFUSED 127.0.0.1"), { code: "ECONNREFUSED" })));
+		req.destroy = () => {};
+		return req;
+	};
+}
 
 test("addresses: host:port, http://, IPv6, unix, wildcards dialled on loopback, https and paths refused", () => {
 	assert.deepEqual(parseConsoleAddress("127.0.0.1:4790"), { kind: "tcp", host: "127.0.0.1", port: 4790, hostHeader: "127.0.0.1:4790", shown: "http://127.0.0.1:4790" });
@@ -265,7 +280,7 @@ test("act: preview prints the summary and reserve, confirm sends the ticket; a n
 	}
 });
 
-test("a stream resumes with Last-Event-ID after a cut, waits Retry-After on 429, and ends on done", async () => {
+test("a stream resumes with Last-Event-ID after a cut, waits Retry-After on 429, and ends on done", { timeout: 10_000 }, async () => {
 	let opens = 0;
 	const lastIds = [];
 	const fake = fakeConsole({
@@ -305,31 +320,145 @@ test("a stream resumes with Last-Event-ID after a cut, waits Retry-After on 429,
 	}
 });
 
-test("an end event signs in again once; a second end right after the fresh sign-in gives up with a sentence", async () => {
+test("an end event signs in again once; a second end right after the fresh sign-in gives up with a sentence", { timeout: 10_000 }, async () => {
+	// A session's end names why (issue #737); an older console's `{}`, data that is not JSON and a word that only looks
+	// like the shutdown one are ends all the same: only the exact STREAM_SHUTDOWN is a dropped connection.
+	for (const data of ['{"ended":"revoked"}', '{"ended":"elsewhere"}', "{}", "not json", '{"ended":"Shutdown"}', '{"ended":"shutdown "}', '{"ended":["shutdown"]}']) {
+		let opens = 0;
+		const fake = fakeConsole({
+			cookieValue: (k) => `sess${k}`,
+			routes: {
+				"/api/transcript": (req, res) => {
+					opens += 1;
+					sse(res);
+					res.write(`event: end\ndata: ${data}\n\n`);
+					res.end();
+				},
+			},
+		});
+		const port = await fake.listen();
+		try {
+			const states = [];
+			const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, sleep: async () => true });
+			await assert.rejects(client.stream("/api/transcript?id=j1&format=json", { onState: (st) => states.push(st) }), (e) => e instanceof ConsoleError && /ended this sign-in again/.test(e.message) && !e.message.includes(TOKEN), data);
+			assert.equal(opens, 2, data);
+			assert.equal(fake.logins, 2, `${data}: exactly one re-login`);
+			assert.deepEqual(states, [{ relogin: true }], `${data}: never taken for the console stopping`);
+		} finally {
+			await fake.close();
+		}
+	}
+});
+
+test("endedOf: the reason an end's data names, a short lowercase word or null; the shutdown word is the console's", () => {
+	assert.equal(STREAM_SHUTDOWN, "shutdown");
+	assert.equal(endedOf('{"ended":"shutdown"}'), STREAM_SHUTDOWN);
+	assert.equal(endedOf('{"ended":"revoked"}'), "revoked");
+	for (const data of ["{}", '{"ended":null}', '{"ended":7}', '{"ended":"Shutdown"}', '{"ended":"shut down"}', `{"ended":"${"x".repeat(21)}"}`, "not json", "", "null", '"shutdown"', '["shutdown"]']) {
+		assert.equal(endedOf(data), null, data);
+	}
+});
+
+test("SHUTDOWN IS A DROPPED CONNECTION: backed off and reconnected with the same cookie, never a re-login, and twice in a minute is not fatal", { timeout: 10_000 }, async () => {
 	let opens = 0;
+	const cookies = [];
 	const fake = fakeConsole({
 		cookieValue: (k) => `sess${k}`,
 		routes: {
 			"/api/transcript": (req, res) => {
 				opens += 1;
+				cookies.push(req.headers.cookie);
 				sse(res);
-				res.write("event: end\ndata: {}\n\n");
+				if (opens === 1) res.write("id: 1-1\nevent: entry\ndata: {}\n\n");
+				res.write(opens < 3 ? `event: end\ndata: {"ended":"${STREAM_SHUTDOWN}"}\n\n` : 'event: done\ndata: {"outcome":"completed"}\n\n');
 				res.end();
 			},
 		},
 	});
 	const port = await fake.listen();
 	try {
-		const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, sleep: async () => true });
-		await assert.rejects(client.stream("/api/transcript?id=j1&format=json"), (e) => e instanceof ConsoleError && /ended this sign-in again/.test(e.message) && !e.message.includes(TOKEN));
-		assert.equal(opens, 2);
-		assert.equal(fake.logins, 2, "exactly one re-login");
+		const waits = [];
+		const states = [];
+		// One instant for the whole stream: two ends inside RELOGIN_WINDOW_MS would be fatal, two shutdowns are not.
+		const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, now: () => 1_000_000, sleep: async (ms) => (waits.push(ms), true), random: () => 1 });
+		assert.deepEqual(await client.stream("/api/transcript?id=j1&format=json", { onState: (st) => states.push(st) }), { done: "completed" });
+		assert.equal(opens, 3);
+		assert.equal(fake.logins, 1, "the sign-in is kept: a stopping console is not a session that ended");
+		assert.deepEqual(cookies, ["pdc_session=sess1", "pdc_session=sess1", "pdc_session=sess1"]);
+		assert.deepEqual(states, [{ shutdown: true }, { waiting: 500 }, { shutdown: true }, { waiting: 1000 }], "said, then waited, each time");
+		assert.deepEqual(waits, [500, 1000], "the dropped connection's backoff, not the re-login's pause");
+		assert.equal(fake.seen.filter((r) => r.path === "/api/transcript")[1].headers["last-event-id"], "1-1", "resumed from the last entry");
 	} finally {
 		await fake.close();
 	}
 });
 
-test("a determinate refusal of a stream (403) is not retried; an aborted stream detaches", async () => {
+test("a console restart: shutdown, refused while it is down, its 401 signs in again, and a sign-in it refuses mid-restart is retried, not the end", { timeout: 10_000 }, async () => {
+	let phase = "old";
+	let downLeft = 0;
+	let loginDown = 0;
+	const asked = [];
+	const fake = fakeConsole({
+		cookieValue: (k) => `sess${k}`,
+		routes: {
+			"/api/transcript": (req, res, body, { json }) => {
+				asked.push([phase, req.headers.cookie, req.headers["last-event-id"] ?? null]);
+				if (phase === "old") {
+					sse(res);
+					res.write("id: 1-1\nevent: entry\ndata: {}\n\n");
+					res.write(`event: end\ndata: {"ended":"${STREAM_SHUTDOWN}"}\n\n`);
+					res.end();
+					// The process stops: two connections are refused, then a new one that knows no session answers.
+					phase = "new";
+					downLeft = 2;
+					loginDown = 1;
+					return;
+				}
+				if (req.headers.cookie !== "pdc_session=sess2") return json(401, { error: "sign in first", ended: "restart" }, { "set-cookie": "pdc_session=; Path=/; Max-Age=0" });
+				sse(res);
+				res.write('id: 1-2\nevent: entry\ndata: {}\n\nevent: done\ndata: {"outcome":"completed"}\n\n');
+				res.end();
+			},
+		},
+	});
+	const port = await fake.listen();
+	try {
+		const states = [];
+		const ids = [];
+		const request = flakyRequest((opts) => {
+			if (downLeft > 0) return ((downLeft -= 1), true);
+			if (opts.path === "/login" && loginDown > 0) return ((loginDown -= 1), true);
+			return false;
+		});
+		const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, request, sleep: async () => true, random: () => 1 });
+		const end = await client.stream("/api/transcript?id=j1&format=json", { onEvent: (e) => ids.push(e.id), onState: (st) => states.push(st) });
+		assert.deepEqual(end, { done: "completed" });
+		assert.deepEqual(ids, ["1-1", "1-2"]);
+		assert.equal(fake.logins, 2, "one sign-in, and one after the restarted console said 401");
+		assert.deepEqual(asked, [["old", "pdc_session=sess1", null], ["new", "pdc_session=sess1", "1-1"], ["new", "pdc_session=sess2", "1-1"]], "the old cookie is tried first: only the 401 signs in again");
+		assert.deepEqual(states.map((st) => Object.keys(st)[0]), ["shutdown", "waiting", "waiting", "waiting", "relogin", "waiting"], "shutdown, two refused reconnects, the 401's re-login, the refused sign-in waited out");
+	} finally {
+		await fake.close();
+	}
+});
+
+test("a sign-in the console answers with a refusal inside the stream's retry is not waited out: a revoked token is the end", { timeout: 10_000 }, async () => {
+	const fake = fakeConsole({
+		routes: {
+			"/api/transcript": (req, res, body, { json }) => json(401, { error: "sign in first" }, { "set-cookie": "pdc_session=; Path=/; Max-Age=0" }),
+		},
+	});
+	const port = await fake.listen();
+	try {
+		const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: "pdc_revoked-token", sleep: async () => true });
+		await assert.rejects(client.stream("/api/transcript?id=j1&format=json"), (e) => e instanceof ConsoleError && e.status === 401 && /refused the token/.test(e.message));
+		assert.equal(fake.logins, 1, "asked once: retrying cannot make a refused token valid");
+	} finally {
+		await fake.close();
+	}
+});
+
+test("a determinate refusal of a stream (403) is not retried; an aborted stream detaches", { timeout: 10_000 }, async () => {
 	const fake = fakeConsole({
 		routes: {
 			"/api/transcript": (req, res, body, { json }) => {
@@ -488,7 +617,7 @@ test("act with no confirm is a no: the preview is asked, nothing is confirmed", 
 	}
 });
 
-test("a connection that delivered entries resets the failure count, so a stream cut after every entry never gives up", async () => {
+test("a connection that delivered entries resets the failure count, so a stream cut after every entry never gives up", { timeout: 10_000 }, async () => {
 	let opens = 0;
 	const fake = fakeConsole({
 		routes: {
@@ -516,7 +645,7 @@ test("a connection that delivered entries resets the failure count, so a stream 
 	}
 });
 
-test("re-login is paced and capped over a stream's life: an entry then end, forever, signs in at most once per window", async () => {
+test("re-login is paced and capped over a stream's life: an entry then end, forever, signs in at most once per window", { timeout: 10_000 }, async () => {
 	let opens = 0;
 	const fake = fakeConsole({
 		cookieValue: (k) => `sess${k}`,
@@ -524,7 +653,7 @@ test("re-login is paced and capped over a stream's life: an entry then end, fore
 			"/api/transcript": (req, res) => {
 				opens += 1;
 				sse(res);
-				res.write(`id: 1-${opens}\nevent: entry\ndata: {}\n\nevent: end\ndata: {}\n\n`);
+				res.write(`id: 1-${opens}\nevent: entry\ndata: {}\n\nevent: end\ndata: {"ended":"revoked"}\n\n`);
 				res.end();
 			},
 		},
@@ -553,7 +682,7 @@ test("re-login is paced and capped over a stream's life: an entry then end, fore
 			"/api/transcript": (req, res) => {
 				n += 1;
 				sse(res);
-				res.write(n > 3 ? 'event: done\ndata: {"outcome":"completed"}\n\n' : "event: end\ndata: {}\n\n");
+				res.write(n > 3 ? 'event: done\ndata: {"outcome":"completed"}\n\n' : 'event: end\ndata: {"ended":"idle"}\n\n');
 				res.end();
 			},
 		},
@@ -569,7 +698,161 @@ test("re-login is paced and capped over a stream's life: an entry then end, fore
 	}
 });
 
-test("a multi-line refusal from the console comes out as one line with no control characters", async () => {
+/**
+ * A fake console whose transcript route plays `script` in order, one step per connection: `["entry", id, reason]` (an
+ * entry, then an end with that reason), `["cut", id]` (an entry, then the connection closes with no end: a killed
+ * console), `["open"]` (open, then closed with nothing at all), `["401", ended]` (a 401, with that `ended` or none),
+ * `["end", reason]`, or done (also every step past the last). The cookie a step is sent with is recorded.
+ */
+function scriptedConsole(steps) {
+	let n = 0;
+	const cookies = [];
+	const fake = fakeConsole({
+		cookieValue: (k) => `sess${k}`,
+		routes: {
+			"/api/transcript": (req, res, body, { json }) => {
+				const step = steps[n] ?? ["done"];
+				n += 1;
+				cookies.push(req.headers.cookie ?? null);
+				if (step[0] === "401") return json(401, step[1] === undefined ? { error: "sign in first" } : { error: "sign in first", ended: step[1] });
+				sse(res);
+				if (step[0] === "entry") res.write(`id: ${step[1]}\nevent: entry\ndata: {}\n\nevent: end\ndata: {"ended":"${step[2]}"}\n\n`);
+				else if (step[0] === "cut") res.write(`id: ${step[1]}\nevent: entry\ndata: {}\n\n`);
+				else if (step[0] === "open") res.write(": ping\n\n");
+				else if (step[0] === "end") res.write(`event: end\ndata: {"ended":"${step[1]}"}\n\n`);
+				else res.write('event: done\ndata: {"outcome":"completed"}\n\n');
+				res.end();
+			},
+		},
+	});
+	return { fake, cookies, get opens() {
+		return n;
+	} };
+}
+
+test("a console restarted twice inside a minute keeps the chat (issue #737): a restart's 401, and the first re-login after a shutdown, use up no re-login window", { timeout: 10_000 }, async () => {
+	// One instant for the whole stream: any two counted re-logins would be inside RELOGIN_WINDOW_MS.
+	for (const [label, steps] of [
+		["the 401 says restart", [["entry", "1-1", STREAM_SHUTDOWN], ["401", "restart"], ["entry", "1-2", STREAM_SHUTDOWN], ["401", "restart"], ["done"]]],
+		["the first re-login after a shutdown, whatever its 401 says", [["entry", "1-1", STREAM_SHUTDOWN], ["401"], ["entry", "1-2", STREAM_SHUTDOWN], ["401"], ["done"]]],
+		// A killed console: the stream is cut with no end, and the reconnect meets the new process's 401.
+		["a restart's 401 with no shutdown before it (a killed console)", [["cut", "1-1"], ["401", "restart"], ["cut", "1-2"], ["401", "restart"], ["done"]]],
+	]) {
+		const c = scriptedConsole(steps);
+		const port = await c.fake.listen();
+		try {
+			const states = [];
+			const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, now: () => 1_000_000, sleep: async () => true, random: () => 1 });
+			assert.deepEqual(await client.stream("/api/transcript?id=j1&format=json", { onState: (st) => states.push(st) }), { done: "completed" }, label);
+			assert.equal(c.fake.logins, 1 + steps.filter((s) => s[0] === "401").length, `${label}: one sign-in per restart`);
+			assert.equal(states.filter((st) => st.relogin).length, steps.filter((s) => s[0] === "401").length, `${label}: each said`);
+		} finally {
+			await c.fake.close();
+		}
+	}
+});
+
+test("a real end still counts (issue #737): after a restart's free re-login, two ends inside a minute end the chat; entries after a shutdown close that stop", { timeout: 10_000 }, async () => {
+	for (const [label, steps, logins] of [
+		// The restart's re-login is free; the first real end signs in again; the second, at once, is the end.
+		["restart, then two real ends", [["cut", "1-0"], ["401", "restart"], ["end", "elsewhere"], ["end", "all"]], 3],
+		// A shutdown, then the console streams again as before (an entry): the stop is over, so the next end is real.
+		["a shutdown the console came back from", [["entry", "1-1", STREAM_SHUTDOWN], ["entry", "1-2", "revoked"], ["end", "all"]], 2],
+	]) {
+		const c = scriptedConsole(steps);
+		const port = await c.fake.listen();
+		try {
+			const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, now: () => 1_000_000, sleep: async () => true, random: () => 1 });
+			await assert.rejects(client.stream("/api/transcript?id=j1&format=json"), (e) => e instanceof ConsoleError && e.status === 401 && /again within 60 s of a fresh one/.test(e.message), label);
+			assert.equal(c.fake.logins, logins, label);
+		} finally {
+			await c.fake.close();
+		}
+	}
+});
+
+test("a console that answers every stream 401 restart (a hostile one) gets one counted re-login, then the chat ends", { timeout: 10_000 }, async () => {
+	// A re-login loop: every sign-in accepted, every stream 401 {ended: "restart"}. Before, the 401
+	// never counted, so the chat signed in again without bound. A free re-login needs a stream that opened since the last.
+	for (const ended of ["restart", undefined]) {
+		const c = scriptedConsole(Array.from({ length: 50 }, () => ["401", ended]));
+		const port = await c.fake.listen();
+		try {
+			const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, now: () => 1_000_000, sleep: async () => true, random: () => 1 });
+			await assert.rejects(client.stream("/api/transcript?id=j1&format=json"), (e) => e instanceof ConsoleError && e.status === 401 && /again within 60 s of a fresh one/.test(e.message), String(ended));
+			assert.deepEqual([c.fake.logins, c.opens], [2, 2], `${ended}: the sign-in, one re-login, and the end`);
+		} finally {
+			await c.fake.close();
+		}
+	}
+	// One that opens each stream only to say it is stopping, then refuses the reconnect 401: each free re-login is paid
+	// for by a stream that opened, and the streams that never delivered an entry spend the failure budget.
+	const c = scriptedConsole(Array.from({ length: 50 }, (_, i) => (i % 2 === 0 ? ["end", STREAM_SHUTDOWN] : ["401", "restart"])));
+	const port = await c.fake.listen();
+	try {
+		const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, now: () => 1_000_000, sleep: async () => true, random: () => 1, backoff: { baseMs: 1, capMs: 1, maxFailures: 8 } });
+		await assert.rejects(client.stream("/api/transcript?id=j1&format=json"), (e) => e instanceof ConsoleError && /kept closing the stream/.test(e.message));
+		assert.ok(c.fake.logins <= 8, `bounded by the failure budget: ${c.fake.logins} sign-ins`);
+	} finally {
+		await c.fake.close();
+	}
+});
+
+test("only a 401 is a restart: an end that says restart counts like any end, and a free re-login is spent until a stream opens again", { timeout: 10_000 }, async () => {
+	for (const [label, steps, logins] of [
+		// An end comes from a console that knows the session, whatever its data says: two at once end the chat.
+		["an end saying restart", [["end", "restart"], ["end", "restart"], ["end", "restart"]], 2],
+		// The shutdown's free re-login is used once: the next 401 with no restart word is counted, the one after it the end.
+		["the shutdown is over once its re-login is made", [["end", STREAM_SHUTDOWN], ["401"], ["open"], ["401"], ["open"], ["401"]], 3],
+		// One stream that opened buys one free re-login, not every restart 401 after it.
+		["one free re-login per stream that opened", [["cut", "1-1"], ["401", "restart"], ["401", "restart"], ["401", "restart"]], 3],
+	]) {
+		const c = scriptedConsole(steps);
+		const port = await c.fake.listen();
+		try {
+			const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, now: () => 1_000_000, sleep: async () => true, random: () => 1 });
+			await assert.rejects(client.stream("/api/transcript?id=j1&format=json"), (e) => e instanceof ConsoleError && e.status === 401 && /again within 60 s of a fresh one/.test(e.message), label);
+			assert.equal(c.fake.logins, logins, label);
+		} finally {
+			await c.fake.close();
+		}
+	}
+});
+
+test("a stream's re-login refused as busy (429) is waited out and tried again, never the end of the chat", { timeout: 10_000 }, async () => {
+	let opens = 0;
+	let loginTries = 0;
+	const fake = fakeConsole({
+		routes: {
+			"/login": (req, res, body, { json }) => {
+				loginTries += 1;
+				// The first sign-in, then the re-login refused once by the limiter, then accepted.
+				if (loginTries === 2) return json(429, { error: "too many sign-in attempts; wait a minute and try again" }, { "retry-after": "3" });
+				return json(200, { ok: true, name: "rob", role: "operator" }, { "set-cookie": `pdc_session=sess${loginTries}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600` });
+			},
+			"/api/transcript": (req, res) => {
+				opens += 1;
+				sse(res);
+				res.write(opens === 1 ? 'event: end\ndata: {"ended":"idle"}\n\n' : 'event: done\ndata: {"outcome":"completed"}\n\n');
+				res.end();
+			},
+		},
+	});
+	const port = await fake.listen();
+	try {
+		const states = [];
+		const client = makeConsoleClient({ address: parseConsoleAddress(`127.0.0.1:${port}`), token: TOKEN, sleep: async () => true, random: () => 1 });
+		assert.deepEqual(await client.stream("/api/transcript?id=j1&format=json", { onState: (st) => states.push(st) }), { done: "completed" });
+		assert.equal(loginTries, 3, "signed in, refused as busy, signed in");
+		assert.equal(opens, 2);
+		assert.deepEqual(states.map((st) => Object.keys(st)[0]), ["relogin", "waiting"], "the re-login, then a wait for the busy console");
+		assert.equal(fake.seen.filter((r) => r.path === "/api/transcript")[1].headers.cookie, "pdc_session=sess3", "the stream resumed on the new sign-in");
+	} finally {
+		await fake.close();
+	}
+});
+
+test("a multi-line refusal from the console comes out as one line with no control characters", { timeout: 10_000 }, async () => {
 	assert.equal(oneLine("first line\r\nsecond\u001b[31m  line\u0085"), "first line second [31m line");
 	assert.equal(oneLine("x".repeat(1200)).length, 1003);
 	const fake = fakeConsole({ routes: { "/api/transcript": (req, res, body, { json }) => json(403, { error: "this needs the operator role\nand nothing else\u001b]0;pwned\u0007" }) } });
@@ -582,7 +865,7 @@ test("a multi-line refusal from the console comes out as one line with no contro
 	}
 });
 
-test("a body that stops moving is cut: a JSON answer after timeoutMs, a stream after streamIdleMs (and resumed)", async () => {
+test("a body that stops moving is cut: a JSON answer after timeoutMs, a stream after streamIdleMs (and resumed)", { timeout: 10_000 }, async () => {
 	let opens = 0;
 	const fake = fakeConsole({
 		routes: {
@@ -615,7 +898,7 @@ test("a body that stops moving is cut: a JSON answer after timeoutMs, a stream a
 	}
 });
 
-test("a stream that keeps sending pings is never cut for idleness, however long it runs", async () => {
+test("a stream that keeps sending pings is never cut for idleness, however long it runs", { timeout: 10_000 }, async () => {
 	let opens = 0;
 	const fake = fakeConsole({
 		routes: {

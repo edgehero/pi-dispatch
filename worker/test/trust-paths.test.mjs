@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { AGENTS_DIR, CONTEXT_FILE_NAMES, PI_CONFIG_DIR, TRUST_ROOT_NAMES, baseHasExtensions, isTrustRootName, resetTrustPaths } from "../src/trust-paths.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
-// The names are pi's, read from the PINNED package (CLAUDE.md: verify against the pinned artifact). A pi bump that adds a
+// The names are pi's, read from the PINNED package (AGENTS.md: verify against the pinned artifact). A pi bump that adds a
 // context file casing or renames the config directory turns this red, which is the prompt to widen the reset: a name pi
 // loads that the reset does not own would load the agent's own copy in a recovered run.
 // The root workspace's install, the one host-pi.pinned.test.mjs reads (the package exports no `./package.json`).

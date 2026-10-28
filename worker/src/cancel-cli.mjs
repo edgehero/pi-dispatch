@@ -8,6 +8,8 @@
  *   held on run.waitFor  -> the shared removeHeldJob sequence (hold keys first, then the job); no record
  *                           (the dispatch_wait_cancel rule).
  *   delayed / queued     -> job.remove(); no record, same rule.
+ *                           Both through `removeQueuedJob` (cancel-state.mjs, issue #737), the sequence the
+ *                           console's cancel-queued shares, which also deletes the removed job's defer record.
  *   active               -> a `cancel:req` key + a brief ack poll (cancel-state.mjs), because the abort can
  *                           only be raised by the process that holds the job. No ack within the window is a
  *                           NAMED failure, never a silent one: the job may be on a host that is down, or on
@@ -22,11 +24,23 @@
  * job's attempt count.
  */
 
-import { cancelReqKey, ranBefore, removeHeldJob, requestCancel } from "./cancel-state.mjs";
-import { jobKey } from "./wait-state.mjs";
+import { cancelReqKey, ranBefore, removeQueuedJob, requestCancel } from "./cancel-state.mjs";
 
 /** Same budget the kill switch gives the host registry before acting on what the keyspace alone says. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
+
+/**
+ * A sentence another module wrote (BullMQ's, a client's, Valkey's own: of any length, holding any bytes), as a line of
+ * this command carries it to stderr, which is a terminal: every control character a terminal acts on (C0, DEL and C1:
+ * an ESC sequence, a CSI with no ESC, a bell, a carriage return that overwrites the line) made a space, then cut at 200
+ * characters. The console carries such text by the same substitution and the same cut (`boundedText` in the admin's
+ * job-actions.mjs, over its `scrubControls`), which a test holds this to on the class a terminal executes. The
+ * console's class is wider (it also substitutes what draws as nothing, or as a blank that is not a space, for a
+ * reader), and it is asked of the admin's own width table, which the worker does not import.
+ */
+export function boundedText(text) {
+	return String(text ?? "no reason given").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
+}
 
 /**
  * Run the cancel. Returns the process exit code. Every collaborator is a seam with the production default,
@@ -98,45 +112,43 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			}
 		}
 		if (!job) {
-			return fail(`no job ${jobId} in ${names.length} queue(s)${blind ? ` [registry unreadable: ${blind} — a host that is not registered may still hold it]` : ""}`);
+			return fail(`no job ${jobId} in ${names.length} queue(s)${blind ? ` [registry unreadable: ${boundedText(blind)} — a host that is not registered may still hold it]` : ""}`);
 		}
 
-		// Held FIRST (see the header). The hash tells held apart from plain-delayed; `since` is the clock
-		// that makes it a real hold rather than a counter key.
-		const hash = await probe.hgetall(jobKey(jobId)).catch(() => null);
-		if (hash?.since) {
-			const res = await removeHeldJob({ redis: probe, queue: owner, jobId });
-			if (res.ok) {
-				// A hold consumes no attempt (`skipAttempt`), so a held job that ran is a retry held again by its conditions.
-				write(`cancelled ${jobId}: it was held on its wait condition, and ${ranBefore(res)}\n`);
-				return 0;
-			}
-			return fail(`could not cancel held job ${jobId}: ${res.invalid}`);
+		// Held FIRST, then a job waiting to start: the shared sequence (`removeQueuedJob`, cancel-state.mjs), which the
+		// console's cancel-queued runs too. It judges the hold by the `wait:job` hash's `since`, the clock that makes it a
+		// real hold rather than a counter key, and deletes the removed job's defer record. This verb's reach is its own:
+		// it removes a job waiting to retry as well, which the console refuses.
+		const queued = await removeQueuedJob({ redis: probe, queue: owner, job, jobId });
+		if (queued.ok && queued.held) {
+			// A hold consumes no attempt (`skipAttempt`), so a held job that ran is a retry held again by its conditions.
+			write(`cancelled ${jobId}: it was held on its wait condition, and ${ranBefore(queued)}\n`);
+			return 0;
 		}
-
-		let state = await job.getState().catch(() => "unknown");
-		if (state === "delayed" || state === "waiting" || state === "prioritized" || state === "paused") {
-			try {
-				await job.remove();
-				write(`removed ${jobId} (${state}): ${ranBefore(job)}\n`);
-				return 0;
-			} catch (error) {
-				// The one race worth handling by name: picked up between getState and remove. remove() throws
-				// on a locked job, so re-read and fall through to the active path rather than failing an
-				// operator whose job is now exactly the case the active path exists for.
-				state = await job.getState().catch(() => "unknown");
-				// The re-read state and the throw's own words together, labelled apart: the error came from
-				// the remove attempt, the state from after it, and gluing them unlabelled read as one
-				// mismatched diagnosis (review finding).
-				if (state !== "active") return fail(`could not remove ${jobId} — it is now ${state}; the remove failed with: ${error.message}`);
-			}
+		// A removal that failed after the hold's keys were deleted changed something: the job lost its hold and was not removed,
+		// so the line says so and how to finish, never only the error (which reads as "nothing happened"). Every error a
+		// line carries is bounded (`boundedText`): it is another module's words, of any length and with any bytes.
+		if (queued.invalid !== undefined && queued.cleared === true) {
+			return fail(`could not cancel held job ${jobId}: its hold was cleared, but the job itself could not be removed (${boundedText(queued.invalid)}); it may still be queued, now without its hold. Run \`pi-dispatch cancel ${jobId}\` again to remove or stop it`);
 		}
+		if (queued.invalid !== undefined) return fail(`could not cancel held job ${jobId}: ${boundedText(queued.invalid)}`);
+		if (queued.ok) {
+			write(`removed ${jobId} (${queued.state}): ${ranBefore(job)}\n`);
+			return 0;
+		}
+		const state = queued.state;
+		// The one race worth handling by name: picked up between getState and remove. remove() throws on a locked job, so
+		// the state is re-read and an active job falls through to the active path rather than failing an operator whose
+		// job is now exactly the case the active path exists for. Otherwise the re-read state and the throw's own words
+		// together, labelled apart: the error came from the remove attempt, the state from after it, and gluing them
+		// unlabelled read as one mismatched diagnosis.
+		if (queued.raced && state !== "active") return fail(`could not remove ${jobId} — it is now ${state}; the remove failed with: ${boundedText(queued.error.message)}`);
 
 		if (state === "active") {
 			requested = true;
 			const res = await requestCancel({ redis: probe, jobId, ackTimeoutMs, pollMs, ...(sleep ? { sleep } : {}) });
 			if (res.ack !== undefined) {
-				write(`cancel accepted by ${res.ack === "" ? "the worker" : res.ack} — stopping the container (allow ~30s); the run record will say operator-cancel\n`);
+				write(`cancel accepted by ${res.ack === "" ? "the worker" : boundedText(res.ack)} — stopping the container (allow ~30s); the run record will say operator-cancel\n`);
 				return 0;
 			}
 			// Gate round 2 of PR #479: the worker stops its cancel poll before it holds or retries a job, so a request that
@@ -165,7 +177,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			]);
 			clearTimeout(bound);
 		}
-		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
+		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${boundedText(error?.message)}`);
 	} finally {
 		probe.disconnect?.();
 		for (const q of queues) await q.close().catch(() => {});

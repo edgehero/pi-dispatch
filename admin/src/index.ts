@@ -803,6 +803,11 @@ function registerTools(pi: ExtensionAPI): void {
       phrase: Type.Optional(Type.String()),
       labels: Type.Optional(Type.Array(Type.String())),
       action: Type.Optional(Type.Array(Type.String())),
+      // Issue #737: the description above has offered reviewState[] since #66, and the schema and the pull_request
+      // arm dropped it in silence, so an operator approved an entry that fired on every verdict. Carried now, as the
+      // model sent it, and judged by the loader at the write (github only, review_submitted in the actions, a
+      // non-empty list of its states); a field the kind does not take is refused by name before the confirm.
+      reviewState: Type.Optional(Type.Array(Type.String())),
       // The close-trigger narrowings (issue #231), read only by the close-capable arms of
       // buildTriggerEntry and refused fail-loud by the shared validator everywhere else -- the
       // `repository` posture above, restated for the two fields whose whole point is narrowing spend.
@@ -830,8 +835,10 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // Judged BEFORE the confirm (`planTriggerAdd`): the tool-proof fields and their near misses (#501 part 7), the
-      // backend against what PI_BACKENDS blesses (#227, refused under an empty set too), and the provider, model and turn
-      // limit with the loader's own message (#502), so the operator never approves an entry the write then refuses.
+      // kind and then every field that kind does not take, by name (#737: a schema does not refuse extra keys, and a
+      // field the kind's arm never reads was dropped in silence), the backend against what PI_BACKENDS blesses (#227,
+      // refused under an empty set too), and the provider, model and turn limit with the loader's own message (#502),
+      // so the operator never approves an entry the write then refuses or that lacks what was asked for.
       const paths = resolvePaths(deploymentEnv());
       const planned: any = planTriggerAdd({ params, paths, env: process.env });
       if (planned.refusal) throw new Error(planned.refusal);

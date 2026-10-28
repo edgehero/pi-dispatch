@@ -1,0 +1,15 @@
+{
+  "card": "OverviewPhone",
+  "pr": 3,
+  "panels": [],
+  "elements": [
+    {"el":"The same cards in one column at 390","kind":"readme","status":"new","source":"admin/src/console/page-css.mjs#PAGE_CSS","holds":"main>.cards-4{grid-template-columns:minmax(0,1fr)}","golden":["overview.operator"],"shows":"class=\"cards-4\""},
+    {"el":"The pill nav scrolls inside itself","kind":"readme","status":"real","source":"admin/src/console/page-css.mjs#SHELL_CSS","holds":".pillnav{flex:0 0 auto"},
+    {"el":"The project chips scroll inside themselves","kind":"readme","status":"new","source":"admin/src/console/page-css.mjs#PAGE_CSS","holds":"#p-timeline .projseg","golden":["overview.operator","overview.viewer"],"shows":"class=\"projseg\""},
+    {"el":"The timeline scrolls inside its card","kind":"readme","status":"real","source":"admin/src/console/pulse-css.mjs#PULSE_CSS","holds":".tl-wrap"},
+    {"el":"Needs you comes first","kind":"readme","status":"new","source":"admin/src/console/pages.mjs#panelIds","golden":["overview.operator","overview.viewer"],"shows":"<div class=\"cards-4\" data-slot-after><section id=\"p-needs\" data-panel>"},
+    {"el":"Capsules wrap four to a row","kind":"readme","status":"real","source":"admin/src/console/pulse-css.mjs#PULSE_CSS","holds":".capbars"},
+    {"el":"Nothing scrolls the page sideways","kind":"readme","status":"real","source":"admin/src/console/page-css.mjs#SHELL_CSS","holds":"minmax(0,1fr)","reason":"held by the width check at 375 px over every golden"},
+    {"el":"The 3,810 px tall sample","kind":"sample","status":"illustrative","reason":"the card's sample length"}
+  ]
+}

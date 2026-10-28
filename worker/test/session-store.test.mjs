@@ -2559,7 +2559,7 @@ test("an A, B, A on the key directory is REPORTED, not reported as promoted (#39
 	// Measured before the repair, with this exact fixture: `{"promoted":true,"reason":"promoted","bytes":60}`
 	// with the transcript in the attacker's directory and the real key holding only `pi-version`,
 	// `resume-chain` and `venue`. The next job on that key cold-starts as `absent` while the record says the
-	// work was promoted, which is the silent no-op `CLAUDE.md` calls the worst outcome available.
+	// work was promoted, which is the silent no-op `AGENTS.md` calls the worst outcome available.
 	//
 	// Driven by injected fs calls rather than by a sleep: the window is two calls wide, and a timing test
 	// cannot hit that ordering reliably. A 45 second unsynchronised live race did not hit it once.

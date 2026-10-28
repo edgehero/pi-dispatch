@@ -1,3 +1,4 @@
+import { parseApprovalEnv } from "./request-approval.mjs";
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { LAYOUT, LAYOUT_ENV, layoutName } from "./layout.mjs";
@@ -32,6 +33,7 @@ export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 	const maxTokens = parseOptionalPositiveInt(env, "PI_MAX_TOKENS");
 
 	return {
+		...parseForkEnv(env),
 		provider,
 		model,
 		maxTurns,
@@ -67,6 +69,7 @@ export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 		// await_human_input tool and may end as `awaiting-input`. `false` (the overwhelmingly common state) is
 		// byte-identical to every job before the feature.
 		awaitInput: parseAwaitInput(env, "PI_AWAIT_INPUT"),
+		...parseApprovalEnv(env),
 		// INT-CONTAINER-JOB-INPUTS (issue #644): the trigger's run.progress -- whether the job is offered the
 		// report_progress tool. `false` (the default) is byte-identical to every job before the feature.
 		reportProgress: parseReportProgress(env, "PI_REPORT_PROGRESS"),
@@ -684,4 +687,22 @@ export function jobSettings(retry) {
 		cacheWarming: "off",
 		enableInstallTelemetry: false,
 	};
+}
+
+export const THINKING_LEVELS = Object.freeze(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** Worker-owned inputs only; a partial request must never silently become an ordinary resumed job. */
+export function parseForkEnv(env) {
+	// env-internal PI_FORK_ENTRY: worker-selected entry in the staged transcript.
+	const entry = env.PI_FORK_ENTRY;
+	// env-internal PI_FORK_POSITION: worker-selected before/at boundary.
+	const position = env.PI_FORK_POSITION;
+	// env-internal PI_THINKING_LEVEL: per-job reasoning override, never deployment configuration.
+	const thinkingLevel = env.PI_THINKING_LEVEL;
+	if (thinkingLevel !== undefined && !THINKING_LEVELS.includes(thinkingLevel)) throw configError("invalid PI_THINKING_LEVEL");
+	if (entry === undefined && position === undefined) return { fork: null, thinkingLevel: thinkingLevel ?? null };
+	if (typeof entry !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(entry)) throw configError("invalid PI_FORK_ENTRY");
+	if (position !== "before" && position !== "at") throw configError("invalid PI_FORK_POSITION");
+	if (!env.PI_SESSION_FILE || env.PI_COMMAND || env.PI_RECOVERING) throw configError("fork requires a staged session and cannot be a command or recovery job");
+	return { fork: { entry, position }, thinkingLevel: thinkingLevel ?? null };
 }

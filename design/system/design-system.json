@@ -1,0 +1,24 @@
+{
+  "v": 3,
+  "layout": "files",
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-10-22T18:24:44Z"
+  },
+  "title": "pi-dispatch console",
+  "namespace": "PiDispatch",
+  "libraries": [],
+  "sections": {},
+  "groups": [],
+  "assetGroups": {},
+  "blobs": {},
+  "docs": {
+    "sections": []
+  },
+  "lastChange": {
+    "by": "Rob",
+    "at": "2026-10-28T09:33:23Z",
+    "via": "Claude",
+    "note": "Start here: a concept map, a glossary, the sample deployment and three journey storyboards. Phone and viewer versions of Run live, Fleet, Triggers, Parked with a draft and Zero touch. Chips only for status, shorter button labels, and one sample deployment that tools/check_fixture.py holds every card to."
+  }
+}

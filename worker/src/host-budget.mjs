@@ -45,8 +45,8 @@ export const HOST_BUDGET_KEYS = Object.freeze({
 });
 
 /**
- * How often a job the budget deferred asks again. Its own value, like every re-check cadence, because nothing records WHY
- * a job sits in the delayed set and the wake instant is the only evidence there is: distinct from the scope re-check
+ * How often a job the budget deferred asks again. Its own value, like every re-check cadence, so the wake instants of the
+ * different deferrals stay apart (the reason itself is recorded, `defer-reasons.mjs`): distinct from the scope re-check
  * (5 s), the endpoint re-check (7 s), the wait throttle floor (11 s) and the supersede re-ask (15 s). A test keeps them
  * apart. Short, because a hold keeps the room meanwhile: the wait is the latency of a freed slot, not a queue position.
  */

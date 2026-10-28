@@ -39,9 +39,9 @@ function spyJob(data) {
 	return { job, moves, updates };
 }
 
-function harness({ now = () => NOW, cancelReq = undefined, observed = { ok: true, podmanConfRefused: { reason: "podman-conf-widens-job", key: null, rootful: true, restart: true, retry: true, message: "Not run yet: ...", evidence: EVIDENCE } } } = {}) {
+function harness({ now = () => NOW, cancelReq = undefined, observed = { ok: true, podmanConfRefused: { reason: "podman-conf-widens-job", key: null, rootful: true, restart: true, retry: true, message: "Not run yet: ...", evidence: EVIDENCE } }, wrap = (redis) => redis, extra = {} } = {}) {
 	const seen = { containerCalls: 0, records: [], logs: [], incr: 0, comments: [], redisOps: [] };
-	const redis = { incr: async () => (seen.incr++, 1), decr: async () => 0, expire: async () => {} };
+	const redis = wrap({ incr: async () => (seen.incr++, 1), decr: async () => 0, expire: async () => {} });
 	if (cancelReq !== undefined) {
 		const keys = new Map([["cancel:req:local-hold", cancelReq]]);
 		Object.assign(redis, {
@@ -66,8 +66,9 @@ function harness({ now = () => NOW, cancelReq = undefined, observed = { ok: true
 			comment: async (_job, text) => void seen.comments.push(text),
 			log: (event, fields) => seen.logs.push({ event, ...fields }),
 		},
+		...extra,
 	});
-	return { processor, seen };
+	return { processor, seen, redis };
 }
 
 test("a job held for podman.service's restart is delayed a minute without an attempt, and its hold start is kept (#448)", { skip }, async () => {
@@ -181,4 +182,40 @@ test("a recovery that waits for its base is delayed by its own wait, without an 
 	assert.deepEqual(moves, [{ ts: NOW + 30_000, tok: "tok" }]);
 	assert.deepEqual([seen.containerCalls, seen.records.length], [0, 0], "nothing started, nothing recorded per wait");
 	assert.deepEqual(seen.logs.filter((l) => l.event === "recovery_wait_hold").map((l) => l.delayMs), [30_000]);
+});
+
+test("the two holds record their reasons: rootful Podman's restart on this host, and a recovery waiting for its run (#737)", { skip }, async () => {
+	const { withDeferRecords, deferRecordOf } = await import("./helpers/defer-redis.mjs");
+	const { job } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t" });
+	const h = harness({ wrap: withDeferRecords, extra: { hostName: "build3", projects: () => [{ id: "site", members: ["/srv/site"] }] } });
+	await assert.rejects(() => h.processor(job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	const r = deferRecordOf(h.redis, "local-hold");
+	assert.deepEqual([r.why, r.bucket, r.until, r.host, r.project], ["podman-restart", "ready", NOW + PODMAN_RESTART_HOLD_RECHECK_MS, "build3", "site"]);
+
+	const { RecoveryWaitHold } = await import("../src/processor.mjs");
+	const redis = withDeferRecords({ incr: async () => 1, decr: async () => 0, expire: async () => {} });
+	const held = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		now: () => NOW,
+		recordRun: () => {},
+		timeoutMs: 100000,
+		deps: {
+			observationPreflight: async () => ({ ok: true }),
+			prepareWorkspace: async () => {
+				throw new RecoveryWaitHold("the run this recovery continues is still running on this host", { reason: "container-never-started", budgetReserved: false, waitMs: 30_000 });
+			},
+			runContainer: async () => assert.fail("never run"),
+			cleanup: async () => {},
+			comment: async () => {},
+			log: () => {},
+		},
+	});
+	const recovery = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", recoveryOf: "local-base", recovery: 1 });
+	recovery.job.id = "local-base.r1";
+	await assert.rejects(() => held(recovery.job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	const w = deferRecordOf(redis, "local-base.r1");
+	assert.deepEqual([w.why, w.bucket, w.until, w.holder], ["recovery-wait", "run", NOW + 30_000, "local-base"], "it names the run it waits for");
 });

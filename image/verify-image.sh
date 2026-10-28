@@ -431,6 +431,12 @@ PROBE
 					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "await_human_input" /app/image/runner/src/await-input.mjs 2>/dev/null \
 					|| fail "the image declares 'awaitInput' but its baked runner never reads PI_AWAIT_INPUT or carries the await_human_input tool"
 				;;
+			approvalGates)
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_APPROVAL_GATES" /app/image/runner/src/request-approval.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "appendContextEdit" /app/image/runner/src/request-approval.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "applyApprovalDecision" /app/image/runner/run-job.mjs 2>/dev/null \
+					|| fail "the image declares approvalGates but lacks its tool or decision replay"
+				;;
 			reportProgress)
 				# Same evidence style as 'awaitInput': the baked runner must read the variable and carry the tool.
 				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_REPORT_PROGRESS" /app/image/runner/src/config.mjs 2>/dev/null \
@@ -445,6 +451,36 @@ PROBE
 					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "toolExecution = \"sequential\"" /app/image/runner/run-job.mjs 2>/dev/null \
 					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "recoverSession" /app/image/runner/src/recover.mjs 2>/dev/null \
 					|| fail "the image declares 'recover' but its baked runner never reads PI_RECOVERING, never runs its tools one at a time, or carries no recovery module"
+				;;
+			fork)
+				# Execute the baked module against a real pinned SessionManager, on an offline container with no key.
+				# This proves a branch is persisted at the worker-observed filename and the source remains unchanged.
+				docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -w /app --entrypoint node "$IMAGE_REF" --input-type=module -e '
+import assert from "node:assert/strict";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { openForkSessionManager, assertThinkingLevel } from "/app/image/runner/src/fork.mjs";
+import { parseForkEnv } from "/app/image/runner/src/config.mjs";
+const cwd = "/tmp/fork-contract";
+mkdirSync(cwd);
+const file = `${cwd}/current.jsonl`;
+writeFileSync(file, "");
+const manager = SessionManager.open(file, cwd, cwd);
+const first = manager.appendMessage({ role: "user", content: "keep", timestamp: 1 });
+const second = manager.appendMessage({ role: "user", content: "discard", timestamp: 2 });
+const source = `${cwd}/source.jsonl`;
+copyFileSync(file, source);
+const original = readFileSync(source, "utf8");
+const cfg = parseForkEnv({ PI_SESSION_FILE: file, PI_FORK_ENTRY: second, PI_FORK_POSITION: "before", PI_THINKING_LEVEL: "off" });
+const fork = openForkSessionManager({ sessionFile: file, cwd, fork: cfg.fork });
+assert.equal(fork.sessionManager.getSessionFile(), file);
+assert.equal(fork.sessionManager.getEntry(second), undefined);
+assert.equal(fork.sessionManager.getEntry(first).message.content, "keep");
+assert.equal(SessionManager.open(file, cwd, cwd).buildSessionContext().messages.length, 1);
+assert.equal(readFileSync(source, "utf8"), original);
+assertThinkingLevel({ reasoning: false }, "off");
+assert.throws(() => assertThinkingLevel({ reasoning: false }, "high"));
+' >/dev/null 2>&1 || fail "the image declares fork but its baked runner cannot isolate and persist a selected transcript branch"
 				;;
 			steer)
 				# Same evidence style as 'recover': the baked runner must read the variable and carry the inbox module.

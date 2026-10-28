@@ -72,6 +72,8 @@
     "./queue": "./src/queue.mjs",
     "./capabilities": "./src/capabilities.mjs",
     "./parked": "./src/parked.mjs",
+    "./approval-policy": "./src/approval-policy.mjs",
+    "./approval-state": "./src/approval-state.mjs",
     "./connection": "./src/connection.mjs",
     "./valkey-auth": "./src/valkey-auth.mjs",
     "./job-id": "./src/job-id.mjs",
@@ -120,6 +122,9 @@
     "./recovery-queue": "./src/recovery-queue.mjs",
     "./run-checkpoint": "./src/run-checkpoint.mjs",
     "./session-key": "./src/session-key.mjs",
+    "./fork-store": "./src/fork-store.mjs",
+    "./fork-policy": "./src/fork-policy.mjs",
+    "./fork-job": "./src/fork-job.mjs",
     "./chat-mode": "./src/chat-mode.mjs",
     "./chat-fork": "./src/chat-fork.mjs",
     "./console-client": "./src/console-client.mjs",
@@ -134,7 +139,9 @@
     "./money": "./src/money.mjs",
     "./dollar-budget": "./src/dollar-budget.mjs",
     "./scheduler-stall-guard": "./src/scheduler-stall-guard.mjs",
-    "./watch-closer": "./src/watch-closer.mjs"
+    "./watch-closer": "./src/watch-closer.mjs",
+    "./defer-reasons": "./src/defer-reasons.mjs",
+    "./record-reason": "./src/record-reason.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

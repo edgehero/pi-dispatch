@@ -987,12 +987,12 @@ test("the budget split's live shape: the envelope, the plan, the headroom, the c
   assert.ok(out.includes("<section><h2>budget split</h2>"), "a section under the caps");
   assert.ok(out.indexOf("<h2>budget split</h2>") > out.indexOf("<h2>budget</h2>") && out.indexOf("<h2>budget split</h2>") < out.indexOf("<h2>daily spend</h2>"));
   assert.ok(out.includes('<div class="row"><span class="wl">envelope</span><span>$100.00 per week · delegation on</span></div>'));
-  assert.ok(out.includes('<div class="row"><span class="wl">plan</span><span>plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied 2026-10-05 06:01 UTC · until 2026-10-19 06:01 UTC · clamped by the step</span></div>'));
+  assert.ok(out.includes('<div class="row"><span class="wl">plan</span><span>plan 3f9a0c1d2e4b5a67 · written by portfolio-job · applied <time datetime="2026-10-05T06:01:00Z">2026-10-05 06:01 UTC</time> · until <time datetime="2026-10-19T06:01:00Z">2026-10-19 06:01 UTC</time> · clamped by the step</span></div>'), "the instants as <time>, UTC text inside (#710, review round 1)");
   assert.ok(out.includes('<div class="row"><span class="wl">headroom</span><span>unallocated $0.00 · deployment spent $82.50 of $100.00</span></div>'));
   assert.ok(out.includes('<div class="small">refusals in runs on this host, last 30d: allocation-cap 3 · envelope-mismatch 0 · portfolio-no-envelope 0 · portfolio-snapshot-oversize 1</div>'));
   assert.ok(out.includes('<div class="small">plans collected in runs on this host, last 30d: applied 2 · plan-stale 1</div>'));
-  assert.ok(out.includes('<tr><td>2026-10-05 12:30 UTC</td><td>operator-session</td><td>refused</td><td>plan-too-soon</td><td class="pid">aaaaaaaaaaaaaaaa</td></tr>'));
-  assert.ok(out.includes('<tr><td>2026-10-05 06:01 UTC</td><td>portfolio-job</td><td>applied</td><td></td><td class="pid">3f9a0c1d2e4b5a67</td></tr>'));
+  assert.ok(out.includes('<tr><td><time datetime="2026-10-05T12:30:00Z">2026-10-05 12:30 UTC</time></td><td>operator-session</td><td>refused</td><td>plan-too-soon</td><td class="pid">aaaaaaaaaaaaaaaa</td></tr>'));
+  assert.ok(out.includes('<tr><td><time datetime="2026-10-05T06:01:00Z">2026-10-05 06:01 UTC</time></td><td>portfolio-job</td><td>applied</td><td></td><td class="pid">3f9a0c1d2e4b5a67</td></tr>'));
   assert.ok(out.includes('$77.00 spent of $70.00 · floor $10.00 <tspan fill="'), "the overspent row says over in words");
   assert.ok(out.includes(">$4.25 spent of $30.00 · floor $10.00</text>"), "a row within its allocation carries no word");
   const tips = listTexts(out, "insights-tips").map((t) => t.text);
@@ -1244,6 +1244,11 @@ test("the capacity section: each host's numbers and caveats, no data hatched wit
   assert.ok(sec.includes("2 jobs refused before a slot"));
   assert.ok(sec.includes("busy 50%, idle 50% (45% of the window has no history)"));
   assert.ok(sec.includes("history truncated: it starts at"), "a truncated host says so");
+  // Page text instants are <time> with their UTC text (the console's script localises them); tips stay UTC text, and say so.
+  assert.match(sec, /history truncated: it starts at <time datetime="\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z">\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC<\/time>/);
+  assert.match(sec, /, from <time datetime="[^"]+Z">[^<]+ UTC<\/time> to <time datetime="[^"]+Z">[^<]+ UTC<\/time>\. Each bar/);
+  const capTips = listTexts(html, "insights-tips").map((t) => t.text);
+  assert.ok(capTips.length > 0 && capTips.every((t) => !t.includes("<time") && (!/\d{2}:\d{2}/.test(t) || / UTC\b/.test(t))), "a tip's instants say UTC");
   assert.ok(sec.includes("history truncated: the run mirror holds nothing older"), "and the section does");
   assert.match(sec, /<span class="pid">laptop<\/span> <span class="cap-warn">history not here<\/span>/);
   assert.ok(sec.includes('<div class="dim small">Coverage:</div><div class="dim small">history: the run mirror</div><div class="dim small">not shared here: laptop</div>'));
@@ -1376,7 +1381,7 @@ test("junk buckets, a window of no time yet, and every gap's own reason", () => 
     assert.ok(capSection(capPage(p)).includes("the report&#39;s buckets are not readable"), String(bucketMs));
   }
   const none = capSection(capPage({ noTime: true, fromMs: NOW }, { window: "mtd" }));
-  assert.ok(none.includes("no time in this window yet: month to date starts at"));
+  assert.match(none, /no time in this window yet: month to date starts at <time datetime="[^"]+Z">[^<]+ UTC<\/time>/);
   assert.ok(!none.includes("not read"));
   const tips = listTexts(capPage(CAP_SLICE()), "insights-tips").map((t) => t.text);
   assert.ok(tips.some((t) => t.endsWith("no data: before this host's history starts (the run mirror holds nothing older: it started then, or its cap or a peer's shorter retention cut it)")));

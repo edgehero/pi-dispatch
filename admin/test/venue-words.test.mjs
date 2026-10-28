@@ -18,11 +18,12 @@ import {
 } from "../src/read-model.mjs";
 import { pagePanels } from "../src/console/pages.mjs";
 import { runTranscriptSection } from "../src/console/transcript.mjs";
+import { parseDocument } from "./helpers/script-dom.mjs";
 import { BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, SERVES, SERVES_WORDS } from "../../worker/src/backends.mjs";
 import { LIVE_SKIPPED_REASONS, STEER_SKIPPED_REASONS } from "../../worker/src/run-history.mjs";
 
 // Issue #712: the console and the panel say what a venue serves, and why a run went without a feature, in sentences
-// keyed by the worker's own tables. Each table is bolted to its source here (CLAUDE.md, "derived or pinned"), and an
+// keyed by the worker's own tables. Each table is bolted to its source here (AGENTS.md, "derived or pinned"), and an
 // openshell run, refused and completed, is rendered on both surfaces with no sentence that is wrong for its venue.
 
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
@@ -84,27 +85,29 @@ const REFUSED = { jobId: "gh-os2", kind: "github", target: "acme/web#2", flow: "
 const ctxOf = (record) => ({ role: "operator", query: { id: record.jobId }, session: { name: "ops", role: "operator" }, data: { now: AT, env: {}, run: { record, source: "local" }, transcript: { exists: false } }, readOnly: false });
 
 test("the console's run page for an openshell run, completed and refused: no sandbox command, and the absences blamed on the venue", async () => {
+  const commands = (page) => [...parseDocument(`<html><body>${page}</body></html>`).querySelectorAll(".cmd code")].map((e) => e.textContent);
   for (const record of [COMPLETED, REFUSED]) {
     const ctx = ctxOf(record);
     const page = (await pagePanels("run", ctx)).map((p) => p.html).join("") + String(runTranscriptSection(ctx));
-    assert.ok(!page.includes("pi-dispatch sandbox"), `${record.jobId}: no command for a venue with no sandbox shell`);
+    assert.ok(!commands(page).some((line) => line.startsWith("pi-dispatch sandbox ")), `${record.jobId}: no command for a venue with no sandbox shell`);
     assert.ok(page.includes("Its workspace is not reopenable (openshell has no sandbox shell)."), record.jobId);
     assert.ok(!page.includes("expired, or not started yet"), `${record.jobId}: never the switch, the expiry and the start alone`);
   }
   const done = (await pagePanels("run", ctxOf(COMPLETED))).map((p) => p.html).join("");
-  assert.match(done, /<dt>Steering<\/dt><dd>skipped \(venue-copies\): its venue copies the job&#39;s files \(no \/inbox mount\) and its job image does not declare steerStdin/);
-  assert.match(done, /<dt>Live transcript<\/dt><dd>none \(no-capability\): its venue streams the transcript only from a job image that declares transcriptStderr/);
+  assert.match(done, /<dt>Steering<\/dt><dd>skipped: its venue copies the job&#39;s files \(no \/inbox mount\) and its job image does not declare steerStdin/);
+  assert.match(done, /<dt>Live transcript<\/dt><dd>none: its venue streams the transcript only from a job image that declares transcriptStderr/);
   assert.match(done, /This run's record holds no progress \(it had no live transcript to read it from: its venue streams/);
-  assert.match(String(runTranscriptSection(ctxOf(COMPLETED))), /No live transcript: its venue streams the transcript only from a job image that declares transcriptStderr, and this one does not\. Reload/);
+  assert.match(done, /No live transcript: its venue streams the transcript only from a job image that declares transcriptStderr, and this one does not/);
   // The refused run never reached a container, so it names no skip: the venue's clause is one of the causes.
   const refused = (await pagePanels("run", ctxOf(REFUSED))).map((p) => p.html).join("");
   assert.match(refused, /This run's record holds no progress \(an older worker, PI_RUN_PROGRESS=0, or its venue or job image does not stream it\)/);
-  assert.ok(!refused.includes("<dt>Steering</dt>") && !refused.includes("<dt>Live transcript</dt>"), "no skip rows for a record that names none");
+  assert.match(refused, /<dt>Steering<\/dt><dd>not armed: its trigger sets no run\.steer/);
+  assert.match(refused, /<dt>Live transcript<\/dt><dd>No live transcript:/, "every run names its transcript state, including a run without a skip token");
   // A local run keeps the command and the sentences it always had.
   const local = { ...COMPLETED, jobId: "gh-l1", backend: "local", steerSkipped: undefined, liveSkipped: undefined };
   const localPage = (await pagePanels("run", ctxOf(local))).map((p) => p.html).join("") + String(runTranscriptSection(ctxOf(local)));
-  assert.ok(localPage.includes("<code class=\"mono\">pi-dispatch sandbox gh-l1</code>"));
-  assert.ok(localPage.includes("expired, or not started yet. Reload"));
+  assert.ok(commands(localPage).includes("pi-dispatch sandbox gh-l1"));
+  assert.ok(localPage.includes("expired, or not started yet."));
 });
 
 // ---- an openshell run and trigger on the panel ---------------------------------------------------------------------------

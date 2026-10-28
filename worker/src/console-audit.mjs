@@ -295,14 +295,45 @@ export function makeConsoleAudit({ logsDir, fs = nodeFs, now = () => Date.now(),
  * surviving row's `prev` cannot be checked once the reaper took the file before it, so it is not: a chain that starts
  * there is reported as `startsAt: { file, seq }`, not as broken. `startsAt` is null when the chain starts at its very
  * first row (seq 1, prev null). Never throws: an unreadable directory or file is the broken link.
+ *
+ * `withLast` (issue #737, the console's audit screen) adds three fields to both shapes, for a reader that marks rows by
+ * their place (the place is the one thing that tells two rows apart reliably: a damaged line has no seq, and a tampered
+ * file can hold one seq twice):
+ *
+ *   - `last: { file, line, seq }`, the last row the chain VOUCHES for (null when none). A row is vouched for only by
+ *     the line after it, when that line's `prev` matches the row's hash. On an intact chain `last` is the newest row
+ *     walked, though no line vouches for that one yet (none follows it). At a break whose line does not show a
+ *     `prev` that matches the row before it (it does not parse, its `prev` is not a hash or null, or its `prev` is
+ *     another hash), `last` is the row before THAT one: an edit to the row before the break leaves that row's own line
+ *     well formed and moves only its hash, so a line after it that does not show a matching `prev` cannot tell an
+ *     edited row from an intact one, and the row before the break is not vouched for. That is judged before the line's
+ *     action, outcome and fields are, so an unknown action does not hide it. Only a line whose `prev` matched and that
+ *     then fails another check (its seq, action, outcome or fields) is damaged alone, and the row before it stays
+ *     vouched for. A file that cannot be read stops the walk, and the row before it stays as the newest row read.
+ *   - `suspect: { file, line, seq }`, that row before a break whose line does not show a matching `prev`, which the
+ *     chain walked but cannot vouch for, or null for every other result.
+ *   - `files: [{ file, seq, rows }]`, oldest first: each month file the walk passed a row in, the seq of its first row
+ *     (always its line 1: a line that does not pass ends the walk) and how many rows the walk passed in it. Row `s` of an
+ *     entry is then at line `s - seq + 1` of its file, so the screen can open the page that holds a row by its number
+ *     without walking every row written since (it reads that place and checks the seq there, falling back to the walk
+ *     when the file no longer agrees). One entry a month, so it stays small.
+ *
+ * Opt-in, so the result doctor, the CLI and the tests compare whole stays as it was.
  */
-export function verifyConsoleAudit({ logsDir, fs = nodeFs }) {
+export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false }) {
 	const dir = join(logsDir, CONSOLE_AUDIT_DIR);
+	let last = null; // { file, line, seq } of the last good row, for `withLast`
+	let beforeLast = null; // the good row before `last`, which a line that does not link to `last` leaves as the last vouched for
+	const index = []; // { file, seq, rows } per month file the walk passed a row in, for `withLast`
+	const shaped = (result, unlinked = false) => {
+		if (!withLast) return result;
+		return unlinked ? { ...result, last: beforeLast, suspect: last, files: index } : { ...result, last, suspect: null, files: index };
+	};
 	let files;
 	try {
 		files = monthFiles(dir, fs);
 	} catch (err) {
-		return { ok: false, rows: 0, broken: { file: null, line: 0, reason: `the audit directory ${dir} cannot be read (${err?.code ?? "error"})` } };
+		return shaped({ ok: false, rows: 0, broken: { file: null, line: 0, reason: `the audit directory ${dir} cannot be read (${err?.code ?? "error"})` } });
 	}
 	let rows = 0;
 	let prior = null; // { seq, hash } of the last good row
@@ -312,13 +343,18 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs }) {
 		try {
 			for (const line of fileLines(fs, join(dir, file))) {
 				i += 1;
-				const broken = (reason) => ({ ok: false, rows, broken: { file, line: i + 1, reason } });
 				let row;
 				try {
 					row = JSON.parse(line);
 				} catch {
-					return broken("the line is not a JSON row (damaged, or written by something else)");
+					row = undefined;
 				}
+				// Whether this line vouches for the row before it (`withLast`, see above), decided before anything else about
+				// the line is judged. `prior.hash` is a sha256, so only a well-formed `prev` can equal it. The first row walked
+				// has no row before it to vouch for.
+				const linked = prior !== null && row?.prev === prior.hash;
+				const broken = (reason) => shaped({ ok: false, rows, broken: { file, line: i + 1, reason } }, !linked);
+				if (row === undefined) return broken("the line is not a JSON row (damaged, or written by something else)");
 				if (row === null || typeof row !== "object" || Array.isArray(row) || !Number.isInteger(row.seq) || row.seq < 1 || !(row.prev === null || (typeof row.prev === "string" && /^[0-9a-f]{64}$/.test(row.prev)))) {
 					return broken("the row has no valid seq and prev");
 				}
@@ -334,17 +370,21 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs }) {
 						startsAt = { file, seq: row.seq };
 					}
 				} else {
-					if (row.prev !== prior.hash) return broken(`prev does not match the row before it (seq ${prior.seq}): a row was changed, removed or moved`);
+					if (!linked) return broken(`prev does not match the row before it (seq ${prior.seq}): a row was changed, removed or moved`);
 					if (row.seq !== prior.seq + 1) return broken(`seq ${row.seq} follows seq ${prior.seq}`);
 				}
 				prior = { seq: row.seq, hash: sha256(line) };
+				beforeLast = last;
+				last = { file, line: i + 1, seq: row.seq };
+				if (index.length === 0 || index[index.length - 1].file !== file) index.push({ file, seq: row.seq, rows: 0 });
+				index[index.length - 1].rows += 1;
 				rows += 1;
 			}
 		} catch (err) {
-			return { ok: false, rows, broken: { file, line: i + 1, reason: `the file cannot be read (${err?.code ?? "error"})` } };
+			return shaped({ ok: false, rows, broken: { file, line: i + 1, reason: `the file cannot be read (${err?.code ?? "error"})` } });
 		}
 	}
-	return { ok: true, rows, startsAt };
+	return shaped({ ok: true, rows, startsAt });
 }
 
 /** The most rows one `readConsoleAudit` call returns, whatever it is asked for. */
@@ -379,12 +419,17 @@ export const CONSOLE_AUDIT_CURSOR_RE = /^(\d{4}-\d{2}):([1-9]\d{0,15})$/;
  * qualifying entries of a file are held (a ring buffer), so a month file of any size costs `limit` entries of memory. A
  * file newer than the cursor is not opened, and the cursor's own file is read only up to the cursor's line.
  */
-export function readConsoleAudit({ logsDir, limit = 100, before = null, fs = nodeFs } = {}) {
+export function readConsoleAudit({ logsDir, limit = 100, before = null, fs = nodeFs, positions = false } = {}) {
 	const cap = Math.min(CONSOLE_AUDIT_READ_MAX, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 100));
+	// `positions` (issue #737) adds each entry's own place, `YYYY-MM:<line>`, parallel to `rows`: the console's audit screen
+	// compares it with `verifyConsoleAudit`'s `broken` and `last` to mark a row damaged, not verified or not yet checked,
+	// and a row's id on the page is built from it when its seq cannot be one. Opt-in, so the shape callers compare whole is
+	// unchanged.
+	const unread = (unreadable) => (positions ? { rows: [], next: null, positions: [], unreadable } : { rows: [], next: null, unreadable });
 	let bound = null; // { file, line }: entries strictly above this place
 	if (before !== null && before !== undefined) {
 		const m = typeof before === "string" ? CONSOLE_AUDIT_CURSOR_RE.exec(before) : null;
-		if (m === null || !Number.isSafeInteger(Number(m[2]))) return { rows: [], next: null, unreadable: "the cursor is not an audit position (YYYY-MM:line)" };
+		if (m === null || !Number.isSafeInteger(Number(m[2]))) return unread("the cursor is not an audit position (YYYY-MM:line)");
 		bound = { file: `${m[1]}.jsonl`, line: Number(m[2]) };
 	}
 	const dir = join(logsDir, CONSOLE_AUDIT_DIR);
@@ -392,7 +437,7 @@ export function readConsoleAudit({ logsDir, limit = 100, before = null, fs = nod
 	try {
 		files = monthFiles(dir, fs);
 	} catch (err) {
-		return { rows: [], next: null, unreadable: `the audit directory cannot be read (${err?.code ?? "error"})` };
+		return unread(`the audit directory cannot be read (${err?.code ?? "error"})`);
 	}
 	const out = []; // newest first, each { entry, pos }
 	let more = false;
@@ -431,7 +476,8 @@ export function readConsoleAudit({ logsDir, limit = 100, before = null, fs = nod
 		// A page that filled exactly at the end of a file: an older file may still hold rows, so say there is more.
 		else if (out.length === cap && f > 0) more = true;
 	}
-	return { rows: out.map((x) => x.entry), next: more && out.length > 0 ? out[out.length - 1].pos : null };
+	const page = { rows: out.map((x) => x.entry), next: more && out.length > 0 ? out[out.length - 1].pos : null };
+	return positions ? { ...page, positions: out.map((x) => x.pos) } : page;
 }
 
 /**

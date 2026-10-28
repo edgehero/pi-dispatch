@@ -153,7 +153,7 @@ test("renderSecretBundles: the facts in words, control bytes scrubbed, and no va
   const v = fixture({ env: { PI_SECRET_BUNDLES: "op-shop:/opt/r/shop.mjs:json" } });
   const text = renderSecretBundles(v);
   assert.match(text, /^Secret bundles \(triggers\.json; names only, never a reference or a value\):/);
-  assert.match(text, /  shop: project shop; profile op-shop \(declared in PI_SECRET_BUNDLES, json; doctor --secrets checks it runs\); fork reviews get it; 1 endpoint: STRIPE_KEY at api\.stripe\.com; 2 triggers opt out: #1, #3/);
+  assert.match(text, /  shop: project shop; profile op-shop \(declared in PI_SECRET_BUNDLES, json; doctor --secrets checks it runs\); fork reviews get it; 1 endpoint: STRIPE_KEY at api\.stripe\.com; 2 triggers opt out: #2, #4/);
   assert.match(text, /    last run gh-new received: A_URL, B_TOKEN/);
   assert.match(text, /  ghost: project ghost \(not in projects\.json\); profile nowhere \(not declared in the overlay or PI_SECRET_BUNDLES: this project's jobs are refused before they spend\)/);
   const quiet = renderSecretBundles(v, { names: false });
@@ -181,9 +181,12 @@ test("recordBundle is the worker's rebuild: names in the env charset, the closed
 const ctxOf = (role, data) => ({ query: { id: "gh-1" }, session: { name: role, role }, data: { now: AT, env: {}, ...data }, readOnly: false });
 
 test("the console's run page shows the variables received, the shadowed names, the openshell counts and a skip's sentence, escaped", async () => {
-  const page = async (extra) => (await pagePanels("run", ctxOf("viewer", { run: { record: { jobId: "gh-1", kind: "github", target: "acme/web#1", ...extra }, source: "local" } }))).map((p) => p.html).join("");
+  const page = async (extra, role = "operator") => (await pagePanels("run", ctxOf(role, { run: { record: { jobId: "gh-1", kind: "github", target: "acme/web#1", ...extra }, source: "local" } }))).map((p) => p.html).join("");
   const got = await page({ bundle: { id: "shop", variables: ["B_TOKEN", "A_URL"], shadowed: ["A_URL"], placeholders: 1, plain: 1 } });
-  assert.match(got, /<dt>Secret bundle<\/dt><dd>Variables received: A_URL, B_TOKEN \(from bundle shop\); shadowed by the trigger&#39;s own run\.secrets: A_URL; 1 as a placeholder, 1 as a value<\/dd>/);
+  assert.match(got, /<dt>Secret bundle<\/dt><dd>Variables received: B_TOKEN \(from bundle shop\); shadowed by the trigger&#39;s own run\.secrets: A_URL; 1 as a placeholder, 1 as a value<\/dd>/);
+  assert.match(got, /The trigger's value won; the bundle's was not passed: A_URL/);
+  const viewer = await page({ bundle: { id: "shop", variables: ["B_TOKEN", "A_URL"], shadowed: ["A_URL"], placeholders: 1, plain: 1 } }, "viewer");
+  assert.doesNotMatch(viewer, /B_TOKEN|A_URL|Secret bundle|Variables received/, "viewer streams omit the secrets panel on the server");
   assert.match(await page({ bundleSkipped: "head-unverified" }), /<dt>Bundle skipped<\/dt><dd>head-unverified: the forge would not say whose pull request this is/);
   const none = await page({});
   assert.ok(!none.includes("Secret bundle") && !none.includes("Bundle skipped"), "a run outside a bundled project draws neither row");
@@ -207,7 +210,7 @@ test("the console's configuration lists each bundle with its facts, the resolver
   const html = panels.map((p) => p.html).join("");
   const one = panels.find((p) => p.id === "p-secret-bundles")?.html ?? "";
   assert.match(one, /<li class="mono">op-web \(dotenv\)<\/li>/);
-  assert.match(one, /<td class="mono">shop<\/td><td>shop<\/td><td>op-shop \(declared in PI_SECRET_BUNDLES, json; doctor --secrets checks it runs\)<\/td><td>yes<\/td><td class="mono">STRIPE_KEY at api\.stripe\.com<\/td><td>#1, #3<\/td>/);
+  assert.match(one, /<td class="mono">shop<\/td><td>shop<\/td><td>op-shop \(declared in PI_SECRET_BUNDLES, json; doctor --secrets checks it runs\)<\/td><td>yes<\/td><td class="mono">STRIPE_KEY at api\.stripe\.com<\/td><td>index 1, index 3<\/td>/, "the opt-outs by the index the Triggers table shows; the pi panel counts from 1");
   assert.match(one, /A_URL, B_TOKEN \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)/);
   assert.match(one, /class="warn">nowhere \(not declared in the overlay or PI_SECRET_BUNDLES/, "an undeclared profile is marked");
   assert.match(one, /data-action="secret-bundle-add"/);
@@ -252,8 +255,8 @@ test("the panel's list: [bundle <id>] beside [secrets], [no bundle] on an opt-ou
   assert.match(all, /nightly .*\[secrets 1 via prod\] \[bundle shop\]/);
   assert.match(all, /off .*\[no bundle\]/);
   assert.match(all, /SECRET BUNDLES .* 3 · names only · doctor --secrets resolves/);
-  assert.match(all, /│ shop  project shop · profile op-shop \(env, json\) · forks yes · 1 endpoint · opt-out #1 #3 +│/);
-  assert.match(all, /│ ghost  project ghost \(not in projects\.json\) · profile nowhere \(NOT DECLARED\) · forks no · 0 endpoints · opt-out #3 +│/);
+  assert.match(all, /│ shop  project shop · profile op-shop \(env, json\) · forks yes · 1 endpoint · opt-out #2 #4 +│/);
+  assert.match(all, /│ ghost  project ghost \(not in projects\.json\) · profile nowhere \(NOT DECLARED\) · forks no · 0 endpoints · opt-out #4 +│/);
   assert.match(all, /last received: A_URL, B_TOKEN/);
   // Without a bundle the list is what it was: no section, no badge.
   const before = (await render({ ...BASE, triggers }, 120)).map(stripAnsi).join("\n");

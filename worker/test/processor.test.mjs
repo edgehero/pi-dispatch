@@ -5,6 +5,7 @@ import { budgetCapsFor, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-
 import { readFileSync, readdirSync } from "node:fs";
 import { HELD_TAKEN_COMMENT, InfraRetry, peakReachedLimit, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, PARKED_COMMENT, PARKED_COMMENT_PR, parkedComment, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
+import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "../src/record-reason.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { MCP_REFUSAL_COMMENT } from "../src/mcp-preflight.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -167,7 +168,25 @@ test("container exit 2 => policy, RETURNS (not retried)", async () => {
 
 test("container exit 1 => THROWS InfraRetry (BullMQ will retry)", async () => {
 	const { deps: d } = deps({ runContainer: async () => ({ code: 1, aborted: false }) });
-	await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.piDispatchRetry === true);
+	await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.piDispatchRetry === true && e.reason === CONTAINER_INFRA_EXIT);
+});
+
+test("an infrastructure exit and an unknown exit record their own tokens, never the throw's message (#737)", async () => {
+	// The message stays what the worker log's job_failed line carries; the record and the failure hook get the token.
+	for (const [code, token, message] of [[1, CONTAINER_INFRA_EXIT, "infra failure, container exit 1"], [42, CONTAINER_EXIT_UNKNOWN, "unknown container exit 42"], [3, CONTAINER_EXIT_UNKNOWN, "unknown container exit 3"], [137, CONTAINER_EXIT_UNKNOWN, "unknown container exit 137"]]) {
+		const redis = fakeRedis();
+		const { deps: d } = deps({ redis, runContainer: async () => ({ code, aborted: false }) });
+		let thrown = null;
+		await assert.rejects(() => runJob(ghJob, d), (e) => ((thrown = e), e instanceof InfraRetry));
+		assert.deepEqual([thrown.reason, thrown.message, thrown.exitCode, thrown.budgetReserved], [token, message, code, true], `exit ${code}`);
+		assert.equal(redis.decrCalls, 0, `exit ${code}: the container ran, so its slot is not refunded`);
+		const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, error: thrown, startedAt: null, endedAt: null });
+		assert.deepEqual([record.outcome, record.reason, record.exitCode], ["failed", token, code], `exit ${code}`);
+		assert.ok(!JSON.stringify(record).includes("container exit"), `exit ${code}: the message is in no field of the record`);
+	}
+	// The never-started codes keep their own token and their refund.
+	const { deps: d } = deps({ runContainer: async () => ({ code: 125, aborted: false }) });
+	await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.reason === "container-never-started" && e.budgetReserved === false);
 });
 
 test("a worker-initiated abort (137, aborted) => policy RETURNS worker-abort, never retried", async () => {
@@ -892,7 +911,7 @@ test("an exit-1 infra throw stamps exitCode/turns and budgetReserved true (conta
 	const { deps: d } = deps({ runContainer: async () => ({ code: 1, aborted: false, turns: 4 }) });
 	await assert.rejects(
 		() => runJob(ghJob, d),
-		(e) => e instanceof InfraRetry && e.exitCode === 1 && e.turns === 4 && e.budgetReserved === true,
+		(e) => e instanceof InfraRetry && e.reason === CONTAINER_INFRA_EXIT && e.exitCode === 1 && e.turns === 4 && e.budgetReserved === true,
 	);
 });
 
@@ -1347,7 +1366,7 @@ test("an unrecognised container exit still falls to the unknown-exit InfraRetry 
 	const { deps: d } = deps({ redis, runContainer: async () => ({ code: 42, aborted: false }) });
 	await assert.rejects(
 		() => runJob(ghJob, d),
-		(e) => e instanceof InfraRetry && /unknown container exit 42/.test(e.message) && e.budgetReserved === true,
+		(e) => e instanceof InfraRetry && /unknown container exit 42/.test(e.message) && e.reason === CONTAINER_EXIT_UNKNOWN && e.budgetReserved === true,
 	);
 	assert.equal(redis.decrCalls, 0, "an unknown exit is not assumed to have spent nothing");
 });
@@ -1362,7 +1381,7 @@ test("a CONTAINER exiting 3 is still unrecognised -- the wait participant's hold
 	const { deps: d } = deps({ redis, runContainer: async () => ({ code: 3, aborted: false }) });
 	await assert.rejects(
 		() => runJob(ghJob, d),
-		(e) => e instanceof InfraRetry && /unknown container exit 3/.test(e.message) && e.budgetReserved === true,
+		(e) => e instanceof InfraRetry && /unknown container exit 3/.test(e.message) && e.reason === CONTAINER_EXIT_UNKNOWN && e.budgetReserved === true,
 	);
 	assert.equal(redis.decrCalls, 0, "and no refund, exactly as for any other unrecognised code");
 });

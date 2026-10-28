@@ -586,3 +586,155 @@ test("verify names a row whose kind, reserve or count is not one the console wri
 		assert.deepEqual(res.broken, { file: "2026-10.jsonl", line: 2, reason: "the row's kind, reserve or count is not one the console writes" });
 	}
 });
+
+// Issue #737: the console's audit screen marks each row by its place in the chain, so the reader and the verifier can
+// each hand back places, opt-in. Without the options both answer exactly as above (every deepEqual in this file).
+
+test("readConsoleAudit with positions: each entry's own place beside it, the cursor's form, damaged lines and failures included", () => {
+	const logsDir = auditFiles({ "2026-09": [1, 2], "2026-10": [3, "not json {", 4] });
+	const all = readConsoleAudit({ logsDir, positions: true });
+	assert.deepEqual(all.rows.map(label), [4, "2026-10:broken:2", 3, 2, 1]);
+	assert.deepEqual(all.positions, ["2026-10:3", "2026-10:2", "2026-10:1", "2026-09:2", "2026-09:1"]);
+	assert.deepEqual(Object.keys(all), ["rows", "next", "positions"]);
+	// Every place is a cursor, and a page's `next` is its last entry's place: paging by either agrees.
+	const page = readConsoleAudit({ logsDir, limit: 2, positions: true });
+	assert.deepEqual([page.positions, page.next], [["2026-10:3", "2026-10:2"], "2026-10:2"]);
+	const below = readConsoleAudit({ logsDir, limit: 2, before: page.positions[1], positions: true });
+	assert.deepEqual([below.rows.map(label), below.positions], [[3, 2], ["2026-10:1", "2026-09:2"]]);
+	// A file that cannot be opened is one entry at line 1 of it; a refused cursor and a blind directory hold no places.
+	const failing = { ...fs, openSync: (p, ...a) => (String(p).endsWith("2026-10.jsonl") ? (() => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })() : fs.openSync(p, ...a)) };
+	const shut = readConsoleAudit({ logsDir, fs: failing, positions: true });
+	assert.deepEqual([shut.rows.map(label), shut.positions], [["2026-10:broken:0", 2, 1], ["2026-10:1", "2026-09:2", "2026-09:1"]]);
+	assert.deepEqual(readConsoleAudit({ logsDir, before: "x", positions: true }), { rows: [], next: null, positions: [], unreadable: "the cursor is not an audit position (YYYY-MM:line)" });
+	const blind = { ...fs, readdirSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } };
+	assert.deepEqual(readConsoleAudit({ logsDir, fs: blind, positions: true }).positions, []);
+	// Off by default, and on only for `true`'s truthiness, never a reshaped default.
+	assert.deepEqual(Object.keys(readConsoleAudit({ logsDir })), ["rows", "next"]);
+	assert.equal(readConsoleAudit({ logsDir, positions: false }).positions, undefined);
+});
+
+test("verifyConsoleAudit with withLast: the last row that verified, by file, line and seq, in every result shape", () => {
+	const intact = chain(3);
+	assert.deepEqual(verifyConsoleAudit({ logsDir: intact.logsDir, withLast: true }), { ok: true, rows: 3, startsAt: null, last: { file: "2026-10.jsonl", line: 3, seq: 3 }, suspect: null, files: [{ file: "2026-10.jsonl", seq: 1, rows: 3 }] });
+	// A first line that is junk: nothing verified, nothing indexed.
+	const junk = chain(2);
+	junk.rewrite((ls) => ["{oops", ...ls]);
+	assert.deepEqual(verifyConsoleAudit({ logsDir: junk.logsDir, withLast: true }), { ok: false, rows: 0, broken: { file: "2026-10.jsonl", line: 1, reason: "the line is not a JSON row (damaged, or written by something else)" }, last: null, suspect: null, files: [] });
+	// A junk line later on: it shows no prev that matches the row before it, so that row is not vouched for either.
+	const later = chain(4);
+	later.rewrite((ls) => [ls[0], ls[1], "{oops", ls[2], ls[3]]);
+	const j = verifyConsoleAudit({ logsDir: later.logsDir, withLast: true });
+	assert.deepEqual([j.broken.line, j.last, j.suspect], [3, { file: "2026-10.jsonl", line: 1, seq: 1 }, { file: "2026-10.jsonl", line: 2, seq: 2 }]);
+	// So is a seq that does not follow a prev that matched: the row before it is what that prev hashed.
+	const skipped = chain(3);
+	skipped.rewrite((ls) => [ls[0], ls[1], JSON.stringify({ ...JSON.parse(ls[2]), seq: 9 })]);
+	const s = verifyConsoleAudit({ logsDir: skipped.logsDir, withLast: true });
+	assert.deepEqual([s.broken.reason, s.last, s.suspect], ["seq 9 follows seq 2", { file: "2026-10.jsonl", line: 2, seq: 2 }, null]);
+	// Across a month boundary, the last good row is in the newer file and each file is indexed by its first row; an empty
+	// log and a blind directory have none.
+	const { logsDir, audit, clock } = setup(Date.UTC(2026, 8, 30, 12, 0, 0));
+	audit.append(row());
+	audit.append(row());
+	clock.set(T0);
+	audit.append(row());
+	const months = verifyConsoleAudit({ logsDir, withLast: true });
+	assert.deepEqual([months.last, months.files], [{ file: "2026-10.jsonl", line: 1, seq: 3 }, [{ file: "2026-09.jsonl", seq: 1, rows: 2 }, { file: "2026-10.jsonl", seq: 3, rows: 1 }]]);
+	assert.deepEqual(verifyConsoleAudit({ logsDir: tempDir("pd-console-audit-none-"), withLast: true }), { ok: true, rows: 0, startsAt: null, last: null, suspect: null, files: [] });
+	const blind = { ...fs, readdirSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } };
+	const shut = verifyConsoleAudit({ logsDir, fs: blind, withLast: true });
+	assert.deepEqual([shut.ok, shut.broken.file, shut.last, shut.suspect, shut.files], [false, null, null, null, []]);
+	// A file that fails part-way: the rows before the failure verified.
+	let reads = 0;
+	const flaky = { ...fs, readSync: (...a) => (++reads > 1 ? (() => { throw Object.assign(new Error("EIO"), { code: "EIO" }); })() : fs.readSync(...a)) };
+	const part = verifyConsoleAudit({ logsDir: intact.logsDir, fs: flaky, withLast: true });
+	assert.deepEqual([part.ok, part.last, part.suspect], [false, { file: "2026-10.jsonl", line: 3, seq: 3 }, null]);
+	// Off by default: the shape doctor and the CLI compare whole.
+	for (const k of ["last", "suspect", "files"]) assert.equal(Object.hasOwn(verifyConsoleAudit({ logsDir: intact.logsDir }), k), false, k);
+});
+
+test("verifyConsoleAudit with withLast: a broken prev vouches for neither end of the link, so an edited outcome is not vouched for", () => {
+	// A tamper: row 2's outcome edited from refused to ok. Its own line still parses and its seq still
+	// follows; what breaks is row 3's prev, which no longer matches row 2's hash. Row 2 is the edit, but the chain alone
+	// cannot tell that from row 3's prev being the edit, so row 2 is not vouched for: the last vouched row is row 1.
+	const s = setup();
+	for (let i = 0; i < 4; i++) {
+		s.clock.set(T0 + i * 1000);
+		s.audit.append(row(i === 1 ? { action: "login-failed", outcome: "refused", reason: "no token matched" } : {}));
+	}
+	const file = join(s.dir, "2026-10.jsonl");
+	fs.writeFileSync(file, `${s.lines("2026-10").map((l, i) => (i === 1 ? l.replace('"outcome":"refused"', '"outcome":"ok"') : l)).join("\n")}\n`);
+	assert.match(s.lines("2026-10")[1], /"outcome":"ok"/, "the edit landed");
+	const v = verifyConsoleAudit({ logsDir: s.logsDir, withLast: true });
+	assert.deepEqual(v, {
+		ok: false,
+		rows: 2,
+		broken: { file: "2026-10.jsonl", line: 3, reason: "prev does not match the row before it (seq 2): a row was changed, removed or moved" },
+		last: { file: "2026-10.jsonl", line: 1, seq: 1 },
+		suspect: { file: "2026-10.jsonl", line: 2, seq: 2 },
+		files: [{ file: "2026-10.jsonl", seq: 1, rows: 2 }],
+	});
+	// The default shape is untouched: doctor and the CLI still read the first broken link and the rows before it.
+	assert.deepEqual(verifyConsoleAudit({ logsDir: s.logsDir }), { ok: false, rows: 2, broken: v.broken });
+	// A broken link across a month boundary: the suspect is the old month's last row, the last vouched the one before.
+	const m = setup(Date.UTC(2026, 8, 30, 12, 0, 0));
+	m.audit.append(row());
+	m.audit.append(row({ target: "t-old" }));
+	m.clock.set(T0);
+	m.audit.append(row());
+	const sep = join(m.dir, "2026-09.jsonl");
+	fs.writeFileSync(sep, fs.readFileSync(sep, "utf8").replace('"t-old"', '"t-new"'));
+	const x = verifyConsoleAudit({ logsDir: m.logsDir, withLast: true });
+	assert.deepEqual([x.broken.file, x.broken.line, x.last, x.suspect], ["2026-10.jsonl", 1, { file: "2026-09.jsonl", line: 1, seq: 1 }, { file: "2026-09.jsonl", line: 2, seq: 2 }]);
+	// The very first row before a broken prev: nothing is vouched for.
+	const first = chain(2);
+	first.rewrite((ls) => [ls[0].replace('"t0"', '"tX"'), ls[1]]);
+	const f = verifyConsoleAudit({ logsDir: first.logsDir, withLast: true });
+	assert.deepEqual([f.broken.line, f.last, f.suspect], [2, null, { file: "2026-10.jsonl", line: 1, seq: 1 }]);
+});
+
+test("verifyConsoleAudit with withLast: a row is vouched for only by a next line whose prev matches it, whatever else breaks there", () => {
+	// Five rows, row 4's outcome edited: its own line still parses, and what would show the edit is line 5's prev. Each
+	// way line 5 can break without showing a prev that matches row 4 (not JSON, no valid prev, a prev that does not match
+	// under an action the console never writes) leaves row 4 vouched for by nothing: the last row vouched for is row 3.
+	const edited = (ls) => ls.map((l, i) => (i === 3 ? l.replace('"outcome":"ok"', '"outcome":"refused"') : l));
+	const cases = {
+		"a garbled line": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4].slice(0, 20)], reason: "the line is not a JSON row (damaged, or written by something else)" },
+		"an unknown action": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4].replace('"action":"login"', '"action":"zz"')], reason: "the row's action or outcome is not one the console writes" },
+		"a prev that is not a hash": { edit: (ls) => [...edited(ls).slice(0, 4), JSON.stringify({ ...JSON.parse(ls[4]), prev: "x" })], reason: "the row has no valid seq and prev" },
+		"a prev that does not match": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4]], reason: "prev does not match the row before it (seq 4): a row was changed, removed or moved" },
+		// The fields check comes after the prev is judged too: a line whose kind, reserve or count the console never writes
+		// does not vouch for the row before it when its prev does not match that row either.
+		...Object.fromEntries(Object.entries({ kind: "BAD KIND", reserve: -5, count: 0 }).map(([k, v]) => [`a ${k} the console never writes`, { edit: (ls) => [...edited(ls).slice(0, 4), JSON.stringify({ ...JSON.parse(ls[4]), [k]: v })], reason: "the row's kind, reserve or count is not one the console writes" }])),
+	};
+	for (const [what, { edit, reason }] of Object.entries(cases)) {
+		const c = chain(5);
+		c.rewrite(edit);
+		assert.match(c.lines("2026-10")[3], /"outcome":"refused"/, `${what}: the edit landed`);
+		const broken = { file: "2026-10.jsonl", line: 5, reason };
+		assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir, withLast: true }), { ok: false, rows: 4, broken, last: { file: "2026-10.jsonl", line: 3, seq: 3 }, suspect: { file: "2026-10.jsonl", line: 4, seq: 4 }, files: [{ file: "2026-10.jsonl", seq: 1, rows: 4 }] }, what);
+		// The default shape, which doctor reads, is what it always was: the first break and the rows walked before it.
+		assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir }), { ok: false, rows: 4, broken }, `${what}: the default shape`);
+	}
+	// A last line cut short by a crash looks the same as a garbled one: the row before it is not verified either.
+	const cut = chain(5);
+	cut.rewrite((ls) => [...ls.slice(0, 4), ls[4].slice(0, 40)]);
+	const c = verifyConsoleAudit({ logsDir: cut.logsDir, withLast: true });
+	assert.deepEqual([c.broken.line, c.last, c.suspect], [5, { file: "2026-10.jsonl", line: 3, seq: 3 }, { file: "2026-10.jsonl", line: 4, seq: 4 }]);
+	// A line whose prev DOES match the row before it vouches for that row, and is damaged alone whatever else it gets
+	// wrong: an action the console never writes, a seq that is not a number, a seq that does not follow, a kind, reserve
+	// or count the console never writes.
+	const alone = {
+		"an unknown action": (l) => l.replace('"action":"login"', '"action":"zz"'),
+		"a seq that is not a number": (l) => JSON.stringify({ ...JSON.parse(l), seq: "five" }),
+		"a seq that does not follow": (l) => JSON.stringify({ ...JSON.parse(l), seq: 9 }),
+		"a kind the console never writes": (l) => JSON.stringify({ ...JSON.parse(l), kind: "BAD KIND" }),
+		"a reserve the console never writes": (l) => JSON.stringify({ ...JSON.parse(l), reserve: -5 }),
+		"a count the console never writes": (l) => JSON.stringify({ ...JSON.parse(l), count: 0 }),
+	};
+	for (const [what, damage] of Object.entries(alone)) {
+		const d = chain(5);
+		d.rewrite((ls) => [...ls.slice(0, 4), damage(ls[4])]);
+		const v = verifyConsoleAudit({ logsDir: d.logsDir, withLast: true });
+		assert.deepEqual([v.broken.line, v.last, v.suspect], [5, { file: "2026-10.jsonl", line: 4, seq: 4 }, null], what);
+	}
+});

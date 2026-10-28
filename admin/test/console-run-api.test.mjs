@@ -4,11 +4,11 @@ import { request } from "node:http";
 import { after, test } from "node:test";
 import { CHAT_REFUSALS, parkedVerdictOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { recoveryJobId } from "@edgehero/pi-dispatch/recovery-queue";
-import { CANDIDATES_MAX, chatFactsOf, NEWER_CACHE_MS, PARK_CHECK_CACHE_MS, parkedAnswerCheckOf, parseRunQuery, resolveRunChat, RUN_UNREADABLE, runDocument, safeRunOf, TARGET_RUNS_MAX } from "../src/console/run-api.mjs";
-import { parkedInbox, runChat } from "../src/console/panels.mjs";
+import { CANDIDATES_MAX, chatFactsOf, NEWER_CACHE_MS, PARK_CHECK_CACHE_MS, parkedAnswerCheckOf, parseRunQuery, resolveRunChat, runNotTold, RUN_UNREADABLE, runDocument, safeRunOf, TARGET_RUNS_MAX } from "../src/console/run-api.mjs";
+import { parkedQuestions, runChat } from "../src/console/panels.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
-import { FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, PENDING_STATES, readJobStatus, readPendingAnswer, targetKeyOf } from "../src/read-model.mjs";
+import { FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, PENDING_STATES, readJobStatus, readPendingAnswer, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD, runAbsent, runPlaces, targetKeyOf } from "../src/read-model.mjs";
 
 // `GET /api/run` (issue #647): the run lookup the terminal chat asks which mode to open. `forgeTargetOf` held to
 // `forgeLinkOf` by a round trip per forge, the query rules, `readJobStatus` on fake queues, and the route over a real
@@ -254,7 +254,7 @@ async function runConsole(fleet, { env = ENV } = {}) {
 }
 
 const TOP_KEYS = ["activeJobId", "forgeLink", "mode", "newerRunOnTarget", "pendingRunOnTarget", "progress", "run", "says", "state", "steer", "transcript", "version"];
-const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "model", "outcome", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
+const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "maxTurns", "model", "outcome", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
 
 test("/api/run: the keys, a finished run's fork, and no free text, job data or session key for either role", { timeout: 20_000 }, async () => {
   const fleet = fakeFleet({ records: { "gh-1": record("gh-1") } });
@@ -287,6 +287,7 @@ test("/api/run: the keys, a finished run's fork, and no free text, job data or s
     attempt: 1,
     exitCode: 0,
     turns: 9,
+    maxTurns: null,
     parentJobId: null,
     recoveryOf: null,
     session: { kept: true, resumed: false },
@@ -508,6 +509,58 @@ test("/api/run: a base whose recovery is queued is queued, never a fork; a run k
   assert.equal((await c.get("/api/run?id=gh-nobody")).status, 404, "and nothing at all is still 404");
 });
 
+test("/api/run is 404 only when every place a run is kept said it holds none; one that could not be read makes it a 503 that names the places, a queue lookup that failed among them, and a run a place shows whose queue could not be read is a 503 that names no cause (#737)", { timeout: 20_000 }, async () => {
+  const id = "gh-nobody";
+  assert.deepEqual(await runDocument(fakeFleet(), id), { status: 404, error: "no run with that id is in this host's history, the fleet's run mirror or the queue" });
+  const unread = (over) => runDocument({ ...fakeFleet(), ...over }, id);
+  for (const [what, over, places] of [
+    ["a mirror that could not be read", { runById: async () => ({ unreadable: RUN_MIRROR_UNREAD }) }, [RUN_PLACES.mirror]],
+    ["this host's record file that could not be read", { runById: async () => ({ unreadable: RUN_FILE_UNREADABLE }) }, [RUN_PLACES.file]],
+    ["a record read that throws", { runById: async () => { throw new Error("ECONNRESET"); } }, [RUN_PLACES.record]],
+    ["a queue lookup that was not over every queue", { jobStatus: async () => ({ found: null, state: null, continuesAs: null, queuedAs: null }) }, [RUN_PLACES.queues]],
+    ["a transcript read that did not answer", { transcriptMeta: async () => ({ unreachable: "timed out reaching the stream" }) }, [RUN_PLACES.transcript]],
+    ["a transcript read that did not answer and says no stream", { transcriptMeta: async () => ({ unreachable: "timed out reaching the stream", exists: false, length: 0 }) }, [RUN_PLACES.transcript]],
+    ["a transcript read that threw", { transcriptMeta: async () => { throw new Error("down"); } }, [RUN_PLACES.transcript]],
+    ["a progress key that could not be read", { progressOfRun: async () => ({ progress: { unreachable: "the progress key could not be read" }, continues: false, continuesAs: null }) }, [RUN_PLACES.progress]],
+    ["no progress reader", { progressOfRun: undefined }, [RUN_PLACES.progress]],
+    ["three places at once", { runById: async () => ({ unreadable: RUN_FILE_UNREADABLE }), jobStatus: async () => ({ found: null, state: null, continuesAs: null, queuedAs: null }), progressOfRun: undefined }, [RUN_PLACES.file, RUN_PLACES.queues, RUN_PLACES.progress]],
+    ["a queue lookup that failed", { jobStatus: async () => ({ unreachable: true }) }, [RUN_PLACES.queues]],
+    ["no queue lookup reader", { jobStatus: undefined }, [RUN_PLACES.queues]],
+    ["a queue lookup that failed and a mirror that could not be read", { runById: async () => ({ unreadable: RUN_MIRROR_UNREAD }), jobStatus: async () => ({ unreachable: true }) }, [RUN_PLACES.mirror, RUN_PLACES.queues]],
+  ]) {
+    assert.deepEqual(await unread(over), { status: 503, error: runNotTold(places) }, what);
+  }
+  // A run a place shows whose queue state could not be read: its chat cannot be judged, which names no cause.
+  const shown = { jobStatus: async () => ({ unreachable: true }), transcriptMeta: async () => ({ exists: true, ended: false, outcome: null, length: 2 }) };
+  assert.deepEqual(await unread(shown), { status: 503, error: RUN_UNREADABLE });
+  assert.equal(RUN_UNREADABLE, "the queue could not be read, so this run's chat cannot be judged; try again");
+  assert.equal(runNotTold([RUN_PLACES.file]), "whether a run with that id exists could not be told: this console could not read this host's record of the run; try again");
+  assert.equal(runNotTold([RUN_PLACES.mirror, RUN_PLACES.queues, RUN_PLACES.transcript]), "whether a run with that id exists could not be told: this console could not read the fleet's run mirror, every queue and the live transcript; try again");
+  for (const place of Object.values(RUN_PLACES)) assert.doesNotMatch(runNotTold([place]), /Valkey|reachable/, "no cause it cannot know");
+  // The route says the same.
+  const c = await runConsole({ ...fakeFleet(), runById: async () => ({ unreadable: RUN_MIRROR_UNREAD }) });
+  const res = await c.get(`/api/run?id=${id}`);
+  assert.deepEqual([res.status, res.json().error], [503, runNotTold([RUN_PLACES.mirror])]);
+});
+
+test("runAbsent is true only when every place a run is kept was read and said it holds none: runPlaces' rule, which the run page and /api/run answer their 404 by (#737)", () => {
+  const none = { run: { missing: true }, lookup: { found: false, activeJobId: null, queuedJobId: null }, transcript: { exists: false }, progress: { absent: true } };
+  assert.equal(runAbsent(none), true);
+  for (const [what, over] of [
+    ["the record unread", { run: { unreadable: RUN_RECORD_UNREAD } }],
+    ["the queues not whole", { lookup: { found: null, activeJobId: null, queuedJobId: null } }],
+    ["the queue lookup failed", { lookup: { unreachable: true } }],
+    ["the transcript unreachable", { transcript: { unreachable: true, exists: false } }],
+    ["the progress unreachable", { progress: { unreachable: true } }],
+    ["no progress reader", { progress: undefined }],
+  ]) {
+    const places = { ...none, ...over };
+    assert.equal(runAbsent(places), false, what);
+    assert.equal(runAbsent(places), !runPlaces(places).shown && runPlaces(places).unread.length === 0, what);
+  }
+  assert.equal(runAbsent({ ...none, lookup: { found: false, activeJobId: "gh-1.r1", queuedJobId: null } }), false, "a recovery running");
+});
+
 test("/api/run: a park whose answer is queued or running is answered (pendingRunOnTarget); a queue scan that cannot tell is unknown (review L6)", { timeout: 20_000 }, async () => {
   const parked = record("gh-park", { reason: "awaiting-input", target: "acme/web#20" });
   const at = async (pending) => {
@@ -604,7 +657,7 @@ test("chatFactsOf: the run page loop reuses a parked record's newer-run search f
   assert.equal(fleet.calls.runsPage.length, 4, "/api/run's search is never cached");
 });
 
-test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pending scan and planner check for PARK_CHECK_CACHE_MS per run id, reads again on a new record, and never keeps an unreadable one (review round 2)", async () => {
+test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pending scan and planner check for PARK_CHECK_CACHE_MS per run id, an unreadable one as long as a good one, and reads again on a new record", async () => {
   const parked = record("gh-park2", { reason: "awaiting-input", target: "acme/web#21" });
   let pending = { jobId: null };
   const fleet = fakeFleet({ records: { "gh-park2": parked }, jobs: { "gh-park2": { found: true, state: "completed", continuesAs: null } }, pending: () => pending });
@@ -615,7 +668,7 @@ test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pen
   const now = () => t;
   const tick = async (rec = parked) => {
     const facts = await chatFactsOf(fleet, "gh-park2", rec, { searchNewer: "parked", now });
-    return { facts, check: await parkedAnswerCheckOf(fleet, "gh-park2", rec, { now }) };
+    return { facts, check: await parkedAnswerCheckOf(fleet, "gh-park2", rec, { now, lookup: { live: true } }) };
   };
   for (let i = 0; i < 5; i += 1) {
     const got = await tick();
@@ -632,12 +685,21 @@ test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pen
   await tick({ ...parked, endedAt: iso(T0 - 1000) });
   assert.equal(fleet.calls.pending.length, 3, "a different record reads afresh");
   assert.equal(checks, 3);
-  // An unreadable scan or check is read again on the next tick, never reused.
+  // An unreadable scan or check is kept for the window as a good one is (issue #737): a Valkey that is failing is asked
+  // once per window, never once per tick; the window after it reads again.
   t += PARK_CHECK_CACHE_MS;
   pending = { unreachable: true };
   check = { unreachable: true };
-  await tick();
-  await tick();
+  const unread = await tick();
+  assert.deepEqual(unread.check, { unreachable: true });
+  t += 2_000;
+  assert.deepEqual((await tick()).check, { unreachable: true }, "the same unreadable answer, reused");
+  assert.equal(fleet.calls.pending.length, 4);
+  assert.equal(checks, 4);
+  pending = { jobId: null };
+  check = { ok: true };
+  t += PARK_CHECK_CACHE_MS;
+  assert.deepEqual((await tick()).check, { ok: true }, "read again once its window passed");
   assert.equal(fleet.calls.pending.length, 5);
   assert.equal(checks, 5);
   // `/api/run` scans afresh every time.
@@ -696,7 +758,7 @@ test("the Chat panel and the parked inbox draw an answer form for exactly the sa
     const fleet = fakeFleet({ records: { "gh-park5": parked }, jobs: { "gh-park5": { found: true, state: "completed", continuesAs: null } }, pending: scan });
     const chat = await chatFactsOf(fleet, "gh-park5", parked, { now: () => T0 });
     const panel = String(runChat({ role: "operator", readOnly: false, env: {}, now: T0, query: { id: "gh-park5" }, data: { chat, run: { record: parked }, chatAnswer: { ok: true } } }));
-    const inbox = String(parkedInbox({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: [{ target: "acme/web#12", kind: "github", jobId: "gh-park5", parkedAt: T0, ageMs: 0, chainCount: 1, pendingScan: scan }] } } }));
+    const inbox = String(parkedQuestions({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: [{ target: "acme/web#12", kind: "github", jobId: "gh-park5", parkedAt: T0, ageMs: 0, chainCount: 1, pendingScan: scan }] }, parkedChecks: { "gh-park5": { ok: true } } } }));
     const form = (html) => html.includes('data-action="parked-answer"');
     assert.equal(form(panel), form(inbox), `${JSON.stringify(scan)}: both screens draw the form, or neither`);
     assert.equal(form(panel), scan.jobId === null, `${JSON.stringify(scan)}: only a complete look that found no answer offers one`);
@@ -710,7 +772,7 @@ test("/api/run?url=: an exact-target scan, so #12 is found past a page of #120s,
   const mine = record("gh-mine", { target: "acme/web#12", endedAt: iso(T0 - 9_000_000) });
   const azCrowd = Array.from({ length: TARGET_RUNS_MAX + 5 }, (_, i) => record(`az-c${i}`, { kind: "azure", target: `proj/repo#12${i}`, endedAt: iso(T0 - i * 1000) }));
   const az = record("az-mine", { kind: "azure", target: "Proj/repo#12", endedAt: iso(T0 - 9_000_000) });
-  const longRepo = `g/${"s".repeat(40)}/${"t".repeat(40)}/${"u".repeat(40)}/p`; // past the q filter's 100 characters
+  const longRepo = `g/${"s".repeat(70)}/${"t".repeat(70)}/${"u".repeat(70)}/p`; // past the q filter's 200 characters
   const gl = record("gl-long", { kind: "gitlab", target: `${longRepo}#3`, endedAt: iso(T0 - 9_000_000) });
   const glCrowd = Array.from({ length: TARGET_RUNS_MAX + 5 }, (_, i) => record(`gl-c${i}`, { kind: "gitlab", target: `g/p#${i}`, endedAt: iso(T0 - i * 1000) }));
   const runs = [...crowd, ...azCrowd, ...glCrowd, mine, az, gl];
@@ -761,4 +823,41 @@ test("resolveRunChat (the one resolution /api/run and /dispatch chat share): the
   const missing = await resolveRunChat(fleet, { id: "nope" });
   assert.equal(missing.status, 404);
   assert.equal(missing.doc, undefined);
+});
+
+test("a request retries an unreadable planner answer cached by a live load; live loads still share it (#747)", async () => {
+  let calls = 0;
+  const fleet = { parkedAnswerCheck: async () => (++calls === 1 ? { unreachable: true } : { ok: true }) };
+  const parked = record("gh-refresh", { reason: "awaiting-input" });
+  const options = { now: () => T0, lookup: { live: true } };
+  assert.deepEqual(await parkedAnswerCheckOf(fleet, "gh-refresh", parked, options), { unreachable: true });
+  assert.deepEqual(await parkedAnswerCheckOf(fleet, "gh-refresh", parked, options), { unreachable: true });
+  assert.equal(calls, 1);
+  assert.deepEqual(await parkedAnswerCheckOf(fleet, "gh-refresh", parked, { now: () => T0, lookup: { asked: 0 } }), { ok: true });
+  assert.equal(calls, 2, "a request never reuses an answer made from an unreadable queue set");
+});
+
+test("finished saved sessions search for later turns with the same bounded cache as parked runs (#747)", async () => {
+  const finished = record("gh-fork", { target: "acme/web#80", session: { resumed: false, reason: "absent", transcriptBytes: 20 } });
+  const fleet = fakeFleet({ records: { "gh-fork": finished, "gh-new": record("gh-new", { target: finished.target, endedAt: iso(T0 + 1000) }) }, jobs: { "gh-fork": { found: true, state: "completed", continuesAs: null } } });
+  const options = { searchNewer: "saved", now: () => T0 };
+  const first = await chatFactsOf(fleet, "gh-fork", finished, options);
+  assert.equal(first.mode, "fork");
+  assert.equal(first.newer.jobId, "gh-new");
+  await chatFactsOf(fleet, "gh-fork", finished, options);
+  assert.equal(fleet.calls.runsPage.length, 1);
+  await chatFactsOf(fleet, "gh-fork", { ...finished, session: null }, options);
+  assert.equal(fleet.calls.runsPage.length, 1, "no saved session needs no fork warning lookup");
+});
+
+test("a fresh session may be saved, while explicit save failures never offer continuation lookup (#747)", async () => {
+  const { sessionSavedOf } = await import("../src/console/run-api.mjs");
+  const { SESSION_NOT_SAVED } = await import("@edgehero/pi-dispatch/record-reason");
+  const { SESSION_REASON_TEXT } = await import("@edgehero/pi-dispatch/reason-catalog");
+  for (const reason of ["absent", "expired", "resumed", "venue-changed"]) assert.equal(sessionSavedOf({ session: { reason } }), true, reason);
+  for (const reason of SESSION_NOT_SAVED) {
+    assert.ok(Object.hasOwn(SESSION_REASON_TEXT, reason), "the reason remains part of the worker's catalog");
+    assert.equal(sessionSavedOf({ session: { reason } }), false, reason);
+  }
+  assert.equal(sessionSavedOf({ session: null }), false);
 });

@@ -206,13 +206,13 @@ test("dispatch_set: refuses (throws) with no interactive operator and writes not
   assert.equal(read(settingsFile).dailyCap, 25, "no write without a confirm-capable UI");
 });
 
-test("dispatch_set: a declined confirm applies nothing, and the confirm shows before->after", async () => {
+test("dispatch_set: a declined confirm applies nothing, and the confirm shows the value before and after", async () => {
   const settingsFile = withSettings({ dailyCap: 25 });
   const { ctx, shown } = toolCtx({ answer: false });
   const out = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "99" }, undefined, undefined, ctx));
   assert.equal(out.applied, false);
   assert.equal(read(settingsFile).dailyCap, 25, "a decline leaves the value untouched");
-  assert.match(shown[0].message, /dailyCap: 25 -> 99/, "the operator saw the concrete change");
+  assert.match(shown[0].message, /dailyCap: 25 to 99/, "the operator saw the concrete change");
 });
 
 test("dispatch_set: an approved confirm writes the coerced value", async () => {
@@ -224,7 +224,7 @@ test("dispatch_set: an approved confirm writes the coerced value", async () => {
 });
 
 test("dispatch_set: a dollar key's confirm shows the EFFECTIVE before-value and its source (#501)", async () => {
-  // With PI_MAX_COST_USD=2 in env and no overlay key, "(unset) -> 1000000" would read as adding a cap while it
+  // With PI_MAX_COST_USD=2 in env and no overlay key, "(unset) to 1000000" would read as adding a cap while it
   // raises one 500,000 times.
   const saved = process.env.PI_MAX_COST_USD;
   try {
@@ -232,34 +232,34 @@ test("dispatch_set: a dollar key's confirm shows the EFFECTIVE before-value and 
     withSettings({});
     let probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "1000000" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 2 \(env PI_MAX_COST_USD\) -> 1000000$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 2 \(env PI_MAX_COST_USD\) to 1000000$/);
     withSettings({ maxCostUsd: "1.50" });
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) -> 3$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to 3$/);
     delete process.env.PI_MAX_COST_USD;
     withSettings({});
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
     // No deployment pointer here: pi's environment is not the worker's, so an absent variable proves nothing.
-    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) -> 3$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) to 3$/);
     // An EMPTY variable is unset, the worker's own reading.
     process.env.PI_MAX_COST_USD = "";
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) -> 3$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) to 3$/);
     delete process.env.PI_MAX_COST_USD;
     // The AFTER side of an unset is the value the key falls back to, by the same rule.
     process.env.PI_MAX_COST_USD = "2.00";
     withSettings({ maxCostUsd: "1.50" });
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) -> 2\.00 \(env PI_MAX_COST_USD\)$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to 2\.00 \(env PI_MAX_COST_USD\)$/);
     delete process.env.PI_MAX_COST_USD;
     withSettings({ maxCostUsd: "1.50" });
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) -> \(not in the overlay; the worker's environment is not visible here\)$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to \(not in the overlay; the worker's environment is not visible here\)$/);
   } finally {
     if (saved === undefined) delete process.env.PI_MAX_COST_USD;
     else process.env.PI_MAX_COST_USD = saved;
@@ -289,7 +289,7 @@ test("dispatch_set: a blank settings file (whitespace or a BOM only) is written 
     const outNo = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "7" }, undefined, undefined, declined.ctx));
     assert.equal(outNo.applied, false);
     assert.equal(declined.shown.length, 1, `the operator is asked, as over a missing file (${JSON.stringify(text)})`);
-    assert.match(declined.shown[0].message, /^dailyCap: \(unset\) -> 7$/);
+    assert.match(declined.shown[0].message, /^dailyCap: \(unset\) to 7$/);
     assert.equal(readFileSync(settingsFile, "utf8"), text, "a decline leaves the blank file alone");
     const approved = toolCtx({ answer: true });
     const outYes = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "7" }, undefined, undefined, approved.ctx));
@@ -413,15 +413,18 @@ test("dispatch_trigger_add cannot produce run.portfolio, even sent as an extra f
   const path = tmpTriggers({ triggers: [] });
   process.env.PI_TRIGGERS_FILE = path;
   const { ctx, shown } = toolCtx({ answer: true });
-  const out = textOf(await toolByName("dispatch_trigger_add").execute(
-    "id",
-    { kind: "cron", id: "pm-weekly", pattern: "0 6 * * 1", folder: "/srv/pm", flow: "pm", task: "plan", portfolio: true, run: { portfolio: true } },
-    undefined, undefined, ctx,
-  ));
-  assert.equal(out.applied, true);
-  const t = read(path).triggers[0];
-  assert.equal("portfolio" in t.run, false, "the written entry carries no flag");
-  assert.doesNotMatch(shown[0].message, /portfolio/, "and the confirm never showed one");
+  // Issue #737: a field the kind does not take is refused by name before the confirm, where it used to be dropped in
+  // silence, so the flag can neither be written nor shown.
+  await assert.rejects(
+    toolByName("dispatch_trigger_add").execute(
+      "id",
+      { kind: "cron", id: "pm-weekly", pattern: "0 6 * * 1", folder: "/srv/pm", flow: "pm", task: "plan", portfolio: true, run: { portfolio: true } },
+      undefined, undefined, ctx,
+    ),
+    { message: "dispatch_trigger_add does not take portfolio for a cron trigger; it takes kind, id, pattern, folder, flow, task, model, provider, maxTurns, backend, progress, statusComment, recover, steer. Nothing was changed" },
+  );
+  assert.equal(shown.length, 0, "the operator was never asked");
+  assert.equal(read(path).triggers.length, 0, "and nothing was written");
 });
 
 test("the panel's add-trigger dialogs never ask for run.portfolio, and the cron entry they write has none (#505)", async () => {
@@ -459,13 +462,13 @@ test("the panel's flow edit keeps an existing run.portfolio flag (#505)", async 
   assert.deepEqual(read(path).triggers[0], { ...PM_CRON, run: { ...PM_CRON.run, flow: "pm3" } });
 });
 
-test("dispatch_trigger_edit: an approved confirm changes the flow and shows old->new", async () => {
+test("dispatch_trigger_edit: an approved confirm changes the flow and shows the old and the new", async () => {
   const path = tmpTriggers({ triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old" } }] });
   process.env.PI_TRIGGERS_FILE = path;
   const { ctx, shown } = toolCtx({ answer: true });
   await toolByName("dispatch_trigger_edit").execute("id", { index: 0, flow: "new" }, undefined, undefined, ctx);
   assert.equal(read(path).triggers[0].run.flow, "new");
-  assert.match(shown[0].message, /old -> new/);
+  assert.match(shown[0].message, /old to new/);
 });
 
 test("dispatch_trigger_edit: provider and model ride the confirm and land on the entry (#502)", async () => {
@@ -475,8 +478,8 @@ test("dispatch_trigger_edit: provider and model ride the confirm and land on the
   const out = textOf(await toolByName("dispatch_trigger_edit").execute("id", { index: 0, flow: "old", provider: "anthropic", model: "claude-sonnet-4-5" }, undefined, undefined, ctx));
   assert.equal(out.applied, true);
   assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "old", model: "claude-sonnet-4-5", provider: "anthropic" });
-  assert.match(shown[0].message, /provider: - -> anthropic/);
-  assert.match(shown[0].message, /model: gpt-5\.4 -> claude-sonnet-4-5/);
+  assert.match(shown[0].message, /provider: - to anthropic/);
+  assert.match(shown[0].message, /model: gpt-5\.4 to claude-sonnet-4-5/);
 });
 
 test("dispatch_trigger_edit: a malformed model is refused BEFORE the confirm, with the loader's message (#502)", async () => {
@@ -705,7 +708,7 @@ test("declaring a profile writes the overlay only after a confirm showing the EX
 
   assert.match(shown[0], /"secretProfiles"/, "the exact JSON to be written is shown");
   assert.match(shown[0], /prod/);
-  assert.match(shown[0], /EXECUTES this script/, "the operator is told what they are granting");
+  assert.match(shown[0], /executes this script/, "the operator is told what they are granting");
   assert.match(shown[0], /PI_SECRET_RESOLVER_ROOTS/, "and that the worker still has to admit it");
   assert.deepEqual(JSON.parse(files["/s/settings.json"]), { secretProfiles: { prod: "/opt/pi/resolve.sh" } });
   assert.ok(notes.some((n) => /triggers\.json/.test(n)), "and the operator is told binding it is still a file edit");
@@ -782,7 +785,7 @@ test("secrets add --bundle writes the overlay's secretBundles only after a confi
   await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, (m) => notes.push(m), ["add", "--bundle"], { fs, env: {}, audit: { append() {} } });
   assert.equal(shown.length, 1);
   assert.match(shown[0], /^\/s\/settings\.json gets:\n\{\n {2}"secretBundles": \{\n {4}"op-shop": \{\n {6}"path": "\/opt\/pi\/op-shop\.mjs",\n {6}"format": "json"\n/);
-  assert.match(shown[0], /EXECUTES this script.*once per job start.*EVERY variable it prints \(json\).*PI_SECRET_RESOLVER_ROOTS/s);
+  assert.match(shown[0], /executes this script.*once per job start.*every variable it prints \(json\).*PI_SECRET_RESOLVER_ROOTS/s);
   const written = JSON.parse(fs.files["/s/settings.json"]);
   assert.deepEqual(written, { model: "m", secretBundles: { "op-shop": { path: "/opt/pi/op-shop.mjs", format: "json" } } });
   assert.deepEqual(readOverlay("/s/settings.json", { fs }).overlay.secretBundles, written.secretBundles, "the worker's validator reads it back as written");
@@ -825,11 +828,11 @@ test("secrets remove --bundle names the bundles it strands, and list shows profi
   const notes = [];
   await runSecretsCommand(paths, { ui: {} }, (m) => notes.push(m), ["list"], { fs, env: { PI_SECRET_RESOLVER_ROOTS: "/opt" } });
   assert.equal(notes[0], [
-    "Resolver profiles (settings overlay):\n  prod -> /opt/p.sh",
+    "Resolver profiles (settings overlay):\n  prod: /opt/p.sh",
     // Issue #712: each profile's use; this fake fs resolves nothing, so the roots are the worker's to judge.
     "Secret profiles in use (names only; the resolver paths are listed above):\n  prod: declared in the settings overlay; its resolver cannot be resolved on this host, so only the worker can judge it against PI_SECRET_RESOLVER_ROOTS (doctor --secrets); used by no trigger; last resolve: no run in view recorded it; served by: the registry is not read here (the console's and the panel's profiles show the live hosts)",
-    "Bundle resolvers (settings overlay):\n  op-shop -> /opt/b.mjs (json)",
-    "Secret bundles (triggers.json; names only, never a reference or a value):\n  shop: project shop; profile op-shop (declared in the settings overlay, json, inside PI_SECRET_RESOLVER_ROOTS as written; doctor --secrets checks it runs); fork reviews do not; no endpoints; 1 trigger opts out: #0",
+    "Bundle resolvers (settings overlay):\n  op-shop: /opt/b.mjs (json)",
+    "Secret bundles (triggers.json; names only, never a reference or a value):\n  shop: project shop; profile op-shop (declared in the settings overlay, json, inside PI_SECRET_RESOLVER_ROOTS as written; doctor --secrets checks it runs); fork reviews do not; no endpoints; 1 trigger opts out: #1",
   ].join("\n\n"));
   assert.ok(!notes[0].includes("env-ref-canary"));
   // Roots the panel can see that do not hold the path: the worker would not run it, and the list says so.
@@ -843,7 +846,7 @@ test("secrets remove --bundle names the bundles it strands, and list shows profi
   const shown = [];
   const said = [];
   await runSecretsCommand(paths, { ui: { input: async () => "", confirm: async (_t, m) => (shown.push(m), true), notify: () => {} } }, (m) => said.push(m), ["remove", "--bundle", "op-shop"], { fs, env: {}, audit: { append() {} } });
-  assert.match(shown[0], /^op-shop -> \/opt\/b\.mjs \(json\)\n\nThe jobs of bundle shop are refused PRE-SPEND after this \(secret-bundle-profile-unknown\), or on a multi-host worker's shared queue held for a host that declares it/);
+  assert.match(shown[0], /^op-shop: \/opt\/b\.mjs \(json\)\n\nThe jobs of bundle shop are refused pre-spend after this \(secret-bundle-profile-unknown\), or on a multi-host worker's shared queue held for a host that declares it/);
   assert.deepEqual(JSON.parse(fs.files["/s/settings.json"]), { secretProfiles: { prod: "/opt/p.sh" }, secretBundles: {} });
   assert.deepEqual(said, ["removed bundle resolver op-shop"]);
   // The profile of the same name is a different namespace: `remove prod` without --bundle still removes the profile.
@@ -953,7 +956,7 @@ test("a relative resolver path is refused before any dialog approves it", async 
   const ctx = { ui: { input: async (t) => (/profile name/.test(t) ? "prod" : "relative/resolve.sh"), confirm: async () => (confirmed = true), notify: () => {} } };
   await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, (m) => notes.push(m), ["add"]);
   assert.equal(confirmed, false, "it must never reach the confirm");
-  assert.ok(notes.some((n) => /ABSOLUTE/.test(n)));
+  assert.ok(notes.some((n) => /absolute path/.test(n)));
 });
 
 test("a profile name carrying a list separator is refused -- it could not round-trip its declaration", async () => {
@@ -1015,7 +1018,7 @@ test("dispatch_limit_edit: an approved partial edit changes one field and keeps 
   assert.equal(out.applied, true);
   const l = read(path).limits[0];
   assert.deepEqual(l, { scope: "acme/web", day: 5, week: 40 });
-  assert.match(shown[0].message, /→/, "the confirm shows before→after");
+  assert.match(shown[0].message, /\nto \{/, "the confirm shows before, then after");
 });
 
 test("dispatch_limit_edit KEEPS a row's dollar window and the file stays version 2 (PR #549's review)", async () => {
@@ -1088,7 +1091,7 @@ test("issue #498: an edit that rewrites a bare scope to a qualified one says the
   const path = tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 10 }] });
   const { ctx, shown } = toolCtx({ answer: true });
   textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, scope: "github:acme/web" }, undefined, undefined, ctx));
-  assert.match(shown[0].message, /starts a NEW count under a new key/);
+  assert.match(shown[0].message, /starts a new count under a new key/);
   assert.match(shown[0].message, /Jobs already running keep their slot under the old scope/, "the in-flight window is named too");
   assert.match(shown[0].message, /up to 2N jobs can run/, "and its size: the new row counts from zero beside the old jobs");
   assert.deepEqual(read(path).limits[0], { scope: "github:acme/web", day: 10 });
@@ -1096,7 +1099,7 @@ test("issue #498: an edit that rewrites a bare scope to a qualified one says the
   // A count-only edit says nothing about it.
   const { ctx: ctx2, shown: shown2 } = toolCtx({ answer: true });
   textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, day: 4 }, undefined, undefined, ctx2));
-  assert.doesNotMatch(shown2[0].message, /NEW count/);
+  assert.doesNotMatch(shown2[0].message, /new count/);
   // The panel dialog asks before a scope change, and a decline writes nothing.
   const declineUi = mockUi({ select: ["Edit a scoped limit", "#1  github:acme/web  day 4"], input: ["forgejo:acme/web", "", "", "", ""], confirm: [false] });
   await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui: declineUi });
@@ -1396,7 +1399,7 @@ test("dispatch_envelope_set: an approved change sets alloc:envelope:expected BEF
     const { ctx, shown } = toolCtx({ answer: true });
     const out = textOf(await toolByName("dispatch_envelope_set").execute("id", { minIntervalHours: 0 }, undefined, undefined, ctx));
     assert.equal(out.applied, true);
-    assert.match(shown[0].message, /minIntervalHours: 24 -> 0/, "the confirm shows the before and after");
+    assert.match(shown[0].message, /minIntervalHours: 24 to 0/, "the confirm shows the before and after");
     assert.equal(fileWhenExpectedSet, before, "the expected digest was stored while the file still held the old envelope");
     const written = readFileSync(files.envelope, "utf8");
     const parsed = parseEnvelope(written, files.envelope, { projects: ALLOC_PROJECTS.map((p) => ({ ...p, name: null })), limits: [], maxCostMicros: 2 * M });

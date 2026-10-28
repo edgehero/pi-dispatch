@@ -9,7 +9,7 @@ import { parseTriggers } from "../src/triggers.mjs";
 
 // The portfolio manager example (issue #506) and its page. The example is copied by operators, so what it ships must
 // load through the same parsers the worker uses, and the page's worked numbers are computed here from the page's own
-// envelope rather than trusted (CLAUDE.md: a hand-written table that restates a derivable source is pinned).
+// envelope rather than trusted (AGENTS.md: a hand-written table that restates a derivable source is pinned).
 
 const root = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");

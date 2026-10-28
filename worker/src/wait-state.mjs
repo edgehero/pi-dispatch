@@ -18,6 +18,12 @@
  *      the worker rather than projected out of a delayed job's `.data`, which holds the issue title and
  *      body.
  *
+ * Two fields say more of the same to an operator, for the same reason (issue #737): `after`, the job's own
+ * `after` instant, and `a:<profile>`, what each check last answered and when (`<go|hold|fault|refuse|unclear>:<ms>`).
+ * A console reads both from here, never from the job's data. `after` is not the hold's lease horizon: on the
+ * polled path that is the next check, and on a throttled wake it is the maximum wait, so a console showing it
+ * as the hold's end would draw a time nobody chose. The next wake is the defer record's (`defer-reasons.mjs`).
+ *
  * WHY THIS IS NOT THE REDIS STATE `OQ-008` AND #242 REFUSED. That refusal is about a claim that would
  * survive a crash WRONGLY -- an in-flight count asserting a container the boot reaper had just killed.
  * This describes DELAYED JOBS, which are themselves Redis-persisted, so it is the same source of truth
@@ -29,7 +35,8 @@
  *
  * The keys, all under one prefix so an operator can see the whole feature with one `KEYS wait:*`:
  *   wait:held                 SET of held job ids -- an index the READER prunes, never a source of truth
- *   wait:job:<jobId>          HASH { since, faults, throttles, target, label, dedupId }, TTL sized to the hold
+ *   wait:job:<jobId>          HASH { since, faults, throttles, checks, target, label, dedupId, after, a:<profile> },
+ *                             TTL sized to the hold
  *   wait:done:<dedupId>       STRING jobId -- this target's wait was satisfied, briefly remembered
  *   wait:key:<dedupId>        STRING jobId -- the supersede lease, TTL sized to the expected hold
  */
@@ -61,6 +68,37 @@ export const satisfiedKey = (dedupId) => `wait:done:${dedupId}`;
 // longest two jobs that cleared together can wake apart.
 const SATISFIED_MS = 15 * 60 * 1000;
 
+/** The hold hash's field prefix for a check's last answer: `a:<profile>`. */
+export const WAIT_ANSWER_PREFIX = "a:";
+
+/** The answers a check's field may hold, the gate's own vocabulary for what it was told (`answerOf`). */
+export const WAIT_ANSWERS = Object.freeze(["go", "hold", "fault", "refuse", "unclear"]);
+
+/**
+ * A profile name that may become a field. The wait loader's charset with a length bound, so a field name stays a
+ * short token whatever a newer loader admits; a longer name keeps its hold and simply records no answer.
+ */
+export const WAIT_PROFILE_FIELD_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * What a check's verdict says, as the hold hash records it, or null when it says nothing about the condition: an
+ * aborted check (a restart or a cancel stopped it), a profile this worker does not declare, and a target no check
+ * can be handed are each decided by the gate without an answer. `hold` with a fault is `fault` (the check could not
+ * tell); anything the gate does not understand is `unclear`, the same shape it holds rather than runs.
+ *
+ * In the gate's own order of tests (index.mjs, after the check loop), so a verdict carrying two signals is recorded
+ * as what the gate did with it: a `refuse` that also says aborted is refused there, and recorded so here.
+ */
+export function answerOf(verdict) {
+	const v = verdict !== null && typeof verdict === "object" ? verdict : {};
+	if (v.unusableTarget || v.profileUnknown) return null;
+	if (v.verdict === "refuse") return "refuse";
+	if (v.aborted) return null;
+	if (v.verdict === "hold") return v.fault === true ? "fault" : "hold";
+	if (v.verdict === "go") return "go";
+	return "unclear";
+}
+
 /**
  * Build the state accessor. `redis` is the same client the budget uses; nothing here is on the paid path,
  * so every method is written to FAIL OPEN: a redis blip must never refuse a job or wedge a hold, it may
@@ -74,13 +112,16 @@ export function makeWaitState({ redis, now = () => Date.now(), counterTtlMs = 25
 		 * Record (or refresh) a hold. `since` is written ONCE with HSETNX so a re-pick does not restart the
 		 * clock -- that is the whole point of not using `job.timestamp`, and a plain HSET here would
 		 * reintroduce the bug from the other side by resetting the wait on every wake.
+		 *
+		 * `afterMs` is the job's own `after` instant (`afterMs(job.data)`), written as `after` beside the label in
+		 * the same HSET when it is a whole number of milliseconds; the hold's lease horizon `untilMs` never is.
 		 */
-		async hold(jobId, { dedupId, target, label, untilMs }) {
+		async hold(jobId, { dedupId, target, label, untilMs, afterMs = null }) {
 			try {
 				const key = jobKey(jobId);
 				const ttl = leaseMs(untilMs);
 				await redis.hsetnx(key, "since", String(now()));
-				await redis.hset(key, "target", target ?? "", "label", label ?? "", "dedupId", dedupId ?? "");
+				await redis.hset(key, "target", target ?? "", "label", label ?? "", "dedupId", dedupId ?? "", ...(Number.isSafeInteger(afterMs) ? ["after", String(afterMs)] : []));
 				await redis.pexpire(key, ttl);
 				await redis.sadd(HELD_SET, jobId);
 				// Refresh OUR lease only, and re-read to find out whether it IS ours: `hold` is no longer
@@ -242,6 +283,24 @@ export function makeWaitState({ redis, now = () => Date.now(), counterTtlMs = 25
 				await redis.pexpire(jobKey(jobId), counterTtlMs);
 			} catch {
 				// Fail open: a lost counter costs a longer wait, never a wrong verdict.
+			}
+		},
+
+		/**
+		 * Record what one profile's check last answered, `a:<profile>` = `<answer>:<ms>`, for a console to show
+		 * beside the hold. One field per profile, overwritten by its next answer, so the hash grows with the job's
+		 * conditions and never with its wakes. Like a counter it may create the hash, so it carries the counters'
+		 * TTL for their reason. A profile or an answer outside its rule is not written, silently: the answers are
+		 * the gate's own vocabulary, and a profile name past the field rule keeps its hold without the detail.
+		 * Fail open.
+		 */
+		async noteAnswer(jobId, { profile, answer } = {}) {
+			if (typeof profile !== "string" || !WAIT_PROFILE_FIELD_RE.test(profile) || !WAIT_ANSWERS.includes(answer)) return;
+			try {
+				await redis.hset(jobKey(jobId), `${WAIT_ANSWER_PREFIX}${profile}`, `${answer}:${now()}`);
+				await redis.pexpire(jobKey(jobId), counterTtlMs);
+			} catch {
+				// Fail open: a lost answer costs a console its detail, never the gate its decision.
 			}
 		},
 

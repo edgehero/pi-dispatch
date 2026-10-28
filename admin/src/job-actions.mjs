@@ -6,6 +6,7 @@
  * surface" stays true for every caller; this file exists only because that one had grown past the point where a new
  * family of functions could be reviewed inside it. Issue #646 adds one more: a message into a running,
  * steer-armed job (`planSteer`/`enqueueSteer`) and taking one back (`planSteerWithdraw`/`withdrawSteerMessage`).
+ * Issue #737 adds cancelling a queued job that never started (`planCancelQueued`/`cancelQueuedJob`).
  *
  * THE SHAPE OF EVERY ACTION. A PLAN, then an APPLY, so the console can show an operator exactly what will happen before
  * they confirm, and bind its ticket to it:
@@ -24,6 +25,7 @@
 import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
+import { makeApprovalStore } from "@edgehero/pi-dispatch/approval-state";
 import { QUEUE, makeQueue, enqueueForgeJob, enqueueLocalJobReporting, enqueueTriggerRunReporting, forgeDeliveryJobId, hostQueueName, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
 import { jobNeeds, routeForgeJob } from "@edgehero/pi-dispatch/capabilities";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
@@ -37,7 +39,12 @@ import { boundAnswerText, consoleAnswerBy, PANEL_ANSWER_BY } from "@edgehero/pi-
 import { runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import * as steerInbox from "@edgehero/pi-dispatch/steer-inbox";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
-import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, readFleetQueues, readPendingAnswer, readRunById, targetKeyOf } from "./read-model.mjs";
+import { removeQueuedJob } from "@edgehero/pi-dispatch/cancel-state";
+import { jobKey } from "@edgehero/pi-dispatch/wait-state";
+import { isSchedulerNext } from "@edgehero/pi-dispatch/defer-reasons";
+import { scrubControls } from "./panel.mjs";
+import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, readFleetQueues, readPendingAnswer, readRunById, readWaitingRow, RUN_RECORD_UNREAD, targetKeyOf, WAITING_STATES } from "./read-model.mjs";
+import { RECORD_REASON_RE, recordReason } from "./words.mjs";
 
 /** The most jobs one bulk action names, and so the most one preview lists (issue #642). */
 export const BULK_MAX = 100;
@@ -80,7 +87,10 @@ function consoleDeliveryId(random = randomBytes) {
 /**
  * Open the fleet's queues lazily over one discovery (`readFleetQueues`: the live registry unioned with the queues that
  * exist, the kill switch's set). `find(jobId)` asks each queue in turn, the first that knows the id owning it, as
- * `pi-dispatch cancel` does: ids are unique across queues by construction. `close()` closes every queue opened.
+ * `pi-dispatch cancel` does: ids are unique across queues by construction. `close()` closes every queue opened since the
+ * last `close()`, all at once, and resolves once each has settled (never rejects). BullMQ's close QUITs each connection
+ * and waits for the answer, which a Valkey that stopped answering on an open socket never sends, so a caller that owes
+ * its answer within a bound starts the close and does not wait on it.
  */
 async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }) {
   const { names, blind, hosts } = await readFleetQueues({ url, redisFn, timeoutMs });
@@ -105,15 +115,29 @@ async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }
       }
       return null;
     },
-    async close() {
-      for (const q of opened.values()) await q.close().catch(() => {});
+    close() {
+      const queues = [...opened.values()];
+      opened.clear();
+      return Promise.all(
+        queues.map((q) => {
+          try {
+            return Promise.resolve(q.close()).catch(() => {});
+          } catch {
+            return undefined;
+          }
+        }),
+      );
     },
   };
 }
 
-/** The words for a job no fleet queue knows, naming a blind registry when there is one. */
-function notInFleet(jobId, fleet) {
-  return `no job ${jobId} in ${fleet.names.length} queue(s)${fleet.blind ? ` (the host registry could not be read: ${fleet.blind}; a host that is not registered may still hold it)` : ""}`;
+/**
+ * The words for a job no fleet queue knows, naming a blind registry when there is one. The registry read's own error is
+ * never in them: it is a client's, which can name a host, and this sentence reaches a page and the audit.
+ */
+function notInFleet(jobId, fleet, action = null) {
+  if (action !== null) return `${action}: no job in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${fleet.blind ? " (the host registry could not be read; a host that is not registered may still hold it)" : ""}; job ${jobId}`;
+  return `no job ${jobId} in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${fleet.blind ? " (the host registry could not be read; a host that is not registered may still hold it)" : ""}`;
 }
 
 /** A failed job's identity for a preview and a re-check: the attempts made and the finish instant. */
@@ -136,12 +160,12 @@ function targetOf(data) {
  * ("it changed since the preview": retried, removed, or failed again since).
  */
 async function actOnFailed(found, jobId, expect, act) {
-  if (!found) return { invalid: `no job ${jobId}: it changed since the preview (it was removed or retried and finished)` };
+  if (!found) return { invalid: `Nothing was done: it changed since the preview (it was removed or retried and finished); job ${jobId}` };
   const state = await found.job.getState().catch(() => "unknown");
-  if (state !== "failed") return { invalid: `job ${jobId} is ${state} now, not failed: it changed since the preview. Nothing was done` };
+  if (state !== "failed") return { invalid: `Nothing was done: it is ${state} now, not failed; it changed since the preview; job ${jobId}` };
   const now = failedFingerprint(found.job);
   if (now.attemptsMade !== expect.attemptsMade || now.finishedOn !== expect.finishedOn) {
-    return { invalid: `job ${jobId} failed again since the preview (it changed since the preview). Nothing was done; look again` };
+    return { invalid: `Nothing was done: it failed again since the preview (it changed since the preview); look again; job ${jobId}` };
   }
   await act(found.job);
   return { ok: true, jobId, queue: found.queue };
@@ -157,8 +181,11 @@ function expectProblem(expect) {
 
 /**
  * Retry ONE failed job (issue #642), wherever in the fleet it is: BullMQ's own `job.retry()`, which moves it back to
- * waiting with its attempts reset, so the worker runs it again with every pre-spend gate (it is a paid action, and the
- * console says so). `expect` is `{ attemptsMade, finishedOn }` from the preview. Returns `{ ok: true, jobId, queue }`,
+ * waiting, so the worker runs it again with every pre-spend gate (it is a paid action, and the console says so). The job
+ * KEEPS the attempts it made: bullmq 5.80.4's `reprocessJob` drops `atm` only when asked to (`resetAttemptsMade`), and
+ * this asks for nothing. That is why a retried job is never one `cancel-queued` removes (`planCancelQueued` refuses a job
+ * that has made an attempt), and why Retry's Undo is a sentence rather than an action (issue #737).
+ * `expect` is `{ attemptsMade, finishedOn }` from the preview. Returns `{ ok: true, jobId, queue }`,
  * `{ invalid }` (not found, not failed, changed since the preview), or `{ unreachable }`.
  *
  * The residual, stated: between the re-check and the call, the job can only leave `failed` by another operator's
@@ -235,7 +262,7 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
       fleet ??= await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
       try {
         const found = await fleet.find(jobId, entry.queue);
-        const res = found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, act) : { invalid: `${notInFleet(jobId, fleet)}: it changed since the preview` };
+        const res = found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, act) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
         results.push(res.ok ? res : { jobId, invalid: res.invalid });
       } catch (err) {
         // One job's Valkey error is that job's result; a bulk action reports per job and goes on.
@@ -400,6 +427,9 @@ function runFieldsOf(run, flow) {
     ...(run.instructions !== undefined ? { instructions: run.instructions } : {}),
     ...(run.resume !== undefined ? { resume: run.resume } : {}),
     ...(run.awaitInput === true ? { awaitInput: true } : {}),
+    ...(run.gates !== undefined ? { gates: run.gates } : {}),
+    ...(run.gateTimeout !== undefined ? { gateTimeout: run.gateTimeout } : {}),
+    ...(run.gateBudgetRaiseUsd !== undefined ? { gateBudgetRaiseUsd: run.gateBudgetRaiseUsd } : {}),
     ...(run.progress === true ? { progress: true } : {}),
     ...(run.statusComment === true ? { statusComment: true } : {}),
     ...(run.recover === true ? { recover: true } : {}),
@@ -469,6 +499,401 @@ function currentTriggerFor(entries, kind, data) {
   return { run };
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Cancel a job that never started (issue #737): `cancel-queued`. The sequence (a held job's keys, then the job, then its
+// defer record) is the worker's `removeQueuedJob`, the one `pi-dispatch cancel` runs; the RULES are the console's, here.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * A cancel answer's sentence with its job named once, LAST, as "(job <id>)" (issue #737): the one way every sentence a
+ * cancel answers with names its job (`cancelQueuedRefusal`, `heldClearedAnswer`, `removalUnknown`, `heldRefused` and
+ * the rest below). The sentence is also the audit row's `reason`, which the log cuts at `CONSOLE_AUDIT_FIELD_MAX` (200)
+ * code points, and a job id may be up to 200 characters: with the id first, a long one pushed what happened past the
+ * cut, so the row kept the id and lost the outcome. The row's `target` names the job already, so the id is the part a
+ * cut may take. Another module's words in such a sentence (`theirWords`) come after the console's own, before the id.
+ */
+const jobLast = (sentence, jobId) => `${sentence} (job ${jobId})`;
+
+/**
+ * Another module's words as a cancel answer carries them (BullMQ's, a client's, the worker's `removeHeldJob`'s):
+ * `boundedText`'s, with the job they name said as "the job", since the answer names it last (`jobLast`). Read before the
+ * bound, so a 200-character id is replaced whole rather than cut part-way.
+ */
+function theirWords(text, jobId) {
+  const said = String(text ?? "no reason given");
+  return boundedText(typeof jobId === "string" && jobId !== "" ? said.replaceAll(`Job ${jobId}`, "the job").replaceAll(`job ${jobId}`, "the job") : said);
+}
+
+/**
+ * The console's sentence for each reason it does not cancel a queued job (issue #737), every one saying "nothing was
+ * changed" and then naming the job (`jobLast`). `kind` is one of `retried`, `stalled`, `recovery`, `scheduled`,
+ * `notQueued`, `started`, `changed`; any other kind throws (every caller names its kind by a literal). The facts:
+ * `jobId`, `attempts` (made), `run` (the run a recovery continues), `scheduler` (the cron trigger) and `state` (BullMQ's).
+ *
+ * WHY "NEVER STARTED" IS THE RULE, and not "not running". A job that made an attempt and waits to retry still owns that
+ * run's steer inbox and held replies, which stay open for its next attempt (they are per run); one handed back after a
+ * stall may have run to the end of an attempt whose record is still being written; a recovery owes the run it continues
+ * that run's final record. Removing any of them from the queue strands state no surface would clean up, so the console
+ * cancels only a job that has done nothing yet, and a job that runs is stopped by Cancel on its run page. `pi-dispatch
+ * cancel` keeps its wider reach (it removes a retry too): an operator at the CLI sees `ranBefore`'s words.
+ */
+export function cancelQueuedRefusal(kind, { jobId, attempts, run, scheduler, state } = {}) {
+  return jobLast(cancelQueuedWords(kind, { attempts, run, scheduler, state }), jobId);
+}
+
+/** `cancelQueuedRefusal`'s words before the job is named. */
+function cancelQueuedWords(kind, { attempts, run, scheduler, state }) {
+  switch (kind) {
+    case "retried": {
+      const n = Number.isSafeInteger(attempts) && attempts > 0 ? attempts : 1;
+      return `the job has made ${n} ${n === 1 ? "attempt" : "attempts"} and waits to retry: a retry keeps its run's steer and held replies open for the next attempt, so the console cancels only a job that never started; once it runs, Cancel on its run page stops it; nothing was changed`;
+    }
+    case "stalled":
+      return "the job was handed back after a stall, so an attempt of it may have finished; nothing was changed";
+    case "recovery":
+      return `the job recovers run ${run} and owes that run its final record; nothing was changed`;
+    case "scheduled":
+      return `the job is cron trigger ${scheduler}'s next run: pause the trigger or edit its schedule; BullMQ refuses to remove a scheduler's next job; nothing was changed`;
+    case "notQueued":
+      return `the job is ${state}, not waiting to start; nothing was changed`;
+    case "started":
+      return "the job started since the preview; nothing was changed";
+    case "changed":
+      return "the job changed since the preview; nothing was changed";
+    default:
+      throw new RangeError(`cancelQueuedRefusal: unknown kind ${JSON.stringify(kind)}`);
+  }
+}
+
+/** The states BullMQ moves a job to once a worker has taken it: a job found in one of these has started. */
+const STARTED_STATES = Object.freeze(["active", "completed", "failed"]);
+
+/** A count off a Job (`attemptsMade`, `stalledCounter`): a non-negative integer, or null for anything else. */
+function countOf(n) {
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+/** A cron trigger's id as BullMQ's scheduler key carries it (the loader's charset), or null. */
+const SCHEDULER_KEY_RE = /^[A-Za-z0-9._-]{1,200}$/;
+
+/** A job's kind as BullMQ's job name carries it (`local`, `github`, ...), or null. */
+const JOB_KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** The run a recovery continues, as a sentence may name it: a job id, else words that name none. */
+function recoveryRunOf(data) {
+  const of = data?.recoveryOf;
+  if (typeof of !== "string" || of === "") return null;
+  return JOB_ID_RE.test(of) ? of : "an earlier run";
+}
+
+/** The scheduler's current next instant for `rjk` in `queueName` (`ZSCORE <queue>:repeat <rjk>`), or null. */
+async function schedulerNextOf(redis, q, rjk) {
+  const key = typeof q?.toKey === "function" ? q.toKey("repeat") : `bull:${q?.name}:repeat`;
+  const got = await redis.zscore(key, rjk);
+  return got === null || got === undefined ? null : got;
+}
+
+/**
+ * The never-started rules, in the order their sentences are the most useful: the scheduler's next run (BullMQ refuses
+ * to remove it anyway), a recovery (it owes a record), a job that made an attempt, a job handed back after a stall.
+ * Returns the refusal sentence, or null when the job is one the console cancels. Reads `.data` for `recoveryOf` alone.
+ */
+async function neverStartedRefusal(job, jobId, { redis, q }) {
+  const rjk = typeof job?.repeatJobKey === "string" && SCHEDULER_KEY_RE.test(job.repeatJobKey) ? job.repeatJobKey : null;
+  if (rjk !== null && isSchedulerNext(jobId, rjk, await schedulerNextOf(redis, q, rjk))) return cancelQueuedRefusal("scheduled", { jobId, scheduler: rjk });
+  const run = recoveryRunOf(job?.data);
+  if (run !== null) return cancelQueuedRefusal("recovery", { jobId, run });
+  const attempts = countOf(job?.attemptsMade);
+  if (attempts !== 0) return cancelQueuedRefusal("retried", { jobId, attempts });
+  if (countOf(job?.stalledCounter) !== 0) return cancelQueuedRefusal("stalled", { jobId });
+  return null;
+}
+
+/** `promise` within `ms`, else `fallback()`'s answer; a late rejection is the race's, never unhandled. */
+function within(promise, ms, fallback) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback()), ms);
+    if (typeof timer?.unref === "function") timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The release of a bounded action's clients: the raw client disconnected (synchronous) and the fleet's queues' close
+ * STARTED, never awaited, so the answer leaves within its bound whatever Valkey does. A close BullMQ cannot finish (a
+ * socket that stopped answering) settles when the socket ends; a later call releases what a late read opened since.
+ */
+function releaseOf(fleetOf, redisOf) {
+  return () => {
+    try {
+      redisOf()?.disconnect?.();
+    } catch {
+      // already closed
+    }
+    void fleetOf()?.close();
+  };
+}
+
+/**
+ * Plan a cancel of a job that never started (issue #737, `cancel-queued`). Free and writes nothing: one fleet discovery
+ * and one `getJob` per queue asked (`openFleet`, `queue` first when given), the job's state, the scheduler's next instant
+ * when it names a scheduler, and its waiting row (`readWaitingRow`, so the preview can say why it waits). The job's
+ * `.data` is read inside this function for `recoveryOf` and `targetFor` alone, and never leaves it.
+ *
+ * Returns `{ plan: { jobId, queue, state, held, attemptsMade, stalledCounter, kind, target, waiting } }`, where `held`
+ * is whether the worker holds it on `run.waitFor` (its `wait:job` hash has a clock: the hold's keys go with it),
+ * `waiting` its waiting row or null when that could not be read, and `target` the record's spelling (`targetFor`) or
+ * null; `{ refusal, status }` (400 an id outside the charset, 404 a job no fleet queue holds, 409 a job the rules do
+ * not cancel: `cancelQueuedRefusal`'s words); or `{ unreachable }` when Valkey did not answer within `timeoutMs`.
+ * `projects`/`triggers` (the projects list and the triggers view, optional) name the row's project as `readWaiting` does.
+ */
+export async function planCancelQueued({ url, jobId, queue = null, projects = null, triggers = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
+  if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: "a job id is letters, digits and . _ : -, at most 200 characters", status: 400 };
+  if (queue !== null && (typeof queue !== "string" || queue === "")) return { refusal: "queue must be a queue name", status: 400 };
+  let fleet = null;
+  let redis = null;
+  const release = releaseOf(() => fleet, () => redis);
+  const work = (async () => {
+    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+    const found = await fleet.find(jobId, queue);
+    if (!found) return { refusal: `${notInFleet(jobId, fleet)}; nothing was changed`, status: 404 };
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const state = await found.job.getState().catch(() => "unknown");
+    if (!WAITING_STATES.includes(state)) return { refusal: cancelQueuedRefusal("notQueued", { jobId, state }), status: 409 };
+    const q = fleet.queueOf(found.queue);
+    const refusal = await neverStartedRefusal(found.job, jobId, { redis, q });
+    if (refusal !== null) return { refusal, status: 409 };
+    const hold = await redis.hget(jobKey(jobId), "since");
+    const row = await readWaitingRow(redis, { q, jobId, state, timeoutMs, projects, triggers });
+    return {
+      plan: {
+        jobId,
+        queue: found.queue,
+        state,
+        held: typeof hold === "string" && hold !== "",
+        attemptsMade: 0,
+        stalledCounter: 0,
+        kind: typeof found.job.name === "string" && JOB_KIND_RE.test(found.job.name) ? found.job.name : null,
+        target: targetOf(found.job.data),
+        waiting: row?.row ?? null,
+      },
+    };
+  })();
+  try {
+    return await within(work, timeoutMs, () => ({ unreachable: "timed out reaching the queue" }));
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    // Started, never awaited (`releaseOf`). A read still in flight when the bound fired may open a client or a queue
+    // after this; it is released when it settles.
+    release();
+    work.then(release, release);
+  }
+}
+
+/** The `expect` a cancel-queued apply must carry (the plan's queue and counts), or the refusal for one that does not. */
+function cancelExpectProblem(expect) {
+  if (expect === null || typeof expect !== "object") return "the preview's queue, attemptsMade and stalledCounter are required";
+  if (typeof expect.queue !== "string" || expect.queue === "") return "expect.queue must be the preview's queue";
+  if (countOf(expect.attemptsMade) === null) return "expect.attemptsMade must be a non-negative integer";
+  if (countOf(expect.stalledCounter) === null) return "expect.stalledCounter must be a non-negative integer";
+  return null;
+}
+
+/**
+ * Whether a job moved since the preview, by the never-started rule's moving parts (issue #737): its state, and the
+ * attempts, stall count and finish instant on BullMQ's own `Job` (which reads them as the worker writes them). The
+ * refusal sentence, or null when nothing moved: `started` for a job a worker took (an active or finished state, a finish
+ * instant, counts that grew), `notQueued` for a state no waiting job is in, `changed` for a job gone or counts that moved
+ * otherwise. Asked of the job the confirm re-found, and again of a fresh read right before the removal is sent.
+ */
+function movedSince(jobId, expect, job, state) {
+  if (!job) return cancelQueuedRefusal("changed", { jobId });
+  if (STARTED_STATES.includes(state)) return cancelQueuedRefusal("started", { jobId });
+  if (!WAITING_STATES.includes(state)) return cancelQueuedRefusal("notQueued", { jobId, state });
+  // BullMQ writes `finishedOn` only when a job finishes, and clears it when one is moved back to wait: a waiting job
+  // that carries one finished an attempt since the preview.
+  if (job.finishedOn !== undefined && job.finishedOn !== null) return cancelQueuedRefusal("started", { jobId });
+  const attempts = countOf(job.attemptsMade);
+  const stalled = countOf(job.stalledCounter);
+  if (attempts !== expect.attemptsMade || stalled !== expect.stalledCounter) {
+    const grew = (attempts ?? 0) > expect.attemptsMade || (stalled ?? 0) > expect.stalledCounter;
+    return cancelQueuedRefusal(grew ? "started" : "changed", { jobId });
+  }
+  return null;
+}
+
+/**
+ * The console's answer for a held job whose removal failed once its hold was cleared (`removeHeldJob`'s `cleared`: most
+ * often a worker locked the job between the state read and the remove), from its state read again (`state`, "unknown"
+ * when it could not be). Always `partial`, since the hold's keys are gone, and never the error's own words (BullMQ's,
+ * or a client's, which can name a host): a job a worker took (an active or a finished state) started while its hold was
+ * being cleared; any other is said to have lost its hold and stayed. Shared by `cancel-queued` and `cancelHeldJob`, so
+ * neither sentence names a preview: the TUI's panel and the model's tool, which reach `cancelHeldJob`, show none.
+ *
+ * THE OUTCOME FIRST AND THE JOB ID LAST (`jobLast`), and NO OTHER MODULE'S WORDS in an answer that is `partial`: what
+ * happened is the part of the audit row that matters most when part of the change may have been made, and an error's
+ * words (up to 200 characters) could push it past the row's cut. With a 64-character id every partial sentence fits the
+ * row's field whole (a test drives `cancelQueuedJob` and `cancelHeldJob` through every answer and holds each to it).
+ */
+export function heldClearedAnswer(jobId, state) {
+  if (STARTED_STATES.includes(state)) return { invalid: jobLast("the job was not removed: it started while its hold was being cleared, and its hold's record is gone; look at the fleet", jobId), partial: true };
+  return { invalid: jobLast("the job was not removed, though its hold was cleared: it may still be queued without one; cancel it again if the fleet shows it", jobId), partial: true };
+}
+
+/**
+ * The answer for a held job's removal that `removeHeldJob` refused before anything was deleted (or after a first delete
+ * that failed with the hold read back in place): nothing was changed, in its words (`theirWords`), the job named last.
+ * Shared by `cancel-queued` and `cancelHeldJob`.
+ */
+export const heldRefused = (jobId, text) => ({ invalid: jobLast(theirWords(text, jobId), jobId) });
+
+/** The refusal when the job could not be read again right before its removal: nothing was sent, so nothing changed. */
+const unreadBeforeRemoval = (jobId) => jobLast("the job could not be read again right before its removal, so it was not removed; nothing was changed", jobId);
+
+/**
+ * The answer for a removal BullMQ refused (`raced`) whose job could not be read back: the remove may have landed, so
+ * `partial`, in the console's words alone (`heldClearedAnswer`'s rule).
+ */
+const removalUnreadBack = (jobId) => ({ invalid: jobLast("the job may or may not have been removed: its removal failed and it could not be read back; look at the fleet", jobId), partial: true });
+
+/**
+ * The answer for a removal whose outcome is not known: asked for and not answered within the bound (`unanswered`), or
+ * answered in a way this console cannot read. True whatever was or was not sent, since the bound covers the removal's
+ * first reads as well as its writes: it never says the removal was sent, nor that it was not. `held` (the re-checks
+ * read a hold) names the hold too, whose keys go first; a hold that came after that read is still covered, since "may
+ * or may not have been removed" claims nothing about one. The outcome first and the id last (`heldClearedAnswer`).
+ */
+export function removalUnknown(jobId, held, unanswered) {
+  const gone = held ? "the job or its hold may or may not be gone: their removal" : "the job may or may not have been removed: its removal";
+  const how = unanswered ? "was asked for and not answered within the bound" : "answered in a way this console cannot read";
+  return { invalid: jobLast(`${gone} ${how}; look at the fleet`, jobId), partial: true };
+}
+
+/**
+ * A held job's cancel that was asked for and not answered within its bound (`cancelHeldJob`'s, and `cancel-queued`'s
+ * for a held job): `removalUnknown`'s held sentence, so the two doors say one thing of one outcome, `{ invalid, partial }`.
+ */
+export const heldRemovalUnanswered = (jobId) => removalUnknown(jobId, true, true);
+
+/**
+ * A sentence another module wrote, as an answer may carry it: control bytes made spaces, at most 200 characters. The
+ * way a cancel's or a planner's answer carries an error's own words (BullMQ's, a client's, a parse of a job's data);
+ * the file funnels' validation sentences, the console's own words about the operator's file, stay whole.
+ */
+export function boundedText(text) {
+  return scrubControls(String(text ?? "no reason given")).slice(0, 200);
+}
+
+/**
+ * Cancel a job that never started (issue #737), after the preview `planCancelQueued` made. `expect` is the plan's `{
+ * queue, attemptsMade, stalledCounter }`. Re-finds the job (the preview's queue first) and refuses, in
+ * `cancelQueuedRefusal`'s words, a job that moved to another queue or moved since the preview (`movedSince`), and any
+ * job the never-started rules now refuse (re-checked, the scheduler's next run included). Then the worker's
+ * `removeQueuedJob` (its held keys first, then the job, then its defer record), with a guard that reads the job's state
+ * and hash again right before the removal is sent and refuses by `movedSince` once more: BullMQ's remove checks only the
+ * lock and the scheduler, and would remove a job a worker took and finished, or failed back to the delayed set, in the
+ * round trips since the re-check. What remains is the one round trip between that read and the remove; for a held job,
+ * `removeHeldJob`'s own steps (its state read again, then the hold's deletes) come between, and a worker that takes the
+ * job there is refused by its lock after the hold was cleared (`heldClearedAnswer`).
+ *
+ * ONE RULE for what it answers: "nothing was changed" only when nothing was. The re-checks change nothing, so that is
+ * each of their refusals, and `{ unreachable }` (Valkey did not answer them within `timeoutMs`). Then the removal is
+ * asked for, and bounded by `timeoutMs` as ONE step: its own reads (the hold's hash, the guard's, `removeHeldJob`'s) and
+ * its writes alike. Of its answers, nothing was changed after the guard's refusal (nothing was sent), `removeHeldJob`'s
+ * refusal before its first delete or after a first delete that failed with the hold read back in place (`{ invalid }`
+ * without `cleared`), and a removal BullMQ refused while the job was read back in place (`{ raced }` with
+ * a state: its remove is one script, so a job still there was not removed; a worker's lock is `started`). Every other
+ * answer is `{ invalid, partial: true }`: a bound that fired (which can be before anything was sent or after, so it says
+ * only that the removal was asked for and may have landed: `removalUnknown`), a throw or an answer this does not know,
+ * a job not read back, and a held job whose removal failed after its hold was cleared (`heldClearedAnswer`, from its
+ * state read again).
+ *
+ * Returns `{ ok: true, jobId, queue, held }`, `{ invalid }`, `{ invalid, partial: true }` or `{ unreachable }`. Answers
+ * within `timeoutMs` for each phase whatever Valkey does: its queues' close is started, never awaited (`releaseOf`).
+ * `removeQueuedJobFn` is a seam (the worker's `removeQueuedJob` by default).
+ */
+export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, removeQueuedJobFn = removeQueuedJob, timeoutMs = 2500 } = {}) {
+  if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { invalid: "a job id is letters, digits and . _ : -, at most 200 characters" };
+  const problem = cancelExpectProblem(expect);
+  if (problem) return { invalid: problem };
+  let fleet = null;
+  let redis = null;
+  const release = releaseOf(() => fleet, () => redis);
+  // The re-checks: everything before the removal, which changes nothing and so may answer unreachable on a timeout.
+  const check = (async () => {
+    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+    const found = await fleet.find(jobId, expect.queue);
+    if (!found || found.queue !== expect.queue) return { invalid: cancelQueuedRefusal("changed", { jobId }) };
+    const state = await found.job.getState().catch(() => "unknown");
+    const moved = movedSince(jobId, expect, found.job, state);
+    if (moved !== null) return { invalid: moved };
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const q = fleet.queueOf(found.queue);
+    const refusal = await neverStartedRefusal(found.job, jobId, { redis, q });
+    if (refusal !== null) return { invalid: refusal };
+    // Whether a hold's keys go with it, for an answer that cannot say what landed. Only words: the removal's own read of
+    // the hash decides the path, and a read that fails here is no hold named.
+    const hold = await Promise.resolve()
+      .then(() => redis.hget(jobKey(jobId), "since"))
+      .catch(() => null);
+    return { found, q, state, held: typeof hold === "string" && hold !== "" };
+  })();
+  try {
+    const checked = await within(check, timeoutMs, () => ({ unreachable: "timed out reaching the queue" }));
+    if (!checked.found) return checked;
+    const { found, q, state, held } = checked;
+    // The state first, then the job's hash (a fresh `getJob`, BullMQ's own reading of `atm`, `stc` and `finishedOn`): a
+    // job that finishes or fails back between the two reads is caught by the hash, and one a worker takes after it is
+    // locked, which the remove refuses. A read that fails refuses: nothing has been sent yet.
+    const guard = async () => {
+      try {
+        const now = await found.job.getState();
+        const fresh = await q.getJob(jobId);
+        return movedSince(jobId, expect, fresh ?? null, now);
+      } catch {
+        return unreadBeforeRemoval(jobId);
+      }
+    };
+    let res;
+    try {
+      res = await within(Promise.resolve().then(() => removeQueuedJobFn({ redis, queue: q, job: found.job, jobId, state, guard })), timeoutMs, () => ({ timedOut: true }));
+    } catch {
+      return removalUnknown(jobId, held, false);
+    }
+    // `partial`: the removal was asked for, so the job may be gone or its hold may be. The console's bar then says it did
+    // not finish, never "nothing was changed" (actions.mjs `funnelResult`, the confirm's `partial` state).
+    if (res?.timedOut) return removalUnknown(jobId, held, true);
+    if (res?.ok) return { ok: true, jobId, queue: found.queue, held: res.held === true };
+    // The guard refused: nothing was sent.
+    if (res !== null && typeof res === "object" && Object.hasOwn(res, "refused")) return { invalid: typeof res.refused === "string" ? res.refused : unreadBeforeRemoval(jobId) };
+    if (typeof res?.invalid === "string" && res.cleared === true) {
+      const after = await within(Promise.resolve().then(() => found.job.getState()).catch(() => "unknown"), timeoutMs, () => "unknown");
+      return heldClearedAnswer(jobId, after);
+    }
+    // `removeHeldJob`'s refusal before anything was deleted (or a first delete that failed with the hold read back in
+    // place): its own sentence, or a client's error, bounded either way, the job named last.
+    if (typeof res?.invalid === "string") return heldRefused(jobId, res.invalid);
+    if (res?.notQueued) return { invalid: STARTED_STATES.includes(res.state) ? cancelQueuedRefusal("started", { jobId }) : cancelQueuedRefusal("notQueued", { jobId, state: String(res.state ?? "in an unknown state") }) };
+    if (res?.raced) {
+      // Not read back: BullMQ's own "unknown" (in no list) or a read that failed. The remove may have landed.
+      if (typeof res.state !== "string" || res.state === "unknown") return removalUnreadBack(jobId);
+      if (STARTED_STATES.includes(res.state)) return { invalid: cancelQueuedRefusal("started", { jobId }) };
+      // What happened first, then BullMQ's words, then the job: a long error is what the audit row's cut may take.
+      return { invalid: jobLast(`the job could not be removed: it is ${res.state} now; nothing was changed; the remove failed with: ${theirWords(res.error?.message ?? res.error, jobId)}`, jobId) };
+    }
+    return removalUnknown(jobId, held, false);
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    release();
+    check.then(release, release);
+  }
+}
+
 /** What a re-run says of a run id outside the run-id charset: the planner's first refusal, and `rerunRefusalOf`'s. */
 export const RERUN_BAD_ID = "a run id is letters, digits and . _ : -, at most 200 characters";
 
@@ -534,6 +959,29 @@ export function rerunRefusalOf(record, now, data) {
 }
 
 /**
+ * A planner's refusal for a run whose record `readRunById` did not hand it (issue #737), the re-run's and the answer's
+ * alike: its `invalid` as it is; "no run record" only where the reader says both places were read and hold none
+ * (`missing`); and for any other answer the read that failed (`unreadable`, else `RUN_RECORD_UNREAD`) and that nothing
+ * was queued, never that the run has no record. `act` is what could not be done ("re-run", "answered").
+ */
+export function recordReadRefusal(read, jobId, act) {
+  if (typeof read?.invalid === "string") return read.invalid;
+  if (read?.missing === true) return `no run record for ${jobId} on this host or in the fleet mirror`;
+  return `${typeof read?.unreadable === "string" ? read.unreadable : RUN_RECORD_UNREAD}, so ${jobId} cannot be ${act} now; nothing was queued, try again`;
+}
+
+/**
+ * A parked answer's refusal for a run that is not parked: how it ended, its outcome and its reason each only as a token
+ * (`recordReason`'s rule, the record's reason as every surface carries it: a value that is no token is shown to nobody,
+ * and a mirrored record can hold any value), "unknown" for an outcome that is none.
+ */
+function notParkedRefusal(jobId, record) {
+  const outcome = typeof record?.outcome === "string" && RECORD_REASON_RE.test(record.outcome) ? record.outcome : "unknown";
+  const reason = recordReason(record);
+  return `${jobId} is not parked (it ended ${outcome}${reason === null ? "" : `, ${reason}`}), so there is no question to answer`;
+}
+
+/**
  * Plan a RE-RUN of a finished run (issue #642). Free: reads the run record, the retained BullMQ job and the triggers
  * file, writes nothing. `{ plan }` or `{ refusal }`.
  *
@@ -591,7 +1039,7 @@ export async function planRerun({
     redis = redisFn(url);
     redis.on?.("error", () => {});
     const read = await readRunById(redis, { logsDir, jobId, fs, timeoutMs });
-    if (!read.record) return { refusal: read.invalid ?? `no run record for ${jobId} on this host or in the fleet mirror` };
+    if (!read.record) return { refusal: recordReadRefusal(read, jobId, "re-run") };
     const record = read.record;
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId);
@@ -661,7 +1109,7 @@ export async function planRerun({
     // and not the other still refuses rather than returning nothing.
     return { refusal: `${jobId} is a ${String(kind)} run, which the console cannot re-run` };
   } catch (err) {
-    return { refusal: `could not read the run or its job (${err?.message ?? String(err)}); nothing was queued` };
+    return { refusal: `could not read the run or its job (${boundedText(err?.message ?? String(err))}); nothing was queued` };
   } finally {
     await fleet?.close();
     try {
@@ -739,11 +1187,20 @@ function commentTriggerFor(triggersPath, kind, fs) {
  * Chat panel offers the reply form exactly where `planParkedAnswer` would plan it, and shows this sentence where it
  * would not; whether the run is parked and still unanswered is the caller's (the record and `chatModeOf`).
  */
-export function parkedAnswerRefusalOf({ jobId, data, triggersPath, fs = nodeFs }) {
+export function parkedAnswerRefusalOf({ jobId, data, triggersPath, approval = false, fs = nodeFs }) {
   if (data === null || data === undefined) return { refusal: `the queue no longer holds ${jobId}'s data (a forge job's data is kept 31 days), so the reply cannot be built; answer on the forge instead` };
   const kind = data.kind;
   const delivery = COMMENT_DELIVERY[kind];
   if (!isForgeKind(kind) || !delivery) return { refusal: `${jobId} is a ${String(kind)} run; only a forge issue's parked run is answered this way` };
+  if (approval && !Array.isArray(data.gates)) return { refusal: "the approval's retained job has no gate declaration; nothing was queued" };
+  if (approval && Array.isArray(data.gates)) {
+    const loaded = loadTriggerEntries(triggersPath, fs);
+    if (loaded.refusal) return loaded;
+    const index = data.trigger?.matched?.index;
+    const entry = loaded.entries[index];
+    if (!entry || entry.run.kind !== kind || entry.on.type !== data.trigger?.matched?.type || !entry.run.gates || entry.run.resume !== true) return { refusal: "the approval's original trigger no longer declares resumable gates; nothing was queued" };
+    return { kind, delivery, rule: { index, run: entry.run }, approval: true };
+  }
   if (data.target?.type !== "issue") return { refusal: `${jobId} parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge` };
   if (typeof triggersPath !== "string" || triggersPath === "") return { refusal: "the triggers file is not known here (PI_TRIGGERS_FILE), so the reply cannot be built as the receiver builds it" };
   const rule = commentTriggerFor(triggersPath, kind, fs);
@@ -816,9 +1273,9 @@ export async function planParkedAnswer({
     redis = redisFn(url);
     redis.on?.("error", () => {});
     const read = await readRunById(redis, { logsDir, jobId, fs, timeoutMs });
-    if (!read.record) return { refusal: read.invalid ?? `no run record for ${jobId} on this host or in the fleet mirror` };
+    if (!read.record) return { refusal: recordReadRefusal(read, jobId, "answered") };
     const record = read.record;
-    if (record.outcome !== "completed" || record.reason !== "awaiting-input") return { refusal: `${jobId} is not parked (it ended ${String(record.outcome)}${record.reason ? `, ${String(record.reason)}` : ""}), so there is no question to answer` };
+    if (record.outcome !== "completed" || !["awaiting-input", "awaiting-approval"].includes(record.reason)) return { refusal: notParkedRefusal(jobId, record) };
     // Answered = a LATER run on the same kind and target (readParkedRuns' rule): the newest runs of this host and the
     // mirror, the fleet reader's wide window, which holds any run newer than this one.
     const runs = runsFn ? await runsFn() : await answeredWindow(redis, { logsDir, fs, now, timeoutMs });
@@ -829,9 +1286,20 @@ export async function planParkedAnswer({
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId);
     const data = found?.job?.data ?? null;
-    const judged = parkedAnswerRefusalOf({ jobId, data, triggersPath, fs });
+    const approval = record.reason === "awaiting-approval";
+    if (approval && !/^[a-f0-9]{64}$/.test(record.approval?.requestId ?? "")) return { refusal: "the approval request has no valid durable identifier; nothing was queued" };
+    const judged = parkedAnswerRefusalOf({ jobId, data, triggersPath, approval, fs });
     if (judged.refusal) return { refusal: judged.refusal };
     const { kind, delivery, rule } = judged;
+    let approvalQueue = null;
+    if (approval) {
+      const current = await within(makeApprovalStore({ redis, now }).read(record.approval.requestId), timeoutMs, () => ({ error: "timeout" }));
+      if (!current.ok) return { refusal: "the durable approval request could not be read; nothing was queued, try again" };
+      if (!current.request || current.request.state !== "pending" || current.request.runId !== jobId) return { refusal: "the approval request is no longer pending for this run; nothing was queued" };
+      // Only the worker's private request knows where its canonical session lives. A host name in a public record
+      // is display data, not a routing declaration; inferring a queue from it could resume on the wrong filesystem.
+      approvalQueue = current.request.hostQueue ?? null;
+    }
     // Issue #647: an answer already queued or running has no record yet, so the later-run check above cannot see it.
     const pending = await readPendingAnswer({ queues: fleet.names.map((n) => fleet.queueOf(n)), kind: record.kind, target: record.target, runId: jobId, budget: pendingBudget, timeoutMs });
     if (pending.jobId) return { refusal: `${jobId} is being answered: ${pending.jobId} is queued or running on ${String(record.target)}` };
@@ -852,22 +1320,23 @@ export async function planParkedAnswer({
       repo: data.repo,
       ...(data.projectId !== undefined ? { projectId: data.projectId } : {}),
       ...(data.azure !== undefined ? { azure: data.azure } : {}),
-      target: { type: "issue", number: data.target.number, title: data.target.title, body: data.target.body },
+      target: approval ? { ...data.target } : { type: "issue", number: data.target.number, title: data.target.title, body: data.target.body },
       ...runFieldsOf(rule.run, rule.run.flow),
-      parkedReply: true,
+      parkedReply: !(approval && data.target.type !== "issue"),
+      ...(approval ? { approvalRequestId: record.approval.requestId } : {}),
       console: { by: who },
       trigger: {
         event: delivery.event,
         action: delivery.action,
         deliveryId,
         sender: { id: null },
-        matched: { index: rule.index, type: "comment", phrase: rule.phrase },
+        matched: approval ? { ...data.trigger.matched } : { index: rule.index, type: "comment", phrase: rule.phrase },
         comment: { body: bounded.text, ...(delivery.association ? { author_association: CONSOLE_ASSOCIATION } : {}) },
       },
     };
-    return { plan: { kind: "parked-answer", jobId, forge: kind, deliveryId, queue: forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), reserve: estimateReserve(job, { overlay, env, modelEndpoints, builtinModel }) } };
+    return { plan: { kind: "parked-answer", jobId, forge: kind, deliveryId, queue: approvalQueue ?? forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), ...(approval ? { approval: { requestId: record.approval.requestId, action: record.approval.action, cap: rule.run.gateBudgetRaiseUsd ?? null } } : {}), reserve: estimateReserve(approval && record.approval.action === "budget-raise" && bounded.text.trim() === "/approve" ? { ...job, maxCostUsd: rule.run.gateBudgetRaiseUsd } : job, { overlay, env, modelEndpoints, builtinModel }) } };
   } catch (err) {
-    return { refusal: `could not read the parked run or its job (${err?.message ?? String(err)}); nothing was queued` };
+    return { refusal: `could not read the parked run or its job (${boundedText(err?.message ?? String(err))}); nothing was queued` };
   } finally {
     await fleet?.close();
     try {
@@ -892,14 +1361,14 @@ async function answeredWindow(redis, { logsDir, fs, now, timeoutMs }) {
  * already queued or running), `{ refusal }` for a plan that is not one, `{ unreachable }`.
  */
 export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection } = {}) {
-  if (plan?.kind !== "parked-answer" || plan.job?.parkedReply !== true || !COMMENT_DELIVERY[plan.forge]) return { refusal: "not a parked-answer plan" };
+  if (plan?.kind !== "parked-answer" || !(plan.job?.parkedReply === true || /^[a-f0-9]{64}$/.test(plan.job?.approvalRequestId ?? "")) || !COMMENT_DELIVERY[plan.forge]) return { refusal: "not a parked-answer plan" };
   if (typeof plan.queue !== "string" || !(plan.queue === QUEUE || plan.queue.startsWith(`${QUEUE}@`))) return { refusal: "the plan names no queue" };
   let queue = null;
   try {
     queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: plan.queue });
     const res = await enqueueForgeJob(queue, plan.forge, plan.job);
     if (res.deduplicated) return { refusal: `an answer to this issue is already queued or running (job ${res.survivingJobId}), so the queue's semantic window took this one as a duplicate and nothing was queued`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
-    return { ok: true, jobIds: [res.jobId], queue: plan.queue };
+    return { ok: true, jobIds: [res.jobId], queue: res.queue ?? plan.queue };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -923,7 +1392,7 @@ async function findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, t
   const fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
   fleetHolder.fleet = fleet;
   const found = await fleet.find(jobId);
-  if (!found) return { refusal: `${notInFleet(jobId, fleet)}; nothing was sent` };
+  if (!found) return { refusal: notInFleet(jobId, fleet, "Nothing was sent") };
   return { job: found.job, queue: found.queue, runId: runIdOf(found.job), fleet };
 }
 
@@ -983,22 +1452,22 @@ export async function planSteer({
     const state = await found.job.getState().catch(() => "unknown");
     if (state !== "active") {
       const next = await activeJobOfRun((id) => found.fleet.find(id), found.runId, jobId);
-      if (!next) return { refusal: `job ${jobId} is ${state}: only a running job takes messages. Nothing was sent` };
+      if (!next) return { refusal: `Nothing was sent: it is ${state}; only a running job takes messages; job ${jobId}` };
       found = { job: next.job, queue: next.queue, runId: runIdOf(next.job), fleet: found.fleet };
     }
     const target = String(found.job.id);
-    if (found.job.data?.steer !== true) return { refusal: `job ${target} is not steer-armed (its trigger does not set run.steer), so it takes no messages. Nothing was sent` };
+    if (found.job.data?.steer !== true) return { refusal: `Nothing was sent: it is not steer-armed (its trigger does not set run.steer), so it takes no messages; job ${target}` };
     redis = redisFn(url);
     redis.on?.("error", () => {});
     const open = await steerInbox.isOpen({ redis, runId: found.runId });
     if (open !== true) {
-      if (open === false) return { refusal: "the run is not accepting messages: it is not steer-armed, not running, or its venue cannot deliver. Nothing was sent" };
-      return { refusal: `the run's inbox could not be read (Valkey said ${String(open?.error ?? "nothing")}); nothing was sent` };
+      if (open === false) return { refusal: "Nothing was sent: the run is not accepting messages; it is not steer-armed, not running, or its venue cannot deliver" };
+      return { refusal: `Nothing was sent: the run's inbox could not be read (Valkey said ${String(open?.error ?? "nothing")})` };
     }
     const kept = norm.entry.text;
     return { plan: { kind: "steer", jobId: target, queue: found.queue, runId: String(found.runId), id, mode, source, by: who, text: kept, bytes: Buffer.byteLength(kept, "utf8"), digest: sha256Hex(kept) } };
   } catch (err) {
-    return { refusal: `could not read the job or its inbox (${err?.message ?? String(err)}); nothing was sent` };
+    return { refusal: `Nothing was sent: could not read the job or its inbox (${boundedText(err?.message ?? String(err))})` };
   } finally {
     await holder.fleet?.close();
     try {
@@ -1026,11 +1495,11 @@ export async function enqueueSteer(plan, { url, redisFn = makeRedisClient, now =
     if (pushed?.error === "refused") return { refusal: `${pushed.reason}` };
     if (pushed?.error) return { unreachable: `Valkey said ${pushed.error}` };
     if (pushed === "ok") return { ok: true, jobId: plan.jobId, id: plan.id, mode: plan.mode, state: "queued" };
-    if (pushed === "gone") return { refusal: "the run stopped accepting messages before this one arrived (it ended, or its worker stopped refreshing it). Nothing was sent" };
-    if (pushed === "closed") return { refusal: "the run has finished and its inbox is closed. Nothing was sent" };
-    if (pushed === "full") return { refusal: `the run's inbox is full (at most ${steerInbox.STEER_MAX_MESSAGES} messages and ${steerInbox.STEER_TOTAL_MAX_BYTES} bytes per run, withdrawn ones included). Nothing was sent` };
-    if (pushed === "dup") return { refusal: `message ${plan.id} is already in the run's inbox; nothing new was sent` };
-    return { refusal: `the inbox answered ${String(pushed)}; nothing was sent` };
+    if (pushed === "gone") return { refusal: "Nothing was sent: the run stopped accepting messages before this one arrived (it ended, or its worker stopped refreshing it)" };
+    if (pushed === "closed") return { refusal: "Nothing was sent: the run has finished and its inbox is closed" };
+    if (pushed === "full") return { refusal: `Nothing was sent: the run's inbox is full (at most ${steerInbox.STEER_MAX_MESSAGES} messages and ${steerInbox.STEER_TOTAL_MAX_BYTES} bytes per run, withdrawn ones included)` };
+    if (pushed === "dup") return { refusal: `Nothing new was sent: the message is already in the run's inbox; message ${plan.id}` };
+    return { refusal: `Nothing was sent: the inbox answered ${String(pushed)}` };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -1084,7 +1553,7 @@ export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisCli
   const holder = { fleet: null };
   try {
     const found = await findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder: holder });
-    if (found.refusal) return { refusal: found.refusal.replace(/; nothing was sent$/, "; nothing was changed") };
+    if (found.refusal) return { refusal: found.refusal.replace(/^Nothing was sent:/, "Nothing was changed:") };
     redis = redisFn(url);
     redis.on?.("error", () => {});
     const prior = await steerInbox.messageState({ redis, runId: found.runId, id });
@@ -1094,7 +1563,7 @@ export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisCli
     if (prior === "withdrawn") return { unchanged: steerWithdrawSentence(prior, id) };
     return { plan: { kind: "steer-withdraw", jobId, runId: String(found.runId), id, prior } };
   } catch (err) {
-    return { refusal: `could not read the job or its inbox (${err?.message ?? String(err)}); nothing was changed` };
+    return { refusal: `could not read the job or its inbox (${boundedText(err?.message ?? String(err))}); nothing was changed` };
   } finally {
     await holder.fleet?.close();
     try {

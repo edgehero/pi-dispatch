@@ -25,7 +25,7 @@ import { clip, columnsOf, fmtCost, pad, scrubControls, sliceColumns } from "./pa
 // is asserted to do no I/O of its own, and reaching for it through the I/O module is the wrong direction.
 import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 // The one vocabulary the console and the panel read (issue #710): the runs table's OUTCOME column says the same words.
-import { outcomeWord } from "./words.mjs";
+import { outcomeWord, recordReason } from "./words.mjs";
 
 // The three spend windows and the overlay cap key each reads. Order is day -> week -> month.
 const BUDGET_WINDOWS = [
@@ -38,14 +38,15 @@ const RUN_COLUMNS = [
   { key: "jobId", header: "JOB ID" },
   { key: "target", header: "TARGET" },
   { key: "flow", header: "FLOW" },
-  // The outcome in the console's word (issue #710, words.mjs): `policy` reads "refused", and the two reasons that change
-  // the word read "awaiting input" and "cancelled"; an outcome this release does not know prints as itself. REASON keeps
-  // the record's token beside it, so the table still names what the record says.
+  // The outcome in the console's word (issue #710, words.mjs): `policy` reads "refused", and the reasons that change the
+  // word read "awaiting input", "cancelled" and, for the recovery ends, "failed"; an outcome this release does not know
+  // prints as itself. REASON keeps the record's token beside it, so the table still names what the record says, and only
+  // a token: an older worker's error text is shown by no surface (`recordReason`).
   { key: "outcome", header: "OUTCOME", derive: (r) => {
     const w = outcomeWord(r?.outcome, r?.reason);
     return w.known ? w.word : r?.outcome;
   } },
-  { key: "reason", header: "REASON" },
+  { key: "reason", header: "REASON", derive: (r) => recordReason(r) },
   { key: "turns", header: "TURNS" },
   // Per-job token accounting (issue #25). `tokens` is `{ input, output, total, cost }` | null; a derive
   // reaches into it so a null record still reads "-", and cost renders as a $-prefixed fixed-decimal.
@@ -482,8 +483,10 @@ function schedulerLine(s) {
   // THROUGH `cell`, because a scheduler key is read back from Valkey and nothing re-validates it on read
   // (issue #382, item 2). Defence in depth, not a live leak: the worker restricts a cron `on.id` to
   // `[A-Za-z0-9._-]+` before the upsert, so a key that arrives here with a control byte in it came from a
-  // writer that is not the worker.
-  const id = cell(s?.key ?? s?.name ?? "-");
+  // writer that is not the worker. By its KEY alone (issue #737): BullMQ's `name` is the job name it mints runs
+  // with, `local` for every one the worker upserts, so a key the reader refused printed as "local", a trigger
+  // id the file may not have.
+  const id = cell(s?.key ?? "-");
   const next = typeof s?.next === "number" ? new Date(s.next).toISOString() : "no next";
   const drift =
     typeof s?.overdueMs === "number" && s.overdueMs > 0 ? `  overdue by ${Math.round(s.overdueMs / 1000)}s` : "";

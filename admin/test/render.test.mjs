@@ -112,6 +112,15 @@ test("renderRuns renders a fully-null record as dashes (chain column included)",
   assert.match(dataRow, /^-(\s+-)+\s*$/, "a non-chain record renders '-' in the chain column");
 });
 
+test("renderRuns' REASON column holds a token only: an older worker's error text is shown as no reason, a recovery end reads failed", () => {
+  const base = { jobId: "gh-1", target: "acme/web#1", flow: "fix", turns: 2, chainDepth: null, endedAt: "2026-10-08T12:00:00.000Z" };
+  const out = renderRuns([{ ...base, outcome: "failed", reason: "infra failure, container exit 1" }, { ...base, jobId: "gh-2", outcome: "policy", reason: "recovery-cap" }]);
+  assert.ok(!out.includes("infra failure"), "the error's own words are shown nowhere");
+  const [, first, second] = out.split("\n");
+  assert.match(first, /\bfailed\s+-\s/, "no reason");
+  assert.match(second, /\bfailed\s+recovery-cap\s/);
+});
+
 test("renderRuns degrades on empty and unreachable inputs", () => {
   assert.match(renderRuns([]), /No runs/);
   assert.match(renderRuns({ unreachable: "x" }), /unreachable/);
@@ -168,6 +177,13 @@ test("renderTriggers lists schedulers with next + overdue drift and a label trig
   assert.match(out, /next 2026-07-21T00:00:00.000Z/);
   assert.match(out, /overdue by 5s/);
   assert.match(out, /label {2}any\[pi:frontend\] none\[wontfix\] → frontend-fix/);
+});
+
+test("renderTriggers names a scheduler by its key alone: one whose key the reader refused is -, never BullMQ's job name", () => {
+  const out = renderTriggers({ schedulers: [{ key: null, name: "local", next: Date.UTC(2026, 6, 21, 3, 0, 0), overdueMs: null }, { key: "nightly-tidy", name: "local", next: Date.UTC(2026, 6, 21, 4, 0, 0), overdueMs: null }], triggers: { triggers: [] } });
+  assert.match(out, /^ {2}- {2}next 2026-07-21T03:00:00\.000Z$/m);
+  assert.match(out, /^ {2}nightly-tidy {2}next 2026-07-21T04:00:00\.000Z$/m);
+  assert.doesNotMatch(out, /local/);
 });
 
 test("renderTriggers renders each of the four on.types", () => {

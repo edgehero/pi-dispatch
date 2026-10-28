@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { NAMED_CHECK_IDS } from "@edgehero/pi-dispatch/doctor-results";
-import { DOCTOR_FILE_CHECKS, doctorQuote, doctorStale } from "../src/doctor-view.mjs";
-import { configPauseWindows, configSettings, configTriggers, fleetDoctor } from "../src/console/panels.mjs";
+import { DOCTOR_FILE_CHECKS, FIRST_RUN_COMMANDS, FIRST_RUN_COMMAND_HINTS, FIRST_RUN_STATES, FIRST_RUN_STEPS, doctorQuote, doctorStale, firstRunCommandHint, firstRunState, stepSentenceText } from "../src/doctor-view.mjs";
+import { BEAT_FRESH_MS, configPauseWindows, configSettings, configTriggers, fleetDoctor } from "../src/console/panels.mjs";
 import { stripAnsi, visibleLen } from "../src/style.mjs";
 
 /**
@@ -190,4 +190,199 @@ test("the fleet reader carries the results on the snapshot, read for the live ho
   await panel.snapshot();
   assert.equal(reads[2].prune, true, "the panel's reader prunes the index, as it prunes the registry's");
   await panel.dispose();
+});
+
+// ---- the first run (issue #737) ----------------------------------------------------------------------------------------
+
+const M = 60_000;
+/** A deployment that has run nothing: no host row, no trigger, no record, and one host's doctor published. */
+const firstRun = (over = {}) => ({
+  queue: { counts: {}, workers: 0, fleetDegraded: null },
+  hostBudgets: [],
+  runs: [],
+  runsDay: { runs: [], floor: false, partial: false },
+  triggers: { triggers: [] },
+  doctor: { hosts: [{ name: "build3", ageMs: 2 * M, counts: { ok: 1, warn: 1, fail: 1 }, checks: [{ id: "egress.proxy", level: "fail", label: "Egress proxy is not on this host (pi-egress-proxy)." }, { id: "provider.key", level: "warn", label: "Provider key not set" }], more: 0 }], more: 0 },
+  ...over,
+});
+const stepOf = (state, id) => state.steps.find((s) => s.id === id);
+
+test("first run: eight steps in doctor's order, each state a status the kit draws", async () => {
+  const { STATUS } = await import("../src/console/kit.mjs");
+  assert.deepEqual(FIRST_RUN_STEPS, ["deployment", "queue", "token", "worker", "egress", "provider", "trigger", "forge"]);
+  for (const [state, { word, status }] of Object.entries(FIRST_RUN_STATES)) assert.ok(Object.hasOwn(STATUS, status) && /^[A-Z][a-z ]+$/.test(word), state);
+  const st = firstRunState(firstRun(), { session: { role: "operator" }, deployment: { folder: "pi-dispatch" } });
+  assert.deepEqual(st.steps.map((s) => s.id), FIRST_RUN_STEPS);
+  assert.equal(st.total, 8);
+  assert.deepEqual(st.steps.map((s) => s.state), ["ready", "ready", "ready", "not-yet", "not-yet", "check", "to-do", "optional"]);
+  assert.equal(st.ready, 3);
+  assert.equal(st.lead, "The console is up. Two steps stand between this deployment and its first job.");
+  assert.equal(st.sub, "Jobs start once a worker runs and its egress proxy is up. This page updates as each step is done.");
+  assert.deepEqual(st.doctor, { host: "build3", ageMs: 2 * M });
+});
+
+test("first run applies only on a read snapshot with no run on record and no host row or no trigger", () => {
+  const applies = (snap) => firstRunState(snap).applies;
+  assert.equal(applies(firstRun()), true);
+  assert.equal(applies(null), false, "a Valkey blink is not a first run");
+  assert.equal(applies(firstRun({ runs: [{ jobId: "gh-1" }] })), false, "a run on record");
+  assert.equal(applies(firstRun({ runsDay: { runs: [{ jobId: "gh-1" }], floor: false, partial: false } })), false);
+  assert.equal(applies(firstRun({ runsDay: null })), false, "an unread day is not an empty one");
+  assert.equal(applies(firstRun({ runs: null })), false, "nor an unread list of the newest runs");
+  assert.equal(applies(firstRun({ runsDay: { runs: [], floor: false, partial: true } })), false, "nor a partial one");
+  assert.equal(applies(firstRun({ hostBudgets: [{ name: "build3", staleMs: 1000 }] })), true, "a host but no trigger");
+  assert.equal(applies(firstRun({ triggers: { triggers: [{ type: "cron" }] } })), true, "a trigger but no host");
+  assert.equal(applies(firstRun({ hostBudgets: [{ name: "build3", staleMs: 1000 }], triggers: { triggers: [{ type: "cron" }] } })), false, "a host and a trigger: the overview");
+  // Every worker gone on a deployment that has run jobs is the overview's "no worker online", never this checklist.
+  assert.equal(applies(firstRun({ triggers: { triggers: [{ type: "cron" }] }, runs: [{ jobId: "gh-old" }] })), false);
+});
+
+test("first run: the token step reads the session's role only, so a live panel drawn per role never names one session", () => {
+  const op = firstRunState(firstRun(), { session: { name: "alice-secret-name", role: "operator" } });
+  assert.ok(!JSON.stringify(op).includes("alice-secret-name"));
+  assert.equal(stepOf(op, "token").state, "ready");
+  assert.deepEqual(stepOf(op, "token").commands, [FIRST_RUN_COMMANDS.token]);
+  const viewer = firstRunState(firstRun(), { session: { role: "viewer" } });
+  assert.deepEqual(stepOf(viewer, "token").commands, []);
+  assert.equal(stepOf(firstRunState(firstRun()), "token").state, "check");
+  assert.equal(stepOf(firstRunState(firstRun()), "deployment").state, "check", "no deployment folder said");
+  assert.deepEqual(stepOf(firstRunState(firstRun(), { deployment: { folder: "pi-dispatch" } }), "deployment").sentence[1], { code: "pi-dispatch" });
+});
+
+test("first run: a worker beats within the console's fresh bound; a registered host that does not is a check", () => {
+  const worker = (hosts, workers = 0, fleetDegraded = null) => stepOf(firstRunState(firstRun({ hostBudgets: hosts, queue: { counts: {}, workers, fleetDegraded } })), "worker");
+  assert.equal(worker([]).state, "not-yet");
+  assert.deepEqual(worker([]).commands, [FIRST_RUN_COMMANDS.service, FIRST_RUN_COMMANDS.worker]);
+  assert.equal(worker([{ name: "build3", staleMs: BEAT_FRESH_MS }]).state, "ready");
+  // A beat's age is Valkey's where the reader had it: a host whose clock runs behind beats, one Valkey has not refreshed
+  // for over a minute does not, whatever their stamps say.
+  assert.equal(worker([{ name: "build3", staleMs: 2 * M, ttlAgeMs: 5_000 }]).state, "ready");
+  assert.equal(worker([{ name: "build3", staleMs: 5_000, ttlAgeMs: 75_000 }]).state, "check");
+  const late = worker([{ name: "build3", staleMs: BEAT_FRESH_MS + 1 }]);
+  assert.equal(late.state, "check");
+  assert.deepEqual(late.sentence, [{ b: "build3" }, " is registered, but its last beat is ", { age: BEAT_FRESH_MS + 1 }, " old."]);
+  assert.equal(worker([], 1).state, "ready", "a worker the queue sees, from before the registry");
+  assert.equal(worker([], 0, "registry unreadable").state, "check");
+});
+
+test("first run: with no host beating, the worker step names the host that beat last, its age as Valkey measured it", () => {
+  const worker = (hosts) => stepOf(firstRunState(firstRun({ hostBudgets: hosts })), "worker");
+  // The newest beat among them, not the oldest and not the first row.
+  const three = worker([{ name: "old", staleMs: 9 * M, ttlAgeMs: 9 * M }, { name: "new", staleMs: 2 * M, ttlAgeMs: 2 * M }, { name: "mid", staleMs: 5 * M, ttlAgeMs: 5 * M }]);
+  assert.equal(three.state, "check");
+  assert.deepEqual(three.sentence, [{ b: "new" }, " is registered, but its last beat is ", { age: 2 * M }, " old."]);
+  // Where the host's clock and Valkey's disagree, the age is Valkey's measure of the row's last refresh (`beatAgeOf`),
+  // and the newest is judged by it too: by its own stamp "skewed" would be the older of the two.
+  const skewed = worker([{ name: "skewed", staleMs: 8 * M, ttlAgeMs: 2 * M }, { name: "plain", staleMs: 3 * M, ttlAgeMs: 3 * M }]);
+  assert.deepEqual(skewed.sentence, [{ b: "skewed" }, " is registered, but its last beat is ", { age: 2 * M }, " old."]);
+  assert.deepEqual(worker([{ name: "build3", staleMs: 5 * M, ttlAgeMs: 2 * M }]).sentence[2], { age: 2 * M });
+  // Without Valkey's measure, the host's own stamp.
+  assert.deepEqual(worker([{ name: "build3", staleMs: 5 * M, ttlAgeMs: null }]).sentence[2], { age: 5 * M });
+});
+
+test("first run: egress and provider take the worst any host published, repeats included; an older doctor is said", () => {
+  const rows = (...hosts) => ({ hosts: hosts.map(([name, ageMs, checks]) => ({ name, ageMs, counts: {}, checks, more: 0 })), more: 0 });
+  const egressOf = (doctor) => stepOf(firstRunState(firstRun({ doctor })), "egress");
+  assert.equal(egressOf(rows(["a", M, [{ id: "egress.proxy", level: "ok" }]])).state, "ready");
+  const worst = egressOf(rows(["a", M, [{ id: "egress.proxy", level: "ok" }, { id: "egress.proxy-2", level: "warn", label: "podman: egress proxy is stopping" }]], ["b", 5 * M, [{ id: "egress.proxy", level: "ok" }]]));
+  assert.equal(worst.state, "check", "the podman proxy's repeat decides");
+  assert.ok(stepSentenceText(worst.sentence).includes("Doctor on a reports a warning: podman: egress proxy is stopping."), "the host whose result judged it");
+  assert.deepEqual(worst.commands, [FIRST_RUN_COMMANDS.up]);
+  const fail = egressOf(rows(["a", M, [{ id: "egress.proxy", level: "warn", label: "w" }]], ["b", 9 * M, [{ id: "egress.proxy", level: "fail", label: "Egress proxy is not on this host (x)." }]]));
+  assert.equal(fail.state, "not-yet");
+  assert.ok(stepSentenceText(fail.sentence).startsWith("Doctor on b reports a failing check: Egress proxy is not on this host (x). "), "one period, the label's own dropped");
+  const absent = egressOf(rows(["a", M, [{ id: "node.1", level: "ok" }]]));
+  assert.equal(absent.state, "check");
+  assert.match(stepSentenceText(absent.sentence), /egress may be off there, or its doctor predates the check/);
+  assert.equal(egressOf({ hosts: [], more: 0 }).state, "to-do");
+  assert.equal(egressOf({ unreachable: "build3.lan" }).state, "to-do", "an unread doctor is no verdict");
+  assert.ok(!JSON.stringify(firstRunState(firstRun({ doctor: { unreachable: "build3.lan" } }))).includes("build3.lan"));
+  const providerOf = (doctor) => stepOf(firstRunState(firstRun({ doctor })), "provider");
+  assert.equal(providerOf(rows(["a", M, [{ id: "provider.key", level: "ok" }]])).state, "ready");
+  assert.equal(providerOf(rows(["a", M, [{ id: "provider.key", level: "fail", label: "no key" }]])).state, "not-yet");
+  const old = providerOf(rows(["a", M, [{ id: "provider.1", level: "ok" }, { id: "provider.2", level: "ok" }]]));
+  assert.equal(old.state, "check");
+  assert.equal(stepSentenceText(old.sentence), "Doctor on a checked the provider but not the key by name: its doctor predates the check.");
+  assert.equal(stepSentenceText(providerOf(rows(["a", M, [{ id: "node.1", level: "ok" }]])).sentence), "Doctor on a did not judge the provider key.");
+});
+
+test("first run: among results of one level the newest host's judges, and a step that is ready offers no command", () => {
+  const rows = (...hosts) => ({ hosts: hosts.map(([name, ageMs, checks]) => ({ name, ageMs, counts: {}, checks, more: 0 })), more: 0 });
+  const st = firstRunState(firstRun({ doctor: rows(["old", 9 * M, [{ id: "egress.proxy", level: "ok" }, { id: "provider.key", level: "warn", label: "old words" }]], ["new", M, [{ id: "egress.proxy", level: "ok" }, { id: "provider.key", level: "warn", label: "new words" }]]) }));
+  assert.equal(stepSentenceText(stepOf(st, "egress").sentence), "Doctor on new found the egress proxy running.");
+  assert.ok(stepSentenceText(stepOf(st, "provider").sentence).startsWith("Doctor on new reports a warning: new words. "));
+  const ready = firstRunState(firstRun({ doctor: rows(["a", M, [{ id: "egress.proxy", level: "ok" }, { id: "provider.key", level: "ok" }, { id: "github.1", level: "ok" }]]), triggers: { triggers: [{ type: "label", forge: "github" }] } }));
+  for (const id of ["egress", "provider", "forge"]) {
+    assert.equal(stepOf(ready, id).state, "ready", id);
+    assert.deepEqual(stepOf(ready, id).commands, [], `${id}: nothing to run once it is ready`);
+  }
+});
+
+test("first run: an empty deployment folder is not a found one; an unreadable registry with a trigger is the overview, not the checklist", () => {
+  assert.equal(stepOf(firstRunState(firstRun(), { deployment: { folder: "" } }), "deployment").state, "check");
+  const blind = firstRun({ triggers: { triggers: [{ type: "cron" }] }, queue: { counts: {}, workers: 0, fleetDegraded: "registry unreadable" } });
+  assert.equal(firstRunState(blind).applies, false, "no row read is not no host");
+  assert.equal(firstRunState({ ...blind, queue: { counts: {}, workers: 0, fleetDegraded: null } }).applies, true, "a read registry with no row is");
+});
+
+test("first run: a check that did not pass is quoted as the check it failed or warned on, never as what doctor says is so", () => {
+  const rows = (checks) => ({ hosts: [{ name: "mini1", ageMs: M, counts: {}, checks, more: 0 }], more: 0 });
+  const provider = stepOf(firstRunState(firstRun({ doctor: rows([{ id: "provider.key", level: "fail", label: "Provider key set (ANTHROPIC_API_KEY)" }]) })), "provider");
+  assert.ok(stepSentenceText(provider.sentence).startsWith("Doctor on mini1 reports a failing check: Provider key set (ANTHROPIC_API_KEY). "));
+  const unlabelled = stepOf(firstRunState(firstRun({ doctor: rows([{ id: "egress.proxy", level: "warn" }]) })), "egress");
+  assert.ok(stepSentenceText(unlabelled.sentence).startsWith("Doctor on mini1 reports a warning. "));
+  for (const st of [provider, unlabelled]) assert.ok(!stepSentenceText(st.sentence).includes(" says"));
+});
+
+test("first run: every command with a placeholder has the sentence that fills it", () => {
+  for (const [name, argv] of Object.entries(FIRST_RUN_COMMANDS)) {
+    const holes = argv.filter((a) => /^<[^>]+>$/.test(a));
+    const hint = firstRunCommandHint(argv);
+    assert.equal(hint !== null, holes.length > 0, name);
+    for (const hole of holes) assert.ok(hint.some((p) => p?.code === hole), `${name}: the hint names ${hole}`);
+  }
+  assert.ok(FIRST_RUN_COMMAND_HINTS.github.some((p) => p?.code === "--no-webhook"), "and the flag for a deployment with no receiver");
+  assert.equal(firstRunCommandHint(["pi-dispatch", "setup", "github", "--webhook-url", "<receiver URL>"]), null, "a copy is no command of the list");
+});
+
+test("first run: a step is its id, state, title, sentence and commands; who reads a command is each surface's rule", () => {
+  const st = firstRunState(firstRun({ doctor: { hosts: [{ name: "a", ageMs: M, counts: {}, checks: [{ id: "provider.1", level: "ok" }], more: 0 }], more: 0 } }), { session: { role: "operator" } });
+  for (const step of st.steps) assert.deepEqual(Object.keys(step), ["id", "state", "title", "sentence", "commands"], step.id);
+});
+
+test("first run: the forge step is optional without a forge trigger, else the worst of the github and forges sections", () => {
+  const forgeOf = (triggers, checks) => stepOf(firstRunState(firstRun({ triggers: { triggers }, doctor: { hosts: [{ name: "a", ageMs: M, counts: {}, checks, more: 0 }], more: 0 } })), "forge");
+  assert.equal(forgeOf([{ type: "cron" }], [{ id: "github.3", level: "fail", label: "x" }]).state, "optional");
+  assert.deepEqual(forgeOf([], []).commands, [FIRST_RUN_COMMANDS.github]);
+  const label = [{ type: "label", forge: "github" }];
+  assert.equal(forgeOf(label, [{ id: "github.1", level: "ok" }, { id: "forges.2", level: "ok" }]).state, "ready");
+  assert.equal(forgeOf(label, [{ id: "github.1", level: "ok" }, { id: "forges.2", level: "warn", label: "gitlab token expires soon" }]).state, "check");
+  assert.equal(forgeOf(label, [{ id: "github.12-2", level: "fail", label: "no app id" }]).state, "not-yet");
+  assert.equal(forgeOf(label, [{ id: "node.1", level: "ok" }]).state, "to-do");
+});
+
+test("first run: a trigger file that does not load is not yet; one trigger is ready", () => {
+  assert.equal(stepOf(firstRunState(firstRun({ triggers: { invalid: "triggers file is not valid JSON" } })), "trigger").state, "not-yet");
+  assert.equal(stepOf(firstRunState(firstRun({ triggers: { missing: true } })), "trigger").state, "to-do");
+  assert.deepEqual(stepOf(firstRunState(firstRun({ triggers: { triggers: [{ type: "cron" }] } })), "trigger").sentence, ["The triggers file holds 1 trigger."]);
+});
+
+test("first run's commands are the CLIs' own: each is in its usage, and setup github carries what the CLI requires", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { USAGE } = await import("../src/console/cli.mjs");
+  const workerCli = readFileSync(new URL("../../worker/src/cli.mjs", import.meta.url), "utf8");
+  const usage = workerCli.slice(workerCli.indexOf("const USAGE = `"), workerCli.indexOf("`;", workerCli.indexOf("const USAGE = `")));
+  assert.ok(USAGE.includes("token add --name <name> --role <role>"));
+  assert.deepEqual(FIRST_RUN_COMMANDS.token, ["pi-dispatch-console", "token", "add", "--name", "<name>", "--role", "viewer"]);
+  assert.match(usage, /pi-dispatch service <render\|install\|/);
+  assert.match(usage, /\n {2}pi-dispatch worker {2,}drain the queue/);
+  assert.match(usage, /\n {2}pi-dispatch up \[--yes\]/);
+  assert.match(usage, /\n {2}pi-dispatch doctor \[--fix\]/);
+  assert.match(usage, /pi-dispatch setup github[^]*\(--webhook-url <URL> \| --no-webhook\)/);
+  assert.deepEqual(FIRST_RUN_COMMANDS.github.slice(0, 4), ["pi-dispatch", "setup", "github", "--webhook-url"]);
+  assert.match(usage, /\/dispatch setup does every step/);
+  const panel = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.ok(panel.includes("`/dispatch setup`"), "the pi panel's guided setup");
+  assert.deepEqual(FIRST_RUN_COMMANDS.pi, ["/dispatch", "setup"]);
+  for (const argv of Object.values(FIRST_RUN_COMMANDS)) assert.ok(Object.isFrozen(argv) && argv.every((a) => typeof a === "string"));
 });

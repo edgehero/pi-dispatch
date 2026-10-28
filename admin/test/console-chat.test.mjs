@@ -4,11 +4,13 @@ import { request } from "node:http";
 import { after, test } from "node:test";
 import { CHAT_REFUSALS } from "@edgehero/pi-dispatch/chat-mode";
 import { makeConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
+import { makeConsoleClient, parseConsoleAddress } from "@edgehero/pi-dispatch/console-client";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { makeLiveHub, stateOf } from "../src/console/live.mjs";
 import * as realPages from "../src/console/pages.mjs";
-import { parkedInbox, runChat, runInbox } from "../src/console/panels.mjs";
+import { parkedQuestions, runChat, runInbox } from "../src/console/panels.mjs";
+import { PARKED_ANSWERING } from "../src/console/panels/parked.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
 import * as RM from "../src/read-model.mjs";
@@ -41,10 +43,11 @@ test("Chat panel: nothing without a job-state reader, a warning when the queue i
   for (const [state, says] of [["queued", CHAT_REFUSALS.queued], ["answered", CHAT_REFUSALS.answered], ["unknown", CHAT_REFUSALS.unknown]]) {
     for (const role of ["operator", "viewer"]) {
       // Issue #710: with no record, a queued or unknown job is the outcome banner's to say, so the panel draws nothing.
-      if (state !== "answered") assert.equal(String(runChat(view(role, { chat: chat(state, null, { says }) }))), "", `${state} ${role}: no record, the banner says it`);
+      if (state === "unknown") assert.match(String(runChat(view(role, { chat: chat(state, null, { says }) }))), /chat state is unknown while its record could not be read/);
+      else if (state !== "answered") assert.ok(String(runChat(view(role, { chat: chat(state, null, { says }) }))).includes(role === "viewer" ? "Chat is for operators" : says.replace(/'/g, "&#39;")), `${state} ${role}: its no-chat state is named`);
       const out = String(runChat(view(role, { chat: chat(state, null, { says }), run: { record: RECORD } })));
       assert.match(out, /<h2>Chat<\/h2>/);
-      assert.ok(out.includes(says.replace(/'/g, "&#39;")), `${state} ${role}: the sentence`);
+      assert.ok(out.includes(role === "viewer" ? "Chat is for operators" : says.replace(/'/g, "&#39;")), `${state} ${role}: the sentence`);
       assert.ok(!out.includes("data-action") && !out.includes("pi-dispatch chat"), `${state} ${role}: no form, no command`);
     }
   }
@@ -57,7 +60,7 @@ test("Chat panel, live: the steer and follow-up forms MOVE here from the Inbox p
   assert.match(op, /<a href="#transcript">below<\/a>/);
   assert.equal(count(op, /data-action="steer"/g), 2, "a steer form and a follow-up form");
   assert.match(op, /name="mode" value="followUp"/);
-  assert.match(op, /<code class="mono">pi-dispatch chat gh-1<\/code>/);
+  assert.doesNotMatch(op, /data-copy/, "terminal copy command is its own p-terminal panel");
   const inbox = String(runInbox(view("operator", data)));
   assert.match(inbox, /<h2>Inbox<\/h2>/, "the inbox still lists");
   assert.equal(count(inbox, /data-action="steer"/g), 0, "and draws no message form while the Chat panel does");
@@ -80,17 +83,24 @@ test("Chat panel, live: the steer and follow-up forms MOVE here from the Inbox p
   assert.ok(!viewer.includes("data-action") && !viewer.includes("pi-dispatch chat") && !viewer.includes("#transcript"), "status only");
 });
 
-test("Chat panel, reply: the parked inbox's own answer form for an operator, status only for a viewer", () => {
+test("Chat panel, reply: the answer form the Parked page draws too (one action, the same fields) for an operator, status only for a viewer", () => {
   const record = { ...RECORD, reason: "awaiting-input" };
   const data = { chat: chat("parked", "reply"), run: { record } };
   const op = String(runChat(view("operator", data)));
-  assert.match(op, /parked, waiting for an answer/);
+  assert.match(op, /asks<\/b>/);
   assert.match(op, /href="https:\/\/github.com\/acme\/web\/issues\/12"/);
-  const form = /<form class="act" data-action="parked-answer"[\s\S]*?<\/form>/.exec(op)?.[0];
+  const form = /<form class="act qform" data-action="parked-answer"[\s\S]*?<\/form>/.exec(op)?.[0];
   assert.ok(form, "the answer form");
-  const parkedPage = String(parkedInbox({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: [{ target: "acme/web#12", kind: "github", jobId: "gh-1", parkedAt: T0, ageMs: 0, chainCount: 1, pendingScan: { jobId: null } }] } } }));
-  assert.ok(parkedPage.includes(form), "byte for byte the /parked page's form: one action, one form");
-  assert.match(op, /pi-dispatch chat gh-1/);
+  const parkedPage = String(parkedQuestions({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: [{ target: "acme/web#12", kind: "github", jobId: "gh-1", parkedAt: T0, ageMs: 0, chainCount: 1, pendingScan: { jobId: null } }] }, parkedChecks: { "gh-1": { ok: true } } } }));
+  const parkedForm = /<form class="act qform" data-action="parked-answer"[\s\S]*?<\/form>/.exec(parkedPage)?.[0];
+  assert.ok(parkedForm, "the Parked page's answer form");
+  // Issue #737: the Parked page draws the kit's answer form, the run page its own until it converts; both post the one
+  // action with the same named fields, so the script and the planner read either alike.
+  const named = (f) => [...f.matchAll(/<(input|textarea)\b[^>]*\sname="([^"]+)"[^>]*>/g)].map((m) => `${m[1]} ${m[2]}`).sort();
+  assert.deepEqual(named(parkedForm), named(form));
+  assert.deepEqual(named(form), ["input jobId", "textarea text"]);
+  for (const f of [form, parkedForm]) assert.ok(f.includes('name="jobId" value="gh-1"') && /maxlength="8192"/.test(f) && /\srequired/.test(f), f);
+  assert.match(op, /name="jobId" value="gh-1"/);
   const viewer = String(runChat(view("viewer", data)));
   assert.ok(!viewer.includes("data-action") && !viewer.includes("<textarea"));
   assert.ok(!String(runChat(view("operator", data, { readOnly: true }))).includes("data-action"));
@@ -134,11 +144,10 @@ test("Chat panel and /parked: a park whose answer is queued or running is being 
     { target: "acme/web#14", kind: "github", jobId: "gh-3", parkedAt: T0, ageMs: 0, chainCount: 1, answering: null, pendingScan: { unknown: true, tooMany: false } },
     { target: "acme/web#15", kind: "github", jobId: "gh-4", parkedAt: T0, ageMs: 0, chainCount: 1, answering: null, pendingScan: { unknown: true, tooMany: true } },
   ];
-  const page = String(parkedInbox({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: rows } } }));
-  assert.match(page, /being answered by <a class="mono" href="\/run\?id=gh-77">/);
-  assert.match(page, /unknown \(the queue could not be fully read\)/);
-  assert.match(page, /unknown \(too many queued jobs to check\)/);
-  assert.ok(page.includes(CHAT_REFUSALS.parkedTooMany), "the honest sentence, once");
+  const page = String(parkedQuestions({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: rows }, parkedChecks: Object.fromEntries(rows.map((r) => [r.jobId, { ok: true }])) } }));
+  assert.ok(page.includes(`${PARKED_ANSWERING} <a class="link code" href="/run?id=gh-77">gh-77</a>.`), page);
+  assert.ok(page.includes(CHAT_REFUSALS.parkedUnknown.replace(/'/g, "&#39;")), "a scan that could not read the queue whole");
+  assert.equal(page.split(CHAT_REFUSALS.parkedTooMany).length - 1, 1, "the honest sentence, on the one card it is true of");
   // Review round 2: a scan that could not tell draws no form, as the Chat panel draws none (the shared verdict).
   assert.equal(count(page, /data-action="parked-answer"/g), 1, "a form for the waiting park alone");
   assert.ok(page.includes('name="jobId" value="gh-2"'), "the waiting park's");
@@ -147,7 +156,7 @@ test("Chat panel and /parked: a park whose answer is queued or running is being 
 
 test("Chat panel, fork: the exact pi-dispatch chat command, or why the record names no session the fork can find", () => {
   const op = String(runChat(view("operator", { chat: chat("finished", "fork"), run: { record: RECORD } })));
-  assert.match(op, /<code class="mono">pi-dispatch chat gh-1<\/code>/);
+  assert.match(op, /<div class="cmd"><code><span>pi-dispatch<\/span> <span>chat<\/span> <span>gh-1<\/span><\/code>/);
   assert.match(op, /PI_SESSIONS_DIR/);
   assert.match(op, /not redacted/);
   const pr = String(runChat(view("operator", { chat: chat("finished", "fork"), run: { record: { ...RECORD, triggerType: "pull_request" } } })));
@@ -238,6 +247,8 @@ async function chatConsole() {
     pagePanels: realPages.pagePanels,
     queryKeyOf: realPages.pageQueryString,
     peekSession: (id, f) => sessions.peek(id, f),
+    // Wired as cli.mjs wires it: the reason a stream ends is the store's pure verdict.
+    endedReason: (id, f) => sessions.verdict(id, f).ended ?? null,
     readTokens,
     transcriptSince: (jobId, a, opts) => fleet.transcriptSince(jobId, a, opts),
     now,
@@ -316,7 +327,7 @@ async function chatConsole() {
   const settle = async (k) => {
     for (let i = 0; i < 200 && hub.size().streams !== k; i += 1) await new Promise((r) => setTimeout(r, 5));
   };
-  return { fleet, hub, rows, logs, planned, pushed, send, post, stream, settle, host, advance: (ms) => (t += ms) };
+  return { fleet, hub, file, rows, logs, planned, pushed, send, post, stream, settle, host, advance: (ms) => (t += ms) };
 }
 
 const entriesIn = (text) => [...text.matchAll(/id: (\S+)\nevent: entry\ndata: (.+)\n\n/g)].map(([, id, data]) => ({ sse: id, ...JSON.parse(data) }));
@@ -360,7 +371,7 @@ test("end to end: token sign-in, /api/run, the JSON transcript with a Last-Event
 
   // The steer: preview (summary, no reserve), then confirm with the ticket; one audit row with the digest, never the text.
   const preview = await c.post("/api/act/steer/preview", { jobId: "gh-live", text: STEER_TEXT, mode: "steer" }, cookie);
-  assert.equal(preview.status, 200, preview.text);
+  assert.equal(preview.status, 200, `${preview.text} (log: ${c.logs.join(" | ")})`);
   const p = preview.json();
   assert.equal(typeof p.ticket, "string");
   assert.ok(p.summary.some((line) => /Send a steer to running job gh-live, as alice/.test(line)), p.summary.join(" | "));
@@ -396,9 +407,46 @@ test("end to end: token sign-in, /api/run, the JSON transcript with a Last-Event
   assert.equal((await c.post("/api/act/steer/preview", { jobId: "gh-live", text: "x" }, vcookie)).status, 403);
   // The run page draws the Chat panel for both, with the forms for the operator alone.
   const opPage = await c.send({ path: "/run?id=gh-live", headers: { cookie } });
-  assert.match(opPage.text, /<section id="p-chat" data-panel><h2>Chat<\/h2>/);
+  assert.match(opPage.text, /<section id="p-chat" data-panel><div class="card"><div class="card__head"><h2>Chat<\/h2>/);
   assert.equal(count(opPage.text, /data-action="steer"/g), 2, "one steer form per mode on the whole page");
   const vPage = await c.send({ path: "/run?id=gh-live", headers: { cookie: vcookie } });
   assert.match(vPage.text, /a viewer sees the run's status only/);
   assert.ok(!vPage.text.includes('data-action="steer"'));
+});
+
+test("the terminal client on the real console: the console stopping is waited out with the sign-in kept; a session that ended is signed in again (issue #737)", { timeout: 30_000 }, async () => {
+  // `pi-dispatch chat`'s own client (worker/src/console-client.mjs) against this console's hub, so the word the hub
+  // writes on close and the word the client waits on are the same one, end to end.
+  const follow = async (c, onFirstEntry) => {
+    const states = [];
+    const waits = [];
+    // Each wait is refused (false), so the stream detaches at the first one and the test reads what led to it.
+    const client = makeConsoleClient({ address: parseConsoleAddress(c.host), token: OP_TOKEN, sleep: async (ms) => (waits.push(ms), false), random: () => 1 });
+    let fired = false;
+    const end = await client.stream("/api/transcript?id=gh-live&format=json", {
+      onState: (st) => states.push(st),
+      onEvent: (ev) => {
+        if (ev.event !== "entry" || fired) return;
+        fired = true;
+        void onFirstEntry();
+      },
+    });
+    return { end, states, waits, logins: c.rows.filter((r) => r.action === "login").length };
+  };
+
+  const stopping = await chatConsole();
+  stopping.fleet.add({ text: "working" });
+  const shut = await follow(stopping, () => stopping.hub.close());
+  assert.deepEqual(shut.end, { detached: true });
+  assert.deepEqual(shut.states.map((st) => Object.keys(st)[0]), ["shutdown", "waiting"], "a dropped connection: said, then backed off");
+  assert.equal(shut.logins, 1, "and the sign-in kept, not spent on a re-login");
+
+  const ended = await chatConsole();
+  ended.fleet.add({ text: "working" });
+  const out = await follow(ended, async () => {
+    ended.file.generation = 1;
+    await ended.hub.tick();
+  });
+  assert.deepEqual(out.end, { detached: true });
+  assert.deepEqual(out.states, [{ relogin: true }], "an operator ended every session: the client signs in again, it does not wait it out");
 });

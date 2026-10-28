@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { defaultWorkerName, loadConfig, sanitizeWorkerName, WORKER_NAME_RE } from "../src/config.mjs";
-import { HOST_BEAT_MS, HOST_SET, HOST_TTL_MS, hostKey, makeHostRegistry, readLiveHosts } from "../src/host-registry.mjs";
+import { HOST_BEAT_MS, HOST_SET, HOST_SKEW_CLAIM_MS, HOST_TTL_MS, hostKey, makeHostRegistry, readLiveHosts } from "../src/host-registry.mjs";
 
 // A fake Valkey: a Map of hashes plus one set, recording every call so the ORDER and the SHAPE of what
 // the registry writes can be asserted, not just its end state. Same hand-rolled style as the wait-state
@@ -433,6 +433,150 @@ test("a reader that writes nothing (prune: false) skips a dead member and leaves
 	assert.ok(redis.sets.get(HOST_SET).has("ghost"));
 	await readLiveHosts(redis, { now: () => NOW });
 	assert.ok(!redis.sets.get(HOST_SET).has("ghost"), "the default still prunes");
+});
+
+test("a member or a row name no worker can have is no host: skipped, its row never read for a bad member, never pruned (#737)", async () => {
+	const redis = fakeRedis();
+	const long = `a${"b".repeat(3000)}`;
+	const members = ["mini1", long, "bad name", "-flag", "mini2", "mini3"];
+	redis.sets.set(HOST_SET, new Set(members));
+	for (const m of members) redis.hashes.set(hostKey(m), { name: m, beatAt: String(NOW) });
+	// A member that holds to the rule, whose row names itself something that does not: the row is no host's either.
+	redis.hashes.set(hostKey("mini2"), { name: "<b>mini2</b>", beatAt: String(NOW) });
+	// A row with no name of its own is named by its member, as before.
+	redis.hashes.set(hostKey("mini3"), { beatAt: String(NOW) });
+	assert.ok(!WORKER_NAME_RE.test(long) && !WORKER_NAME_RE.test("bad name") && !WORKER_NAME_RE.test("-flag"));
+	const { hosts } = await readLiveHosts(redis, { now: () => NOW });
+	assert.deepEqual(hosts.map((h) => h.name), ["mini1", "mini3"]);
+	assert.ok(!JSON.stringify(hosts).includes("bbbb") && !JSON.stringify(hosts).includes("<b>"), "nothing of a skipped row is handed on");
+	const read = redis.calls.filter((c) => c[0] === "hgetall").map((c) => c[1]);
+	assert.deepEqual(read, ["mini1", "mini2", "mini3"].map(hostKey), "a member that fails the rule is not even read");
+	assert.ok(!redis.calls.some((c) => c[0] === "srem"), "and nothing is removed: what someone else wrote is not the reader's to delete");
+	assert.deepEqual([...redis.sets.get(HOST_SET)], members);
+});
+
+// ---- issue #737: the row's age on Valkey's clock, the clock skew, and a row with no expiry ------------------------------
+
+/**
+ * `fakeRedis` plus a `pttl` the test answers per key: a number (the reply), or "throw" (a synchronous throw), "reject"
+ * or "hang" (the real client's failure mode, see `fakeRedis`). Recorded in `calls` like every other command.
+ */
+function withPttl(redis, answerOf) {
+	redis.pttl = (key) => {
+		redis.calls.push(["pttl", key]);
+		const answer = typeof answerOf === "function" ? answerOf(key) : answerOf;
+		if (answer === "throw") throw new Error("pttl threw");
+		if (answer === "reject") return Promise.reject(new Error("pttl refused"));
+		if (answer === "hang") return new Promise(() => {});
+		return Promise.resolve(answer);
+	};
+	return redis;
+}
+
+/** Index and write rows as a beat leaves them, `{ name: fields }`, without going through a registry. */
+function seedRows(redis, rows) {
+	redis.sets.set(HOST_SET, new Set(Object.keys(rows)));
+	for (const [name, fields] of Object.entries(rows)) redis.hashes.set(hostKey(name), { name, ...fields });
+}
+
+test("each row's PTTL gives its age on Valkey's clock, the clock skew in both directions, and a row with no expiry (#737)", async () => {
+	const age = 5000;
+	const redis = fakeRedis();
+	seedRows(redis, {
+		even: { beatAt: String(NOW - age) },
+		// The host's clock runs 120 s BEHIND the reader's: its beat reads 120 s older than it is.
+		behind: { beatAt: String(NOW - age - 120_000) },
+		ahead: { beatAt: String(NOW - age + 120_000) },
+		forever: { beatAt: String(NOW - age) },
+		raced: { beatAt: String(NOW - age) },
+		nobeat: { version: "4.3.1" },
+		fresh: { beatAt: String(NOW) },
+	});
+	const replies = { forever: -1, raced: -2, nobeat: HOST_TTL_MS - 1000, fresh: HOST_TTL_MS + 50 };
+	withPttl(redis, (key) => replies[key.slice(hostKey("").length)] ?? HOST_TTL_MS - age);
+	const { hosts } = await readLiveHosts(redis, { now: () => NOW });
+	const by = Object.fromEntries(hosts.map((h) => [h.name, [h.ttlAgeMs, h.skewMs, h.noExpiry]]));
+	assert.deepEqual(by, {
+		even: [age, 0, false],
+		behind: [age, 120_000, false],
+		ahead: [age, -120_000, false],
+		forever: [null, null, true],
+		raced: [null, null, null],
+		nobeat: [1000, null, false],
+		fresh: [0, 0, false],
+	});
+	// The staleMs rule is unchanged: clamped at 0 for a host whose clock is ahead.
+	assert.deepEqual(Object.fromEntries(hosts.map((h) => [h.name, h.staleMs])), { even: age, behind: age + 120_000, ahead: 0, forever: age, raced: age, nobeat: null, fresh: 0 });
+	assert.equal(redis.calls.filter((c) => c[0] === "pttl").length, 7, "one PTTL per member");
+	// A key that went between the HGETALL and the PTTL (-2) is still the row the HGETALL read: only the HGETALL prunes.
+	assert.ok(redis.sets.get(HOST_SET).has("raced"));
+});
+
+test("a client without pttl gives the three fields as null, and a row's own fields of those names never stand in (#737)", async () => {
+	const redis = fakeRedis();
+	seedRows(redis, { mini1: { beatAt: String(NOW), ttlAgeMs: "1", skewMs: "999999", noExpiry: "true" } });
+	const [row] = (await readLiveHosts(redis, { now: () => NOW })).hosts;
+	assert.deepEqual([row.ttlAgeMs, row.skewMs, row.noExpiry], [null, null, null]);
+	assert.ok(!redis.calls.some((c) => c[0] === "pttl"));
+	withPttl(redis, -1);
+	const [again] = (await readLiveHosts(redis, { now: () => NOW })).hosts;
+	assert.deepEqual([again.ttlAgeMs, again.skewMs, again.noExpiry], [null, null, true], "the reader's value, not the row's text");
+});
+
+test("a PTTL that throws, rejects, hangs or answers no whole number costs the three fields, never the row (#737)", async () => {
+	for (const answer of ["throw", "reject", "hang", "5000", 1.5, Number.NaN, null, undefined, -3]) {
+		const redis = withPttl(fakeRedis(), answer);
+		seedRows(redis, { mini1: { beatAt: String(NOW - 2000) } });
+		const t0 = Date.now();
+		const { hosts } = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 30 });
+		assert.ok(Date.now() - t0 < 1000, `${String(answer)}: bounded`);
+		assert.equal(hosts.length, 1, String(answer));
+		assert.equal(hosts[0].staleMs, 2000, String(answer));
+		assert.deepEqual([hosts[0].ttlAgeMs, hosts[0].skewMs, hosts[0].noExpiry], [null, null, null], String(answer));
+	}
+});
+
+test("the PTTL goes out beside the HGETALL, before either is answered, not as a second round trip after it (#737)", async () => {
+	// An HGETALL that answers only once the PTTL has been asked: a reader awaiting the HGETALL first would wait past its
+	// bound and lose the row.
+	const redis = fakeRedis();
+	seedRows(redis, { mini1: { beatAt: String(NOW - 2000) } });
+	let asked;
+	const pttlAsked = new Promise((resolve) => (asked = resolve));
+	const hgetall = redis.hgetall.bind(redis);
+	redis.hgetall = async (key) => {
+		await pttlAsked;
+		return hgetall(key);
+	};
+	redis.pttl = async () => {
+		asked();
+		return HOST_TTL_MS - 2000;
+	};
+	const { hosts } = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 200 });
+	assert.deepEqual(hosts.map((h) => [h.name, h.ttlAgeMs, h.skewMs]), [["mini1", 2000, 0]]);
+});
+
+test("ttlMs is the TTL the writer set: a reader told another one counts the age from it (#737)", async () => {
+	const redis = withPttl(fakeRedis(), 7000);
+	seedRows(redis, { mini1: { beatAt: String(NOW - 3000) } });
+	const [row] = (await readLiveHosts(redis, { now: () => NOW, ttlMs: 10_000 })).hosts;
+	assert.deepEqual([row.ttlAgeMs, row.skewMs], [3000, 0]);
+	// A ttlMs that is no positive whole number is the registry's own.
+	for (const ttlMs of [0, -1, 1.5, "10000", Number.NaN]) {
+		const [odd] = (await readLiveHosts(redis, { now: () => NOW, ttlMs })).hosts;
+		assert.equal(odd.ttlAgeMs, HOST_TTL_MS - 7000, String(ttlMs));
+	}
+});
+
+test("a skew is claimed only past two beats: a read between a beat's HSET and its PEXPIRE is off by one beat period (#737)", async () => {
+	assert.equal(HOST_SKEW_CLAIM_MS, 30_000);
+	assert.equal(HOST_SKEW_CLAIM_MS, 2 * HOST_BEAT_MS);
+	// The HSET has just written a new beatAt; the PTTL is still the one the PREVIOUS beat's PEXPIRE set.
+	const redis = withPttl(fakeRedis(), HOST_TTL_MS - HOST_BEAT_MS);
+	seedRows(redis, { mini1: { beatAt: String(NOW) } });
+	const [row] = (await readLiveHosts(redis, { now: () => NOW })).hosts;
+	assert.equal(row.skewMs, -HOST_BEAT_MS, "in sync clocks, read mid-beat");
+	assert.ok(Math.abs(row.skewMs) < HOST_SKEW_CLAIM_MS, "below the claim, so no reader calls it a skew");
 });
 
 // ---- issue #712: the `backends` field ----------------------------------------------------------------------------------

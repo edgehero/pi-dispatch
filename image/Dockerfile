@@ -403,6 +403,9 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # the variables would ignore both: the interrupted run would resume into pi's "No result provided" for a push or a
 # comment that may have happened, and the model would repeat it. The worker sends them only to an image declaring
 # this token. verify-image.sh checks the baked runner reads the variables and carries the recovery module.
+# `fork` (issue #648) tells the worker this runner branches the staged session at PI_FORK_ENTRY, honours
+# PI_FORK_POSITION and PI_THINKING_LEVEL, and preserves the selected model/thinking in the new transcript.
+# verify-image.sh exercises the baked branch module without network access or a provider key.
 # `steer` (issue #646) tells the worker this runner reads PI_STEER: it reads the messages the worker relays into the
 # read-only /inbox mount and hands each to the running agent once, as framed data, with an ack MACed under the exit
 # key (image/runner/src/inbox.mjs). An older runner handed the variable would ignore it: every message an operator or
@@ -438,7 +441,7 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # that starts the supervisor and the runner from it on PI_RUNNER_OBSERVABLE=1, which an OpenShell venue needs before any
 # connection of the job can be made. A gate on those venues only: an image without it is refused there before spend.
 # verify-image.sh holds the copy to runner-node's bytes, its mode, its label entry, and both key holders to it.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner"
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

@@ -321,3 +321,49 @@ completed successfully has its copy promoted back — so a failed or retried job
 transcript exactly as it was.
 
 Deleting the whole directory is always safe: every key degrades to a cold start and nothing else breaks.
+
+## Managed fork lineages
+
+An operator can select a retained issue run in the console or with
+[`pi-dispatch chat --fork-as-job`](chat.md#fork-as-a-managed-job). The new job gets a separate
+`pi/issue-<number>-fork-<id>` branch and pull request. Its session lives under the original key's
+`forks/<id>/` directory, with independent locks, sidecars and canonical transcript. The original session continues
+as before. A same-repository pull request on that fork branch resolves its fork lineage, and another fork records
+its direct source run.
+
+Completed issue runs that opted into transcript retention with `run.resume`, and explicitly requested managed fork
+jobs, can publish sources; failed and recovery attempts do not. A configured session directory and a final per-job
+transcript are required. Opted-out runs are never archived just because they had a live transcript. Historical
+selection reads an immutable run source, rather than the root key's moving `current.jsonl`. These private
+artifacts live under `PI_SESSIONS_DIR/.fork-sources/`, addressed by hashed run ids. They retain the source digest,
+base SHA, source attempt, pi version, venue and host. The console exposes entry metadata and eligible positions,
+never their raw unredacted transcript or host paths.
+
+Before the first user message is a restart from the original base. Other positions require an exact archived quiet
+transcript/workspace pair. Archiving happens before a paused container is thawed, or after it is confirmed dead,
+with a separate short snapshot deadline. A completed run can keep a final point without `run.recover`; intermediate
+points need recovery's armed live checkpoint path. It is optional: a skipped archive leaves recovery's checkpoint valid but
+that rewind point unavailable. Recovery still keeps only its newest and previous checkpoint; the fork archive keeps
+its own bounded history. A venue without live pause support cannot supply live rewind points merely because it can
+restore an exit checkpoint. Copy-mode OpenShell forks are refused.
+
+Sources expire after seven days. The defaults cap each transcript at 8 MiB, total source transcripts at 256 MiB,
+source directories at 1,024, and captured points at 64 per run. Workspace archives have a separate 20 GiB cap.
+Sources that fail validation, belong to another host or venue, use a different pi version, lack a matching workspace,
+or have base extensions that could import restored agent-written files are unavailable by name. Every fork uses
+current trigger policy and the ordinary budget, model and container gates.
+
+Fork source selection uses its own archive expiry and byte cap. The ordinary session-resume context-percent guard
+is unchanged; the source model's old occupancy estimate does not establish how much context a different model can
+accept. Selecting another model therefore does not guarantee before spend that the retained transcript fits its
+window. Temporary storage failures are retried as infrastructure failures; expired or invalid sources are refused.
+
+A run's optional `forkSource` record says whether its source was saved and, when it was not, gives a closed reason
+such as capacity, unsafe extensions or not completed. A skipped final workspace point can be recorded beside a
+saved source. Archiving failure lets the original job finish; the record explains why a later fork may be unavailable.
+
+Triggers enabling `run.awaitInput` cannot start managed forks in this release: they return
+`fork-await-input-unsupported` before spend, because parked-answer jobs still rebuild the canonical namespace.
+An existing managed fork can use durable crash recovery: it restores its own checkpoint and continues its own
+lineage, rather than selecting the original source point again. Recovery-attempt records are not published as new
+fork sources. Ordinary parked answers remain unchanged.

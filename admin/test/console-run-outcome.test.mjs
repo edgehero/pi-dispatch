@@ -8,10 +8,12 @@ import { loadPageData, pagePanels, panelIds, renderPage } from "../src/console/p
 import { refusedBeforeStart, runOutcome } from "../src/console/panels.mjs";
 import { rerunCheckOf, sandboxCheckOf } from "../src/console/run-api.mjs";
 import { makeLiveHub } from "../src/console/live.mjs";
-import { createFleetReader, fleetQueuesOn, readFleetQueues } from "../src/read-model.mjs";
+import { createFleetReader, fleetQueuesOn, readFleetQueues, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD } from "../src/read-model.mjs";
+import { runUnreadText, runUntoldText } from "../src/console/panels/run.mjs";
 import { sandboxRetentionOf } from "../src/sandbox-verdict.mjs";
 import { RERUN_DATA_KEPT_MS, RERUN_KEPT_SLACK_MS, rerunRefusalOf } from "../src/job-actions.mjs";
 import { DOCS_ROOT } from "../src/words.mjs";
+import { parseDocument } from "./helpers/script-dom.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The run page leads with its outcome and offers only what can work (issue #710, PR 3; REQ-OPERATOR-CONSOLE-SCREENS (c),
@@ -33,17 +35,17 @@ const panelsOf = async (role, data, id) => pagePanels("run", ctxOf(role, data, i
 const joined = (panels) => panels.map((p) => p.html).join("");
 const count = (text, needle) => text.split(needle).length - 1;
 
-test("the outcome banner is the run page's first panel", () => {
-  assert.equal(panelIds("run")[0], "p-outcome");
+test("the viewer disclosure precedes the run's outcome, then its progress", () => {
+  assert.deepEqual(panelIds("run").slice(0, 3), ["p-viewer", "p-outcome", "p-progress"]);
 });
 
 test("a refused run: the banner says the outcome word, the catalog's sentence for its why, the next step and the docs link; Progress and Chat draw nothing", async () => {
   const chat = { found: false, jobState: null, state: "finished", mode: "fork", says: null };
   for (const role of ["operator", "viewer"]) {
     const panels = await panelsOf(role, { run: { record: REFUSED, source: "local" }, chat, progress: { absent: true }, transcript: { exists: false } }, REFUSED.jobId);
-    assert.equal(panels[0].id, "p-outcome");
-    const banner = panels[0].html;
-    assert.match(banner, /<h2>Outcome<\/h2><p class="big warn">refused<\/p>/, role);
+    assert.equal(panels.find((p) => p.id === "p-outcome").id, "p-outcome");
+    const banner = panels.find((p) => p.id === "p-outcome").html;
+    assert.match(banner, /tone-refused[\s\S]*Refused before it started/, role);
     // `why` picks the catalog's variant (the comment the worker posted), escaped by the template.
     const variant = (await import("@edgehero/pi-dispatch/reason-catalog")).explainReason("model-unknown", { why: "overlay-link" }).sentence;
     assert.notEqual(variant, REASONS["model-unknown"].sentence, "the fixture's why has a variant");
@@ -60,7 +62,7 @@ test("a refused run: the banner says the outcome word, the catalog's sentence fo
   assert.equal(refusedBeforeStart({ ...REFUSED, outcome: "failed" }), false, "a failure may be retried under the same id");
   // The page has no transcript section for it either, and the banner comes before every other section.
   const page = (await renderPage("run", ctxOf("operator", { run: { record: REFUSED, source: "local" }, chat, transcript: { exists: false } }, REFUSED.jobId))).html;
-  assert.ok(!String(page).includes('id="transcript"'), "no transcript section");
+  assert.match(String(page), /id="p-transcript" data-panel><\/section>/, "unused transcript state is empty; the static box is hidden");
   assert.ok(String(page).indexOf('id="p-outcome"') < String(page).indexOf('id="p-progress"'));
 });
 
@@ -68,18 +70,18 @@ test("a run with no record says why ONCE: not a run id, unknown, queued, running
   const cases = [
     ["bad id", { run: { invalid: "x" } }, "That is not a run id."],
     ["unknown", { run: { missing: true }, chat: { found: false, jobState: null, state: "unknown", mode: null, says: CHAT_REFUSALS.unknown }, progress: { absent: true }, transcript: { exists: false } }, "No run with that id is in this host&#39;s history or the fleet&#39;s run mirror."],
-    ["queued", { run: { missing: true }, chat: { found: true, jobState: "waiting", state: "queued", mode: null, says: CHAT_REFUSALS.queued }, progress: { absent: true }, transcript: { exists: false } }, "This job is queued and has not started yet: a run&#39;s record is written when it ends, and its live transcript is on this page once it runs (reload then)."],
+    ["queued", { run: { missing: true }, chat: { found: true, jobState: "waiting", state: "queued", mode: null, says: CHAT_REFUSALS.queued }, progress: { absent: true }, transcript: { exists: false } }, "This job is queued and has not started yet: a run&#39;s record is written when it ends, and its live transcript attaches on this page once it runs."],
     ["running", { run: { missing: true }, chat: { found: true, jobState: "active", state: "active", mode: "live", says: null, activeJobId: "gh-x" }, progress: { absent: true }, transcript: { exists: true } }, "This run has no record yet: a run&#39;s record is written when it ends."],
   ];
   for (const [name, data, sentence] of cases) {
     for (const role of ["operator", "viewer"]) {
       const panels = await panelsOf(role, data, "gh-x");
       const text = joined(panels);
-      assert.equal(panels[0].id, "p-outcome", name);
-      assert.ok(panels[0].html.includes(sentence), `${name} ${role}: the banner says it`);
+      assert.equal(panels.find((p) => p.id === "p-outcome").id, "p-outcome", name);
+      assert.ok(panels.find((p) => p.id === "p-outcome").html.includes(sentence), `${name} ${role}: the banner says it`);
       assert.equal(count(text, sentence), 1, `${name} ${role}: once`);
       for (const id of ["p-run", "p-cost", "p-resources", "p-session", "p-chain"]) assert.equal(panels.find((p) => p.id === id).html, "", `${name} ${role}: ${id} is empty`);
-      assert.ok(!text.includes(CHAT_REFUSALS.unknown.replace(/'/g, "&#39;")), `${name}: the Chat panel does not say it again`);
+      assert.ok(!text.includes("Reload to check again"), `${name}: transcript attachment needs no reload`);
       assert.ok(!/No live progress/.test(text) || name === "running", `${name}: the Progress panel does not say it again`);
     }
   }
@@ -87,33 +89,73 @@ test("a run with no record says why ONCE: not a run id, unknown, queued, running
   // an unknown one; a running job does. The whole page says "not started" once.
   const pageOf = async (data) => String((await renderPage("run", ctxOf("operator", data, "gh-x"))).html);
   const queued = await pageOf(cases[2][1]);
-  assert.ok(!queued.includes('id="transcript"') && !(await pageOf(cases[1][1])).includes('id="transcript"'));
+  assert.ok(queued.includes('id="transcript"'), "queued jobs keep a waiting transcript box for late attachment");
   assert.ok((await pageOf(cases[3][1])).includes('id="transcript"'));
-  assert.equal(count(queued, "not started yet"), 1, "the queued page says it once");
-  assert.ok(queued.includes("its live transcript is on this page once it runs (reload then)"));
+  assert.equal(count(queued, cases[2][2]), 1, "the full banner explanation appears once");
+  assert.ok(queued.includes("its live transcript attaches on this page once it runs"));
   // ...unless its stream exists or could not be read, which the section then says.
   assert.ok((await pageOf({ ...cases[2][1], transcript: { unreachable: true, exists: false } })).includes('id="transcript"'));
   // The tone: a job that exists and has not ended is a grey note with no outcome word; what the page cannot show is amber.
-  const tone = async (data) => (await panelsOf("viewer", data, "gh-x"))[0].html;
+  const tone = async (data) => (await panelsOf("viewer", data, "gh-x")).find((p) => p.id === "p-outcome").html;
   for (const i of [2, 3]) {
     const banner = await tone(cases[i][1]);
-    assert.match(banner, /^<h2>Outcome<\/h2><p class="note">/, `${cases[i][0]}: a note`);
+    assert.match(banner, /banner tone-idle/, `${cases[i][0]}: a note`);
     assert.ok(!banner.includes('class="big'), `${cases[i][0]}: no outcome word`);
   }
-  for (const i of [0, 1]) assert.match(await tone(cases[i][1]), /^<h2>Outcome<\/h2><p class="warn">/, `${cases[i][0]}: amber`);
+  for (const i of [0, 1]) assert.match(await tone(cases[i][1]), /banner tone-idle/, `${cases[i][0]}: amber`);
+});
+
+test("a record that could not be read is said so on the banner, which sentence for which read, for both roles, and never that no such run is known", async () => {
+  const base = { jobStatus: async () => ({ found: false, state: null, continuesAs: null, queuedAs: null }), transcriptMeta: async () => ({ exists: false }), progress: async () => ({ absent: true }), runsPage: async () => ({ runs: [], next: null, mirror: "ok" }) };
+  const cases = [
+    [RUN_FILE_UNREADABLE, async () => ({ unreadable: RUN_FILE_UNREADABLE })],
+    [RUN_MIRROR_UNREAD, async () => ({ unreadable: RUN_MIRROR_UNREAD })],
+    [RUN_RECORD_UNREAD, async () => { throw new Error("ECONNRESET"); }],
+  ];
+  assert.equal(runUnreadText(RUN_MIRROR_UNREAD), "The fleet's run mirror could not be read, so this page cannot say what the run did. Reload to try again.");
+  for (const [why, runById] of cases) {
+    for (const role of ["operator", "viewer"]) {
+      const session = { name: "u", role };
+      const data = await loadPageData("run", { id: "gh-1" }, { fleet: { ...base, runById } }, session);
+      const got = await renderPage("run", { query: { id: "gh-1" }, session, data, readOnly: false, theme: null });
+      const html = String(got.html);
+      const outcome = html.match(/<section id="p-outcome"[\s\S]*?<\/section>/)?.[0] ?? "";
+      assert.ok(outcome.includes(runUnreadText(why).replace(/'/g, "&#39;")), `${role}, ${why}: ${outcome.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")}`);
+      assert.ok(!/No run with (that|this) id/.test(html), `${role}, ${why}: says no such run`);
+      assert.equal(got.status, 503, `${role}, ${why}: a page that cannot say whether the run exists`);
+    }
+  }
+});
+
+test("a run with no record says what it could not read whenever a place is unread: a record read that gave no answer is unread, and only a record both sides said they do not hold, with every place read, is no such run (#737)", async () => {
+  const read = { chat: { found: false, jobState: null, state: "unknown", mode: null, says: CHAT_REFUSALS.unknown }, transcript: { exists: false }, progress: { absent: true } };
+  const banner = async (data) => (await panelsOf("viewer", data, "gh-x")).find((p) => p.id === "p-outcome").html;
+  for (const run of [null, {}, { unreadable: 7 }]) {
+    const html = await banner({ ...read, run });
+    assert.ok(html.includes(runUnreadText(RUN_RECORD_UNREAD).replace(/'/g, "&#39;")), `${JSON.stringify(run)}: ${html}`);
+    assert.ok(!/No run with that id/.test(html), `${JSON.stringify(run)}: never no such run`);
+  }
+  for (const [what, over, unread] of [
+    ["the queues not all read", { chat: { unreachable: true } }, [RUN_PLACES.queues]],
+    ["the transcript and the progress unread", { transcript: { unreachable: true, exists: false }, progress: { unreachable: true } }, [RUN_PLACES.transcript, RUN_PLACES.progress]],
+  ]) {
+    const html = await banner({ ...read, run: { missing: true }, ...over });
+    assert.ok(html.includes(runUntoldText(unread).replace(/'/g, "&#39;")), `${what}: ${html}`);
+  }
+  assert.ok((await banner({ ...read, run: { missing: true } })).includes("No run with that id is in this host&#39;s history or the fleet&#39;s run mirror."));
 });
 
 test("a completed run: its word in the success tone, no reason sentence repeated, and the detail tokens with their catalog sentences", async () => {
-  const panels = await panelsOf("viewer", { run: { record: COMPLETED, source: "local" } }, COMPLETED.jobId);
-  assert.match(panels[0].html, /<p class="big good">completed<\/p><p>The run finished, and its record names no reason to say more\.<\/p>/);
+  const panels = await panelsOf("operator", { run: { record: COMPLETED, source: "local" } }, COMPLETED.jobId);
+  assert.match(panels.find((p) => p.id === "p-outcome").html, /tone-ok[\s\S]*Completed[\s\S]*The run finished, and its record names no reason to say more/);
   const session = panels.find((p) => p.id === "p-session").html;
   const plain = (t) => t.replace(/`/g, "").replace(/'/g, "&#39;");
-  assert.ok(session.includes(`<dd>fresh (absent): ${plain(SESSION_REASON_TEXT.absent.sentence)}</dd>`), "fresh (absent) with its sentence");
-  assert.ok(session.includes(`<dd>refused (plan-stale): ${plain(PLAN_REASON_TEXT["plan-stale"].sentence)}</dd>`), "the plan reason with its sentence");
+  assert.ok(session.includes(`fresh: ${plain(SESSION_REASON_TEXT.absent.sentence)}`), "fresh (absent) with its sentence");
+  assert.ok(session.includes(`refused: ${plain(PLAN_REASON_TEXT["plan-stale"].sentence)}`), "the plan reason with its sentence");
   // A token the catalog does not know is kept raw, and says so.
-  const odd = await panelsOf("viewer", { run: { record: { ...COMPLETED, session: { resumed: false, reason: "newer-token" }, outcome: "failed", reason: "brand-new-reason" }, source: "local" } }, COMPLETED.jobId);
-  assert.ok(odd.find((p) => p.id === "p-session").html.includes("fresh (newer-token): no explanation yet"));
-  assert.match(odd[0].html, /<p class="big bad">failed<\/p><p><span class="mono">brand-new-reason<\/span>, no explanation yet\.<\/p>/);
+  const odd = await panelsOf("operator", { run: { record: { ...COMPLETED, session: { resumed: false, reason: "newer-token" }, outcome: "failed", reason: "brand-new-reason" }, source: "local" } }, COMPLETED.jobId);
+  assert.ok(odd.find((p) => p.id === "p-session").html.includes("fresh: no explanation yet"));
+  assert.match(odd.find((p) => p.id === "p-outcome").html, /tone-failed[\s\S]*Failed[\s\S]*brand-new-reason, no explanation yet/);
 });
 
 test("a parked run: the banner's next step offers the console only where the Chat panel takes the answer (review)", async () => {
@@ -121,7 +163,7 @@ test("a parked run: the banner's next step offers the console only where the Cha
   const consolePath = "or answer from the console&#39;s run page";
   const reply = { found: true, jobState: "completed", state: "finished", mode: "reply", says: null };
   const page = async (data) => joined(await panelsOf("operator", { run: { record: PARKED, source: "local" }, ...data }, PARKED.jobId));
-  const bannerOf = async (data) => (await panelsOf("operator", { run: { record: PARKED, source: "local" }, ...data }, PARKED.jobId))[0].html;
+  const bannerOf = async (data) => (await panelsOf("operator", { run: { record: PARKED, source: "local" }, ...data }, PARKED.jobId)).find((p) => p.id === "p-outcome").html;
   // The answer can be taken here: the catalog's line, and the form beside it.
   for (const chatAnswer of [{ ok: true }, { unreachable: true }, undefined]) {
     assert.ok((await bannerOf({ chat: reply, chatAnswer })).includes(consolePath), JSON.stringify(chatAnswer));
@@ -129,32 +171,33 @@ test("a parked run: the banner's next step offers the console only where the Cha
   // The planner refuses it here (the queue no longer holds the job's data): the Chat panel says so, and the banner agrees.
   const gone = { refusal: "the queue no longer holds gh-p9's data (a forge job's data is kept 31 days)" };
   const refused = await page({ chat: reply, chatAnswer: gone });
-  assert.ok(refused.includes("It cannot be answered from here"), "the Chat panel's sentence");
+  assert.ok(refused.includes("This question cannot be answered here"), "the Chat attention banner replaces the refusal note");
   assert.ok(!refused.includes(consolePath), "the banner no longer offers the console");
   assert.ok(refused.includes("This console cannot take the answer for this run."));
   // A run no longer waiting for a reply (a later run took the answer): no form, so no console path either.
   assert.ok(!(await bannerOf({ chat: { ...reply, mode: "fork" } })).includes(consolePath));
   // Both roles still see the same banner.
-  const viewer = (await panelsOf("viewer", { run: { record: PARKED, source: "local" }, chat: reply, chatAnswer: gone }, PARKED.jobId))[0].html;
-  assert.equal(viewer, await bannerOf({ chat: reply, chatAnswer: gone }));
+  const viewer = (await panelsOf("viewer", { run: { record: PARKED, source: "local" }, chat: reply, chatAnswer: gone }, PARKED.jobId)).find((p) => p.id === "p-outcome").html;
+  const bodyText = (h) => parseDocument(`<html><body>${h}</body></html>`).querySelector(".banner__s").textContent;
+  assert.equal(bodyText(viewer), bodyText(await bannerOf({ chat: reply, chatAnswer: gone })));
 });
 
 test("SECURITY: the banner is the same for a viewer and an operator, and never carries a job's free-text failedReason", async () => {
   const data = { run: { record: { ...REFUSED, failedReason: "FREE-TEXT <b>secret</b>" }, source: "local" } };
   const op = runOutcome({ data: { now: NOW, ...data }, role: "operator", now: NOW, query: { id: REFUSED.jobId } });
   const viewer = runOutcome({ data: { now: NOW, ...data }, role: "viewer", now: NOW, query: { id: REFUSED.jobId } });
-  assert.equal(String(op), String(viewer));
+  assert.equal(String(op).split('<div class="banner__act">')[0], String(viewer).replace(/<\/div>$/, ""));
   assert.ok(!String(op).includes("FREE-TEXT"));
   // An unknown token is cut, and escaped.
   const hostile = String(runOutcome({ data: { now: NOW, run: { record: { ...REFUSED, reason: `<script>${"x".repeat(200)}` } } }, role: "viewer", now: NOW }));
-  assert.ok(!hostile.includes("<script>") && hostile.includes("&lt;script&gt;") && hostile.includes("…"));
+  assert.ok(!hostile.includes("<script>") && !hostile.includes("&lt;script&gt;"), "a free-text reason is shown to nobody");
   // An outcome word this console does not know is cut the same, at 64 code points (an astral one counts once), and escaped.
   const word = `\u{1F600}${"y".repeat(100)}`;
   const outcome = String(runOutcome({ data: { now: NOW, run: { record: { ...REFUSED, outcome: `<i>${word}`, reason: null } } }, role: "viewer", now: NOW }));
-  const big = outcome.match(/<p class="big[^"]*">([^<]*)<\/p>/)[1];
-  assert.equal(big, `&lt;i&gt;\u{1F600}${"y".repeat(60)}…`, "61 code points of the word after the 3 of <i>, then the ellipsis");
+  const big = outcome.match(/<p class="banner__t">([^<]*)<\/p>/)[1];
+  assert.equal(big.split(": finished")[0], `&lt;i&gt;\u{1F600}${"y".repeat(60)}…`, "61 code points of the word after the 3 of <i>, then the ellipsis");
   const short = String(runOutcome({ data: { now: NOW, run: { record: { ...REFUSED, outcome: "rebooted", reason: null } } }, role: "viewer", now: NOW }));
-  assert.match(short, /<p class="big[^"]*">rebooted<\/p>/, "a short unknown word whole");
+  assert.match(short, /<p class="banner__t">Rebooted[\s\S]*?<\/p>/, "a short unknown word whole");
   // The viewer sees no action at all.
   const panels = await panelsOf("viewer", { run: { record: COMPLETED, source: "local" } }, COMPLETED.jobId);
   assert.ok(!joined(panels).includes("Actions") && !joined(panels).includes("data-action"));
@@ -162,10 +205,10 @@ test("SECURITY: the banner is the same for a viewer and an operator, and never c
 
 // ---- the actions ---------------------------------------------------------------------------------------------------------
 
-const summaryOf = async (record, data = {}, { role = "operator", readOnly = false } = {}) => (await pagePanels("run", ctxOf(role, { run: { record, source: "local" }, ...data }, record.jobId, readOnly))).find((p) => p.id === "p-run").html;
+const summaryOf = async (record, data = {}, { role = "operator", readOnly = false } = {}) => (await pagePanels("run", ctxOf(role, { run: { record, source: "local" }, ...data }, record.jobId, readOnly))).find((p) => p.id === "p-actions").html.replace(/<\/?span[^>]*>/g, "");
 
 test("the sandbox action: hidden with a reason for a venue with no shell, a run refused before it started, and a manifest this host refuses; kept otherwise", async () => {
-  const cmd = (id) => `<code class="mono">pi-dispatch sandbox ${id}</code>`;
+  const cmd = (id) => `<code>pi-dispatch sandbox ${id}</code>`;
   assert.ok((await summaryOf(COMPLETED)).includes(cmd(COMPLETED.jobId)), "no check read: the command, as before");
   const os = await summaryOf({ ...COMPLETED, backend: "openshell" });
   assert.ok(!os.includes("pi-dispatch sandbox") && os.includes("Its workspace is not reopenable (openshell has no sandbox shell)."));
@@ -175,7 +218,7 @@ test("the sandbox action: hidden with a reason for a venue with no shell, a run 
   assert.ok((await by({ retained: false, why: "swept", reason: "swept" })).includes("Its workspace is no longer kept on this host"));
   assert.ok((await by({ retained: false, why: "retention-off", reason: "retention off" })).includes("PI_SANDBOX_RETENTION_HOURS=0"));
   assert.ok((await by({ retained: false, why: "workspace-gone", reason: "not reopenable (the workspace has moved or been deleted)" })).includes("Its workspace is not reopenable (the workspace has moved or been deleted)."));
-  assert.ok((await by({ retained: false, why: "past-window", reason: "x" })).includes(`<code class="mono">pi-dispatch sandbox ${COMPLETED.jobId} --pin</code>`), "past its window: the command with --pin");
+  assert.ok((await by({ retained: false, why: "past-window", reason: "x" })).includes(`<code>pi-dispatch sandbox ${COMPLETED.jobId} --pin</code>`), "past its window: the command with --pin");
   for (const keep of [{ retained: true, why: null }, { elsewhere: true }, { unreachable: true }, { retained: false, why: "policy-unreadable", reason: "x" }]) assert.ok((await by(keep)).includes(cmd(COMPLETED.jobId)), JSON.stringify(keep));
 });
 
@@ -261,7 +304,7 @@ function retainedRoot(jobId, extra = {}) {
 test("the fleet reader's sandboxCheck is the panel's manifest verdict, read only for a run of this host", async () => {
   const sandboxDir = retainedRoot("gh-1");
   const reader = readerOn({ paths: { sandboxDir, sandboxRetentionHours: 24 }, env: { PI_WORKER_NAME: "mini1" } });
-  assert.deepEqual(await reader.sandboxCheck("gh-1", { jobId: "gh-1", host: "mini1" }), { retained: true, why: null });
+  assert.deepEqual(await reader.sandboxCheck("gh-1", { jobId: "gh-1", host: "mini1" }), { retained: true, why: null, until: NOW + 23 * 3_600_000 });
   assert.deepEqual(await reader.sandboxCheck("gh-1", { jobId: "gh-1", host: "mini2" }), { elsewhere: true }, "another host's manifest is not here");
   assert.equal((await reader.sandboxCheck("gh-9", { jobId: "gh-9", host: "mini1" })).why, "swept");
   const off = readerOn({ paths: { sandboxDir, sandboxRetentionHours: 0 }, env: { PI_WORKER_NAME: "mini1" } });
@@ -311,18 +354,21 @@ test("the retained-job read asks the planner's queues: a host out of the registr
   assert.match((await reader.rerunCheck("gh-9", { jobId: "gh-9", kind: "github", endedAt: iso(NOW - DAY) })).refusal, /no longer holds gh-9's data/);
 });
 
-test("a degraded queue list makes not-found unreadable, never a refusal, and it is not cached (review round 1)", async () => {
+test("a degraded queue list makes not-found unreadable, never a refusal, kept for the window as any answer is", async () => {
   for (const [name, redis] of [["the registry unread", fleetRedis({ smembersThrows: true })], ["the keyspace scan unread", fleetRedis({ scanThrows: true })]]) {
     const { reader } = namedQueueReader(redis, {});
     const record = { jobId: "gh-9", kind: "github", endedAt: iso(NOW - DAY) };
     assert.deepEqual(await reader.rerunCheck("gh-9", record), { unreachable: true }, name);
     assert.deepEqual(await reader.parkedAnswerCheck("gh-9"), { unreachable: true }, name);
-    // Through the page's cache: read again on the next tick, and the record alone decides meanwhile (the form stays).
+    // Through the page's cache: kept for the window as a good answer is (issue #737: a failing Valkey is asked once per
+    // window, never once per tick), and the record alone decides meanwhile (the form stays).
     let reads = 0;
     const counting = { rerunCheck: async (...a) => ((reads += 1), reader.rerunCheck(...a)) };
     await rerunCheckOf(counting, "gh-9", record, { now: () => NOW });
     await rerunCheckOf(counting, "gh-9", record, { now: () => NOW + 1 });
-    assert.equal(reads, 2, `${name}: not cached`);
+    assert.equal(reads, 2, `${name}: a request retries an incomplete queue answer`);
+    await rerunCheckOf(counting, "gh-9", record, { now: () => NOW + 15_000 });
+    assert.equal(reads, 3, `${name}: read again once its window passed`);
     assert.ok((await summaryOf({ ...COMPLETED, jobId: "gh-9" }, { rerunCheck: { unreachable: true } })).includes('data-action="rerun"'), `${name}: the form, from the record alone`);
   }
   // The planner's discovery reports the scan's state; the kill switch's list shape reads as complete.
@@ -335,14 +381,14 @@ test("the console never hides the sandbox command on a venue policy it cannot se
   // The console's env as it really is: no PI_BACKENDS (not a key it takes from the deployment's .env, OQ-038).
   const reader = readerOn({ paths: { sandboxDir, sandboxRetentionHours: 24 }, env: { PI_WORKER_NAME: "mini1" } });
   const check = await reader.sandboxCheck("gh-p1", { jobId: "gh-p1", host: "mini1", backend: "podman" });
-  assert.deepEqual(check, { retained: true, why: null });
+  assert.deepEqual(check, { retained: true, why: null, until: NOW + 23 * 3_600_000 });
   const page = await summaryOf({ ...COMPLETED, jobId: "gh-p1", backend: "podman" }, { sandboxCheck: check });
-  assert.ok(page.includes('<code class="mono">pi-dispatch sandbox gh-p1</code>'), "the command, for the opener's shell to decide");
+  assert.ok(page.includes('<code>pi-dispatch sandbox gh-p1</code>'), "the command, for the opener's shell to decide");
   // The panel's own verdict, with this process's env, still refuses it there: only the console asks with the policy unknown.
   assert.equal(sandboxRetentionOf({ sandboxDir, sandboxRetentionHours: 24 }, "gh-p1", { now: () => NOW, env: {} }).why, "unblessed");
   // Even a venue-policy word that reached the page keeps the command (the backstop).
   for (const why of ["unblessed", "policy-unreadable", "a-word-added-later"]) {
-    assert.ok((await summaryOf({ ...COMPLETED, jobId: "gh-p1", backend: "podman" }, { sandboxCheck: { retained: false, why, reason: "not reopenable here (PI_BACKENDS lacks podman)" } })).includes('<code class="mono">pi-dispatch sandbox gh-p1</code>'), why);
+    assert.ok((await summaryOf({ ...COMPLETED, jobId: "gh-p1", backend: "podman" }, { sandboxCheck: { retained: false, why, reason: "not reopenable here (PI_BACKENDS lacks podman)" } })).includes('<code>pi-dispatch sandbox gh-p1</code>'), why);
   }
   // What is certain still hides it: a venue with no sandbox shell, whatever any shell blesses.
   const shellless = retainedRoot("gh-o1", { backend: "openshell" });
@@ -350,16 +396,18 @@ test("the console never hides the sandbox command on a venue policy it cannot se
   assert.equal(o.why, "venue");
 });
 
-test("the checks are reused for 15 s per run id while the record is the same, and an unreadable one is read again", async () => {
+test("complete action answers are reused for 15 s while a request retries unreadable queue answers", async () => {
   let reads = 0;
   const fleet = { rerunCheck: async () => ((reads += 1), reads === 1 ? { unreachable: true } : { ok: true }), sandboxCheck: async () => ({ retained: true, why: null }) };
   const record = { jobId: "gh-1", endedAt: iso(NOW) };
   assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW }), { unreachable: true });
-  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 1 }), { ok: true }, "an unreadable check is not kept");
-  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 10_000 }), { ok: true });
-  assert.equal(reads, 2, "the second answer is reused within the window");
-  await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 16_000 });
-  assert.equal(reads, 3, "and read again after it");
+  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 1 }), { ok: true }, "a request retries an unreadable queue check");
+  assert.equal(reads, 2);
+  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 15_000 }), { ok: true }, "and read again after it");
+  assert.deepEqual(await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 25_000 }), { ok: true });
+  assert.equal(reads, 3, "the good answer is reused until its window passes");
+  await rerunCheckOf(fleet, "gh-1", record, { now: () => NOW + 31_000 });
+  assert.equal(reads, 3, "the latest complete answer is still within its window");
   assert.equal(await rerunCheckOf({}, "gh-1", record), null, "no reader: null");
   assert.deepEqual(await sandboxCheckOf(fleet, "gh-1", record, { now: () => NOW }), { retained: true, why: null });
 });

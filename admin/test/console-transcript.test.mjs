@@ -73,20 +73,25 @@ const doneIn = (text) => [...text.matchAll(/event: done\ndata: (.+)\n\n/g)].map(
 
 // ---- the entry html ----------------------------------------------------------------------------------------------------
 
-test("entry html: a header (kind, tool, error, UTC time), the text in a pre with its real newlines and tabs, tool args and results in details, truncated shown", () => {
+test("entry html: Pulse kinds, UTC time, folded arguments, open failed results and truncated marks", () => {
   const ts = Date.UTC(2026, 9, 14, 12, 34, 56);
-  const a = String(transcriptEntryHtml({ id: "1-0", kind: "assistant", ts, text: "line one\nline\ttwo", tool: null, error: false, truncated: false }));
-  assert.equal(a, `<article class="t-entry t-assistant"><header><span class="t-kind">assistant</span> <time datetime="2026-10-14T12:34:56.000Z">12:34:56 UTC</time></header><pre>line one\nline\ttwo</pre></article>`);
-  const call = String(transcriptEntryHtml({ id: "2-0", kind: "tool-call", ts, text: '{"cmd":"ls"}', tool: "bash", error: false, truncated: true }));
-  assert.equal(call, `<article class="t-entry t-tool-call"><header><span class="t-kind">tool call</span> <span class="t-tool mono">bash</span> <time datetime="2026-10-14T12:34:56.000Z">12:34:56 UTC</time> <span class="t-trunc warn">truncated</span></header><details><summary>arguments</summary><pre>{&quot;cmd&quot;:&quot;ls&quot;}</pre></details></article>`);
-  const result = String(transcriptEntryHtml({ id: "3-0", kind: "tool-result", ts: null, text: "boom", tool: "bash", error: true, truncated: false }));
-  assert.equal(result, `<article class="t-entry t-tool-result"><header><span class="t-kind">tool result</span> <span class="t-tool mono">bash</span> <span class="t-error bad">error</span></header><details><summary>result</summary><pre>boom</pre></details></article>`);
-  assert.match(String(transcriptEntryHtml({ id: "4-0", kind: "end", ts, outcome: "policy" })), /<p class="note">The run is over \(refused\)\.<\/p><\/article>$/, "the console's word (#710 round 2)");
-  assert.match(String(transcriptEntryHtml({ id: "4-1", kind: "end", ts, outcome: "unknown" })), /The run is over \(unknown\)\./);
-  assert.match(String(transcriptEntryHtml({ id: "5-0", kind: "reset", ts })), /starts over/);
-  assert.match(String(transcriptEntryHtml({ id: "6-0", kind: "skipped", ts })), /left out/);
-  assert.match(String(transcriptEntryHtml({ id: "7-0", kind: "invented", ts, text: "x" })), /^<article class="t-entry t-note">/, "an unknown kind is a note");
-  for (const h of [a, call, result]) assert.doesNotMatch(h, /style=|<script|\son[a-z]+=/i, "no inline style, script or handler");
+  const assistant = String(transcriptEntryHtml({ id: "1-0", kind: "assistant", ts, text: "line one\nline\ttwo" }));
+  assert.match(assistant, /class="tx__e tx__entry tx__e--assistant" data-kind="assistant" data-entry-id="1-0"/);
+  assert.match(assistant, /<pre>line one\nline\ttwo<\/pre>/);
+  assert.match(assistant, /<time class="tx__t" datetime="2026-10-14T12:34:56.000Z">12:34:56 UTC<\/time>/);
+  const call = String(transcriptEntryHtml({ id: "2-0", kind: "tool-call", ts, tool: "bash", text: '{"cmd":"ls"}', truncated: true }));
+  assert.match(call, /<details><summary>arguments<\/summary>/);
+  assert.match(call, /class="tx__trunc">truncated/);
+  assert.match(call, /data-tool-timer/);
+  const result = String(transcriptEntryHtml({ id: "3-0", kind: "tool-result", text: "boom", tool: "bash", error: true }));
+  assert.match(result, /<details open><summary>result<\/summary><pre>boom<\/pre>/);
+  for (const [raw, word] of [["policy", "refused"], ["unknown", "unknown"]]) assert.match(String(transcriptEntryHtml({ kind: "end", outcome: raw })), new RegExp("The run is over \\(" + word + "\\)"));
+  assert.match(String(transcriptEntryHtml({ kind: "end", outcome: "policy" }, { outcomeWord: "cancelled" })), /over \(cancelled\)/);
+  assert.match(String(transcriptEntryHtml({ kind: "reset" })), /starts over/);
+  assert.match(String(transcriptEntryHtml({ kind: "skipped" })), /left out/);
+  assert.match(String(transcriptEntryHtml({ kind: "invented", text: "x" })), /data-kind="note"/);
+  assert.match(String(transcriptEntryHtml({ kind: "steer", text: "operator: go" })), /data-kind="steer"/);
+  for (const h of [assistant, call, result]) assert.doesNotMatch(h, /style=|<script|\son[a-z]+=/i);
 });
 
 test("hostile entries are escaped: markup, a fake </pre>, raw control and bidi bytes, spelled-out escapes and very long text", () => {
@@ -107,31 +112,18 @@ test("hostile entries are escaped: markup, a fake </pre>, raw control and bidi b
   assert.equal(preText("a\nb").map(String).join(""), "a\nb");
 });
 
-test("the run page's section: an operator with a stream gets [data-transcript]; no stream says why and opens nothing (ended, not started, or no such run); a viewer gets the note", () => {
+test("the static transcript box waits through every state; availability is a separate swapped panel", () => {
   const view = (role, data) => ({ role, query: { id: "gh-1" }, data });
-  const live = String(runTranscriptSection(view("operator", { transcript: { exists: true, ended: false }, run: { missing: true } })));
-  assert.match(live, /<h2>Live transcript<\/h2><p class="note">The run is publishing its transcript\.<\/p><p class="t-status" data-transcript-status role="status" aria-live="polite">not live<\/p><div class="transcript" data-transcript data-job="gh-1" tabindex="0"><\/div>/);
-  const ended = String(runTranscriptSection(view("operator", { transcript: { exists: true, ended: true, outcome: "completed" }, run: { record: { endedAt: "x" } } })));
-  assert.match(ended, /has ended \(completed\)/);
-  const refused = String(runTranscriptSection(view("operator", { transcript: { exists: true, ended: true, outcome: "policy" }, run: { record: { endedAt: "x" } } })));
-  assert.match(refused, /has ended \(refused\)/, "the console's word (#710 round 2)");
-  assert.match(ended, /data-transcript /);
-  const gone = String(runTranscriptSection(view("operator", { transcript: { exists: false }, run: { record: { endedAt: "2026-10-14T11:00:00Z" } } })));
-  assert.ok(gone.includes(TRANSCRIPT_ABSENT));
-  assert.match(TRANSCRIPT_ABSENT, /not published \(PI_LIVE_TRANSCRIPTS=0\), expired, or not started yet/);
-  assert.doesNotMatch(gone, /data-transcript/, "an ended run whose stream is gone holds no stream open");
-  const early = String(runTranscriptSection(view("operator", { transcript: { exists: false }, run: { missing: true } })));
-  // Issue #712: no record yet, so the venue cannot be named here, and its cause is listed with the other three.
-  assert.ok(early.includes(transcriptAbsentText(null)) && early.includes("Reload to check again."), "no record and no stream: say why");
-  assert.match(transcriptAbsentText(null), /not started yet, or its venue or job image does not stream it\.$/);
-  assert.doesNotMatch(early, /data-transcript/, "and hold no stream open for a run that may never publish (or does not exist: the page's 404)");
-  const down = String(runTranscriptSection(view("operator", { transcript: { unreachable: true, exists: false }, run: { missing: true } })));
-  assert.match(down, /could not be read/);
-  assert.doesNotMatch(down, /data-transcript/);
-  const viewer = String(runTranscriptSection(view("viewer", { transcript: { exists: true }, run: { missing: true } })));
-  assert.equal(viewer, `<h2>Live transcript</h2><p class="note">Transcripts are shown to operators only.</p>`);
-  const hostileId = String(runTranscriptSection({ role: "operator", query: { id: `x"><script>` }, data: { transcript: { exists: true } } }));
-  assert.ok(hostileId.includes(`data-job="x&quot;&gt;&lt;script&gt;"`), "the job id is an escaped attribute");
+  for (const transcript of [{ exists: true }, { exists: false }, { unreachable: true }, { exists: true, ended: true }]) {
+    const box = String(runTranscriptSection(view("operator", { transcript })));
+    assert.match(box, /data-transcript data-job="gh-1"/);
+    assert.match(box, /data-transcript-filter="messages"/);
+    assert.doesNotMatch(box, /Reload to check|data-transcript-status/);
+  }
+  const viewer = String(runTranscriptSection(view("viewer", {})));
+  assert.match(viewer, /Transcripts are shown to operators only/);
+  assert.doesNotMatch(viewer, /data-transcript/);
+  assert.match(String(runTranscriptSection({ role: "operator", query: { id: `x"><script>` } })), /data-job="x&quot;&gt;&lt;script&gt;"/);
 });
 
 // ---- the hub, on a fake reader -----------------------------------------------------------------------------------------
@@ -168,6 +160,8 @@ function hubOn({ streams = fakeStreams(), alive = new Set(["s1", "s2", "s3", "s4
     loadPageData: async () => ({}),
     pagePanels: async () => [],
     peekSession: (id, file) => (file === FILE && alive.has(id) ? { id } : null),
+    // The store's verdict, faked: a session that left `alive` was revoked.
+    endedReason: (id, file) => (file === FILE && !alive.has(id) ? "revoked" : null),
     readTokens: () => ({ file: FILE }),
     transcriptSince: transcriptSince ?? streams.since,
     now: clock(),
@@ -316,7 +310,7 @@ test("hub: ids past a digit boundary (a 12-digit ms then a 13-digit one, <ms>-9 
   assert.ok(!entriesIn(ahead.take()).some((e) => e.id === `${ms}-10` || e.id === `${ms}-9`), "the stream at -10 gets nothing it has");
 });
 
-test("hub: a transcript stream whose session fails peek gets event: end; one whose buffer passes 2 MiB is cut; an unreachable read is logged once, without text", async () => {
+test("hub: a transcript stream whose session fails peek gets event: end with its reason; one whose buffer passes 2 MiB is cut; an unreachable read is logged once, without text", async () => {
   const h = hubOn();
   h.streams.add("job-a", { text: "x" });
   const dead = fakeRes();
@@ -329,7 +323,7 @@ test("hub: a transcript stream whose session fails peek gets event: end; one who
   h.alive.delete("s1");
   full.writableLength = 2 * 1024 * 1024 + 1;
   await h.hub.tick();
-  assert.match(dead.take(), /event: end\ndata: \{\}\n\n$/);
+  assert.match(dead.take(), /event: end\ndata: \{"ended":"revoked"\}\n\n$/);
   assert.equal(dead.ended, true);
   assert.equal(full.destroyed, true, "cut, not ended");
   assert.equal(h.hub.size().streams, 1);
@@ -349,6 +343,33 @@ test("hub: a transcript stream whose session fails peek gets event: end; one who
   await u.hub.tick();
   assert.equal(entriesIn(res.take()).length, 1);
   assert.equal(u.logs.filter((l) => /read again/.test(l)).length, 1);
+});
+
+test("hub: a transcript stream is never told stale or fresh (its entries are a log, not a picture), on a failed read or an unreadable tokens file; close says shutdown", async () => {
+  let read = () => ({ file: FILE });
+  let unreachable = false;
+  const s = fakeStreams();
+  const h = hubOn({ streams: s, readTokens: () => read(), transcriptSince: async (...a) => (unreachable ? { unreachable: "down" } : s.since(...a)) });
+  s.add("job-a", { text: "one" });
+  const res = fakeRes();
+  h.hub.subscribeTranscript({ res, sessionId: "s1", session: OP, jobId: "job-a" });
+  await h.hub.tick();
+  unreachable = true;
+  await h.hub.tick();
+  read = () => ({ refusal: "the tokens file is readable by others" });
+  s.add("job-a", { text: "two" });
+  h.alive.delete("s1");
+  await h.hub.tick();
+  assert.equal(res.ended, false, "an unreadable tokens file ends no transcript stream either");
+  unreachable = false;
+  read = () => ({ file: FILE });
+  h.alive.add("s1");
+  await h.hub.tick();
+  const text = res.take();
+  assert.doesNotMatch(text, /event: (stale|fresh)\n/);
+  assert.deepEqual(entriesIn(text).map((e) => JSON.stringify(e.html).includes("two")), [false, true], "the entry held back is sent once the file reads again");
+  h.hub.close();
+  assert.match(res.take(), /^event: end\ndata: \{"ended":"shutdown"\}\n\n$/);
 });
 
 // ---- over HTTP ---------------------------------------------------------------------------------------------------------
@@ -387,6 +408,8 @@ async function transcriptConsole({ fleet, maxStreams = 4, readOnly = false } = {
     pagePanels: realPages.pagePanels,
     queryKeyOf: realPages.pageQueryString,
     peekSession: (id, file) => sessions.peek(id, file),
+    // Wired as cli.mjs wires it: the reason a stream ends is the store's pure verdict.
+    endedReason: (id, file) => sessions.verdict(id, file).ended ?? null,
     readTokens,
     transcriptSince: (jobId, after, opts) => fleet.transcriptSince(jobId, after, opts),
     readOnly,
@@ -399,7 +422,7 @@ async function transcriptConsole({ fleet, maxStreams = 4, readOnly = false } = {
     audit: { append: (row) => row },
     sessions,
     cookies: sessionsModule,
-    tickets: { issue: () => ({ ticket: "t" }), redeem: () => ({ refusal: "no" }) },
+    tickets: { issue: () => ({ ticket: "t", expiresAt: now() + 5 * MIN }), redeem: () => ({ refusal: "no" }) },
     readTokens,
     findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null,
     consumeLoginCode: () => ({ refusal: "unknown" }),
@@ -560,21 +583,23 @@ test("over HTTP: Last-Event-ID resumes in the stream's own shape; a panel-shaped
   await resumed.done;
 });
 
-test("over HTTP: a session that ends mid-stream (logout, revoke) gets event: end on its transcript stream", { timeout: 20_000 }, async () => {
+test("over HTTP: a session that ends mid-stream (logout, revoke) gets event: end on its transcript stream, saying why", { timeout: 20_000 }, async () => {
   const c = await transcriptConsole({ fleet: fakeFleet() });
   const op = await c.login();
   const s = await c.stream(op, "/api/transcript?id=job-1");
   await s.waitFor(/^retry: 2000\n\n/);
   await c.send({ method: "POST", path: "/logout", headers: { ...c.writeHeaders, cookie: op } });
-  await s.waitFor(/event: end\ndata: \{\}\n\n/);
+  await s.waitFor(/event: end\ndata: /);
   await s.done;
+  assert.match(s.text, /event: end\ndata: \{"ended":"elsewhere"\}\n\n$/, "this browser signed out in another tab");
   const op2 = await c.login();
   const s2 = await c.stream(op2, "/api/transcript?id=job-1");
   await s2.waitFor(/^retry: 2000\n\n/);
   c.tokens.file = { ...c.tokens.file, tokens: c.tokens.file.tokens.filter((t) => t.name !== "alice") };
   await c.hub.tick();
-  await s2.waitFor(/event: end\ndata: \{\}\n\n/);
+  await s2.waitFor(/event: end\ndata: /);
   await s2.done;
+  assert.match(s2.text, /event: end\ndata: \{"ended":"revoked"\}\n\n$/);
   await c.settle(0);
   assert.equal(c.hub.size().streams, 0);
 });
@@ -607,7 +632,7 @@ after(async () => {
   }
 });
 
-test("end to end: the producer's stream reaches the operator's /api/transcript in order, escaped, then done with the outcome; none of it in /api/state, the run page or a panel stream", live, async () => {
+test("end to end: the producer's stream reaches the operator's /api/transcript in order, escaped, then done with the outcome; text only in operator entry events, never /api/state, initial HTML or panel events", live, async () => {
   const redis = await fresh();
   const jobId = "job-live";
   const MARK = "TRANSCRIPT-ONLY-MARK";
@@ -637,12 +662,12 @@ test("end to end: the producer's stream reaches the operator's /api/transcript i
   // The run page: no record yet (it is running), a stream: the operator's section opens it, 200 not 404.
   const page = await c.send({ path: `/run?id=${jobId}`, headers: { cookie: op } });
   assert.equal(page.status, 200);
-  assert.match(page.text, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2>/);
-  assert.match(page.text, /<div class="transcript" data-transcript data-job="job-live" tabindex="0"><\/div>/);
+  assert.match(page.text, /<div id="transcript" class="run-transcript">/);
+  assert.match(page.text, /<div class="tx transcript" data-transcript data-job="job-live" tabindex="0" aria-label="Run transcript"><\/div>/);
   assert.ok(!page.text.includes(MARK), "the run page itself carries no transcript text");
   const vpage = await c.send({ path: `/run?id=${jobId}`, headers: { cookie: viewer } });
   assert.match(vpage.text, /Transcripts are shown to operators only\./);
-  assert.doesNotMatch(vpage.text, /data-transcript/);
+  assert.doesNotMatch(vpage.text, /data-transcript data-job/);
 
   const a = await c.stream(op, `/api/transcript?id=${jobId}`);
   const b = await c.stream(op, `/api/transcript?id=${jobId}`);
@@ -650,7 +675,7 @@ test("end to end: the producer's stream reaches the operator's /api/transcript i
   await a.waitFor(/tool call/);
   await b.waitFor(/tool call/);
   const got = entriesIn(a.text);
-  assert.deepEqual(got.map((e) => /t-kind">([^<]+)</.exec(e.html)[1]), ["note", "user", "assistant", "tool call"]);
+  assert.deepEqual(got.map((e) => /data-kind="([^"]+)"/.exec(e.html)[1]), ["note", "user", "assistant", "tool-call"]);
   for (const e of got) assert.match(e.id, /^\d{1,16}-\d{1,10}$/, "the id is the stream's own");
   assert.deepEqual(entriesIn(b.text).map((e) => e.id), got.map((e) => e.id), "both streams, the same entries");
   const user = got[1].html;
@@ -673,8 +698,8 @@ test("end to end: the producer's stream reaches the operator's /api/transcript i
     await s.done;
   }
   const all = entriesIn(a.text);
-  assert.deepEqual(all.slice(-2).map((e) => /t-kind">([^<]+)</.exec(e.html)[1]), ["tool result", "end"]);
-  assert.match(all.at(-2).html, /<span class="t-error bad">error<\/span>/);
+  assert.deepEqual(all.slice(-2).map((e) => /data-kind="([^"]+)"/.exec(e.html)[1]), ["tool-result", "end"]);
+  assert.match(all.at(-2).html, /tx__e--error[\s\S]*?<span>error<\/span>/);
 
   // Nothing of it outside the operator's transcript stream.
   const state = await c.send({ path: "/api/state", headers: { cookie: op } });
@@ -689,7 +714,7 @@ test("end to end: the producer's stream reaches the operator's /api/transcript i
   }
   assert.ok(!JSON.stringify(runData).includes(MARK), "the run page's data holds no text, only the stream's facts");
   const ended = await c.send({ path: `/run?id=${jobId}`, headers: { cookie: op } });
-  assert.match(ended.text, /The run has ended \(completed\)/);
+  assert.match(ended.text, /Ended \(completed\)/);
   panels.destroy();
   await panels.done;
 });
@@ -708,7 +733,7 @@ test("end to end: an expired or unpublished stream gives the run page its reason
   const page = await c.send({ path: "/run?id=gone-1", headers: { cookie: op } });
   assert.equal(page.status, 200);
   assert.ok(page.text.includes(TRANSCRIPT_ABSENT), "the reason, naming all three causes");
-  assert.doesNotMatch(page.text, /data-transcript/, "nothing to open");
+  assert.match(page.text, /data-transcript data-job="gone-1"/, "a static box waits without a second stream");
 
   // The cut, on the hub the server uses: a reader that stopped reading is destroyed, its slot given back.
   const res = fakeRes();
@@ -812,4 +837,36 @@ test("over HTTP: format=json streams JSON entries, resumes on Last-Event-ID, end
   assert.ok(entriesIn(html.text).every((e) => typeof e.html === "string"));
   html.destroy();
   await html.done;
+});
+
+test("#747 HTTP run pages carry operator entries on one connection each, preserve cursors and leave spare slots", { timeout: 20_000 }, async () => {
+  const streams = fakeStreams();
+  const ids = [streams.add("job-1", { text: "only-in-entry-747" }), streams.add("job-1", { text: "second-entry-747" })];
+  const c = await transcriptConsole({ fleet: fakeFleet(streams), maxStreams: 4 });
+  const op = await c.login();
+  const one = await c.stream(op, "/api/events?page=run&id=job-1");
+  const two = await c.stream(op, "/api/events?page=run&id=job-1");
+  assert.equal(one.status, 200);
+  assert.equal(two.status, 200);
+  await one.waitFor(/only-in-entry-747/);
+  await two.waitFor(/second-entry-747/);
+  assert.equal(c.hub.size().streams, 2, "each tab holds exactly its page connection");
+  for (const connection of [one, two]) {
+    assert.deepEqual(entriesIn(connection.text).map((e) => e.id), ids);
+    for (const [, data] of connection.text.matchAll(/event: panel\ndata: (.+)\n\n/g)) assert.doesNotMatch(data, /only-in-entry|second-entry/);
+    assert.doesNotMatch(connection.text, /id: [^\n]+\nevent: panel/);
+  }
+  const spare = await c.stream(op, "/api/events?page=overview");
+  assert.equal(spare.status, 200, "two run tabs leave room for another page");
+  one.destroy(); two.destroy(); spare.destroy();
+  await Promise.all([one.done, two.done, spare.done]);
+  await c.settle(0);
+  const resumed = await c.stream(op, "/api/events?page=run&id=job-1", { "last-event-id": ids[0] });
+  await resumed.waitFor(/second-entry-747/);
+  assert.deepEqual(entriesIn(resumed.text).map((e) => e.id), ids.slice(1));
+  resumed.destroy(); await resumed.done;
+  const viewer = await c.stream(await c.login(VIEW_TOKEN), "/api/events?page=run&id=job-1");
+  await viewer.waitFor(/event: panel/);
+  assert.doesNotMatch(viewer.text, /event: entry|only-in-entry-747|second-entry-747/);
+  viewer.destroy(); await viewer.done;
 });

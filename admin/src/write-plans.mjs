@@ -5,7 +5,7 @@
  * PI-FREE ON PURPOSE. The operator console (`admin/src/console/`) is a separate process that never loads pi, and it must
  * refuse with the SAME words the tools and the commands use, or an operator sees two rules for one file. These lived in
  * `index.ts`, which imports pi and typebox, so the console could not reach them; a copy in the console would have been
- * the hand-written restatement this repository refuses (CLAUDE.md, "derived or pinned, never trusted"). So they moved
+ * the hand-written restatement this repository refuses (AGENTS.md, "derived or pinned, never trusted"). So they moved
  * here, `index.ts` imports them back, and `admin/test/write-plans.test.mjs` walks this module's imports to keep pi and
  * typebox out of it.
  *
@@ -56,6 +56,7 @@ import {
 } from "./read-model.mjs";
 import { escapeInterpreted } from "./panel.mjs";
 import { sizeBits } from "./render.mjs";
+import { fieldNamed } from "./words.mjs";
 
 // ---- small field readers, shared by the dialogs and the tools ----
 
@@ -89,6 +90,26 @@ export function optInt(x) {
 /** A plan's confirm: the title, the message, and the message as lines. */
 function confirmOf(title, message) {
   return { title, message, summary: message.split("\n") };
+}
+
+/**
+ * How a plan names a row of a list (issue #737). The pi tools and the `/dispatch` panel say "trigger #2" for index
+ * 1, as they always have: the number a person counts by. The console's Configuration page still draws its tables and
+ * forms by the 0-based index (the Triggers table's "#" column, its "Row #" fields, "History row # (newest is 0)"), so
+ * until that page converts (PR 7a) the console's sentences name a row by that same index, "trigger at index 1", and the
+ * page never says two numbers for one row. The value a form or a tool sends is the index on both surfaces; only the
+ * words differ. `surface` is "console" for the console's actions, anything else for the tools and the panel.
+ */
+export function rowName(what, index, surface = "tool") {
+  return surface === "console" ? `${what} at index ${index}` : `${what} #${index + 1}`;
+}
+
+/**
+ * A change as a confirm says it, `key: before to after` (issue #737: words, not an arrow), each pair joined by a
+ * comma. The console draws the same pairs with the two values in bold (`plan.changes`), so the words are this one rule.
+ */
+export function changeText(changes) {
+  return changes.map(([key, before, after]) => `${key}: ${before} to ${after}`).join(", ");
 }
 
 /** A validator that throws, as a refusal: its own message, so the tool that re-throws it says the same words. */
@@ -249,11 +270,6 @@ export function buildTriggerEntry(kind, f) {
     return { on: { type: "cron", id: f.id, pattern: f.pattern }, run };
   }
   const forge = optStr(f.forge) ?? "github";
-  // `run.repository` is required on an azure label/comment trigger and REFUSED on every other forge's, so
-  // it is carried only when set and `parseTriggers` decides whether it belongs. Passing it through rather
-  // than validating here keeps one validator, exactly as an unrecognised forge is passed through to be
-  // refused fail-loud at the write instead of silently rewritten to github.
-  const repository = optStr(f.repository);
   const backend = optStr(f.backend);
   // #502. The tool's schema has always offered model/provider/maxTurns on every kind, and before #502 a
   // webhook arm dropped them in silence: the operator approved an entry without the model they asked for.
@@ -262,11 +278,27 @@ export function buildTriggerEntry(kind, f) {
   const provider = optStr(f.provider);
   const maxTurns = optInt(f.maxTurns);
   const modelRun = { ...(model ? { model } : {}), ...(provider ? { provider } : {}), ...(maxTurns !== undefined ? { maxTurns } : {}), ...progressRun(f) };
-  const forgeRun = (rest) => ({ kind: forge, ...rest, ...(repository ? { repository } : {}), ...(backend ? { backend } : {}), ...modelRun });
+  // `run.repository` is required on an azure label/comment trigger and REFUSED on every other forge's, so
+  // it is carried only when set and `parseTriggers` decides whether it belongs. Passing it through rather
+  // than validating here keeps one validator, exactly as an unrecognised forge is passed through to be
+  // refused fail-loud at the write instead of silently rewritten to github. Read HERE, by the two arms that
+  // carry it (label and comment), and nowhere else (issue #737): the pull_request and issue arms build their
+  // run without it, so a read at the top of the function made `repository` look like a field those kinds take
+  // while it was dropped in silence. `TRIGGER_ADD_FIELDS` is derived from what each arm reads, and refuses it there.
+  const forgeRun = (rest) => {
+    const repository = optStr(f.repository);
+    return { kind: forge, ...rest, ...(repository ? { repository } : {}), ...(backend ? { backend } : {}), ...modelRun };
+  };
   if (kind === "label") return { on: { type: "label", any: asWords(f.labels ?? f.any) }, run: forgeRun({ flow: f.flow }) };
   if (kind === "comment") return { on: { type: "comment", phrase: f.phrase }, run: forgeRun({ flow: f.flow }) };
   if (kind === "pull_request") {
     const on = { type: "pull_request", action: asWords(f.action) };
+    // The review-verdict narrowing (issue #66), which the add tool's description has always offered and, until issue
+    // #737, this arm dropped in silence: the operator approved an entry that fired on every verdict. Carried when
+    // sent, as sent, after `action` (the loader's own key order), and judged by the loader's `validateReviewState` at
+    // the write: github only, `review_submitted` in the actions, a non-empty list of its states. A value that is not a
+    // list is passed through too, for that validator to refuse by name, the posture this function keeps for `forge`.
+    if (f.reviewState !== undefined) on.reviewState = Array.isArray(f.reviewState) ? [...f.reviewState] : f.reviewState;
     const any = asWords(f.labels ?? f.any);
     if (any.length > 0) on.any = any;
     // The close-trigger narrowings (issue #231), carried only when set so every pre-#231 call site
@@ -299,6 +331,37 @@ export function buildTriggerEntry(kind, f) {
     return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}), ...modelRun } };
   }
   return null;
+}
+
+/** The model's fields and the flags, which every kind of trigger add takes (`TRIGGER_ADD_FIELDS`). */
+const MODEL_FIELDS = ["model", "provider", "maxTurns"];
+const FLAG_FIELDS = ["progress", "statusComment", "recover", "steer"];
+
+/**
+ * The fields the trigger add takes, per kind (issue #737): exactly the keys `buildTriggerEntry`'s arm for that kind
+ * reads, plus `kind` itself, which picks the arm. A field outside its kind's list is REFUSED by name before any confirm
+ * (`planTriggerAdd`), for the tool and the console's form alike, because the alternative is the one this function's
+ * history keeps finding: a field the caller sent and the arm never reads, dropped in silence, so the operator approves
+ * an entry without what was asked for (`repository` on a pull request, `reviewState` before issue #737). Derived, not
+ * trusted: `admin/test/write-plans.test.mjs` reads each arm through a recording Proxy and holds its reads to this
+ * table, both ways, so a field an arm starts reading cannot be refused here, and one it stops reading cannot be taken.
+ */
+export const TRIGGER_ADD_FIELDS = Object.freeze({
+  cron: Object.freeze(["kind", "id", "pattern", "folder", "flow", "task", ...MODEL_FIELDS, "backend", ...FLAG_FIELDS]),
+  label: Object.freeze(["kind", "flow", "forge", "repository", "labels", "any", "backend", ...MODEL_FIELDS, ...FLAG_FIELDS]),
+  comment: Object.freeze(["kind", "phrase", "flow", "forge", "repository", "backend", ...MODEL_FIELDS, ...FLAG_FIELDS]),
+  pull_request: Object.freeze(["kind", "action", "reviewState", "labels", "any", "number", "once", "flow", "forge", "backend", ...MODEL_FIELDS, ...FLAG_FIELDS]),
+  issue: Object.freeze(["kind", "action", "number", "once", "flow", "forge", "backend", ...MODEL_FIELDS, ...FLAG_FIELDS]),
+});
+
+/**
+ * The first key of `params` its trigger kind does not take (`TRIGGER_ADD_FIELDS`), or null. A key whose value is
+ * `undefined` was not sent (JSON has no such value; an in-process caller spreading an absent optional field is not a
+ * caller asking for it), so it is not judged.
+ */
+function unknownTriggerField(params, kind) {
+  const takes = TRIGGER_ADD_FIELDS[kind];
+  return Object.keys(params).find((k) => params[k] !== undefined && !takes.includes(k)) ?? null;
 }
 
 /**
@@ -382,6 +445,14 @@ export function triggerList(paths, fs = nodeFs) {
 export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_add", surface = "tool", fs = nodeFs }) {
   const widening = wideningFieldRefusal(params, tool);
   if (widening !== null) return { refusal: widening };
+  // Issue #737: the kind first (its fields depend on it), then every field it does not take, by name, before anything
+  // else is judged. The tool-proof sweep above stays first, so a near miss of a cap is refused as the widening it is,
+  // never as a mere unknown field.
+  // The kinds it takes are named and the sent one never is (issue #737, the rule for a field: a caller's bytes do not
+  // travel into a sentence a page or a model reads).
+  if (typeof params.kind !== "string" || !Object.hasOwn(TRIGGER_ADD_FIELDS, params.kind)) return { refusal: `unknown trigger kind: kind must be one of ${Object.keys(TRIGGER_ADD_FIELDS).join(", ")}` };
+  const unknown = unknownTriggerField(params, params.kind);
+  if (unknown !== null) return { refusal: `${tool} does not take ${fieldNamed(unknown)} for a ${params.kind} trigger; it takes ${TRIGGER_ADD_FIELDS[params.kind].join(", ")}. Nothing was changed` };
   if (params.backend !== undefined) {
     const venue = backendRefusal(params.backend, env);
     if (venue !== null) return { refusal: venue };
@@ -398,7 +469,6 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
   const recoverVenue = recoverVenueRefusal({ recover: params.recover, backend: optStr(params.backend), env });
   if (recoverVenue !== null) return { refusal: recoverVenue };
   const built = buildTriggerEntry(params.kind, params);
-  if (!built) return { refusal: `unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)` };
   // Issue #704: a trigger a MODEL-CALLABLE tool writes is kept out of its project's secret bundle. Its task text (cron)
   // or its flow is the model's choice, and a bundle is the project's whole environment, granted to the triggers the
   // operator reviewed; an operator confirm on one entry does not review what that entry's jobs would hold. The
@@ -421,15 +491,18 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
  * `provider` and `model`, each merged only when sent so an edit of the flow leaves every other key byte-identical.
  * The model reference is judged alone and then MERGED with the entry's own `run` (PR #536's review), before the
  * confirm. `progress` and `statusComment` (issue #644) merge the same way, and so does `recover` (issue #645), judged
- * against the entry's own `run.command` as well as its type. `{ plan: { index, flow, backend, ref, flags, mutate, target, expect, title, message, summary } }` or `{ refusal }`.
+ * against the entry's own `run.command` as well as its type. `surface` names the row (`rowName`). `{ plan: { index, flow,
+ * backend, ref, flags, row, type, changes, mutate, target, expect, title, message, summary } }` or `{ refusal }`, where
+ * `changes` is the message's `[key, before, after]` pairs (`changeText`).
  */
-export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_edit", fs = nodeFs }) {
+export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_edit", surface = "tool", fs = nodeFs }) {
   const widening = wideningFieldRefusal(params, tool);
   if (widening !== null) return { refusal: widening };
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
   const list = triggerList(paths, fs);
   const cur = list[params.index];
   if (!cur) return { refusal: `no trigger at index ${params.index} (have ${list.length})` };
+  const row = rowName("trigger", params.index, surface);
   const flow = String(params.flow ?? "").trim();
   if (!flow) return { refusal: "flow must be non-empty" };
   // #227, the same allowlist the add applies and for the same reason: the picker bounds what an operator
@@ -440,13 +513,12 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
     const venue = backendRefusal(backend, env);
     if (venue !== null) return { refusal: venue };
   }
-  const venue = backend === undefined ? "" : `, backend: ${cur.backend ?? "-"} -> ${backend}`;
   // #502. Blank means "not sent", optStr's rule for backend above. A sent value goes through the
   // worker's validator, the one parseTriggers runs at the write, so a malformed id is refused here
   // with the loader's own message instead of after the operator approved it.
   let ref;
   const alone = refusalOf(() => {
-    ref = validateModelRef({ provider: optStr(params.provider), model: optStr(params.model) }, `trigger #${params.index + 1}`, paths.triggersPath);
+    ref = validateModelRef({ provider: optStr(params.provider), model: optStr(params.model) }, row, paths.triggersPath);
   });
   if (alone !== null) return { refusal: alone };
   // The display record carries no provider for a forge trigger, so the before half reads the raw
@@ -460,11 +532,10 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   })();
   // #502 (PR #536's review): the MERGED run, before the confirm. A new provider or model checked alone passes, and
   // only the write's parse would then find it off the trigger's own `run.models`, after the operator approved it.
-  const merged = refusalOf(() => validateModelRef({ ...rawRun, ...ref }, `trigger #${params.index + 1}`, paths.triggersPath));
+  const merged = refusalOf(() => validateModelRef({ ...rawRun, ...ref }, row, paths.triggersPath));
   if (merged !== null) return { refusal: merged };
-  const modelLine = ["provider", "model"].filter((k) => ref[k] !== undefined).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${ref[k]}`).join("");
   // #644. Merged only when sent, like backend; judged against the entry's own on.type (no status comment on cron).
-  const progressFault = progressRefusal(params, cur.type, `trigger #${params.index + 1}`, paths.triggersPath, rawRun.command);
+  const progressFault = progressRefusal(params, cur.type, row, paths.triggersPath, rawRun.command);
   if (progressFault !== null) return { refusal: progressFault };
   // Issue #712: judged only when this edit sends `recover` or a venue, against the entry as it would be after it, so an
   // edit of the flow alone is not refused over a pairing the operator did not touch (the processor refuses that one per
@@ -474,8 +545,15 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
     if (recoverVenue !== null) return { refusal: recoverVenue };
   }
   const flags = progressRun(params);
-  const flagLine = Object.keys(flags).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${flags[k]}`).join("");
   const index = params.index;
+  // What the edit changes, each as `[key, before, after]` in the order the message has always listed them: the flow,
+  // then the venue, the provider and the model it was sent, then the flags. The console bolds the two values.
+  const changes = [
+    ["flow", String(cur.flow ?? "-"), flow],
+    ...(backend === undefined ? [] : [["backend", String(cur.backend ?? "-"), backend]]),
+    ...["provider", "model"].filter((k) => ref[k] !== undefined).map((k) => [k, String(rawRun[k] ?? "-"), String(ref[k])]),
+    ...Object.keys(flags).map((k) => [k, String(rawRun[k] ?? "-"), String(flags[k])]),
+  ];
   return {
     plan: {
       index,
@@ -486,27 +564,36 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
       // changes just the flow leaves the entry byte-identical in every other key -- including a venue
       // or a model it already had.
       flags,
+      row,
+      type: cur.type,
+      changes,
       mutate: (raw) => raw.map((tr, i) => (i === index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }), ...ref, ...flags } } : tr)),
       target: paths.triggersPath,
       expect,
-      ...confirmOf(`Edit trigger #${index + 1}`, `trigger #${index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}${venue}${modelLine}${flagLine}`),
+      ...confirmOf(`Edit ${row}`, `${row} (${cur.type}) ${changeText(changes)}`),
     },
   };
 }
 
-/** Plan a trigger delete (`dispatch_trigger_delete`) by index. `{ plan: { index, mutate, ... } }` or `{ refusal }`. */
-export function planTriggerDelete({ index, paths, fs = nodeFs }) {
+/**
+ * Plan a trigger delete (`dispatch_trigger_delete`) by index; `surface` names the row (`rowName`). `{ plan: { index,
+ * mutate, ... } }` or `{ refusal }`.
+ */
+export function planTriggerDelete({ index, paths, surface = "tool", fs = nodeFs }) {
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
   const list = triggerList(paths, fs);
   const cur = list[index];
   if (!cur) return { refusal: `no trigger at index ${index} (have ${list.length})` };
+  const row = rowName("trigger", index, surface);
   return {
     plan: {
       index,
       mutate: (raw) => raw.filter((_, i) => i !== index),
       target: paths.triggersPath,
       expect,
-      ...confirmOf(`Delete trigger #${index + 1}`, `Remove trigger #${index + 1}: ${cur.type} -> ${cur.flow ?? "-"}`),
+      // The row as the edit's confirm names it, "trigger #1 (label) flow: fix", in words (issue #737: a confirm
+      // says what it does in words and never an arrow, the pi panel's and the console's alike).
+      ...confirmOf(`Delete ${row}`, `Remove ${row} (${cur.type}) flow: ${cur.flow ?? "-"}`),
     },
   };
 }
@@ -593,17 +680,20 @@ function planSettingTool({ key, value, paths, env, shown, fs }) {
   const problem = isDollarKey ? mergedDollarProblem(afterOverlay, env, shown) : null;
   const broken = settingsEnvelopeRefusal(key, view?.overlay ?? {}, afterOverlay, paths, env);
   if (broken) return { refusal: `rejected: ${escapeInterpreted(broken)}` };
+  // The change as one `[key, before, after]` pair (`changeText`), which the console draws with the values in bold.
+  const changes = [[key, settingShown(key, view?.overlay, env, shown), after]];
   return {
     plan: {
       key,
       unset,
       value: unset ? null : newVal,
+      changes,
       mutate: unset ? (o) => { delete o[key]; return o; } : (o) => ({ ...o, [key]: newVal }),
       writeArgs: {},
       warning: problem?.warning ?? null,
       target: paths.settingsFile,
       expect: writeInputs({ paths: [paths.settingsFile], fs }),
-      ...confirmOf(unset ? `Unset ${key}` : `Set ${key}`, `${key}: ${settingShown(key, view?.overlay, env, shown)} -> ${after}${problem?.warning ? `\n\nWarning: ${problem.warning}` : ""}`),
+      ...confirmOf(unset ? `Unset ${key}` : `Set ${key}`, `${changeText(changes)}${problem?.warning ? `\n\nWarning: ${problem.warning}` : ""}`),
     },
   };
 }
@@ -725,9 +815,10 @@ export function planPauseWindowAdd({ fields, paths, fs = nodeFs }) {
 
 /**
  * Plan a pause-window edit (`dispatch_pause_edit`): a provided field replaces, an omitted one keeps the current value,
- * and the result is rebuilt through the shared builder so it is judged like an add. `{ plan }` or `{ refusal }`.
+ * and the result is rebuilt through the shared builder so it is judged like an add. `surface` names the row
+ * (`rowName`). `{ plan }` or `{ refusal }`.
  */
-export function planPauseWindowEdit({ index, fields, paths, fs = nodeFs }) {
+export function planPauseWindowEdit({ index, fields, paths, surface = "tool", fs = nodeFs }) {
   const expect = writeInputs({ paths: [paths.pauseWindowsPath], fs });
   const at = pauseWindowAt(paths, index, fs);
   if (at.refusal) return { refusal: at.refusal };
@@ -745,28 +836,32 @@ export function planPauseWindowEdit({ index, fields, paths, fs = nodeFs }) {
   return {
     plan: {
       index,
+      // The window as read, through the same builder (issue #737): the console's Undo edits it back to exactly this.
+      before,
       entry: merged,
       mutate: (l) => l.map((w, i) => (i === index ? merged : w)),
       target: paths.pauseWindowsPath,
       expect,
-      ...confirmOf(`Edit pause window #${index + 1}`, `pause window #${index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}`),
+      // "to", not an arrow (issue #737: the console's copy has no Unicode symbol, and this text is its bar's too).
+      ...confirmOf(`Edit ${rowName("pause window", index, surface)}`, `${rowName("pause window", index, surface)}:\n${JSON.stringify(before)}\nto ${JSON.stringify(merged)}`),
     },
   };
 }
 
-/** Plan a pause-window delete (`dispatch_pause_delete`) by index. `{ plan }` or `{ refusal }`. */
-export function planPauseWindowDelete({ index, paths, fs = nodeFs }) {
+/** Plan a pause-window delete (`dispatch_pause_delete`) by index; `surface` names the row. `{ plan }` or `{ refusal }`. */
+export function planPauseWindowDelete({ index, paths, surface = "tool", fs = nodeFs }) {
   const expect = writeInputs({ paths: [paths.pauseWindowsPath], fs });
   const at = pauseWindowAt(paths, index, fs);
   if (at.refusal) return { refusal: at.refusal };
   const cur = at.cur;
+  const row = rowName("pause window", index, surface);
   return {
     plan: {
       index,
       mutate: (l) => l.filter((_, i) => i !== index),
       target: paths.pauseWindowsPath,
       expect,
-      ...confirmOf(`Delete pause window #${index + 1}`, `Remove pause window #${index + 1}: ${cur.scope} ${cur.from}-${cur.to} ${cur.tz}`),
+      ...confirmOf(`Delete ${row}`, `Remove ${row}: ${cur.scope} ${cur.from}-${cur.to} ${cur.tz}`),
     },
   };
 }
@@ -894,7 +989,7 @@ export function liveOr(res) {
  */
 export function scopeChangeNote(before, after) {
   if (before?.scope === after?.scope) return "";
-  return "\nThe scope changes, so this row starts a NEW count under a new key: the used runs and dollars of the old scope do not carry over. Jobs already running keep their slot under the old scope until they finish, and the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until then.";
+  return "\nThe scope changes, so this row starts a new count under a new key: the used runs and dollars of the old scope do not carry over. Jobs already running keep their slot under the old scope until they finish, and the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until then.";
 }
 
 /** The envelope cross-check context the scoped-limits and projects writers take (`envelopeRefusal`). */
@@ -955,9 +1050,9 @@ export function planLimitAdd({ params, paths, env, fs = nodeFs }) {
  * Plan a scoped-limit edit (`dispatch_limit_edit`): a provided field replaces, an omitted one keeps the current value
  * (the dollar windows and the size fields are CARRIED, never dropped), rebuilt through the shared builder and judged
  * like an add. `sizingNoteFn(scope)`, when given, adds the project's size evidence to the confirm when a size field
- * changes (index.ts's `sizingNote`). `{ plan }` or `{ refusal }`.
+ * changes (index.ts's `sizingNote`). `surface` names the row (`rowName`). `{ plan }` or `{ refusal }`.
  */
-export function planLimitEdit({ params, paths, env, sizingNoteFn = null, fs = nodeFs }) {
+export function planLimitEdit({ params, paths, env, sizingNoteFn = null, surface = "tool", fs = nodeFs }) {
   const index = params.index;
   const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile], fs });
   const at = limitAt(paths, index, fs);
@@ -996,14 +1091,18 @@ export function planLimitEdit({ params, paths, env, sizingNoteFn = null, fs = no
     expect,
     envelope,
     mutate,
-    title: `Edit scoped limit #${index + 1}`,
-    message: `scoped limit #${index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}${sizing}`,
-    extra: { index, entry: merged },
+    title: `Edit ${rowName("scoped limit", index, surface)}`,
+    message: `${rowName("scoped limit", index, surface)}:\n${JSON.stringify(before)}\nto ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}${sizing}`,
+    // The row as read, through the same builder (issue #737): the console's Undo edits it back to exactly this.
+    extra: { index, before, entry: merged },
   });
 }
 
-/** Plan a scoped-limit delete (`dispatch_limit_delete`) by index, judged like an add. `{ plan }` or `{ refusal }`. */
-export function planLimitDelete({ index, paths, env, fs = nodeFs }) {
+/**
+ * Plan a scoped-limit delete (`dispatch_limit_delete`) by index, judged like an add; `surface` names the row. `{ plan }`
+ * or `{ refusal }`.
+ */
+export function planLimitDelete({ index, paths, env, surface = "tool", fs = nodeFs }) {
   const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile], fs });
   const at = limitAt(paths, index, fs);
   if (at.refusal) return { refusal: at.refusal };
@@ -1012,7 +1111,8 @@ export function planLimitDelete({ index, paths, env, fs = nodeFs }) {
   const mutate = (l) => l.filter((_, i) => i !== index);
   const refused = limitsWriteRefusal({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate, envelope, fs });
   if (refused !== null) return { refusal: refused };
-  return limitPlan({ paths, expect, envelope, mutate, title: `Delete scoped limit #${index + 1}`, message: `Remove scoped limit #${index + 1}: ${cur.scope} ${limitSummary(cur)}`, extra: { index } });
+  const row = rowName("scoped limit", index, surface);
+  return limitPlan({ paths, expect, envelope, mutate, title: `Delete ${row}`, message: `Remove ${row}: ${cur.scope} ${limitSummary(cur)}`, extra: { index } });
 }
 
 // ---- projects ----
@@ -1115,7 +1215,7 @@ export function planProjectEdit({ params, paths, env, fs = nodeFs }) {
     mutate,
     planned: judged.planned,
     title: `Edit project ${cur.id}`,
-    message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\n→ ${JSON.stringify(projectShown(after))}${note}`,
+    message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\nto ${JSON.stringify(projectShown(after))}${note}`,
     extra: { before: cur, after },
     fs,
   });
@@ -1221,7 +1321,7 @@ export const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
  */
 export function renderProfiles(profiles, env = null) {
   const names = Object.keys(profiles).sort();
-  const overlay = names.length === 0 ? "No resolver profiles are declared in the settings overlay." : ["Resolver profiles (settings overlay):", ...names.map((n) => `  ${n} -> ${profiles[n]}`)].join("\n");
+  const overlay = names.length === 0 ? "No resolver profiles are declared in the settings overlay." : ["Resolver profiles (settings overlay):", ...names.map((n) => `  ${n}: ${profiles[n]}`)].join("\n");
   if (env === null || typeof env !== "object") return overlay;
   if (env.malformed) return `${overlay}\nPI_SECRET_PROFILES does not parse, so the worker refuses to boot until it is fixed.`;
   const fromEnv = Object.keys(env.profiles ?? {}).sort();
@@ -1229,7 +1329,7 @@ export function renderProfiles(profiles, env = null) {
   if (fromEnv.length === 0) return overlay;
   // A name in both is the worker's ambiguity: it then refuses every secrets job (secret-profiles.mjs `mergeSecretProfiles`).
   const both = fromEnv.filter((n) => Object.hasOwn(profiles, n));
-  return [overlay, "Resolver profiles (PI_SECRET_PROFILES):", ...fromEnv.map((n) => `  ${n} -> ${env.profiles[n]}${both.includes(n) ? " (AMBIGUOUS: also in the settings overlay, so the worker refuses every secrets job)" : ""}`)].join("\n");
+  return [overlay, "Resolver profiles (PI_SECRET_PROFILES):", ...fromEnv.map((n) => `  ${n}: ${env.profiles[n]}${both.includes(n) ? " (ambiguous: also in the settings overlay, so the worker refuses every secrets job)" : ""}`)].join("\n");
 }
 
 /**
@@ -1283,7 +1383,18 @@ export function secretProfileNameRefusal(name) {
  * different file on every host.
  */
 export function secretResolverPathRefusal(path) {
-  return path.startsWith("/") || /^([A-Za-z]:[\\/]|\\\\)/.test(path) ? null : "the resolver needs an ABSOLUTE path: a service manager's working directory is not your shell's";
+  return path.startsWith("/") || /^([A-Za-z]:[\\/]|\\\\)/.test(path) ? null : "the resolver needs an absolute path: a service manager's working directory is not your shell's";
+}
+
+/**
+ * A resolver as a confirm names it, "dev: /opt/d.sh", or a bundle resolver with its declared format, "op-shop:
+ * /opt/b.mjs (json)": the line a removal shows, and what "This replaces the current resolver, ..." names. In words
+ * (issue #737): a confirm, the pi panel's and the console's bar alike, never draws a mapping as an arrow, the
+ * rule `changeText` keeps for a change. `format` is undefined for a profile (it declares none), null for a bundle
+ * resolver whose format the overlay does not hold.
+ */
+function resolverText(name, path, format = undefined) {
+  return `${name}: ${path}${format === undefined ? "" : ` (${format ?? "no format"})`}`;
 }
 
 /**
@@ -1304,7 +1415,7 @@ export function planSecretProfileAdd({ name, path, profiles, envProfiles = {}, e
   if (roots.refusal) return { refusal: roots.refusal };
   const rootsNote = roots.warning ? `\n\nNote: ${roots.warning}.` : "";
   const next = { ...profiles, [name]: path };
-  const replacing = profiles[name] ? `\n\nThis REPLACES the current ${name} -> ${profiles[name]}` : "";
+  const replacing = profiles[name] ? `\n\nThis replaces the current resolver, ${resolverText(name, profiles[name])}` : "";
   return {
     plan: {
       name,
@@ -1314,7 +1425,7 @@ export function planSecretProfileAdd({ name, path, profiles, envProfiles = {}, e
       target: settingsFile,
       ...confirmOf(
         "Declare a secret resolver",
-        `${settingsFile} gets:\n${JSON.stringify({ secretProfiles: next }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per reference. It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.${rootsNote}`,
+        `${settingsFile} gets:\n${JSON.stringify({ secretProfiles: next }, null, 2)}${replacing}\n\nThe worker executes this script, as the account it runs as, once per reference. It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.${rootsNote}`,
       ),
     },
   };
@@ -1331,7 +1442,7 @@ export function planSecretProfileRemove({ name, profiles, settingsFile }) {
       profiles: next,
       mutate: (o) => ({ ...o, secretProfiles: next }),
       target: settingsFile,
-      ...confirmOf("Remove a secret resolver", `${name} -> ${profiles[name]}\n\nEvery trigger naming it refuses PRE-SPEND after this, rather than running without its secrets.`),
+      ...confirmOf("Remove a secret resolver", `${resolverText(name, profiles[name])}\n\nEvery trigger naming it refuses pre-spend after this, rather than running without its secrets.`),
     },
   };
 }
@@ -1371,7 +1482,7 @@ export function planSecretBundleAdd({ name, path, format, bundles, envBundles = 
   if (roots.refusal) return { refusal: roots.refusal };
   const rootsNote = roots.warning ? `\n\nNote: ${roots.warning}.` : "";
   const next = { ...bundles, [name]: { path, format } };
-  const replacing = bundles[name] ? `\n\nThis REPLACES the current ${name} -> ${bundles[name].path} (${bundles[name].format ?? "no format"})` : "";
+  const replacing = bundles[name] ? `\n\nThis replaces the current resolver, ${resolverText(name, bundles[name].path, bundles[name].format ?? null)}` : "";
   return {
     plan: {
       name,
@@ -1382,7 +1493,7 @@ export function planSecretBundleAdd({ name, path, format, bundles, envBundles = 
       target: settingsFile,
       ...confirmOf(
         "Declare a secret bundle resolver",
-        `${settingsFile} gets:\n${JSON.stringify({ secretBundles: next }, null, 2)}${replacing}\n\nThe worker EXECUTES this script, as the account it runs as, once per job start of every project a bundle in triggers.json binds to it, and hands that job EVERY variable it prints (${format}). It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.${rootsNote}`,
+        `${settingsFile} gets:\n${JSON.stringify({ secretBundles: next }, null, 2)}${replacing}\n\nThe worker executes this script, as the account it runs as, once per job start of every project a bundle in triggers.json binds to it, and hands that job every variable it prints (${format}). It must also sit inside PI_SECRET_RESOLVER_ROOTS or the worker will refuse it.${rootsNote}`,
       ),
     },
   };
@@ -1416,7 +1527,7 @@ export function planSecretBundleRemove({ name, bundles, bound = null, envBundles
     effect = "No bundle in triggers.json names it, so no project's jobs depend on it.";
   } else {
     const who = Array.isArray(bound) ? `The jobs of bundle${bound.length === 1 ? "" : "s"} ${bound.join(", ")}` : "The triggers file could not be read, so the jobs of any bundle naming it";
-    effect = `${who} are refused PRE-SPEND after this (secret-bundle-profile-unknown), or on a multi-host worker's shared queue held for a host that declares it, rather than running without their environment.`;
+    effect = `${who} are refused pre-spend after this (secret-bundle-profile-unknown), or on a multi-host worker's shared queue held for a host that declares it, rather than running without their environment.`;
   }
   return {
     plan: {
@@ -1424,7 +1535,7 @@ export function planSecretBundleRemove({ name, bundles, bound = null, envBundles
       bundles: next,
       mutate: (o) => ({ ...o, secretBundles: next }),
       target: settingsFile,
-      ...confirmOf("Remove a secret bundle resolver", `${name} -> ${bundles[name].path} (${bundles[name].format ?? "no format"})\n\n${effect}`),
+      ...confirmOf("Remove a secret bundle resolver", `${resolverText(name, bundles[name].path, bundles[name].format ?? null)}\n\n${effect}`),
     },
   };
 }

@@ -11,8 +11,9 @@
  * widens WHICH comments start a job, never WHO may: the comment trigger's author gate still runs first.
  */
 export const PARKED_LABEL = "pi-awaiting-input";
+export const APPROVAL_LABEL = "pi-awaiting-approval";
 
 /** Whether a subset's `[{ name }]` label list (or Azure's tag list, the same shape) carries the marker. */
 export function hasParkedLabel(labels) {
-	return Array.isArray(labels) && labels.some((label) => label?.name === PARKED_LABEL);
+	return Array.isArray(labels) && labels.some((label) => (label?.name === PARKED_LABEL || label?.name === APPROVAL_LABEL));
 }

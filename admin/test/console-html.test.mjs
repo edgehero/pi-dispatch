@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { html, isSafeHtml, loginCodePage, loginPage, raw, signedInPage } from "../src/console/html.mjs";
+import { html, isSafeHtml, page, raw, signedInPage } from "../src/console/html.mjs";
+import { loginCodePage, loginPage } from "../src/console/shell.mjs";
+import { SYSTEM_SCHEME, THEMES } from "../src/console/theme.mjs";
 
 // The console's escaping (issue #640, REQ-CONSOLE-SECURITY f and the run-text rule): every interpolation is escaped,
 // and nothing but a fragment `html` built passes through.
@@ -62,13 +64,33 @@ test("no page carries inline script, inline style or an event handler; each load
 
 // ---- issue #641: the page shell's live attributes and the insights renderers' one entry ----
 
-test("a live page carries data-live and its query, escaped; a static page carries neither", async () => {
-  const { page } = await import("../src/console/html.mjs");
+test("a live page carries data-live and its query, escaped; a static page carries neither", () => {
   const live = String(page({ title: "t", name: "runs", body: html`<main></main>`, live: "runs", query: 'repo=a"b&q=<x>' }));
   assert.match(live, /<body data-page="runs" data-live="runs" data-query="repo=a&quot;b&amp;q=&lt;x&gt;">/);
   assert.match(live, /<link rel="stylesheet" href="\/static\/console\.css">/);
   const still = String(page({ title: "t", name: "config", body: html`<main></main>` }));
   assert.match(still, /<body data-page="config">/);
+});
+
+// ---- issue #737: the theme the page is drawn in ----
+
+test("a page's theme: data-theme on <html> and the color-scheme meta from a closed table, the system's for anything else", () => {
+  const head = (theme) => String(page({ title: "t", name: "overview", body: html`<main></main>`, theme })).split("</head>")[0];
+  const system = head(undefined);
+  assert.match(system, /^<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<meta name="color-scheme" content="light dark">\n/);
+  assert.equal(SYSTEM_SCHEME, "light dark");
+  assert.equal(head(null), system);
+  for (const theme of THEMES) {
+    const got = head(theme);
+    assert.match(got, new RegExp(`^<!doctype html>\\n<html lang="en" data-theme="${theme}">\\n`), theme);
+    assert.match(got, new RegExp(`<meta name="color-scheme" content="${theme}">`), theme);
+    assert.equal(got.match(/data-theme=/g).length, 1, `${theme}: one attribute`);
+  }
+  // Nothing but a listed theme reaches the attribute: not another case, not the system's own name, not markup, not a
+  // prototype key, not a value that is not a string. Each draws the system's head, byte for byte.
+  for (const odd of ["Dark", "LIGHT", " dark", "dark ", "system", "auto", `dark"><script>alert(1)</script>`, `light${String.fromCharCode(0)}`, "__proto__", "constructor", "toString", 1, true, {}, ["dark"], { toString: () => "dark" }]) {
+    assert.equal(head(odd), system, JSON.stringify(String(odd)));
+  }
 });
 
 test("trustedRenderer admits a renderer's escaped output and refuses script, style, handlers and javascript: links", async () => {

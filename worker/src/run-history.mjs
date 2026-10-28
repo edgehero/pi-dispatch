@@ -1,3 +1,4 @@
+import { forkArchiveFact, recordedFork } from "./fork-job.mjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { scrubCredentials } from "./redact.mjs";
@@ -11,6 +12,7 @@ import { waitArmed } from "./wait-for.mjs";
 import { secretProfileNeeded } from "./capabilities.mjs";
 import { scheduledForMillis } from "./repeat-slot.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
+import { recordReasonOf } from "./record-reason.mjs";
 
 export { EARLIER_MAX, recordedEarlier };
 
@@ -192,7 +194,7 @@ export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"
  * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
  */
 export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -203,7 +205,7 @@ export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap
  * only inside its exit-0 branch, so the worst a forged line can do on a real exit 0 is mark a completed run parked: the
  * worker then posts one fixed sentence and writes a marker beside a transcript the job already promoted.
  */
-export const RUNNER_COMPLETED_REASONS = new Set(["awaiting-input"]);
+export const RUNNER_COMPLETED_REASONS = new Set(["awaiting-input", "awaiting-approval"]);
 
 /**
  * The reason off the decisive exit line (`decisiveExitLine`), or `null`: a member of `RUNNER_POLICY_REASONS`
@@ -223,6 +225,21 @@ export function parseExitReason(text) {
 	if (parsed === null) return null;
 	if (parsed?.code === 0 && RUNNER_COMPLETED_REASONS.has(parsed?.reason)) return parsed.reason;
 	return parsed?.code === 2 && RUNNER_POLICY_REASONS.has(parsed?.reason) ? parsed.reason : null;
+}
+
+/** Only authenticated runner metadata, never the model's summary. The worker still checks the declared action. */
+export function parseExitApproval(text) {
+	const line = decisiveExitLine(text);
+	const value = line?.approval;
+	if (line?.code !== 0 || line.reason !== "awaiting-approval" || !value || typeof value.action !== "string" || !/^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(value.action) || value.action.length > 80 || typeof value.toolCallId !== "string" || !/^[A-Za-z0-9_.:|/-]{1,256}$/.test(value.toolCallId)) return null;
+	return { action: value.action, toolCallId: value.toolCallId };
+}
+
+/** The audit contains host-validated identifiers only; rebuild it so tool arguments cannot add text. */
+export function approvalRecordOf(value) {
+	if (!value || !/^[0-9a-f]{64}$/.test(value.requestId ?? "") || typeof value.action !== "string" || !/^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(value.action) || value.action.length > 80) return null;
+	if (value.decision !== undefined && (!["approved", "declined", "question"].includes(value.decision) || !["forge", "operator", "panel", "system"].includes(value.actorKind) || !/^(?:[0-9a-f]{64}|expiry|revocation)$/.test(value.actorId ?? "") || !Number.isSafeInteger(value.decidedAt) || value.decidedAt < 0)) return null;
+	return { requestId: value.requestId, action: value.action, ...(value.decision !== undefined ? { decision: value.decision, actorKind: value.actorKind, actorId: value.actorId, decidedAt: value.decidedAt } : {}) };
 }
 
 /**
@@ -503,7 +520,7 @@ const BUNDLE_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BUNDLE_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
 /**
- * The record's `bundle` (issue #704): `{ id, variables, shadowed, placeholders?, plain? }`, the bundle's id and the
+ * The record's `bundle` (issue #704): `{ id, variables, shadowed, placeholders?, plain?, placeholderNames? }`, the bundle's id and the
  * variable NAMES the job received from it and the ones the trigger's own run.secrets shadowed, sorted, and on an
  * OpenShell venue two counts (below), or null on any violation. REBUILT,
  * never the source's object, and NAMES ONLY: each is held to the environment-name charset, so no value, no
@@ -523,8 +540,10 @@ export function recordedBundle(b) {
 	// variable cap, or neither key: a record never says one without the other, and every other venue's record is
 	// byte-identical to before.
 	const count = (n) => Number.isSafeInteger(n) && n >= 0 && n <= BUNDLE_NAMES_MAX;
+	const placeholderNames = names(b.placeholderNames);
+	const named = placeholderNames !== null && placeholderNames.every((n) => variables.includes(n) && !shadowed.includes(n)) && placeholderNames.length <= b.placeholders;
 	const counted = count(b.placeholders) && count(b.plain) && b.placeholders + b.plain <= variables.length;
-	return { id: b.id, variables, shadowed, ...(counted ? { placeholders: b.placeholders, plain: b.plain } : {}) };
+	return { id: b.id, variables, shadowed, ...(counted ? { placeholders: b.placeholders, plain: b.plain, ...(named ? { placeholderNames } : {}) } : {}) };
 }
 
 /** The two OpenShell venues and the mode each runs in (backends.mjs `OPENSHELL_BACKENDS`, pinned by a test). */
@@ -889,13 +908,18 @@ function rebuildUsage(u) {
  * path stay out of the record -- for local jobs only the folder's `basename` is kept, because the full
  * path embeds the operator's OS account name.
  *
- * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | portfolio-snapshot-oversize | unprotected-branch |
- * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
+ * `reason` is a token of the fixed enum (worker-abort | over-budget | dollar-cap | allocation-cap | envelope-mismatch | portfolio-no-envelope | portfolio-snapshot-oversize | unprotected-branch |
+ * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | container-infra-exit | ...), never free-form or payload text,
+ * and it comes through ONE door, `recordReasonOf` (record-reason.mjs), rather than as `source.reason` copied: an InfraRetry
+ * built without a token carries its whole message as its reason, and a forge host's message names an API path, a
+ * repository and a library's own words. So an error whose reason is no token records `worker-error` (a failure is never
+ * reasonless), and a result's records null. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null }) {
 	const data = job.data ?? {};
+	const fork = recordedFork(data.fork, sourceModel(result, error));
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
 	const progress = recordedProgress(source.progress);
@@ -913,6 +937,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const secretsProfile = recordedSecretsProfile(data);
 	// Issue #704: only for a job whose project has a secret bundle, so no other record can carry either key.
 	const bundle = recordedBundle(source.bundle);
+	if (bundle !== null && !Object.hasOwn(OPENSHELL_VENUE_MODES, backend)) delete bundle.placeholderNames;
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
 	return {
 		jobId: job.id,
@@ -922,7 +947,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		startedAt: startedAt ?? null,
 		endedAt: endedAt ?? null,
 		outcome: result ? (result.outcome ?? null) : "failed",
-		reason: source.reason ?? null,
+		reason: recordReasonOf({ result, error }),
 		exitCode: source.exitCode ?? null,
 		turns: source.turns ?? null,
 		// Token accounting (INT-RUN-HISTORY-FILE-CONTRACT): additive and nullable, an explicit literal, no
@@ -1027,6 +1052,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// settled (`metered` | `floor` | `refunded`, null when the job held none). Null when no dollar window applied to the job (no dollar setting, or a
 		// refusal before the reservation step), which is every record of a deployment that sets none.
 		dollars: dollarsOf(source.dollars),
+		...(approvalRecordOf(source.approval) ? { approval: approvalRecordOf(source.approval) } : {}),
 		// The refusal's detail (PR #558, the end-of-round check of #501 and #502): which rule of the reason refused the job, the same fixed token
 		// the worker's log line carries, e.g. `overlay-link` under `model-unknown`, so the drill-in can tell the
 		// deployment's file from the job's model. Additive, nullable, an explicit literal, TAIL position after `dollars`
@@ -1121,6 +1147,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(recovered !== null ? { recovered } : {}),
 		...(RECOVER_SKIPPED_REASONS.includes(source.recoverSkipped) ? { recoverSkipped: source.recoverSkipped } : {}),
 		...(checkpoints !== null ? { checkpoints } : {}),
+		...(fork !== null ? { fork } : {}),
+		...(source.forkSource && typeof source.forkSource.saved === "boolean" ? { forkSource: forkArchiveFact(source.forkSource) } : {}),
 		// Steering (issue #646, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after the durable-run keys, CONDITIONAL like
 		// them and only for a job whose data says `steer: true`, so every other record is byte-identical to before:
 		//   - `steered`: how many of the run's messages were delivered (a verified ack), late (the run ended first) and
@@ -1147,6 +1175,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		//   - `secretsProfile`: the profile NAME `run.secrets` resolved through (`recordedSecretsProfile`).
 		...(openshell !== null ? { openshell } : {}),
 		...(secretsProfile !== null ? { secretsProfile } : {}),
+		// Effective turn budget captured at pickup, not the settings as they stand when the run ends (#747).
+		...(Number.isSafeInteger(maxTurns) && maxTurns > 0 ? { maxTurns } : {}),
 	};
 }
 
@@ -1423,6 +1453,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const exitText = keyed ? authenticExitLines(tail, exitKey) : tail;
 			const exitAuth = exitText === "" ? "unverified" : "verified";
 			const exitReason = parseExitReason(exitText);
+			const approval = parseExitApproval(exitText);
 			const exitLineCode = parseExitCode(exitText);
 			const exitWhy = parseExitWhy(exitText);
 			const turns = parseExitTurns(exitText);
@@ -1463,7 +1494,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };
@@ -1729,4 +1760,9 @@ export function makeLogReaper({ logsDir, retentionDays, fs = nodeFs, log = () =>
 			log("log_reaper_skipped", { reason: scrubCredentials(err?.message) });
 		}
 	};
+}
+
+function sourceModel(result, error) {
+	const model = (result ?? error)?.model;
+	return typeof model === "string" && USAGE_ID_PATTERN.test(model.toLowerCase()) ? model : null;
 }

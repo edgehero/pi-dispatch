@@ -8,6 +8,7 @@ import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { recordReasonEnum } from "./helpers/spec-enum.mjs";
+import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT, RECORD_REASON_RE, WORKER_ERROR, recordReasonOf } from "../src/record-reason.mjs";
 import { RESOURCE_KEYS as RUNNER_RESOURCE_KEYS } from "../../image/runner/src/cgroup-usage.mjs";
 
 /**
@@ -810,6 +811,81 @@ test("buildRecord throw-path admits no PII for either job kind", () => {
 	assert.ok(!localJson.includes("/Users/rob/"), "OS account path must not leak on the error branch");
 });
 
+// Issue #737: the record's reason comes through one door. An InfraRetry built without a token carries its whole message
+// as its reason, and a forge host's message names an API path, a repository and a library's own words; the record is
+// read by every console role, so no such text may reach it.
+const DOOR_JOB = { id: "gh-door", attemptsMade: 0, name: "github", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 3 } } };
+const doorRecord = (source) => buildRecord({ job: DOOR_JOB, ...source, startedAt: "2026-10-26T00:00:00.000Z", endedAt: "2026-10-26T00:00:30.000Z" });
+// Reasons no reader may be handed: free text, markup, a path, a control or bidi byte, case, a leading dash, a 65th
+// character, and values that are not strings at all.
+const HOSTILE_REASONS = [
+	"infra failure, container exit 1",
+	"unknown container exit 42",
+	"GET /repos/acme/secret-repo/issues/3 failed: ECONNRESET",
+	"<img src=x onerror=alert(1)>",
+	"/var/lib/pi/auth.json",
+	"worker-abort\nforged",
+	"worker\u202eabort",
+	"Worker-Abort",
+	"-rf",
+	"a".repeat(65),
+	"",
+	" worker-abort",
+	42,
+	true,
+	{ toString: () => "worker-abort" },
+	["worker-abort"],
+];
+
+test("the door: an error's reason that is no token records worker-error, so a failure is never reasonless or free text", () => {
+	for (const reason of HOSTILE_REASONS) {
+		const record = doorRecord({ error: { reason } });
+		assert.equal(record.outcome, "failed");
+		assert.equal(record.reason, WORKER_ERROR, JSON.stringify(String(reason)));
+	}
+	for (const error of [{}, { reason: null }, { reason: undefined }, new Error("ECONNREFUSED 127.0.0.1:6379")]) {
+		assert.equal(doorRecord({ error }).reason, WORKER_ERROR, "an error with no reason of its own");
+	}
+	assert.deepEqual([doorRecord({}).outcome, doorRecord({}).reason], ["failed", WORKER_ERROR], "neither a result nor an error: a failure with no reason");
+	// A token passes as it is, the new exit tokens and the error path's oldest fixture among them.
+	for (const reason of ["error", "container-never-started", "recovery-host-lost", CONTAINER_INFRA_EXIT, CONTAINER_EXIT_UNKNOWN, WORKER_ERROR, "a".repeat(64)]) {
+		assert.equal(doorRecord({ error: { reason } }).reason, reason, reason);
+	}
+	const json = JSON.stringify(doorRecord({ error: { reason: HOSTILE_REASONS[2] } }));
+	assert.ok(!json.includes("acme") && !json.includes("ECONNRESET"), "the message reaches no field of the record");
+});
+
+test("the door: a result's reason that is no token records null; a token, and no reason, are as before", () => {
+	for (const reason of HOSTILE_REASONS) {
+		const record = doorRecord({ result: { outcome: "policy", reason } });
+		assert.equal(record.outcome, "policy", "the outcome is the result's own");
+		assert.equal(record.reason, null, JSON.stringify(String(reason)));
+	}
+	assert.equal(doorRecord({ result: { outcome: "completed" } }).reason, null, "a completed run names no reason");
+	assert.equal(doorRecord({ result: { outcome: "completed", reason: null } }).reason, null);
+	for (const [outcome, reason] of [["policy", "runner-policy"], ["completed", "awaiting-input"], ["failed", "recovery-enqueued"], ["policy", "recovery-cap"]]) {
+		assert.equal(doorRecord({ result: { outcome, reason } }).reason, reason, reason);
+	}
+	// The result wins whenever there is one, exactly as `outcome` reads it: an error beside it is not consulted.
+	assert.equal(doorRecord({ result: { outcome: "completed" }, error: { reason: "container-detached" } }).reason, null);
+	assert.equal(doorRecord({ result: { outcome: "policy", reason: "worker-abort" }, error: { reason: "x y" } }).reason, "worker-abort");
+});
+
+test("recordReasonOf is the leaf's door, and every reason the record contract names passes it unchanged", () => {
+	assert.equal(recordReasonOf(), WORKER_ERROR, "called with nothing, it is the error path with no reason");
+	assert.equal(recordReasonOf({ result: { reason: "Not a token" } }), null);
+	assert.equal(recordReasonOf({ error: { reason: "Not a token" } }), WORKER_ERROR);
+	assert.equal(recordReasonOf({ result: null, error: { reason: CONTAINER_INFRA_EXIT } }), CONTAINER_INFRA_EXIT);
+	// Two-way with INT-RUN-HISTORY-FILE-CONTRACT's enum: the door would turn a named reason the charset refused into
+	// worker-error or null, and the three tokens the door itself relies on are named there.
+	const tokens = recordReasonEnum();
+	for (const token of tokens) assert.match(token, RECORD_REASON_RE, token);
+	for (const token of [CONTAINER_INFRA_EXIT, CONTAINER_EXIT_UNKNOWN, WORKER_ERROR]) assert.ok(tokens.includes(token), `${token} is in the record's reason enum`);
+	const src = readFileSync(new URL("../src/run-history.mjs", import.meta.url), "utf8");
+	assert.match(src, /\n\t\treason: recordReasonOf\(\{ result, error \}\),\n/, "buildRecord's reason is the door's");
+	assert.doesNotMatch(src, /reason: source\.reason/, "never the source's reason copied");
+});
+
 test("buildRecord: the chain fields default null on a non-chain record and chainEnqueued is never stored", () => {
 	const job = { id: "gh-x", name: "github", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 5 } } };
 	const record = buildRecord({
@@ -1480,7 +1556,7 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// argument is the reason, the shape `configError(message, reason)` in outcome.mjs gives the exit line.
 	const mcpSrc = ["../../image/runner/src/mcp.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
 	// The run.awaitInput refusals (issue #625) are thrown the same way, where the env is checked and the session built.
-	const awaitSrc = ["../../image/runner/src/config.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
+	const awaitSrc = ["../../image/runner/src/config.mjs", "../../image/runner/src/request-approval.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
 	// The run.steer refusals (issue #646) are thrown where the inbox is checked (image/runner/src/inbox.mjs).
 	const steerSrc = readFileSync(new URL("../../image/runner/src/inbox.mjs", import.meta.url), "utf8");
 	for (const reason of RUNNER_POLICY_REASONS) {
@@ -1488,7 +1564,7 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(steerSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
 		}
-		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason) || PROGRESS_RUNNER_REASONS.includes(reason)) {
+		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason) || PROGRESS_RUNNER_REASONS.includes(reason) || reason.startsWith("approval-")) {
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(awaitSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
 		}
@@ -1514,7 +1590,9 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// The run.steer refusals (issue #646), both ways.
 	const steerThrown = new Set([...steerSrc.matchAll(/configError\(.*, "(steer-[a-z-]+)"\)/g)].map((m) => m[1]));
 	assert.deepEqual([...steerThrown].sort(), [...STEER_RUNNER_REASONS].sort());
-	// The one completed reason the worker acts on is the runner's exported literal (issue #625).
+	const approvalThrown = new Set([...awaitSrc.matchAll(/configError\(.*, "(approval-[a-z-]+)"\)/g)].map((m) => m[1]));
+	assert.deepEqual([...approvalThrown].sort(), [...RUNNER_POLICY_REASONS].filter((reason) => reason.startsWith("approval-")).sort());
+	// Completed reasons the worker acts on are exported literals (issues #625, #649).
 	for (const reason of RUNNER_COMPLETED_REASONS) assert.match(runnerSrc, new RegExp(`export const [A-Z_]+ = "${reason}";`));
 	for (const reason of ["cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]) {
 		assert.ok(RUNNER_POLICY_REASONS.has(reason), `${reason} is a runner reason the worker keeps`);
@@ -2300,4 +2378,12 @@ test("recovered.countsFrom is a closed enum, and the transcript fallback sums or
 	assert.equal(recoveryCountsFromProgress({ turns: 3, interrupted: 2 }), null, "no mark, no counts: interrupted alone is not a recovery count");
 	assert.equal(recoveryCountsFromProgress(null), null);
 	assert.equal(recoveryCountsFromProgress([1]), null);
+});
+
+test("the record's turn budget is pickup's validated positive integer, never a mutable job or result field (#747)", () => {
+	const job = { id: "turns", data: { kind: "github", maxTurns: 99 } };
+	const result = { outcome: "completed", maxTurns: 100, turns: 3 };
+	assert.equal(buildRecord({ job, result, maxTurns: 40 }).maxTurns, 40);
+	for (const maxTurns of [null, undefined, 0, -1, 1.5, "40", Infinity]) assert.equal(buildRecord({ job, result, maxTurns }).maxTurns, undefined);
+	assert.equal(Object.keys(buildRecord({ job, result, maxTurns: 40 })).at(-1), "maxTurns", "the additive field preserves existing field order");
 });

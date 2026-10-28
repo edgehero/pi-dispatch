@@ -60,7 +60,7 @@ import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_proce
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SESSION_KEY_PATTERN, sessionKeyOfRecord } from "./session-key.mjs";
+import { FORK_SESSION_KEY_PATTERN, SESSION_KEY_PATTERN, sessionKeyOfRecord } from "./session-key.mjs";
 import { isForgeKind } from "./forges.mjs";
 
 /** The largest transcript forked. The store's own default cap is 8 MiB; this is generous above any setting of it. */
@@ -271,12 +271,16 @@ export function planFork({ record = null, key = null, env = {}, force = false, n
 		k = sessionKeyOfRecord(record);
 		if (k === null) return { refusal: "this run has no session to fork: its record names no issue number or cron trigger id to derive a session key from" };
 	}
-	if (typeof k !== "string" || !SESSION_KEY_PATTERN.test(k)) return { refusal: "a session key is 32 lowercase hex characters" };
+	const forkKey = typeof k === "string" ? FORK_SESSION_KEY_PATTERN.exec(k) : null;
+	if (typeof k !== "string" || (!SESSION_KEY_PATTERN.test(k) && !forkKey)) return { refusal: "a session key is 32 lowercase hex characters (a managed fork also names its 32-hex lineage)" };
 	const sessionsDir = typeof env.PI_SESSIONS_DIR === "string" ? env.PI_SESSIONS_DIR.trim() : "";
 	if (sessionsDir === "") return { refusal: "PI_SESSIONS_DIR is not set for this deployment, so there is no session store on this host to fork from; run this on the host whose worker keeps the sessions, from its deployment folder" };
-	const dir = join(resolve(sessionsDir), k);
+	const dir = forkKey ? join(resolve(sessionsDir), forkKey[1], "forks", forkKey[2]) : join(resolve(sessionsDir), k);
 	let dst;
 	try {
+		if (forkKey) {
+			for (const parent of [join(resolve(sessionsDir), forkKey[1]), join(resolve(sessionsDir), forkKey[1], "forks")]) if (!fs.lstatSync(parent).isDirectory()) return { refusal: `${parent} is not a plain directory (a link or a file), so it is not read` };
+		}
 		dst = fs.lstatSync(dir);
 	} catch (e) {
 		if (e?.code === "ENOENT") return { refusal: `there is no session ${k} in ${resolve(sessionsDir)}: the run did not keep one (its trigger has no run.resume), it was reaped (PI_SESSIONS_TTL_DAYS), or the store is on another host` };

@@ -75,7 +75,7 @@ export function optionalUsdMicros(value, key) {
 
 /**
  * Integer micro-dollars as a plain dollar decimal, at least two decimals and no trailing zeros past them:
- * 2500000 is "2.50", 1 is "0.000001". For messages and displays; never parsed back by anything that enforces.
+ * 2500000 is "2.50", 1 is "0.000001". For messages, displays and exact managed-fork cap serialization; no floating-point conversion is needed.
  */
 export function formatMicros(micros) {
 	if (!Number.isSafeInteger(micros) || micros < 0) throw new TypeError("formatMicros: want a non-negative safe integer");

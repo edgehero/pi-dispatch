@@ -7,6 +7,7 @@ import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { EXIT_POLICY } from "../src/outcome.mjs";
 import { NOTE_MAX, PHASE_MAX, progressArgsError, REPORT_PROGRESS_TOOL, createReportProgress, reportProgressShadow } from "../src/report-progress.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { trackPiRefreshes } from "./helpers/track-pi-refreshes.mjs";
 
 /**
  * Issue #644, the container's half: the report_progress tool a job armed with run.progress is offered, its reserved
@@ -21,6 +22,8 @@ let importError;
 try {
 	loaderModule = await import("../src/loader.mjs");
 	pi = await import("@earendil-works/pi-coding-agent");
+	// registerProvider starts a refresh without awaiting it; settle its auth writes before temp-dir cleanup.
+	trackPiRefreshes(pi.ModelRuntime);
 	piAi = await import("@earendil-works/pi-ai");
 } catch (error) {
 	importError = error;

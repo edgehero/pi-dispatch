@@ -5,7 +5,7 @@
  * of it is the agent's work and is meant to come back. A few paths are not work: they are what pi LOADS when it starts,
  * as trusted configuration, before the agent says anything. A fresh job gets them from the base repository's
  * default-branch commit, which is merge-gated content ("a serviced repo's .pi/extensions really does load in a job",
- * CLAUDE.md). A recovered job would get them from the agent: a `.pi/extensions/evil.js` it planted in attempt 1, or an
+ * AGENTS.md). A recovered job would get them from the agent: a `.pi/extensions/evil.js` it planted in attempt 1, or an
  * `AGENTS.md` it rewrote, would load as the repository's own code and instructions in the recovery's fresh pi. So
  * before the container starts, every such path is put back to its content at the base commit, and one absent there is
  * deleted.

@@ -709,10 +709,12 @@ export async function runReplyView({ client, info, who, question, pi, terminal, 
 	}
 
 	screen.setStatus(statusText(info));
+	const approval = info?.run?.reason === "awaiting-approval" ? info.run.approval : null;
+	if (approval) screen.addBlock("approval gate", `${approval.action}\n${approval.action === "budget-raise" ? "Worker-enforced: the declared cap remains subject to deployment and scoped budgets." : "Advisory: the worker does not enforce this external action."}`);
 	if (question?.question) screen.addBlock("the run asked", question.question, { markdown: true });
 	else screen.addBlock("the run asked", question?.pointer ?? "The question could not be read.");
 	screen.setEditor(editorAvailability({ mode: "reply", who, info }));
-	screen.setNotice(screen.editorShown ? "Type the answer: Enter previews it, Shift+Enter starts a new line, Ctrl+C leaves without answering." : "Ctrl+C leaves.");
+	screen.setNotice(screen.editorShown ? approval ? "Type /approve, /decline [reason], or a question (no approval). Enter previews it; Ctrl+C leaves without deciding." : "Type the answer: Enter previews it, Shift+Enter starts a new line, Ctrl+C leaves without answering." : "Ctrl+C leaves.");
 	screen.start();
 	return result;
 }

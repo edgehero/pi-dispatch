@@ -7,7 +7,7 @@ import { recoverVenueProblem } from "../src/triggers.mjs";
 
 /**
  * Issue #712: each venue's `serves` block is a hand-written table that RESTATES derivable sources, so it is held to them
- * here (CLAUDE.md, "derived or pinned, never trusted"): the bundle's own `binds`, the `transcript` its runContainer is
+ * here (AGENTS.md, "derived or pinned, never trusted"): the bundle's own `binds`, the `transcript` its runContainer is
  * built with, `SANDBOX_LAUNCHERS`, and the copy mode's pre-spend recovery refusal. The console and the panel word these
  * facts from the table, so a venue whose bundle changed and whose table did not would put a wrong sentence on both.
  *

@@ -405,9 +405,10 @@ with other work reads as idle.
 lines are live, from the registry rows the panel already reads every second: the slots in use of the host's
 `PI_CONCURRENCY`, the memory and CPU its budget has promised its jobs against the budget (`no memory budget` for a
 dimension switched off, `budget not known yet` while a starting worker has not read it, `budget unreadable` for a value
-no worker writes), how many jobs wait for the
-budget, `stale` with the row's age when it has not beaten for 30 seconds, and up to four running jobs with their id,
-project, size and age (an orphan, a container whose stop did not take, is marked and holds no slot; the rest are
+no worker writes), how many jobs wait for the budget, `stale` with its beat's age when it has not beaten for 30 seconds
+(the age the console takes: how long ago Valkey last refreshed its row, where the panel could ask, else its own beat
+time, so a host whose clock runs behind is not called stale), and up to four running jobs with their id, project, size
+and age (an orphan, a container whose stop did not take, is marked and holds no slot; the rest are
 counted, running and orphaned apart). Under them comes the host's last 7 days from the same report as doctor, labelled
 with the minute it was read (`last 7d to 12:00 UTC`): busy share, slots on average and at peak, time with every slot
 taken, the wait p95 and the top projects, then the same caveats `pi-dispatch capacity` prints (how the slot count was
@@ -418,12 +419,32 @@ machine that ran nothing from one that was not there. The 7 days are read when t
 panel's tick, and only one read runs at a time. A read that has not answered after 30 seconds is given up: the view
 says the history did not answer in time, and the next `u` reads again. A host whose history is not here says why, in the words
 `pi-dispatch capacity` uses, and shows no busy share. A host whose job list cannot be read, or whose row carries no beat
-time (no evidence it runs), shows `?` slots in use, never 0.
+age at all (no evidence it runs), shows `?` slots in use, never 0.
 
 To count the jobs running now, each worker's registry row carries three more fields: `jobs` (each running job's id,
 project id, size and start, and an `o` flag on a container whose stop did not take, at most 32, oldest first),
 `jobsMore` (how many it does not list) and `waiters` (jobs waiting for the host budget). Ids and numbers only: a job id
 outside the usual characters is published as its hash, and a repository name never is. Nothing decides on them.
+
+**What the console reads off a row's expiry.** Since issue #737 the console's reader also asks Valkey how long each
+host row has left before it expires (its `PTTL`, sent beside the row's own read, so it costs no extra round trip). It
+uses Valkey's clock only to count time, never as a time of day. From it each host row gets how long ago its expiry was
+last set (`ttlAgeMs`), an estimate of how far that host's clock is from the console's (`skewMs`, positive when the
+host's clock is behind; it carries up to one beat period and a round trip of noise, so less than 30 seconds is not
+called a skew), and whether the row has no expiry at all (`noExpiry`: a row the 90 second TTL will never remove). A
+host's first beat never reads that way, since the reader finds rows through the list of live names and a beat adds its
+name only after setting the expiry. A row with no expiry is one a beat did not finish: for a moment, when a beat
+writes again a row that expired while its name was still listed, and for good when the worker died between writing the
+row and setting its expiry. A reader that cannot ask, or a key that went between the two reads, leaves all three
+unknown. The console's overview says two of them on its Hosts card: a host whose clock is more than 30 seconds out, by
+how much, and a host whose row has no expiry ([console.md](console.md#the-overview)). And it takes the first as a
+host's check-in age: every beat sets the row's expiry again, so how long ago that was is how long ago the host beat,
+whatever its clock says. Whether a worker is online, the slots the overview draws as free, each host's row and age on
+its Hosts card, its first-run checklist, the fleet page's hosts table, the `lastBeatAgeMs` of
+[`/api/state`](console.md#the-state-api) and the `/dispatch` panel's hosts view all go by that age, so a host whose
+clock runs behind still checks in on time there (and its line says its clock is behind); where the reader could not
+ask, the age is the console's clock against the host's beat time, as before. Nothing else decides on them: the
+worker's own readers (routing, the cron gate, capacity, doctor) do not read them.
 
 What it does **not** check yet: whether two hosts are sharing a directory they should not be. That one is
 on you.

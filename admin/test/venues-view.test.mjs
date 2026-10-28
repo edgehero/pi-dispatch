@@ -111,10 +111,10 @@ test("the Venues panel escapes a host's name and never reads one as markup", asy
 test("the run lists carry the run's venue, local for a record that names none", async () => {
   const runsPage = { runs: [{ jobId: "gh-1", target: "acme/web#1", backend: "openshell", outcome: "completed", endedAt: "2026-10-21T11:00:00Z" }, { jobId: "gh-2", target: "acme/web#2", outcome: "completed", endedAt: "2026-10-21T11:01:00Z" }], next: null };
   const html = (await pagePanels("runs", { ...ctxOf({ runsPage, subscriptions: [] }), query: { filter: {} } })).map((p) => p.html).join("");
-  assert.match(html, /<th scope="col">Venue<\/th>/);
-  assert.match(html, /<td>openshell<\/td>/);
-  assert.match(html, /<td>local<\/td>/);
-  assert.match(html, /<label for="f-backend">Venue<input id="f-backend" name="backend"/, "and the filter field");
+  assert.match(html, /<th scope="col" class="hide-phone">Venue<\/th>/);
+  assert.match(html, /<td class="hide-phone" data-l="Venue"><span class="vtag">openshell<\/span><\/td>/);
+  assert.match(html, /<td class="hide-phone" data-l="Venue"><span class="vtag">local<\/span><\/td>/);
+  assert.match(html, /<div class="field"><label for="rf-backend">Venue<\/label><select id="rf-backend" class="select" name="backend">/, "and the filter's list");
 });
 
 // ---- the panel ------------------------------------------------------------------------------------------------------

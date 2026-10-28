@@ -42,8 +42,8 @@ import { LIVE_MAX_ENTRIES } from "@edgehero/pi-dispatch/live-transcript";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
-import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords } from "./words.mjs";
-import { doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
+import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords, recordReason, rowNumber } from "./words.mjs";
+import { beatAgeOf, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
@@ -1118,7 +1118,9 @@ export function makeDashboard({
               open(res.record);
               return;
             }
-            parkedNote = res?.unreachable ? `the run could not be read (${cellOf(res.unreachable)})` : res?.invalid ? `the run id is not readable (${cellOf(res.invalid)})` : "no record of this run on this host or in the mirror";
+            // "No record" only where the reader says both places were read and hold none (`missing`); any other answer
+            // (a read that failed, a shape this panel does not know) is a run that could not be read.
+            parkedNote = res?.invalid ? `the run id is not readable (${cellOf(res.invalid)})` : res?.missing === true ? "no record of this run on this host or in the mirror" : `the run could not be read (${cellOf(res?.unreachable ?? res?.unreadable ?? "no answer the panel can read")})`;
             tui?.requestRender?.();
           })();
         }
@@ -2039,7 +2041,8 @@ function bundlesSection(view: any, inner: number, styler: any): any[] {
   for (const b of rows) {
     const ok = b.declared === "env" || b.declared === "overlay";
     const ends = Array.isArray(b.endpoints) ? b.endpoints.length : 0;
-    const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map((i: number) => `#${i}`).join(" ") : "none";
+    // The triggers that opt out, by the number a person calls them (`#1` is the first), never the raw 0-based index.
+    const opted = Array.isArray(b.optedOut) && b.optedOut.length > 0 ? b.optedOut.map((i: number) => `#${rowNumber(i)}`).join(" ") : "none";
     const facts = [
       `project ${b.project ?? "-"}${b.projectKnown === false ? " (not in projects.json)" : ""}`,
       `profile ${b.profile ?? "-"} (${DECLARED[b.declared] ?? "NOT DECLARED"}${b.format ? `, ${b.format}` : ""})`,
@@ -3254,9 +3257,12 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
   const liveLines = (r: any): string[] => {
     const out: string[] = [];
     // A row with no readable beat time is no evidence the host runs (capabilities.mjs, and the report counts none of its
-    // jobs), so its slots in use are `?`, never its list's count; a row older than the report trusts is stale.
-    const undated = !Number.isSafeInteger(r?.staleMs);
-    const stale = undated ? "no beat time" : r.staleMs > LIVE_FRESH_MS ? `stale ${durationText(r.staleMs)}` : "";
+    // jobs), so its slots in use are `?`, never its list's count; a row older than the report trusts is stale. Its age
+    // is `beatAgeOf`'s, the console's (issue #737): Valkey's measure of the row's last refresh where the reader had it,
+    // else the host's own beat time, so a host whose clock runs behind reads as beating when it beats, never stale.
+    const age = beatAgeOf(r);
+    const undated = age === null;
+    const stale = undated ? "no beat time" : age > LIVE_FRESH_MS ? `stale ${durationText(age)}` : "";
     const nameWidth = Math.max(8, iw - (stale ? styler.visibleLen(stale) + 2 : 0));
     out.push(fitLine(styler.bold(styler.fg("accent", clip(hostName(r?.name), nameWidth))) + (stale ? "  " + styler.fg("warning", stale) : ""), iw, styler));
     const listed: any[] | null = Array.isArray(r?.jobs) ? r.jobs : null;
@@ -3524,10 +3530,11 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
 function outcomeColored(outcome: any, reason: any, styler: any): string {
   // Compared against the RAW values and rendered from scrubbed ones, so a control byte can change what a
   // row looks like but never what it says a run did.
-  // The console's words (issue #710, words.mjs): completed, refused, failed, and the two reasons that change the word,
-  // awaiting input (a completed run waiting on a person, REQ-AWAIT-INPUT: the word "done" once told the operator nothing waited
-  // on them) and cancelled. Any other reason is its own cell at the row's end (`reasonToken`). An outcome this release
-  // does not know prints as itself, as a failure.
+  // The console's words (issue #710, words.mjs): completed, refused, failed, and the reasons that change the word
+  // (`REASON_WORDS`): awaiting input (a completed run waiting on a person, REQ-AWAIT-INPUT: the word "done" once told the
+  // operator nothing waited on them), cancelled, and the recovery ends, which read failed. A reason the word does not
+  // say is its own cell at the row's end (`reasonToken`). An outcome this release does not know prints as itself, as a
+  // failure.
   const w = outcomeWord(outcome, reason);
   const word = w.known ? w.word : scrubControl(String(outcome ?? "failed"));
   return styler.fg(w.tone, `${w.glyph} ${word}`);
@@ -3535,8 +3542,10 @@ function outcomeColored(outcome: any, reason: any, styler: any): string {
 
 /** The reason a list row names after its other cells: a reason the outcome's word does not already say, or null. */
 function reasonToken(outcome: any, reason: any): any {
-  if (reason === null || reason === undefined || reason === "") return null;
-  return outcomeWord(outcome, reason).qualified ? null : reason;
+  // A reason that is no token (an older worker's error text) is shown nowhere, here as on the console.
+  const token = recordReason({ reason });
+  if (token === null) return null;
+  return outcomeWord(outcome, token).says ? null : token;
 }
 
 /** A compact colored settings summary (the full editor is the `s` drill-in). */
@@ -4316,14 +4325,16 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // cap stopped at $0 otherwise reads as a cap set too low. Absent on a record with no `why`, which renders as before.
   const why = typeof r.why === "string" && r.why !== "" ? r.why : null;
   const hint = r.reason === "cost-cap" && why === "unboundable" ? ": see compat.maxTokensField" : "";
-  if (r.reason) head += styler.fg("dim", ` · ${show(r.reason)}${why !== null ? ` (${show(why)}${hint})` : ""}`);
+  // Only a reason that is a token: an older worker's record may hold an error's own words, which no surface shows.
+  const reasonShown = recordReason(r);
+  if (reasonShown) head += styler.fg("dim", ` · ${show(reasonShown)}${why !== null ? ` (${show(why)}${hint})` : ""}`);
   out.push(fitLine(head, inner, styler));
   // WHAT THE REASON MEANS AND WHAT TO DO (issue #710): the reason catalog's sentence (its `why` variant where it has one)
   // and next step, WRAPPED under their labels, never clipped, since half a sentence reads as a whole one. Fixed catalog
   // text, but it still goes through `show` like every line here. A token the catalog does not know (a newer worker's)
   // says so in one dim line. A record with no reason (a clean completion) renders as before.
-  if (r.reason) {
-    const said = reasonWords(r.reason, why);
+  if (reasonShown) {
+    const said = reasonWords(reasonShown, why);
     const wrapped = (k: string, v: string, color: string) =>
       wrapColumns(show(v), Math.max(1, inner - 13), styler).forEach((part: string, i: number) => out.push(kv(i === 0 ? k : "", part, color)));
     if (said.known) {
@@ -4570,14 +4581,16 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
 
 /**
  * Join a cron trigger to its resident scheduler + stall counter for the drill-in's next/health fields. Matches
- * by scheduler key/name === the cron id, else by pattern. Returns null for a non-cron trigger or no match, so
+ * by the scheduler's KEY alone, which is the cron id (issue #737): never by BullMQ's `name`, the job name its runs
+ * are minted with (`local` for every one the worker upserts, so a trigger with that id matched every scheduler),
+ * and never by pattern, which two triggers can share. Returns null for a non-cron trigger or no match, so
  * the detail view renders only real schedule data (`next` is the BullMQ scheduler's; `stalls` the money
  * backstop's). `last` is not stored on the scheduler and is deliberately not shown rather than faked.
  */
 function cronSchedInfo(t: any, snapshot: any): any {
-  if (t?.type !== "cron") return null;
+  if (t?.type !== "cron" || typeof t?.id !== "string" || t.id === "") return null;
   const schedulers = Array.isArray(snapshot?.schedulers) ? snapshot.schedulers : [];
-  const s = schedulers.find((x: any) => (t.id && (x.key === t.id || x.name === t.id)) || (t.pattern && x.pattern === t.pattern));
+  const s = schedulers.find((x: any) => x?.key === t.id);
   if (!s) return null;
   const stalls = Number(snapshot?.schedulerStalls?.[t.id] ?? 0) || 0;
   const stallMax = Number.isFinite(snapshot?.schedulerStallMax) ? snapshot.schedulerStallMax : 2;

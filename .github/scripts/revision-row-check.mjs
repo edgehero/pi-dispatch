@@ -8,7 +8,7 @@
  * lost between 1,100 and 2,800 characters each, including most of a `CONST-TRIGGER-AUTHOR-GATE`
  * amendment, and nothing in CI looked at these tables at all.
  *
- * WHY THIS IS A BOLT AND NOT A REVIEW HABIT. `CLAUDE.md`'s rule is that a hand-written table restating a
+ * WHY THIS IS A BOLT AND NOT A REVIEW HABIT. `AGENTS.md`'s rule is that a hand-written table restating a
  * derivable source is either derived or pinned. This is the narrow, mechanical half of that: the number of
  * cells in a row is derivable from the row, needs no prose understanding, and is the one thing in a
  * revision row that a human reader cannot see by reading the diff. The three other guards in this directory
@@ -28,7 +28,7 @@
  * makes the leading and trailing pipe optional, so `2026-01-01 | ...` is a legal row that this guard skips
  * and that CAN be truncated. Every row in these five files has both, the repo writes them that way, and
  * recognising the optional forms means deciding which lines in a markdown file are table rows at all --
- * which is the arms race `CLAUDE.md` warns about. A row that loses an outer pipe is caught by reading the
+ * which is the arms race `AGENTS.md` warns about. A row that loses an outer pipe is caught by reading the
  * diff, unlike the class this exists for.
  *
  * ESCAPING. `\|` inside a code span renders as a literal pipe and keeps the cell, which two rows in

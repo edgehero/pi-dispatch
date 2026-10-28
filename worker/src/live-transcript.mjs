@@ -36,7 +36,7 @@ export const LIVE_TTL_LIVE_MS = 7 * 24 * 60 * 60 * 1000;
 /** The key's lifetime after the `end` entry. */
 export const LIVE_TTL_ENDED_MS = 24 * 60 * 60 * 1000;
 /** Every `kind` an entry can carry; readers refuse anything else. */
-export const LIVE_KINDS = Object.freeze(["user", "assistant", "tool-call", "tool-result", "compaction", "note", "reset", "skipped", "end"]);
+export const LIVE_KINDS = Object.freeze(["user", "assistant", "tool-call", "tool-result", "steer", "compaction", "note", "reset", "skipped", "end"]);
 /** The `outcome` an `end` entry carries: the run's outcome, or `unknown`. Never free text. */
 export const LIVE_OUTCOMES = Object.freeze(["completed", "policy", "failed", "unknown"]);
 /** The most code points a `text` carries; an `assistant` entry gets the larger one. */
@@ -212,7 +212,7 @@ export function entriesOf(line, ts) {
 			}
 		}
 		case "custom_message":
-			return [{ kind: "note", ts, text: `${toolName(line.customType)}: ${contentText(line.content)}` }];
+			return [{ kind: line.customType === "pi-dispatch-inbox" ? "steer" : "note", ts, text: `${toolName(line.customType)}: ${contentText(line.content)}` }];
 		case "compaction":
 			return [{ kind: "compaction", ts, text: typeof line.summary === "string" ? line.summary : "" }];
 		case "branch_summary":

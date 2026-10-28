@@ -843,14 +843,14 @@ test("judgeBundle (#704 part 3): with the variables, an undelivered endpoint nam
 	const endpoints = { STRIPE_KEY: { host: "api.stripe.com", auth: "bearer" } };
 	const judge = (vars, extra = {}) => mod.judgeBundle({ endpoints, vars, network, ...extra });
 	const capable = { capabilities: ["bundleEnvFile"] };
-	assert.deepEqual(judge({ STRIPE_KEY: "s", DB_URL: "d", FLAG: "on" }, capable), { ok: true, placeholders: 1, plain: 2 });
+	assert.deepEqual(judge({ STRIPE_KEY: "s", DB_URL: "d", FLAG: "on" }, capable), { ok: true, placeholders: 1, plain: 2, placeholderNames: ["STRIPE_KEY"] });
 	assert.deepEqual(judge({ DB_URL: "d" }), { refused: "openshell-bundle-endpoint-unknown", name: "STRIPE_KEY" });
 	// Review round 1, M2: a shadowed endpoint name is still its host's placeholder, with the trigger's value.
-	assert.deepEqual(judge({ DB_URL: "d" }, { shadowed: ["STRIPE_KEY"], ...capable }), { ok: true, placeholders: 1, plain: 1 }, "shadowed by run.secrets is not unknown");
+	assert.deepEqual(judge({ DB_URL: "d" }, { shadowed: ["STRIPE_KEY"], ...capable }), { ok: true, placeholders: 1, plain: 1, placeholderNames: [] }, "shadowed by run.secrets is not unknown");
 	// Review round 1, H1: plain variables go by file, which only an image declaring bundleEnvFile reads.
 	assert.deepEqual(judge({ STRIPE_KEY: "s", DB_URL: "d" }), { refused: "openshell-bundle-image-too-old", name: null });
 	assert.deepEqual(judge({ STRIPE_KEY: "s", DB_URL: "d" }, { capabilities: ["steerStdin"] }), { refused: "openshell-bundle-image-too-old", name: null });
-	assert.deepEqual(judge({ STRIPE_KEY: "s" }), { ok: true, placeholders: 1, plain: 0 }, "no plain variable, no file, any image");
+	assert.deepEqual(judge({ STRIPE_KEY: "s" }), { ok: true, placeholders: 1, plain: 0, placeholderNames: ["STRIPE_KEY"] }, "no plain variable, no file, any image");
 	for (const taken of ["OPENSHELL_THING", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "GIT_CONFIG_COUNT", "grpc_proxy"]) {
 		assert.deepEqual(judge({ STRIPE_KEY: "s", [taken]: "v" }), { refused: "openshell-bundle-name-taken", name: taken }, taken);
 	}
@@ -882,7 +882,7 @@ test("bundleGate (#704 part 3): the venue's own refusal with its fixed sentence 
 	// A configured forge instance's host is the forge token's.
 	const forge = bundle(fake, { readAllowlist: () => ["git.acme.test"], forgeHosts: { gitlab: "https://git.acme.test" } });
 	assert.equal((await forge.bundleGate(job, { endpoints: { K: { host: "git.acme.test", auth: "bearer" } } })).venueRefused.reason, "openshell-bundle-endpoint-shared");
-	assert.deepEqual(await bundle(fake, { readAllowlist: () => ["api.stripe.com"] }).bundleGate(job, { endpoints: BUNDLE_KEYS.endpoints, vars: BUNDLE_SECRETS, capabilities: ["bundleEnvFile"] }), { ok: true, placeholders: 1, plain: 1 });
+	assert.deepEqual(await bundle(fake, { readAllowlist: () => ["api.stripe.com"] }).bundleGate(job, { endpoints: BUNDLE_KEYS.endpoints, vars: BUNDLE_SECRETS, capabilities: ["bundleEnvFile"] }), { ok: true, placeholders: 1, plain: 1, placeholderNames: ["STRIPE_KEY"] });
 	// Review round 1, H2: the processor's credential hosts (a model's composed baseUrl, a model endpoint, an MCP server).
 	const modelHost = bundle(fake, { readAllowlist: () => ["api.anthropic.com"] });
 	assert.equal((await modelHost.bundleGate(job, { endpoints: { K: { host: "api.anthropic.com", auth: "bearer" } }, credentialHosts: ["api.anthropic.com"] })).venueRefused.reason, "openshell-bundle-endpoint-shared");

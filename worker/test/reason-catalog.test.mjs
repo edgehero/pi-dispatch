@@ -19,6 +19,7 @@ import { MCP_REFUSAL_COMMENT, mcpRefusalComment } from "../src/mcp-preflight.mjs
 import { OPENSHELL_BIND_LINGERING } from "../src/backends.mjs";
 import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, PLAN_RECORD_REASONS, RECOVER_SKIPPED_REASONS, SESSION_REASONS, STEER_SKIPPED_REASONS } from "../src/run-history.mjs";
 import { recordNestedEnum, recordReasonEnum } from "./helpers/spec-enum.mjs";
+import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT, WORKER_ERROR } from "../src/record-reason.mjs";
 
 // The reason catalog (issue #710, INT-REASON-CATALOG). Every bolt here is two-way: a reason the record can carry with no
 // explanation would render as a bare token, and an explanation for a reason the record cannot carry is a table nobody
@@ -203,6 +204,17 @@ test("a reason with a fixed comment explains itself with that comment, identical
 		derived++;
 	}
 	assert.ok(derived >= 60, `${derived} derived sentences`);
+});
+
+test("the reasons for infrastructure exits are failures written here: no table is keyed by them, and none is the generic failure comment", () => {
+	// A terminal attempt with one of them posts FAILED_COMMENT (FAILED_COMMENT_BY_REASON has no row for them), so the
+	// catalog's sentence says more than the issue was told, and must not pretend to be what the issue was told.
+	for (const token of [CONTAINER_INFRA_EXIT, CONTAINER_EXIT_UNKNOWN, WORKER_ERROR]) {
+		assert.ok(Object.hasOwn(REASONS, token), token);
+		assert.match(REASONS[token].sentence, /^Failed: /, token);
+		assert.notEqual(REASONS[token].sentence, tables.FAILED_COMMENT, token);
+		for (const [name, table] of Object.entries(KEYED)) assert.ok(!Object.hasOwn(table, token), `${token} is not a key of ${name}`);
+	}
 });
 
 test("each ambiguous reason really has two or more different comments, and the catalog's sentence is none of them", () => {

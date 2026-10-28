@@ -87,7 +87,7 @@ export async function runChat(argv, { env = process.env, out = (l) => process.st
 		parsed = parseArgs({
 			args: argv,
 			allowPositionals: true,
-			options: { fork: { type: "boolean", default: false }, force: { type: "boolean", default: false }, tools: { type: "boolean", default: false }, pi: { type: "string" }, console: { type: "string" }, yes: { type: "boolean", default: false } },
+			options: { "fork-as-job": { type: "boolean", default: false }, entry: { type: "string" }, position: { type: "string" }, model: { type: "string" }, provider: { type: "string" }, thinking: { type: "string" }, message: { type: "string" }, fork: { type: "boolean", default: false }, force: { type: "boolean", default: false }, tools: { type: "boolean", default: false }, pi: { type: "string" }, console: { type: "string" }, yes: { type: "boolean", default: false } },
 		});
 	} catch (e) {
 		err(`error: ${e.message}\n  ${CHAT_USAGE}`);
@@ -101,6 +101,14 @@ export async function runChat(argv, { env = process.env, out = (l) => process.st
 	const target = classifyChatTarget(positionals[0]);
 	if (target.refusal) {
 		err(`error: ${target.refusal}`);
+		return 1;
+	}
+	if (values["fork-as-job"] && (values.fork || target.kind === "key" || values.force || values.tools || values.pi)) {
+		err("error: --fork-as-job needs a run id or issue URL and cannot use local-fork options");
+		return 1;
+	}
+	if (!values["fork-as-job"] && ["entry", "position", "model", "provider", "thinking", "message"].some((k) => values[k] !== undefined)) {
+		err("error: entry, position, model, provider, thinking and message options need --fork-as-job");
 		return 1;
 	}
 	const deployment = (keys) => (typeof deploymentEnv === "function" ? deploymentEnv(env, keys, { cwd }) : { env });
@@ -142,6 +150,7 @@ export async function runChat(argv, { env = process.env, out = (l) => process.st
 		const who = await client.whoami();
 		let info = await lookupRun(client, lookup, { err });
 		if (!info) return 1;
+		if (values["fork-as-job"]) return managedFork({ client, info, who, values, deps, out, err });
 		for (let round = 0; round < 8; round += 1) {
 			const mode = values.fork ? "fork" : info.mode;
 			if (mode === "fork") {
@@ -250,4 +259,30 @@ async function forkRun({ values, env, out, err, cwd, home, deployment, deps, rec
 	}
 	const { agentDirFrom } = await import("./host-pi.mjs");
 	return fork.runFork({ plan: planned.plan, out, ask: deps.ask ?? ((q) => askYesNo(q)), agentDir: agentDirFrom(env), cwd, home, tools: values.tools, env });
+}
+
+/** Managed execution uses the console's exact paid preview and confirm pipeline. */
+async function managedFork({ client, info, who, values, deps, out, err }) {
+	if (who.role !== "operator" || who.readOnly) {
+		err("error: a managed fork needs an operator on a writable console");
+		return 1;
+	}
+	const jobId = info.run?.jobId;
+	if (!values.entry) {
+		const got = await client.getJson(`/api/fork-points?id=${encodeURIComponent(jobId ?? "")}`);
+		if (got.status !== 200) {
+			err(`error: ${await safe(got.json?.error ?? "fork points unavailable")}`);
+			return 1;
+		}
+		for (const e of got.json.entries ?? []) if (e.positions?.length) out(await safe(`${e.id} ${e.role ?? e.type} (${e.positions.join(", ")})`));
+		out("Choose a supported entry: add --entry <id> --position before|at to --fork-as-job");
+		return 0;
+	}
+	const body = { jobId, entry: values.entry, position: values.position ?? "before" };
+	for (const key of ["model", "provider", "thinking", "message"]) if (values[key] !== undefined) body[key] = values[key];
+	const got = await client.act("run-fork", body, { print: (line) => out(String(line).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")), confirm: async () => values.yes || (await (deps.ask ?? askYesNo)("Queue this paid fork? [y/N] ")) });
+	if (got.refusal) { err(`error: ${await safe(got.refusal)}`); return 1; }
+	if (got.declined) { out("left without queuing a fork"); return 0; }
+	out("fork queued; the original run and branch are preserved");
+	return 0;
 }

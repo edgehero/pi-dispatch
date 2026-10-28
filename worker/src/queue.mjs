@@ -1,3 +1,5 @@
+import { makeApprovalStore } from "./approval-state.mjs";
+import { validateFork } from "./fork-job.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
@@ -353,11 +355,32 @@ export async function enqueueGitLabJob(queue, fields) {
  */
 export async function enqueueForgeJob(queue, kind, fields) {
 	const { jobId, data, dedupId } = forgeJobOf(kind, fields);
-	const added = await queue.add(kind, data, {
-		jobId,
-		deduplication: { id: dedupId, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
-		...forgeJobOpts(),
-	});
+	let routedName = null;
+	// Bind the delivery to the request visible at ingress: a delayed old reply must never decide a later park.
+	// A reply held before publication has no binding yet; its post-park enqueue reads again here.
+	if ((data.gates?.length > 0 && data.trigger?.comment) || data.approvalRequestId !== undefined) {
+		const found = await makeApprovalStore({ redis: await queue.client }).find(data);
+		if (!found.ok) throw new Error("approval-state-unavailable");
+		if (data.approvalRequestId !== undefined) {
+			if (found.request?.requestId !== data.approvalRequestId) throw new TypeError("approval-request-stale");
+		} else if (found.request?.state === "pending") {
+			data.approvalRequestId = found.request.requestId;
+		}
+		if (data.approvalRequestId !== undefined && found.request?.hostQueue) routedName = found.request.hostQueue;
+	}
+	// Only the host owning the retained session can consume this decision. Central routing also covers console
+	// answers and held replies, whose callers may have selected the shared queue before a request existed.
+	const routed = routedName !== null && routedName !== queue.name ? makeQueue(queue.opts.connection, { name: routedName }) : null;
+	let added;
+	try {
+		added = await (routed ?? queue).add(kind, data, {
+			jobId,
+			deduplication: { id: dedupId, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
+			...forgeJobOpts(),
+		});
+	} finally {
+		if (routed) await routed.close();
+	}
 	// Issue #289: WHICH of the two dedup layers spoke is readable off `queue.add`'s return, and only one
 	// of them is. Verified at bullmq 5.80.4's own Lua: a jobId collision (the GUID shield,
 	// REQ-DEDUP-BY-DELIVERY-GUID) returns THE SAME id -- structurally invisible here, and correctly so,
@@ -366,8 +389,8 @@ export async function enqueueForgeJob(queue, kind, fields) {
 	// So `added.id !== jobId` means this delivery was swallowed by the window and created nothing, which
 	// the receiver used to log as `enqueued` and answer as success. A defensive undefined (a fake queue
 	// predating the comparison) reads as not-deduplicated, today's behaviour exactly.
-	if (added?.id && added.id !== jobId) return { jobId, deduplicated: true, survivingJobId: added.id };
-	return { jobId, deduplicated: false };
+	if (added?.id && added.id !== jobId) return { jobId, deduplicated: true, survivingJobId: added.id, ...(routed ? { queue: routedName } : {}) };
+	return { jobId, deduplicated: false, ...(routed ? { queue: routedName } : {}) };
 }
 
 // A forge job's retry policy and retention, one table for both of its enqueue paths (the window-deduplicated one above
@@ -397,8 +420,9 @@ export async function enqueueLateForgeJob(queue, kind, fields) {
 }
 
 /** The forge job's id, its data (an explicit field list, see `enqueueForgeJob`) and its semantic dedup id. Throws on a bad delivery id or console name. */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, recover, steer, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
+	if (approvalRequestId !== undefined && (typeof approvalRequestId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(approvalRequestId))) throw new TypeError("approval-request-invalid");
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
 	// else. Rebuilt from the one field rather than copied, `parkedReply`'s rule for durable job data, and refused when the
 	// name is not a console token's: the worker prints it on the forge in the answer's trail comment, so a name outside
@@ -461,6 +485,10 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// REQ-AWAIT-INPUT (issue #625): only when armed, so an unflagged job's data is byte-identical, and at JOB level
 		// for resume's reason: `trigger` is copied verbatim into /job/event.json.
 		...(awaitInput === true && { awaitInput: true }),
+		...(gates !== undefined && { gates }),
+		...(approvalRequestId !== undefined && { approvalRequestId }),
+		...(gateTimeout !== undefined && { gateTimeout }),
+		...(gateBudgetRaiseUsd !== undefined && { gateBudgetRaiseUsd }),
 		// Issue #644: the report_progress tool, and the forge status comment. Only when armed, awaitInput's rule and
 		// for its reasons (byte-identical unflagged data; job level, never inside `trigger`).
 		...(progress === true && { progress: true }),
@@ -497,6 +525,8 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// Conditional for the same reason packages/image/resume are: an unflagged job's data must keep
 		// exactly the keys it has today. `replica` is this job's 1-based index and `replicas` the set size;
 		// both are integers, so the run record they land in stays PII-free by construction.
+		...(fork !== undefined && { fork: validateFork(fork), forkPolicy, forkReserveMicros }),
+		...(thinkingLevel !== undefined && { thinkingLevel }),
 		...(replica !== undefined && { replica }),
 		...(replicas !== undefined && { replicas }),
 	};
@@ -521,7 +551,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 	// `cmd:` prefix keeps a command named X from coalescing against a flow named X -- `:` is outside
 	// the skill-name charset, so no real flow can spell the prefixed form -- and a flow job's key
 	// stays byte-identical to before the feature.
-	const dedupId = `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${replica !== undefined ? `:r${replica}` : ""}`;
+	const dedupId = `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${fork !== undefined ? `:fork:${fork.id}` : ""}${replica !== undefined ? `:r${replica}` : ""}`;
 	return { jobId, data, dedupId };
 }
 

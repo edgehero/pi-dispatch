@@ -12,6 +12,7 @@ import {
   enqueueSteer,
   estimateReserve,
   planFailedBulk,
+  planCancelQueued,
   planParkedAnswer,
   planRerun,
   rerunRefusalOf,
@@ -30,6 +31,7 @@ import {
   steerAuditTarget,
 } from "../src/read-model.mjs";
 import { createHash } from "node:crypto";
+import { makeApprovalStore } from "../../worker/src/approval-state.mjs";
 import { closeInbox, listInboxPublic, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, enqueueForgeJob, enqueueLateForgeJob, forgeDeliveryJobId, manualTriggerJobId } from "@edgehero/pi-dispatch/queue";
@@ -218,11 +220,11 @@ test("retryFailedJob and removeFailedJob act only on a job still failed as previ
     assert.deepEqual(await retryFailedJob({ url: URL12, jobId: "gh-f1", expect }), { ok: true, jobId: "gh-f1", queue: "pi-jobs@mini1" });
     assert.equal(await (await host.getJob("gh-f1")).getState(), "waiting");
     // Now it is not failed: a second retry from the same preview refuses.
-    assert.match((await retryFailedJob({ url: URL12, jobId: "gh-f1", expect })).invalid, /is waiting now, not failed: it changed since the preview/);
+    assert.match((await retryFailedJob({ url: URL12, jobId: "gh-f1", expect })).invalid, /Nothing was done: it is waiting now, not failed; it changed since the preview; job gh-f1$/);
     const f2 = await host.getJob("gh-f2");
     assert.deepEqual(await removeFailedJob({ url: URL12, jobId: "gh-f2", expect: { attemptsMade: f2.attemptsMade, finishedOn: f2.finishedOn } }), { ok: true, jobId: "gh-f2", queue: "pi-jobs@mini1" });
     assert.equal(await host.getJob("gh-f2"), undefined);
-    assert.match((await removeFailedJob({ url: URL12, jobId: "gh-f2", expect: { attemptsMade: 1, finishedOn: 1 } })).invalid, /no job gh-f2 in 2 queue\(s\)/);
+    assert.match((await removeFailedJob({ url: URL12, jobId: "gh-f2", expect: { attemptsMade: 1, finishedOn: 1 } })).invalid, /^Nothing was done; it changed since the preview: no job in 2 queues; job gh-f2$/);
   } finally {
     await v.done();
   }
@@ -641,6 +643,51 @@ function parkedTriggers(path, kind) {
 const ISSUE = { number: 7, title: "Flaky test", body: "It fails on Mondays" };
 const PARKED = "pi-awaiting-input";
 
+for (const targetType of ["issue", "pull_request"]) {
+  test(`an approval decision on ${targetType} is bound to its original request and current gate declaration`, live, async () => {
+  const v = await freshValkey();
+  const dir = tempDir("pd-649-approval-");
+  const logsDir = join(dir, "logs");
+  const triggersPath = join(dir, "triggers.json");
+  const gateFields = { gates: ["budget-raise", "deploy:staging"], gateTimeout: 3, maxCostUsd: 2, gateBudgetRaiseUsd: 3.5 };
+  try {
+    writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: targetType === "issue" ? { type: "comment", phrase: "@pi" } : { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "fix", resume: true, ...gateFields } }] }));
+    const shared = await v.q("pi-jobs");
+    const { jobId } = await enqueueForgeJob(shared, "github", { repo: "org/repo", target: { type: targetType, ...ISSUE, ...(targetType === "pull_request" ? { head: "fix/gated" } : {}) }, flow: "fix", resume: true, trigger: { event: "issue_comment", action: "created", deliveryId: "approval-orig", sender: { id: 5 }, matched: targetType === "issue" ? { index: 0, type: "comment", phrase: "@pi" } : { index: 0, type: "pull_request", action: "opened" }, comment: { body: "@pi fix", author_association: "OWNER" } }, ...gateFields });
+    await shared.removeDeduplicationKey("org/repo#7:fix");
+    writeRecord(logsDir, { jobId, kind: "github", target: "org/repo#7", outcome: "completed", reason: "awaiting-approval", approval: { requestId: "a".repeat(64), action: "budget-raise" }, endedAt: "2026-10-15T10:00:00.000Z" });
+    const missing = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "/approve", by: "alice", triggersPath, runsFn: async () => [], now: () => Date.parse("2026-10-15T11:00:00Z") });
+    assert.match(missing.refusal, /approval request is no longer pending/);
+    const store = makeApprovalStore({ redis: v.redis, now: () => Date.parse("2026-10-15T11:00:00Z") });
+    const published = await store.publish({ requestId: "a".repeat(64), runId: jobId, kind: "github", repo: "org/repo", target: { type: targetType, number: ISSUE.number }, action: "budget-raise", toolCallId: "call-1", configDigest: "digest", sessionKey: "session", host: "worker", hostQueue: "pi-jobs@worker", createdAt: Date.parse("2026-10-15T10:00:00Z") });
+    assert.equal(published.ok, true, JSON.stringify(published));
+    const owner = await v.q("pi-jobs@worker");
+    const got = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "/approve", by: "alice", triggersPath, runsFn: async () => [], now: () => Date.parse("2026-10-15T11:00:00Z") });
+    assert.ok(got.plan, JSON.stringify(got));
+    assert.equal(got.plan.queue, "pi-jobs@worker", "preview reads the authoritative private session owner queue");
+    assert.equal(got.plan.job.trigger.comment.body, "/approve");
+    assert.equal(got.plan.job.approvalRequestId, "a".repeat(64));
+    assert.equal(got.plan.reserve.capMicros, 3_500_000, "approval previews the raised reservation without changing the original policy fields");
+    for (const [key, value] of Object.entries(gateFields)) assert.deepEqual(got.plan.job[key], value, key);
+    assert.deepEqual(got.plan.job.console, { by: "alice" });
+    assert.equal(got.plan.job.target.type, targetType);
+    assert.equal(got.plan.job.parkedReply, targetType === "issue");
+    if (targetType === "pull_request") assert.equal(got.plan.job.target.head, "fix/gated");
+    const queued = await enqueueParkedAnswer({ ...got.plan, queue: "pi-jobs" }, { url: URL12 });
+    assert.equal(queued.ok, true, JSON.stringify(queued));
+    assert.equal(queued.queue, "pi-jobs@worker", "confirmation reports the actual destination even when an older preview selected shared");
+    assert.equal((await owner.getJob(queued.jobIds[0])).data.approvalRequestId, "a".repeat(64));
+    assert.equal(await shared.getJob(queued.jobIds[0]), undefined);
+    assert.equal((await store.decide({ requestId: "a".repeat(64), decisionId: "decision-1", decision: "approved", actor: { kind: "operator", id: "b".repeat(64) } })).ok, true);
+    const decided = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "/decline", by: "alice", triggersPath, runsFn: async () => [], now: () => Date.parse("2026-10-15T11:00:00Z") });
+    assert.match(decided.refusal, /approval request is no longer pending/);
+  } finally {
+    await v.done();
+  }
+});
+
+}
+
 /** What each forge's receiver arm makes of a phrase-free reply on the parked issue: the real filter over the real config. */
 function receiverReply(kind, triggersPath, body) {
   const cfg = {};
@@ -848,11 +895,11 @@ test("planSteer refuses by name before anything is written: source, sender, mode
     assert.match((await plan({ mode: "later" })).refusal, /the mode is not one of steer, followUp/);
     assert.match((await plan({ text: " \u0007\u200b " })).refusal, /the message is empty/);
     assert.match((await plan({ text: "x".repeat(8193) })).refusal, /8193 bytes, above the 8192-byte limit; shorten it\. Nothing was sent/);
-    assert.match((await plan({ jobId: "gh-none" })).refusal, /no job gh-none in 2 queue\(s\); nothing was sent/);
-    assert.match((await plan({ jobId: "gh-s3" })).refusal, /job gh-s3 is waiting: only a running job takes messages\. Nothing was sent/);
-    assert.match((await plan({ jobId: "gh-s2" })).refusal, /job gh-s2 is not steer-armed \(its trigger does not set run\.steer\)/);
+    assert.match((await plan({ jobId: "gh-none" })).refusal, /^Nothing was sent: no job in 2 queues; job gh-none$/);
+    assert.match((await plan({ jobId: "gh-s3" })).refusal, /^Nothing was sent: it is waiting; only a running job takes messages; job gh-s3$/);
+    assert.match((await plan({ jobId: "gh-s2" })).refusal, /^Nothing was sent: it is not steer-armed \(its trigger does not set run\.steer\)/);
     // Armed and active, but the relay has not opened the run (no `run:steer:open:` key): one sentence for all three causes.
-    assert.match((await plan()).refusal, /the run is not accepting messages: it is not steer-armed, not running, or its venue cannot deliver/);
+    assert.match((await plan()).refusal, /^Nothing was sent: the run is not accepting messages; it is not steer-armed, not running, or its venue cannot deliver$/);
     await registerLive({ redis: v.redis, runId: "gh-s1", host: "h1" });
     const ok = await plan({ text: "use the\u200b staging db\r\n" });
     assert.equal(ok.plan.kind, "steer");
@@ -881,7 +928,7 @@ test("enqueueSteer pushes exactly the plan as an operator message; withdraw name
     assert.deepEqual(await enqueueSteer(p1, { url: URL12, now: () => 1_791_000_000_000 }), { ok: true, jobId: "gh-r1", id: p1.id, mode: "followUp", state: "queued" });
     const stored = (await readInbox({ redis: v.redis, runId: "gh-base" })).entries[0];
     assert.deepEqual(stored, { v: 1, id: p1.id, mode: "followUp", source: "console", author: { kind: "operator", by: "alice" }, text: "first", at: 1_791_000_000_000 });
-    assert.match((await enqueueSteer(p1, { url: URL12 })).refusal, /already in the run's inbox; nothing new was sent/, "a replayed plan is dup");
+    assert.match((await enqueueSteer(p1, { url: URL12 })).refusal, /^Nothing new was sent: the message is already in the run's inbox; message /, "a replayed plan is dup");
     const p2 = await plan("second", "steer", "panel", "panel");
     assert.equal((await enqueueSteer(p2, { url: URL12 })).ok, true);
     assert.equal((await readInbox({ redis: v.redis, runId: "gh-base" })).entries[1].source, "panel");
@@ -909,7 +956,7 @@ test("enqueueSteer pushes exactly the plan as an operator message; withdraw name
     // A plan made while open, pushed after the final close, is refused: it is never accepted and silently unseen.
     const p4 = await plan("fourth");
     await closeInbox({ redis: v.redis, runId: "gh-base" });
-    assert.match((await enqueueSteer(p4, { url: URL12 })).refusal, /the run has finished and its inbox is closed\. Nothing was sent/);
+    assert.match((await enqueueSteer(p4, { url: URL12 })).refusal, /^Nothing was sent: the run has finished and its inbox is closed$/);
     assert.match((await enqueueSteer({ kind: "rerun" }, { url: URL12 })).refusal, /not a steer plan/);
     // The public list never carries the text.
     const pub = await listInboxPublic({ redis: v.redis, runId: "gh-base" });
@@ -976,7 +1023,7 @@ test("planSteer, every branch: completed and unknown states, an open read that f
     await completedJob(v, "pi-jobs@h3", "gh-done", { kind: "github", repo: "o/r", steer: true });
     await registerLive({ redis: v.redis, runId: "gh-b1", host: "h1" });
     const plan = (over = {}) => planSteer({ url: URL12, jobId: "gh-b1", text: "go", mode: "steer", by: "alice", ...over });
-    assert.match((await plan({ jobId: "gh-done" })).refusal, /^job gh-done is completed: only a running job takes messages\. Nothing was sent$/);
+    assert.match((await plan({ jobId: "gh-done" })).refusal, /^Nothing was sent: it is completed; only a running job takes messages; job gh-done$/);
     assert.match((await plan({ source: "cli" })).refusal, /the source is not one of console, panel/, "the CLI's own source is not the console's to write");
     assert.match((await plan({ jobId: "gh b1" })).refusal, /a job id is letters, digits and \. _ : -, at most 200 characters/);
     // The framed inbox file's cap (normalizeSteerEntry's own refusal): backslashes double in JSON.
@@ -989,12 +1036,12 @@ test("planSteer, every branch: completed and unknown states, an open read that f
       const q = realQueue(conn, o);
       return new Proxy(q, { get: (t, k) => (k === "getJob" ? async (id) => { const j = await t.getJob(id); return j && id === "gh-b1" ? Object.assign(Object.create(Object.getPrototypeOf(j)), j, { getState: async () => { throw new Error("gone"); } }) : j; } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
     };
-    assert.match((await plan({ queueFn })).refusal, /job gh-b1 is unknown: only a running job takes messages/);
+    assert.match((await plan({ queueFn })).refusal, /^Nothing was sent: it is unknown; only a running job takes messages; job gh-b1$/);
     const redisFn = (url) => {
       const c = makeRedisClient(url);
       return new Proxy(c, { get: (t, k) => (k === "exists" ? async (key) => { if (String(key).startsWith("run:steer:open:")) throw Object.assign(new Error("x"), { code: "ECONNRESET" }); return t.exists(key); } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
     };
-    assert.match((await plan({ redisFn })).refusal, /the run's inbox could not be read \(Valkey said ECONNRESET\); nothing was sent/);
+    assert.match((await plan({ redisFn })).refusal, /^Nothing was sent: the run's inbox could not be read \(Valkey said ECONNRESET\)$/);
   } finally {
     for (const h of held) await h.stop();
     await v.done();
@@ -1016,7 +1063,7 @@ test("enqueueSteer and the withdraw funnels, every branch: gone, full, an entry 
     assert.equal((await enqueueSteer({ ...p, source: "cli" }, { url: URL12 })).refusal, "not a steer plan");
     // Full: 16 messages per run, then the 17th.
     for (let i = 0; i < 16; i += 1) assert.equal((await enqueueSteer(await mk(`m${i}`), { url: URL12 })).ok, true);
-    assert.match((await enqueueSteer(await mk("one more"), { url: URL12 })).refusal, /the run's inbox is full \(at most 16 messages and 65536 bytes per run, withdrawn ones included\)\. Nothing was sent/);
+    assert.match((await enqueueSteer(await mk("one more"), { url: URL12 })).refusal, /^Nothing was sent: the run's inbox is full \(at most 16 messages and 65536 bytes per run, withdrawn ones included\)$/);
     // Gone: the relay stopped refreshing (the open key lapsed) after the plan.
     const fresh = v.redis;
     await fresh.del("run:inbox:gh-e1", "run:inbox:state:gh-e1");
@@ -1038,7 +1085,7 @@ test("enqueueSteer and the withdraw funnels, every branch: gone, full, an entry 
     assert.match((await withdrawSteerMessage({ ...w4, id: "nope" }, { url: URL12 })).refusal, /32 lowercase hex/);
     assert.deepEqual(await withdrawSteerMessage(w4, { url: URL12, redisFn: down }), { unreachable: "Valkey said ECONNREFUSED" });
     assert.equal((await withdrawSteerMessage({ ...w4, kind: "steer" }, { url: URL12 })).refusal, "not a steer-withdraw plan");
-    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-none", id: p4.id })).refusal, /^no job gh-none in \d+ queue\(s\); nothing was changed$/);
+    assert.match((await planSteerWithdraw({ url: URL12, jobId: "gh-none", id: p4.id })).refusal, /^Nothing was changed: no job in \d+ queues?; job gh-none$/);
     const badHget = (url) => {
       const c = makeRedisClient(url);
       return new Proxy(c, { get: (t, k) => (k === "hget" ? async () => { throw Object.assign(new Error("z"), { code: "ETIMEDOUT" }); } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
@@ -1149,4 +1196,81 @@ test("steerAuditTarget: the job and the 32-hex message id, split on the last #; 
   const t = steerAuditTarget(long, id);
   assert.equal(t, `${"j".repeat(166)}#${id}`);
   assert.equal(t.length, 199, "inside the audit row's 200-character cap");
+});
+
+test("a client's or a registry's error reaches no refusal unbounded: the planners' catch-alls scrub and cut it, and a registry that could not be read is named, never quoted", async () => {
+  const words = `connect ECONNREFUSED 10.9.8.7:6379 \u001b]52;c;${"A".repeat(300)}\u0007`;
+  const bounded = `connect ECONNREFUSED 10.9.8.7:6379  ]52;c;${"A".repeat(300)} `.slice(0, 200);
+  const boom = () => {
+    throw new Error(words);
+  };
+  const fakes = { url: "redis://x", parseConnectionFn: () => ({}), timeoutMs: 200 };
+  const logsDir = tempDir("pd-737-bounded-words-");
+  assert.deepEqual(await planRerun({ ...fakes, logsDir, jobId: "gh-1", redisFn: boom, queueFn: boom }), { refusal: `could not read the run or its job (${bounded}); nothing was queued` });
+  assert.deepEqual(await planParkedAnswer({ ...fakes, logsDir, jobId: "gh-1", text: "yes", by: "alice", triggersPath: join(logsDir, "triggers.json"), redisFn: boom, queueFn: boom }), { refusal: `could not read the parked run or its job (${bounded}); nothing was queued` });
+  assert.deepEqual(await planSteer({ ...fakes, jobId: "gh-1", text: "x", by: "alice", redisFn: boom, queueFn: boom }), { refusal: `Nothing was sent: could not read the job or its inbox (${bounded})` });
+  assert.deepEqual(await planSteerWithdraw({ ...fakes, jobId: "gh-1", id: "a".repeat(32), redisFn: boom, queueFn: boom }), { refusal: `could not read the job or its inbox (${bounded}); nothing was changed` });
+  // The registry's read failed with a client's words: the sentence says so, without them.
+  const blind = () => ({ on() {}, smembers: async () => { throw new Error(words); }, scan: async () => ["0", []], disconnect() {} });
+  const empty = (_c, { name }) => ({ name, getJob: async () => undefined, close: async () => {} });
+  assert.deepEqual(await planCancelQueued({ ...fakes, jobId: "gh-1", redisFn: blind, queueFn: empty }), { refusal: "no job gh-1 in 1 queue (the host registry could not be read; a host that is not registered may still hold it); nothing was changed", status: 404 });
+  assert.deepEqual(await setQueuePausedOne({ url: "redis://x", queue: "pi-jobs@gone", paused: true, redisFn: blind, makeQueueFn: empty, parseConnectionFn: () => ({}) }), { invalid: "\"pi-jobs@gone\" is not a queue this deployment drains (pi-jobs); the host registry could not be read, so a host's queue may be missing from that list. Nothing was changed" });
+});
+
+test("a re-run or an answer over a record that could not be read says which read failed and that nothing was queued, never that the run has no record", async () => {
+  const { RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_RECORD_UNREAD } = await import("../src/read-model.mjs");
+  const { recordReadRefusal } = await import("../src/job-actions.mjs");
+  const logsDir = tempDir("pd-737-planner-unread-");
+  writeFileSync(join(logsDir, "triggers.json"), "[]");
+  writeFileSync(join(logsDir, "gh-bad.json"), "{ half a reco");
+  const down = () => ({ on() {}, async get() { throw new Error("ECONNRESET"); }, disconnect() {}, quit() {} });
+  const empty = () => ({ on() {}, async get() { return null; }, disconnect() {}, quit() {} });
+  const common = { url: "redis://unused", logsDir, triggersPath: join(logsDir, "triggers.json"), timeoutMs: 200 };
+  // The mirror did not answer for a run this host has no file of; this host's file is there and is no record.
+  for (const [jobId, redisFn, why] of [["gh-none", down, RUN_MIRROR_UNREAD], ["gh-bad", empty, RUN_FILE_UNREADABLE]]) {
+    assert.equal((await planRerun({ ...common, jobId, redisFn })).refusal, `${why}, so ${jobId} cannot be re-run now; nothing was queued, try again`);
+    assert.equal((await planParkedAnswer({ ...common, jobId, text: "yes", by: "ops", redisFn })).refusal, `${why}, so ${jobId} cannot be answered now; nothing was queued, try again`);
+  }
+  // Both read, neither holds it: the one answer that says no record.
+  assert.equal((await planRerun({ ...common, jobId: "gh-gone", redisFn: empty })).refusal, "no run record for gh-gone on this host or in the fleet mirror");
+  assert.equal((await planParkedAnswer({ ...common, jobId: "gh-gone", text: "yes", by: "ops", redisFn: empty })).refusal, "no run record for gh-gone on this host or in the fleet mirror");
+  // The one rule both planners use: "no run record" only on the reader's missing; any other answer is a read that failed.
+  assert.equal(recordReadRefusal({ missing: true }, "gh-1", "re-run"), "no run record for gh-1 on this host or in the fleet mirror");
+  assert.equal(recordReadRefusal({ invalid: "a run id is letters" }, "gh-1", "re-run"), "a run id is letters");
+  for (const read of [{}, null, { missing: false }, { unreadable: 7 }]) assert.equal(recordReadRefusal(read, "gh-1", "answered"), `${RUN_RECORD_UNREAD}, so gh-1 cannot be answered now; nothing was queued, try again`, JSON.stringify(read));
+});
+
+test("a parked answer's refusal for a run that is not parked names how it ended only in tokens: a reason or an outcome that is no token reaches no refusal", async () => {
+  const logsDir = tempDir("pd-737-not-parked-");
+  writeFileSync(join(logsDir, "triggers.json"), "[]");
+  const empty = () => ({ on() {}, async get() { return null; }, disconnect() {}, quit() {} });
+  const ended = (jobId, outcome, reason) => writeFileSync(join(logsDir, `${jobId}.json`), JSON.stringify({ jobId, kind: "github", target: "acme/web#1", outcome, reason, startedAt: "2026-10-14T11:59:00.000Z", endedAt: "2026-10-14T12:00:00.000Z" }));
+  const refusal = async (jobId) => (await planParkedAnswer({ url: "redis://unused", logsDir, triggersPath: join(logsDir, "triggers.json"), jobId, text: "yes", by: "ops", redisFn: empty, timeoutMs: 200, now: () => Date.parse("2026-10-14T12:01:00.000Z") })).refusal;
+  const FREE = ["GET /repos/acme/secret failed", "connect ECONNREFUSED 10.0.0.7:6379", "host\u202eevil", "Container-Lost"];
+  for (const [i, reason] of FREE.entries()) {
+    ended(`gh-r${i}`, "failed", reason);
+    assert.equal(await refusal(`gh-r${i}`), `gh-r${i} is not parked (it ended failed), so there is no question to answer`, reason);
+  }
+  ended("gh-token", "failed", "container-lost");
+  assert.equal(await refusal("gh-token"), "gh-token is not parked (it ended failed, container-lost), so there is no question to answer");
+  ended("gh-odd", "<b>done</b>", null);
+  assert.equal(await refusal("gh-odd"), "gh-odd is not parked (it ended unknown), so there is no question to answer");
+});
+
+// The audit cuts long answers: the result must survive even a maximum-length run id (#747).
+test("failed-job and steering refusals keep the result before a long job id", async () => {
+  const jobId = "j".repeat(200);
+  const redisFn = () => ({ on() {}, smembers: async () => [], scan: async () => ["0", []], disconnect() {} });
+  const job = { id: jobId, data: {}, attemptsMade: 1, finishedOn: 1, getState: async () => "waiting" };
+  const queueFn = (_connection, { name }) => ({ name, getJob: async () => job, close: async () => {} });
+  const fakes = { url: "redis://x", parseConnectionFn: () => ({}), redisFn, queueFn, timeoutMs: 200 };
+  const failed = await retryFailedJob({ ...fakes, jobId, expect: { attemptsMade: 1, finishedOn: 1 } });
+  assert.match(failed.invalid.slice(0, 200), /^Nothing was done:/);
+  assert.ok(failed.invalid.endsWith(jobId));
+  const steer = await planSteer({ ...fakes, jobId, text: "hello", by: "alice", now: () => 1000 });
+  assert.match(steer.refusal.slice(0, 200), /^Nothing was sent:/);
+  assert.ok(steer.refusal.endsWith(jobId));
+  const missing = await retryFailedJob({ ...fakes, queueFn: (_c, { name }) => ({ name, getJob: async () => null, close: async () => {} }), jobId, expect: { attemptsMade: 1, finishedOn: 1 } });
+  assert.match(missing.invalid.slice(0, 200), /^Nothing was done;/);
+  assert.ok(missing.invalid.endsWith(jobId));
 });

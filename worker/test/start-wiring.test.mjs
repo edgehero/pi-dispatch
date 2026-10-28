@@ -118,7 +118,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, readProgressKey, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, durable = {} } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -333,6 +333,9 @@ async function runStart({ env = {}, makeDoctorSpawner, makeAuth, makeHost, makeG
 			judgeValkey: judgeValkey ?? (async ({ url }) => ({ url, servername: null, pinned: null, notes: [] })),
 		});
 		booted = true;
+		// Some integration assertions must run with the real Valkey client still open. The usual return path
+		// intentionally tears it down first, so job-path tests opt into this awaited lifetime rather than leak a client.
+		if (whileRunning) await whileRunning({ captured: calls[0], deps: calls[0]?.deps });
 	} finally {
 		// TEARDOWN RUNS ON A REJECTING BOOT TOO (issue #295). A boot can refuse AFTER `createWorkerFn` has
 		// already been handed the queue, the registry and the redis client -- `reconcileGated` awaits
@@ -413,6 +416,124 @@ function captureLogs(fn) {
 	fn();
 	return parseLines(bootLines.slice(from));
 }
+
+test("approval expiry: a host without gate declarations constructs no approval timer", { skip }, async () => {
+	const dir = tempDir("approval-start-empty-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
+	const constructions = [];
+	await runStart({
+		env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_SWEEP_INTERVAL_HOURS: "0" },
+		makeRetentionSweep: (args) => { constructions.push(args); return { start() {}, close: async () => {} }; },
+	});
+	assert.equal(constructions.length, 0);
+});
+
+test("approval expiry: a boot declaration constructs and starts one periodic sweep and closes it", { skip }, async () => {
+	const dir = tempDir("approval-start-declared-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", resume: true, gates: ["deploy:staging"], gateTimeout: 1 } }] }));
+	const constructions = [];
+	let starts = 0;
+	let closes = 0;
+	await runStart({
+		env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_SESSIONS_DIR: join(dir, "sessions"), PI_SWEEP_INTERVAL_HOURS: "0" },
+		makeRetentionSweep: (args) => { constructions.push(args); return { start() { starts++; }, close: async () => { closes++; } }; },
+	});
+	assert.equal(constructions.length, 1);
+	assert.deepEqual(constructions[0].reapers.map((reaper) => reaper.name), ["approval"]);
+	assert.equal(constructions[0].intervalMs, 60_000);
+	assert.equal(starts, 1);
+	assert.equal(closes, 1);
+});
+
+test("approval expiry: first successful park after a live declaration arms once; refused parks arm nothing", { skip }, async () => {
+	const { approvalDueKey, approvalTargetKey } = await import("../src/approval-state.mjs");
+	const dir = tempDir("approval-start-live-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
+	const constructions = [];
+	let starts = 0;
+	let closes = 0;
+	const at = Date.parse("2026-10-28T10:00:00Z");
+	await runStart({
+		env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_SESSIONS_DIR: join(dir, "sessions"), PI_SWEEP_INTERVAL_HOURS: "0" },
+		now: () => at,
+		makeRetentionSweep: (args) => { constructions.push(args); return { start() { starts++; }, close: async () => { closes++; } }; },
+		whileRunning: async ({ deps, captured }) => {
+			assert.equal(constructions.length, 0);
+			const run = { kind: "github", flow: "fix", resume: true, gates: ["deploy:staging"], gateTimeout: 1 };
+			writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run }] }));
+			const id = `approval-start-${process.pid}-${Math.random().toString(36).slice(2, 12)}`;
+			const job = { ...run, id, repo: `org/${id}`, target: { type: "issue", number: 649 }, trigger: { matched: { index: 0, type: "comment", phrase: "@pi" } } };
+			const options = { job, session: { key: "a".repeat(32), digest: "b".repeat(64) }, metadata: { action: "deploy:staging", toolCallId: "call-1" } };
+			assert.equal((await deps.approvalRuntime.afterPark({ ...options, metadata: { ...options.metadata, action: "unknown" } })).ok, undefined);
+			assert.equal(constructions.length, 0);
+			let request;
+			try {
+				const published = await deps.approvalRuntime.afterPark(options);
+				assert.equal(published.ok, true, JSON.stringify(published));
+				request = published.request;
+				assert.equal(starts, 1);
+				assert.equal(constructions.length, 1);
+				assert.equal((await deps.approvalRuntime.afterPark(options)).ok, true);
+				assert.equal(starts, 1, "idempotent publication cannot construct another timer");
+			} finally {
+				if (request) {
+					await captured.redis.del(`run:approval:request:${request.requestId}`, approvalTargetKey(job));
+					await captured.redis.zrem("run:approval:due", request.requestId);
+					await captured.redis.zrem(approvalDueKey(request.host), request.requestId);
+				}
+			}
+		},
+	});
+	assert.equal(closes, 1);
+});
+
+test("approval expiry: restart finds retained future work after its declaration is removed and withdraws it when due", { skip }, async (t) => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const { approvalDueKey, approvalTargetKey, makeApprovalStore } = await import("../src/approval-state.mjs");
+	const dir = tempDir("approval-start-revoked-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
+	const host = `approval-boot-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+	const redis = makeRedisClient(VALKEY_URL);
+	redis.on("error", () => {});
+	let at = Date.parse("2026-10-28T10:00:00Z");
+	const store = makeApprovalStore({ redis, now: () => at });
+	const request = {
+		requestId: `${host}-request`, runId: `${host}-run`, kind: "github", repo: `org/${host}`, target: { type: "issue", number: 649 },
+		action: "deploy:staging", toolCallId: "call-1", configDigest: "old-policy", sessionKey: "a".repeat(32), host,
+		createdAt: at, expiresAt: at + 1000,
+		resumeJob: { kind: "github", repo: `org/${host}`, target: { type: "issue", number: 649 }, gates: ["deploy:staging"], resume: true, trigger: { matched: { index: 0, type: "comment", phrase: "@pi" } } },
+	};
+	t.after(async () => {
+		await redis.del(`run:approval:request:${request.requestId}`, approvalTargetKey(request), `run:approval:expiry-comment:${request.requestId}`);
+		await redis.zrem("run:approval:due", request.requestId);
+		await redis.zrem(approvalDueKey(host), request.requestId);
+		await redis.quit();
+	});
+	assert.equal((await store.publish(request)).ok, true);
+	const constructions = [];
+	let starts = 0;
+	let closes = 0;
+	await runStart({
+		env: { VALKEY_URL, PI_WORKER_NAME: host, PI_TRIGGERS_FILE: triggersPath, PI_SESSIONS_DIR: join(dir, "sessions"), PI_SWEEP_INTERVAL_HOURS: "0" },
+		now: () => at,
+		makeRetentionSweep: (args) => { constructions.push(args); return { start() { starts++; }, close: async () => { closes++; } }; },
+		whileRunning: async () => {
+			assert.equal(constructions.length, 1, "retained work arms expiry even though no current trigger declares gates");
+			assert.equal(starts, 1);
+			assert.deepEqual(await store.due(100, host), { ok: true, requestIds: [] }, "the retained request's deadline is still in the future");
+			at += 1000;
+			await constructions[0].reapers[0].reap();
+			assert.equal((await store.read(request.requestId)).request.state, "finished");
+			assert.equal((await store.find(request)).request, null);
+			assert.deepEqual(await store.hasPending(host), { ok: true, pending: false });
+		},
+	});
+	assert.equal(closes, 1);
+});
 
 test("github configured: real mintToken and the host's isDefaultBranchProtected are wired", { skip }, async () => {
 	const host = fakeHost();
@@ -3539,7 +3660,7 @@ test("the boot-race rule fires only on a change, only with a live watch, and nev
 });
 
 test("one debounce, shared: the 150ms literal is written once (issue #386)", async () => {
-	// It was written four times, which is the shape CLAUDE.md warns about: four copies agree until one of
+	// It was written four times, which is the shape AGENTS.md warns about: four copies agree until one of
 	// them does not. The value itself is pinned because it is a contract with the panel's atomic writer --
 	// a tmp+rename delivers more than one event for one edit, and the window only has to outlast that burst.
 	const mod = await import("../src/watch-closer.mjs");
@@ -5860,4 +5981,81 @@ test("the registry's caps thunk advertises the profiles this host would resolve,
 	assert.match(body, /servableSecretProfiles\(\{ envProfiles: config\.secretProfiles, overlayProfiles: settings\.invalid \? \{\} : \(settings\.secretProfiles \?\? \{\}\), roots: config\.secretResolverRoots, realExecutablePath: realExecutable \}\)/, "the resolver's own probe, so the row and the job agree");
 	assert.match(body, /served\.ambiguous \? \{\} : served\.profiles/, "an ambiguous name advertises no secret profile");
 	assert.doesNotMatch(src, /capabilityTokens\(config\)/, "the env-only advertisement is gone");
+});
+
+test("terminal approval failure closes only the exhausted job's claim; an intermediate retry retains authority", { skip }, async () => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const { makeApprovalStore, approvalTargetKey, approvalDueKey } = await import("../src/approval-state.mjs");
+	const dir = tempDir("approval-terminal-failure-");
+	const triggersPath = join(dir, "triggers.json");
+	const run = { kind: "github", flow: "fix", resume: true, gates: ["deploy:staging"] };
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run }] }));
+	const redis = makeRedisClient(VALKEY_URL);
+	redis.on("error", () => {});
+	const now = () => Date.parse("2026-10-28T12:00:00Z");
+	const store = makeApprovalStore({ redis, now });
+	const unique = `approval-final-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+	let request;
+	let finish;
+	let runtime;
+	const finishCalls = [];
+	try {
+		const boot = await runStart({
+			env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_WORKER_NAME: unique },
+			now,
+			makeRetentionSweep: () => ({ start() {}, close() {} }),
+			whileRunning: async ({ deps }) => {
+				runtime = deps.approvalRuntime;
+				const job = { ...run, id: `${unique}-source`, repo: `org/${unique}`, target: { type: "issue", number: 649 }, trigger: { matched: { index: 0, type: "comment", phrase: "@pi" } } };
+				const published = await runtime.afterPark({ job, session: { key: "a".repeat(32), digest: "b".repeat(64) }, metadata: { action: "deploy:staging", toolCallId: "call-1" } });
+				assert.equal(published.ok, true, JSON.stringify(published));
+				request = published.request;
+				assert.equal((await store.decide({ requestId: request.requestId, decisionId: `${unique}-reply`, decision: "approved", actor: { kind: "forge", id: "123" } })).ok, true);
+				assert.equal((await store.claim({ requestId: request.requestId, jobId: `${unique}-reply` })).ok, true);
+				// The listener stays the real startup closure. Give its existing runtime a live independent store
+				// after this harness closes the boot's client, so the persisted transition itself is still exercised.
+				runtime.finish = (args) => { finishCalls.push(args); finish = store.finish(args); return finish; };
+			},
+		});
+		const job = { id: `${unique}-reply`, attemptsMade: 1, data: { kind: "github", repo: request.repo, target: request.target, approvalRequestId: request.requestId } };
+		boot.handlers.failed(job, new Error("first infrastructure failure"));
+		await settleListeners();
+		assert.equal(finishCalls.length, 0);
+		assert.equal((await store.read(request.requestId)).request.state, "claimed");
+		boot.handlers.failed({ ...job, attemptsMade: 2, finishedOn: now() }, new Error("last infrastructure failure"));
+		await settleListeners();
+		await finish;
+		assert.deepEqual(finishCalls, [{ requestId: request.requestId, jobId: job.id }]);
+		assert.equal((await store.read(request.requestId)).request.state, "finished");
+		assert.equal((await store.find(request)).request, null, "exhausted retries no longer lock the target");
+		assert.equal((await store.claim({ requestId: request.requestId, jobId: job.id })).ok, undefined, "even retrying the old failed job cannot reuse finished authority");
+		assert.equal((await store.publish({ ...request, requestId: `${unique}-fresh`, runId: `${unique}-fresh-run` })).ok, true);
+		assert.equal((await store.find(request)).request.requestId, `${unique}-fresh`, "a new authorized run may request fresh approval");
+		// Shutdown joins the bounded listener task before its Redis client is closed.
+		let release;
+		runtime.finish = () => new Promise((resolve) => { release = resolve; });
+		boot.handlers.failed({ ...job, finishedOn: now() }, new Error("infra"));
+		await settleListeners();
+		let drained = false;
+		const draining = boot.captured.extraClosers.at(-1).close().then(() => { drained = true; });
+		await settleListeners();
+		assert.equal(drained, false, "the shutdown closer waits for the in-flight authority transition");
+		release({ ok: true });
+		await draining;
+		assert.equal(drained, true);
+		// A cleanup failure is named without the private error or decision text, and never becomes an unhandled reject.
+		runtime.finish = async () => { throw new Error("private human text"); };
+		boot.handlers.failed({ ...job, finishedOn: now() }, new Error("infra"));
+		await settleListeners();
+		const failure = boot.logsNow().find((line) => line.event === "approval_terminal_finish_failed");
+		assert.equal(failure.reason, "approval-finish-unavailable");
+		assert.equal(JSON.stringify(failure).includes("private human text"), false);
+	} finally {
+		if (request) {
+			await redis.del(`run:approval:request:${request.requestId}`, `run:approval:request:${unique}-fresh`, approvalTargetKey(request));
+			await redis.zrem("run:approval:due", request.requestId, `${unique}-fresh`);
+			await redis.zrem(approvalDueKey(request.host), request.requestId, `${unique}-fresh`);
+		}
+		await redis.quit();
+	}
 });

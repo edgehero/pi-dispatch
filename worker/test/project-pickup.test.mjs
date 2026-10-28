@@ -153,7 +153,7 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	// The rule is one closure (`recordAfterGate`), not a field each call site has to remember. A bare `recordRun({`
 	// below its definition would record without the pickup project, and start.mjs would then resolve the LIVE ref.
 	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
-	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier });");
+	const at = src.indexOf("const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier, maxTurns: pickupMaxTurns });");
 	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project, the size resolved beside it (#596), the capacity set at admission and the earlier attempts read at pickup (#599)");
 	assert.ok(at > src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), "the size is resolved from the same limits snapshot and pickup project, before the recorder");
 	// One read of the projects ref per pickup (issue #504 part B reuses the same snapshot for the resolved folder).
@@ -192,4 +192,41 @@ test("the size is resolved at pickup from the project row, then the deployment's
 	await processor(gh("j-2", "acme/api"), "tok", new AbortController().signal);
 	assert.deepEqual(ran[1], { memMiB: 2048, cpuCenti: 200, source: "env" }, "no project: the deployment's settings");
 	assert.deepEqual(seen.records[1].size, { memMiB: 2048, cpuCenti: 200, source: "env" });
+});
+
+test("BY SHAPE: the pickup project is resolved right above the pause gate, so every deferral's reason can name it (issue #737)", () => {
+	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	const body = src.slice(src.indexOf("export function makeProcessor("), src.indexOf("export function createWorker("));
+	const at = (needle) => {
+		const i = body.indexOf(needle);
+		assert.notEqual(i, -1, needle);
+		return i;
+	};
+	// After the lost-lock gate and the earlier attempts' read, which stay first; before the first deferral gate.
+	assert.ok(at("await settledRecord(job.id,") < at("const nowMs = now();"));
+	assert.ok(at("earlierFrom(await previousRecord(job.id))") < at("const nowMs = now();"));
+	assert.ok(at("const nowMs = now();") < at("const pickupProjects = projects();"));
+	assert.ok(at("const project = projectOf(job.data, pickupProjects);") < at("const until = pauseUntil(job.data, nowMs);"));
+	assert.match(body, /if \(until && until > nowMs \+ 1000\) await deferTo\(job, token, until, "pause-window", \{ project \}\);/);
+	// The limits snapshot and the size stay below the pause gate, where a paused job never reads them.
+	assert.ok(at("const until = pauseUntil(job.data, nowMs);") < at("const limits = scopedLimits();"));
+	assert.ok(at("const limits = scopedLimits();") < at("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"));
+	assert.equal(body.replace(/\/\/[^\n]*/g, "").split("projects()").length - 1, 1, "still one read of the projects ref per pickup");
+});
+
+test("the effective turn budget is captured at pickup and survives a settings edit while the job runs (#747)", { skip }, async () => {
+	let maxTurns = 40;
+	const ref = { current: SHOP };
+	const { processor, seen } = harness({
+		ref,
+		getSettings: () => ({ ...SETTINGS(), maxTurns }),
+		runContainer: async () => {
+			maxTurns = 80;
+			return { code: 0, aborted: false, turns: 3 };
+		},
+	});
+	await processor(gh("turn-settings", "acme/web"), "tok", new AbortController().signal);
+	assert.equal(seen.records[0].maxTurns, 40);
+	await processor(gh("turn-job", "acme/web", { maxTurns: 12 }), "tok", new AbortController().signal);
+	assert.equal(seen.records[1].maxTurns, 12, "the job's own turn budget wins over the overlay");
 });

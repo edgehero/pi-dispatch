@@ -43,6 +43,7 @@ const KEY_LENGTH = 32;
  * reaper ignore every real key (they would all read as `not-a-key`) or judge names this module never mints.
  */
 export const SESSION_KEY_PATTERN = new RegExp(`^[0-9a-f]{${KEY_LENGTH}}$`);
+export const FORK_SESSION_KEY_PATTERN = new RegExp(`^([0-9a-f]{${KEY_LENGTH}})\\.([0-9a-f]{32})$`);
 
 /**
  * @param {object} job - The job data (`kind`, `repo`, `target`, `trigger`).
@@ -53,6 +54,20 @@ export const SESSION_KEY_PATTERN = new RegExp(`^[0-9a-f]{${KEY_LENGTH}}$`);
 export function sessionKeyFor(job, resolved = {}) {
 	const parts = keyParts(job, resolved);
 	if (parts === null) return null;
+	const forkRef = job?.target?.type === "pull_request" ? /^pi\/issue-([1-9][0-9]*)-fork-([0-9a-f]{32})$/.exec(resolved.headRef ?? "") : null;
+	if (forkRef) {
+		const root = hashParts([parts[0], parts[1], issueBranch(forkRef[1])]);
+		return `${root}.${forkRef[2]}`;
+	}
+	const key = hashParts(parts);
+	if (job?.fork !== undefined) {
+		if (!job.fork || job.fork.rootKey !== key || typeof job.fork.id !== "string" || !/^[0-9a-f]{32}$/.test(job.fork.id)) return null;
+		return `${key}.${job.fork.id}`;
+	}
+	return key;
+}
+
+function hashParts(parts) {
 	// NUL-delimited so ("a", "bc") and ("ab", "c") cannot collide -- the same reasoning job-id.mjs uses.
 	return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, KEY_LENGTH);
 }
@@ -128,6 +143,10 @@ export function keyParts(job, resolved = {}) {
  * @returns {string|null} The 32-hex key, or null.
  */
 export function sessionKeyOfRecord(record) {
+	if (record?.fork !== undefined) {
+		const root = sessionKeyOfRecord({ ...record, fork: undefined });
+		return root && typeof record.fork?.id === "string" && /^[0-9a-f]{32}$/.test(record.fork.id) ? `${root}.${record.fork.id}` : null;
+	}
 	const kind = record?.kind;
 	if (kind === "local") {
 		// The scheduler id is the middle of a cron (`repeat:`) or manual-fire (`manual:`) job id; the trailing number is

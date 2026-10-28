@@ -12,7 +12,8 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  * into its agent dir. `trackPiRefreshes` makes the temp-dir cleanup wait for every such refresh first.
  *
  * Proved in a child `node --test` run, since the cleanup is the child file's own `after()` hook: a fake runtime
- * whose refresh writes into its `tempDir()` 300 ms after the test returned. Tracked, the directory is gone when the
+ * whose refresh waits for a gate released after the test returns, then writes on the next immediate. The root
+ * cleanup waits for that gate too, so an untracked write lands after removal without a timing race. Tracked, the directory is gone when the
  * child exits; untracked (`PI_DISPATCH_TRACK=0`, the regression), the late write recreates it.
  */
 const helpers = join(import.meta.dirname, "helpers");
@@ -26,17 +27,20 @@ function runChild(track) {
 		`import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { tempDir } from ${JSON.stringify(pathToFileURL(join(helpers, "temp-dir.mjs")).href)};
+import { tempDir, settleBeforeCleanup } from ${JSON.stringify(pathToFileURL(join(helpers, "temp-dir.mjs")).href)};
 import { trackPiRefreshes } from ${JSON.stringify(pathToFileURL(join(helpers, "track-pi-refreshes.mjs")).href)};
+
+let release;
+const gate = settleBeforeCleanup(new Promise((resolve) => { release = resolve; }));
 
 class FakeRuntime {
 	constructor(dir) { this.dir = dir; }
 	refresh() {
-		return new Promise((resolve) => setTimeout(() => {
+		return gate.then(() => new Promise((resolve) => setImmediate(() => {
 			mkdirSync(this.dir, { recursive: true });
 			writeFileSync(join(this.dir, "auth.json"), "{}");
 			resolve();
-		}, 300));
+		})));
 	}
 	registerProvider() { void this.refresh(); }
 }
@@ -46,6 +50,7 @@ test("a runtime whose refresh lands after the test returns", () => {
 	const dir = tempDir("pi-dispatch-settle-agent-");
 	writeFileSync(${JSON.stringify(reportPath)}, dir);
 	new FakeRuntime(dir).registerProvider();
+	setImmediate(release);
 });
 `,
 	);

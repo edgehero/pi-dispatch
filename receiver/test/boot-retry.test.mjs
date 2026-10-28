@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { entryExitCode } from "../src/cli.mjs";
 import { retryIdentity } from "../src/boot-retry.mjs";
 
-// Everything time-shaped is injected (CLAUDE.md: a window takes an injected clock, always): `now` is a
+// Everything time-shaped is injected (AGENTS.md: a window takes an injected clock, always): `now` is a
 // hand-advanced counter, `sleep` records and advances it, and the FUSE's setTimeout/clearTimeout pair is
 // a handle bag so the tests can prove the clearing instead of trusting it. No test here waits real time
 // except the two that exist to census real timers.

@@ -28,18 +28,23 @@ export function makeConfirmTickets({ now = () => Date.now(), random = randomByte
 
   return {
     /**
-     * Store a previewed change and return `{ticket}`, the only thing the browser gets. `reserve` is a paid action's
-     * estimate (what the worker will hold) and `targets` a bulk action's job list with each job's previewed state
-     * (issue #642); both ride the ticket so the confirm acts on exactly what the preview showed. `count` is how many
-     * jobs a resume lets start, which the preview showed and the audit row records.
+     * Store a previewed change and return `{ ticket, expiresAt }`: the ticket is the only thing of the change the
+     * browser gets, and `expiresAt` (this store's clock, epoch milliseconds) is when the confirm stops taking it, which
+     * the preview bar counts down to. `reserve` is a paid action's estimate (what the worker will hold) and `targets` a
+     * bulk action's job list with each job's previewed state (issue #642); both ride the ticket so the confirm acts on
+     * exactly what the preview showed. `count` is how many jobs a resume lets start, which the preview showed and the
+     * audit row records. `meta` (issue #737) is what the banner after the write says, decided at the preview, where the
+     * file as it was is known: `{ title, undo, inverse, danger }`. It rides the ticket for the same reason the payload
+     * does: the browser never sends it back, so it cannot claim an Undo the preview did not offer.
      */
-    issue({ sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve = null, targets = null, count = null }) {
+    issue({ sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve = null, targets = null, count = null, meta = null }) {
       const t = now();
       sweep(t);
       while (tickets.size >= max) tickets.delete(tickets.keys().next().value);
       const ticket = random(32).toString("base64url");
-      tickets.set(ticket, { sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve, targets, count, issuedAt: t, expiresAt: t + ttlMs });
-      return { ticket };
+      const expiresAt = t + ttlMs;
+      tickets.set(ticket, { sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve, targets, count, meta, issuedAt: t, expiresAt });
+      return { ticket, expiresAt };
     },
 
     /**

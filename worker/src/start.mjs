@@ -1,3 +1,12 @@
+import { parseTriggers } from "./triggers.mjs";
+import { makeApprovalSessionCheck } from "./approval-session.mjs";
+import { makeApprovalStore } from "./approval-state.mjs";
+import { makeApprovalRuntime, approvalExpiryJobId } from "./approval-runtime.mjs";
+import { makeCheckApprovalPolicy } from "./approval-policy.mjs";
+import { APPROVAL_LABEL } from "./parked.mjs";
+import { createForkStore } from "./fork-store.mjs";
+import { makeCheckForkPolicy } from "./fork-policy.mjs";
+import { thinkingLevelAllowed } from "./thinking-level.mjs";
 import { readdirSync, readFileSync, statSync, watch } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { homedir, networkInterfaces, release as osRelease, userInfo } from "node:os";
@@ -1495,10 +1504,11 @@ export async function startWorker(
 	// is how long a paid job can sit frozen (its provider stream stalled, its tool timers running on the clock). A tree too
 	// big to walk in 20 s is skipped (`timeout`) and the run goes on, with its exit checkpoint as the fallback; 60 s of
 	// freeze per checkpoint would be long enough for a provider to drop the stream the agent is waiting on.
+	const forkStore = config.sessionsDir ? createForkStore({ dir: join(config.sessionsDir, ".fork-sources"), now, hostName: durableHost, hostQueue }) : null;
 	const workspaceCheckpointer = config.checkpointsDir ? makeWorkspaceCheckpointerFn({ storeDir: config.checkpointsDir, now, log, hostName: durableHost, limits: { snapshotTimeoutMs: 20_000 } }) : null;
 	const runCheckpointer =
 		workspaceCheckpointer && typeof runCheckpointModule?.makeRunCheckpointer === "function"
-			? runCheckpointModule.makeRunCheckpointer({ checkpointer: workspaceCheckpointer, redis, hostName: durableHost, hostQueue, now, log })
+			? runCheckpointModule.makeRunCheckpointer({ forkStore, checkpointer: workspaceCheckpointer, redis, hostName: durableHost, hostQueue, now, log })
 			: null;
 	// The per-run dollar ledger (run-budget-ledger.mjs): on every host, since a recovery settles the crashed attempt's hold
 	// wherever it runs, and an unarmed job never calls it.
@@ -1706,7 +1716,7 @@ export async function startWorker(
 			// The comment decides nothing: a failure here costs a stale comment, never the record path.
 		}
 	};
-	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null }) => {
+	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null, maxTurns = null }) => {
 		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
 		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
 		// path that ends BEFORE the pickup gate (the wait gate's refusals) passes none, and resolves from the live ref
@@ -1716,7 +1726,7 @@ export async function startWorker(
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
 		// The default venue rides the same way and for the same reason (#277): it is the value the registry
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier });
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier, maxTurns });
 		writeRecord(record);
 		// Issue #644: the status comment's last edit, from the record's classification. An infrastructure failure the queue
 		// will retry says the attempt ended and is being retried, not "finished": BullMQ retries an error that is not
@@ -2455,7 +2465,7 @@ export async function startWorker(
 	// rule: it NEVER throws, because the marker decides nothing (the session store's sidecar does) and a forge that refuses
 	// the label must not flip an outcome. A local job has no forge and no marker. Issues only: a pull request's reply is
 	// routed on the phrase (parked.mjs).
-	const parkedLabel = async (job, on) => {
+	const parkedLabel = async (job, on, approval = false) => {
 		const forge = forgeFor(job);
 		if (!forge?.host?.setParkedLabel || job?.target?.type !== "issue") return;
 		try {
@@ -2463,9 +2473,53 @@ export async function startWorker(
 			if (!auth) return;
 			const token = await auth.mintToken(job);
 			await forge.host.setParkedLabel(job, job.target, on, token);
+			if (approval || !on) await forge.host.setParkedLabel(job, job.target, on && approval, token, APPROVAL_LABEL);
 		} catch (err) {
 			log("parked_label_failed", { jobId: job?.id, on, reason: err?.message });
 		}
+	};
+
+	const approvalSessionCheck = makeApprovalSessionCheck({ sessionsDir: config.sessionsDir, maxBytes: config.sessionMaxBytes, ttlDays: config.sessionsTtlDays, maxAgeDays: config.sessionMaxAgeDays, maxResumeChain: config.sessionMaxResumeChain, maxContextPct: config.sessionMaxContextPct, now });
+	const approvalStore = makeApprovalStore({ redis, now });
+	const approvalRuntime = makeApprovalRuntime({
+		store: approvalStore,
+		checkPolicy: makeCheckApprovalPolicy({ triggersPath: onceTriggersFile, parseTriggers }),
+		now,
+		host: durableHost,
+		hostQueue,
+		requireSessionDigest: true,
+		enqueueExpiry: async (request) => {
+			const queue = hostQueue ? cronQueue : runtimeQueue;
+			const jobId = approvalExpiryJobId(request.requestId);
+			await queue.add(request.kind, {
+				...request.resumeJob,
+				approvalRequestId: request.requestId,
+				trigger: { ...request.resumeJob.trigger, deliveryId: `expiry-${request.requestId}`, comment: { body: "/decline" } },
+			}, { jobId, attempts: 2, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 31 * 86400 }, removeOnFail: { age: 31 * 86400 } });
+			return { ok: true };
+		},
+		comment: async (request, text) => {
+			if (await redis.set(`run:approval:expiry-comment:${request.requestId}`, "1", "PX", 32 * 86400_000, "NX") === "OK") await comment(request.resumeJob, text);
+		},
+	});
+
+	let approvalSweep = null;
+	const startApprovalSweep = () => {
+		if (approvalSweep) return;
+		approvalSweep = makeRetentionSweepFn({
+			reapers: [{ name: "approval", reap: async () => {
+				const result = await approvalRuntime.sweep();
+				if (!result.ok) log("approval_expiry_unavailable", { failures: result.failures?.length ?? 1 });
+			} }], intervalMs: 60_000, log,
+		});
+		approvalSweep.start();
+		extraClosers.push(approvalSweep);
+	};
+	const publishApproval = approvalRuntime.afterPark;
+	approvalRuntime.afterPark = async (options) => {
+		const result = await publishApproval(options);
+		if (result.ok) startApprovalSweep();
+		return result;
 	};
 
 	// The operator's failure hook (issue #288, INT-ON-FAILURE-HOOK-CONTRACT). Constructed ONLY when the
@@ -2750,6 +2804,8 @@ export async function startWorker(
 			// Issue #645: a recovery stages its checkpoint's transcript as the job's session (`reason: "recovered"`).
 			...(typeof sessionStore.stageRecovered === "function" ? { stageRecovered: sessionStore.stageRecovered } : {}),
 			isParked: sessionStore.isParked,
+			approvalRuntime,
+			approvalSessionCheck,
 			parkedLabel,
 			// The same value the store above was built from, passed explicitly so the processor's fail-closed
 			// `run.resume` gate answers from THIS config rather than from its own env default. Identical on the
@@ -2907,6 +2963,9 @@ export async function startWorker(
 			// Issue #645 (durable runs), built above. Null where this host has no store (`recover-store-unset` refuses an
 			// armed job before it spends); the ledger, the pointer read and the enqueue exist on every host.
 			workspaceCheckpointer,
+			forkStore,
+			checkForkPolicy: makeCheckForkPolicy({ triggersPath: onceTriggersFile }),
+			checkThinking: (job) => thinkingLevelAllowed(job, { models: readOverlayModels(config.globalPiDir), builtinModel }),
 			runCheckpointer,
 			runBudgetLedger,
 			readCheckpointPointer,
@@ -2956,6 +3015,8 @@ export async function startWorker(
 		});
 		// The failed listener's body, for a failure the queue decided. Split out only so the lost-lock check below can
 		// run it after an await; a failure of any other reason runs it synchronously, exactly as before.
+		const approvalFinalizers = new Set();
+		let approvalFinalizerCloser = false;
 		const onFailed = (job, err) => {
 			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) });
 			// The one reason whose sentence is the fix itself (issue #458): logged WHOLE, beside the cut line above.
@@ -2968,6 +3029,19 @@ export async function startWorker(
 			// never sees: the stall-kill (maxStalledCount 0 fails a crashed worker's job at next pickup)
 			// and the wait-gate rethrow that escapes above the processor's catch.
 			if (job?.finishedOn) {
+				// An exhausted retry has no future container to consume its claim. Close only this queue job's
+				// authority, never another job's, and let a new authorized run request a fresh approval.
+				if (job.data?.approvalRequestId) {
+					const finishing = settleWithin(Promise.resolve().then(() => approvalRuntime.finish({ requestId: job.data.approvalRequestId, jobId: String(job.id) })), 2500, { error: "approval-finish-timeout" })
+						.then((result) => { if (!result?.ok) log("approval_terminal_finish_failed", { jobId: String(job.id), reason: "approval-finish-unavailable" }); })
+						.catch(() => log("approval_terminal_finish_failed", { jobId: String(job.id), reason: "approval-finish-unavailable" }))
+						.finally(() => approvalFinalizers.delete(finishing));
+					approvalFinalizers.add(finishing);
+					if (!approvalFinalizerCloser) {
+						approvalFinalizerCloser = true;
+						extraClosers.push({ close: () => Promise.allSettled([...approvalFinalizers]) });
+					}
+				}
 				// Issue #646, review finding F2: a TERMINAL failure the processor never saw (a stall-kill of a crashed worker's
 				// job with no recovery enqueued, a rethrow above the processor's catch) is the run's final outcome too, so its
 				// inbox is closed here and what waits becomes `late` instead of sitting `queued` until the key expires. A
@@ -3158,6 +3232,15 @@ export async function startWorker(
 			extraClosers.push(watchModelEndpointsFile(config, modelEndpoints, log, atBoot.modelEndpoints));
 		}
 
+		// Arm expiry only for declarations this host serves, including after a live edit first publishes a request.
+		let declaresApprovals = false;
+		try { declaresApprovals = parseTriggers(readFileSync(onceTriggersFile, "utf8"), onceTriggersFile).some((entry) => entry.run?.gates); } catch {}
+		const retainedApprovals = await settleWithin(approvalStore.hasPending(durableHost), 2500, { error: "store-unavailable" });
+		if (!retainedApprovals.ok) log("approval_expiry_scan_unavailable", { reason: "store-unavailable" });
+		// A revoked declaration still has unanswered requests to retire. On an unreadable index, arm the retrying
+		// sweep and name the uncertainty; do not silently abandon a durable deadline.
+		if (declaresApprovals || retainedApprovals.pending || !retainedApprovals.ok) startApprovalSweep();
+
 		// issue #292 / OQ-007: re-run the three retention sweeps on a timer, because the supported deployment
 		// is a service that restarts only on failure, so the healthy worker was the one that never re-swept.
 		// Armed HERE, at the end of boot beside the watches: all three closures exist, boot's own sweeps have
@@ -3178,11 +3261,12 @@ export async function startWorker(
 		// active list could change no verdict. A run waiting for its recovery is bounded the same way: the host-lost sweep
 		// gives up on it at RECOVERY_MAX_WAIT_MS, which IS that TTL. (The processor's running list holds job ids, not run
 		// ids, so passing it would also name a `.rN` job's store wrongly.)
+		const reapForkSources = forkStore ? () => forkStore.sweep() : null;
 		const reapCheckpoints = workspaceCheckpointer ? async () => void (await workspaceCheckpointer.sweep()) : null;
 		const reapHostLost = async () => void (await sweepHostLost());
 		// NOT awaited: the host-lost sweep's first command waits for Valkey however long it is away, and the boot must not.
 		// Each settles into its own log line; neither can reject unhandled.
-		for (const [name, reap] of [["recovery_host_lost", reapHostLost], ...(reapCheckpoints ? [["checkpoint", reapCheckpoints]] : [])]) {
+		for (const [name, reap] of [["recovery_host_lost", reapHostLost], ...(reapForkSources ? [["fork_source", reapForkSources]] : []), ...(reapCheckpoints ? [["checkpoint", reapCheckpoints]] : [])]) {
 			void Promise.resolve()
 				.then(reap)
 				.catch((err) => log(`${name}_reaper_skipped`, { reason: scrubCredentials(err?.message) }));
@@ -3196,6 +3280,7 @@ export async function startWorker(
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "sandbox", reap: reapSandboxes },
 					{ name: "session", reap: () => sessionStore.reapSessions() },
+					...(reapForkSources ? [{ name: "fork_source", reap: reapForkSources }] : []),
 					{ name: "recovery_host_lost", reap: reapHostLost },
 					...(reapCheckpoints ? [{ name: "checkpoint", reap: reapCheckpoints }] : []),
 				],

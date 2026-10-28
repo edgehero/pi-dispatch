@@ -87,9 +87,10 @@ function world({ snapshot, pause, unpause, manifestSeq = null, pointerReply = "O
 	return { order, store, clock, checkpointer, redis, verbs };
 }
 
-function makeHandle(w, { limits = {}, args = {}, semaphore, logs = [] } = {}) {
+function makeHandle(w, { limits = {}, args = {}, semaphore, logs = [], forkStore = null } = {}) {
 	const rc = makeRunCheckpointer({
 		checkpointer: w.checkpointer,
+		forkStore,
 		redis: w.redis,
 		hostName: "host-a",
 		hostQueue: "pi-jobs@host-a",
@@ -671,4 +672,27 @@ test("the pointer's host is the manifest's when it names one, the checkpointer's
 	h2.consume(assistant([]), 0, 1);
 	await h2.pending();
 	assert.equal(JSON.parse(w2.store.get("run:checkpoint:run-1")).host, "host-a");
+});
+
+test("fork archive captures the exact frozen prefix before thaw, and a failed archive does not lose recovery", async () => {
+	for (const fails of [false, true]) {
+		const tr = transcript();
+		tr.append(header());
+		const w = world();
+		const forkStore = { capturePoint: async (args) => {
+			w.order.push(["fork", args.quiesced, args.offset]);
+			assert.equal(args.transcriptPath, tr.file);
+			if (fails) throw new Error("archive unavailable");
+			return { ok: true };
+		} };
+		const h = makeHandle(w, { args: { sessionFile: tr.file }, forkStore });
+		w.clock.advance(60_000);
+		const entry = assistant();
+		const end = tr.append(entry);
+		h.consume(entry, AT, end);
+		assert.deepEqual(await h.pending(), { seq: 1 });
+		assert.deepEqual(w.order.map((e) => e[0]), ["pause", "snapshot", "fork", "unpause", "pointer"]);
+		assert.deepEqual(w.order.find((e) => e[0] === "fork"), ["fork", "frozen", end]);
+		await h.close();
+	}
 });

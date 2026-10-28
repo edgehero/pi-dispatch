@@ -33,9 +33,17 @@
  * `jobs` (issue #599, phase 2) is the one field that carries a list: JSON of the jobs this host runs now, ids and
  * integers only, built and read back by `live-jobs.mjs`, whose header argues each field against this rule. The reader
  * below parses it through that module's allowlist, so a row's `jobs` is an array (or null), never the raw string.
+ *
+ * VALKEY'S CLOCK IS USED ONLY AS A DURATION (issue #737). The reader asks each row's `PTTL` beside its `HGETALL`, and
+ * `ttlMs - PTTL` is how long ago the row's last PEXPIRE landed, counted by the server that holds it. That is a length
+ * of time, never an instant: no field here is ever compared with Valkey's own time of day. Set beside `beatAt` (an
+ * instant on the HOST's clock) and the reader's own `now()`, it gives a third party's estimate of how far the two
+ * machines' clocks disagree (`skewMs`), and it says when a row has no expiry at all (`noExpiry`), which is a row the TTL
+ * will never remove.
  */
 
 import { parseJobsMore, parseLiveJobs } from "./live-jobs.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
 
 /** The index. A SET cannot expire its members, so the leak is handled by the reader, as `wait:held` does. */
 export const HOST_SET = "host:live";
@@ -53,6 +61,14 @@ export const HOST_BEAT_MS = 15_000;
  * within one panel refresh cycle of an operator noticing anything at all.
  */
 export const HOST_TTL_MS = 90_000;
+
+/**
+ * The smallest `skewMs` a reader may call a clock skew (issue #737). TWO BEATS, and the margin is not decoration:
+ * `skewMs` is measured from the row's last PEXPIRE, and a read landing between a beat's HSET (the new `beatAt`) and its
+ * PEXPIRE sees the previous beat's expiry, so the estimate can be off by one beat period, and by a round trip besides.
+ * Below this, a difference is noise a reader must not report.
+ */
+export const HOST_SKEW_CLAIM_MS = 30_000;
 
 /**
  * Build the registry accessor. `redis` is the client the budget and the wait state already share.
@@ -275,8 +291,22 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
  * `{ unreachable }` and `[]` are DIFFERENT ANSWERS and must never be collapsed by a caller, even where
  * one treats them alike: "there are no other hosts" and "I could not find out" differ, and a panel that
  * renders the second as the first tells an operator their fleet is gone when Valkey merely blinked.
+ *
+ * Each row also carries three fields read off the key's `PTTL` (issue #737), all null where the client has no `pttl`,
+ * where the PTTL failed or timed out, or where the key went between the two reads (-2):
+ *   - `ttlAgeMs`: how long ago the row's last PEXPIRE landed, `ttlMs - PTTL` (never below 0), on Valkey's clock as a
+ *     duration. `ttlMs` is the TTL the writer sets, `HOST_TTL_MS` for every worker.
+ *   - `skewMs`: `(now() - beatAt) - ttlAgeMs`, the reader's clock minus the host's, as a third party measures it.
+ *     Positive: the host's clock is behind. A round trip and up to one beat period of noise; a reader claims a skew only
+ *     past `HOST_SKEW_CLAIM_MS`. Null without a readable `beatAt`.
+ *   - `noExpiry`: true when the key has no expiry at all (-1), which the TTL will never remove; false when it has one.
+ *     A reader walks `host:live`, and a beat SADDs only after its PEXPIRE, so a reader meets it only under a name an
+ *     EARLIER beat indexed: for a moment when a beat re-creates a row that expired while its name stayed, and for good
+ *     when the process died between that HSET and its PEXPIRE.
+ * The PTTL goes out beside the HGETALL, in the same tick and each under its own bound, so it costs no round trip; a
+ * failed PTTL costs these three fields and never the row.
  */
-export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS, prune = true } = {}) {
+export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS, prune = true, ttlMs = HOST_TTL_MS } = {}) {
 	let names;
 	try {
 		names = await bounded(redis.smembers(HOST_SET), timeoutMs);
@@ -287,9 +317,23 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 		return { unreachable: err?.message ?? "registry unreadable" };
 	}
 	const hosts = [];
+	const withTtl = typeof redis?.pttl === "function";
 	for (const member of names ?? []) {
+		// A name outside the worker name charset (`WORKER_NAME_RE`: a letter or a digit, then letters, digits, `.`, `_` and
+		// `-`, at most 64 in all) is no host's: anything with the Valkey's URL can SADD one, and a reader that took it would
+		// print it wherever rows are drawn (a 3,000-character member widened the console's page to 43,000 px). The charset
+		// alone, looser than the boot rule, which also refuses a `.json` or `.log` tail on `PI_WORKER_NAME` (`config.mjs`).
+		// Skipped before its row is even read, and never pruned: removing what someone else wrote is not a reader's call,
+		// and the member costs only its place in the set.
+		if (typeof member !== "string" || !WORKER_NAME_RE.test(member)) continue;
 		try {
-			const row = await bounded(redis.hgetall(hostKey(member)), timeoutMs);
+			const key = hostKey(member);
+			// Both issued before either is awaited. The PTTL's own failure (a throw, a rejection, a hang past its bound)
+			// is null here, so only the HGETALL decides whether the row is read at all.
+			const [row, pttl] = await Promise.all([
+				bounded(redis.hgetall(key), timeoutMs),
+				withTtl ? bounded((async () => redis.pttl(key))(), timeoutMs).catch(() => null) : null,
+			]);
 			if (!row || Object.keys(row).length === 0) {
 				// `prune: false` for a reader that promises to write nothing (the capacity report, issue #599): the stale member
 				// is skipped the same, and left for the next pruning reader.
@@ -297,9 +341,13 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 				continue;
 			}
 			const beatAt = typeof row.beatAt === "string" && row.beatAt.trim() !== "" ? Number(row.beatAt) : NaN;
+			const nowMs = now();
 			// The running jobs through the allowlist (issue #599, phase 2): an array, or null where the row publishes none (a
 			// worker from before the field) or none that parses. A listed entry that does not read is a running job not
 			// counted, so it joins `jobsMore` rather than vanishing.
+			// The row's own `name` stands for the member only when it holds to the same rule, else the row is no host's.
+			const name = row.name || member;
+			if (typeof name !== "string" || !WORKER_NAME_RE.test(name)) continue;
 			const live = parseLiveJobs(row.jobs);
 			const more = parseJobsMore(row.jobsMore);
 			hosts.push({
@@ -309,11 +357,12 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 				// A row that HAS a `jobs` value that is not a list: how many it runs is unknown, which a reader must say
 				// rather than read as a worker from before the field.
 				jobsUnreadable: live.jobs === null && typeof row.jobs === "string" && row.jobs !== "",
-				name: row.name || member,
+				name,
 				// Derived rather than stored, so the panel can say "stale 2m" about a row that still lives.
 				// A row whose clock is AHEAD of ours reads as 0 rather than negative: the difference is the
-				// skew between two machines, which is its own signal and not this field's to report.
-				staleMs: Number.isFinite(beatAt) ? Math.max(0, now() - beatAt) : null,
+				// skew between two machines, which is its own signal and not this field's to report (`skewMs` is).
+				staleMs: Number.isFinite(beatAt) ? Math.max(0, nowMs - beatAt) : null,
+				...expiryFields(pttl, { ttlMs, beatAt, nowMs }),
 			});
 		} catch {
 			// One unreadable row degrades that row, never the listing.
@@ -321,4 +370,14 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 	}
 	hosts.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 	return { hosts };
+}
+
+/** `readLiveHosts`'s three PTTL fields (see there). `pttl` is the reply, or null where none was read. */
+function expiryFields(pttl, { ttlMs, beatAt, nowMs }) {
+	if (pttl === -1) return { ttlAgeMs: null, skewMs: null, noExpiry: true };
+	// -2 (the key went between the two reads), a failed read, or a reply that is not a whole number: nothing is known.
+	if (!Number.isSafeInteger(pttl) || pttl < 0) return { ttlAgeMs: null, skewMs: null, noExpiry: null };
+	const ttl = Number.isSafeInteger(ttlMs) && ttlMs > 0 ? ttlMs : HOST_TTL_MS;
+	const ttlAgeMs = Math.max(0, ttl - pttl);
+	return { ttlAgeMs, skewMs: Number.isFinite(beatAt) ? nowMs - beatAt - ttlAgeMs : null, noExpiry: false };
 }

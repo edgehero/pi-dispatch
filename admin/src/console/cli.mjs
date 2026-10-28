@@ -5,7 +5,8 @@
  *   token add --name N --role operator|viewer
  *   token list | token revoke --name N | token rotate --name N
  *   sessions end-all                        sign every browser out (bumps the tokens file's generation)
- *   link --name N                           a one-time sign-in link for token N, valid 60 seconds
+ *   link --name N [--port P]                a one-time sign-in link for token N, valid 60 seconds (P: an ssh -L
+ *                                           tunnel's local port, which the console cannot know)
  *   audit verify                            walk the audit log's hash chain
  *
  * Every subcommand takes `--deployment <dir>`. Exit codes: 0 done, 2 refused (a configuration or input problem, with a
@@ -22,7 +23,7 @@
 import * as nodeFs from "node:fs";
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
@@ -38,7 +39,7 @@ export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
   token revoke --name <name>               remove a token; its sessions end at their next request
   token rotate --name <name>               a new secret for a name; prints it once
   sessions end-all                         sign every browser out
-  link --name <name>                       a one-time sign-in link, valid 60 seconds
+  link --name <name> [--port <n>]          a one-time sign-in link, valid 60 seconds
   audit verify                             check the audit log's hash chain
 
 The deployment is --deployment, else the one the setup wizard recorded, else the current directory.`;
@@ -80,6 +81,12 @@ export async function loadModules() {
 export const INSIGHTS_CACHE_MS = 30_000;
 
 /**
+ * How long one audit-chain verification is reused (issue #737). `verifyConsoleAudit` re-hashes every row of every
+ * month the log keeps, which is far too much for each load of the audit page; the page says when it was checked.
+ */
+export const AUDIT_VERIFY_CACHE_MS = 30_000;
+
+/**
  * `fn(window, opts)` memoised per key for `ttlMs` on `now`; a rejection is not kept, so the next call tries again. The
  * key is the window and, for the spend screen, whether full paths were asked (`opts.fullPaths`): an operator's
  * full-path assembly must never be handed to a viewer's request, so the two are different entries. At most six keys
@@ -99,6 +106,24 @@ export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_C
       if (held.get(key)?.promise === promise) held.delete(key);
     });
     return promise;
+  };
+}
+
+/**
+ * `fn()` memoised for `ttlMs` on `now`: `cachedPerWindow`'s rule for a call with no key. A rejection is not kept (the
+ * next call tries again, rather than serving a failure for 30 s), and a clock that went backwards is a miss.
+ */
+export function cachedFor(fn, { now = () => Date.now(), ttlMs } = {}) {
+  let held = null;
+  return () => {
+    const t = now();
+    if (held && t >= held.at && t - held.at < ttlMs) return held.promise;
+    const entry = { at: t, promise: Promise.resolve().then(() => fn()) };
+    held = entry;
+    entry.promise.catch(() => {
+      if (held === entry) held = null;
+    });
+    return entry.promise;
   };
 }
 
@@ -174,6 +199,14 @@ export function readSideOf({ m, env, dir, fs, platform, uid }) {
   return { env: merged, paths, notice: panel.notice };
 }
 
+/**
+ * The deployment the pages name (issue #737: the first run's steps), from the folder serve was given: its last folder
+ * alone, never the path, since every page (a viewer's too) is drawn from the same data and a page carries no host path.
+ */
+export function deploymentOf(dir) {
+  return { folder: basename(dir) };
+}
+
 /** The pricing facade `assembleInsights` takes, from the worker's pricing module. */
 function pricingOf(pricing) {
   const { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVersion } = pricing;
@@ -185,7 +218,7 @@ function parse(argv) {
     return parseArgs({
       args: argv,
       allowPositionals: true,
-      options: { deployment: { type: "string" }, name: { type: "string" }, role: { type: "string" }, help: { type: "boolean", short: "h" } },
+      options: { deployment: { type: "string" }, name: { type: "string" }, role: { type: "string" }, port: { type: "string" }, help: { type: "boolean", short: "h" } },
     });
   } catch (e) {
     throw new Refusal(`${e?.message ?? "the arguments could not be read"}; run pi-dispatch-console --help`);
@@ -195,6 +228,18 @@ function parse(argv) {
 function needName(values) {
   if (typeof values.name !== "string" || values.name === "") throw new Refusal("this command needs --name <name>");
   return values.name;
+}
+
+/**
+ * `link --port`'s value as a port number, refused unless it is 1 to 5 digits from 1 to 65535. The console cannot know
+ * the local end of an operator's `ssh -L` tunnel (a unix socket has no port at all, and a tunnel may map 4790 to any
+ * free one), so the operator says it and the link is printed for `localhost` there, the one name a tunnel answers on.
+ */
+function linkPortOf(text) {
+  if (typeof text !== "string" || !/^[0-9]{1,5}$/.test(text) || Number(text) < 1 || Number(text) > 65535) {
+    throw new Refusal("--port must be a port number (1 to 65535): the local port of your ssh -L tunnel");
+  }
+  return Number(text);
 }
 
 /** Wait for SIGINT or SIGTERM: how `serve` is stopped when no test hands it a promise. */
@@ -240,6 +285,8 @@ async function run(argv, io) {
   const command = positionals.join(" ");
   const known = ["serve", "token add", "token list", "token revoke", "token rotate", "sessions end-all", "link", "audit verify"];
   if (!known.includes(command)) throw new Refusal(`unknown command "${command.slice(0, 40)}"; run pi-dispatch-console --help`);
+  // Refused before anything is read or written, so a `--port` that would be silently ignored never runs its command.
+  if (values.port !== undefined && command !== "link") throw new Refusal("--port is for link only");
 
   const m = io.modules ?? (await loadModules());
   const where = deploymentDirOf({ arg: values.deployment ?? null, env, fs, cwd });
@@ -306,25 +353,36 @@ async function run(argv, io) {
     }
     case "link": {
       const name = needName(values);
+      // Judged before the code is minted, so a mistyped port costs no code and no audit row.
+      const port = values.port === undefined ? null : linkPortOf(values.port);
       const read = m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
       if (read.refusal) throw new Refusal(read.refusal);
       if (!read.file.tokens.some((t) => t.name === name)) throw new Refusal(`there is no token named "${name}"; see pi-dispatch-console token list`);
       const minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now }));
       if (minted.refusal) throw new Refusal(minted.refusal);
       if (!record({ action: "login-code", target: name })) return 1;
-      const base = listenUrl(config.listen) ?? "http://localhost:<the local port of your ssh -L tunnel>/";
+      const base = port !== null ? `http://localhost:${port}/` : (listenUrl(config.listen) ?? "http://localhost:<the local port of your ssh -L tunnel>/");
       io.out(`${base}login/code#${minted.code}`);
       io.err("open it within 60 seconds; it works once");
       return 0;
     }
     case "audit verify": {
-      const res = m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs });
+      // `withLast` (opt-in, so the result doctor reads is untouched) names the last row the chain vouches for and, when
+      // the line at the break shows no `prev` that matches the row before it, that row, which the chain walked but
+      // cannot vouch for: an edit to it leaves its own line well formed and only the NEXT line's `prev` would show it,
+      // so whatever else is wrong with that line, nothing says whether the row was changed. Counting the rows read before
+      // the break as intact, as this sentence did, vouched for exactly the row an edited outcome sits in.
+      const res = m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true });
       if (res.ok) {
         const from = res.startsAt ? ` (starts at ${res.startsAt.file} row ${res.startsAt.seq}: older files were removed by retention)` : "";
         io.out(`the console audit log holds ${res.rows} rows and its chain is intact${from}`);
         return 0;
       }
-      throw new Refusal(`the console audit log's chain breaks at ${res.broken.file} line ${res.broken.line}: ${res.broken.reason}. Rows before it (${res.rows}) are intact; keep the file for inspection`);
+      const { broken, last, suspect } = res;
+      if (broken.file === null) throw new Refusal(`the console audit log cannot be checked: ${broken.reason}`);
+      const either = suspect ? ` Row ${suspect.seq} before it (${suspect.file} line ${suspect.line}) is not vouched for either: the link between the two does not hold, so the chain cannot tell whether row ${suspect.seq} was changed.` : "";
+      const intact = last ? `Rows through row ${last.seq} are intact` : "No row before it is vouched for";
+      throw new Refusal(`the console audit log's chain breaks at ${broken.file} line ${broken.line}: ${broken.reason}.${either} ${intact}; keep the file for inspection`);
     }
     case "serve":
       return serve({ io, m, config, audit, fs, now, uid, random });
@@ -387,6 +445,10 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // Issue #642: the same reader carries the console's kill switch (`pause`/`resume`) and the cancel request. Its pause
     // goes through `killSwitchPlan` over THIS deployment's folder (`killSwitchPlanFn`), so the two-Valkey refusal of a
     // resume holds here exactly as it does for the tools and the TUI. `readOnly` covers `snapshot()` alone.
+    //
+    // Issue #737: the waiting jobs and why each waits are NOT turned on here: the reader serves every page and
+    // `/api/state`, so the overview's load asks for them per call (`pages.mjs` `PAGE_READS`), and a page that draws no
+    // waiting job pays no read for one.
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const pricing = pricingOf(m.pricing);
@@ -396,17 +458,28 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers
       // bounded and cached per (model, flow, scan window) (`whatif.mjs`).
       ...(m.whatif ? { whatIf: m.whatif.makeWhatIfReader({ pricing, scan: () => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, nowMs: now(), fs }), now }), pricedModels: memoOnce(() => m.whatif.pricedModelIds(pricing)) } : {}),
-      audit: ({ limit, before } = {}) => m.audit.readConsoleAudit({ logsDir: config.logsDir, limit, before, fs }),
+      // The audit page (issue #737) asks for each row's position (`positions`), so a row's chain state can be told by
+      // where it sits against the verification's last good row and its first damaged one.
+      audit: ({ limit, before, positions } = {}) => m.audit.readConsoleAudit({ logsDir: config.logsDir, limit, before, fs, positions: positions === true }),
+      auditVerify: cachedFor(async () => ({ ...(await m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true })), checkedAt: now() }), { now, ttlMs: AUDIT_VERIFY_CACHE_MS }),
       // The subscriptions file, for a run's cost class (a plan-covered run is not a dollar run).
       subscriptions: () => m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs }),
       env: side.env,
+      // Issue #737: the deployment the first run's steps name, by its last folder alone (`deploymentOf`).
+      deployment: deploymentOf(config.dir),
       now,
     };
     hub = m.live.makeLiveHub({
-      loadPageData: (page, query) => m.pages.loadPageData(page, query, pageDeps),
+      loadPageData: (page, query, who) => m.pages.loadPageData(page, query, pageDeps, who),
       pagePanels: (page, ctx) => m.pages.pagePanels(page, ctx),
       queryKeyOf: (page, query) => m.pages.pageQueryString(page, query),
+      // Issue #737: one load per page whatever its query's view-only parameters (pages.mjs's `dataQueryOf`: the
+      // overview's grouping and zoom regroup one snapshot), keyed by the canonical text of what it returns. A pages
+      // module without it loads once per distinct query, as before.
+      ...(typeof m.pages.dataQueryOf === "function" ? { dataQueryOf: (page, query) => m.pages.dataQueryOf(page, query) } : {}),
       peekSession: (id, file) => sessions.peek(id, file),
+      // Issue #737: why a stream's session ended, from the store's pure verdict (never `get`, which would delete it).
+      endedReason: (id, file) => sessions.verdict(id, file).ended ?? null,
       // Issue #643: the operator's live transcript streams read through the same reader (non-blocking XRANGE).
       transcriptSince: (jobId, after, opts) => fleet.transcriptSince(jobId, after, opts),
       readTokens,
@@ -470,6 +543,9 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       io.out(`pi-dispatch console on unix socket ${config.listen.path}`);
       io.out(`from another machine: ssh -L 4790:${config.listen.path} <this host>, then open http://localhost:4790/`);
     }
+    // How to get in, never a token: the commands that make one (issue #737). A unix socket's link needs the tunnel's
+    // local port, which only the operator knows.
+    io.out(`sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you>${config.listen.kind === "tcp" ? "" : " --port <your tunnel's local port>"}`);
     if (config.readOnly) io.out("read-only: every change is refused (PI_CONSOLE_READ_ONLY=1)");
     if (io.onListening) io.onListening(server);
     await (io.until ?? untilSignal());

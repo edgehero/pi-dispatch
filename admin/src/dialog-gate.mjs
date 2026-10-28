@@ -55,7 +55,7 @@ export function gateDialogs(ctx) {
    * caller's own `labels.indexOf(picked)` is -1 against its unscrubbed array, so `editPauseWindowViaDialogs`,
    * `deletePauseWindowViaDialogs` and both scoped-limit twins return silently: the operator picks a window
    * and nothing happens, with no notify and no error. Measured on the first version of this gate, on all
-   * four, and it is the silent no-op `CLAUDE.md` calls the worst outcome available.
+   * four, and it is the silent no-op `AGENTS.md` calls the worst outcome available.
    *
    * So the wrapper maps the answer back to the caller's own array by the position of the scrubbed string it
    * handed pi.

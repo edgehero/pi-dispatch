@@ -1,0 +1,24 @@
+{
+  "card": "Actions",
+  "pr": 2,
+  "panels": [],
+  "elements": [
+    {"el":"Button kinds: primary, answer, paid, danger, ghost","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#BTN_KINDS"},
+    {"el":"One solid pill per card for the step forward","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#btn","golden":["login.anonymous"],"shows":"btn btn--primary"},
+    {"el":"The page's own act buttons in their kind: Answer violet, re-run and retry outlined yellow, pause, cancel and remove outlined red","kind":"readme","status":"new","source":"admin/src/console/kit.mjs#answerForm","holds":"kind: \"answer\"","golden":["panels/parked-answerable.operator"],"shows":"class=\"btn btn--answer\"","reason":"the Parked page's answer is the answer kind since PR 4, and the overview's retry, pause and cancel forms are the kit's kinds since PR 3 (kit.mjs actForm); the run page's, Fleet's and Configuration's forms are still legacy markup (panels/common.mjs actForm draws a plain button the compatibility layer styles) until their pages' pull requests convert them"},
+    {"el":"Answer only for parked runs","kind":"readme","status":"real","source":"admin/src/console/panels/common.mjs#parkedAnswerForm"},
+    {"el":"Adopt a model, a paid act","kind":"readme","status":"illustrative","reason":"adopting a model is #716's (ModelsScreen, a planned card)"},
+    {"el":"Decline, a destructive act","kind":"readme","status":"illustrative","reason":"declining an approval is #649's (ApprovalRequest, a planned card)"},
+    {"el":"Each act is paid or destructive, never both","kind":"provides","status":"new","source":"admin/src/console/actions.mjs#ACTIONS","holds":"\"danger\":true"},
+    {"el":"In the confirm bar the confirm button fills: confirm, confirm-paid, confirm-danger","kind":"readme","status":"new","source":"admin/src/console/confirm-view.mjs#previewBarHtml","holds":"confirm-danger","golden":["panels/confirm-preview-paid.operator","panels/confirm-preview-danger.operator"],"shows":"btn--confirm-"},
+    {"el":"Every confirm bar lists what will happen","kind":"readme","status":"new","source":"admin/src/console/confirm-view.mjs#previewBarHtml","holds":"confirm__list","golden":["panels/confirm-preview.operator"],"shows":"class=\"confirm__list\""},
+    {"el":"An Undo line","kind":"readme","status":"new","source":"admin/src/console/actions.mjs#UNDO_SENTENCES","golden":["panels/confirm-preview.operator"],"shows":"Undo: "},
+    {"el":"Undo: set maxTurns back to 30 (a setting's way back)","kind":"readme","status":"new","source":"admin/src/console/actions.mjs#ACTIONS","reason":"a setting set's inverse sets the old value again, or unsets a key that had none"},
+    {"el":"Undo: Resume the fleet","kind":"readme","status":"new","source":"admin/src/console/actions.mjs#ACTIONS","reason":"fleet-pause's inverse is fleet-resume"},
+    {"el":"Re-run's Undo, \"Cancel the new run\"","kind":"readme","status":"new","golden":["panels/confirm-done-rerun.operator"],"reason":"a re-run makes a new job, so its Undo is decided at the confirm with that job's id: the banner's Undo previews the cancel of the new job while it has not started","source":"admin/src/console/confirm-view.mjs#doneBannerHtml","shows":"data-action=\"cancel-queued\""},
+    {"el":"The preview ticket's expiry","kind":"readme","status":"new","source":"admin/src/console/confirm-view.mjs#previewBarHtml","holds":"Preview expires in","golden":["panels/confirm-preview.operator"],"shows":"data-expires"},
+    {"el":"maxTurns: 30 to 40, the two values in bold","kind":"readme","status":"new","source":"admin/src/write-plans.mjs#changeText","holds":"to ${after}","golden":["panels/confirm-preview.operator"],"shows":"maxTurns: <b>30</b> to <b>40</b>","reason":"the planner's words, in words and never an arrow, which the pi panel's confirm shows too; the bold is the bar's (actions.mjs changesHtml)"},
+    {"el":"Opens below the card that asked, never inside a table cell","kind":"readme","status":"new","source":"admin/src/console/script.mjs#CONSOLE_SCRIPT","holds":"up.classList.contains(\"legacy\")","reason":"one slot, moved after the panel that asked and out of its legacy wrapper"},
+    {"el":"Set maxTurns to 40, the Valkey redis://127.0.0.1:6399/0, acme/web#491 on mini1","kind":"sample","status":"illustrative","reason":"sample values"}
+  ]
+}

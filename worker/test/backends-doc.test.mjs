@@ -7,7 +7,7 @@ import { JOB_USER_FIX } from "../src/job-user.mjs";
 import { jobUserBootRefusal, podmanBootRefusal } from "../src/start.mjs";
 
 // `docs/backends.md` names WHEN each job-user refusal fires, which is a restatement of a derivable source, so it is
-// BOLTED to that source (CLAUDE.md: a hand-written table is derived or pinned, never trusted). Until this file there
+// BOLTED to that source (AGENTS.md: a hand-written table is derived or pinned, never trusted). Until this file there
 // was NO test reading that page at all, which is why its own refusal sentence had drifted to naming seven of the
 // code's eight causes in six clauses, omitting `runtime-unreadable` entirely.
 //

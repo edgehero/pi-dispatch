@@ -6,7 +6,7 @@
  * BUILT FROM THE COMMENT TABLES, NEVER FROM A COPY. Where the worker already posts a FIXED sentence for a reason (its
  * forge comment), that sentence IS the catalog's, read from the table the call site posts from (comment-tables.mjs, and
  * mcp-preflight.mjs for the MCP refusals' one template, filled without a server name). A copy here would drift from the
- * comment the issue actually got, and `CLAUDE.md`'s rule is that a hand-written table restating a derivable source is
+ * comment the issue actually got, and `AGENTS.md`'s rule is that a hand-written table restating a derivable source is
  * derived or pinned. The test (reason-catalog.test.mjs) holds every derived entry identical to its source, and makes any
  * table keyed by a reason the catalog's source for it unless the reason is named there as ambiguous.
  *
@@ -33,7 +33,7 @@
  */
 
 import {
-	BUNDLE_COMMENTS,
+	APPROVAL_COMMENTS,	BUNDLE_COMMENTS,
 	MODEL_NOT_ALLOWED_COMMENTS,
 	FAILED_COMMENT_BY_REASON,
 	OPENSHELL_REFUSALS,
@@ -57,6 +57,7 @@ const REBUILD = "Rebuild the job image from a release that declares the feature,
  * table read is derived; a string literal is written here for one of the three reasons in the header.
  */
 const ROWS = [
+	...Object.entries(APPROVAL_COMMENTS).map(([token, sentence]) => [token, sentence, "Check the current approval, its saved session, and the trigger declaration; reload before replying again."]),
 	// ── Stopped while running ───────────────────────────────────────────────────────────────────────────────────────
 	["worker-abort", TERMINAL_COMMENTS["worker-abort"], "Check the worker log for the 30-minute limit or a shutdown, then run the job again if its work is still wanted."],
 	["operator-cancel", "Stopped: the operator cancelled this run. If it had started, partial work may exist; if it was cancelled before it started, nothing was spent. Not retried.", "Nothing to fix. Run the job again if its work is still wanted."],
@@ -126,6 +127,9 @@ const ROWS = [
 	["egress-proxy-stopped", "Refused: this deployment runs jobs behind an egress policy, and its allowlist proxy is not running, so the job could not have reached its provider. Not run.", "Start the proxy (`pi-dispatch up` from the deployment folder, or as `docs/podman.md` says for the podman venue), or set `PI_EGRESS=0`."],
 	["container-never-started", "Failed: the container runtime never handed control to the job (it could not create or start the container, or a check before it could not run), so nothing was spent. The job was retried and did not start.", "Run `pi-dispatch doctor` on the worker and check the container runtime, then run the job again."],
 	["container-detached", "Failed: the job's container outlived the command that started it (a lost connection to the runtime), so the worker could not see how it ended. The job was retried.", "Check the worker's connection to its container runtime, and stop any job container left running."],
+	["container-infra-exit", "Failed: the job's container ended with the runner's infrastructure exit (an AI provider error or rate limit, a lost network, or a crash inside the container), so the worker counted it as an infrastructure fault and retried it while attempts were left. Partial work may exist.", "Read the `exit` line in the job log for what the runner met, then run the job again if every attempt was used."],
+	["container-exit-unknown", "Failed: the job's container ended with an exit code the runner never uses (for example a container stopped from outside the worker), so the worker could not tell what happened and retried it while attempts were left. Partial work may exist.", "Read the job log for how the container ended: a job image older or newer than the worker, or a container stopped from outside the worker, can cause this."],
+	["worker-error", "Failed: the worker met an error it has no reason for (a forge or Valkey call that failed, or a fault in the worker itself). The record keeps none of the error's own words, which can name an API path or a repository.", "Read the worker log's `job_failed` line for this job, then run the job again."],
 	["config-refused", REFUSAL_COMMENTS["config-refused"], "Run `pi-dispatch doctor` on the worker: it names the setting or file to fix."],
 	["settings-overlay-invalid", "Refused: the deployment's settings file (the overlay `/dispatch set` writes) is present but invalid, so every job is refused rather than run on settings nobody chose. Not run.", "Fix the key `pi-dispatch doctor` names, or delete the settings file to start from an empty overlay."],
 	// ── The OpenShell venues ────────────────────────────────────────────────────────────────────────────────────────

@@ -115,6 +115,16 @@ export const DOCTOR_SECTIONS = Object.freeze([
  * The ids a reader matches on, each carried by its check in doctor.mjs (`id:`), pinned by a test against the source.
  * `<file>.file` is the SERVICE's verdict on a boot file (does the file the service reads load), `<file>.file-shell`
  * this shell's; the console quotes the first beside its own "does not load" sentence.
+ *
+ * Issue #737, for the console's first-run steps and its hosts:
+ *   - `egress.proxy`: whether the egress proxy runs, on each venue that has one. Docker's line carries it, or, for a
+ *     running proxy that is not this deployment's, the line saying so, which doctor prints in its place; Podman's line
+ *     carries it too. A host on both venues publishes `egress.proxy` and `egress.proxy-2` (`assignCheckIds`), and a
+ *     reader judges the worst of the two.
+ *   - `provider.key`: whether the provider's key is found where the worker looks.
+ * No id names a forge's credentials, because no one check holds them: the `github` section alone prints about twenty
+ * lines across its three auth sources, and the other forges print theirs under `forges`. A reader judges those by the
+ * section part of their derived ids, which `DOCTOR_SECTIONS` pins.
  */
 export const NAMED_CHECK_IDS = Object.freeze([
 	"triggers.file",
@@ -131,7 +141,18 @@ export const NAMED_CHECK_IDS = Object.freeze([
 	"envelope.file-shell",
 	"settings.overlay",
 	"settings.overlay-dollars",
+	"egress.proxy",
+	"provider.key",
 ]);
+
+/**
+ * The named ids doctor.mjs writes at more than one site, with how many. Every other named id is written once, which a
+ * test holds against the source. `egress.proxy` is written twice because the proxy is a different container on each
+ * venue (docker's, and the one under this account's rootless Podman), each judged by its own line, and the question a
+ * reader asks of either is the same one. Docker's stand-in line takes the id from its check (`proxyCheck.id`) rather
+ * than writing it a third time.
+ */
+export const REPEATED_CHECK_IDS = Object.freeze({ "egress.proxy": 2 });
 
 /** An id as published: a section, a dot, a name or a number, with a `-<n>` tail when a run repeated one. */
 export const CHECK_ID_RE = /^[a-z][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,39}$/;
@@ -147,8 +168,8 @@ export function checkLevel(check) {
 
 /**
  * Each check's id: its own `id` where it names one, else `<section>.<n>`. A repeat (two checks naming one id, or a
- * check object added twice) gets `-2`, `-3` and so on, so no two published entries share an id; a test holds the
- * source's named ids free of repeats in the first place. `sectionOf(check)` is the section it was added in.
+ * check object added twice) gets `-2`, `-3` and so on, so no two published entries share an id; a test holds each of
+ * the source's named ids to one site, `REPEATED_CHECK_IDS` excepted. `sectionOf(check)` is the section it was added in.
  */
 export function assignCheckIds(checks, sectionOf = () => "env") {
 	const counters = new Map();

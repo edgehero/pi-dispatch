@@ -22,6 +22,7 @@ import {
 } from "../src/read-model.mjs";
 import { resolverRootsJudgement } from "../src/write-plans.mjs";
 import { pagePanels } from "../src/console/pages.mjs";
+import { parseDocument } from "./helpers/script-dom.mjs";
 
 // Issue #712, PR D: a run's OpenShell policy facts and secrets profile on the run views, and the secret profiles view
 // (source, roots, triggers, projects, last resolve, the hosts that advertise each) on the console, the panel and
@@ -170,16 +171,19 @@ test("recordOpenshell and recordSecretsProfile rebuild, and the model projection
 const ctxOf = (role, data) => ({ query: { id: "gh-1" }, session: { name: role, role }, data: { now: AT, env: {}, ...data }, readOnly: false });
 
 test("the console's run page: the sandbox policy, the rule hosts and the secrets profile, escaped; nothing for a run without them", async () => {
-  const page = async (extra) => (await pagePanels("run", ctxOf("viewer", { run: { record: { jobId: "gh-1", kind: "github", target: "acme/web#1", backend: "openshell", ...extra }, source: "local" } }))).map((p) => p.html).join("");
+  const page = async (extra) => (await pagePanels("run", ctxOf("operator", { run: { record: { jobId: "gh-1", kind: "github", target: "acme/web#1", backend: "openshell", ...extra }, source: "local" } }))).map((p) => p.html).join("");
   const got = await page({ openshell: OPENSHELL, secretsProfile: "prod" });
   assert.match(got, /<dt>Sandbox policy<\/dt><dd>copy mode, 1 credential provider, 3 placeholders<\/dd>/);
-  assert.match(got, /<dt>Rule hosts<\/dt><dd>2 rule hosts: api\.anthropic\.com, github\.com<\/dd>/);
+  const hostFacts = parseDocument(`<html><body>${got}</body></html>`).querySelectorAll(".fact");
+  const ruleHosts = [...hostFacts].find((f) => f.querySelector("dt")?.textContent === "Rule hosts");
+  assert.ok(ruleHosts.querySelector("dd").textContent.startsWith("2 rule hosts:"));
+  assert.deepEqual([...ruleHosts.querySelectorAll(".chip")].map((e) => e.textContent), OPENSHELL.ruleHosts, "each validated host is a chip, in record order");
   assert.match(got, /<dt>Secrets profile<\/dt><dd>prod<\/dd>/);
   const none = await page({});
   assert.ok(!none.includes("Sandbox policy") && !none.includes("Secrets profile"));
-  for (const hostile of [{ openshell: { ...OPENSHELL, mode: "<b>" } }, { secretsProfile: "<script>" }, { openshell: { ...OPENSHELL, ruleHosts: ["<img src=x>"], ruleHostCount: 0 } }]) {
+  for (const hostile of [{ openshell: { ...OPENSHELL, mode: "<b>HOSTILE-MODE</b>" } }, { secretsProfile: "<script>" }, { openshell: { ...OPENSHELL, ruleHosts: ["<img src=x>"], ruleHostCount: 0 } }]) {
     const html = await page(hostile);
-    assert.ok(!html.includes("<img") && !html.includes("<script>") && !html.includes("<b>"), JSON.stringify(hostile));
+    assert.ok(!html.includes("<img") && !html.includes("<script>") && !html.includes("HOSTILE-MODE"), JSON.stringify(hostile));
   }
 });
 
@@ -208,7 +212,8 @@ test("the console's configuration: each profile's use in a table, words and name
   const one = panels.find((p) => p.id === "p-secret-profiles")?.html ?? "";
   assert.match(one, /aria-label="Secret profiles in use"/);
   assert.match(one, /<td class="mono">prod<\/td><td>declared in the settings overlay<\/td><td class="warn">its resolver&#39;s real path on this host is OUTSIDE PI_SECRET_RESOLVER_ROOTS/);
-  assert.match(one, /<td>#0<\/td><td class="mono">shop<\/td><td class="warn">refused \(secret-unresolved\) at 2026-10-21T10:00:00\.000Z \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)<\/td><td class="mono">mini&lt;1&gt;<\/td>/);
+  // Issue #737: a trigger by the index the Triggers table shows, in the page's one wording.
+  assert.match(one, /<td>index 0<\/td><td class="mono">shop<\/td><td class="warn">refused \(secret-unresolved\) at 2026-10-21T10:00:00\.000Z \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)<\/td><td class="mono">mini&lt;1&gt;<\/td>/);
   assert.match(one, /<td class="mono">default<\/td><td class="warn">named by a trigger/);
   const html = panels.map((p) => p.html).join("");
   assert.ok(!html.includes("/opt/secret-resolvers") && !html.includes("/tmp/elsewhere"), "no resolver path, not even its real one");

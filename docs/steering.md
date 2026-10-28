@@ -238,7 +238,7 @@ want, not as new rules. Instructions that should bind every run belong in the tr
 lives in the reviewed triggers file. This is deliberate: if a message could change a run's rules, anyone who got
 hold of a way to send one could too.
 
-The message is part of the run's conversation from then on. It shows in the run's live transcript as a note, and a
+The message is part of the run's conversation from then on. It shows in the run's live transcript as a steer entry, with the sender named; an older console or terminal that does not know that kind shows it as a note, and a
 resumed or recovered run carries it like any other part of the conversation.
 
 ## Limits

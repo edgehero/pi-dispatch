@@ -933,7 +933,7 @@ test("run-job: the steer refusals run pre-spend, the inbox is seeded before and 
 	// Issue #686: on the stdin frame channel the frame source is checked instead of /inbox, and handed to the inbox.
 	const ready = src.indexOf("assertSteerReady({ steer: cfg.steer, exitKey: exitKey.key, ...(exitKey.frames === true ? { frames: frameChannel } : {}) });");
 	assert.ok(ready > 0 && ready < src.indexOf("readPrompt(PROMPT_PATH)") && ready < src.indexOf("createJobModelRuntime({"), "before the prompt is read and before any model lookup");
-	assert.match(src, /const inbox = cfg\.steer \? createInbox\(\{ exitKey: exitKey\.key, runId: process\.env\.PI_JOB_ID, log, isParked: \(\) => awaitInput\?\.state\.called === true, \.\.\.\(exitKey\.frames === true \? \{ frames: frameChannel \} : \{\}\) \}\) : null;/);
+	assert.match(src, /const inbox = cfg\.steer \? createInbox\(\{ exitKey: exitKey\.key, runId: process\.env\.PI_JOB_ID, log, isParked: \(\) => awaitInput\?\.state\.called === true \|\| requestApproval\?\.state\.called === true, \.\.\.\(exitKey\.frames === true \? \{ frames: frameChannel \} : \{\}\) \}\) : null;/);
 	const seed = src.indexOf("inbox?.seed(sessionManager);");
 	assert.ok(seed > src.indexOf("await createAgentSession({") && seed < src.indexOf("inbox?.start();"), "seeded from the transcript before it starts reading");
 	// The frame stream is read from the moment the inbox exists: before the loader and the session are built (their I/O is

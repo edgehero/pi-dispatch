@@ -195,7 +195,7 @@ One command puts a live terminal view over the whole deployment:
   It counts jobs only: a machine busy with other work reads as idle.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-21" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a stale host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects, then each host's last doctor run with its failing and warning checks" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-26" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects, then each host's last doctor run with its failing and warning checks" width="820">
 </p>
 
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
@@ -235,12 +235,19 @@ One command puts a live terminal view over the whole deployment:
 
 **A web console as well.** The same package installs `pi-dispatch-console`, a separate process that serves a live web
 console for the deployment on loopback or on a private unix socket, behind a named token per person. It shows the
-whole fleet as it changes: an overview, every run with filters and paging, the runs waiting for an answer, spend and
-insights by range, queues, hosts and schedules, the configuration and its own audit log, plus `/api/state` as JSON for
-scripts. It reads through the same code as the panel, so the two never disagree; the panel shows the waiting runs too.
+whole fleet as it changes: an overview of what needs you, what waits and why, and the last hours as a timeline (on a
+deployment that has not run yet, what stands before its first job), every run with filters, one search by
+repository, target or job id, the last 24 hours counted by outcome and paging, a card for each run waiting for an
+answer, spend and insights by range, queues, hosts and schedules, the configuration and its own audit
+log, plus `/api/state` as JSON for scripts. It reads through the same code as the panel, so the two never disagree;
+the panel shows the waiting runs too.
 It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
-and edit the configuration, each previewed, confirmed and recorded in one audit log that holds the panel's own writes
-too. Every running job's progress shows in its row and on its run page, and its transcript, redacted, streams live
+and edit the configuration, each previewed (with how to undo it), confirmed and recorded in one audit log that holds
+the panel's own writes too, and after each change the page names it, who made it and its audit row, with an Undo
+where there is a way back. When `serve` starts it prints how to sign in (the commands that make a token or a one time
+link, never a token), and `pi-dispatch-console link --name <you> --port <n>` prints the link for an SSH tunnel's local
+port. The sign-in page says why a session ended. Every running job's progress shows in its row on the fleet page
+and on its run page, and its transcript, redacted, streams live
 on its run page for operators, and the panel's live tail
 (`l`) reads the same transcript for a run on any host. Nothing listens unless you start it. In pi,
 `/dispatch console [page] [--link]` prints a page's address, says whether the console is running, makes a one time

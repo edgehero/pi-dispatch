@@ -895,6 +895,43 @@ test("RUN_DETAIL names the reason's detail after it, and points an unboundable c
   }
 });
 
+test("RUN_DETAIL shows a record's reason only when it is a token: an older worker's error text is shown nowhere, and a recovery end reads failed", async () => {
+  const opened = async (extra) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], ...extra }] }) }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const lines = comp.render(80).map(stripAnsi);
+    await comp.dispose();
+    return lines;
+  };
+  const head = (lines) => lines.map((l) => l.trim()).find((l) => /^│ [⚠✔✘] /.test(l)) ?? null;
+  const row = (value) => `│ ${value.padEnd(66)} │`;
+  const text = await opened({ outcome: "failed", reason: "infra failure, container exit 1" });
+  assert.equal(head(text), row("✘ failed"));
+  assert.ok(!text.some((l) => l.includes("infra failure")), "the error's own words are on no line");
+  const cap = await opened({ outcome: "policy", reason: "recovery-cap" });
+  assert.equal(head(cap), row("✘ failed · recovery-cap"));
+  assert.ok(cap.some((l) => l.includes("│ what ")), "and its catalog sentence");
+});
+
+test("the panel's list row leaves out a reason that is no token, an older worker's error text", async () => {
+  const run = { ...SNAPSHOT.runs[0], jobId: "gh-x1", target: "acme/web#1", outcome: "failed", reason: "GET /repos/acme/secret failed" };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [run] }), sandboxInfo: () => null }) });
+  await flush();
+  const lines = comp.render(160).map(stripAnsi);
+  await comp.dispose();
+  const listed = lines.find((l) => l.includes("gh-x1 · ")) ?? "";
+  assert.ok(listed !== "", "the row is drawn");
+  assert.ok(!listed.includes("secret") && !listed.includes("GET /repos"), listed);
+  // A token is drawn at the row's end, so the rule leaves out only what is no token.
+  const token = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...run, reason: "infra" }] }), sandboxInfo: () => null }) });
+  await flush();
+  const tokenRow = token.render(160).map(stripAnsi).find((l) => l.includes("gh-x1 · ")) ?? "";
+  await token.dispose();
+  assert.match(tokenRow, /\binfra\b/, tokenRow);
+});
+
 test("RUN_DETAIL says in words whether a run kept a budget slot, and nothing for a value the record contract has not got (#507)", async () => {
   // `budgetReserved` is a boolean or null (INT-RUN-HISTORY-FILE-CONTRACT). The line used to print the value itself:
   // "true budget slot". Pinned as the whole framed row, so the words and their place on the line are both held.
@@ -978,6 +1015,36 @@ test("Enter on a cron trigger opens a detail with next/health/stalls from the sc
   assert.match(d, /healthy/, "shows a health marker when the scheduler is not overdue");
   assert.match(d, /2030-01-01 03:00/, "formats the scheduler's real next-fire timestamp");
   assert.match(d, /stalls 1\/2/, "surfaces the stall count against the threshold");
+});
+
+test("a cron trigger's detail takes its scheduler by key alone: never by BullMQ's job name, never by a pattern another shares", async () => {
+  // The worker names every run "local", so a trigger with that id matched every scheduler by name; a pattern two
+  // triggers share drew the other's next fire and health on this one.
+  const detail = async (trigger) => {
+    const snap = {
+      queue: { pausedState: false, counts: { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }, workers: 1 },
+      budget: { day: 0, week: 0, month: 0 },
+      settings: { path: "/s", overlay: {} },
+      triggers: { triggers: [trigger] },
+      schedulers: [{ key: "nightly", name: "local", pattern: "0 3 * * *", next: Date.UTC(2030, 0, 1, 3, 0, 0), overdueMs: null }],
+      schedulerStalls: { nightly: "1" },
+      schedulerStallMax: 2,
+      runs: [],
+    };
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const d = comp.render(80).join("\n");
+    await comp.dispose();
+    return d;
+  };
+  assert.match(await detail({ type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv", flow: "tidy" }), /2030-01-01 03:00/, "its own key");
+  for (const t of [{ type: "cron", id: "local", pattern: "0 5 * * *", folder: "/srv", flow: "tidy" }, { type: "cron", id: "other", pattern: "0 3 * * *", folder: "/srv", flow: "tidy" }]) {
+    const d = await detail(t);
+    assert.match(d, /trigger · cron/);
+    assert.doesNotMatch(d, /2030-01-01 03:00|healthy|stalls 1\/2/, `${t.id}: no other scheduler's next, health or stalls`);
+  }
 });
 
 test("Enter on the ACTIVE row tails its live log inside the overlay", async () => {
@@ -2465,6 +2532,21 @@ const HELD_ROWS = [
   { jobId: "gh-4", target: "acme/api#4", label: "deploy", waitedMs: 1_000 },
 ];
 
+// Issue #737: the panel names a trigger by the number a person counts it by, the console's and the planners' `#1`.
+test("the secret bundles section names the opted-out triggers by their row numbers, #1 for the first, never the raw index", async () => {
+  const secretBundles = { bundles: [{ id: "shop", project: "web", projectKnown: true, profile: "op-shop", declared: "env", format: "json", forkReviews: false, endpoints: [], optedOut: [0, 2], last: null }] };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, secretBundles }) }) });
+  await flush();
+  const text = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(text, /opt-out #1 #3/, "triggers 0 and 2 are the first and the third");
+  assert.doesNotMatch(text, /opt-out #0/);
+  const none = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, secretBundles: { bundles: [{ ...secretBundles.bundles[0], optedOut: [] }] } }) }) });
+  await flush();
+  assert.match(stripAnsi(none.render(120).join("\n")), /opt-out none/);
+  await none.dispose();
+});
+
 test("the HELD section is absent when nothing is held -- byte-identical to before the feature", async () => {
   // Conditional, not merely empty. `buildListLines` charges a RULE plus a divider for every section it is
   // given and its row budget is `chrome + sections.length - 1`, so an unconditional section would move the
@@ -3067,8 +3149,9 @@ test("issue #596, phase 3: the snapshot carries each live host's budget and use,
   const deps = createDashboardDeps(panelPaths, v.deps);
   const snap = await deps.fetchSnapshot();
   // Issue #599 phase 3 added the HOSTS view's live fields (hosts-view.test.mjs pins them); `fpUsd` and every other field a
-  // row carries still stay out.
-  assert.deepEqual(snap.hostBudgets, [{ name: "mini1", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200", concurrency: undefined, budgetRunning: undefined, waiters: undefined, jobs: null, jobsMore: null, jobsUnreadable: false, staleMs: null, routes: "true", caps: [], backends: null, capsSeen: false }], "the budget fields, the live fields and the name, nothing else");
+  // row carries still stay out. Issue #737 added the three the registry reads off Valkey's clock, null here: this fake
+  // registry reader publishes none of them, so none is known.
+  assert.deepEqual(snap.hostBudgets, [{ name: "mini1", budgetMemMiB: "8192", budgetCpuCenti: "700", usedMemMiB: "4096", usedCpuCenti: "200", concurrency: undefined, budgetRunning: undefined, waiters: undefined, jobs: null, jobsMore: null, jobsUnreadable: false, staleMs: null, ttlAgeMs: null, skewMs: null, noExpiry: null, routes: "true", caps: [], backends: null, capsSeen: false }], "the budget fields, the live fields and the name, nothing else");
   await deps.dispose();
 });
 
@@ -3287,13 +3370,16 @@ test("f opens the FAILED view with every hydrated row and the retention split; E
   await clean.dispose();
 });
 
-test("the deps layer projects a failed Job to five host-chosen fields -- .data never enters the snapshot (key-set pin)", async () => {
+test("the deps layer projects a failed Job to five host-chosen fields and its record's reason -- .data never enters the snapshot (key-set pin)", async () => {
   const v = fakePanelValkey({ hosts: [] });
   const deps = createDashboardDeps(panelPaths, v.deps);
   const snap = await deps.fetchSnapshot();
   await deps.dispose();
   const row = snap.failed.rows[0];
-  assert.deepEqual(Object.keys(row).sort(), ["attemptsMade", "endedAt", "failedReason", "jobId", "queue"], "the projection is CLOSED -- a grown key is a review question, not a drive-by");
+  // Issue #710 grew it by `reason`, answered in review: it is NOT read off the Job but off the job's own run record (the
+  // newest in the wide window), the record's closed enum alone, null without one; the Job still gives five fields.
+  assert.deepEqual(Object.keys(row).sort(), ["attemptsMade", "endedAt", "failedReason", "jobId", "queue", "reason"], "the projection is CLOSED -- a grown key is a review question, not a drive-by");
+  assert.equal(row.reason, null, "no record of the job in the window: no reason, never a guess");
   assert.equal(row.jobId, "gh-dead-1");
   assert.equal(row.attemptsMade, 2);
   const line = JSON.stringify(snap.failed);

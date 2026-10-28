@@ -24,7 +24,7 @@ staging a workflow extension).
 
 | `on.type` | Fires on | Required in `on` | What narrows it | What the agent gets as its task |
 |---|---|---|---|---|
-| `cron` | your schedule | `id` (unique, no `:`) · `pattern` (5 or 6 cron fields) | nothing: a schedule is its own condition | `run.task`, written in the file |
+| `cron` | your schedule | `id` (unique, letters, digits, `.`, `_` and `-`, at most 176 characters) · `pattern` (5 or 6 cron fields) | nothing: a schedule is its own condition | `run.task`, written in the file |
 | `label` | a label on an **issue** (or an Azure work item), never a pull request | at least one positive selector, `any` or `all` | the label **predicate**: `any` (any of these) · `all` (all of them) · `none` (suppress-only, it can prevent a fire but never cause one) | the issue title and body |
 | `comment` | a comment containing your phrase | `phrase`, for example `@pi` | the phrase, and **one comment trigger per forge** | the comment body plus the issue title and body |
 | `pull_request` | a PR or MR event, including a submitted GitHub review, and including its close (the close word rides **alone**, never mixed with other actions; on GitHub and Forgejo a merged PR counts as closed, on GitLab only an explicit close fires it) | `action`, a non-empty array in your forge's own words | `action`, plus the same label predicate; where the forge has a label action and you name it, a positive selector becomes **required**; on a GitHub review, also `reviewState`; on a close-only rule, `number` and `once` instead of the predicate | the PR title and body, plus the review body when a review fired it |
@@ -42,7 +42,9 @@ relative path resolves against the worker's own directory) and, with `flow`, a `
 `comment` triggers need `run.repository`, because a work item belongs to a project and names no repository.
 The webhook types also charset check `run.flow` at load (skill names are lowercase). A flow that could
 never name a repo skill is refused when the file loads, at no cost, instead of failing inside a paid
-container.
+container. A cron `id` longer than 176 characters refuses the file too: each run its schedule starts is the job
+`repeat:<id>:<time>`, and the console and the panel read a job id of at most 200 characters (and a schedule's id of
+at most 176), so a longer one would run with nothing able to name it.
 
 Two matching behaviours to know before you turn on a paid trigger:
 
@@ -75,6 +77,12 @@ to pick the verdicts worth paying for:
 { "on": { "type": "pull_request", "action": ["review_submitted"], "reviewState": ["changes_requested"] },
   "run": { "kind": "github", "flow": "address-review" } }
 ```
+
+The AI tool `dispatch_trigger_add` sets `reviewState` too, behind the operator's confirm, and the write checks it like
+the file's own (GitHub only, beside `review_submitted`, a non-empty list of `approved`, `changes_requested` and
+`commented`). **Upgrading:** before this release the tool's description offered `reviewState` but the tool dropped it
+without a word, so a review trigger added that way fired on every verdict. Check the review triggers you added with
+the tool, and add the narrowing by hand, or add them again.
 
 Two behaviours to know before you turn it on. A **Comment** type review whose remarks are all line comments
 and whose summary box is empty starts nothing. Those remarks arrive on an event this service
@@ -551,7 +559,20 @@ changed after the job was queued. Re-run those jobs too. Upgrade the worker and 
 receiver after editing the file.
 
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via
-the confirm-gated AI tools. Every write is validated. Both services reload it live. The worker itself
+the confirm-gated AI tools. Every write is validated. Both services reload it live.
+
+`dispatch_trigger_add` takes only the fields its trigger type uses. A field the type does not take is refused before
+the operator is asked to confirm, by its name and with the list the type does take, for example: "dispatch_trigger_add
+does not take repository for a pull_request trigger; it takes kind, action, reviewState, labels, any, number, once,
+flow, forge, backend, model, provider, maxTurns, progress, statusComment, recover, steer. Nothing was changed". A
+field whose name is not a plain word is called "a field it was sent", and the value is never repeated. Before this
+release such a field was dropped without a word (`repository` on a pull request or issue trigger, for one), and the
+operator approved an entry without it. The console's trigger form refuses the same way, in the same words, naming
+itself where the tool's name stands ("this form does not take repository for a pull_request trigger; ..."). The fields
+that decide what a trigger's jobs may spend, reach or hold (`maxCostUsd`, `models`, `mcp`, `secretBundle`) are
+refused first, as before: no AI tool sets them.
+
+The worker itself
 writes exactly one thing back, the `on.disarmed` mark. That mark spends a one-shot. Every local job also
 receives a read-only `/job/event.json`. It contains source, folder, and HEAD sha. Cron adds its id,
 pattern and schedule instants. A scheduled flow can triage only what changed since its last run.
@@ -696,3 +717,5 @@ everything that runs in every job.
 
 Read where a workflow's own state lives before you build on it. It differs between
 a cron job and a forge job. See [`docs/workflows.md`](workflows.md).
+
+Resumable forge flows may declare typed approval gates with `run.gates`, an optional `run.gateTimeout`, and a bounded `run.gateBudgetRaiseUsd` for budget raises. See [approval gates](approval-gates.md) for configuration, decision surfaces and enforcement limits.

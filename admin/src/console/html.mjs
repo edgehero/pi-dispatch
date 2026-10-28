@@ -12,9 +12,14 @@
  * the page's `data-page` attribute; values the script needs are never embedded in a script element. The one exception
  * to "only `html` builds a fragment" is `trustedRenderer`, for the insights renderers' already-escaped output (issue
  * #641), and it checks what it admits.
+ *
+ * Since issue #737 the frames inside `<body>` (the signed-in shell, and the sign-in pages built on `page`) are drawn by
+ * `shell.mjs`. They cannot live here: the shell draws the icon sprite, and `pulse-icons.mjs` builds it with `html` as
+ * it loads, so this module importing the shell would ask for `html` before this module had defined it.
  */
 import { escapeHtml } from "../graph-html.mjs";
 import { scrubControls, scrubControlsPerLine } from "../panel.mjs";
+import { SYSTEM_SCHEME, THEMES } from "./theme.mjs";
 
 /** An already-escaped HTML fragment. Only `html` makes one. */
 class SafeHtml {
@@ -58,18 +63,31 @@ export function isSafeHtml(value) {
 }
 
 /**
+ * What a page's theme choice (`theme.mjs` `themeOf`: "light", "dark" or null) puts in its head, by choice, derived from
+ * `THEMES`: the `data-theme` attribute on `<html>`, which the stylesheet's tokens follow, and the `color-scheme` meta,
+ * so the browser's own parts (scrollbars, form controls, the canvas before the stylesheet arrives) match it. A value not
+ * in the table (null, or anything a caller got wrong) is the system's: no attribute, and both schemes offered. The
+ * attribute comes from this frozen table and never from the value asked with, so no caller can put its own bytes there.
+ */
+const THEME_HEAD = Object.freeze(Object.fromEntries(THEMES.map((t) => [t, Object.freeze({ attr: html` data-theme="${t}"`, scheme: t })])));
+const SYSTEM_HEAD = Object.freeze({ attr: null, scheme: SYSTEM_SCHEME });
+
+/**
  * The page shell: the stylesheet and the script by URL, `data-page` for the script to dispatch on. A live page (issue
  * #641) also carries `data-live` (the page name the event stream is opened for) and `data-query` (its query string,
  * encoded here like any value), so the script can reopen the stream with exactly what rendered the page. Neither is
- * ever read as markup: the script passes them to `EventSource` as a URL.
+ * ever read as markup: the script passes them to `EventSource` as a URL. `theme` (issue #737) is the person's theme
+ * choice (`THEME_HEAD`); the theme button's script changes the same two places when it is clicked.
  */
-export function page({ title, name, body, live = null, query = "" }) {
+export function page({ title, name, body, live = null, query = "", theme = null }) {
   const liveAttrs = live ? html` data-live="${live}" data-query="${query ?? ""}"` : null;
+  const head = typeof theme === "string" && Object.hasOwn(THEME_HEAD, theme) ? THEME_HEAD[theme] : SYSTEM_HEAD;
   return html`<!doctype html>
-<html lang="en">
+<html lang="en"${head.attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="${head.scheme}">
 <meta name="referrer" content="no-referrer">
 <title>${title}</title>
 <link rel="stylesheet" href="/static/console.css">
@@ -111,37 +129,6 @@ export function trustedRenderer(input) {
     if (hit) throw new Error(`an insights renderer emitted markup the console refuses (${JSON.stringify(hit[0].slice(0, 60))})`);
   }
   return new SafeHtml(str);
-}
-
-/** The sign-in form. Submitted by the script as JSON; a plain form POST would be form-encoded and is refused. */
-export function loginPage() {
-  return page({
-    title: "pi-dispatch console: sign in",
-    name: "login",
-    body: html`<main>
-<h1>pi-dispatch console</h1>
-<form id="login-form" autocomplete="off">
-<label for="token">Console token</label>
-<input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required>
-<button type="submit">Sign in</button>
-</form>
-<p id="notice" role="status"></p>
-<noscript><p>The console needs JavaScript to sign in.</p></noscript>
-</main>`,
-  });
-}
-
-/** The one-time link landing page: the script reads the code from the fragment, drops it from history and posts it. */
-export function loginCodePage() {
-  return page({
-    title: "pi-dispatch console: signing in",
-    name: "login-code",
-    body: html`<main>
-<h1>pi-dispatch console</h1>
-<p id="notice" role="status">Signing in with a one-time link...</p>
-<p><a href="/login">Sign in with a token instead</a></p>
-</main>`,
-  });
 }
 
 /** The signed-in placeholder (#641 replaces the body with screens). `name` and `role` are escaped like any value. */

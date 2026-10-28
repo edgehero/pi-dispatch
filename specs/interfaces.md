@@ -434,7 +434,7 @@ Evidence convention as in `constitution.md`.
   `scopedModels`, `noTools`, `tools`, `excludeTools`, `customTools`, `resourceLoader`, `sessionManager`,
   `settingsManager`, `sessionStartEvent`. `OQ-005`'s migration shipped: `authStorage` and `modelRegistry`
   became the one `modelRuntime`. This sentence is a
-  hand-written table restating a derivable source and carries its bolt (CLAUDE.md's rule):
+  hand-written table restating a derivable source and carries its bolt (AGENTS.md's rule):
   `image/runner/test/pinned-api.test.mjs` extracts the interface's top-level member names from the
   pinned `sdk.d.ts` and deepEquals them against this exact list. `excludeTools` became LOAD-BEARING
   with issue #291: the runner passes it (conditionally -- an unflagged job's options object stays
@@ -549,9 +549,11 @@ Evidence convention as in `constitution.md`.
   3. **`model` must stay explicit.** `createAgentSession` restores the model from the session *only when
      `options.model` is omitted*. The runner always passes it, so the pinned model wins — but omitting it
      would make a stored transcript silently choose the model, and therefore the cost.
-  4. **`thinkingLevel` is NOT passed, and therefore IS restored from the transcript.** That is a live
-     behaviour change nobody asked for: a `thinking_level_change` entry crosses jobs and changes spend.
-     Named here rather than fixed, because changing it is a behaviour decision, not a bug fix.
+  4. **For ordinary jobs, `thinkingLevel` is NOT passed, and therefore IS restored from the transcript.**
+     A `thinking_level_change` entry crosses those jobs and changes spend. This existing resume behavior remains
+     unchanged. Issue #648 adds one explicit exception: a managed fork's selected `PI_THINKING_LEVEL` is checked
+     against the model, passed to `createAgentSession` and recorded in the new lineage
+     (`INT-MANAGED-FORK-CONTRACT`); an omitted selection keeps pi's normal restoration behavior.
   Plus one documented-but-inert knob worth pinning: **`PI_CODING_AGENT_SESSION_DIR`** is documented by pi
   (`docs/usage.md`, `docs/settings.md`) as the session-storage override and is **read by nothing on
   the SDK path** (in `dist/` only the CLI's `main.js` reads it, still so at 0.99.1) — `getDefaultSessionDir(cwd,
@@ -584,6 +586,8 @@ Evidence convention as in `constitution.md`.
   (the residuals are in OQ-011 M6).
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
+
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
 **container → worker, secret resolver → worker, and wait profile → worker.**
 
@@ -1275,6 +1279,8 @@ refactor apart.
 
 ## INT-CONTAINER-JOB-INPUTS
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 **worker → container.**
 
 - **Contract**: `/job` mounted **read-only**. `/workspace` is writable; a **local** job additionally
@@ -1383,7 +1389,7 @@ refactor apart.
   store's own `file://` URL by sha with no token and no default-branch resolve (`pin`, `prepareGithubWorkspace`), with
   the checkpoint's tree written over it and the trust paths reset to the base (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`);
   `/session/current.jsonl` is the checkpoint's transcript, copied by `stageRecovered` (reason `recovered`; a resume
-  job's carries its key, so a completed recovery promotes it). No input names the checkpoint: the container sees a
+  job or explicitly requested managed fork carries its own key, so a completed recovery promotes it). No input names the checkpoint: the container sees a
   workspace and a transcript, never the store, a path into it or a run directory name. The job's prompt file is
   written as for any job and not read by a recovering runner, which sends the fixed recovery prompt instead.
 - **`/inbox` is a steer-armed attempt's inbox, and deliberately NOT a `/job` input either** (issue #646,
@@ -4092,6 +4098,8 @@ with it: no delivery-id header, two actor representations, tags as a string, and
 
 ## INT-TRIGGERS-FILE-CONTRACT
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 **operator → worker + receiver.** One unified file, read by both services; each validates the WHOLE file
 and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`, `pull_request`, `issue`).
 
@@ -4101,7 +4109,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                   receiver falls back to ./triggers.json in its working directory — the file
                   `pi-dispatch init` scaffolds — and refuses to start when neither exists)
   { "triggers": [
-    { "on": { "type": "cron", "id": "<[A-Za-z0-9._-]+, no ':' , unique>",
+    { "on": { "type": "cron", "id": "<[A-Za-z0-9._-]+, no ':' , at most 176 (CRON_ID_MAX), unique>",
               "pattern": "<5 or 6 space-separated fields>" },
       "run": { "kind": "local", "folder": "<absolute HOST path, must exist>", "flow": "<flow name>",
                "command": "<registered pi command [args] — EXACTLY ONE of flow/command, every kind>",
@@ -4213,6 +4221,16 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   rebuilt the file as `{ "triggers": [...] }`, so a console edit or a disarm deleted any other key silently; the
   coming project secret bundles live beside the array, which is why this changed first. A file whose only key is
   `triggers` is written byte-identically to before (2-space JSON and one trailing newline).
+- **A cron `on.id` is at most `CRON_ID_MAX` (176) characters** (AMENDED 2026-10-25, #737 PR 3b;
+  `worker/src/triggers.mjs`). The id is its scheduler's key, which every admin surface reads back from Valkey and
+  bounds there (`SCHEDULER_NAME_MAX` in `admin/src/read-model.mjs` IS this constant), since anything holding the
+  Valkey's URL can plant a scheduler and a surface prints the key in running text; and each run the scheduler mints is
+  the job `repeat:<id>:<slot>`, the slot the run's instant in ms (at most 16 digits), which every reader of a job id
+  takes at most 200 characters long (`DEFER_ID_RE`, the console's `RUN_ID_RE`). So the id is at most 200 less the run
+  id's frame (`200 - "repeat::".length - 16`): every run of every legal id is a job id the readers take. A longer one,
+  a schedule whose runs no surface could name, refuses the whole file at load in both services (`normalizeCron`,
+  through the shared `parseTriggers`), its message naming the entry's index and the id's length, never the id; the
+  setup wizard's first-trigger dialog refuses it too, without echoing it.
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
   every webhook type (`label`, `comment`, `pull_request`, `issue`) `⟹ run.kind ∈ {"github", "gitlab", "forgejo", "azure"}` — a forge
   job, never a local one. Off-matrix throws a `piDispatchConfig` error — a `cron` trigger has no webhook
@@ -5545,6 +5563,8 @@ validator rather than a second copy of it.
 
 ## INT-RUN-HISTORY-FILE-CONTRACT
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 **worker → admin extension.**
 
 - **Contract**:
@@ -5560,7 +5580,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -6141,6 +6161,42 @@ validator rather than a second copy of it.
   fixed sentence and next step in `INT-REASON-CATALOG` (issue #710), each held to its enum both ways by a test (this line, for
   `reason`).
 
+  **AMENDED 2026-10-26 (#737, PR 4a): one door, so "never free-form" holds.** "Passed through" was not so: `InfraRetry`
+  sets its `reason` to its whole message when the throw names no token (`this.reason = reason ?? message`,
+  `worker/src/processor.mjs`), so the runner's infrastructure exit recorded "infra failure, container exit 1", an
+  unknown exit "unknown container exit 42", and every untagged throw of a forge host its message, which names an API
+  path, a repository and a library's own words; only a throw that is not an `InfraRetry` reached the record with no
+  reason. Every record's `reason` now comes through ONE door, `recordReasonOf({ result, error })`
+  (`worker/src/record-reason.mjs`, an import-free leaf exported as `@edgehero/pi-dispatch/record-reason`, whose
+  `RECORD_REASON_RE` is the token charset, `^[a-z0-9][a-z0-9-]{0,63}$`): on the result path a reason that is a token is
+  recorded and any other is `null`; on the error path a reason that is a token is recorded and any other (none, or a
+  message) is `worker-error` (`WORKER_ERROR`), so a failure is never reasonless and never free text. The two container
+  exits throw tokens of their own, `container-infra-exit` (`CONTAINER_INFRA_EXIT`: the runner's infrastructure exit,
+  code 1) and `container-exit-unknown` (`CONTAINER_EXIT_UNKNOWN`: a code the runner never uses); every other site is
+  unchanged, and the retry class is still the exit code's (`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked: both
+  still throw `InfraRetry`, are retried while attempts are left and keep their slot and spend, since the container ran,
+  `isNeverStartedRetry` and the refund reading `container-never-started` alone; an armed run with a checkpoint still
+  records `recovery-enqueued`). No comment table is keyed by the three tokens, so a final failure with one posts the
+  generic failure comment as before (`FAILED_COMMENT_BY_REASON` has no row for them,
+  `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked). The failure hook gets the two exit tokens where it got
+  `infra` (`INT-ON-FAILURE-HOOK-CONTRACT`); a forge host's untagged throw and a throw that is not an `InfraRetry` still
+  reach the hook as `infra`, while their record says `worker-error`. Readers hold a record's reason to the same charset
+  (`admin/src/words.mjs` re-exports it, and `recordReason` applies it), and every admin reader that hands a record's
+  reason on goes through `recordReason`: the console's state document, `/api/run` (`safeRunOf`), the runs window, the
+  day's runs, a run's children, the parked answer's refusal for a run that is not parked (`planParkedAnswer`, which
+  names the outcome and the reason only as tokens) and the model-callable `dispatch_runs` (`modelRunRecord`, by id and
+  as a list), so an older record that kept a message reads as having no reason and its text reaches no script, no
+  model and no page but the run page of that record, whose Outcome banner (cut to 64 characters) and Run panel's
+  Reason row, still in the old markup, print it escaped to both roles (`REQ-CONSOLE-SECURITY` (l),
+  `REQ-OPERATOR-CONSOLE-SCREENS` (c)). The failure hook's guard is the same rule (`INT-ON-FAILURE-HOOK-CONTRACT`). The
+  portfolio snapshot's rule that a reason that is not a plain token counts under `other` (`INT-CONTAINER-JOB-INPUTS`) is
+  UNCHANGED, checked: a new record's failure now counts under its token instead. Tests:
+  `worker/test/run-history.test.mjs` ("the door: an error's reason that is no token records worker-error, so a failure
+  is never reasonless or free text", "the door: a result's reason that is no token records null; a token, and no reason,
+  are as before", "recordReasonOf is the leaf's door, and every reason the record contract names passes it unchanged"),
+  `worker/test/processor.test.mjs` ("an infrastructure exit and an unknown exit record their own tokens, never the
+  throw's message (#737)").
+
   **A container exit `2` records `runner-policy` unless the runner named a reason the worker keeps**
   (issue #437). Eleven such reasons: `provider-auth-refused`, the provider refused the credential (a 401/403,
   or a Google or Bedrock refusal shape since issue #451); and since issues #501/#502 `cost-cap` and
@@ -6241,6 +6297,17 @@ validator rather than a second copy of it.
   reach a record — it is a DI-seam backstop, unreachable in a wired worker for the same reason the
   store's own no-`sessionsDir` return is, since `sessionKeyFor` is total and binary and `resolveSession`
   therefore returns `null` rather than a keyless session.
+  **Which session reasons say the conversation was not saved (ADDED 2026-10-26, #737, PR 4a).** A session is written
+  only by `promoteSession`, on the completed branch, so a reader can tell from the record alone that a run's
+  conversation was NOT saved only for some reasons, and the leaf names both sets (`worker/src/record-reason.mjs`):
+  `SESSION_NOT_SAVED`, `disabled` (a job that keeps none, the live file's `disabled` in `mergeSession` among them),
+  `key-not-a-directory`, `locked`, `promote-failed` and `transcript-diverted`, each a promotion refusal or no session
+  at all; and `SESSION_SAVE_AMBIGUOUS`, `absent`, `not-a-regular-file` and `too-large`, which the resolve step
+  (`readCanonical`, through the store's `inspectFile`) and the promote step write alike, so they do not tell a saved
+  session from one that was not. `no-key` is in neither, for the reason above. Every promote refusal literal in
+  `promoteSession`'s body, and the live file's `disabled`, is in exactly one list, and every member is in
+  `SESSION_REASONS` (`worker/test/session-reasons.test.mjs`, "SESSION_NOT_SAVED and SESSION_SAVE_AMBIGUOUS split
+  every promote refusal and the live file's disabled, each in exactly one list"). No reader uses them in this release.
   **`model` is always an id the console accepts** (issue #673). The record writes the host-effective model as
   written (`job.data > overlay > env`), unchecked at the writer, and every source of it is held to the one model-id
   rule, `modelIdProblem` (`worker/src/model-ref.mjs`): a trigger's `run.model` at load, `PI_MODEL` at boot, the
@@ -6448,6 +6515,17 @@ validator rather than a second copy of it.
   next write replaces it with the index's oldest run; given a pruning reader that removes runs whose bodies expired,
   then `runs:horizon` holds the newest of them.
 
+- **AMENDED 2026-10-28 (#747), additive fields.** `maxTurns` is an optional positive integer effective turn budget captured
+  at pickup, after job/overlay/environment resolution, absent when unavailable (including refusal before effective
+  settings were resolved). An older record without it shows its turn count alone. Later settings changes cannot
+  change that record's budget. An OpenShell bundle may add `bundle.placeholderNames`, a sorted, deduplicated array
+  of environment variable names that were received as placeholders, each also in the received names; no shadowed
+  name or secret value is carried. A record without this additive array retains the existing names and counts.
+  Non-OpenShell records omit the array. Readers validate the array rather than infer which name was a placeholder
+  from aggregate counts. Tests: `worker/test/run-history.test.mjs`, `worker/test/backend-openshell.test.mjs`,
+  `worker/test/start-wiring.test.mjs`. `INT-RUN-PROGRESS-KEY` is UNCHANGED, checked: no `maxTurns` field is added to
+  the progress key, because older readers refuse undeclared fields.
+
 ## INT-REASON-CATALOG
 
 **worker → operator console and `/dispatch` panel (issue #710).**
@@ -6493,6 +6571,14 @@ validator rather than a second copy of it.
   rows but a row a `why` picks (`MODEL_NOT_ALLOWED_COMMENTS`' `fallback-unlisted`).
   `next` is always the catalog's own. A token twice in any of the catalog's tables is an error when the module loads,
   never a silent override.
+  **Three written rows (ADDED 2026-10-26, #737, PR 4a)**, in the venue and host group after `container-detached`:
+  `container-infra-exit`, `container-exit-unknown` and `worker-error`, the record's reasons for an infrastructure exit,
+  an unknown exit and a failure the worker has no token for (`INT-RUN-HISTORY-FILE-CONTRACT`). No comment table is keyed
+  by them, since a final failure with one posts the generic failure comment (`FAILED_COMMENT`), so each sentence is
+  written here, starts "Failed: ", and is never that comment, which says less than the record knows; `docs/reasons.md`
+  gains their three headings and one paragraph without a heading on what an older record that names no reason, or keeps
+  an error's own words, reads as. Test: `worker/test/reason-catalog.test.mjs` ("the reasons for infrastructure exits are
+  failures written here: no table is keyed by them, and none is the generic failure comment").
 - **Forge comment text is UNCHANGED.** The processor's fixed inline comment literals moved into named tables in the
   leaf (`REFUSAL_COMMENTS`, `MODEL_NOT_ALLOWED_COMMENTS`, `ENVELOPE_MISMATCH_COMMENTS`, `PODMAN_CONF_COMMENTS`,
   `VENUE_REFUSED_COMMENT`, `VENUE_BUNDLE_REFUSED_COMMENT`), and every call site posts the table's entry, so each comment
@@ -6830,6 +6916,8 @@ validator rather than a second copy of it.
   to the audit file or `alloc:log`.
 
 ## INT-SESSION-STORE-CONTRACT
+
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
 **worker <-> host store <-> container.**
 
@@ -8052,13 +8140,17 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   was spent). The worker log names the scope by its 16-hex key, never the raw string (a folder path in the
   log would breach no-PII-in-logs); the forge comment may name the repo it posts on, and names it without a
   forge prefix (issue #498: the comment already lives on that forge). Concurrency defers at
-  the pickup gate with a fixed re-check delay; deferral consumes no attempt, no budget, no record. Since
+  the pickup gate with a fixed re-check delay; deferral consumes no attempt, no budget, no run record (since
+  issue #737 it writes the job's defer record, `INT-DEFER-REASON-KEY`). Since
   issue #230 the delayed set holds a FIFTH population beside cron next-occurrences, retry backoff, quiet
   hours and scope deferrals: jobs held on `run.waitFor`. A POLLED hold is told apart from a scope deferral
   by wake instant, which is why the wait interval floor is deliberately greater than this gate's re-check;
   an `after` hold is not, since it wakes at an instant the operator chose and may legitimately fall inside
-  the same few seconds. Nothing records WHY a job sits in the delayed set, which is what makes both
-  statements about wake instants rather than about state. No
+  the same few seconds. Until issue #737 nothing recorded WHY a job sits in the delayed set, which is what
+  made both statements about wake instants rather than about state. The worker now records its reason as it
+  defers (`scope-folder`, `scope-repo`, `scope-project` or `chained` here, `INT-DEFER-REASON-KEY`), and the
+  distinct instants stay: they are the evidence for a reader older than that record and for a job whose
+  record could not be written. No
   per-scope FIFO is promised: a newer job may take a freed scope ahead of an older deferred one, and a
   sustained same-scope arrival rate can starve a deferred job indefinitely — deferral is a gate, not a
   queue. A lowered `concurrent` never preempts in-flight jobs (next-pickup grain); a lowered cap applies
@@ -8787,12 +8879,16 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   them read the worker's own `wait:job:*` hashes rather than enumerating the delayed set, and that is a
   PII decision before it is a convenience: a delayed forge job's `.data` holds the issue title, body and
   username, so hydrating one to build a row would pull into the panel exactly what the snapshot refuses
-  to carry. It also removes a PER-JOB classifier that could only ever be a guess, since the delayed set
+  to carry. It also removed a PER-JOB classifier that could only ever have been a guess, since the delayed set
   mixes five populations (scope and host deferrals counted as one, though the worker defers them at
-  two distinct sites) and records which for none of them -- and issue #289's breakdown line keeps
+  two distinct sites) and recorded which for none of them; and issue #289's breakdown line keeps
   that refusal intact while naming what CAN be counted: the status area says how many are cron
   next-occurrences (the scheduler list's own count) and how many are held (this index's own count),
   with the remainder stated as undifferentiated, still never enumerating or hydrating a delayed job.
+  AMENDED 2026-10-25 (#737, PR 3a): the worker now records which, as it defers each job
+  (`INT-DEFER-REASON-KEY`), so the guess is no longer needed: the console's `readWaiting` lists the jobs
+  that have not started from the queue's own sets, their scores and those records, and reads no job's
+  data (`DES-WAITING-REASONS`). The panel's held section and its breakdown line still read as above.
   The section is CONDITIONAL and SELF-BOUNDING:
   absent when nothing is held, so a deployment that never waits renders byte-identically to one before
   this existed; capped, with the remainder counted from the whole index rather than from whatever the
@@ -8806,10 +8902,32 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   design and a stale hash can outlive a job that already woke and ran. Its blast radius therefore cannot
   reach a cron occurrence, a retry backoff, or a completed run — writes no run record (the job never
   ran), and cannot be undone, which is why the model tool is confirm-gated like every other write and the
-  panel's `x` sits behind the same in-frame y/n the trigger delete uses.
+  panel's `x` sits behind the same in-frame y/n the trigger delete uses. Since issue #737 the CLI's door reaches
+  `removeHeldJob` through `removeQueuedJob` (`cancel-state.mjs`, the sequence the console's `cancel-queued` runs
+  too, `INT-CANCEL-CHANNEL-CONTRACT`), which then also deletes the removed job's `defer:job:<id>`; the panel's, the
+  tool's and the console's `cancel-held` doors call `removeHeldJob` through `cancelHeldJob` and leave that record to
+  its TTL, where no reader finds it, since every reader starts from the delayed set.
+- **The hold's own fields for a console** (issue #737, PR 3a): `wait:job:<jobId>` also holds `after` and one
+  `a:<profile>` field per profile it checked (`wait-state.mjs`). `after` is the job's own `after` instant in ms
+  (`afterMs(job.data)`), written by `hold` beside the label in the same HSET when it is a safe integer, on every hold
+  path; it is the job's own instant, not the hold's lease horizon (`untilMs`, which on the polled path is the next
+  check and on a throttled wake the maximum wait, a time nobody chose). The next wake is the defer record's `until`
+  (`INT-DEFER-REASON-KEY`). `a:<profile>` is `<answer>:<ms>`, the last thing that profile's check said and when
+  (`noteAnswer`, after each check): `go`, `hold`, `fault` (a hold that could not tell), `refuse`, or `unclear` (an
+  answer the gate does not understand), by `answerOf(verdict)` in the gate's own order of tests, and nothing at all
+  for a check that said nothing about the condition (aborted by a restart or a cancel, a profile this worker does not
+  declare, a target no check can be handed). A profile outside `WAIT_PROFILE_FIELD_RE` (`[A-Za-z0-9._-]{1,64}`) or
+  an answer outside `WAIT_ANSWERS` is not written; the field is overwritten by the profile's next answer, so the hash
+  grows with the job's conditions and never with its wakes; it carries the counters' TTL, and a failed write costs
+  the console its detail and never the gate its decision. The admin reads both and holds each to the same rules on
+  the way out, an instant (`after`, an answer's time, `readWaiting`'s hold clock) also to at most `DEFER_TIME_MAX_MS`
+  (`INT-DEFER-REASON-KEY`), so a page can draw it: the fleet reader's held rows gain `checks`, `after` and `answers`
+  (at most four, sorted by profile), and so does `readWaiting`'s hold; the `dispatch_waits` listing keeps its keys.
 - **The 30s floor is load-bearing twice**, and lowering it would break the second silently: it is also what
   distinguishes a wait deferral from a scope deferral by wake instant, since `SCOPE_BUSY_RECHECK_MS` is 5s
-  and nothing else records WHY a job sits in the delayed set.
+  and, until issue #737, nothing else recorded WHY a job sits in the delayed set. The worker's defer record says it
+  now (`INT-DEFER-REASON-KEY`); the floor stays, because the wake instant remains the evidence for a reader older
+  than that record and for a job whose record could not be written.
 - **The load-time half** (`pi-dispatch doctor`), which `INT-TRIGGERS-FILE-CONTRACT`'s `run.waitFor` bullet
   promised and this contract now states. Four checks, and what separates a FAILURE from a warning here is
   whether something actually refuses: a hard failure means a worker that will not start or a delivery that
@@ -9052,7 +9170,8 @@ abstains.
     name            the worker's name; redundant with the key so a row is self-describing when pasted
     version         the worker package version, so a rolling upgrade is a visible fact
     startedAt       epoch ms, first beat of this process
-    beatAt          epoch ms, this beat. Readers derive AGE from it rather than trusting expiry
+    beatAt          epoch ms, this beat. Readers derive AGE from it rather than trusting expiry (`staleMs` stays
+                    `now - beatAt`; the key's PTTL, read beside the row, gives the reader's three expiry fields, below)
     pid             the worker process id on its own host
     concurrency     the LIVE slot count, not the boot value (published as a thunk, so the overlay moves it)
     image           the deployment's default job image TAG
@@ -9093,6 +9212,41 @@ abstains.
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
 carries no configuration and no authority: nothing here is an instruction to anybody.
+
+**What a reader reads off the key's expiry** (issue #737, PR 3a, ADDED 2026-10-25). `readLiveHosts(redis, { now,
+timeoutMs, prune, ttlMs })` asks each member's `PTTL` beside its `HGETALL`: both are issued before either is awaited
+(`Promise.all`, so no second round trip), each under its own bound, and only where the client has `pttl`; a PTTL that
+throws, rejects, hangs past the bound or answers no whole number costs these three fields and never the row. **Valkey's
+clock is used only as a duration**: `ttlMs - PTTL` is how long ago the row's last PEXPIRE landed, counted by the server
+that holds it, and no field is ever compared with Valkey's own time of day. Each row gains:
+- `ttlAgeMs`: that duration, `max(0, ttlMs - PTTL)`. `ttlMs` is the TTL the writer sets, `HOST_TTL_MS` (90 s) for
+  every worker and the reader's default; a value that is not a positive whole number reads as `HOST_TTL_MS`.
+- `skewMs`: `(now() - beatAt) - ttlAgeMs`, the reader's clock minus the host's as a third party measures it,
+  positive when the host's clock is behind; null without a readable `beatAt`. It carries a round trip and up to one
+  beat period of noise (a read between a beat's HSET, the new `beatAt`, and its PEXPIRE sees the previous beat's
+  expiry), so a reader claims a skew only past `HOST_SKEW_CLAIM_MS` (30 s, two beats).
+- `noExpiry`: true when the key has no expiry at all (`PTTL` -1), a row the TTL will never remove, false when it has
+  one. A reader walks `host:live`, and a beat SADDs the name only after its PEXPIRE, so a host's first beat is never
+  read this way: a reader meets a row with no expiry only under a name an EARLIER beat indexed, for a moment when a
+  beat re-creates a row that expired while its name stayed in `host:live` (between that HSET and its PEXPIRE), and
+  for good when the process died between that HSET and its PEXPIRE. Either is a row the writer did not finish.
+All three are null where the client has no `pttl`, where the PTTL failed or timed out, and where the key went between
+the two reads (-2). `staleMs` is unchanged. The admin's fleet reader carries them on its host rows (`hostRowOf`, each
+re-checked: null is "not known", never 0 or false) in the snapshot's `hostBudgets`, beside the new `hostsReadAt`, when
+those rows were last read, on the reader's clock (null before the first read; a registry it cannot read keeps the last
+rows and their time). In PR 3a no surface drew them, `/api/state` projects its host rows by name and names none of
+them (`INT-CONSOLE-STATE-API` UNCHANGED, checked), and NO DECISION READS THEM. AMENDED 2026-10-25 (#737, PR 3b): the
+console's overview draws two of them, on its hosts panel: a host whose `skewMs` is past `HOST_SKEW_CLAIM_MS`, in
+either direction, gets a sentence that says by about how much and from what (`hostSkewText`, with `staleMs` and
+`ttlAgeMs`), and a row whose `noExpiry` is true gets one that says it will not leave the registry by itself
+(`HOST_NO_EXPIRY_TEXT`); null draws neither. And the console reads `ttlAgeMs` as a beat's age (`beatAgeOf`,
+`admin/src/doctor-view.mjs`): every beat refreshes the row's expiry, so where the reader had it, it is how long ago
+the host last beat whatever the host's clock says, else the age is `staleMs` as before; whether a worker is online
+(`workersOnline`, still the beats' and BullMQ's list's), Running's slots, the hosts panel's rows, the first run's
+worker step, the fleet page's hosts table and the `/dispatch` panel's HOSTS view judge freshness by it, so a host whose
+clock runs behind beats when it beats. Nothing else reads them (`skewMs` and `noExpiry` decide nothing, and no worker
+reader reads any of the three); `/api/state` carries none of them as a key of its own, and its
+`hosts[].lastBeatAgeMs` is that age (`beatAgeOf`, `INT-CONSOLE-STATE-API`).
 
 **The budget fields' readers** (issue #596): doctor (each host's budget, use and largest fitting project size), and
 since phase 3 the admin panel's PROJECTS view and the insights page, which cap a size suggestion's raise at what a
@@ -9282,6 +9436,17 @@ recorded there: a SET cannot expire its members, and the alternative -- no index
 instead -- walks HARDEST on deployments with nothing to show, because the early exit never fires, while
 the panel reads every second.
 
+**A member outside the worker name charset is no host's** (issue #737, PR 3b, ADDED 2026-10-25). `readLiveHosts` skips
+a `host:live` member that fails `WORKER_NAME_RE` (the worker name charset: a letter or a digit, then letters, digits,
+`.`, `_` and `-`, at most 64 characters in all; looser than the boot rule, which also refuses a `.json` or `.log` tail
+on `PI_WORKER_NAME`, `config.mjs`, so a member such as `prod.json` is still read) before it reads that member's row,
+and skips a row whose own `name` fails the same charset (an empty `name` still stands for the member). It prunes
+neither, a pruning reader included: anything with the Valkey's URL can SADD a member, removing what someone else wrote
+is not a reader's call, and such a member costs only its place in the set. A reader that took one would print it
+wherever rows are drawn: a 3,000-character member widened the console's page to 43,000 px. Every consumer reads
+through `readLiveHosts` (the cron gate through `livePeers`), so none of them is handed such a row, and the
+falsification test holds unamended (a skipped member was never a host).
+
 **`{ unreachable }` and `[]` are different answers** and no consumer may collapse them. "There are no
 other hosts" and "I could not find out" differ, and a panel that renders the second as the first tells an
 operator their fleet is gone when Valkey merely blinked.
@@ -9379,7 +9544,43 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   `job.remove()` (a mid-dispatch pickup re-reads the state and falls through to the channel, since
   `remove()` throws on a locked job); active gets the request/ack poll above; completed/failed refuse.
   Queued and held cancels write NO run record -- the job never ran, the `dispatch_wait_cancel` rule --
-  and the CLI says so in its output.
+  and the CLI says so in its output. AMENDED 2026-10-25 (#737, PR 3a): the held and the queued branches are
+  ONE function, `removeQueuedJob({ redis, queue, job, jobId, state, guard })` in `cancel-state.mjs`, placed after
+  `removeHeldJob` and calling it, which the console's `cancel-queued` runs too, so the two doors cannot drift. The
+  CLI's output has one new line, for a held job whose removal failed after its hold was cleared (below): "could not
+  cancel held job <id>: its hold was cleared, but the job itself could not be removed (<the error>); it may still be
+  queued, now without its hold. Run `pi-dispatch cancel <id>` again to remove or stop it", an `error:` line on stderr
+  with exit 1, where it said "could not cancel held job <id>: <the error>". And every line that carries another
+  module's words carries them bounded (`boundedText` in `cancel-cli.mjs`), since they are of any length and any bytes
+  on a terminal: each C0, DEL and C1 character made a space, then at most 200 characters of them. Those are the
+  registry's words in "no job <id> in <n> queue(s) [registry unreadable: <its words> ...]", a removal's in the
+  cleared line, in "could not cancel held job <id>: <the error>" and in "could not remove <id> ... the remove failed
+  with: <the error>", and the error under the could-not-reach line (a lookup's, or anything else that threw). So, but
+  for the new line, a line whose words hold none of those characters and are at most 200 characters long is byte for
+  byte what it was, as is every line that carries none (a thrown value that is not an Error and has no message now reads
+  "no reason given"); the worker's name in "cancel accepted by <host>", read from the ack key, is bounded the same way.
+  It judges the hold first by the hash's `since` (a hash that cannot be read is no hold, as the CLI always read it),
+  else removes a job in `QUEUED_STATES` (`delayed`, `waiting`, `prioritized`, `paused`), else changes nothing.
+  `guard` is optional (the CLI passes none): a caller's last check, asked with the job right before the removal is
+  sent (before `removeHeldJob` for a held job; after the state check and before `remove()` otherwise), which answers
+  null to go on or what to refuse with, a throw refusing too; BullMQ's remove checks only the job's lock and its
+  scheduler, so a caller whose rule is about what the job has DONE reads that again here. It answers
+  `{ ok, held: true, jobId, attemptsMade }`, `{ invalid }` (removeHeldJob's refusal, nothing changed),
+  `{ invalid, cleared: true }` (removeHeldJob failed once its hold's first key had been sent for deletion, most often
+  `remove()` refusing a job a worker locked in between: the hold is gone, or partly gone, and the job stayed, which a
+  caller never words as nothing changed; a first delete that failed, whatever the error, is followed by a read of the
+  hold's clock (`HEXISTS wait:job:<id> since`, `holdInPlace`), and only a hold read back in place answers `{ invalid }`,
+  nothing changed (Valkey refused the command, such as NOPERM, READONLY or MISCONF); a hold not read back, a read
+  that fails, or a client with no `hexists` keeps the mark, since a refusal can be the answer to ioredis's resend,
+  after a reconnect, of a delete that already ran), `{ refused, error? }` (the guard's answer, or its throw as
+  `error` with `refused` null; nothing was sent), `{ notQueued, state }`, `{ ok, held: false, jobId, state,
+  attemptsMade }` or `{ raced, state, error }` (`remove()` threw: a worker took the job between the read and the
+  remove, or it is a job scheduler's next run, which BullMQ refuses to remove; the state read again), and never
+  throws. Once a job is removed, and only then, it deletes the job's defer record (`DEL defer:job:<jobId>`,
+  `INT-DEFER-REASON-KEY`): bounded (2 s), best effort (a failed delete leaves the record to its TTL, and a record
+  whose job is gone is never read), and only where the client has `del`; a job that stays keeps its reason. WHO may
+  be removed stays each caller's rule: the CLI also removes a job waiting to retry, and the console's `cancel-queued`
+  takes only a job that never started (`REQ-OPERATOR-CONSOLE-ACTIONS`).
 - **A cancelled job is never run again, and never recorded against what its requester was told** (issue
   #476, gate of PR #479). The poll runs from pickup, so a cancel could be acknowledged after a job was picked
   up and before the processor handed it back to the queue (one of its holds, the podman.service hold or the
@@ -9439,10 +9640,12 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   per job id, it has no ack key (the state hash says `written` and `delivered`), and it is opened only for a
   steer-armed attempt. Nothing in this contract changes.
 
-**Code evidence**: worker/src/cancel-state.mjs -> requestCancel, removeHeldJob; worker/src/index.mjs ->
-the cancel poll beside the kill timer, the abortReason mapping; worker/src/processor.mjs -> the
-classification; worker/src/cancel-cli.mjs -> runCancel; admin/src/read-model.mjs -> cancelHeldJob
-(delegating); admin/src/dashboard.ts -> cancelActive/cancelHeld deps, the HELD_LIST view.
+**Code evidence**: worker/src/cancel-state.mjs -> requestCancel, removeHeldJob, and since #737 QUEUED_STATES,
+removeQueuedJob, holdInPlace; worker/src/index.mjs -> the cancel poll beside the kill timer, the abortReason mapping;
+worker/src/processor.mjs -> the classification; worker/src/cancel-cli.mjs -> runCancel, and since #737 boundedText;
+admin/src/read-model.mjs -> cancelHeldJob (delegating); admin/src/job-actions.mjs -> planCancelQueued,
+cancelQueuedJob, heldClearedAnswer (since #737); admin/src/dashboard.ts -> cancelActive/cancelHeld deps, the
+HELD_LIST view.
 
 ## INT-STEER-INBOX-CONTRACT
 
@@ -9913,10 +10116,23 @@ this project never grows one.
   still `exit`). It runs on the HOST as the worker, with the worker's environment: this is not a weaker
   blast radius than `--env-setup`, it is the same one at a different time, and what bounds it is that
   the operator named the script in a file only they can write.
-- **The reason is shape-guarded at the spawn**, the single normalizing door: a value that does not match
-  `^[a-z0-9-]{1,40}$` flattens to `infra` before it can become argv, because `InfraRetry.reason`
-  defaults to the whole message when no token was given and messages carry library words. Argv[1..3]
-  must be non-empty and no element may lead with a dash; `host` may honestly be `""`.
+- **The reason is shape-guarded at the spawn**, the single normalizing door: a value that is not a record reason
+  token (`RECORD_REASON_RE`, `^[a-z0-9][a-z0-9-]{0,63}$`, the run record's own rule from the worker's leaf
+  `record-reason.mjs`; AMENDED 2026-10-26, #737 PR 4a, where it was `^[a-z0-9-]{1,40}$`, which flattened a reason of
+  41 to 64 characters that the record keeps to `infra`) flattens to `infra` before it can become argv, because
+  `InfraRetry.reason` defaults to the whole message when no token was given and messages carry library words. Argv[1..3]
+  must be non-empty and no element may lead with a dash; `host` may honestly be `""`. **AMENDED 2026-10-26 (#737,
+  PR 4a)**: the terminal failed listener passes the thrown error's `reason`, and the container's two exits now throw
+  with tokens of their own, so a final failure on the runner's infrastructure exit (code 1) crosses into argv as
+  `container-infra-exit` and one on an exit code the runner never uses as `container-exit-unknown`, where both said
+  `infra` before (their messages, "infra failure, container exit 1" and "unknown container exit 42", were flattened).
+  Both fit the shape. A forge host's untagged `InfraRetry` (its message) and a throw that is not an `InfraRetry` (no
+  `reason`) still reach argv as `infra`, though the run record says `worker-error` for them
+  (`INT-RUN-HISTORY-FILE-CONTRACT`'s door, which the hook does not read). The guard takes the record's token rule
+  (above), so every reason the record keeps crosses as itself; the firing rules and the argv's other elements
+  are UNCHANGED, checked. Tests: `worker/test/on-failure.test.mjs` ("a container's infrastructure exit and an unknown
+  exit cross into argv as their tokens, where their messages read infra (#737)", "every reason the run record keeps
+  crosses into argv as itself, up to its 64 characters; anything else reads infra (#737)").
 - **Fires for the paid terminals only**: outcome `failed` at the TERMINAL failed event (`finishedOn`
   set -- BullMQ writes it on the non-retry branch alone, and the emit follows the move, so the guard
   reads the queue's own decision), and outcome `policy` with reason `worker-abort`, `runner-policy` or
@@ -10054,11 +10270,16 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     issue #708 `/dispatch console --link`: actor role `panel`, target the token's name, outcome `ok`, appended BEFORE
     the code is made (no code without the row), and a second row with outcome `failed` and the mint's refusal as
     `reason` when the mint is then refused; both rows carry the same `ticket` (12 hex, `writeTicket`), so a reader
-    takes the last row for the ticket as the outcome, as for every panel write. The row never holds the code.
+    takes the last row for the ticket as the outcome, as for every panel write. The row never holds the code. A
+    `logout` row names a session the console ended; since #737 (PR 2) a sign-out ends every session its cookies name
+    that the console holds, one `logout` row for each, and a sign-out with no session held (an unknown cookie, or
+    none) is still answered and still a row, one, `anonymous`, target `/logout`, outcome `ok`, reason "no session was
+    held, so only the cookie was cleared", rate limited like every other row without a session.
   - `outcome`, exactly one of: `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`).
   - `target`, `reason` (optional, absent when unset): short strings, control characters written out as `\u{XXXX}`,
     at most 200 characters. A refusal's `reason` starts with the guard (`host`, `origin`, `content-type`,
-    `read-only`, `role`, `auth`) followed by the console's own refusal sentence, which may name a refused Host
+    `read-only`, `role`, `auth`, and since #737 (PR 2) `person`, a write from a page drawn for another person than the
+    session's) followed by the console's own refusal sentence, which may name a refused Host
     hostname but never quotes a header value, a cookie or a body.
   - `beforeDigest`, `afterDigest` (optional): digests of the file before and after a write, so a row ties to a change
     without holding it. `ticket` (optional): the first 12 hex characters of the sha256 of the confirm ticket the
@@ -10076,7 +10297,8 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     `secret-bundle-remove` (issue #704, AMENDED 2026-10-20), `cancel-active`,
     `cancel-held`, `fleet-pause`, `fleet-resume` and `run-enqueue`; and the console's own `queue-pause`,
     `queue-resume`, `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`,
-    `run-rerun`, `parked-answer` and (issue #646) `steer-withdraw`; and `steer` (issue #646), which the console and
+    `run-rerun`, `parked-answer`, (issue #646) `steer-withdraw` and (issue #737, PR 3a) `cancel-queued`, a job that
+    never started taken out of its queue, `target` its job id; and `steer` (issue #646), which the console and
     the panel (the TUI's `t` and `T`) both write. The list is descriptive: the writer enforces the charset, not the list, and
     the console's configuration actions write the kind of their action's own name, plus `pause-windows-set` for the
     whole-list replace.
@@ -10085,7 +10307,11 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     paid, no dollar cap applies, or the action takes no new reserve (a `steer`, which spends from its run's own).
   - `count` (optional, issue #642): a bulk action's size, a positive safe integer. A bulk action writes one row per
     job, `target` that job's id, every row carrying the same `count` and `ticket`, so a reader groups a bulk action
-    by its ticket and reads each job's outcome from its own last row.
+    by its ticket and reads each job's outcome from its own last row. A resume (`fleet-resume`, `queue-resume`)
+    writes `count` too, as the number of jobs waiting to start in the queues it resumes, as its preview counted them
+    (none when none waits or the count could not be read), so a reader takes `count` by the row's `kind`. CORRECTED
+    2026-10-24 (#737 PR 2): this bullet called every `count` a bulk action's size, which a resume's has not been since
+    #642; the console's audit page says the two apart.
   - An answer to a parked run is recorded by the parked run's job id in `target` and the sha256 of the answer text
     in `afterDigest`; the text is never in a row.
   - A message into a running job (kind `steer`, issue #646) is recorded by `<job id>#<message id>` in `target`
@@ -10099,7 +10325,9 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 - **Rate-limited refusals**: a refusal of a request that carried no session (`actor.name` `anonymous`) is written
   one row each up to 60 a minute (burst 120). Past that, refusals are counted, and the count is written as one row,
   `action: "refused"`, `target: "(rate limited)"`, its `reason` starting with the number, just before the next
-  allowed row. A refusal from a signed-in session is always its own row.
+  allowed row. A refusal from a signed-in session is always its own row. Since #737 (PR 2) the anonymous `logout` row
+  of a sign-out with no session held is limited and counted the same way, so the count is of rows, and the reason
+  says so ("3 more rows without a session (refusals and sign-outs) went unwritten one by one (limit 60 a minute)").
 - **Never in a row**: a token, a login code, a cookie value, a session id, a request body, or any payload text.
 - **Head recovery**: the writer keeps no head in memory. Every append reads the newest month file's last line (a
   bounded 64 KiB tail read) under the append lock, so a restart, or a CLI command writing while `serve` runs,
@@ -10112,7 +10340,21 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   the first broken link. A row whose `kind`, `reserve` or `count` is present and not of the shape above is a broken
   link too. The first row of the oldest SURVIVING file is not checked against a predecessor: when the
   retention reaper removed older months, verify reports where the chain starts (`startsAt`, the file and `seq`), and
-  does not call it broken. A broken chain is a doctor warning.
+  does not call it broken. A broken chain is a doctor warning. Since #737 (PR 2) a caller may ask `withLast: true`
+  (the console's audit page does, cached 30 s), which adds three fields to either shape: `last: {file, line, seq}`, the
+  place and `seq` of the last row the chain vouches for (null when none); `suspect: {file, line, seq}`, the row before
+  a break whose line carries no `prev` that matches it, or null; and `files: [{file, seq, rows}]`, oldest first, each
+  month file the walk passed a row in, the `seq` of its first row (its line 1) and how many rows the walk passed in
+  it, so row `s` of an entry is at line `s - seq + 1` of its file. A row is vouched for only by the line after it,
+  when that line's `prev` matches the row's hash: an edit to a row leaves its own line well formed and moves only its
+  hash. So at a break whose line does not carry a matching `prev` (it does not parse, its `prev` is not a hash, or it
+  is another hash, whatever else is wrong with the line: the `prev` is compared before the line's action, outcome and
+  fields are judged), the row before is not vouched for either: it is `suspect`, and `last` is the row before it.
+  Only a line whose `prev` matched and that fails another check (its seq, action, outcome or fields) is damaged
+  alone, `last` then the row before it and `suspect` null. On an intact chain `last` is the newest row walked, which
+  no line vouches for yet, since none follows it. Without `withLast` the result is exactly
+  the one above, which doctor, the CLI and the tests compare whole. The row format, the files and the chain are
+  unchanged.
 - **Retention**: reaped on `PI_LOG_RETENTION_DAYS` by the worker (`makeConsoleAuditReaper`, at boot and on each
   retention sweep, beside the allocation log reaper), because the worker always runs and the console may not. Only
   names of the `YYYY-MM.jsonl` shape are touched, and the newest file is never reaped, since it holds the head.
@@ -10130,6 +10372,8 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 
 ## INT-CONSOLE-STATE-API
 
+**Extension (#649):** `/api/run` and parked folds may carry optional validated id-only `approval` audit metadata under `INT-APPROVAL-STATE-CONTRACT`. The existing parked-answer action accepts optional approve/decline decisions, converted to command text before its shared planner; request binding and worker authority remain mandatory.
+
 **The console → scripts and later integrations.** `GET /api/state`: the deployment's live snapshot as JSON, so a
 script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONSOLE`,
 `REQ-OPERATOR-CONSOLE-SCREENS` (k)).
@@ -10137,7 +10381,34 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
 - **Request**: `GET /api/state`, no query. It needs a session (`pdc_session`, from `POST /login` with a token, or
   from a one-time link); without one it is answered `401` with a JSON error, never a redirect, as every `/api/*`
   route is. The viewer role is enough. It is a GET and has no side effect beyond the request moving its session's
-  `lastSeen`, as every request does.
+  `lastSeen`, as every request does. **Since #737 (PR 2) the 401 body says why**, on every `/api/*` route and every
+  write that needs a session: `{ "error": "sign in first", "ended": "<reason>" }`, `ended` one of `ENDED_REASONS`
+  (`idle`, `max`, `revoked`, `role`, `all`, `elsewhere`, `restart`, `admin/src/console/session-ends.mjs`) when the
+  cookie names a session that ended (`restart` only as a possibility: a well-formed id this process does not know,
+  while it has been up for less than `PI_CONSOLE_MAX_HOURS` and has forgotten no ended session), and null otherwise
+  (no cookie, or one with no reason to give). The list's eighth word, `switched`, is never this 401's: no session
+  ends for it (below). The sign-in posts need no session and their own refusals are not this
+  401: `POST /login`'s wrong token (`{"error": "that token is not valid for this console"}`) and `POST /login/code`'s
+  refused link carry `error` alone. The 401 sends NO Set-Cookie, where before PR 2 it cleared the cookie: a script's
+  next request still carries the cookie, so it can still read why, and a 401 never clears a newer cookie another
+  tab's sign-in set meanwhile (a page's 303 to `/login` still clears it, and so does sign-out). `error` is the
+  sentence it always was, so a script that read it reads the same. And while the console cannot use its tokens file,
+  a request that carries a session cookie is answered `503` with `{ "error": "the console's tokens file cannot be used
+  right now; the operator should run pi-dispatch doctor" }` (`TOKENS_UNUSABLE`), with no Set-Cookie and the session
+  kept, on every route that needs a session (`REQ-CONSOLE-SECURITY` (i)): a script waits and asks again rather than
+  signing in. `POST /logout` needs none: it ends every session its cookies name that the console holds, and answers
+  `200` with the clearing Set-Cookie whatever the tokens file's state. **Since #737 (PR 2) a request may say whose page
+  it comes from**, `<name>.<role>`, in the header `x-console-as` (`PERSON_HEADER`; the console's own page sends it
+  on every preview and confirm, and an event stream says it in its query instead, `INT-CONSOLE-EVENT-STREAM`). When
+  it names another person than the session the cookie names, the request is refused after auth and before the role,
+  the body or the handler: `409` `{ "error": "this browser is now signed in as someone else, so nothing was changed;
+  sign in again", "ended": "switched" }` (`PERSON_CHANGED`), a write's with `html` (the confirm bar's refusal, whose
+  Look again the console's page sends to `/login?ended=switched`) and an audit row. A request that sends no such
+  header is not checked: a script is held to the cookie alone, as before. A write's `503` `TOKENS_UNUSABLE` carries
+  `html` too, the confirm bar's refusal: since #737 PR 3a in the setup state ("This console cannot take this
+  action"), its sentence `TOKENS_UNUSABLE`'s words with `pi-dispatch doctor` in the code face, and Close, since
+  nothing on the page can fix the file and a reload would meet the same 503 (it offered Look again); the `error`
+  beside it is the sentence as it always was.
 - **Response**: `200`, `Content-Type: application/json`, with the security headers of every console response
   (`Cache-Control: no-store` among them). The body is ONE fleet reader snapshot (`createFleetReader`, the reader the
   pages and the `/dispatch` panel read), projected by `stateOf` (`admin/src/console/live.mjs`) to these keys and no
@@ -10154,6 +10425,7 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
     "parked": [ { "target": "acme/web#12", "kind": "github", "jobId": "gh-...", "ageMs": 60000, "chainCount": null } ],
     "parkedUnknown": false,
     "failures24h": 0, "failures24hFloor": false,
+    "refusals24h": { "count": 3, "top": [ { "reason": "scope-cap", "count": 2 }, { "reason": "over-budget", "count": 1 } ] },
     "active": [ { "jobId": "gh-...", "queue": "pi-jobs", "startedAt": 1760432400000, "host": "mac" } ],
     "schedulers": [ { "name": "nightly", "next": 1760432400000, "overdue": false, "overdueMs": 0, "stalls": 0 } ],
     "schedulerStallMax": 3,
@@ -10179,7 +10451,31 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   chat can open the run or answer it through the `parked-answer` action without a second lookup. The fleet reader's
   snapshot also marks each parked row `answering` (the job taking its answer, false, or null when unknown; review round
   1 of #647), which the `/parked` page and the overview draw; `/api/state`'s parked projection does NOT carry it (the
-  keys above are the whole row), and a script asks `/api/run`'s `pendingRunOnTarget` for one run instead.
+  keys above are the whole row), and a script asks `/api/run`'s `pendingRunOnTarget` for one run instead. **Since
+  issue #710 the document gains `refusals24h`**, an added key within `version: 1`, beside `failures24h` and from the same
+  window: `{ "count", "top": [ { "reason", "count" } ] }`, the runs of the last 24 hours whose outcome the console calls
+  "refused" (`refusalsIn`: a `policy` record, but NOT one with `operator-cancel`, which the console calls "cancelled"),
+  and the five most frequent reasons by count, then token, each `reason` the record's token charset
+  (`^[a-z0-9][a-z0-9-]{0,63}$`) or the row is left out; null where `failures24h` is null (the runs could not be read)
+  and for a snapshot without the field. `failures24hFloor` marks both counts as floors. The same for both roles.
+  AMENDED 2026-10-26 (#737, PR 4a), no key added or renamed: `failures24h` counts the runs of the window whose outcome
+  the console calls "failed" (`outcomeWord(...).word`), as `refusals24h` counts those it calls "refused", where it
+  counted `outcome === "failed"`; the console's words now call the three recovery ends the worker records as `policy`
+  (`recovery-cap`, `recovery-checkpoint-absent`, `recovery-unsafe-extensions`) failed, so they move from
+  `refusals24h` (count and top reasons) to `failures24h`. Each key still means what it says, the day's failed and
+  refused runs in the console's words, so `version` stays 1; a script that compared `failures24h` with its own count of
+  `outcome: "failed"` records reads it larger by the recovery ends. Test: `admin/test/read-model-pages.test.mjs` ("the
+  parked rows carry the record's project, a project id only; failures24h counts a recovery end as the failure it reads
+  as (#737)"). The snapshot's parked rows gain `project` (the record's, a project id only, else null), which the
+  `/parked` page draws and `/api/state`'s parked projection does NOT carry. Whether
+  a worker is online is not a key of its own: it is a host whose last beat is at most 60000 ms old, the overview's
+  rule, and the overview says none is only when `workers` (BullMQ's connected workers on the shared queue, free of any
+  host clock; null, read as 0, when unknown) is not above zero either, and judges neither way while `fleetDegraded` is
+  true. AMENDED 2026-10-25 (#737 PR 3b), words only, no key changed: `hosts[].lastBeatAgeMs` is the beat's age as the
+  overview takes it, Valkey's measure of the row's last refresh where the reader had it (`ttlAgeMs`, `beatAgeOf`,
+  `INT-HOST-REGISTRY-CONTRACT`), else the console's clock against the host's beat time (`staleMs`), so a script that
+  applies the rule to it judges a host whose clock runs behind as the overview does; `schedulers[].name` is the
+  scheduler's key, the cron trigger's id (null when the reader refused it), never BullMQ's job name.
 - **What it never holds**: a token, a cookie, a session id, a host path beyond what the panel shows, a secret's value
   or resolver reference (secret profiles appear by name only), a job's `.data`, log or transcript text, or a steer
   message's text or sender. A record's
@@ -10245,11 +10541,26 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   - **Errors** (each `{ "error": "<sentence>" }`, the sentence never echoing the value): `400` for a query refusal or
     a URL that names no target on a forge this deployment knows; `404` for a run that this host's history, the run mirror
     or the queue knows, and for a target with no run (the sentence says a running job's record is written at its end,
-    so give its run id, and after a truncated scan that it searched the newest 2000 runs); `409` for an Azure work item whose runs are in several repositories of its project, with
-    `"candidates": [ { "target", "jobId" } ]` (the newest run per repository, at most 10); `503` for a queue that
-    could not be read (a fixed sentence: a mode judged on half the facts is worse than none), a history that could not
-    be searched for a URL (also one whose logs or run mirror could not be read: a partial history is not a known
-    absence), or a console with no fleet reader; `401` without a session.
+    so give its run id, and after a truncated scan that it searched the newest 2000 runs); AMENDED 2026-10-26 (#737, PR
+    4a): for a run id, by one rule the run page's status follows too (`runPlaces`), `404` only when no place a run is
+    kept shows one and every place was read and said it holds none (`runAbsent`, the run page's run-not-found rule:
+    this host's record file and the fleet's run mirror both read with no record, every queue the kill switch flips
+    asked, over a keyspace scan started after the question, with no such job and no active or queued recovery of its
+    run, the live transcript and the progress key read and absent), and `503` with `runNotTold`'s sentence ("whether a
+    run with that id exists could not be told: this console could not read <places>; try again", each place said in
+    its `RUN_PLACES` words, `admin/src/read-model.mjs`, joined "a, b and c", and no cause) when no place shows a run
+    while one of them could not be read (its record, a queue lookup that failed or ran over a set that was not whole,
+    the transcript or the progress key), which it answered `404` before (a queue lookup that failed, the fixed queue
+    sentence below); a run some place shows is answered as before, a base run whose job the queue no longer holds
+    while its recovery runs or waits included; `409` for
+    an Azure work item whose runs are in several repositories of its project, with `"candidates": [ { "target", "jobId"
+    } ]` (the newest run per repository, at most 10); `503` for a run some place shows whose queue state could not be
+    read (`RUN_UNREADABLE`, a fixed sentence: a mode judged on half the facts is worse than none; since #737 PR 4a it
+    names no cause, and a run no place shows is told by `runNotTold` instead), a history that could not be searched for
+    a URL (also one whose logs or run mirror could not be read: a partial history is not a known absence), or a console
+    with no fleet reader; `401`
+    without a session, with `ended` beside its `error` as for `/api/state` (since #737 PR 2), and `503`
+    `TOKENS_UNUSABLE` while the tokens file cannot be used.
   - **What it never holds**: a record's free text (`why`, a failure reason), a Job's `.data`, transcript text, or a
     session key (it names a directory of unredacted transcript; a host-local fork re-derives it,
     `sessionKeyOfRecord`). That is why a viewer may read it (`REQ-CONSOLE-SECURITY` (l)).
@@ -10268,6 +10579,13 @@ script is its only intended client; it is documented so that what a stream may c
   page the session's role may not open is refused as the page itself would be. `Last-Event-ID` (the header the
   browser sends on a reconnect) is optional. An unknown page, a page that is not live (insights, config, audit;
   the run page too until issue #644 made it live for its Progress panel) or a refused query is answered 400 JSON; a page above the session's role is 403.
+  **Since #737 (PR 2)** the query may also carry `as=<name>.<role>` (`PERSON_PARAM`), the person the page was drawn
+  for, which the console's page always sends: it is taken off before the page's own query is parsed (no page's query
+  takes the name), and when it names another person than the cookie's session the stream is refused `401`
+  `{"error": PERSON_CHANGED_STREAM, "ended": "switched"}` ("this browser is now signed in as someone else, so this
+  page's live updates were refused") after auth and before any slot is taken (an EventSource cannot read the body;
+  the page learns why from its probe, below). A stream with no `as` is not checked, and on a route that is not an
+  event stream `as` is not read as a person.
 - **Admission**: at most `PI_CONSOLE_MAX_STREAMS` (default 4, 1 to 32) open streams per token across all its
   sessions, and at most 32 in the process, of which 8 are kept for the operator role; a stream over any of these is
   answered `429` with `Retry-After` and opens nothing. `HEAD` is answered `405`. The slot is taken before the response
@@ -10282,8 +10600,14 @@ script is its only intended client; it is documented so that what a stream may c
 
   : ping
 
-  event: end
+  event: stale
+  data: {"since":1760432400000,"what":"data"}
+
+  event: fresh
   data: {}
+
+  event: end
+  data: {"ended":"revoked"}
   ```
   - `panel`: `data` is one line of JSON, `{id, html}`. `id` is a panel region of the page (`p-<panel>`, the `id` of a
     `<section data-panel>` the page rendered); `html` is that region's complete new content, rendered on the server by
@@ -10292,7 +10616,19 @@ script is its only intended client; it is documented so that what a stream may c
     inline script in any case). `html` may be the EMPTY string (since #710: the run page's record panels with no
     record, and its Progress and Chat panels for a run refused before it started): the client writes it like any
     other, which empties the section, and the stylesheet's `section[data-panel]:empty` hides it until a later event
-    fills it.
+    fills it. **Since #737 (PR 1) an `id` may also name the shell's panel**, `p-nav-parked`: the
+    `<span id="p-nav-parked" data-panel>` inside the navigation's Parked pill, drawn on every live page and sent after
+    that page's own panels (`panelIds`, `pagePanels`), by the same digest rule. Its `html` is the count of unanswered
+    parked runs (a `<span class="count tone-parked">`), or EMPTY when nothing is waiting or the count is not known, and
+    the stylesheet hides an empty one (`.pillnav [data-panel]:empty`). No other element outside the page's sections
+    is ever a panel, and the client's `data-panel` guard is unchanged. **AMENDED 2026-10-25 (#737 PR 3b): a page's
+    headline is the shell's second panel**, `p-headline`: the `<span id="p-headline" data-panel>` inside the title
+    bar's `p.titlebar__sub`, drawn only on a page that has a headline (the overview alone) and sent after
+    `p-nav-parked` (`SHELL_PANEL_IDS`' order, `panelIds`, `pagePanels`), by the same digest rule. Its `html` is the
+    headline's sentence. The overview's page sections may also be EMPTY: its first run's three while the deployment
+    runs, and its other eight while the first run's checklist stands in for them, so a stream moves the page from one
+    to the other by `panel` events alone. These two spans are the only panels outside a page's sections, and the
+    client's `data-panel` guard is unchanged.
   - The event `id` is the hub's sequence for that page, query, role and name (each is drawn for its own reader, so
     a viewer never receives an operator's panels), prefixed by a random per-process epoch: it rises whenever any of its panels changes, and
     every `panel` event written in one tick carries the same value. Ids carry a per-process prefix, so an id from
@@ -10301,27 +10637,73 @@ script is its only intended client; it is documented so that what a stream may c
     it.
   - `end`: the session is over (logout, revoke, rotate, a role change, `sessions end-all`, the idle or the absolute
     limit). The server closes the stream after it; the page goes to `/login` instead of reconnecting.
-    Its data is `{}`, because a browser fires no event that carries none.
-- **The first events**: a new stream gets every panel of its page, as of the latest tick, unless its
-  `Last-Event-ID` equals the current sequence for that page, query, role and name, in which case it missed nothing and gets
-  nothing until the next change. Any other `Last-Event-ID`, a stale one or garbage, gets every panel: the hub keeps
-  no history to replay, so a full set is the only correct answer to "I missed something".
+    Its data is `{}`, because a browser fires no event that carries none. **AMENDED 2026-10-24 (#737 PR 2): the data
+    says why.** It is `{"ended": <word>}`, never empty, the word one of `STREAM_ENDS` (`admin/src/console/session-ends.mjs`)
+    or null: `idle`, `max`, `revoked`, `role`, `all` (`sessions end-all`) and `elsewhere` (this session signed out,
+    which ends its streams at once, or the browser signed in again over its cookie, which ends them once the sign-in's
+    answer, with the new cookie, has gone out) are the session's own end, and `shutdown` is the console stopping, which is NOT a sign-out: a client keeps what it shows
+    and connects again once the console answers. `restart` is never sent (this process opened every stream it ends),
+    and null means ended for no reason the console can give. A client treats a word it does not know as an end with no
+    reason. The
+    browser page goes to `/login?ended=<word>` only for a member of `ENDED_REASONS`; on `shutdown` and on `elsewhere`
+    it waits 2 seconds (the browser may be storing a newer cookie) and asks `/api/whoami`, a 401 then meaning the
+    console no longer knows the session, and a 200 reloading the page only when it names the person the page was
+    drawn for (the top bar's name and role), else going to `/login?ended=switched` (the page's own word: no stream
+    ends with it). The terminal chat treats `shutdown` as a cut connection: it backs off and reconnects with the same
+    cookie, and the 401 of a restarted console signs it in again inside its retry loop. Its once-a-minute limit on
+    signing in again does not count a 401 that says `restart` or the first 401 after a `shutdown`, so a second
+    restart inside a minute does not end the chat; a real end still counts, and so does an `end` whatever its word
+    (only a 401 is a restart), and the free sign-in is had at most once per stream that opened since the last one, so
+    a console that answers every stream 401 `restart` ends the chat after one counted sign-in.
+  - `stale` and `fresh` (since #737 PR 2): a page stream's state, and its FIRST message, before any panel: `fresh`
+    (data `{}`) once its page's load and render succeeded, `stale` once they failed and its browser holds panels (a
+    load or a render that throws, and a tokens file the console cannot read, send `stale` to every stream they were
+    for, whatever it holds), each sent once and again only when it changes. `stale` says the console could not read this page's data (the load or
+    the render threw, or the load's primary read failed) or could not read its tokens file this tick, so it keeps the
+    panels it last sent rather than draw unreadable ones over them. Its data is `{"since": <ms or null>, "what":
+    "tokens" or "data"}`: `since` the hub's clock at that view's last good render, null when the hub holds none (a
+    view goes with its last stream, so a lone tab that reconnects is told null), and `what` which failed, the
+    console's tokens file or the page's data, so a client never blames the deployment's data for a tokens file. A
+    browser holds panels once a good render was sent to its stream, when its stream came with a `Last-Event-ID` (a
+    reconnect holds the panels it was drawn with), and once its stream was told `stale`: a read-failed load sends such
+    a stream `stale` and no panel, while a first stream that holds none is sent the degraded panels the load makes,
+    with no state before them (they say what the page already says). What a stream is sent after a failure is always
+    measured against the last good render: a degraded draw is never kept as what another stream of the same view
+    holds, so the next good render sends each stream that holds panels every panel that changed, and a reconnect with
+    a `Last-Event-ID` during the failure is sent the last good render. A reconnect is a new stream: told `stale` first while its page still fails,
+    `fresh` first once it recovered. At subscribe only the page's data and render are judged, never the tokens file
+    (the stream's own request has just read it). A client takes its stale state back on `fresh` alone, never when a
+    stream opens, and a page already marked keeps the time it was told when a `stale` comes with `since` null. Page
+    streams only: a
+    transcript stream never gets either.
+- **The first events**: a new stream gets its state (`fresh` or `stale`, above), then every panel of its page, as of
+  the latest tick, unless its `Last-Event-ID` equals the current sequence for that page, query, role and name, in
+  which case it missed nothing and gets no panel until the next change. Any other `Last-Event-ID`, a stale one or
+  garbage, gets every panel: the hub keeps no history to replay, so a full set is the only correct answer to "I missed
+  something".
 - **Only what changed**: after the first events, a panel is sent only when its rendered content differs from what
   the stream was last sent for it (a digest per panel). One poll of the fleet reader a second, in the console
-  process, serves every stream, and only while at least one is open.
+  process, serves every stream, and only while at least one is open. (Since #737 PR 3b the overview's query, `rows`,
+  `zoom` and `project`, is the page's own like any other, and its streams share one load whatever its value; which
+  load a stream shares is the hub's (`DES-OPERATOR-CONSOLE`), and nothing a stream is sent depends on it.)
 - **When it ends**: on `end` (above); within a tick, about a second, of the session failing any check, which is
   re-judged every tick without moving its `lastSeen`, so an open stream never keeps a session alive; at once on
   logout; when the client's unsent buffer passes 2 MiB, without an `end` (the browser reconnects and, its
-  `Last-Event-ID` being stale by then, gets every panel again); and when the console stops. `requestTimeout` and
-  `headersTimeout` do not end it.
+  `Last-Event-ID` being stale by then, gets every panel again); and when the console stops (`end` with `shutdown`,
+  since #737 PR 2). `requestTimeout` and `headersTimeout` do not end it. **Since #737 PR 2 a tokens file the console
+  cannot read ends nothing**: for each tick it cannot be read no stream is ended and none is written a `panel` or an
+  `entry`, each page stream is sent `stale`, and the `: ping` goes on; the first tick that reads it again judges every
+  session, so one that ended meanwhile gets its `end` then. A request to open a stream with a session cookie while
+  the file cannot be used is `503` (`INT-CONSOLE-STATE-API`), and one without a session is `401` with `ended`.
 - **The transcript stream** (issue #643, `REQ-LIVE-TRANSCRIPT`, `DES-OPERATOR-CONSOLE`): `GET /api/transcript?id=<jobId>`,
   a second kind of event stream, opened by the run page's live transcript section, and since issue #647
   (`REQ-TERMINAL-CHAT`) by the terminal chat with `&format=json`.
   - **Request**: a GET with the session cookie, operator role only: a viewer is answered 403 before any slot is
     taken. `id` is a run id in the run-id charset, else 400. `format` (issue #647) is optional, at most once, `html`
     (the default) or `json`; any other value, or a second one, is 400 with a sentence that names the rule and never
-    echoes the value, and so is any other key. `Last-Event-ID`, when present, must match
-    `TRANSCRIPT_ID_RE` (`^\d{1,16}-\d{1,10}$`, a Valkey stream id, a different shape from the hub's
+    echoes the value, and so is any other key but `as`, the page's person, taken off and held to the session as for
+    the hub's stream (since #737 PR 2; the run page sends it, the terminal chat does not). `Last-Event-ID`, when
+    present, must match `TRANSCRIPT_ID_RE` (`^\d{1,16}-\d{1,10}$`, a Valkey stream id, a different shape from the hub's
     `<epoch>-<n>`); the stream then resumes after that entry. A malformed one, the hub's panel shape included, is ignored, and the
     stream is read from its start. `HEAD` is answered `405`.
   - **Admission and lifecycle**: the same slots as the hub's streams (per token, global, the operator reserve), the
@@ -10358,6 +10740,22 @@ script is its only intended client; it is documented so that what a stream may c
 - **Acceptance**: `REQ-CONSOLE-SECURITY` (k) and (l), `REQ-OPERATOR-CONSOLE-SCREENS` (j), `REQ-LIVE-TRANSCRIPT` (f),
   and for `format=json` `REQ-TERMINAL-CHAT` (f).
 
+- **AMENDED 2026-10-28 (#747), run-page multiplexing.** For `page=run`, `panel` events have no SSE `id:` line,
+  on full, changed and degraded renders alike. Reconnect always resends the run panels whole. An operator's stream
+  may additionally carry `entry` events (`id: <transcript ms-seq>`, data `{html}`) after a successful page load reports
+  transcript existence; a viewer's stream never carries them. `Last-Event-ID` for this page is the validated
+  transcript cursor, never a panel sequence. The headline region `p-headline` is a block `div` inside the title
+  bar's sub line, allowing the active run's Cancel form without invalid inline markup; it keeps `data-panel` and
+  the same swap guard. `tdone` data `{outcome}` marks the transcript ended without closing the
+  connection; its outcome word and the entry end line use the record's reason-aware word when available. The
+  transcript box stays outside panel swaps, within the page grid. Its key follows the query run id and the existing
+  worker run-id mapping across retries/recovery, never a new cursor space invented by the page. A terminal event
+  received before the final run record is available can be corrected to the record's word on a later page load. Internal attachment takes no second stream slot;
+  all actual connections still count. Other pages retain their sequence ids and reconnect rule; `/api/transcript`
+  retains its `done` and closure. Session expiry, fresh/stale signals, backpressure cuts and keep-alives are
+  UNCHANGED, checked. Tests: `admin/test/console-live.test.mjs`, `admin/test/console-transcript.test.mjs`,
+  `admin/test/console-server.test.mjs`.
+
 ## INT-LIVE-TRANSCRIPT-STREAM
 
 **worker → Valkey → the read model (the `/dispatch` panel and the console).** One Valkey stream per running job,
@@ -10375,7 +10773,7 @@ publisher cannot drift.
 - **Entries**: Valkey's own ids (`<ms>-<seq>`), written by `XADD <key> MAXLEN ~ 2000 * <fields>`. Every entry is a
   flat field list and every value a string:
   ```
-  kind       user | assistant | tool-call | tool-result | compaction | note | reset | skipped | end
+  kind       user | assistant | tool-call | tool-result | steer | compaction | note | reset | skipped | end
   ts         ms since epoch, decimal: the pi entry's own timestamp when present, else the publish time
   text       redacted, escaped, cut; absent on reset, skipped and end
   tool       on tool-call and tool-result only: [A-Za-z0-9_.:-]{1,64}, else "?"
@@ -10393,11 +10791,10 @@ publisher cannot drift.
   `usage`, `custom`, `session_info` and `label` entries, a provider's error message, and the bytes of a line that did
   not parse.
 - **A steering message in the stream** (issue #646, `INT-STEER-INBOX-CONTRACT`). A message the runner handed to pi is
-  persisted as a `custom_message` entry of type `pi-dispatch-inbox`, so it appears as one `note` whose `text` is
+  persisted as a `custom_message` entry of type `pi-dispatch-inbox`, so it appears as one `steer` whose `text` is
   `pi-dispatch-inbox: ` followed by the framed text the worker wrote (the heading, the attribution, the no-authority
   sentences and the fenced message), redacted, escaped and capped at `LIVE_TEXT_MAX` like any `text`. The entry's
-  `details` (the id, the mode, the source and the ack MAC) never reach the stream. No mapping was added for it: it is
-  the existing custom-message rule above. The note appears only once pi persisted the message (its `message_end`),
+  `details` (the id, the mode, the source and the ack MAC) never reach the stream. Only the exact inbox custom type gets the `steer` kind; other custom messages keep the note rule above. The entry appears only once pi persisted the message (its `message_end`),
   so a message still queued, written, withdrawn or late is not in the stream. With `PI_LIVE_TRANSCRIPTS=0` nothing is
   published, although a steer-armed attempt's transcript file is still tailed for its acks (`stream: false`).
 - **`reset`**: the source file shrank, was replaced or had its first line rewritten; the entries after it start the
@@ -10442,6 +10839,12 @@ publisher cannot drift.
   and marked truncated. The fleet reader's `transcriptSince` and `transcriptMeta` run these on its own client,
   bounded at 2 s.
 - **Acceptance**: `REQ-LIVE-TRANSCRIPT` (b) to (e).
+
+- **AMENDED 2026-10-28 (#747), `steer`.** `LIVE_KINDS` includes `steer` for a delivered custom message whose
+  `customType` is exactly `pi-dispatch-inbox`; its text remains the redacted delivered message with attribution.
+  The ack details never leave the publisher. Consumers that do not recognize `steer` render it as a note, just as
+  any unknown kind. No key, field, cap, TTL or outcome vocabulary changes. Tests:
+  `worker/test/live-transcript.test.mjs`, `admin/test/console-transcript.test.mjs`.
 
 ## INT-RUN-PROGRESS-KEY
 
@@ -10671,7 +11074,24 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   `<scaffold name>.file`, the service's verdict on the file it reads, and `<scaffold name>.file-shell`, this shell's);
   else `<section>.<n>`, the check's place in its section on that run (`DOCTOR_SECTIONS`, `--live` read-backs in
   `live`). A repeat gets `-2`, `-3`. A reader matches on named ids only: a derived id is stable for one host's
-  configuration, not across hosts. Both lists are pinned against `doctor.mjs` by a test.
+  configuration, not across hosts. Both lists are pinned against `doctor.mjs` by a test. AMENDED 2026-10-25 (#737,
+  PR 3a): two more named ids. `egress.proxy` says whether the egress proxy runs, on each venue that has one: docker's
+  proxy line carries it, and so does the line doctor prints in its place for a running proxy that is not this
+  deployment's (or is out of date), which takes the id from the proxy's check (`proxyCheck.id`); rootless Podman's
+  proxy line carries it too, so a host on both venues publishes `egress.proxy` and `egress.proxy-2`, and a reader
+  of the proxy takes both and judges the worse. `provider.key` says whether the provider's key is found where the
+  worker looks (the provider key line, not drawn for a malformed `PI_PROVIDER`, whose shape row is the one line).
+  Every named id is written at ONE site of `doctor.mjs`, except those in `REPEATED_CHECK_IDS`
+  (`{ "egress.proxy": 2 }`: the proxy is a different container on each venue, each judged by its own line, and the
+  question a reader asks of either is the same), and the test counts the literal sites against it. No id names a
+  forge's credentials, because no one check holds them: the `github` section alone prints about twenty lines across
+  its three auth sources, and the other forges print theirs under `forges`; a reader judges those by the section part
+  of their derived ids, which `DOCTOR_SECTIONS` pins. AMENDED 2026-10-25 (#737, PR 3b): the console's first run is
+  that reader (`firstRunState`, `admin/src/doctor-view.mjs`): over every host's readable record it takes the worst
+  level of `egress.proxy` and its repeats, the worst of `provider.key` and its repeats, and, for a deployment with a
+  forge trigger, the worst of every check whose id's section is `github` or `forges`; a record with a `provider`
+  derived id (`provider.<n>`) and no `provider.key` is a doctor older than the named id, and is said so. It reads no
+  derived id's number.
 - **Content rule** (`redactText`, applied by the writer), in this order: invisible characters (zero-width, joiners,
   marks, the soft hyphen, the byte-order mark) are deleted, and control, bidi, line and paragraph separator characters
   are spaces; every value of a secret-named variable in doctor's resolution (and the `.env` values
@@ -10716,10 +11136,313 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   ("doctor publishes one record per run", "publishing is best effort"), worker/test/doctor-spawner.test.mjs,
   admin/test/doctor-view.test.mjs, admin/test/console-pages.test.mjs (the Fleet fixtures).
 
+## INT-DEFER-REASON-KEY
+
+**The worker → Valkey → the admin console's waiting reader.** Why the worker put a job that has not started back on
+the delayed set, in the worker's own words, written at the moment it defers (issue #737, PR 3a,
+`DES-WAITING-REASONS`). The key, the closed vocabulary and every field's rule are ONE leaf,
+`worker/src/defer-reasons.mjs`, exported as `@edgehero/pi-dispatch/defer-reasons` (`./defer-reasons` in the worker's
+exports map). It imports nothing, so the console imports it without the worker's dependencies, and the writer and the
+reader cannot drift on the key, a field, a reason or a bucket. The writer is `worker/src/defer-write.mjs`
+(`makeDeferTo`, worker only, never loaded by the admin); the readers are the admin's `readWaiting` and
+`readWaitingRow` (`admin/src/read-model.mjs`); besides the writer itself, the one deleter is `removeQueuedJob`
+(`INT-CANCEL-CHANNEL-CONTRACT`).
+
+```
+  defer:job:<jobId>   HASH, one per job id, with its own TTL; the fields in DEFER_FIELDS order, the readers' HMGET
+    why         the reason, a key of DEFER_WHYS (below)
+    at          epoch ms on the deferring worker's clock: when it wrote the record (a retry's: the reading its delay is from)
+    until       epoch ms: the instant it moved the job to, the very value it hands `moveToDelayed`
+    project     the job's project id, as this pickup resolved it, when it has one
+    host        the deferring worker's name, as the registry names its row
+    holder      a job id the wait is on: the chained parent, the run a recovery continues, or the holder of the target
+    endpoint    the model endpoint's id (`endpoint`)
+    budgetWhy   the host budget's verdict word: `budget`, `share`, `running-here` or `unseeded` (`host-budget`)
+    trigger     the job's matched trigger index, `job.data.trigger.matched.index`, 0-based
+    attempt     the attempt a retry will be (`retry`)
+    attempts    the job's total attempts, `opts.attempts` (`retry`), so a reader need not read `opts`
+    n           the writer's nonce, 16 hex characters; never returned by a reader
+```
+
+- **Who writes it.** Every gate of `makeProcessor` that puts a job back on the delayed set goes through ONE function,
+  `deferTo(job, token, untilMs, why, extra)`: it writes the record, then calls `job.moveToDelayed(untilMs, token)`,
+  then throws BullMQ's `DelayedError`, the move and the throw the gates always made (the class is handed in by the
+  processor, which imports bullmq, so the processor's own `instanceof` still tells a deferral apart). No module in
+  `worker/src` moves a job to the delayed set except `defer-write.mjs`, which a source-shape test holds. Before each of
+  the four `InfraRetry` throws (the netns keeper loop's three and the processor's own retryable failure),
+  `noteRetry(job, { project })` writes the `retry` record, because BullMQ delays that job itself after the throw, where
+  no gate can say why: only when `retryDelayOf(job)` knows the delay, which mirrors the pinned BullMQ 5.80.4's retry
+  decision and builtin backoffs (`attemptsMade + 1 < opts.attempts` and not discarded; a number or `fixed` waits
+  `delay`, `exponential` waits `round(2^attemptsMade * delay)`), and is null, so nothing is written, for a jittered or
+  custom backoff and a delay at or below zero. Its `until` is the worker's `now()` plus that delay, `attempt` is
+  `attemptsMade + 2` and `attempts` is `opts.attempts`.
+- **The reasons** (`DEFER_WHYS`, closed: each its bucket and the sentence a console shows, whose `{placeholders}` the
+  console fills from the record's own fields, escaped, times drawn as `<time>`):
+
+  | Reason | Bucket | The gate |
+  |---|---|---|
+  | `pause-window` | pause | a scoped pause window |
+  | `size-never-fits` | slot | a job size that never fits this host, on a fleet's shared queue, which another host may take |
+  | `host-slot` | slot | this host's job slots across its queues, on a host without a host budget |
+  | `scope-folder`, `scope-repo` | slot | a folder's or a repository's concurrent limit, in process or the fleet lease |
+  | `chained` | run | the same slot, for a job with a `parentJobId`; `holder` is that parent |
+  | `scope-project` | slot | a project row's concurrent limit |
+  | `endpoint` | slot | every slot of a model endpoint; `endpoint` is its id |
+  | `host-budget` | slot | the host budget; `budgetWhy` is its verdict |
+  | `bundle-profile` | slot | a host that serves the job's secret bundle profile |
+  | `recovery-wait` | run | a recovery whose run's attempt still runs; `holder` is that run |
+  | `wait-after` | check | an `after` hold |
+  | `wait-hold` | check | a wait check that said not yet, or could not tell |
+  | `wait-throttled` | check | the check lease denied, on this host's or the fleet's |
+  | `wait-supersede` | check | the supersede probe could not answer; `holder` is the delivery holding the target |
+  | `wait-aborted` | check | a wait check a restart or a cancel stopped |
+  | `wait-unclear` | check | a wait check that answered what the gate cannot read |
+  | `podman-restart` | ready | rootful Podman's service, restarting |
+  | `netns-keeper` | ready | the rootless network keeper, too young |
+  | `retry` | retry | an infrastructure retry's backoff (`noteRetry`) |
+
+  The buckets are `DEFER_BUCKETS`, in the order a console shows them: `slot`, `run`, `check`, `retry`, `pause`,
+  `ready`, `paused`, `due`, `unknown` and `none`, each with a title and a short form (`DEFER_BUCKET_WORDS`). No reason
+  is `paused`, `due`, `unknown` or `none`: a reader gives these four itself. `due` comes first: a delayed job more
+  than `WAITING_DUE_GRACE_MS` (10 s, the admin's `read-model.mjs`) past its due instant, the delayed set's score read
+  against the read's own clock, is `due` whatever its record says, and its line is the leaf's `DEFER_DUE_SENTENCE`,
+  "Due since {due}; no worker has taken it", which no worker records, since the job is overdue exactly because no
+  worker has looked at it since. Then `paused`, a job in the paused list or in a paused queue's wait list or
+  prioritized set (the queue's meta hash has a `paused` field at all, whatever it holds, as BullMQ 5.80.4 reads it).
+  Then `unknown` ("A reason this console does not know", short "Unknown reason"), a delayed job whose record names a
+  reason within the reason charset (`DEFER_WHY_RE`) that the table does not hold, most often a newer worker's, whose
+  line names that reason's word with "no explanation yet"; and `none` ("No reason was recorded"), a delayed job with
+  no record it can use (none at all, an earlier episode's, or one whose reason fails the charset) that is not held on
+  `run.waitFor` (a held one with none is `check`). Each title is true of every job in its bucket, which is why a
+  reason a console cannot explain has a bucket of its own rather than `none`'s "No reason was recorded". A
+  source-shape test holds every reason to a site that writes it, and every site to a reason of the table.
+- **Field rules**, judged on the way in by `deferHsetArgs` (a field that fails its rule is left out and the record is
+  still written; a reason outside the table throws `RangeError`, a defect at the call site, and nothing is written)
+  and on the way out by `parseDefer`: `at` and `until` decimal integers with no leading zero from 0 to
+  253402300799999 (`DEFER_TIME_MAX_MS`, 9999-12-31T23:59:59.999Z, the last instant a UTC date-time can be written
+  with a four-digit year, so a console that draws an instant's first sixteen characters as `YYYY-MM-DD HH:MM` can
+  always draw one; it is not the latest instant a JavaScript Date holds, 8.64e15 in the year 275760, whose ISO form
+  writes the year as six digits with a sign, which those sixteen characters would draw as another date); `project`
+  `DEFER_PROJECT_RE` (a copy of `project-id.mjs`'s `PROJECT_ID_RE`); `host` `DEFER_HOST_RE` (a copy of
+  `worker-name.mjs`'s `WORKER_NAME_RE`); `holder` `DEFER_ID_RE`, `[A-Za-z0-9._:-]{1,200}` (the admin reader's
+  `RUN_ID_RE`); `endpoint` `DEFER_ENDPOINT_RE` (a copy of `model-endpoints.mjs`'s `MODEL_ENDPOINT_ID_RE`);
+  `budgetWhy` `DEFER_WHY_RE`, `[a-z][a-z0-9-]{0,31}`; `trigger` 0 to 9999; `attempt` and `attempts` 1 to 1000; `n`
+  `DEFER_N_RE`, 16 lowercase hex characters. The leaf carries the four copies because it imports nothing, and
+  `worker/test/defer-reasons.test.mjs` imports the sources and holds each copy to its source byte for byte. So every
+  value is an id, a name, a closed word or an integer: never a path, a repository name or payload text
+  (`INT-HOST-REGISTRY-CONTRACT`'s content rule).
+- **The write, then the move.** `writeReason` sends ONE `MULTI` of `DEL`, `HSET` and `PEXPIRE` on the key, so a reader
+  never sees this deferral's fields mixed with an earlier one's, raced against `DEFER_WRITE_TIMEOUT_MS` (2 s), and
+  always BEFORE the move, so the record is in place the moment the job is delayed. The bound is load-bearing: the
+  worker's client queues a command during an outage rather than rejecting it (`maxRetriesPerRequest: null`), so an
+  unbounded write would hold the deferral for the whole outage. The record is ADVISORY and fails open: a write that
+  fails, errors in its reply or outlasts the bound changes nothing about the deferral, and the job is moved all the
+  same. So the gate waits for the write at most the 2 s bound, and a deferral never fails for its reason. Nothing is
+  written where the processor's client has no `multi` (a bare test wiring, which then moves exactly as it always did)
+  or the job has no string id.
+- **The TTL**: `deferTtlMs(until, at)`, the time until the job is due plus `DEFER_TTL_SLACK_MS` (60 s), and never
+  less than 60 s, so the record outlives the job's promotion and the pickup that follows it.
+- **A timed-out MULTI may still land.** The bound stops the waiting, not the command: a queued MULTI runs when the
+  connection comes back. So a timed-out write still answers its nonce, and the compare-and-delete below goes out on
+  the same connection after it, so it runs after the MULTI if that lands at all. A record that lands for a job that
+  ran meanwhile is never read, since the job is not delayed, and expires with its TTL.
+- **A move that rejects** (a lost lock, Valkey gone) leaves a record for a job that is not delayed, so `deferTo`
+  removes ITS OWN record by a compare-and-delete on the nonce (`DEFER_CAD_LUA`: `DEL` only while `HGET n` is this
+  write's), bounded by the same 2 s with its own failure swallowed, and rethrows the move's rejection unchanged, so it
+  reaches BullMQ's failed-attempt handling exactly as a raw `moveToDelayed` rejection always did. A plain `DEL` could
+  remove the record another worker wrote for a later deferral of the same job id.
+- **The log, once per outage for each queue a worker drains.** The first failed write says
+  `defer_reason_unwritten { why, reason }`, `reason` a fixed word (`timeout`, `threw`, `rejected`, `error-reply`) or
+  an errno-shaped code, never an error's message (it can quote a URL); nothing more is said until a write succeeds,
+  which says `defer_reason_restored { why }` once. One writer per processor, and a worker runs one processor per queue
+  it drains (`createWorker`'s `[QUEUE, hostQueue]`: the shared queue and, on a host with one, its own), so one episode
+  spans every job that processor defers, never a line per wake, and a worker with a host queue says each line once per
+  queue. Every line goes through one guarded call: a logger that throws loses its line, never the deferral, and the
+  episode's state is set before the line, so it holds even when the line is lost.
+- **Readers start from the delayed set; the record alone proves nothing.** A record can outlive its deferral (a late
+  MULTI, a delete that failed) and a job can be delayed for a reason nobody recorded, so a reader lists the delayed
+  set first (`ZRANGE ... WITHSCORES`) and reads the records (`HMGET defer:job:<id>` of `DEFER_FIELDS`, in that order)
+  of the ids it found there only. The job's due time is BullMQ's own score: at 5.80.4 a delayed job's score is
+  `due * 4096 + counter` (`getDelayedScore.lua`; `DELAYED_SCORE_SHIFT`), so its due time is `floor(score / 4096)`
+  (`dueOfScore`, null for anything but a non-negative number or a non-empty string, so a missing member never reads
+  as a due time at the epoch, and null for a due time past `DEFER_TIME_MAX_MS`, since a score anything with the URL
+  wrote can be any double and such an instant has no date a console can draw). Every other instant the admin's
+  reader hands on from a hash is held to the same bound (`instantOf`, null past it): a job's enqueue instant and a
+  scheduler run's slot (`queuedAt`), a hold's `since` and `after`, and each answer's `at`; and the console draws an
+  instant only where `utcText` draws one, a whole number of milliseconds from 0 to `DEFER_TIME_MAX_MS`, the year
+  9999's last, past which it says "unknown", as it does before 1970 (`drawable` is `utcText`'s own answer). So a
+  console's line never says "at unknown": an instant no date can show is a missing value, and a sentence missing one
+  says its bucket's title instead (`waitingLine`). `readWaiting` reads a record whose `until` disagrees with that due
+  time (outside `until` minus 5 s to the later of `until` and `at` plus 5 s, `DEFER_STALE_MS`) as no reason at all,
+  an earlier episode's, never as the old reason. The leaf also holds `isSchedulerNext`: a `repeat:` job is its
+  scheduler's CURRENT next run only when its id is `repeat:<scheduler>:<the scheduler's score in the queue's repeat
+  zset>` (BullMQ's `isJobSchedulerJob.lua`).
+- **`parseDefer(values)`**, the HMGET reply in `DEFER_FIELDS` order: null when there is no `why` (absent, null or
+  empty), else every field, each null when absent or failing its rule. A `why` within `DEFER_WHY_RE` that the table
+  does not hold is read as unknown (`known: false`, bucket `unknown`): a newer worker's reason an older console has no
+  words for, which the console says by its token (since #737 PR 3b on the overview too, to every role: the word is of
+  the reason charset, and "No reason was recorded" would be false). A `why` outside the charset is no reason at all
+  (`why: null`, bucket `none`), and `readWaiting` reads such a hash as no record at all, so a held job with one still
+  waits on its check. The nonce is never returned.
+- **Deleted** by the writer (the `DEL` that opens each write, and its compare-and-delete after a rejected move), by
+  `removeQueuedJob` once the job it removed is gone, bounded and best effort, and otherwise by its TTL. Nothing else
+  deletes it, and NO DECISION READS IT.
+- **The falsification test**: delete every `defer:*` key while the fleet runs, and every job is deferred, moved and
+  run exactly as before; a console then says "No reason was recorded" for a delayed job (one held on `run.waitFor`
+  still reads as waiting on a time or a check, from its `wait:job` hash) until its next deferral writes one, and a
+  job past its due by more than the grace reads "Due since ...; no worker has taken it" with or without one. It is
+  not the Redis state `OQ-008` refuses: it describes delayed jobs, which Valkey already holds, expires with them, and
+  instructs nobody.
+- **What a record cannot promise** (`DES-WAITING-REASONS`): a failed write leaves the previous deferral's record, until
+  it expires, beside a job now delayed for another reason; a job BullMQ delays by itself (a raw gate rejection the
+  queue retries, a backoff `retryDelayOf` cannot know, a job added with a delay) gets no fresh record. Both show as a
+  record that is missing or whose `until` is not the job's due time, which is how a reader tells a record that
+  describes the wait from one that does not. Neither is shown once the job is more than the grace past its due:
+  it is then `due`, whatever its record says.
+- **Acceptance**: worker/test/defer-reasons.test.mjs (the closed tables, the leaf imports nothing, the four copied
+  rules, `parseDefer` against hostile values, the TTL, `dueOfScore`, `isSchedulerNext`, and "INT-DEFER-REASON-KEY
+  restates the leaf: its reason table is DEFER_WHYS with each bucket, its fields block DEFER_FIELDS, its bucket lists
+  DEFER_BUCKETS", which reads this section's reason table, its fields block and both of its bucket lists and holds
+  each two-way to the leaf), worker/test/defer-write.test.mjs (the write before the move as one transaction, a
+  failed or slow write still moves, the raw rethrow after the compare-and-delete, one log episode, a logger that
+  throws, `retryDelayOf`, `noteRetry`, "BY SHAPE: no module in worker/src moves a job to the delayed set except
+  through defer-write.mjs", "BY SHAPE: every reason in the table is written by a site, and every site writes a reason
+  from the table"), worker/test/defer-write.integration.test.mjs (a real Valkey and BullMQ: the record and the
+  score's due, a failed write, a wrong token, a retry's record against BullMQ's own delay), the gate tests that record
+  each site's reason (wait-gate, pause-gate, scope-mutex, host-budget-gate, podman-restart-hold, netns-keeper-young,
+  processor-bundles), admin/test/read-model-waiting.test.mjs (the reader, "readWaiting: every instant it hands on is
+  one a page can draw, at most DEFER_TIME_MAX_MS: ..." among them) and admin/test/read-model-waiting.valkey.test.mjs
+  (the reader against a real Valkey and BullMQ).
+
+## INT-MANAGED-FORK-CONTRACT
+
+**Console/terminal -> queue -> worker -> runner**, issue #648 (`REQ-MANAGED-RUN-FORK`).
+
+- **Queue input**: `fork` is a closed object with `id` (32 lowercase hex), `fromJob` (1–200 run-id characters),
+  `fromEntry` (1–128 alphanumeric, underscore or hyphen), `position` (`before` or `at`), `sourceDigest` (64 lowercase
+  hex), and `rootKey` (32 lowercase hex). Optional `message` is at most 16,384 UTF-8 bytes and contains no NUL.
+  It carries no filesystem path or policy override. Optional top-level `thinkingLevel` is one of `off`, `minimal`,
+  `low`, `medium`, `high`, `xhigh`, `max`; compatibility with the effective model is checked before spend and again
+  in the runner. `forkPolicy` is the SHA-256 fingerprint of the current parsed trigger entry, re-read at pickup.
+  `forkReserveMicros` is the preview's reserved micro-dollar amount (a non-negative safe integer, or null where
+  no dollar reservation applies). Preview freezes provider/model and any effective positive per-job cost ceiling.
+  A zero-rated preview becoming paid, or a current paid cap greater than the confirmed reservation, returns
+  `fork-reservation-changed` before minting rather than silently increasing the authorized spend. A trigger with
+  `run.awaitInput: true` returns `fork-await-input-unsupported` before spend: parked replies do not yet preserve
+  fork namespaces. Recovery of an already admitted managed fork instead restores that fork's own durable checkpoint;
+  it does not reselect the original source entry. Recovery-attempt records remain unavailable as new fork sources.
+- **Session identity**: Root keys keep their existing derivation. A managed fork uses `<rootKey>.<id>`, stored at
+  `<PI_SESSIONS_DIR>/<rootKey>/forks/<id>/`; a same-repository pull request on the worker-derived fork branch
+  resolves that same lineage. Original and fork locks, canonical files and sidecars are separate.
+- **Publication**: Sources are published only after a completed exit 0 and a confirmed-dead container. A failed
+  infrastructure attempt cannot freeze the source identity of a later successful retry. Recovery attempts are not
+  published as sources in this release. Only an issue job that opted into transcript retention with `run.resume`,
+  or an explicitly requested managed fork, may prime a source. A configured session directory, derived root and
+  final per-job transcript file are required. Opted-out jobs are never archived merely because they have a live
+  transcript. A final exact quiet workspace point is captured before publication, even when `run.recover` was off. Live intermediate
+  points are available only where the existing recovery checkpoint path was armed and could pause the container.
+- **Private source artifacts**: `<PI_SESSIONS_DIR>/.fork-sources/<source-key>/manifest.json` and `transcript.jsonl`,
+  where `source-key` is the first 32 hex characters of SHA-256 of `fork-source` + NUL + run id. Directories are 0700,
+  files 0600, source opens reject symlinks and non-regular files. The manifest commit follows a durable transcript
+  write and binds version, run id, original session key, base SHA, venue, pi version, attempt, host, optional host
+  queue, creation time, transcript byte count/hash and a digest of that metadata. An existing source cannot be
+  replaced with different bytes. Retention defaults are seven days, 8 MiB per transcript, 256 MiB total source
+  transcripts, 1,024 source directories and 64 captured points per run. A separate `.workspaces` checkpointer keeps
+  historical snapshots, bounded by its 20 GiB store cap and conservative base admission. Archive mutations are
+  serialized within the worker; a busy optional archive is skipped by name. Unsafe base extensions leave a private
+  refusal marker, so selection returns `fork-unsafe-extensions` before a job can spend.
+- **Read failures and context**: Missing, expired, malformed, incompatible or digest-mismatched artifacts return
+  determinate `refused` results. Temporary filesystem failures (`EIO`, `EAGAIN`, `EMFILE`, `ENFILE`, `ETIMEDOUT`,
+  `EINTR`) return `unavailable` through source, point and restore reads, so pickup throws an infrastructure retry;
+  archive restore's `skipped` infrastructure answer is also retryable. The base ref and its commit/tree objects are
+  verified before clone. These source gates use the fork archive's own TTL/byte limits. Ordinary resume chain,
+  age and context-percent behavior is unchanged; a new fork does not inherit its source's stored occupancy estimate.
+  Changing models may change the context window, and this feature does not prove before spend that a selected
+  transcript fits that new window. No provider context-error classification is claimed here.
+- **Exact points**: Private `points/<hash>.json` files bind entry id, `at` position, archive sequence, base SHA,
+  transcript byte offset and SHA-256. A selected **before** point resolves its parent's **at** artifact, except
+  first-user **before**, which explicitly uses the original base. The retained prefix must end at that exact safe
+  tree entry with no pending tool call. Partial workspace snapshots and snapshots that dropped ignored files are
+  unavailable. Recovery's default newest-two retention is unchanged; only the fork archive enables history reads.
+- **Runner environment**: An image must declare capability `fork` when `job.fork` or `job.thinkingLevel` is set,
+  otherwise pickup returns `job-image-fork-unsupported`. `PI_FORK_ENTRY` and `PI_FORK_POSITION` are emitted together
+  from validated job lineage, and require a staged `PI_SESSION_FILE`. Combining fork selection with command/recovery
+  flags is refused. Recovery of an existing managed fork omits `PI_FORK_ENTRY` and `PI_FORK_POSITION` and uses its
+  own checkpoint with the normal recovery flags instead.
+  `PI_THINKING_LEVEL` is emitted only when selected. All three names are reserved and structural, never trigger-bound
+  secrets. The runner branches its own staged copy using pinned pi's tree APIs and records effective model/thinking
+  changes before continuing. No raw source archive is mounted.
+- **Console**: Operator-only `GET /api/fork-points?id=<run-id>` returns entry id, parent id, closed type/role metadata
+  and supported `positions`, never message text or an archive path. `POST /api/act/run-fork/preview` accepts `jobId`,
+  `entry`, `position`, optional `provider`, `model`, `thinking`, `message`; the browser form may send `point` as
+  `<entry>:<position>` instead of the separate entry/position fields. The ordinary single-use confirmation ticket,
+  audit-before-write, CSRF and write-role guards apply. Confirmation and pickup revalidate current policy and source.
+- **Run record**: Optional `fork` contains only `id`, `fromJob`, `fromEntry`, `position` and effective `model` (or
+  null), rebuilt through the closed lineage validator. `fromEntry` in a run record is restricted to pi's generated
+  eight-character lowercase-hex ids; an arbitrary custom entry id causes the optional lineage record to be omitted.
+  Operator message, raw transcript, source path and policy
+  payload are omitted. Optional `forkSource` records archive availability for an opted-in source attempt:
+  `{saved: boolean, reason: null or closed token, pointSkipped?: closed token}`. `forkArchiveFact` rebuilds those
+  fields against its closed reason vocabulary and maps arbitrary values to `unavailable`; successful source
+  publication has null reason, while a primed run that did not complete records `not-completed`. A failed optional
+  point capture may coexist with a successfully saved source. Archive failure is fail-open for the original job,
+  with its named reason retained in the record. Jobs that never requested source retention gain no archive fact.
+- **Constraint audit**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
+  `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED` and
+  `CONST-MERGE-NEVER-AUTOMATIC` **UNCHANGED, checked**: managed forks use normal container/admission gates, determinate
+  refusal results and exact pinned APIs, copy only their own transcript, log no message text, and create separate
+  reviewable pull requests without any merge action.
+
+## INT-APPROVAL-STATE-CONTRACT
+
+- **Declaration**: `run.gates` is a nonempty distinct string array, maximum 32 entries, maximum 80 characters per
+  action, matching `^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$`. `run.gateTimeout` optionally declares integer days 1..365;
+  `run.gateBudgetRaiseUsd` is an absolute one-container cap, strictly above `run.maxCostUsd`, only beside
+  `budget-raise`. All three travel at job level through normalized triggers, every forge filter and the queue.
+  They never become event payload fields. Gate declarations require resumable forge flows and arm `awaitInput`.
+- **Container input**: internal `PI_APPROVAL_GATES` is a JSON string array; internal `PI_APPROVAL_DECISION` is JSON
+  `{requestId, action, toolCallId, decision}` with no human text. `decision` is approved, declined or question. The accepted human text is staged in the existing read-only `event.json` comment body; the runner reads it once before extensions or provider calls and combines it with the decision metadata. Only the host-owned
+  decision reaches this input: a queued `approvalDecision` is discarded. Both variables are reserved from secrets.
+  Gate jobs require image capabilities `approvalGates` AND `exitAuth` before mint or reservation.
+- **Runner output**: authenticated exit 0 / `awaiting-approval` carries `approval: {action, toolCallId}` only when
+  the run ends on its own successful terminating approval tool. Unknown actions and shadowed tools cannot park.
+  Runner exit-2 reasons: `approval-config-invalid`, `approval-without-session`, `approval-shadowed`,
+  `approval-decision-invalid`. Summary and decision text never enter the exit metadata or public record.
+- **Private state**: `run:approval:request:<requestId>` stores version 1 normalized request identity, state, and
+  optional immutable decision and claimed job ID. `requestId` is SHA-256 of requesting queue job ID, NUL, tool-call ID.
+  Request identity binds run ID, forge/repository/target, action, call ID, config digest, session key, exact canonical SHA-256 transcript digest, host, optional declared host queue, created
+  time and optional expiry plus private original queue data. The target key is derived from forge/repository/type/
+  number; `run:approval:due` is a sorted deadline index, with a hashed per-host deadline index to prevent a down host starving another host. No pending key TTL implements expiry. Terminal infrastructure failures finish their same-job claim; nonterminal retries retain it, and pending bounded terminal finalizers join worker shutdown before Redis closes. Unknown/missing versions or malformed state are determinate refusals, never authority. State transitions are
+  pending to decided to claimed to finished; withdrawn live policy may retire an unanswered/decided request or the same job's claim directly to finished, preserving any accepted decision; the first decision wins, same-decision delivery and same-job claim are
+  idempotent, another claim refuses. Finish removes the active target mapping and retains the immutable decision for 32 days (longer than queue retention).
+  Private decision text is bounded to the existing 8 KiB answer limit and is never logged as metadata.
+- **Reply binding**: the queue binds a gated comment to the active request observed at ingress; an explicitly named
+  different request is rejected before enqueue. A reply that arrived before publication stays unbound until the
+  held-reply path enqueues it after publication. The worker refuses an unbound decision. The console carries the
+  request ID read from its original parked record; its preview and confirmation cannot approve a later request.
+- **Session binding**: host preflight checks a real key directory, a bounded regular canonical transcript, age/TTL/
+  lineage limits and the unanswered original call before spending. Reused provider tool-call IDs cannot transfer a decision to different transcript bytes. The normal session resolver must still stage a
+  resumed session with the request's exact key; pi's projected context is independently checked in the runner.
+- **Public record**: optional `approval` is rebuilt as `{requestId, action, decision?, actorKind?, actorId?, decidedAt?}`.
+  Request IDs are 64 hex; actions must be declaration tokens. A decided record carries approved/declined/question,
+  forge/operator/panel/system actor kind, SHA-256 actor identifier (or `expiry`/`revocation` for system), and integer milliseconds.
+  Model summaries, human reasons, names and arbitrary nested fields are discarded. No approval is inferred from
+  job data when building a record.
+- **Expiry**: only a persisted system decline and the exact `approval-expiry-<requestId>` job, carrying the same
+  request ID and `expiry-<requestId>` delivery ID, can continue an expired request. The host checks due state each
+  minute, including overdue declines left by enqueue failure. A deterministic queue ID prevents repeated sweeps
+  making multiple continuations. The comment marker is a private NX key retained for 32 days; failure to post remains the existing
+  adapter's named failure. A later policy refusal finishes the request without granting authority to another job.
+- **Traces to**: `REQ-APPROVAL-GATES`, `DES-APPROVAL-DECISION-IS-HOST-AUTHORITY`,
+  `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `INT-SESSION-STORE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-28 (#649) | Issue #649: added `INT-APPROVAL-STATE-CONTRACT`; trigger fields, container env, authenticated exit metadata and optional id-only run audit extend their existing contracts. Run-record reason enum amended. `INT-SESSION-STORE-CONTRACT` derivation, promotion and cold-start rules UNCHANGED, checked; approval continuations refuse any cold start. |
+| 2026-10-28 (#648) | NEW `INT-MANAGED-FORK-CONTRACT`: managed issue-run forks use immutable source identity, exact retained transcript/workspace boundaries, independently derived branches and session lineage, current policy and normal admission. Console and terminal share paid preview/confirm/audit. Pinned pi tree semantics, model/thinking recording, named unavailable points/venues, bounded private retention and new zero-spend/worker/UI tests are specified. Existing host-local chat fork and recovery newest-two retention remain unchanged. Relevant constitutional constraints UNCHANGED, checked as recorded in `INT-MANAGED-FORK-CONTRACT`. Final cross-feature checks: `run.awaitInput` managed forks refuse before spend as `fork-await-input-unsupported`; recovery of an existing managed fork restores its checkpoint without re-forking, while recovery-attempt records are not new sources. `REQ-AWAIT-INPUT` and ordinary canonical reply behavior UNCHANGED, checked. |
 | 2026-08-30 | Issue #57, the identity slice. **NEW `INT-HOST-REGISTRY-CONTRACT`**: the `host:` keyspace -- a live SET plus one PEXPIRE'd HASH per worker, every row a host's own self-description and none of it an instruction to anybody. Three of its clauses are the load-bearing ones. The CONTENT RULE (names, integers and digests; never a path, a credential-bearing URL, a repository name or operator free text) is `targetFor`'s `local:<basename>` discipline applied to a Valkey value, and it earns its strictness from the READER: the panel is where an operator screenshots and doctor prints these rows. The TTL is refreshed on every beat, which REVERSES `budget.mjs`'s stated set-once rule, and the reversal is recorded with its reason rather than left to be discovered -- a counter whose TTL refreshes stops being a window, while a lease's expiry IS its liveness claim, and the in-repo precedent (`wait-state.hold` re-expiring the supersede lease) is lease-shaped. And the falsification test any later addition must pass: delete the whole `host:*` keyspace while the fleet runs, and every host must behave exactly as it did before -- which is what distinguishes this from the Redis-side toggle `OQ-008` refuses, since deleting THAT loses the operator's edit. `tz` is carried because a cron pattern has none: `triggers.json` has no `tz` field on a cron entry and BullMQ hands the pattern to cron-parser with no zone, so one pattern is two different instants on two hosts in different zones -- unlike `pause-windows.json`, whose every window is already zone-explicit and therefore already fleet-correct. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record gains `host` as key 25, additive, nullable, unconditional and in tail position. The admissibility paragraph engages this record's own sentences rather than sidestepping them -- `host` holds no attacker-chosen string absolutely (no path from any payload reaches it, it is fixed once at boot, and its charset excludes the separators that would let it be path-shaped), but it is NOT anonymous, since the default is a hostname and a personal machine's hostname is often a person's name. The honest word is operator-disclosed, and `PI_WORKER_NAME` is the documented answer for anyone who wants something else. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the worker name is environment-only and deliberately not an overlay key -- the registry publishes it before the first per-job settings read, and a name the panel could change mid-flight would rename a host between two of its own log lines. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no mount, flag or env var moves, and the name never enters the container. **Code evidence**: worker/src/host-registry.mjs -> makeHostRegistry, readLiveHosts; worker/src/config.mjs -> WORKER_NAME_RE, sanitizeWorkerName, defaultWorkerName; worker/src/run-history.mjs -> buildRecord; worker/src/start.mjs -> startWorker (the log closure, recordRun, the registry wiring); worker/src/image-preflight.mjs -> parseLabels. |
 | 2026-08-30 | v1.6.1, two corrections found by an adversarial pass over the #57 plan rather than by a failure. Both are places where a contract this file states was true of the code one level up and false one level down. **`INT-WAIT-PROFILES-CONTRACT` CORRECTED**: the check lease is released on every exit from the polled arm. It was acquired before the supersede claim and released only around the check loop, so both of the claim's exits -- the `wait-superseded` return and the unverified-holder re-defer -- left holding it. At the shipped default of one slot that wedged every wait check on the worker until restart, and it pointed at the wrong culprit: later held jobs throttled and recorded `wait-expired`/`max-wait-unchecked`, blaming deployment capacity for a leak. Reproduced by driving the real `makeProcessor`, and pinned by two tests whose mutation is the pre-fix block structure. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED, twice, and the pair is one finding**: this file has always said the record is PII-free by construction and that `session.reason` is a CLOSED enum, and neither was enforced where the container's copy is admitted. `parseExitTokens` returned the container's object VERBATIM whenever `total` was numeric, so an invented key -- a path, a branch name, a string read out of the workspace -- reached the durable record; `parseExitSession` accepted any string as `reason`. Both now rebuild: `tokens` from a closed twelve-key list in the runner's own emission order, so a conformant object round-trips byte-identically and an omitted key stays omitted rather than becoming a measured zero; `reason` against the enum this file publishes. The asymmetry that made this findable is that `usage` was already given exactly this treatment (`parseExitUsage`'s rebuild, with the reason written on it) and its two siblings were not -- an oversight, not a decision. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: all three fields stay read-only telemetry feeding no classification, and no exit code moves. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no mount, flag or env var moves, and a conformant image's exit line is accepted exactly as before. **Code evidence**: worker/src/index.mjs -> makeProcessor (the polled arm's try/finally); worker/src/run-history.mjs -> rebuildTokens, SESSION_REASONS, parseExitTokens, parseExitSession. |
 | 2026-08-30 | Issue #230, the doctor and docs slice. **`INT-WAIT-PROFILES-CONTRACT` AMENDED**: it now carries the LOAD-TIME half that `INT-TRIGGERS-FILE-CONTRACT`'s `run.waitFor` bullet has pointed at since the grammar landed, four checks, with the FAILURE-versus-warning line drawn at whether something actually refuses -- a worker that will not start or a delivery that will not run, never a preference. An undeclared profile a trigger names (`secretProfiles`' check exactly, the file being valid while the deployment is not); a declared path that does not resolve to an executable regular file, probed the way the checker probes it at spawn, symlinks included, so doctor and the gate cannot disagree about what will run; a `PI_WAIT_PROFILES` that does not parse, REPORTED rather than thrown since the operator running doctor is very likely running it because the worker refused to boot on that exact line; and an `after` beyond `PI_WAIT_AFTER_MAX_MS`, which refuses every delivery at first pickup and which doctor can see before anything is enqueued because it holds both the instant and the ceiling. Two of those four were settled by TESTING the block rather than by writing it, and both inverted a decision the first draft had made. The parse check is now asked UNCONDITIONALLY: `loadConfig` parses `PI_WAIT_PROFILES` on every boot whether or not a trigger holds anything, so a garbled value is a worker that will not START, and the `waiting > 0` gate hid it from exactly the operator the check exists for -- reached by the ordinary sequence of declaring the variable, restarting, and only then writing the trigger. And a declared profile NO trigger names now only warns, because nothing looks it up and failing the whole command on a retired `.env` entry is the same always-on advisory the gate exists to prevent. Everything else stays behind `waiting > 0`, which is why `readTriggerFacts` grew `waiting`, `waitProfiles` and `waitAfters`: a deployment that holds no jobs must hear nothing about a feature it does not use. One gap is recorded rather than closed: a resolver gets a group/world-writable warning and a wait profile does not, so the docs say plainly that doctor checks what a check IS and not who may edit it. The VERSION FLOOR is the deliberate exception and is disclosed once as `ok: true` -- doctor runs on the worker host and cannot see the receiver's installed version, so an unconditional warning would be the always-on amber the panel's own design rejects, and the skew is already enforced where it can be by the worker's own `wait-skew` refusal, which the line names rather than duplicates. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no field, no load refusal and no pre-spend refusal moved; this slice builds the half it already promised. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: doctor writes no record and the reason enum gains nothing. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the eight `PI_WAIT_*` keys still join no `KNOWN_KEYS`, and doctor reads them from the environment for the same reason the gate does. Operator docs land with it: NEW `docs/wait-for.md` on `docs/scoped-limits.md`'s section shape, organised by CHECK SHAPE with the vendors as instances rather than one section per vendor, carrying the version floor in `docs/secrets.md`'s own words and leading its traps with the receiver skew, which is the one failure whose symptom is a run that looks entirely correct. `docs/scoped-limits.md`'s "deferrals are visible only as the delayed count" caveat is corrected rather than deleted -- a SCOPE deferral still is, a wait no longer is, and the reason only one of them earned a section is stated so the asymmetry does not read as an oversight. One defect found while building it is fixed here rather than filed, and it was not in the new code alone: both `parseWaitProfilesSafe` and the `parseSecretProfilesSafe` it was copied from returned the profile table with an `error` key beside the profiles, and `error` passes the profile charset -- so `PI_SECRET_PROFILES=error:/opt/pi/r.sh` declared one profile whose PATH then read as a parse failure, and doctor reported the variable as unparseable, quoted the path as the message, and skipped every check below it on a deployment that was entirely correct. Both return an envelope now and both are pinned, since the second was the first's copy and a fix to one alone would leave the older half broken. No contract term moved: `INT-WAIT-PROFILES-CONTRACT` and `INT-TRIGGERS-FILE-CONTRACT` both already say what an undeclared profile does, and this is doctor failing to ask the question rather than the answer changing. The version floor those docs and doctor both state (worker 1.6.0, admin 1.6.0, receiver 1.4.0) names versions this tree does not yet carry, and that ORDERING is a dependency rather than an oversight: the release slice bumps all four package versions plus the wizard's `RUNTIME_VERSION` and `RECEIVER_VERSION`, and it must land before anything here is published, or doctor tells an operator to run a worker newer than the worker printing the line. **Code evidence**: worker/src/doctor.mjs -> readTriggerFacts, collectChecks (the wait block), statPath, parseWaitProfilesSafe, parseSecretProfilesSafe; worker/src/config.mjs -> loadConfig (the unconditional parse this mirrors). |
@@ -11044,3 +11767,14 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
 | 2026-10-22 (#710, PR 2, round 2) | Issue #710, PR 2, review round 2. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: no document gains or loses a field; the transcript's `outcome` and the stream's `done` event still carry the record's value (`policy`), and the console maps it to its word where it prints it (the page, the Progress panel, the browser's status line, the topology tip). **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: same payloads. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the runs filter's `outcome` is now held to that contract's outcome union (via `words.mjs`'s keys), so a value outside it is refused by name instead of matching nothing. **`INT-REASON-CATALOG` UNCHANGED, checked**: the short form is still derived from its sentences. |
 | 2026-10-22 (#710, PR 3) | Issue #710, PR 3: the run page leads with its outcome. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: no new route or event; the run page gains a first panel, `p-outcome` (the outcome banner), and a `panel` event's `html` may be the empty string, which empties and so hides its section (the run page's record panels with no record, and Progress and Chat for a run refused before it started). UNCHANGED, checked: `INT-CONSOLE-STATE-API` (`stateOf` and `/api/run` carry no new field; the run page's action checks are page data, never serialized), `INT-RUN-HISTORY-FILE-CONTRACT` (no record field is added; `refusedBeforeSpend` reads the existing `tokens`, `exitCode` and `budgetReserved`), `INT-REASON-CATALOG` (read, not changed: the banner and the nested sentences use `explainReason`, its `why` variants and its nested tables as they are), `INT-SANDBOX-CONTRACT` (the manifest is read through the same `readManifest`, `sandboxSyncRefusal`, `sandboxWindowRefusal` and `sandboxDeadline` the panel used). |
 | 2026-10-22 (#710, PR 3, round 1) | Issue #710, PR 3, review round 1. **`INT-SANDBOX-CONTRACT` AMENDED**: a "where the manifest-only policy lives" paragraph: the launcher table, the venue policy and the manifest-only refusals moved verbatim into `worker/src/sandbox-policy.mjs`, a new subpath export `@edgehero/pi-dispatch/sandbox-policy` with no package in its graph, re-exported by `sandbox.mjs` under the same names. No refusal, message or order changed. `worker/src/queue.mjs` gains `discoverHostQueuesReporting` (`{ names, incomplete }`), of which `discoverHostQueues` is the names, unchanged for the kill switch. `INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked. **Code evidence**: worker/src/sandbox-policy.mjs; worker/src/sandbox.mjs (re-exports); worker/package.json -> exports["./sandbox-policy"]; worker/src/queue.mjs -> discoverHostQueuesReporting; admin/test/console-bundle.test.mjs. |
+| 2026-10-23 (#710, PR 4) | Issue #710, PR 4: a truthful overview and readable numbers. **`INT-CONSOLE-STATE-API` AMENDED**: `/api/state` gains `refusals24h`, `{ count, top: [{ reason, count }] }`, the runs refused in the last 24 hours from `failures24h`'s window (an operator's cancel, `policy` with `operator-cancel`, is not counted), the five most frequent reasons each held to the record's token charset, null where `failures24h` is; the example shows it; an added key within `version: 1`, the same for both roles; whether a worker is online stays `hosts[].lastBeatAgeMs` (the overview counts at most 60000). **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: no route, event or payload shape changed; a `panel` event's `html` may now hold `<time datetime>` elements, which the served script localises after the swap, and the overview's panels arrive in their new page order. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no record field added; the refusals and a failed job's reason read the existing `outcome` and `reason`. **`INT-REASON-CATALOG` UNCHANGED, checked**: read through `reasonWords`/`shortSentence` as it is. **Code evidence**: admin/src/read-model.mjs -> refusalsIn, REFUSALS_TOP, newestReasonsOf, createFleetReader (`refusals24h`, `failed.rows[].reason`); admin/src/console/live.mjs -> stateOf, refusalsOf. |
+| 2026-10-23 (#710, PR 4, round 1) | Issue #710, PR 4, review round 1. **`INT-CONSOLE-STATE-API` AMENDED** (words only, no key changed): whether a worker is online reads `queue.workers` beside `hosts[].lastBeatAgeMs`; the overview says none is only when no host beat within 60000 ms AND `queue.workers` (BullMQ's connected workers, free of any host clock) is not above zero, so a script reproducing the overview's rule needs both. **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: a `panel` event's `html` may carry the new note and the Spend page's new `<time>` elements; no event or payload shape changed. **`INT-HOST-REGISTRY` UNCHANGED, checked**: the registry row and `readLiveHosts` are untouched (no PTTL read, no new field). **Code evidence**: admin/src/console/panels.mjs -> workersOnline, STALE_BEATS_TEXT, moneyHtml, COUNT_WINDOWS_UTC_TEXT; admin/src/panel.mjs -> usd2; admin/src/insights-html.mjs -> splitAtHtml, capWhenHtml. |
+| 2026-10-23 (#710, PR 4, round 2) | Issue #710, PR 4, review round 2. **`INT-CONSOLE-STATE-API` CORRECTED** (words only, no key changed): the round-1 row and its text named the BullMQ count `queue.workers`, a key `/api/state` does not have; it is the top-level `workers` (null when unknown, which the overview reads as 0), and the rule judges neither way while `fleetDegraded` is true. **Code evidence**: admin/src/console/live.mjs -> stateOf (`workers`); admin/src/console/panels.mjs -> workersOnline. |
+| 2026-10-23 (#737, PR 1) | Issue #737, PR 1: the Pulse foundation. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: a `panel` event's `id` may also name the shell's panel, `p-nav-parked`, the `<span id="p-nav-parked" data-panel>` inside the navigation's Parked pill, drawn on every live page and sent after that page's own panels by the same digest rule; its `html` is the count of unanswered parked runs, or empty when none waits or the count is unknown, and an empty one is hidden by the stylesheet. No event, field or route changed, and the client's `data-panel` guard is the same. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: no key added or changed; the navigation's count is drawn from the snapshot the page read (the same `parked` rows `/api/state` projects) or from the fleet reader's new `parkedCount()`, which no route exposes. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: the theme choice is no action and writes no row, and no row holds its cookie; no `kind` added. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked**: the theme cookie is not a session or a token and is never read as one. **Code evidence**: admin/src/console/shell.mjs -> NAV_PARKED_ID, navParkedCount, navParkedHtml, shellHtml; admin/src/console/pages.mjs -> panelIds, pagePanels; admin/src/console/page-css.mjs -> SHELL_CSS; admin/src/read-model.mjs -> createFleetReader (`parkedCount`); admin/test/helpers/console-pages-harness.mjs -> assertPanelsMatch. |
+| 2026-10-24 (#737, PR 2) | Issue #737, PR 2 (most of #711). **`INT-CONSOLE-EVENT-STREAM` AMENDED**: `end`'s data is `{"ended": <word>}`, never empty, the word a member of `STREAM_ENDS` (`idle`, `max`, `revoked`, `role`, `all`, `elsewhere`, `shutdown`) or null, and never `restart`; `shutdown` is the console stopping and not a sign-out (the page keeps itself, waits and asks `/api/whoami`; the terminal chat backs off and reconnects with its cookie, signing in again on a restarted console's 401 inside its retry loop); `elsewhere` ends a session's streams at once on a sign-out, and on a sign-in over its cookie once that sign-in's answer, with the new cookie, has gone out; on `shutdown` and `elsewhere` the page waits 2 s, asks `/api/whoami` and reloads only into the person it was drawn for, else goes to sign-in with `switched`; the terminal chat's once-a-minute re-login does not count a 401 saying `restart` or the first 401 after a `shutdown`, never an `end`, and at most once per stream that opened since the last sign-in; the request's `as=<name>.<role>` (`PERSON_PARAM`, the hub's stream and the transcript's), taken off before the page's query is parsed, a stream whose person is not the session's refused 401 `PERSON_CHANGED_STREAM` with `ended: "switched"` before any slot, none sent not checked, and `as` not read as a person on any other route; two new events, `stale` (`{"since": <ms or null>, "what": "tokens" or "data"}`, the hub time of the view's last good render, null when the hub holds none, and which failed) and `fresh` (`{}`), page streams only, a stream's state and its first message before any panel, each said once and again when it changes, a stream whose browser holds panels (a good render sent, a `Last-Event-ID`, or a `stale` told it) sent `stale` and no panel by a read-failed load and a first stream that holds none the degraded panels, never kept as what another stream of the view holds, a throw and an unreadable tokens file sending `stale` to every stream they were for, at subscribe only data and render judged, a client taking its stale state back on `fresh` alone; a tick that cannot read the tokens file ends no stream and sends no panel and no entry, only `stale` and the pings; the example shows the new events. **`INT-CONSOLE-STATE-API` AMENDED**: the 401 of every `/api/*` route and every write that needs a session is `{"error": "sign in first", "ended": <reason or null>}`, the `error` sentence as it was, with no Set-Cookie (it cleared the cookie before; a page's 303 and sign-out still do); the sign-in posts' own refusals (`POST /login`'s wrong token, `POST /login/code`'s refused link) carry `error` alone, and `switched` is never this 401's; a request with a session cookie while the tokens file cannot be used is `503` `TOKENS_UNUSABLE` with no Set-Cookie and the session kept, and `POST /logout`, which needs no session, ends every session its cookies name and is `200` with the clearing Set-Cookie whatever the file; a request whose `x-console-as` (`PERSON_HEADER`, the page's previews and confirms) names another person than the session's is `409` `PERSON_CHANGED` ("...; sign in again") with `ended: "switched"`, a write's with `html` (whose Look again the page sends to `/login?ended=switched`) and an audit row, and one without the header is not checked; a write's `503` carries the confirm bar's refusal as `html` too; `/api/run`'s errors say the same. `/api/state`'s keys and `version` UNCHANGED, checked. **`INT-CONSOLE-AUDIT-LOG` AMENDED, words only**: the row, the files, the chain and the closed vocabularies are as they were (no action, outcome or kind added; a confirm wraps the writer in `capturingAudit`, outside `auditedWrite`, and appends the same rows); the Verification bullet gains the opt-in `withLast`, which the audit page asks for: `last: {file, line, seq}` (the last row the chain vouches for), `suspect` (the row before a break whose line carries no `prev` that matches it, the `prev` compared before the line's other checks, since only a next line's matching `prev` vouches for a row; `last` then the row before it) and `files: [{file, seq, rows}]` (each month file's first `seq` and the rows walked, so row s is at line `s - seq + 1`), the result without it as before; the `action` bullet gains a sign-out's `logout` row for each session it ended and, with none held, the one `anonymous` row (outcome `ok`, "no session was held, so only the cookie was cleared"); the `reason` bullet gains the `person` guard; "Rate-limited refusals" gains that anonymous `logout` row, so the count is of rows and its reason says so; the `count` bullet CORRECTED: a resume's `count` (since #642) is the jobs waiting to start in what it resumes, not a bulk action's size, so a reader takes `count` by the row's `kind`. The reader's opt-in `positions` (each entry's own `YYYY-MM:<line>`, parallel to `rows`) is not in this entry, which describes no reader option; `DES-OPERATOR-CONSOLE` says it. **`INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked**: the file and its reader are as they were; only what the console does while it cannot use the file changed (`REQ-CONSOLE-SECURITY` (i)). **Code evidence**: admin/src/console/live.mjs (`finish`, `markStale` and its `what`, `failingNow`, `markFresh`, a stream's `holds`, `said` and `degraded`, `drawDegraded`, `runTick`, `drawTick`, `subscribe`, `close`); admin/src/console/session-ends.mjs (`PERSON_PARAM`, `PERSON_HEADER`, `switched`); admin/src/console/server.mjs (`resolveSession`, the auth step, the person check, `PERSON_CHANGED` and `PERSON_CHANGED_STREAM`, `startSession`, `postLogout`, the count row's words, `SIGN_IN_FIRST`, `TOKENS_UNUSABLE`); admin/src/console/sessions.mjs (`readSessionCookies`); admin/src/console/script.mjs (`streamEnded`, `probe`, `samePerson`, the person each request says, `RETRY_MS`); worker/src/console-client.mjs (`endedOf`, `STREAM_SHUTDOWN`, `stream`'s `sinceShutdown` and `openedSinceRelogin`, `RELOGIN_WINDOW_MS`); worker/src/console-audit.mjs (`verifyConsoleAudit`'s `withLast`: `last`, `suspect`, `files`; `readConsoleAudit`'s `positions`). |
+| 2026-10-25 | The maintainer notes moved from `CLAUDE.md` to `AGENTS.md`, so the hand-written-table bullet's pointer names `AGENTS.md`. Words only, no contract changes; the context files pi discovers (`AGENTS.md` and `CLAUDE.md`) are unchanged. |
+| 2026-10-25 (#737, PR 3a) | Issue #737, PR 3a: why a job waits, and cancelling one that never started. **NEW `INT-DEFER-REASON-KEY`**: `defer:job:<jobId>`, the HASH the worker writes as it defers a job (`deferTo`, the one deferral, and `noteRetry` before the four `InfraRetry` throws): its twelve fields (`DEFER_FIELDS`) and their rules (`at` and `until` at most 253402300799999, `DEFER_TIME_MAX_MS`, 9999-12-31T23:59:59.999Z, the last instant a four-digit year can write, so a console can always draw one, where a Date's own limit, 8.64e15, writes a six-digit year), the closed vocabulary of twenty reasons in ten buckets (`DEFER_WHYS`, `DEFER_BUCKETS`), four of them the reader's own (`paused`; `due`, a delayed job more than `WAITING_DUE_GRACE_MS`, 10 s, past its due whatever its record says, said by `DEFER_DUE_SENTENCE`; `unknown`, "A reason this console does not know", a record whose reason has the reason charset and is not in the table, most often a newer worker's; `none`, no record it can use, or one whose reason fails the charset), each title true of every job in its bucket, the TTL (due plus 60 s, never less than 60 s), the write before the move as one MULTI bounded at 2 s and failing open (the gate waits for it at most 2 s and a deferral never fails for its reason), a timed-out MULTI that may still land, the compare-and-delete on the nonce when the move rejects and the rejection rethrown raw, a failed write logged once per outage for each queue a worker drains (one writer per processor, one processor per queue) and a logger that throws losing its line, never the deferral, readers that start from the delayed set and its BullMQ 5.80.4 score (`floor(score / 4096)`, `dueOfScore` null past `DEFER_TIME_MAX_MS`, every other instant the admin's reader hands on held to the same bound, `instantOf`, and the console drawing an instant only where `utcText` does, 0 to `DEFER_TIME_MAX_MS`, "unknown" outside it, before 1970 too, `drawable` being `utcText`'s own answer, so a line never says "at unknown"), `parseDefer`'s unknown and charset rules (an unknown reason is bucket `unknown`; a reason outside the charset is bucket `none`, and no record to `readWaiting`), the leaf export `./defer-reasons`, who deletes it, its falsification test, and its acceptance, which names the test that holds this section's reason table, fields block and both bucket lists two-way to the leaf. **`INT-WAIT-PROFILES-CONTRACT` AMENDED**: the operator surface says the worker now records which population a delayed job is in, so the console's `readWaiting` lists them without a guess and without a job's data, while the panel reads as before; the 30 s floor stays, the evidence for a reader older than the record; the CLI's cancel door reaches `removeHeldJob` through `removeQueuedJob`, which also deletes the defer record (the panel's, the tool's and the console's `cancel-held` doors leave it to its TTL); NEW bullet, the hold's `after` (the job's own instant, never the lease horizon) and its `a:<profile>` answers (`answerOf`, `noteAnswer`), with the admin's held rows' `checks`, `after` and `answers`, each instant at most `DEFER_TIME_MAX_MS`. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: a deferral writes no run record but its defer record, and "nothing records why a job sits in the delayed set" is past tense, the distinct instants kept as an older reader's evidence. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: `readLiveHosts` reads each row's PTTL beside its HGETALL and gives `ttlAgeMs`, `skewMs` and `noExpiry`, Valkey's clock used only as a duration, a skew claimed only past `HOST_SKEW_CLAIM_MS` (30 s), and a row with no expiry met only under a name an earlier beat indexed (a reader walks `host:live` and a beat SADDs after its PEXPIRE, so never a first beat): for a moment when a beat re-creates a row that expired while its name stayed, and for good when the process died between that HSET and its PEXPIRE; the admin's host rows carry them re-checked, beside the snapshot's `hostsReadAt`; no decision reads them, so the falsification test holds unamended. **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**: the CLI's held and queued branches are `removeQueuedJob`, which the console's `cancel-queued` shares, with its optional `guard` (a caller's last check, asked right before the removal is sent), its seven answers (`{ invalid, cleared: true }` for a held job whose removal failed after its hold was cleared, except where the first hold delete failed and the hold was read back in place, `HEXISTS` of its `since` (`holdInPlace`), which is `{ invalid }`, while a hold not read back, or a read that fails, keeps the mark, since a refusal can be the answer to ioredis's resend of a delete that already ran, and `{ refused, error? }` for the guard's refusal among them) and the defer record deleted after a successful remove, bounded and best effort; the CLI's output has one new line, for a held job whose removal failed after its hold was cleared, which says so and how to finish, and every line that carries another module's words (the registry's, a removal's, the error under the could-not-reach line) carries them bounded (each C0, DEL and C1 character a space, at most 200 characters, `boundedText`), so a line whose words hold none of those characters and are at most 200 characters long is byte for byte what it was; the code evidence widened. **`INT-DOCTOR-RESULTS-KEY` AMENDED**: two named ids, `egress.proxy` (docker's proxy line or the line that stands in for it, and podman's, hence `REPEATED_CHECK_IDS`) and `provider.key`, every other named id at one site, and why no id names a forge's credentials. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the kind `cancel-queued`; the row, the chain and the verifier are unchanged. **`INT-CONSOLE-STATE-API` AMENDED**, one sentence: a write's 503 for an unusable tokens file carries the setup bar with Close, where it offered Look again; the body of `/api/state` is UNCHANGED, checked (`stateOf` projects by name, a test holds it free of `waiting`, and its host rows name none of the three registry fields). **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: no event, field or route moved; the probe's one question is the page script's. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a deferral and a cancel of a queued job write no run record, and no reason token was added. **Code evidence**: worker/src/defer-reasons.mjs; worker/src/defer-write.mjs -> makeDeferTo, retryDelayOf, DEFER_CAD_LUA; worker/src/index.mjs -> makeProcessor (every deferral, the four retry exits, the check loop's answers); worker/src/wait-state.mjs -> answerOf, hold, noteAnswer; worker/src/host-registry.mjs -> readLiveHosts, HOST_SKEW_CLAIM_MS; worker/src/doctor.mjs; worker/src/doctor-results.mjs -> NAMED_CHECK_IDS, REPEATED_CHECK_IDS; worker/src/cancel-state.mjs -> QUEUED_STATES, removeQueuedJob, holdInPlace; worker/src/cancel-cli.mjs -> runCancel, boundedText; admin/src/read-model.mjs -> readWaiting, readWaitingRow, createFleetReader, hostRowOf, instantOf; admin/src/job-actions.mjs -> planCancelQueued, cancelQueuedJob; admin/src/console/actions.mjs -> drawable; admin/src/console/panels/common.mjs -> utcText; admin/src/console/server.mjs -> tokensUnusableBar. |
+| 2026-10-25 (#737, PR 3b) | Issue #737, PR 3b: the overview in the Pulse markup. **`INT-CONSOLE-EVENT-STREAM` AMENDED** (in substance, not only internally): a page's headline is the shell's second panel, `p-headline`, a `<span id="p-headline" data-panel>` in the title bar, drawn on the overview alone and sent after `p-nav-parked` by the same digest rule; the overview's sections may be empty (the first run's three while the deployment runs, the other eight while the checklist stands in); those two spans are the only panels outside a page's sections, and the client's `data-panel` guard is unchanged. The overview's query (`rows`, `zoom`, `project`) is the page's own like any other; which load a stream shares (`dataQueryOf`, `dataKeyOf`) is internal, and nothing a stream is sent depends on it. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: PR 3a's "No surface draws them yet" says PR 3a; the console's overview draws `skewMs` past `HOST_SKEW_CLAIM_MS` and `noExpiry` as sentences on its hosts panel, and reads `ttlAgeMs` as a beat's age (`beatAgeOf`, else `staleMs`) for whether a worker is online, Running's slots, the hosts' rows, the first run's worker step, the fleet page's hosts table and the `/dispatch` panel's HOSTS view, so a host whose clock runs behind beats when it beats; nothing else reads them (no worker reader reads any of the three), and `/api/state` carries none of them as a key, its `hosts[].lastBeatAgeMs` being that age. NEW paragraph, "A member outside the worker name charset is no host's": `readLiveHosts` skips a `host:live` member that fails `WORKER_NAME_RE` (the charset alone, looser than the boot rule, which also refuses a `.json` or `.log` tail) before reading its row, and a row whose own `name` fails it, and prunes neither, since anything with the Valkey's URL can SADD one and removing what someone else wrote is not a reader's call (a 3,000-character member widened the console's page to 43,000 px); every consumer reads through it, and the falsification test holds unamended. **`INT-DOCTOR-RESULTS-KEY` AMENDED**: the console's first run is the reader of `egress.proxy`, `provider.key` and their repeats (the worst level across hosts), of the `github` and `forges` sections for the forge step, and of a `provider.<n>` derived id without `provider.key` as an older doctor; it reads no derived id's number. **`INT-DEFER-REASON-KEY` AMENDED**, one parenthesis: a reason this console has no words for (bucket `unknown`) is said by its token on the overview too, to every role, since "No reason was recorded" would be false; the bucket lists, the reason table and the fields block are UNCHANGED, checked (`worker/test/defer-reasons.test.mjs`). **`INT-CONSOLE-STATE-API` AMENDED**, words only, no key added or changed: `refusals24h` and `workers` mean what they did, and the overview's rule for a worker online is the same `workersOnline`; `hosts[].lastBeatAgeMs` is now the beat's age as the overview takes it (`beatAgeOf`: Valkey's measure of the row's last refresh where the reader had it, else `staleMs`), so a script applying that rule to it judges a host whose clock runs behind as the overview does; `schedulers[].name` is the scheduler's key, the cron trigger's id, null where the reader refused it, never BullMQ's job name; `/api/state` calls `snapshot()`, which reads no waiting job (the waiting read is a per-call option only the overview's load asks for), so its body stays free of `waiting`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a cron `on.id` is at most `CRON_ID_MAX` (176) characters, in the contract block and a bullet of its own: 200 less the frame of its runs' job id `repeat:<id>:<slot>` (a slot of at most 16 digits), so every run of every legal id is a job id the readers take (`DEFER_ID_RE`, the console's `RUN_ID_RE`), and the admin's scheduler bound (`SCHEDULER_NAME_MAX`) is the same constant, so every id the loader takes is one the admin reads back; a longer one refuses the whole file at load in both services, its message naming the entry's index and the id's length and never the id, and the setup wizard's dialog refuses it too. The rest of the contract UNCHANGED, checked: the id's charset, the no-colon rule and uniqueness are as before. |
+| 2026-10-26 (#737, PR 4a) | Issue #737, PR 4a: the reasons for infrastructure exits, and the runs and parked pages' reads. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, and it CORRECTS a claim: the record's `reason` was said to be "a fixed enum passed through from the terminal outcome, never free-form", while `InfraRetry` recorded its whole message for a throw that named no token (the runner's infrastructure exit as "infra failure, container exit 1", an unknown exit as "unknown container exit 42", a forge host's untagged throw as an API path, a repository and a library's words). NEW paragraph, "one door": every reason comes through `recordReasonOf({ result, error })` in the import-free leaf `worker/src/record-reason.mjs` (exported as `./record-reason`), a result's non-token reason recorded as null and an error's as `worker-error`, so a failure is never reasonless or free text; the two exits throw `container-infra-exit` and `container-exit-unknown`; the enum line gains the three tokens; the retry class, the slot and spend, the never-started refund and the recovery path are UNCHANGED, checked; the hook still says `infra` for the throws the record now calls `worker-error`; every admin reader of the reason takes the leaf's `RECORD_REASON_RE`, and every one that hands the reason on goes through `recordReason`, the state document, `/api/run`, a run's children, the parked answer's not-parked refusal and the model-callable `dispatch_runs` (`modelRunRecord`) included, so an older record's text reaches no script and no model, and no page but that record's run page, still in the old markup, which prints it escaped (its Outcome banner and its Run panel's Reason row). NEW paragraph, which session reasons say the conversation was not saved: `SESSION_NOT_SAVED` (`disabled`, `key-not-a-directory`, `locked`, `promote-failed`, `transcript-diverted`) and `SESSION_SAVE_AMBIGUOUS` (`absent`, `not-a-regular-file`, `too-large`, written by the resolve step and the promote step alike through `inspectFile`), `no-key` in neither, pinned both ways against the store's own refusals and `SESSION_REASONS`, read by nothing yet. **`INT-REASON-CATALOG` AMENDED**: three written rows after `container-detached` (`container-infra-exit`, `container-exit-unknown`, `worker-error`), keyed by no comment table and never the generic failure comment, and their `docs/reasons.md` headings beside one unheaded paragraph on older records. **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: a final failure on the infrastructure exit crosses into argv as `container-infra-exit` and one on an unknown exit as `container-exit-unknown`, where both said `infra`; a forge host's untagged throw and a throw that is not an `InfraRetry` still say `infra`; the shape guard is the record's own `RECORD_REASON_RE` (at most 64 characters, starting with a letter or digit) where it was `^[a-z0-9-]{1,40}$`, so a reason of 41 to 64 characters the record keeps crosses as itself where it read `infra`; the firing set and the argv's other elements UNCHANGED, checked. **`INT-CONSOLE-STATE-API` AMENDED**, no key added or renamed: `failures24h` counts by the console's word, as `refusals24h` always did, so the three recovery ends recorded `policy` move from `refusals24h` to `failures24h`; each key still means the day's failed or refused runs in the console's words, so `version` stays 1, and a script that counted `outcome: "failed"` itself reads a larger `failures24h` by the recovery ends; the snapshot's parked rows gain `project`, which `/api/state` does not carry; `/api/run` is `404` for a run id only when no place a run is kept shows one and every one said it holds none (`runAbsent`, the run page's run-not-found rule, `runPlaces`), the queues asked over a keyspace scan started after the question and a recovery that runs or waits showing the run, and `503` with `runNotTold`'s sentence, which names the places it could not read and no cause (the contract names `RUN_PLACES` for their words rather than copying them), when no place shows a run while one of them could not be read, where both were `404`, a queue lookup that failed among them as "every queue", where it answered the fixed queue sentence; that sentence (`RUN_UNREADABLE`) now answers a run some place shows whose queue state could not be read, and names no cause where it asked whether Valkey was reachable; its `version` stays 1, since no key changed. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: a fleet resume over a short read writes no `count`, a count that could not be read exactly, as the contract already says. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: exit 1 and an unknown code are still retried as infrastructure; only the reason the worker records for them changed. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: the portfolio snapshot's `byReason` still counts a reason that is not a plain token under `other`; a new record's failure now counts under its own token. **`INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: the runs and parked pages are live pages on the same stream, their panels `p-filters`, `p-summary`, `p-runs` and `p-questions` swapped by digest as every panel is. **`INT-LIVE-TRANSCRIPT-STREAM` UNCHANGED, checked**: no entry or route changed. **Code evidence**: worker/src/record-reason.mjs, worker/src/run-history.mjs (`buildRecord`), worker/src/on-failure.mjs (the guard), worker/src/run-mirror.mjs (`readMirroredRecord`'s `tellUnread`, `UNREAD_RECORD`), worker/src/processor.mjs (the two `InfraRetry` sites), worker/src/reason-catalog.mjs, worker/package.json (`./record-reason`), admin/src/words.mjs (`RECORD_REASON_RE`, `recordReason`), admin/src/read-model.mjs (`failures24h`, `readParkedRuns`' `project`, `readRunById`, `RUN_PLACES`, `runPlaces`, `runPlacesText`, `runAbsent`, `lookUp`, `modelRunRecord`), admin/src/console/run-api.mjs (`runDocument`, `runNotTold`, `RUN_UNREADABLE`, `chatFactsOf`'s `tellAbsent`, `safeRunOf`), admin/src/job-actions.mjs (`notParkedRefusal`); worker/test/run-history.test.mjs, worker/test/processor.test.mjs, worker/test/session-reasons.test.mjs, worker/test/reason-catalog.test.mjs, worker/test/on-failure.test.mjs, worker/test/run-mirror.test.mjs, admin/test/read-model-pages.test.mjs, admin/test/console-run-api.test.mjs, admin/test/record-reason-out.test.mjs, admin/test/console-actions.test.mjs, admin/test/console-pages.test.mjs, admin/test/job-actions.test.mjs. |
+| 2026-10-27 (#753) | Spec only, nothing ships. **Every entry UNCHANGED, checked**: no contract is fixed for the proposals of `REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-ZERO-TOUCH-RATE` and `REQ-PARKED-ANSWERER` until a build makes them. Each build writes its contracts into these entries then. `INT-SANDBOX-CONTRACT` gets the prepared sandbox's `sb-` id, its manifest, the trigger it was prepared as and the `--new` and `--as` options. Beside `INT-CANCEL-CHANNEL-CONTRACT` go the prepare request key, the open-shell key and the *End* request key, plus the per-host key that publishes kept workspaces. `INT-RUN-HISTORY-FILE-CONTRACT` gets a resumed run's reply source and a re-run's source run, and the touch index key goes beside it. `INT-TRIGGERS-FILE-CONTRACT` gets the answer rule, a field no tool may set. The job-level `console` field, today one token name the worker prints on the forge, may gain the draft job's run id, in the run-id charset. `INT-CONSOLE-AUDIT-LOG` gets a configuration write's refused run and the prepare, *End* and group-naming actions. The opener's link is the operator's computer's, not a file or container contract. |
+| 2026-10-28 (#747) | **`INT-CONSOLE-EVENT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM` and `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: run-page panels carry no SSE id; operator entry events carry the transcript cursor and tdone does not close page updates; terminal done/closure unchanged. Additive record maxTurns captures pickup settings; OpenShell bundle.placeholderNames carries validated names only; delivered inbox messages gain the steer kind with unknown-kind note fallback. **`INT-RUN-PROGRESS-KEY` UNCHANGED, checked**: its closed field contract is preserved. All actual stream connections keep counting against the same caps. |

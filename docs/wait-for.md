@@ -252,7 +252,16 @@ recorded stays (`pi-dispatch cancel` and the panel say which, from the job's att
 - `dispatch_wait_cancel`, the model-callable tool, behind the same operator confirm dialog as every other
   write.
 
-Whichever door: nothing else prunes the delayed set, and a cancelled job is gone rather than deferred.
+The [operator console](console.md) has the same stop: Cancel on a held job, and the cancel of a queued job that never
+started, which takes a held one too and whose preview says why the job waits
+([Cancelling a queued job](console.md#cancelling-a-queued-job)). `pi-dispatch cancel` and the console's queued-job
+cancel also delete the job's defer record (trap 4); the other doors leave it to expire on its own, unread.
+
+Whichever door: nothing else prunes the delayed set, and a cancelled job is gone rather than deferred. The hold goes
+first, so if the job's own removal then fails (most often a worker took it in that moment), the job is left without
+its hold, and every door says so rather than that nothing happened: `pi-dispatch cancel` says to run it again, and the
+panel, the tool and the console say the hold was cleared and the job was not removed (the console's bar says the
+change did not finish).
 
 `pi-dispatch doctor` reports the rest: a garbled `PI_WAIT_PROFILES` (a worker that will not **boot**, so
 this one is asked even when nothing waits), a profile a trigger names that is not declared, a declared path
@@ -315,15 +324,32 @@ every measure the money system takes. `PI_WAIT_MAX_CHECKS` (96 per job) exists b
 all bounds the count — the other knobs bound duration, cadence and concurrency. If your check calls a
 metered API, that cap is your bill's only ceiling.
 
-### 4. The delayed count is still one number, and it will not be split per job
+### 4. The panel's delayed count is still one number
 
 The panel's `delayed` figure mixes cron next-occurrences, retry backoff, quiet-hours deferrals, scope
-and host deferrals, and waits, and nothing records which population a given job is in -- classifying one would be a
-guess, and the spec refuses guesses. What the panel does since issue #289 is name the parts it can COUNT
+and host deferrals, and waits. What the panel does since issue #289 is name the parts it can COUNT
 from their own sources: a dim line under the status header says how many are cron next-occurrences (from
 the scheduler list) and how many are held on `waitFor` (from the worker's own index), and calls the
 remainder what it is, undifferentiated. Read the **held** section for what is actually waiting on a
 condition; the count itself stays the total it has always been.
+
+For a long time nothing recorded which population a given job was in, and classifying one would have been a guess,
+which the spec refuses. Since issue #737 the worker records why it puts each job back on the delayed set, as it does
+so: one small record per job in Valkey (`defer:job:<id>`, the spec's `INT-DEFER-REASON-KEY`), naming the reason from a
+fixed list (for a wait, `wait-after`, `wait-hold`, `wait-throttled`, `wait-supersede`, `wait-aborted` or
+`wait-unclear`) and when the job is due again. It is written just before the job is moved, waits at most 2 seconds,
+and never stops the move: if it cannot be written, the job waits exactly as before, and the worker logs
+`defer_reason_unwritten` once per outage for each queue it drains (a worker with a host queue drains two, the shared
+one and its own) and `defer_reason_restored` when a write works again. The console's reader of the waiting jobs reads
+it and never reads a job's data: the console's overview counts the waiting jobs by reason and lists each one with why
+it waits ([Waitlists](console.md#waitlists)), and its preview of a queued job's cancel, which loads only the one job it
+would cancel, says why that job waits in the same words, the worker's own. A delayed job with no record says "No
+reason was recorded"; one whose record names a reason this console does not know (a newer worker's) shows that
+reason's word with "no explanation yet"; one more than 10 seconds past the time it was due, which no worker has taken,
+says "Due since <time>; no worker has taken it", whatever it recorded. The hold's own record (`wait:job:<id>`) now
+also keeps your `after` instant and each check's last answer (`go`, `hold`, `fault`, `refuse` or `unclear`) with its
+time, and the console's reader carries both with each held job: the Waitlists say how long a held job has been held
+and, to an operator, each check's last answer.
 
 ### 5. Whoever clears the condition chooses the commit
 

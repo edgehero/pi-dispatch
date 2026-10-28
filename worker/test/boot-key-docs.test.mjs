@@ -22,7 +22,7 @@ const repoFile = (rel) => readFileSync(join(REPO, rel), "utf8");
 // inverted during review -- "An EMPTY value IS an unset one", "doctor stays silent", "reads this key with
 // `||`", "the worker starts normally" -- and the whole suite stayed green, because no test in this repo
 // opens `docs/pause-windows.md`, `docs/scoped-limits.md`, `REQ-DEPLOYMENT-BOOTSTRAP`,
-// `INT-PAUSE-WINDOWS-FILE-CONTRACT` or `INT-SCOPED-LIMITS-FILE-CONTRACT`. That is CLAUDE.md's own rule
+// `INT-PAUSE-WINDOWS-FILE-CONTRACT` or `INT-SCOPED-LIMITS-FILE-CONTRACT`. That is AGENTS.md's own rule
 // ("a hand-written table that restates a derivable source is either derived or pinned, never trusted")
 // unapplied to five documents that restate a behaviour two modules decide.
 //
