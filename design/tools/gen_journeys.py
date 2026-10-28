@@ -131,7 +131,7 @@ def thumbs():
                     win = j.get("win", {}).get(i, WIN)
                     if cardname not in pages:
                         pg = b.new_page(viewport={"width": 1440, "height": 900}, device_scale_factor=DSF)
-                        pg.goto(f"file://{harness(ROOT_PATH / cardname / 'preview.html', theme)}")
+                        pg.goto(harness(ROOT_PATH / cardname / 'preview.html', theme).as_uri())
                         pg.wait_for_timeout(120)
                         pages[cardname] = pg
                     out.setdefault((jname, i), {})[theme] = cut(pages[cardname], sels, focus, win)
@@ -280,7 +280,7 @@ def measure(name):
     with sync_playwright() as p:
         b = p.chromium.launch()
         pg = b.new_page(viewport={"width": 1440, "height": 300})
-        pg.goto(f"file://{harness(ROOT_PATH / name / 'preview.html', 'dark')}")
+        pg.goto(harness(ROOT_PATH / name / 'preview.html', 'dark').as_uri())
         pg.wait_for_timeout(120)
         h = pg.evaluate("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)")
         b.close()

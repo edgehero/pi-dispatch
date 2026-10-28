@@ -24,7 +24,7 @@ import { assertOwnReferences } from "./helpers/console-pages-harness.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #737: the console's kit and its icon sprite. Each helper is pinned to its component card's own sample, written
-// here as the card's bytes (the design files are not in this repository, so the samples are copied, and `fromCard`
+// here as the card's bytes (copied from design/system, which this test does not read, and `fromCard`
 // applies the one spelling the kit writes differently everywhere). Where the kit adds to a card on purpose (a column
 // head's scope, a meter's minimum, the Copy button's reveal hook) the difference is spelled out beside the sample.
 // The sweeps at the end run over every fragment the tests above built.

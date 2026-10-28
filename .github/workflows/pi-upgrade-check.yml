@@ -46,6 +46,8 @@ on:
       # admin/test/render-images.test.mjs runs launch/render-images.mjs, so a launch/ change can break
       # this workflow without touching anything listed above. The pin file is the browser it measures with.
       - "launch/**"
+      # Issue #737: admin/test/design-folder.test.mjs reads design/system, so a design change can turn it red.
+      - "design/**"
       - ".github/scripts/console-width-check.mjs"
       - ".github/chrome-for-testing.json"
   # DELIBERATELY UNFILTERED, unlike the push trigger above. Five of the jobs below are REQUIRED status

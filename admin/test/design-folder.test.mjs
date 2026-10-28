@@ -18,10 +18,11 @@ import { PULSE_TOKENS_SHA256 } from "../src/console/pulse-tokens.mjs";
 
 /**
  * The design's bundle.css waiting to be pasted, or null when the paste is current. Waiting since #737's design moved
- * into the repository: tabular figures on numbers only (counts, money, times and table figures), because on running
- * text they also widen hyphens, so an id like gh-2f6a read "gh - 2f6a". Before, `body` set them for all text.
+ * into the repository: tabular figures on numbers only (counts, money, times, table figures and the timeline's times),
+ * because on running text they also widen hyphens, so an id like gh-2f6a read "gh - 2f6a". Before, `body` set them
+ * for all text. The paste re-measures what the console sizes by hand on tabular digits (DES-OPERATOR-CONSOLE).
  */
-const DESIGN_CSS_WAITING_SHA256 = "f15687685cdd9243e286d079cd8fa9460d40b2d54297eecef057966ddb437ca8";
+const DESIGN_CSS_WAITING_SHA256 = "c94d6fe9f9513ace1f42bfff05f3058ddb5a845c85a606b9899e14653d4f7a8f";
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const designFile = (path) => readFileSync(new URL(`../../design/system/${path}`, import.meta.url));

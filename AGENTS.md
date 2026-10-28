@@ -88,7 +88,8 @@ Two consequences worth internalising before you design anything:
 
 ## The design folder
 
-- **Edit a generator, never a card.** `design/system/components/<Card>/` is written by `design/tools/gen_*.py`, and
+- **Edit a generator, never a card.** Every card in `design/system/components/` but the hand-written Cover is
+  written by `design/tools/gen_*.py`, and
   `python3 design/tools/build.py` rebuilds and checks every card (Python and Playwright, not part of `npm test`).
   Commit the generator and the rebuilt cards together.
 - **The console pastes, it never reads.** A change to the look lands in `design/` first, and a console pull request

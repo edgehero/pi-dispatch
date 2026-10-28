@@ -9,7 +9,7 @@ The design of pi-dispatch's operator console (issue #737), in the Pulse style: e
 | `system/README.md` | The system's own guide: the screens by group, workflows, coverage of the console, voice, colour, type, components |
 | `system/tokens.json` | Colour, space, radius and type tokens for light and dark |
 | `system/components/bundle.css` | The one stylesheet every card is drawn with |
-| `system/components/<Card>/` | One card: `preview.html` (the screen) and `README.md` (how a person uses it, its panels, what the server provides, who sees what, why it works this way, and which data is sample) |
+| `system/components/<Card>/` | One card: `preview.html` (the screen) and `README.md` (how a person uses it, its panels, what the server provides, who sees what, why it works this way, and which data is sample). Cover is written by hand and has no README |
 | `system/design-system.json` | The artifact's index and its last change |
 | `tools/gen_*.py` | The generators: each writes its cards |
 | `tools/pulse.py`, `tools/common2.py` | The page kit: the shell, the icons and the shared parts |

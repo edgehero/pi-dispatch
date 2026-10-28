@@ -7,9 +7,10 @@ import { ROLES as PAGE_ROLES, SHOTS, STATIC_SHOTS } from "./helpers/console-page
 import { PANEL_STATES } from "./helpers/panel-goldens.mjs";
 
 // Issue #737: every design card in scope has an element ledger, `fixtures/console-ledger/<Card>.json`, and
-// each thing the card draws is accounted for in it. CI never reads the design files (they are untrusted reference data
-// outside the repository), so a ledger copies what it needs of its card: the README's panel list, and one element per
-// README bullet, panel id, "server provides" item, browser state and sample value.
+// each thing the card draws is accounted for in it. A ledger copies what it needs of its card (the README's panel list,
+// and one element per README bullet, panel id, "server provides" item, browser state and sample value) rather than
+// reading design/system: it was written while the design lived outside this repository, and a card the design rebuilds
+// must not move a console test unseen. Reading the cards here is a later bolt (#752).
 //
 // AN ELEMENT: `{ el, kind, status, as?, panel?, source?, holds?, sentence?, roles?, golden?, shows?, reason? }`.
 //   - `el` the card's own words for it; `kind` where the card has it: `readme` (its README or what its preview draws

@@ -1,8 +1,8 @@
 """Check every card the way the Design System frame shows it, in both themes, at the card's width and at 390 px.
 
-A card fails on: an inline style= attribute or a <script> (the console's CSP allows neither), a page wider than the
-card at its own width or wider than 390 px on a phone, a console error, or a marker height more than 60 px off the
-measured page. Prints one line per card and exits 1 if any card fails. Run after build.py (it runs this itself)."""
+A card fails on: an inline style= attribute, a <script>, a web font, an @import, a <link> or a url() that leaves the
+page (the console's CSP allows none of them); a page wider than the card at its own width, or wider than 390 px on a
+phone; a console error; or a marker height more than 60 px off the measured page. Prints one line per card and exits 1 if any card fails. Run after build.py (it runs this itself)."""
 import re, sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from shoot import harness
@@ -24,12 +24,14 @@ def main():
             flags = []
             if re.search(r"\sstyle=", body): flags.append("style=")
             if "<script" in t: flags.append("script")
+            if re.search(r"@font-face|@import|<link\b", t): flags.append("font or outside stylesheet")
+            if re.search(r"url\(\s*['\"]?(?!#|data:)", t): flags.append("url() outside the page")
             for theme in ("dark", "light"):
                 for w in ([W, 390] if d.name != "Cover" and W != 390 else [W]):
                     pg = b.new_page(viewport={"width": w, "height": 300})
                     errs = []
                     pg.on("console", lambda msg: errs.append(msg.text) if msg.type == "error" else None)
-                    pg.goto(f"file://{harness(src, theme)}")
+                    pg.goto(harness(src, theme).as_uri())
                     pg.wait_for_timeout(60)
                     sw = pg.evaluate("document.documentElement.scrollWidth")
                     sh = pg.evaluate("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)")

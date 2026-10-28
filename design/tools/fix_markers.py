@@ -97,7 +97,7 @@ with sync_playwright() as p:
         m = re.match(r'<!-- @dsCard (.*?) -->', t); a = m.group(1)
         W = int(re.search(r'width=(\d+)', a).group(1))
         pg = b.new_page(viewport={"width": W, "height": 300})
-        pg.goto(f"file://{harness(src, 'dark')}"); pg.wait_for_timeout(60)
+        pg.goto(harness(src, 'dark').as_uri()); pg.wait_for_timeout(60)
         h = pg.evaluate("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)")
         pg.close()
         H = int((h + 9) // 10 * 10)
