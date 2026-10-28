@@ -127,8 +127,11 @@ test("browser uses only the page stream, safely fills question/tail after swaps 
   s.emit("tdone", { outcome: "cancelled" });
   assert.equal(s.closed, false);
   assert.equal(d.document.querySelector("[data-transcript-status]").textContent, "ended (cancelled)");
-  s.emit("panel", { id: "p-transcript", html: "<p data-transcript-status></p>" });
-  assert.equal(d.document.querySelector("[data-transcript-status]").textContent, "ended (cancelled)");
+  s.emit("panel", { id: "p-transcript", html: "<p data-transcript-status>Ended (cancelled); kept 24 hours after the end.</p>" });
+  assert.equal(d.document.querySelector("[data-transcript-status]").textContent, "Ended (cancelled); kept 24 hours after the end.");
+  s.emit("panel", { id: "p-transcript", html: "<p data-transcript-status>No longer kept: its transcript expired.</p>" });
+  s.emit("panel", { id: "p-tail", html: "<div data-run-tail></div>" });
+  assert.equal(d.document.querySelector("[data-transcript-status]").textContent, "No longer kept: its transcript expired.", "an older entry status cannot erase the server's not-kept reason");
 });
 
 test("browser filters and running-call timer update on result; reset clears the parked question", () => {
