@@ -124,3 +124,7 @@ desktop.ini
 
 # The design tools' screenshots and harness pages (design/tools/shoot.py). Rebuilt on every run.
 design/.shots/
+
+# Planning notes and review evidence belong in pull requests.
+.plan-artifacts/
+plan-artifacts/
