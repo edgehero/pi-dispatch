@@ -504,7 +504,7 @@ const BUNDLE_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BUNDLE_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
 /**
- * The record's `bundle` (issue #704): `{ id, variables, shadowed, placeholders?, plain? }`, the bundle's id and the
+ * The record's `bundle` (issue #704): `{ id, variables, shadowed, placeholders?, plain?, placeholderNames? }`, the bundle's id and the
  * variable NAMES the job received from it and the ones the trigger's own run.secrets shadowed, sorted, and on an
  * OpenShell venue two counts (below), or null on any violation. REBUILT,
  * never the source's object, and NAMES ONLY: each is held to the environment-name charset, so no value, no
@@ -524,8 +524,10 @@ export function recordedBundle(b) {
 	// variable cap, or neither key: a record never says one without the other, and every other venue's record is
 	// byte-identical to before.
 	const count = (n) => Number.isSafeInteger(n) && n >= 0 && n <= BUNDLE_NAMES_MAX;
+	const placeholderNames = names(b.placeholderNames);
+	const named = placeholderNames !== null && placeholderNames.every((n) => variables.includes(n) && !shadowed.includes(n)) && placeholderNames.length <= b.placeholders;
 	const counted = count(b.placeholders) && count(b.plain) && b.placeholders + b.plain <= variables.length;
-	return { id: b.id, variables, shadowed, ...(counted ? { placeholders: b.placeholders, plain: b.plain } : {}) };
+	return { id: b.id, variables, shadowed, ...(counted ? { placeholders: b.placeholders, plain: b.plain, ...(named ? { placeholderNames } : {}) } : {}) };
 }
 
 /** The two OpenShell venues and the mode each runs in (backends.mjs `OPENSHELL_BACKENDS`, pinned by a test). */
@@ -899,7 +901,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null }) {
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
@@ -918,6 +920,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const secretsProfile = recordedSecretsProfile(data);
 	// Issue #704: only for a job whose project has a secret bundle, so no other record can carry either key.
 	const bundle = recordedBundle(source.bundle);
+	if (bundle !== null && !Object.hasOwn(OPENSHELL_VENUE_MODES, backend)) delete bundle.placeholderNames;
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
 	return {
 		jobId: job.id,
@@ -1152,6 +1155,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		//   - `secretsProfile`: the profile NAME `run.secrets` resolved through (`recordedSecretsProfile`).
 		...(openshell !== null ? { openshell } : {}),
 		...(secretsProfile !== null ? { secretsProfile } : {}),
+		// Effective turn budget captured at pickup, not the settings as they stand when the run ends (#747).
+		...(Number.isSafeInteger(maxTurns) && maxTurns > 0 ? { maxTurns } : {}),
 	};
 }
 

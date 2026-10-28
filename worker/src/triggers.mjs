@@ -239,7 +239,7 @@ export const CRON_ID_MAX = 200 - "repeat::".length - 16;
  * concurrency setting: this validator is pure and fs-free, and the operator who raises concurrency to 10
  * is the operator who can raise this line too, in a reviewed commit.
  */
-const REPLICAS_MAX = 3;
+export const REPLICAS_MAX = 3;
 
 /**
  * The ceiling on how many references one trigger may name (issue #225). Not tidiness: the worker resolves

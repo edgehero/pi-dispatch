@@ -148,7 +148,7 @@ test("the title bar: the page's title, and the run detail's back link to Runs wi
   assert.ok(refused.includes(String(forbiddenContent())), "the operators-only card");
   for (const absent of ['class="legacy"', 'id="p-audit', 'class="titlebar__end"', "Drawn at"]) assert.ok(!refused.includes(absent), absent);
   const run = (await draw("run")).html;
-  assert.match(run, /<div class="titlebar__lead"><a class="back" href="\/runs"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"><\/use><\/svg>Runs<\/a><h1>Run gh-1<\/h1><\/div>/);
+  assert.match(run, /<div class="titlebar__lead"><a class="back" href="\/runs"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"><\/use><\/svg>Runs<\/a><h1>gh-1<\/h1><div class="titlebar__sub">/);
   for (const name of Object.keys(PAGES).filter((n) => n !== "run")) assert.ok(!(await draw(name)).html.includes('class="back"'), `${name} has no back link`);
 });
 
@@ -167,7 +167,7 @@ test("the headline: a panel span in the title bar's sub line, drawn for a page t
   // Text is escaped; the run detail keeps its back link before the title; a page drawn once keeps its end.
   const hostile = String(shellHtml("overview", ctx, html``, { headline: HOSTILE }));
   assert.ok(hostile.includes(`<span id="p-headline" data-panel>&lt;img src=x onerror=alert(1)&gt;&quot;&#39; </span>`), hostile.slice(0, 200));
-  assert.match(lead(shellHtml("run", { ...ctx, query: { id: "gh-1" } }, html``, { headline: "x" })), /^<a class="back" href="\/runs">[^]*<\/a><h1>Run gh-1<\/h1><p class="titlebar__sub"><span id="p-headline" data-panel>x<\/span><\/p>$/);
+  assert.match(String(shellHtml("run", { ...ctx, query: { id: "gh-1" } }, html``, { headline: "x" })), /<a class="back" href="\/runs">[^]*<\/a><h1>gh-1<\/h1><div class="titlebar__sub"><span id="p-headline" data-panel>x<\/span><\/div>/);
   assert.match(String(shellHtml("config", ctx, html``, { headline: "x" })), /<h1>Configuration<\/h1><p class="titlebar__sub"><span id="p-headline" data-panel>x<\/span><\/p><\/div><div class="titlebar__end">/);
   // One per page, its element carrying exactly its id and data-panel (a panel element is the stream's to swap).
   const page = String(shellHtml("overview", ctx, html``, { headline: "x" }));
@@ -290,7 +290,7 @@ test("LEGACY_PAGES is a written-out frozen list: a page added to PAGES later is 
   // The list as written: a copy derived from PAGES would make every new page start in the old markup. PR 2
   // converted the audit log, the two sign-in pages and the operators-only refusal; PR 3 the overview; PR 4 the runs and
   // parked pages.
-  assert.deepEqual(LEGACY_PAGES, ["run", "insights", "fleet", "config"]);
+  assert.deepEqual(LEGACY_PAGES, ["insights", "fleet", "config"]);
   assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "an array, frozen: a frozen Set still takes .add()");
   assert.throws(() => LEGACY_PAGES.push("models"), TypeError);
   assert.equal(new Set(LEGACY_PAGES).size, LEGACY_PAGES.length);

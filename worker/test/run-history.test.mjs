@@ -2377,3 +2377,11 @@ test("recovered.countsFrom is a closed enum, and the transcript fallback sums or
 	assert.equal(recoveryCountsFromProgress(null), null);
 	assert.equal(recoveryCountsFromProgress([1]), null);
 });
+
+test("the record's turn budget is pickup's validated positive integer, never a mutable job or result field (#747)", () => {
+	const job = { id: "turns", data: { kind: "github", maxTurns: 99 } };
+	const result = { outcome: "completed", maxTurns: 100, turns: 3 };
+	assert.equal(buildRecord({ job, result, maxTurns: 40 }).maxTurns, 40);
+	for (const maxTurns of [null, undefined, 0, -1, 1.5, "40", Infinity]) assert.equal(buildRecord({ job, result, maxTurns }).maxTurns, undefined);
+	assert.equal(Object.keys(buildRecord({ job, result, maxTurns: 40 })).at(-1), "maxTurns", "the additive field preserves existing field order");
+});

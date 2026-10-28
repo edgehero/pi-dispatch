@@ -1,0 +1,148 @@
+{
+  "card": "RunRefused",
+  "pr": 5,
+  "panels": [
+    "p-outcome",
+    "p-run",
+    "p-rest",
+    "p-why",
+    "p-host"
+  ],
+  "elements": [
+    {
+      "el": "p-outcome",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runOutcome",
+      "golden": [
+        "panels/run-refused.operator"
+      ]
+    },
+    {
+      "el": "p-run",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary",
+      "golden": [
+        "panels/run-refused.operator"
+      ]
+    },
+    {
+      "el": "p-rest",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runRest",
+      "golden": [
+        "panels/run-refused.operator"
+      ]
+    },
+    {
+      "el": "p-why",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWhy",
+      "golden": [
+        "panels/run-refused.operator"
+      ]
+    },
+    {
+      "el": "p-host",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runHost",
+      "golden": [
+        "panels/run-refused.operator"
+      ]
+    },
+    {
+      "el": "The run page for a run refused before it started: the outcome banner leads with the reason sentence and the next step, and everything that did not happen folds into one line.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runOutcome"
+    },
+    {
+      "el": "## How a person uses it",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "The banner says what happened (\"Refused: \u2026\"), why (the egress proxy on build3 is not running), what to do (start the proxy, then re-run) and that nothing was spent.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "The one primary action is **Open Fleet**, where the proxy and doctor live. **Preview a re-run** is shown but disabled, with the reason beside it, so the person knows it exists and why it waits.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "Progress, transcript, tokens and chain do not apply, so they collapse into one line instead of five empty panels.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChain"
+    },
+    {
+      "el": "The sandbox command is hidden because the run kept no workspace (#710), and a small line says there is none to open.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSandbox"
+    },
+    {
+      "el": "*Why it was refused* names the rule in one sentence, counts the same reason in 24 hours and links the reason's docs.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "## Panels",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "`p-outcome`, `p-run`, `p-rest` (the collapsed line), `p-why`, `p-host`.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runOutcome"
+    },
+    {
+      "el": "## The server provides",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "The run record (target, project, flow, host, venue, trigger, model, attempt, times, reason token), the reason catalog's sentence and next step for the token, whether a re-run would be refused again and why, whether a workspace was kept, the count of the same reason in 24 hours, and the host's doctor summary.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "## Why it works this way",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "The egress floor exists so a job can reach the hosts on its allowlist and nothing else. With the proxy down, no job on build3 may start.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "## Fixture note",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "From the fixture: gh-e9a0, acme/billing#260, fix, build3, podman, trigger 3 (index 2 in the fixture file), claude-sonnet-5-5, attempt 1, 15:30 UTC, 0s, not metered, no dollar window, `egress-proxy-missing`. The fixture record says project `api`; the page follows the project config, which maps acme/billing to `billing`. The rule text, the doctor link and \"same reason in 24 hours\" are sample copy.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runCostPanel"
+    }
+  ]
+}

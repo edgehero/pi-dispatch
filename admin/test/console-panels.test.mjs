@@ -222,7 +222,7 @@ test("the stylesheet draws the old panels on the Pulse tokens, inside .legacy, w
   // The old palette is a set of properties defined from the tokens, so it follows the theme; no literal is left in a rule.
   assert.match(LEGACY_CSS, /\.legacy\{--pd-canvas:var\(--canvas\);--pd-panel:var\(--surface\);/);
   assert.match(LEGACY_CSS, /\.legacy svg \[fill="#58a6ff"\]\{fill:var\(--pd-accent\)\}/, "a chart's presentation attribute follows the theme");
-  assert.match(LEGACY_CSS, /\.legacy>section\[data-panel\],\.legacy>section\.transcript-section\{[^}]*border-radius:var\(--radius-lg\);background:var\(--surface\)\}/, "each old panel is a card");
+  assert.match(LEGACY_CSS, /\.legacy>section\[data-panel\]\{[^}]*border-radius:var\(--radius-lg\);background:var\(--surface\)\}/, "each old panel is a card");
   const declarations = LEGACY_CSS.replace(/\[[^\]]*\]/g, "");
   assert.ok(!/#[0-9a-f]{3,8}\b/i.test(declarations), "no colour literal outside an attribute selector");
 });
@@ -950,7 +950,7 @@ test("the run page's Progress panel (issue #644): a finished run shows its recor
   const view = (role, data) => ({ page: "run", role, readOnly: false, query: { id: "gh-1" }, env: {}, now: NOW, data: { now: NOW, ...data } });
   const op = String(runProgress(view("operator", { run: { record }, progress: key })));
   assert.match(op, /<dt>Turns<\/dt><dd>9<\/dd>/);
-  assert.match(op, /<dt>Sum of step durations<\/dt><dd>1m<\/dd><dt>Longest step<\/dt><dd>2\.5 s<\/dd><dt>Phases declared<\/dt>/, "no interrupted step: no row for it");
+  assert.match(op, /<dt>Sum of step durations<\/dt><dd>1m<\/dd>(?:<\/div><div class="fact">)?<dt>Longest step<\/dt><dd>2\.5 s<\/dd>(?:<\/div><div class="fact">)?<dt>Phases declared<\/dt>/, "no interrupted step: no row for it");
   assert.match(op, /<dt>Last phase<\/dt><dd>3 of 3<\/dd>/);
   assert.match(op, /<td class="mono">bash<\/td><td class="num">6<\/td>/);
   assert.ok(!op.includes("script") && !op.includes("RECORD-TEXT"), "a key outside the closed set, and a free string, never leave the record");
@@ -1009,7 +1009,7 @@ test("the Progress panel of a retried job (issue #644): a key newer than the rec
   assert.match(op, /An earlier attempt of this run ended \(failed\); this is the attempt after it\./);
   assert.match(op, /<dt>Turn<\/dt><dd>2<\/dd>/, "attempt 2's live counters");
   assert.match(op, /<span class="mono">bash<\/span> running 20s/);
-  assert.match(op, /Current phase: <strong>ATTEMPT-2-PHASE<\/strong>/);
+  assert.match(op, /<span class="name">ATTEMPT-2-PHASE<\/span>/);
   assert.doesNotMatch(op, /Last phase/, "attempt 1's lastPhaseIndex is not set beside attempt 2's names");
   // The same key once attempt 2 has ended (its record not written yet) is still attempt 2's.
   const done = String(runProgress(view("operator", { run: { record }, progress: { ...attempt2, running: [], ended: true, outcome: "completed" } })));
@@ -1045,7 +1045,7 @@ test("stale progress (issue #644): no write past three minutes says the worker m
   const g = { v: 1, turn: 4, steps: 6, failed: 1, interrupted: 0, running: [{ tool: "bash", since: NOW - 600_000 }], recent: [], phase: null, phases: [], note: null, prior: { turns: 3, steps: 8 }, startedAt: NOW - 900_000, updatedAt: NOW - 300_000, ended: false, outcome: null };
   const view = (data, now = NOW) => ({ page: "run", role: "viewer", readOnly: false, query: { id: "gh-1" }, env: {}, now, data: { now, ...data } });
   const stale = String(runProgress(view({ run: { missing: true }, progress: g })));
-  assert.match(stale, /<p class="warn">Stale: no update for 5 min; the worker may be gone\.<\/p>/);
+  assert.match(stale, /<p class="warn">Stale: no update for 5 min; the worker may be gone\. <a href="\/fleet">Open Fleet<\/a>\.<\/p>/);
   assert.match(stale, /<span class="mono">bash<\/span> open 5m at the last update/, "the age stops at the last write");
   assert.doesNotMatch(stale, /running 10m/);
   assert.match(stale, /<dt>Earlier runs of this session<\/dt><dd>3 turns, 8 steps before this run resumed the session<\/dd>/);
@@ -1115,8 +1115,8 @@ test("the run page's Inbox panel (issue #646): the list for both roles without t
   const view = (role, inbox, readOnly = false, id = "gh-1") => ({ page: "run", role, readOnly, query: { id }, env: {}, now: NOW, data: { now: NOW, inbox } });
   const op = String(runInbox(view("operator", box)));
   assert.match(op, /<h2>Inbox<\/h2>/);
-  assert.match(op, new RegExp(`<td class="mono">${q}</td><td>steer</td><td>console</td><td>queued</td><td><time datetime="2026-10-08T15:38:38.000Z">2026-10-08 15:38 UTC</time></td><td class="num">18</td>`));
-  assert.match(op, new RegExp(`<td class="mono">${w}</td><td>follow-up</td><td>forge</td><td>written</td>`));
+  assert.match(op, new RegExp(`<td class="mono">${q}</td><td>steer</td><td>console</td><td><span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>queued</span></td><td><time datetime="2026-10-08T15:38:38.000Z">2026-10-08 15:38 UTC</time></td><td class="num">18</td>`));
+  assert.match(op, new RegExp(`<td class="mono">${w}</td><td>follow-up</td><td>forge</td><td><span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>written</span></td>`));
   assert.match(op, /<td class="num">2,048<\/td>/);
   assert.equal((op.match(/data-action="steer-withdraw"/g) ?? []).length, 2, "a withdraw for the queued and the written message only, never the delivered one or an id outside the charset");
   assert.match(op, new RegExp(`name="id" value="${q}"`));
@@ -1154,7 +1154,7 @@ test("the Inbox panel's edges (issue #646, review round 1): no form without a ru
   const base = { found: true, steer: true, state: "active", open: true, entries, closed: false };
   const view = (role, inbox, id2 = "gh-1") => ({ page: "run", role, readOnly: false, query: { id: id2 }, env: {}, now: NOW, data: { now: NOW, inbox } });
   const op = String(runInbox(view("operator", base)));
-  assert.match(op, new RegExp(`<td class="mono">${id}</td><td>steer</td><td>console</td><td>queued</td><td>-</td>`), "a missing time is -");
+  assert.match(op, new RegExp(`<td class="mono">${id}</td><td>steer</td><td>console</td><td><span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>queued</span></td><td>-</td>`), "a missing time is -");
   assert.equal((op.match(/>Withdraw<\/button>/g) ?? []).length, 1, "the Withdraw label, once: only the well-formed id; a 33-character or non-hex id gets none");
   assert.equal((op.match(/maxlength="8192"/g) ?? []).length, 2, "each textarea is bounded at the inbox's 8 KiB");
   assert.match(op, /<th scope="col">Action<\/th>/);
@@ -1185,7 +1185,7 @@ test("the run page reads the inbox end to end (issue #646): loadPageData asks th
   assert.deepEqual(asked, ["gh-7"]);
   assert.deepEqual(data.inbox, box);
   const page = await renderPage("run", { query: { id: "gh-7" }, session: { name: "ops", role: "operator" }, data });
-  assert.match(String(page.html), /<section id="p-inbox" data-panel><h2>Inbox<\/h2>/);
+  assert.match(String(page.html), /<section id="p-inbox" data-panel><div class="card"><div class="card__head"><h2>Inbox<\/h2>/);
   const panels = await pagePanels("run", { query: { id: "gh-7" }, session: { name: "v", role: "viewer" }, data });
   assert.ok(panels.some((p) => p.id === "p-inbox" && p.html.includes("written") && !p.html.includes("data-action")));
   const broken = await loadPageData("run", { id: "gh-7" }, { fleet: { ...fleet, inbox: async () => { throw new Error("down"); } }, now: NOW });
@@ -1697,8 +1697,8 @@ test("the runs table: the outcome as the panel's word on a badge, quiet when com
 test("the run summary and the chain say the panel's words; the nav, the spend page and the held panel use its titles", async () => {
   const record = { jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "policy", reason: "operator-cancel", backend: "local", startedAt: "2026-10-08T14:00:00Z", endedAt: "2026-10-08T15:00:00Z" };
   const data = { run: { record, source: "local" }, children: [{ jobId: "gh-2", outcome: "completed", reason: "awaiting-input" }], childrenSearched: 1 };
-  const run = (await pagePanels("run", ctxOf("viewer", data, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
-  assert.match(run, /<dt>Outcome<\/dt><dd>cancelled<\/dd><dt>Reason<\/dt><dd>operator-cancel<\/dd>/, "the word, then the token");
+  const run = (await pagePanels("run", ctxOf("operator", data, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
+  assert.match(run, /<dt>Outcome<\/dt><dd>cancelled<\/dd>(?:<\/div><div class="fact">)?<dt>Reason<\/dt><dd>operator-cancel<\/dd>/, "the word, then the token");
   assert.match(run, /<dt>Venue<\/dt><dd>local<\/dd>/);
   assert.match(run, /<a class="mono" href="\/run\?id=gh-2">gh-2<\/a> awaiting input<\/li>/);
   assert.equal(PAGES.insights.nav, "Spend");
@@ -1721,7 +1721,7 @@ test("the chain's children carry their reason through loadPageData, so a waiting
   const fleet = { runById: async () => ({ record, source: "local" }), runsPage: async () => ({ runs, next: null }), inbox: async () => ({ found: false }) };
   const data = await loadPageData("run", { id: "gh-1" }, { fleet, now: NOW });
   assert.deepEqual(data.children.map((c) => c.reason), ["awaiting-input", "operator-cancel", "scope-cap", null], "the reason is kept, a non-string one is null");
-  const run = (await pagePanels("run", ctxOf("viewer", data, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
+  const run = (await pagePanels("run", ctxOf("operator", data, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
   assert.match(run, /href="\/run\?id=gh-2">gh-2<\/a> awaiting input<\/li>/);
   assert.match(run, /href="\/run\?id=gh-3">gh-3<\/a> cancelled<\/li>/);
   assert.match(run, /href="\/run\?id=gh-4">gh-4<\/a> refused<\/li>/);
@@ -1849,7 +1849,7 @@ test("readable numbers: money in one fixed form with the exact amount on hover, 
   assert.match(fleet, /<td>h4<\/td><td class="num">1<\/td><td>-<\/td><td>1 \/ lots<\/td>/);
   // The run page's Resources: the size in cores.
   const record = { jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "completed", size: { memMiB: 4096, cpuCenti: 250, source: "trigger" } };
-  const run = (await pagePanels("run", ctxOf("viewer", { run: { record, source: "local" } }, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
+  const run = (await pagePanels("run", ctxOf("operator", { run: { record, source: "local" } }, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
   assert.match(run, /<dt>Size given<\/dt><dd>4,096 MiB, 2\.5 cores \(trigger\)<\/dd>/);
 });
 
@@ -1956,5 +1956,22 @@ test("only a time whose row names its day (data-day) stays alone, on the reader'
     const first = timeDom(undated, offsetMin).els.map((e) => e.textContent);
     assert.deepEqual(first, want, `${offsetMin}: dated`);
     assert.deepEqual(timeDom(undated.map(([iso], i) => [iso, first[i]]), offsetMin).els.map((e) => e.textContent), first, `${offsetMin}: twice is once`);
+  }
+});
+
+test("#739 run panels: running without stream, expired parked stream, cancelled before start and completed saved session", async () => {
+  const at = NOW;
+  const base = { jobId: "gh-739", kind: "github", target: "acme/web#739", outcome: "completed", startedAt: new Date(at - 60_000).toISOString(), endedAt: new Date(at).toISOString() };
+  const cases = [
+    { name: "running with no stream", data: { run: { missing: true }, chat: { state: "active", mode: "live", jobState: "active" }, transcript: { exists: false } }, expected: /Waiting for the run/, absent: /Reload to check again/ },
+    { name: "parked with expired stream", data: { run: { record: { ...base, reason: "awaiting-input" } }, chat: { state: "parked", mode: "reply" }, transcript: { exists: false } }, expected: /Read the question on the forge thread/, absent: /question[^<]*below/ },
+    { name: "cancelled before start", data: { run: { record: { ...base, outcome: "policy", reason: "operator-cancel", budgetReserved: false, tokens: null, dollars: null, exitCode: null } } }, expected: /Nothing ran/, absent: /data-action="parked-answer"/ },
+    { name: "completed with saved session", data: { run: { record: { ...base, session: { resumed: false, reason: "absent", bytes: 4096 } } }, chat: { state: "finished", mode: "fork" } }, expected: /<span>pi-dispatch<\/span> <span>chat<\/span> <span>gh-739<\/span>/, absent: /no transcript to fork/ },
+  ];
+  for (const c of cases) {
+    const panels = await pagePanels("run", { session: { role: "operator" }, query: { id: "gh-739" }, data: { now: at, ...c.data } });
+    const text = panels.map((p) => p.html).join("");
+    assert.match(text, c.expected, c.name);
+    assert.doesNotMatch(text, c.absent, c.name);
   }
 });

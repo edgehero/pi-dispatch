@@ -39,6 +39,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  RunLive: 5, RunEnded: 5, RunRefused: 5, RunParked: 5, RunRecovered: 5, RunSandboxed: 5, RunChatStates: 5, RunViewer: 5, Transcript: 5, FactsAndLevels: 5,
   Shell: 1,
   Status: 1,
   SignIn: 2,
@@ -77,6 +78,7 @@ const PLANNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  "run.operator", "run.viewer", "run-live.operator", "run-live.viewer",
   "overview.operator",
   "overview.viewer",
   "overview-host.operator",

@@ -278,3 +278,19 @@ test("a misspelt opt-out or bundle block refuses the file rather than silently g
 	}
 	assert.equal(parseTriggersDocument(JSON.stringify({ triggers: [{ ...cron, run: { ...cron.run, secretBundle: false } }], secretBundles: bundles }), "t").triggers[0].run.secretBundle, false, "the exact spellings load");
 });
+
+test("bundle placeholder names are rebuilt names only and emitted only for OpenShell records (#747)", async () => {
+	const { recordedBundle, buildRecord } = await import("../src/run-history.mjs");
+	const bundle = { id: "shop", variables: ["A", "B"], shadowed: [], placeholders: 1, plain: 1, placeholderNames: ["B", "B"] };
+	assert.deepEqual(recordedBundle(bundle).placeholderNames, ["B"]);
+	for (const placeholderNames of [["VALUE=secret"], ["C"], ["A", "B"], "B", [null]]) assert.equal(recordedBundle({ ...bundle, placeholderNames }).placeholderNames, undefined);
+	for (const backend of ["openshell", "openshell-bind", "local", "podman"]) {
+		const record = buildRecord({ job: { id: "bundle", data: { kind: "github", backend } }, result: { outcome: "completed", bundle } });
+		assert.deepEqual(record.bundle.placeholderNames, backend.startsWith("openshell") ? ["B"] : undefined);
+	}
+});
+
+test("a shadowed bundle variable is never named as a received placeholder (#747)", async () => {
+	const { recordedBundle } = await import("../src/run-history.mjs");
+	assert.equal(recordedBundle({ id: "shop", variables: ["A"], shadowed: ["A"], placeholders: 1, plain: 0, placeholderNames: ["A"] }).placeholderNames, undefined);
+});

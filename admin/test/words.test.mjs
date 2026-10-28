@@ -318,7 +318,7 @@ test("the panel and the console both import words.mjs, and neither keeps its own
   assert.match(SRC("render.mjs"), /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\/words\.mjs";$/m, "the /dispatch runs table too");
   // Round 2: every place a stream's end or a chip's last run is said (#710 round 2).
   assert.match(SRC("console/transcript.mjs"), /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\.\/words\.mjs";$/m, "the live transcript's end");
-  assert.match(SRC("console/script.mjs"), /^import \{[^}]*\bOUTCOME_WORD_OF\b[^}]*\} from "\.\.\/words\.mjs";$/m, "the browser's stream status");
+  assert.match(SRC("console/live.mjs"), /^import \{[^}]*\boutcomeWord\b[^}]*\} from "\.\.\/words\.mjs";$/m, "the page stream resolves reason-aware words before the browser sees them");
   assert.match(panels, /^import \{[^}]*\bOUTCOME_WORD_OF\b[^}]*\} from "\.\.\/\.\.\/words\.mjs";$/m);
   assert.match(panels, /buildGraphScene\(p\.graph, \{[^}]*outcomeWords: OUTCOME_WORD_OF[^}]*\}\)/, "the topology, which loads no module, is handed the words");
   assert.match(panel, /\(run ended: \$\{scrubControl\(outcomeWord\(tail\.ended\)\.word \?\? tail\.ended\)\}\)/, "the panel's tail");
@@ -329,18 +329,16 @@ test("the panel and the console both import words.mjs, and neither keeps its own
   }
 });
 
-test("the browser script's outcome words are words.mjs's, and its stream status maps through them (#710 round 2)", async () => {
+test("the browser displays the run stream's reason-aware outcome without remapping it (#747)", async () => {
   const { CONSOLE_SCRIPT } = await import("../src/console/script.mjs");
+  const { runConsoleScript } = await import("./helpers/script-dom.mjs");
   assert.deepEqual(OUTCOME_WORD_OF, Object.fromEntries(Object.entries(OUTCOME_WORDS).map(([k, v]) => [k, v.word])));
-  const client = JSON.parse(/^ {2}var OUTCOME_WORD = (\{.*\});$/m.exec(CONSOLE_SCRIPT)[1]);
-  assert.deepEqual(client, OUTCOME_WORD_OF, "the client's table is the server's, written in");
-  // The done handler's own mapping, run as the browser runs it.
-  const rhs = /if \(d && typeof d\.outcome === "string"\) outcome = (.*);$/m.exec(CONSOLE_SCRIPT)[1];
-  const map = new Function("OUTCOME_WORD", "d", `return ${rhs};`);
-  assert.equal(map(client, { outcome: "policy" }), "refused");
-  assert.equal(map(client, { outcome: "completed" }), "completed");
-  assert.equal(map(client, { outcome: "unknown" }), "unknown");
-  assert.equal(map(client, { outcome: "constructor" }), "constructor", "an own key only");
+  assert.doesNotMatch(CONSOLE_SCRIPT, /var OUTCOME_WORD =/);
+  for (const outcome of ["cancelled", "awaiting input", "failed", "completed", "future-state"]) {
+    const d = runConsoleScript(CONSOLE_SCRIPT, '<html><body data-live="run" data-query="id=gh-1"><main id="main"><p data-transcript-status></p><div data-transcript data-job="gh-1"></div></main></body></html>');
+    d.streams[0].emit("tdone", { outcome });
+    assert.equal(d.document.querySelector("[data-transcript-status]").textContent, `ended (${outcome})`);
+  }
 });
 
 // ---- the panel's run detail ---------------------------------------------------------------------------------------------

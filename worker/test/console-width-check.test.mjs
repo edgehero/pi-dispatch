@@ -1434,7 +1434,7 @@ test("the glue: every golden (the sign-in pages' and the panel goldens among the
 	assert.equal(handed.shellDocs.length, pageNames.length * 4, "every page for each of the four sign-ins");
 	assert.deepEqual([...new Set(handed.shellDocs.map((d) => d.role))], ["operator", "viewer", "read-only", "longest-name"]);
 	const run = handed.shellDocs.find((d) => d.id === "shell.longest-name.run");
-	assert.match(run.html, new RegExp(`<h1>Run [a-z0-9]{${RUN_ID_LENGTH}}</h1>`), "the run page's title holds the long id");
+	assert.match(run.html, new RegExp(`<h1>[a-z0-9]{${RUN_ID_LENGTH}}</h1>`), "the run page's title holds the long id");
 	assert.match(run.html, /Read-only console/);
 	assert.match(run.html, new RegExp(`<b\\b[^>]*>m{32}</b>`), "the top bar names the longest name");
 	assert.match(handed.shellDocs.find((d) => d.id === "shell.operator.overview").html, new RegExp(`id="p-nav-parked" data-panel><span class="count[^<]*(?:<span[^>]*>)?${PARKED_SHOWN}<`), "the Parked pill carries its count");

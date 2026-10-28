@@ -25,6 +25,9 @@
  * panels out in the kit's grids (`PAGE_LAYOUT`) and have a line under its title that the stream swaps
  * (`PAGE_HEADLINES`).
  */
+import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
+import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
+import { REPLICAS_MAX } from "@edgehero/pi-dispatch/triggers";
 import { FORGES } from "@edgehero/pi-dispatch/forges";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
@@ -73,7 +76,7 @@ import {
   overviewWaitlists,
   parkedCheckRows,
   parkedQuestions,
-  runChain,
+  runChain, runHeadline, runRecord, runRest, runTranscriptState, runTerminal, runActionsPanel, runSandbox, runSecrets, runModels, runTail, runRecovery, runWhy, runHost, runViewer,
   runChat,
   runCostPanel,
   runInbox,
@@ -128,7 +131,7 @@ export const PAGES = Object.freeze({
  * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
  * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
  */
-export const LEGACY_PAGES = Object.freeze(["run", "insights", "fleet", "config"]);
+export const LEGACY_PAGES = Object.freeze(["insights", "fleet", "config"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
@@ -138,7 +141,7 @@ const PAGE_PANELS = Object.freeze({
   // swapping panels; on a phone, where the layout is one column, Needs you comes first once the checklist is gone.
   overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
   runs: [["p-filters", runsFilters], ["p-summary", runsSummary], ["p-runs", runsTable]],
-  run: [["p-outcome", runOutcome], ["p-progress", runProgress], ["p-chat", runChat], ["p-inbox", runInbox], ["p-run", runSummary], ["p-cost", runCostPanel], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain]],
+  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
   parked: [["p-questions", parkedQuestions]],
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
@@ -151,7 +154,7 @@ const PAGE_PANELS = Object.freeze({
  * (`shell.mjs` `HEADLINE_ID`), and the stream swaps it like any panel, since what it says changes while the page is
  * open ("All clear. 4 jobs running, nothing needs you."). A screen with none draws no line.
  */
-const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline });
+const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadline });
 
 /**
  * How a screen's panels are laid out (issue #737), for a screen whose cards stand in a grid rather than one under
@@ -165,6 +168,7 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline });
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-terminal", "p-inbox", "p-run", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
   overview: Object.freeze([
     Object.freeze({ cls: "cols", items: Object.freeze(["p-setup", Object.freeze({ cls: "stack", items: Object.freeze(["p-setup-pi", "p-setup-empty"]) })]) }),
     Object.freeze({ cls: "cards-4", slotAfter: true, items: Object.freeze(["p-needs", "p-waiting", "p-active", "p-spend"]) }),
@@ -524,6 +528,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const reads = PAGE_READS[name];
   // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
   const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
+  if (name === "run" && typeof deps.env?.PI_CHAIN_MAX_PER_JOB === "string" && /^\d{1,9}$/.test(deps.env.PI_CHAIN_MAX_PER_JOB)) data.chainMaxPerJob = Number(deps.env.PI_CHAIN_MAX_PER_JOB);
   if (reads.includes("snapshot")) {
     try {
       data.snapshot = await (reads.includes("waiting") ? deps.fleet.snapshot({ waiting: true }) : deps.fleet.snapshot());
@@ -560,13 +565,13 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   if (reads.includes("transcriptMeta") && typeof deps.fleet?.transcriptMeta === "function") {
     // Issue #643: whether the run has a live transcript stream, without a byte of its text (the stream's text goes to an
-    // operator's `/api/transcript` alone). Read for both roles, as all page data is; only an operator's page uses it.
+    // operator's page entry events or `/api/transcript`, never a panel). Read for both roles, as all page data is; only an operator's page uses it.
     // Only a read's own answer (`exists` true or false) says whether a stream exists: anything else, an answer that is
     // not one included, is a stream that could not be read, never "none".
     try {
       const meta = await deps.fleet.transcriptMeta(q.id);
       const read = meta !== null && typeof meta === "object" && !meta.unreachable && !meta.invalid && typeof meta.exists === "boolean";
-      data.transcript = read ? { exists: meta.exists, ended: meta.ended === true, outcome: typeof meta.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta.length) ? meta.length : 0 } : { unreachable: true, exists: false };
+      data.transcript = read ? { exists: meta.exists, ended: meta.ended === true, outcome: typeof meta.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta.length) ? meta.length : 0, lastId: typeof meta.lastId === "string" && TRANSCRIPT_ID_RE.test(meta.lastId) ? meta.lastId : null } : { unreachable: true, exists: false };
     } catch {
       data.transcript = { unreachable: true, exists: false };
     }
@@ -590,6 +595,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       if (typeof deps.fleet.progressOfRun === "function" && data.run?.record?.reason === "recovery-enqueued") data.progressContinues = { as: null };
     }
   }
+  if (name === "run" && !data.run?.record && typeof deps.fleet?.runLiveFacts === "function") {
+    try { data.activeRun = await deps.fleet.runLiveFacts(q.id, lookup); } catch { data.activeRun = null; }
+  }
   if (reads.includes("inbox") && typeof deps.fleet?.inbox === "function") {
     // Issue #646: a steer-armed job's inbox, WITHOUT TEXT (the reader's `readJobInbox`: ids, modes, sources, states,
     // times and byte counts), and whether its run takes messages now. Both roles get the list; `runInbox` draws the
@@ -606,7 +614,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // record whether a later run took the answer), for the Chat panel. Null without a job-state reader. The newer-run
     // search is a runs-page read, so the live loop pays it only for a parked record, whose mode depends on it.
     try {
-      data.chat = await chatFactsOf(deps.fleet, q.id, data.run?.record ?? null, { searchNewer: "parked", now: () => now, lookup });
+      data.chat = await chatFactsOf(deps.fleet, q.id, data.run?.record ?? null, { searchNewer: "saved", now: () => now, lookup });
     } catch {
       data.chat = { unreachable: true };
     }
@@ -628,6 +636,42 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (!refusedBeforeStart(record)) data.sandboxCheck = await sandboxCheckOf(deps.fleet, q.id, record, { now: () => now });
   };
   await Promise.all([reads.includes("chat") ? chatRead() : null, reads.includes("actions") && data.run?.record ? actionsRead() : null]);
+  if (name === "run" && data.run?.record) {
+    const record = data.run.record;
+    // These lookups are bounded by the worker's own replica/recovery caps, never a history scan. A related record
+    // remains PII-free; no retained queue payload is passed to a renderer.
+    const siblings = [];
+    if (Number.isInteger(record.replica) && Number.isInteger(record.replicas) && record.replicas <= REPLICAS_MAX && record.replicas >= 2) {
+      const stem = String(record.recoveryOf ?? record.jobId ?? "").replace(/-r[1-3](?=\.r[1-2]$|$)/, "-r");
+      for (let i = 1; i <= record.replicas; i += 1) {
+        if (i === record.replica) continue;
+        const id = stem.replace(/-r(?=\.r[1-2]$|$)/, `-r${i}`);
+        if (id !== record.jobId && RUN_ID_RE.test(id)) siblings.push(id);
+      }
+    }
+    const related = async (id) => { try { return (await deps.fleet.runById(id))?.record ?? null; } catch { return null; } };
+    const base = typeof record.recoveryOf === "string" && RUN_ID_RE.test(record.recoveryOf) ? record.recoveryOf : q.id;
+    const recoveryIds = record.checkpoints || record.recovered || record.recoverSkipped || String(record.reason ?? "").startsWith("recovery-")
+      ? [base, ...Array.from({ length: RECOVERY_CAP }, (_, i) => `${base}.r${i + 1}`)].filter((id) => id !== q.id && RUN_ID_RE.test(id)) : [];
+    const [siblingRecords, recoveryRecords, trigger, holds] = await Promise.all([
+      Promise.all(siblings.map(related)), Promise.all(recoveryIds.map(related)),
+      typeof deps.fleet.runTrigger === "function" ? Promise.resolve().then(() => deps.fleet.runTrigger(record.triggerIndex, record.triggerType)).catch(() => null) : null,
+      recoveryIds.length && typeof deps.fleet.runHolds === "function" ? deps.fleet.runHolds(q.id, record).catch(() => null) : null,
+    ]);
+    data.siblings = siblingRecords.filter(Boolean);
+    data.recoveryRuns = [record, ...recoveryRecords.filter(Boolean)].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+    data.trigger = trigger;
+    data.runHolds = holds;
+    const continuation = data.chat?.activeJobId ?? data.chat?.queuedJobId;
+    if (continuation && continuation !== q.id && RUN_ID_RE.test(continuation)) {
+      try { data.recoveryLive = await deps.fleet.runLiveFacts?.(continuation, lookup) ?? null; } catch { data.recoveryLive = null; }
+      try { data.recoveryProgress = await deps.fleet.progressOfRun?.(continuation, recoveryRecords.find((r) => r?.jobId === continuation) ?? null) ?? null; } catch { data.recoveryProgress = null; }
+    }
+    if (refusedBeforeStart(record)) {
+      try { data.snapshot = await deps.fleet.snapshot(); } catch { data.snapshot = null; }
+      try { data.runsWindow = await deps.fleet.runsWindow?.() ?? null; } catch { data.runsWindow = null; }
+    }
+  }
   if (reads.includes("insights")) {
     const fullPaths = q.paths === "full" && who?.role === "operator";
     try {
@@ -686,10 +730,13 @@ function viewOf(name, ctx) {
   return { page: name, data, role: ctx?.session?.role ?? null, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now, pages: PAGES };
 }
 
-/** Each panel of screen `name` as `{ id, fragment }`. */
+/** The viewer card's fixed visible panels. The other ids remain empty for live state swaps. */
+export const RUN_VIEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-progress", "p-transcript", "p-chat", "p-inbox", "p-run"]);
+
+/** Each panel of screen `name` as `{ id, fragment }`, with the role split enforced before rendering. */
 function panelFragments(name, ctx) {
   const view = viewOf(name, ctx);
-  return PAGE_PANELS[name].map(([id, render]) => ({ id, fragment: render(view) }));
+  return PAGE_PANELS[name].map(([id, render]) => ({ id, fragment: name === "run" && view.role !== "operator" && !RUN_VIEWER_PANELS.includes(id) ? html`` : render(view) }));
 }
 
 /**
@@ -711,27 +758,17 @@ function headlineOf(name, ctx) {
   return Object.hasOwn(PAGE_HEADLINES, name) ? PAGE_HEADLINES[name](viewOf(name, ctx)) : null;
 }
 
+/** A parked question leads the main column, with the same one panel id used in every state. */
+function runLayoutOf(data) {
+  const layout = PAGE_LAYOUT.run;
+  if (data?.chat?.mode !== "reply") return layout;
+  const columns = layout[1];
+  return [layout[0], { ...columns, items: columns.items.map((column, i) => ({ ...column, items: i === 0 ? ["p-chat", ...column.items] : column.items.filter((id) => id !== "p-chat") })) }];
+}
+
 /** A layout's markup (`PAGE_LAYOUT`): its wrappers in order, each panel's section where the layout names it. */
 function layoutHtml(items, sections) {
   return html`${items.map((it) => (typeof it === "string" ? sections.get(it) : html`<div class="${it.cls}"${it.slotAfter ? html` data-slot-after` : null}>${layoutHtml(it.items, sections)}</div>`))}`;
-}
-
-/**
- * Whether the run page draws its live transcript section (issue #710): not for a run refused before it started (it never
- * had one), not for an id that is not a run id, and not for a job with no record that the queue does not know either
- * (the chat facts' `unknown`) or holds as queued (`queued`, review: the section's "not started yet" said the banner's
- * sentence a second time), each of which the outcome banner says once, unless a stream exists or its read failed (the
- * section says which). The section is static (the browser attaches to a stream that exists when the page loads, and
- * the absent sentence always said to reload), so a queued page loses no live behaviour: the panels still swap live when
- * the job starts, and the reload the banner names draws the section. Every other page keeps it: a running job, and a
- * page whose reader has no chat facts, which cannot tell a queued job from none.
- */
-function runHasTranscript(data) {
-  const record = data?.run?.record ?? null;
-  if (record) return !refusedBeforeStart(record);
-  if (data?.run?.invalid) return false;
-  if (data?.transcript?.exists === true || data?.transcript?.unreachable) return true;
-  return data?.chat?.state !== "unknown" && data?.chat?.state !== "queued";
 }
 
 /**
@@ -774,11 +811,12 @@ export async function renderPage(name, ctx) {
   // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
   // Issue #710: none for a run that never had one to show: refused before it started, or no record of a run that is not
   // running (not a run id, queued, or unknown), which the outcome banner says once.
-  const extra = name === "run" && runHasTranscript(ctx?.data) ? html`<section id="transcript" class="transcript-section">${runTranscriptSection(viewOf(name, ctx))}</section>` : null;
+  const extra = name === "run" && !ctx?.data?.run?.invalid ? html`<div id="transcript" class="run-transcript">${runTranscriptSection(viewOf(name, ctx))}</div>` : null;
   const sections = new Map(panels.map(({ id, fragment }) => [id, legacyWrap(name, html`<section id="${id}" data-panel>${fragment}</section>`)]));
-  const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
+  if (name === "run" && extra !== null) sections.set("p-transcript", html`${sections.get("p-transcript")}${extra}`);
+  const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
-  const body = shellHtml(name, ctx, html`${inner}${extra === null ? null : legacyWrap(name, extra)}`, headline === null ? {} : { headline });
+  const body = shellHtml(name, ctx, html`${inner}`, headline === null ? {} : { headline });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = places !== null && !runPlaces(places).shown ? 503 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query, theme }) };

@@ -19,8 +19,8 @@
  * Each is text through `textContent` or `createTextNode`, never markup.
  *
  * A PAGE ACTS ONLY AS THE PERSON IT WAS DRAWN FOR (issue #737): the top bar's `.who` carries the session's `data-name`
- * and `data-role`, and every request this script makes on the session's behalf says that person (`<name>.<role>`): both
- * event streams in the `as` query parameter, every preview and confirm in the `x-console-as` header (`session-ends.mjs`
+ * and `data-role`, and every request this script makes on the session's behalf says that person (`<name>.<role>`): the
+ * page stream in the `as` query parameter, every preview and confirm in the `x-console-as` header (`session-ends.mjs`
  * `PERSON_PARAM`, `PERSON_HEADER`). The server refuses a request whose person is not the cookie's session (a stream
  * 401, a write 409 with the bar's own refusal), so a browser that signed in as someone else in another tab can neither
  * stream that person's panels into this page nor preview or confirm as them under this page's bar; and a probe whose
@@ -28,7 +28,7 @@
  * who it is sends no person, and is never reloaded into one.
  *
  * AN ANSWER THAT IS NOT A WRITE'S OWN IS NEVER ITS SENTENCE IN THE SLOT. A 401 from a preview or a confirm, or a stream
- * the browser closed (the page's or the transcript's), is a session that ended or a browser that is someone else's
+ * the browser closed, is a session that ended or a browser that is someone else's
  * now, whatever the request was: each goes through the one probe (below) and its `toLogin`. A write's 401 first puts
  * `CONFIRM_SIGNED_OUT` (`confirm-view.mjs`: nothing was changed, and the console is being asked) in the slot that asked,
  * never the answer's own text, so a slot whose probe waits on a stream's question never stays on its skeleton. A write's
@@ -165,16 +165,16 @@
  *     changed field holds its panel until it is applied (a filter bar's Apply loads the page anew), or set back as it
  *     was drawn and left. A swap never drops the focus: one that held it goes to the same form's button in the new
  *     markup, else a link to the same place, else the panel.
- *   - the run page's LIVE TRANSCRIPT (issue #643; `[data-transcript]`, drawn for an operator only): opens
- *     `/api/transcript?id=<data-job>` with `EventSource`. Each `event: entry` carries `{html}`, server-rendered and
+ *   - the run page's LIVE TRANSCRIPT (issue #747; `[data-transcript]`, drawn for an operator only): uses
+ *     the page's one `EventSource`. Each `event: entry` carries `{html}`, server-rendered and
  *     escaped, which is APPENDED to that one element (`insertAdjacentHTML("beforeend")`) and nowhere else. The view
  *     follows the bottom unless the operator has scrolled up. `[data-transcript-status]` says "live", "reconnecting",
- *     "ended (<outcome>)", "not live" or "signed out", through `textContent`. `event: done` (the run is over) closes the
- *     stream, so it is not reopened; `event: end` is the page stream's handler (above). A dropped stream reconnects by
+ *     "ended (<outcome>)", "not live" or "signed out", through `textContent`. `event: tdone` ends the transcript only;
+ *     the page connection keeps receiving panels. `event: end` is the session handler (above). A dropped stream reconnects by
  *     itself and resends the last entry's id as `Last-Event-ID`, so nothing is appended twice. One the browser closed
  *     (a 401, a 429, a 503) is asked about with the page stream's probe, saying "reconnecting" on its own line while it
- *     asks: a 401 or another person goes to sign-in, and only a 200 for the page's person is the stream limit, "not
- *     live" on that line alone.
+ *     asks: a 401 or another person goes to sign-in, and only a 200 for the page's person is the stream limit,
+ *     said on both the page's pill and its transcript status.
  *   - every page's TIMES (issue #710): each `<time datetime>` the server drew (its text the UTC instant) is rewritten to
  *     the reader's local time with its UTC offset, its `title` set to the UTC text, on load and inside each panel a
  *     live update swaps in, with the reader's date before it. A time the server marks `data-day`, whose row names its UTC
@@ -195,7 +195,6 @@ import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, STREAM_EN
 import { SEARCH_ID } from "./kit.mjs";
 import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF } from "./shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "./theme.mjs";
-import { OUTCOME_WORD_OF } from "../words.mjs";
 
 /**
  * How long the page waits before it asks again, when the console did not answer (a sign-in post, a one-time link's
@@ -255,7 +254,6 @@ export const CONSOLE_SCRIPT = `"use strict";
   var PAGE_PATHS = ${JSON.stringify(Object.values(PAGES).map((p) => p.path))};
   // The console's outcome words (words.mjs, issue #710), written in from the one table: a stream's end says "refused",
   // never the record's "policy". An outcome not in it shows as itself.
-  var OUTCOME_WORD = ${JSON.stringify(OUTCOME_WORD_OF)};
   // The closed lists this script switches on, written in from their one source each (issue #737): why a session ended
   // (session-ends.mjs; the only reasons /login?ended= is ever given), what a stream's end may carry, which sign-in notice
   // a status selects, the confirm slot's id and its no-answer and signed-out sentences (confirm-view.mjs), and the live
@@ -1450,6 +1448,7 @@ ${FIT_JS}
       try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
       try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
       try { foldBars(el); } catch (e) { /* the swapped panel's filters stay shown */ }
+      try { fillRunSlots(); } catch (e) { /* transcript entries remain in their static box */ }
     });
     if (keep) keepFocus(el, keep);
   }
@@ -1525,7 +1524,7 @@ ${FIT_JS}
   // ---- the live stream (issue #641) and how a page says what it is showing (issue #737) ----
   var live = document.body ? document.body.getAttribute("data-live") : null;
   var es = null;
-  var tes = null;
+  var transcriptTimer = null;
   var tmark = null;
   var status = document.getElementById("live-status");
   var word = status && typeof status.querySelector === "function" ? status.querySelector("[data-live-word]") : null;
@@ -1577,7 +1576,8 @@ ${FIT_JS}
   }
   function closeStreams() {
     if (es) es.close();
-    if (tes) tes.close();
+    if (transcriptTimer !== null) clearInterval(transcriptTimer);
+    transcriptTimer = null;
   }
   // ---- asking the console what a closed stream meant (probe) ----
   // A caller's on.ok is what a 200 means to it on the first ask: "limit" (a stream the browser closed, refused while the
@@ -1585,8 +1585,7 @@ ${FIT_JS}
   // reason a 401 goes to sign-in with when its answer names none of the console's own. A 503 or no answer keeps the
   // page and asks again every RETRY_MS, and once that has happened a 200 reloads (the console is back).
   //
-  // ONE QUESTION, EVERY CALLER ANSWERED (issue #737). The browser closes a run page's two streams together (a 429 over
-  // the stream limit refuses both), and a write's 401 can come while a stream's question is out. So each probe (in a
+  // ONE QUESTION, EVERY CALLER ANSWERED (issue #737). Repeated stream errors and a write's 401 can arrive together. So each probe (in a
   // browser that can ask at all) joins the callers waiting (asks) and says its own "asking", a question goes out only
   // when none is, and its answer settles every caller waiting: the limit is said on every stream the browser has closed
   // and by each caller in its own words, a reload or a sign-in once for all. A guard that dropped the second caller (the
@@ -1606,6 +1605,7 @@ ${FIT_JS}
   // all ("guess"): by default the page's pill and notes; the transcript's probe says it on its own status line (on.say),
   // since its stream being refused says nothing about the page's.
   function pageSays(state) {
+    if (tmark && !tdone) tmark(state === "asking" ? "reconnecting" : "not live: reload after closing another console tab", "off");
     if (state === "limit") {
       mark("off");
       note("limit");
@@ -1688,7 +1688,7 @@ ${FIT_JS}
       }
     }, again);
   }
-  // A stream's end, for the page's stream and the transcript's alike (the hub ends both of a session's streams).
+  // The page stream's session end also ends its transcript; tdone never takes this path.
   var ended = false;
   function streamEnded(ev) {
     var r = null;
@@ -1794,48 +1794,162 @@ ${FIT_JS}
     });
     es.addEventListener("end", streamEnded);
   }
-  // ---- the live transcript (issue #643) ----
+  // ---- the run transcript: entries share the page's stream (issue #747) ----
   var tbox = document.querySelector("[data-transcript]");
   var tjob = tbox ? tbox.getAttribute("data-job") : null;
-  if (tbox && tjob && typeof EventSource === "function") {
-    var tstatus = document.querySelector("[data-transcript-status]");
-    tmark = function (text, cls) {
-      if (!tstatus) return;
-      tstatus.textContent = text;
-      tstatus.className = "t-status " + cls;
-    };
-    tes = new EventSource("/api/transcript?id=" + encodeURIComponent(tjob) + personQuery);
-    tes.addEventListener("open", function () { tmark("live", "on"); });
-    // A transcript stream the browser CLOSED (a 401, a 429, a 503) is asked about as the page's own is (probe): a session
-    // that ended goes to sign-in with its reason, another person to sign-in as switched, the console out of reach is
-    // asked again; only a 200 for the page's person is the stream limit, said on this line alone.
-    var transcriptSays = function (state) {
-      tmark(state === "asking" ? "reconnecting" : "not live: reload after closing another console tab", "off");
-    };
-    tes.addEventListener("error", function () {
-      tmark("reconnecting", "off");
-      if (tes.readyState === 2) probe({ ok: "limit", ended: null, say: transcriptSays }, false);
+  var tseen = Object.create(null);
+  var tfilter = "all";
+  var tstate = null;
+  var tdone = false;
+  function transcriptEntries() {
+    return tbox ? Array.prototype.slice.call(tbox.querySelectorAll("[data-kind]")) : [];
+  }
+  // Agent-written text is copied only from the server-escaped entries. Setting textContent keeps a question that
+  // contains markup as text; panels themselves carry empty slots, including after a live swap.
+  // A parked question is the hero, ahead of the main column's other cards. Move the existing panel node, never
+  // clone it: its form, held input, and the independent transcript box survive the next state change.
+  function placeRunChat() {
+    var chat = document.getElementById("p-chat");
+    var main = document.querySelector(".run-main");
+    var side = document.querySelector(".run-side");
+    if (!chat || !main || !side || typeof chat.querySelector !== "function") return;
+    var target = chat.querySelector(".qcard") ? main : side;
+    if (chat.parentNode !== target && typeof target.insertBefore === "function") target.insertBefore(chat, target.firstChild);
+  }
+  function fillRunSlots() {
+    placeRunChat();
+    if (!tbox) return;
+    var entries = transcriptEntries();
+    var question = document.querySelector("[data-run-question]");
+    var tail = document.querySelector("[data-run-tail]");
+    var tools = document.querySelector("[data-recovery-tools]");
+    if (question) {
+      var answer = "";
+      for (var i = 0; i < entries.length; i++) {
+        var kind = entries[i].getAttribute("data-kind");
+        if (kind === "reset") answer = "";
+        if (kind === "assistant") {
+          var text = entries[i].querySelector("pre");
+          if (text) answer = text.textContent;
+        }
+      }
+      question.textContent = answer;
+    }
+    if (tail) {
+      tail.textContent = "";
+      entries.slice(-3).forEach(function (entry) { var clone = entry.cloneNode(true); clone.hidden = false; tail.appendChild(clone); });
+    }
+    if (tools) {
+      tools.textContent = "";
+      entries.filter(function (entry) { return entry.getAttribute("data-kind") === "tool-call" || entry.getAttribute("data-kind") === "tool-result"; }).slice(-3).forEach(function (entry) { var clone = entry.cloneNode(true); clone.hidden = false; tools.appendChild(clone); });
+    }
+    if (tstate && tmark) tmark(tstate.text, tstate.cls);
+  }
+  placeRunChat();
+  function transcriptFollowing() {
+    if (!tbox) return true;
+    return tbox.scrollHeight - tbox.scrollTop - tbox.clientHeight < 24;
+  }
+  function followingState() {
+    var follows = transcriptFollowing();
+    var label = document.querySelector("[data-transcript-following]");
+    var newest = document.querySelector("[data-transcript-newest]");
+    if (label) label.textContent = follows ? "Following" : "Reading earlier entries";
+    if (newest) newest.hidden = follows;
+  }
+  function filterTranscript() {
+    transcriptEntries().forEach(function (entry) {
+      var kind = entry.getAttribute("data-kind");
+      var tool = kind === "tool-call" || kind === "tool-result";
+      entry.hidden = tfilter === "tools" ? !tool : tfilter === "messages" ? kind !== "user" && kind !== "assistant" && kind !== "steer" : false;
     });
-    tes.addEventListener("entry", function (ev) {
+    var buttons = document.querySelectorAll("[data-transcript-filter]");
+    for (var i = 0; i < buttons.length; i++) buttons[i].setAttribute("aria-pressed", String(buttons[i].getAttribute("data-transcript-filter") === tfilter));
+    followingState();
+  }
+  function transcriptTimers() {
+    var entries = transcriptEntries();
+    var active = Object.create(null);
+    entries.forEach(function (entry) {
+      var kind = entry.getAttribute("data-kind");
+      var tool = entry.getAttribute("data-tool") || "?";
+      if (kind === "reset" || kind === "end") active = Object.create(null);
+      else if (kind === "tool-result" && active[tool]) active[tool].shift();
+      else if (kind === "tool-call") {
+        if (!active[tool]) active[tool] = [];
+        active[tool].push(entry);
+      }
+      var old = entry.querySelector("[data-call-elapsed]");
+      if (old) old.remove();
+    });
+    if (tdone) return;
+    Object.keys(active).forEach(function (tool) {
+      active[tool].forEach(function (entry) {
+      var ts = Number(entry.getAttribute("data-ts"));
+      if (!isFinite(ts) || ts <= 0) return;
+      var span = document.createElement("span");
+      span.setAttribute("data-call-elapsed", "");
+      span.className = "muted mono";
+      span.textContent = "running " + Math.max(0, Math.floor((Date.now() - ts) / 1000)) + "s";
+      var timer = entry.querySelector("[data-tool-timer]") || entry.querySelector("header");
+      if (timer) timer.appendChild(span);
+      });
+    });
+  }
+  if (tbox && tjob && es) {
+    tmark = function (text, cls) {
+      tstate = { text: text, cls: cls };
+      var status = document.querySelector("[data-transcript-status]");
+      if (!status) return;
+      status.textContent = text;
+      status.setAttribute("data-stream-state", cls);
+    };
+    es.addEventListener("error", function () { if (!tdone) tmark("reconnecting", "off"); });
+    es.addEventListener("entry", function (ev) {
       var msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       if (!msg || typeof msg.html !== "string") return;
-      // Follow the bottom only when the reader is already there: one who scrolled up to read keeps their place.
-      var atBottom = tbox.scrollHeight - tbox.scrollTop - tbox.clientHeight < 24;
+      var id = ev.lastEventId;
+      if (id && tseen[id]) return;
+      if (id) tseen[id] = true;
+      var atBottom = transcriptFollowing();
       tbox.insertAdjacentHTML("beforeend", msg.html);
+      // A resumed attempt may publish again after an earlier end on the same run key.
+      tdone = false;
+      if (transcriptTimer === null) transcriptTimer = setInterval(transcriptTimers, 1000);
+      try { localTimes(tbox); } catch (e) { /* keep UTC */ }
+      filterTranscript();
+      transcriptTimers();
+      fillRunSlots();
       if (atBottom) tbox.scrollTop = tbox.scrollHeight;
+      followingState();
       tmark("live", "on");
     });
-    tes.addEventListener("done", function (ev) {
-      tes.close();
+    es.addEventListener("tdone", function (ev) {
+      tdone = true;
+      if (transcriptTimer !== null) clearInterval(transcriptTimer);
+      transcriptTimer = null;
       var outcome = "unknown";
       try {
         var d = JSON.parse(ev.data);
-        if (d && typeof d.outcome === "string") outcome = Object.prototype.hasOwnProperty.call(OUTCOME_WORD, d.outcome) ? OUTCOME_WORD[d.outcome] : d.outcome;
+        if (d && typeof d.outcome === "string") outcome = d.outcome;
       } catch (e) { /* keep unknown */ }
       tmark("ended (" + outcome + ")", "ended");
+      var ends = tbox.querySelectorAll("[data-transcript-end]");
+      for (var i = 0; i < ends.length; i++) ends[i].textContent = "The run is over (" + outcome + ").";
+      fillRunSlots();
+      transcriptTimers();
+      // The page stream stays open: its panels still change after the transcript ends.
     });
-    tes.addEventListener("end", streamEnded);
+    tbox.addEventListener("scroll", followingState);
+    document.addEventListener("click", function (ev) {
+      var filter = ev.target && ev.target.closest ? ev.target.closest("[data-transcript-filter]") : null;
+      if (filter) { tfilter = filter.getAttribute("data-transcript-filter"); filterTranscript(); }
+      var newest = ev.target && ev.target.closest ? ev.target.closest("[data-transcript-newest]") : null;
+      if (newest) { tbox.scrollTop = tbox.scrollHeight; followingState(); }
+    });
+    es.addEventListener("open", function () { if (tstate && tstate.text === "reconnecting" && !tdone) tmark("live", "on"); });
+    filterTranscript();
   }
 })();
 `;

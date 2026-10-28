@@ -1,6 +1,6 @@
 /**
- * The live transcript's entries as HTML (issue #643, DES-OPERATOR-CONSOLE "Live transcript"): what `/api/transcript`
- * writes as each `event: entry`'s `{html}`, and the run page's section that the stream fills.
+ * The live transcript's entries as HTML (issue #747, DES-OPERATOR-CONSOLE "Live transcript"): what an operator's run
+ * page stream and `/api/transcript` write as each `event: entry`'s `{html}`, and the static box the browser fills.
  *
  * THE TEXT IS AGENT-WRITTEN. The worker redacts the job's secrets and writes every control and bidi character as
  * `\u{XXXX}`, keeping only real newlines and tabs; this module treats it as untrusted anyway. Every value goes through
@@ -10,13 +10,14 @@
  * Issue #647 adds the same entry as structured JSON (`transcriptEntryJson`), for the terminal chat, which renders it
  * itself; the route, the role and the caps are the same, only the `data` differs.
  *
- * THE OPERATOR ALONE SEES IT. Only `/api/transcript` (operator only) renders an entry; the run page's section holds no
+ * THE OPERATOR ALONE SEES IT. Only the operator's entry events render transcript text. The initial run page holds no
  * entry, only the empty `[data-transcript]` element the browser script fills, and a viewer gets a sentence instead.
  * Nothing here reaches `/api/state`, a hub panel or a list.
  */
 import { LIVE_OUTCOMES, LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { TRANSCRIPT_ID_RE, transcriptAbsentText } from "../read-model.mjs";
 import { html } from "./html.mjs";
+import { icon } from "./kit.mjs";
 import { outcomeWord } from "../words.mjs";
 
 /** The kinds that carry text worth folding: a tool call's arguments and a tool's result go in a `<details>`. */
@@ -30,6 +31,7 @@ const KIND_LABEL = Object.freeze({
   "tool-result": "tool result",
   compaction: "compaction",
   note: "note",
+  steer: "steer",
   reset: "restart",
   skipped: "skipped",
   end: "end",
@@ -60,19 +62,21 @@ const endedWord = (o) => (typeof o === "string" && o !== "" ? (outcomeWord(o).wo
  * `<details>` for a tool call's arguments and a tool's result. `reset`, `skipped` and `end` carry no text and say what
  * they mean instead.
  */
-export function transcriptEntryHtml(entry) {
+export function transcriptEntryHtml(entry, options = {}) {
   const e = entry ?? {};
   const kind = Object.hasOwn(KIND_LABEL, e.kind) ? e.kind : "note";
   const time = timeOf(e.ts);
-  const header = html`<header><span class="t-kind">${KIND_LABEL[kind]}</span>${typeof e.tool === "string" && e.tool !== "" ? html` <span class="t-tool mono">${e.tool}</span>` : null}${e.error ? html` <span class="t-error bad">error</span>` : null}${time ? html` <time datetime="${time.iso}">${time.text}</time>` : null}${e.truncated ? html` <span class="t-trunc warn">truncated</span>` : null}</header>`;
+  // Use the sprite's stable icons; an unknown transcript kind is still a note.
+  const marks = { user: "comment", assistant: "running", "tool-call": "terminal", "tool-result": e.error ? "failed" : "done", steer: "comment", compaction: "more", note: "info", reset: "rerun", skipped: "attention", end: "done" };
+  const header = html`<span class="tx__k">${icon(marks[kind], { size: "sm" })}${KIND_LABEL[kind]}${typeof e.tool === "string" && e.tool !== "" ? html` <span class="code">${e.tool}</span>` : null}${e.error ? html` <span>error</span>` : null}</span>`;
   let body;
-  if (kind === "reset") body = html`<p class="note">The session file was rewritten; what follows starts over.</p>`;
-  else if (kind === "skipped") body = html`<p class="note">A line was left out (too large or unreadable).</p>`;
-  else if (kind === "end") body = html`<p class="note">The run is over (${endedWord(e.outcome)}).</p>`;
+  if (kind === "reset") body = html`<p>The session file was rewritten; what follows starts over.</p>`;
+  else if (kind === "skipped") body = html`<p>A line was left out (too large or unreadable).</p>`;
+  else if (kind === "end") body = html`<p data-transcript-end>The run is over (${options.outcomeWord ?? endedWord(e.outcome)}).</p>`;
   else if (typeof e.text !== "string") body = null;
-  else if (Object.hasOwn(FOLDED, kind)) body = html`<details><summary>${FOLDED[kind]}</summary><pre>${preText(e.text)}</pre></details>`;
+  else if (Object.hasOwn(FOLDED, kind)) body = html`<details${e.error ? html` open` : null}><summary>${FOLDED[kind]}</summary><pre>${preText(e.text)}</pre></details>`;
   else body = html`<pre>${preText(e.text)}</pre>`;
-  return html`<article class="t-entry t-${kind}">${header}${body}</article>`;
+  return html`<article class="tx__e tx__entry tx__e--${kind === "reset" ? "restart" : kind}${e.error ? " tx__e--error" : ""}" data-kind="${kind}" data-entry-id="${typeof e.id === "string" && TRANSCRIPT_ID_RE.test(e.id) ? e.id : ""}"${typeof e.tool === "string" ? html` data-tool="${e.tool}"` : null}${time ? html` data-ts="${e.ts}"` : null}>${header}<div class="tx__b tx__body">${body}${e.truncated ? html`<span class="tx__trunc">truncated</span>` : null}${kind === "tool-call" ? html`<span data-tool-timer></span>` : null}</div>${time ? html`<time class="tx__t" datetime="${time.iso}">${time.text}</time>` : null}</article>`;
 }
 
 /** The formats `/api/transcript` writes an entry in: the run page's HTML, or the structured entry (issue #647). */
@@ -114,20 +118,13 @@ export function transcriptEntryJson(entry) {
 export const TRANSCRIPT_ABSENT = transcriptAbsentText({ backend: "local" });
 
 /**
- * The run page's "Live transcript" section (operator only), from the page data's `transcript` (the fleet reader's
- * `transcriptMeta`, without text). The stream is opened only while one exists: a run's record is written at its end,
- * so "no record and no stream" is a run that has not started publishing, or no run at all (the page's 404), and a
- * stream opened for it would wait on a slot forever; the page says why there is none, and a reload picks up a stream
- * that has started since.
+ * The static transcript box, outside panel swaps but inside the run grid. It exists while queued too, so the page
+ * stream can attach without a reload. The adjacent p-transcript names the stream's state; refused runs hide the box
+ * while that panel is empty. A viewer gets a locked sentence and no browser attachment hook.
  */
 export function runTranscriptSection(view) {
-  const title = html`<h2>Live transcript</h2>`;
-  if (view?.role !== "operator") return html`${title}<p class="note">Transcripts are shown to operators only.</p>`;
+  if (view?.role !== "operator") return html`<div class="card"><p>Transcripts are shown to operators only. The run's messages, tool calls and results stay with operators. Its numbers are above.</p></div>`;
   const id = view?.query?.id;
-  if (typeof id !== "string" || id === "") return title;
-  const meta = view?.data?.transcript ?? null;
-  if (meta?.unreachable) return html`${title}<p class="warn">The live transcript could not be read (is Valkey reachable?). Reload to try again.</p>`;
-  if (meta?.exists !== true) return html`${title}<p class="note">${transcriptAbsentText(view?.data?.run?.record ?? null)} Reload to check again.</p>`;
-  const note = html`<p class="note">${meta.ended ? `The run has ended (${endedWord(meta.outcome)}); its stream is kept 24 hours.` : "The run is publishing its transcript."}</p>`;
-  return html`${title}${note}<p class="t-status" data-transcript-status role="status" aria-live="polite">not live</p><div class="transcript" data-transcript data-job="${id}" tabindex="0"></div>`;
+  if (typeof id !== "string" || id === "") return html``;
+  return html`<div class="card"><div class="tx__bar"><div class="seg" role="group" aria-label="Transcript filter"><button type="button" data-transcript-filter="all" aria-pressed="true">All</button><button type="button" data-transcript-filter="messages" aria-pressed="false">Messages</button><button type="button" data-transcript-filter="tools" aria-pressed="false">Tools</button></div><span data-transcript-following>Following</span><button class="btn btn--sm" type="button" data-transcript-newest hidden>Back to newest</button></div><div class="tx transcript" data-transcript data-job="${id}" tabindex="0" aria-label="Run transcript"></div></div>`;
 }

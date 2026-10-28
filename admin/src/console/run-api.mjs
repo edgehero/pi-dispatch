@@ -27,6 +27,7 @@ import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
+import { SESSION_NOT_SAVED } from "@edgehero/pi-dispatch/record-reason";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
@@ -131,12 +132,18 @@ export function safeRunOf(id, record) {
     attempt: count(r.attempt),
     exitCode: int(r.exitCode),
     turns: count(r.turns),
+    maxTurns: count(r.maxTurns),
     parentJobId: str(r.parentJobId, RUN_ID_RE),
     recoveryOf: rec?.recoveryOf ?? null,
     // Whether the run kept a session (its trigger armed run.resume), and whether this run resumed one: two booleans, so
     // a terminal can say "this run keeps no session" before it looks for a directory. Never the key.
     session: { kept: r.session !== null && typeof r.session === "object", resumed: r.session?.resumed === true },
   };
+}
+
+/** A session object is kept unless its reason explicitly records a failed save; `absent` is a fresh start. */
+export function sessionSavedOf(record) {
+  return record?.session !== null && typeof record?.session === "object" && !Array.isArray(record.session) && !SESSION_NOT_SAVED.includes(record.session.reason);
 }
 
 /**
@@ -264,15 +271,16 @@ const answerCheckCache = new WeakMap();
  * when an earlier read of this run saw a job id (`got.jobId`) and this fresh one reads none (`jobId: null`), which is
  * the moment the answer run has ended. EVERY answer is kept for the window, an unreadable one as long as a good one
  * (issue #737): one that was read again on every tick sent a Valkey that was already failing a queue lookup per run per
- * tick, and the Parked page has twenty runs. The page says the check could not be read until the window ends.
+ * tick, and the Parked page has twenty runs. The live page says the check could not be read until the window ends. A request retries an unreadable
+ * answer: the live load may have asked an incomplete set of queues (#747).
  */
-async function parkCheckCached(cache, fleet, id, record, now, read) {
+async function parkCheckCached(cache, fleet, id, record, now, read, { reuseUnreachable = true } = {}) {
   const at = typeof now === "function" ? now() : Date.now();
   const recordKey = recordKeyOf(record);
   let byId = cache.get(fleet);
   if (!byId) cache.set(fleet, (byId = new Map()));
   const hit = byId.get(id);
-  if (hit && hit.recordKey === recordKey && at >= hit.at && at - hit.at < PARK_CHECK_CACHE_MS) return { got: hit.got, answerLeft: false };
+  if (hit && (reuseUnreachable || hit.got?.unreachable !== true) && hit.recordKey === recordKey && at >= hit.at && at - hit.at < PARK_CHECK_CACHE_MS) return { got: hit.got, answerLeft: false };
   const got = await read();
   const seen = str(got?.jobId, RUN_ID_RE);
   const answerLeft = typeof hit?.sawJobId === "string" && got !== null && typeof got === "object" && Object.hasOwn(got, "jobId") && got.jobId === null;
@@ -306,7 +314,7 @@ export async function parkedAnswerCheckOf(fleet, id, record, { now = Date.now, l
       return { unreachable: true };
     }
   };
-  return (await parkCheckCached(answerCheckCache, fleet, id, record, now, read)).got;
+  return (await parkCheckCached(answerCheckCache, fleet, id, record, now, read, { reuseUnreachable: lookup.live === true })).got;
 }
 
 // The run page's action checks (issue #710), per fleet reader, then per run id, `parkCheckCached`'s entries.
@@ -323,7 +331,7 @@ async function actionCheckOf(cache, fleet, method, id, record, now, lookup = {})
       return { unreachable: true };
     }
   };
-  return (await parkCheckCached(cache, fleet, id, record, now, read)).got;
+  return (await parkCheckCached(cache, fleet, id, record, now, read, { reuseUnreachable: lookup.live === true })).got;
 }
 
 /**
@@ -355,7 +363,7 @@ export async function sandboxCheckOf(fleet, id, record, { now = Date.now } = {})
  * `{ asked }`, pages.mjs `loadPageData`; none for `/api/run`, a request asked now): a request's miss costs at most one
  * keyspace scan, shared by its load's other lookups, and a live load's costs none (the reader's `lookUp`).
  * The newer-run search is a runs-page read, so the run page's live loop asks for it only when the mode depends on it
- * (`searchNewer: "parked"`, a parked record) and reuses its answer for `NEWER_CACHE_MS` per run id (`now` the clock);
+ * (`searchNewer: "saved"`, a parked record or finished saved session; "parked" for a parked record alone) and reuses its answer for `NEWER_CACHE_MS` per run id (`now` the clock);
  * `/api/run` always searches afresh. A parked record that no later record answered is then looked for in the queue
  * (`fleet.pendingAnswer`, read through chat-mode's `pendingFactsOf`): a job queued or running on its target takes the
  * answer (`answeringJobId`), and a scan that could not tell makes the park unknown, never a reply. The live loop reuses
@@ -377,8 +385,8 @@ export async function chatFactsOf(fleet, id, record, { searchNewer = "always", n
   const activeJobId = jobState === "active" ? id : str(status.continuesAs, RUN_ID_RE);
   const queuedJobId = activeJobId === null ? str(status.queuedAs, RUN_ID_RE) : null;
   const parkedRecord = record?.outcome === "completed" && record?.reason === "awaiting-input";
-  const cached = searchNewer === "parked";
-  let newer = searchNewer === "always" ? await newerRunOf(fleet, record) : cached && parkedRecord ? await newerRunCached(fleet, id, record, now) : { known: false, jobId: null };
+  const cached = searchNewer === "parked" || searchNewer === "saved";
+  let newer = searchNewer === "always" ? await newerRunOf(fleet, record) : cached && (parkedRecord || (searchNewer === "saved" && sessionSavedOf(record) && chatModeOf({ state: jobState, record, activeJobId, queuedJobId }).mode === "fork")) ? await newerRunCached(fleet, id, record, now) : { known: false, jobId: null };
   let parked = null;
   let answeringJobId = null;
   if (parkedRecord && newer.known && newer.jobId === null && activeJobId === null && typeof fleet.pendingAnswer === "function") {

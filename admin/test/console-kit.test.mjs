@@ -1343,3 +1343,10 @@ test("every icon a fragment uses is a symbol in the sprite, and every class it w
   for (const [, names] of own) for (const c of names) assert.ok(classes.has(c), `.${c} is a class the kit writes`);
   for (const [, names] of own) for (const c of names) assert.doesNotMatch(PULSE_CSS, new RegExp(`\\.${c.replace(/[-_]/g, "\\$&")}(?![a-z0-9_-])`), `.${c} is not bundle.css's: it would be styled twice`);
 });
+
+test("a banner's block body holds paragraphs without nesting a paragraph inside another", () => {
+  const body = html`<p>What happened.</p><p>What to do.</p>`;
+  const text = out(ui.banner({ status: "failed", title: "Run failed", body, block: true }));
+  assert.match(text, /<div class="banner__s"><p>What happened\.<\/p><p>What to do\.<\/p><\/div>/);
+  assert.doesNotMatch(text, /<p class="banner__s"><p>/);
+});

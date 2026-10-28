@@ -58,7 +58,7 @@ const ICONS = new Set(ICON_NAMES);
  * page's panels and every id the script names in a `getElementById("...")` is refused (listed here, the sprite's, or
  * one of the families below), and each one listed here is still one of those.
  */
-export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "p-headline", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes", "q"]);
+export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "p-headline", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes", "q", "transcript"]);
 
 /**
  * The runs search field's id (the RunsScreen card's search pill): the top bar's Search button links to `/runs#q`
@@ -739,9 +739,9 @@ export function waitBar(segments, { label } = {}) {
  * A banner: what happened (`title`), what it means or what to do (`body`), and its `actions`, in a status's tint with
  * the status's icon (or `icon`) on a tile. `sm` is the compact notice. `role="status"`.
  */
-export function banner({ status, title, body = null, actions = null, icon: glyph = null, sm = false }) {
+export function banner({ status, title, body = null, actions = null, icon: glyph = null, sm = false, block = false }) {
   const s = statusOf(status, "banner");
-  return html`<div class="${classes("banner", sm && "banner--sm", `tone-${s.tone}`)}" role="status"><span class="tile">${icon(glyph ?? s.icon)}</span><div><p class="banner__t">${title}</p>${given(body) ? html`<p class="banner__s">${body}</p>` : null}</div>${given(actions) ? html`<div class="banner__act">${actions}</div>` : null}</div>`;
+  return html`<div class="${classes("banner", sm && "banner--sm", `tone-${s.tone}`)}" role="status"><span class="tile">${icon(glyph ?? s.icon)}</span><div><p class="banner__t">${title}</p>${given(body) ? block ? html`<div class="banner__s">${body}</div>` : html`<p class="banner__s">${body}</p>` : null}</div>${given(actions) ? html`<div class="banner__act">${actions}</div>` : null}</div>`;
 }
 
 /**
@@ -1058,4 +1058,17 @@ export function pageHref(pages, name, query = null) {
   }
   const s = q.toString();
   return s === "" ? path : `${path}?${s}`;
+}
+
+/** Phase chapters: the current phase has bounded item ticks; unknown or large totals remain a plain bar. */
+export function phases({ names, index = 0, done = null, total = null }) {
+  if (!Array.isArray(names) || names.length > 64 || names.some((n) => typeof n !== "string")) throw new TypeError("kit.phases: names is a list of at most 64 phase names");
+  const current = Number.isSafeInteger(index) && index >= 0 ? index : 0;
+  const ticks = Number.isSafeInteger(total) && total > 0 && total <= 32 && Number.isSafeInteger(done) && done >= 0;
+  return html`<ol class="phases" aria-label="Run phases">${names.map((name, i) => html`<li${i < current ? html` class="is-done"` : i === current ? html` class="is-now" aria-current="step"` : null}><span class="bar" aria-hidden="true">${i === current && ticks ? Array.from({ length: total }, (_, t) => html`<i${t < done ? html` class="on"` : null}></i>`) : null}</span><span class="name">${name}</span></li>`)}</ol>`;
+}
+
+/** Stripes say explicitly that the worker supplied no numerical progress. */
+export function noProgress(label = "The worker reports no progress.") {
+  return html`<span class="pnone" role="img" aria-label="${label}"></span><p class="card__sub">${label}</p>`;
 }

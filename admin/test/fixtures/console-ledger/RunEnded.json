@@ -1,0 +1,291 @@
+{
+  "card": "RunEnded",
+  "pr": 5,
+  "panels": [
+    "p-outcome",
+    "p-run",
+    "p-actions",
+    "p-cost",
+    "p-resources",
+    "p-session",
+    "p-chain"
+  ],
+  "elements": [
+    {
+      "el": "p-outcome",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runOutcome",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ]
+    },
+    {
+      "el": "p-run",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ]
+    },
+    {
+      "el": "p-actions",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runActionsPanel",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ]
+    },
+    {
+      "el": "p-cost",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runCostPanel",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ]
+    },
+    {
+      "el": "p-resources",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runResources",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ]
+    },
+    {
+      "el": "p-session",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSession",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ]
+    },
+    {
+      "el": "p-chain",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChain",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ]
+    },
+    {
+      "el": "The page of a finished run leads with its outcome, what happened and the next step, then the facts, costs and resources, with the actions to run it again or continue it.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runResources"
+    },
+    {
+      "el": "**How a person uses it.** The outcome banner says \"Completed: finished in 22m on mini1\" and reminds the reader that merges are never automatic. Its buttons open the issue and preview a re-run. *Run* lists the record's facts in plain words: trigger, turns against maxTurns, attempt, exit code and recovery. *Actions* explains each next step in a sentence:",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runRecovery"
+    },
+    {
+      "el": "**Preview a re-run** (paid). Its confirm bar is shown open with the reservation against today's cap and an undo line.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "**Fork from a point** links to the fork view.",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "#747 excludes point-in-time forking (#648), Watch (#735), and exact sample fixture text and marker timestamps. Production uses real records and catalog words; the card\u2019s sample values are not runtime contracts."
+    },
+    {
+      "el": "**Terminal chat** and **sandbox** commands copy with one click.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSandbox"
+    },
+    {
+      "el": "The side column has tokens and dollars (job cap as a bar with the soft-hold line), resources (peak memory against the size given), session and plan, and the chain as one line.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runResources"
+    },
+    {
+      "el": "**The server provides.** The run record: facts, outcome, reason and next-step sentences from the catalog, tokens, cost class and reservation, resource figures, session state in words (not raw tokens such as \"fresh (absent)\"), chain, and whether a workspace was kept. It also says whether a re-run is allowed, so the button is hidden or disabled with its reason when the planner would refuse it.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runResources"
+    },
+    {
+      "el": "**Fixture note.** gh-9575's target, flow, host, venue, model, tokens, cost, cap and end time are the fixture. The start time (14:50), turns, trigger, token split, model calls, resources, session wording and transcript size are sample values.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "#747 excludes point-in-time forking (#648), Watch (#735), and exact sample fixture text and marker timestamps. Production uses real records and catalog words; the card\u2019s sample values are not runtime contracts."
+    },
+    {
+      "el": "Production p-progress",
+      "kind": "panel",
+      "as": "p-progress",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runProgress",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-recovery",
+      "kind": "panel",
+      "as": "p-recovery",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runRecovery",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-transcript",
+      "kind": "panel",
+      "as": "p-transcript",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runTranscriptState",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-record",
+      "kind": "panel",
+      "as": "p-record",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runRecord",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-rest",
+      "kind": "panel",
+      "as": "p-rest",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runRest",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-chat",
+      "kind": "panel",
+      "as": "p-chat",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-terminal",
+      "kind": "panel",
+      "as": "p-terminal",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runTerminal",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-inbox",
+      "kind": "panel",
+      "as": "p-inbox",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runInbox",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-sandbox",
+      "kind": "panel",
+      "as": "p-sandbox",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSandbox",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-secrets",
+      "kind": "panel",
+      "as": "p-secrets",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSecrets",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-why",
+      "kind": "panel",
+      "as": "p-why",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWhy",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-host",
+      "kind": "panel",
+      "as": "p-host",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runHost",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-models",
+      "kind": "panel",
+      "as": "p-models",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runModels",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-tail",
+      "kind": "panel",
+      "as": "p-tail",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runTail",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    },
+    {
+      "el": "Production p-viewer",
+      "kind": "panel",
+      "as": "p-viewer",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runViewer",
+      "golden": [
+        "panels/run-chat-fork.operator"
+      ],
+      "reason": "Fixed panel set across every run state; unused panels stay empty and hidden so state changes need no reload."
+    }
+  ]
+}

@@ -197,15 +197,12 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["run.viewer"].html, /awaiting-input/);
   // Issue #643: the live transcript section, outside every panel. The fixture's run has ended and Valkey holds no
   // stream for it, so the operator reads why and nothing is opened; a viewer reads that transcripts are operators'.
-  // Since issue #737 each section is in a .legacy wrapper of its own, and an operator's page ends with the confirm slot
-  // and the held note's template, outside every wrapper, where a viewer's ends with the section's wrapper and the held
-  // note's template (every live page draws it, for every role).
-  const writes = `${confirmSlotHtml()}<template id="held-note">${heldNoteHtml()}</template>`;
-  assert.ok(first["run.operator"].html.includes(`<div class="legacy"><section id="transcript" class="transcript-section"><h2>Live transcript</h2><p class="note">No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired, or not started yet. Reload to check again.</p></section></div>${writes}\n</main>`), "the operator's transcript section, then the slot");
-  // Issue #712: a local run's page shows the command that reopens its sandbox.
-  assert.match(first["run.operator"].html, /<code class="mono">pi-dispatch sandbox gh-2f6a<\/code>/);
-  assert.match(first["run.viewer"].html, /<section id="transcript" class="transcript-section"><h2>Live transcript<\/h2><p class="note">Transcripts are shown to operators only\.<\/p><\/section><\/div><template id="held-note">/);
-  for (const key of ["run.operator", "run.viewer"]) assert.doesNotMatch(first[key].html, /data-transcript/, `${key}: no stream for an ended run without one`);
+  // #747: the browser-owned transcript is in the main grid and never inside a swapped panel.
+  assert.match(first["run.operator"].html, /<div id="transcript" class="run-transcript"><div class="card">/);
+  assert.match(first["run.operator"].html, /data-transcript data-job="gh-2f6a"/);
+  assert.match(first["run.operator"].html, /<span>pi-dispatch<\/span> <span>sandbox<\/span> <span>gh-2f6a<\/span>/);
+  assert.match(first["run.viewer"].html, /Transcripts are shown to operators only/);
+  assert.doesNotMatch(first["run.viewer"].html, /data-transcript data-job/);
   // Issue #644: the active tables carry each job's progress as integers and a tool name, the remote host's job too; the
   // running job's detail shows its counters to everyone and its phase names, bar and note to the operator alone.
   // Since issue #737 the overview counts the running jobs in each host's slots, and the table with their progress is
@@ -218,13 +215,13 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   const liveRun = first["run-live.operator"].html;
   assert.equal(first["run-live.operator"].status, 200, "a running job without a record is a page, not a 404");
   assert.match(liveRun, /This run has no record yet/);
-  assert.match(liveRun, /Current phase: <strong>migrate the schema<\/strong> <progress value="3" max="10">3 of 10<\/progress>/);
+  assert.match(liveRun, /<li class="is-now" aria-current="step"><span class="bar" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i class="on"><\/i>/);
   assert.match(liveRun, /three of ten tables migrated/);
   const liveViewer = first["run-live.viewer"].html;
-  assert.match(liveViewer, /<dt>Turn<\/dt><dd>7<\/dd>/, "a viewer gets the counters");
+  assert.match(liveViewer, /<dt>Turn<\/dt><dd>7 of 30<\/dd>/, "a viewer gets the counters");
   assert.match(liveViewer, /Phase 2 of 4: 3 of 10 done/, "and the phase's integers");
   assert.match(liveViewer, /Phase names and the run's note are shown to operators only\./);
-  for (const text of ["migrate the schema", "three of ten tables migrated", "<progress"]) {
+  for (const text of ["migrate the schema", "three of ten tables migrated"]) {
     for (const [key, page] of Object.entries(first)) if (key !== "run-live.operator") assert.ok(!page.html.includes(text), `${key} carries no ${text}`);
   }
   assert.match(first["runs.viewer"].html, /<th scope="col">Job<\/th>/);
@@ -259,7 +256,7 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
   // Issue #644: the hostile phase name and note are escaped and scrubbed on the operator's run page, and absent from
   // every other page (a viewer's run page, every list, every hub panel).
   const liveRun = pages["run-live.operator"].html;
-  assert.match(liveRun, /Current phase: <strong>&lt;script&gt;alert\(6\)&lt;\/script&gt; ?\[2J<\/strong>/, "the hostile phase name is text");
+  assert.match(liveRun, /<span class="name">&lt;script&gt;alert\(6\)&lt;\/script&gt; ?\[2J<\/span>/, "the hostile phase name is text");
   assert.match(liveRun, /PHASE-NOTE-TEXT &lt;img src=x onerror=alert\(7\)&gt;/, "the hostile note is text");
   for (const [key, page] of Object.entries(pages)) {
     if (key === "hostileRunQuery" || key === "run-live.operator") continue;
@@ -457,7 +454,7 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
     assert.deepEqual(Object.keys(calls).filter((k) => calls[k] > 0).sort(), [...expected].sort(), `${name} reads ${expected.join(", ")}`);
     assert.ok(calls.parkedCount <= 1, `${name}: the count at most once`);
     assert.equal(data.parkedCount, expected.includes("parkedCount") ? 2 : undefined, `${name}: the count is in the data where it was read`);
-    if (name === "run") assert.deepEqual(data.transcript, { exists: true, ended: false, outcome: null, length: 3 }, "the stream's facts only, never an id or a byte of text");
+    if (name === "run") assert.deepEqual(data.transcript, { exists: true, ended: false, outcome: null, length: 3, lastId: "3-0" }, "the stream's safe metadata and cursor only, never a byte of text");
   }
   // A read that throws is a stated absence, never a thrown page.
   const broken = { fleet: { snapshot: async () => { throw new Error("down"); }, runsPage: async () => { throw new Error("down"); }, runById: async () => { throw new Error("down"); }, transcriptMeta: async () => { throw new Error("down"); } }, insights: async () => { throw new Error("down"); }, audit: async () => { throw new Error("down"); }, now: 1 };
@@ -514,14 +511,14 @@ test("the run page says the transcript could not be read when transcriptMeta is 
     const data = await loadPageData("run", { id: "gh-1" }, { fleet: fleetWith(meta), subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
     assert.deepEqual(data.transcript, { unreachable: true, exists: false }, `${meta.unreachable}: a stated failure`);
     const html = String((await renderPage("run", { query: { id: "gh-1" }, session, data, readOnly: false })).html);
-    assert.match(html, /The live transcript could not be read \(is Valkey reachable\?\)/, meta.unreachable);
+    assert.match(html, /The live transcript could not be read; the next update tries again/, meta.unreachable);
     assert.doesNotMatch(html, /not started yet/, "an unreachable Valkey is not an absent stream");
-    assert.doesNotMatch(html, /data-transcript/, "and no stream is opened on it");
+    assert.match(html, /data-transcript data-job="gh-1"/, "the static box waits for the page stream to attach after a good load");
     assert.ok(!html.includes(meta.unreachable), "the reader's reason itself is not shown");
   }
   // The same page with the stream merely absent says why, and watches.
   const absent = await loadPageData("run", { id: "gh-1" }, { fleet: fleetWith({ exists: false, ended: false, outcome: null, length: 0, firstId: null, lastId: null }), subscriptions: () => ({ subscriptions: [] }), now: () => 1 });
-  assert.match(String((await renderPage("run", { query: { id: "gh-1" }, session, data: absent, readOnly: false })).html), /not started yet/);
+  assert.match(String((await renderPage("run", { query: { id: "gh-1" }, session, data: absent, readOnly: false })).html), /Waiting for the run/);
 });
 
 test("the run page reads progress by the run (progressOfRun), handing it the record, and pairs a continued attempt with its own record (issue #662)", async () => {

@@ -887,10 +887,10 @@ export function fakeEventSource() {
       this.readyState = 2;
     };
     /** Deliver `type` with `data` (an object is sent as JSON, as the hub writes it); nothing reaches a closed stream. */
-    this.emit = (type, data = undefined) => {
+    this.emit = (type, data = undefined, lastEventId = "") => {
       if (this.closed && type !== "error") return;
       if (type === "open") this.readyState = 1;
-      const ev = { type, data: data === undefined ? "" : typeof data === "string" ? data : JSON.stringify(data) };
+      const ev = { type, lastEventId, data: data === undefined ? "" : typeof data === "string" ? data : JSON.stringify(data) };
       for (const fn of this.listeners.get(type) ?? []) fn(ev);
     };
     streams.push(this);

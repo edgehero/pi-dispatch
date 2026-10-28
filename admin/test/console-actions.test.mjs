@@ -22,7 +22,7 @@ import { fieldNamed, UNNAMED_FIELD } from "../src/words.mjs";
 import { FLASH_MAX_BYTES } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { readJobsData } from "../src/console/job-data.mjs";
-import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parkedQuestions, runSummary } from "../src/console/panels.mjs";
+import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parkedQuestions, runSummary, runActionsPanel } from "../src/console/panels.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
@@ -2229,8 +2229,9 @@ test("the script writes markup in exactly three places: the confirm slot, the pa
   assert.deepEqual(CONSOLE_SCRIPT.match(/\btbox\s*=(?!=)/g), ["tbox ="]);
   assert.match(CONSOLE_SCRIPT, /var tbox = document\.querySelector\("\[data-transcript\]"\);/);
   assert.match(CONSOLE_SCRIPT, /if \(!msg \|\| typeof msg\.html !== "string"\) return;\n[^]*?tbox\.insertAdjacentHTML\("beforeend", msg\.html\);/);
-  assert.match(CONSOLE_SCRIPT, /new EventSource\("\/api\/transcript\?id=" \+ encodeURIComponent\(tjob\) \+ personQuery\)/, "the job id is encoded into the URL, never markup, and the stream says the page's person");
-  assert.match(CONSOLE_SCRIPT, /tes\.addEventListener\("done", function \(ev\) \{\n\s+tes\.close\(\);/, "done closes the stream, so it is not reopened");
+  assert.equal((CONSOLE_SCRIPT.match(/new EventSource\(/g) ?? []).length, 1, "the transcript uses the page's only connection");
+  assert.doesNotMatch(CONSOLE_SCRIPT, /new EventSource\("\/api\/transcript/, "terminal-only endpoint is not opened by the browser");
+  assert.match(CONSOLE_SCRIPT, /es\.addEventListener\("tdone"/, "transcript completion leaves the page stream open");
   assert.ok(!/form\.innerHTML|area\.innerHTML|diffHtml/.test(CONSOLE_SCRIPT), "never the form, never a per-form preview area, never the old answer field");
   // `slot` is bound once, to the element the server drew with the slot's id (embedded as JSON from confirm-view.mjs).
   assert.deepEqual(CONSOLE_SCRIPT.match(/\bslot\s*=(?!=)/g), ["slot ="]);
@@ -2286,8 +2287,8 @@ test("the controls: drawn for an operator, never for a viewer or on a read-only 
     assert.ok(!String(render(view("viewer"))).includes("data-action"), "none for a viewer");
     assert.ok(!String(render(view("operator", true))).includes("data-action"), "none on a read-only console");
   }
-  const run = (jobId, role = "operator", readOnly = false) => String(runSummary({ data: { run: { record: { jobId, startedAt: null } } }, role, readOnly, env: {}, now: 0, query: {} }));
-  assert.match(run("repeat:nightly:1760500000000"), /<code class="mono">pi-dispatch sandbox repeat:nightly:1760500000000<\/code>/);
+  const run = (jobId, role = "operator", readOnly = false) => String(runActionsPanel({ data: { run: { record: { jobId, startedAt: null } } }, role, readOnly, env: {}, now: 0, query: {} })).replace(/<\/?span[^>]*>/g, "");
+  assert.match(run("repeat:nightly:1760500000000"), /<code>pi-dispatch sandbox repeat:nightly:1760500000000<\/code>/);
   assert.match(run("gh-1"), /data-action="rerun"/);
   const hostile = run(`gh-<script>"x`);
   assert.ok(!hostile.includes("pi-dispatch sandbox") && !hostile.includes("data-action"), "an id outside the charset gets neither");

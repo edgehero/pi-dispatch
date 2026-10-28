@@ -42,7 +42,7 @@ test("the constants readers share, and the key is the run mirror's sanitized id"
 	assert.equal(LIVE_MAX_ENTRIES, 2000);
 	assert.equal(LIVE_TTL_LIVE_MS, 7 * 24 * 3600 * 1000);
 	assert.equal(LIVE_TTL_ENDED_MS, 24 * 3600 * 1000);
-	assert.deepEqual([...LIVE_KINDS], ["user", "assistant", "tool-call", "tool-result", "compaction", "note", "reset", "skipped", "end"]);
+	assert.deepEqual([...LIVE_KINDS], ["user", "assistant", "tool-call", "tool-result", "steer", "compaction", "note", "reset", "skipped", "end"]);
 	assert.deepEqual([...LIVE_OUTCOMES], ["completed", "policy", "failed", "unknown"]);
 	assert.equal(liveKeyFor("repeat:abc:17"), `run:live:${sanitizeJobId("repeat:abc:17")}`);
 	assert.equal(liveKeyFor("repeat:abc:17"), "run:live:repeat_abc_17");
@@ -1222,4 +1222,10 @@ test("stdio: a line ending at or before the last one, with no reset between, app
 	assert.equal(resets, 1);
 	assert.deepEqual(seen, [[1, null], [2, null], [1, true], [3, false]], "the last end before it bounds the replay");
 	assert.deepEqual(redis.writes.map((w) => w.kind).filter((k) => k === "reset"), ["reset"]);
+});
+
+test("only the delivered inbox custom message becomes steer; other custom messages remain notes (#747)", () => {
+	const text = "Operator alice (console): please check the tests";
+	assert.deepEqual(entriesOf({ type: "custom_message", customType: "pi-dispatch-inbox", content: text }, 9), [{ kind: "steer", ts: 9, text: `pi-dispatch-inbox: ${text}` }]);
+	for (const customType of ["pi-dispatch-inbox-other", "PI-DISPATCH-INBOX", "note"]) assert.equal(entriesOf({ type: "custom_message", customType, content: text }, 9)[0].kind, "note");
 });

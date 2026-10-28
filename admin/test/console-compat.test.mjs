@@ -4,14 +4,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { COLLISIONS, LEGACY_CLASSES, LEGACY_CSS, NEUTRALISED, PD_TOKENS, SVG_EXTRA } from "../src/console/compat-css.mjs";
-import { SHELL_CSS, cssBlocks, selectorsOf, splitSelectors } from "../src/console/page-css.mjs";
+import { PAGE_CSS, SHELL_CSS, cssBlocks, selectorsOf, splitSelectors } from "../src/console/page-css.mjs";
 // A static import, so a pages.mjs that stops exporting the list fails this file at load instead of skipping its checks.
 import { LEGACY_PAGES, PAGES, renderPage } from "../src/console/pages.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { loginCodePage, loginPage } from "../src/console/shell.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
-import { TONE_CLASS } from "../src/words.mjs";
 import { ROLES, SHOTS } from "./helpers/console-pages-harness.mjs";
 
 // The compatibility layer's ratchet (issue #737, `compat-css.mjs`). The layer is temporary, and these tests are what
@@ -33,7 +32,7 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));
  * refusal converted in the same pull request (`signin.mjs`, `error-pages.mjs`), so no old markup is read from them.
  */
 function legacySources() {
-  const files = ["console/transcript.mjs", "console/html.mjs", "console/pages.mjs", "insights-html.mjs", "graph-html.mjs"];
+  const files = ["console/html.mjs", "console/pages.mjs", "insights-html.mjs", "graph-html.mjs"];
   for (const f of readdirSync(join(SRC, "console/panels")).filter((x) => x.endsWith(".mjs")).sort()) {
     const page = f.slice(0, -".mjs".length);
     if (page === "common" ? LEGACY_PAGES.length > 0 : LEGACY_PAGES.includes(page)) files.push(`console/panels/${f}`);
@@ -69,7 +68,6 @@ const SIGN_IN = Object.freeze({ login: String(loginPage({ notice: "idle" })), "l
  */
 const DYNAMIC = Object.freeze({
   cls: ["act", "note", "warn"],
-  tone: [...Object.values(TONE_CLASS).filter((c) => c !== null), "good"],
 });
 
 /**
@@ -77,7 +75,7 @@ const DYNAMIC = Object.freeze({
  * because the script builds them by string concatenation; each must still be a literal there. (The live pill's classes
  * and `main.stale` are the shell's, and since PR 2 the confirm bar is the server's markup, put in the slot whole.)
  */
-const SCRIPT_CLASSES = Object.freeze(["dim", "ended", "hi", "off", "on", "t-status"]);
+const SCRIPT_CLASSES = Object.freeze(["dim", "hi"]);
 
 const CLASS_TOKEN = /^[A-Za-z_][\w-]*$/;
 
@@ -190,7 +188,7 @@ test("the class scan reads the old markup: static, escaped, ternary and template
   assert.deepEqual([...got.names], ["tone"], "a bare name is resolved through DYNAMIC");
   assert.deepEqual([...got.prefixes], ["t-"], "a word glued to a name is a prefix");
   assert.deepEqual(EMITTED.problems, [], "every class the old markup builds at run time is accounted for");
-  for (const c of ["note", "warn", "mono", "kpi", "wl", "bl", "cap", "t-entry", "preview-area", "act", "good", "transcript-section"]) assert.ok(EMITTED.classes.has(c), `${c} is old markup`);
+  for (const c of ["note", "warn", "mono", "kpi", "wl", "bl", "cap", "preview-area", "act", "good"]) assert.ok(EMITTED.classes.has(c), `${c} is old markup`);
 });
 
 test("a class glued to a run-time value never collides: bundle.css styles no class with that prefix", () => {
@@ -203,7 +201,7 @@ test("a class glued to a run-time value never collides: bundle.css styles no cla
 test("the neutraliser is first and covers exactly the bundle.css selectors the old markup can still match", () => {
   assert.deepEqual([...NEUTRALISED].sort(), reachable(EMITTED.classes), "NEUTRALISED is the derived set: add what can collide, drop what no longer can");
   assert.deepEqual(COLLISIONS, [...new Set(NEUTRALISED.map((s) => classesIn(s)[0]))].sort(), "the collisions are the classes the neutralised selectors start with");
-  for (const c of ["banner", "kpi", "badge", "cap", "wl", "big", "note", "facts", "phases"]) assert.ok(COLLISIONS.includes(c), `.${c} collides`);
+  for (const c of ["banner", "kpi", "badge", "cap", "wl", "note", "facts"]) assert.ok(COLLISIONS.includes(c), `.${c} collides`);
   // The write flow's bar and diff are the server's Pulse markup since PR 2, outside every wrapper: nothing old is called
   // so any more, so bundle.css's rules for them need no reverting (and a revert inside a wrapper would be dead).
   for (const c of ["confirm", "diff"]) assert.ok(!COLLISIONS.includes(c) && !EMITTED.classes.has(c), `.${c} is no old markup`);
@@ -271,7 +269,7 @@ test("the overview PR 3 converted is not legacy: its panels are read as old mark
   assert.ok(!legacySources().includes("console/panels/overview.mjs"), "the overview's panels are Pulse markup");
   // Its old panels drew only classes another old page or the shared helpers still draw: the dead-rule check and the
   // neutraliser's derived set (above) hold with them gone, so the layer kept every rule.
-  for (const c of ["big", "note", "warn", "plain", "num"]) assert.ok(EMITTED.classes.has(c), `.${c} is still old markup`);
+  for (const c of ["note", "warn", "plain", "num"]) assert.ok(EMITTED.classes.has(c), `.${c} is still old markup`);
 });
 
 test("the runs and parked pages PR 4 converted are not legacy: their panels are read as old markup no more, and the old pager went with them", () => {
@@ -407,6 +405,17 @@ test("a converted page carries no .legacy and no class only the legacy layer sty
     }
     assert.ok(!/class="(?:[^"]* )?legacy(?: [^"]*)?"/.test(html), `${key}: ${page} is converted, so nothing is legacy`);
     const used = new Set([...html.matchAll(/class="([^"]*)"/g)].flatMap((m) => m[1].split(/\s+/)));
-    assert.deepEqual([...used].filter((c) => legacyOnly.has(c)), [], `${key}: ${page} is converted but uses a class only the legacy layer styles`);
+    const own = new Set(selectorsOf(PAGE_CSS[page] ?? "").flatMap(classesIn));
+    assert.deepEqual([...used].filter((c) => legacyOnly.has(c) && !own.has(c)), [], `${key}: ${page} is converted but uses a class only the legacy layer styles`);
+  }
+});
+
+test("the Pulse run and transcript leave no legacy transcript classes or rules (#747)", () => {
+  assert.ok(!LEGACY_PAGES.includes("run"));
+  assert.ok(!legacySources().includes("console/transcript.mjs"));
+  assert.ok(!legacySources().includes("console/panels/run.mjs"));
+  for (const c of ["t-entry", "t-status", "transcript-section", "big", "phases"]) {
+    assert.ok(!EMITTED.classes.has(c), c);
+    assert.ok(!LEGACY_CLASSES.includes(c), c);
   }
 });

@@ -452,7 +452,7 @@ export function judgeBundle({ endpoints = {}, vars = null, shadowed = [], networ
 		if (placeholders.filter((n) => String(endpoints[n].host).toLowerCase() === host).length > OPENSHELL_LIMITS.credentialsPerProvider) return { refused: "openshell-bundle-unpassable", name: null, host };
 	}
 	if (plain.length > 0 && !(Array.isArray(capabilities) && capabilities.includes(BUNDLE_ENV_FILE_CAPABILITY))) return { refused: "openshell-bundle-image-too-old", name: null };
-	return { ok: true, placeholders: placeholders.length, plain: plain.length };
+	return { ok: true, placeholders: placeholders.length, plain: plain.length, placeholderNames: placeholders.filter((n) => delivered.has(n)).sort() };
 }
 
 /**

@@ -43,10 +43,11 @@ test("Chat panel: nothing without a job-state reader, a warning when the queue i
   for (const [state, says] of [["queued", CHAT_REFUSALS.queued], ["answered", CHAT_REFUSALS.answered], ["unknown", CHAT_REFUSALS.unknown]]) {
     for (const role of ["operator", "viewer"]) {
       // Issue #710: with no record, a queued or unknown job is the outcome banner's to say, so the panel draws nothing.
-      if (state !== "answered") assert.equal(String(runChat(view(role, { chat: chat(state, null, { says }) }))), "", `${state} ${role}: no record, the banner says it`);
+      if (state === "unknown") assert.match(String(runChat(view(role, { chat: chat(state, null, { says }) }))), /chat state is unknown while its record could not be read/);
+      else if (state !== "answered") assert.ok(String(runChat(view(role, { chat: chat(state, null, { says }) }))).includes(role === "viewer" ? "Chat is for operators" : says.replace(/'/g, "&#39;")), `${state} ${role}: its no-chat state is named`);
       const out = String(runChat(view(role, { chat: chat(state, null, { says }), run: { record: RECORD } })));
       assert.match(out, /<h2>Chat<\/h2>/);
-      assert.ok(out.includes(says.replace(/'/g, "&#39;")), `${state} ${role}: the sentence`);
+      assert.ok(out.includes(role === "viewer" ? "Chat is for operators" : says.replace(/'/g, "&#39;")), `${state} ${role}: the sentence`);
       assert.ok(!out.includes("data-action") && !out.includes("pi-dispatch chat"), `${state} ${role}: no form, no command`);
     }
   }
@@ -59,7 +60,7 @@ test("Chat panel, live: the steer and follow-up forms MOVE here from the Inbox p
   assert.match(op, /<a href="#transcript">below<\/a>/);
   assert.equal(count(op, /data-action="steer"/g), 2, "a steer form and a follow-up form");
   assert.match(op, /name="mode" value="followUp"/);
-  assert.match(op, /<code class="mono">pi-dispatch chat gh-1<\/code>/);
+  assert.doesNotMatch(op, /data-copy/, "terminal copy command is its own p-terminal panel");
   const inbox = String(runInbox(view("operator", data)));
   assert.match(inbox, /<h2>Inbox<\/h2>/, "the inbox still lists");
   assert.equal(count(inbox, /data-action="steer"/g), 0, "and draws no message form while the Chat panel does");
@@ -86,9 +87,9 @@ test("Chat panel, reply: the answer form the Parked page draws too (one action, 
   const record = { ...RECORD, reason: "awaiting-input" };
   const data = { chat: chat("parked", "reply"), run: { record } };
   const op = String(runChat(view("operator", data)));
-  assert.match(op, /parked, waiting for an answer/);
+  assert.match(op, /asks<\/b>/);
   assert.match(op, /href="https:\/\/github.com\/acme\/web\/issues\/12"/);
-  const form = /<form class="act" data-action="parked-answer"[\s\S]*?<\/form>/.exec(op)?.[0];
+  const form = /<form class="act qform" data-action="parked-answer"[\s\S]*?<\/form>/.exec(op)?.[0];
   assert.ok(form, "the answer form");
   const parkedPage = String(parkedQuestions({ role: "operator", readOnly: false, env: {}, now: T0, data: { snapshot: { parked: [{ target: "acme/web#12", kind: "github", jobId: "gh-1", parkedAt: T0, ageMs: 0, chainCount: 1, pendingScan: { jobId: null } }] }, parkedChecks: { "gh-1": { ok: true } } } }));
   const parkedForm = /<form class="act qform" data-action="parked-answer"[\s\S]*?<\/form>/.exec(parkedPage)?.[0];
@@ -99,7 +100,7 @@ test("Chat panel, reply: the answer form the Parked page draws too (one action, 
   assert.deepEqual(named(parkedForm), named(form));
   assert.deepEqual(named(form), ["input jobId", "textarea text"]);
   for (const f of [form, parkedForm]) assert.ok(f.includes('name="jobId" value="gh-1"') && /maxlength="8192"/.test(f) && /\srequired/.test(f), f);
-  assert.match(op, /pi-dispatch chat gh-1/);
+  assert.match(op, /name="jobId" value="gh-1"/);
   const viewer = String(runChat(view("viewer", data)));
   assert.ok(!viewer.includes("data-action") && !viewer.includes("<textarea"));
   assert.ok(!String(runChat(view("operator", data, { readOnly: true }))).includes("data-action"));
@@ -155,7 +156,7 @@ test("Chat panel and /parked: a park whose answer is queued or running is being 
 
 test("Chat panel, fork: the exact pi-dispatch chat command, or why the record names no session the fork can find", () => {
   const op = String(runChat(view("operator", { chat: chat("finished", "fork"), run: { record: RECORD } })));
-  assert.match(op, /<code class="mono">pi-dispatch chat gh-1<\/code>/);
+  assert.match(op, /<div class="cmd"><code><span>pi-dispatch<\/span> <span>chat<\/span> <span>gh-1<\/span><\/code>/);
   assert.match(op, /PI_SESSIONS_DIR/);
   assert.match(op, /not redacted/);
   const pr = String(runChat(view("operator", { chat: chat("finished", "fork"), run: { record: { ...RECORD, triggerType: "pull_request" } } })));
@@ -406,7 +407,7 @@ test("end to end: token sign-in, /api/run, the JSON transcript with a Last-Event
   assert.equal((await c.post("/api/act/steer/preview", { jobId: "gh-live", text: "x" }, vcookie)).status, 403);
   // The run page draws the Chat panel for both, with the forms for the operator alone.
   const opPage = await c.send({ path: "/run?id=gh-live", headers: { cookie } });
-  assert.match(opPage.text, /<section id="p-chat" data-panel><h2>Chat<\/h2>/);
+  assert.match(opPage.text, /<section id="p-chat" data-panel><div class="card"><div class="card__head"><h2>Chat<\/h2>/);
   assert.equal(count(opPage.text, /data-action="steer"/g), 2, "one steer form per mode on the whole page");
   const vPage = await c.send({ path: "/run?id=gh-live", headers: { cookie: vcookie } });
   assert.match(vPage.text, /a viewer sees the run's status only/);

@@ -1653,3 +1653,10 @@ test("stateOf: a parked row carries its jobId (issue #647) for both roles, and a
     assert.equal(stateOf({ parked: [{ target: "o/r#1", kind: "github", jobId }] }, "viewer").parked[0].jobId, null, JSON.stringify(jobId));
   }
 });
+
+test("stateOf: a refused scheduler key has no stall count, including a stored null-string key (#747)", () => {
+  const result = stateOf({ schedulers: [{ key: null, name: "local" }, { key: "nightly" }], schedulerStalls: { null: 99, nightly: 2 } }, "operator", { now: T0 });
+  assert.equal(result.schedulers[0].name, null);
+  assert.equal(result.schedulers[0].stalls, null);
+  assert.equal(result.schedulers[1].stalls, 2);
+});

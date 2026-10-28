@@ -1,0 +1,138 @@
+{
+  "issue": "https://github.com/edgehero/pi-dispatch/issues/747",
+  "base": "ce58b4de1c4a85b83cb2e838f8d118f95f2e870f",
+  "verification_scope": "Local execution; required CI results are attached to the pull request.",
+  "environment": {
+    "node": "22.19.0",
+    "services": [
+      "Valkey"
+    ],
+    "required_flags": [
+      "PI_DISPATCH_REQUIRE_LOADER_TESTS=1",
+      "PI_DISPATCH_REQUIRE_WORKER_TESTS=1",
+      "PI_DISPATCH_REQUIRE_RECEIVER_TESTS=1"
+    ],
+    "isolation": [
+      "PI_CODING_AGENT_DIR isolates personal extensions",
+      "canonical TMPDIR; checked empty after suite"
+    ]
+  },
+  "full_suite": {
+    "tests": 10692,
+    "passed": 10686,
+    "failed": 0,
+    "skipped": 6,
+    "skips": "Linux-only /proc, podman init and systemd checks; exercised by Linux CI."
+  },
+  "browser": {
+    "command": "node .github/scripts/console-width-check.mjs --require --shots <directory>",
+    "browser_pin": ".github/chrome-for-testing.json",
+    "page_state_renders": 276,
+    "pages": 137,
+    "shell_width_renders": 321,
+    "shell_pages": 33,
+    "failed": 0,
+    "csp_or_other_problems": 0
+  },
+  "build": {
+    "command": "node admin/build.mjs",
+    "result": "passed"
+  },
+  "design": {
+    "commands": [
+      "python3 design/tools/check.py",
+      "python3 design/tools/check_fixture.py"
+    ],
+    "result": "passed"
+  },
+  "acceptance": [
+    {
+      "area": "one stream, late attachment, replay cursor, completion, caps and viewer isolation",
+      "tests": [
+        "admin/test/console-run-stream.test.mjs",
+        "admin/test/console-transcript.test.mjs"
+      ]
+    },
+    {
+      "area": "lookup absence/incomplete queues and no live discovery scans",
+      "tests": [
+        "admin/test/read-model-pages.test.mjs",
+        "admin/test/console-run-api.test.mjs"
+      ]
+    },
+    {
+      "area": "Pulse states, all four #739 cases, phases, role restrictions and static transcript",
+      "tests": [
+        "admin/test/console-panels.test.mjs",
+        "admin/test/console-run-pulse.test.mjs",
+        "admin/test/console-client-states.test.mjs"
+      ]
+    },
+    {
+      "area": "question escaping and browser-owned slot restoration, filters and tool timers",
+      "tests": [
+        "admin/test/console-run-stream.test.mjs"
+      ]
+    },
+    {
+      "area": "recovery metadata/progress/holds, bounded siblings, refusal diagnostics, model/cache and secret facts",
+      "tests": [
+        "admin/test/console-run-context.test.mjs",
+        "admin/test/console-run-api.test.mjs",
+        "admin/test/read-model-pages.test.mjs"
+      ]
+    },
+    {
+      "area": "outcome words, token-only reasons, absent-record ordering and truthful actions",
+      "tests": [
+        "admin/test/console-run-outcome.test.mjs",
+        "admin/test/record-reason-out.test.mjs",
+        "admin/test/words.test.mjs",
+        "admin/test/console-actions.test.mjs"
+      ]
+    },
+    {
+      "area": "pickup turn budget and backward-compatible records",
+      "tests": [
+        "worker/test/project-pickup.test.mjs",
+        "worker/test/run-history.test.mjs"
+      ]
+    },
+    {
+      "area": "placeholder names and delivered steer kind",
+      "tests": [
+        "worker/test/secret-bundles.test.mjs",
+        "worker/test/backend-openshell.test.mjs",
+        "worker/test/live-transcript.test.mjs"
+      ]
+    },
+    {
+      "area": "all ten card ledgers and state goldens",
+      "tests": [
+        "admin/test/console-ledger.test.mjs",
+        "admin/test/console-pages.test.mjs",
+        "admin/test/console-panel-goldens.test.mjs"
+      ]
+    },
+    {
+      "area": "contrast/CSP/width, documentation tables and source mirrors",
+      "tests": [
+        "admin/test/console-contrast.test.mjs",
+        "admin/test/console-doc-tables.test.mjs",
+        "admin/test/design-folder.test.mjs",
+        "worker/test/console-width-check.test.mjs"
+      ]
+    }
+  ],
+  "screenshots": {
+    "before_source": "Archived base commit with its original stylesheet/script and page fixtures.",
+    "after_source": "Final implementation and regenerated fixtures.",
+    "before": "before/",
+    "after": "after/"
+  },
+  "independent_reviews": [
+    "backend contracts, data bounds and stream security",
+    "UI states, card coverage, viewer payloads and screenshot review",
+    "tests, specifications, diagnostics and browser validation"
+  ]
+}

@@ -496,3 +496,11 @@ test("a capsule's percent is the on-status on status pair: its tone is on the sv
   assert.equal(contrast("#000000", colorOf("ok", "light")).toFixed(2), "4.16");
   assert.equal(contrast("#000000", colorOf("failed", "light")).toFixed(2), "4.42");
 });
+
+test("a user transcript timestamp uses muted ink on its running tint, in both themes (#747 placement)", () => {
+  assert.match(PULSE_CSS, /\n\.tx__t \{[^}]*color: var\(--ink-muted\);/);
+  assert.match(PULSE_CSS, /\.tx__e--user[^}]*\{[^}]*background: var\(--running-tint\);/);
+  assert.ok(PAIRS.includes("ink-muted on running-tint 4.5"));
+  assert.equal(contrast(colorOf("ink-faint", "light"), colorOf("running-tint", "light")).toFixed(2), "4.30", "the old placement missed AA");
+  for (const theme of THEMES) assert.ok(contrast(colorOf("ink-muted", theme), colorOf("running-tint", theme)) >= 4.5, theme);
+});

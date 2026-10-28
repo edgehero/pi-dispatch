@@ -1650,6 +1650,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			if (backendFor(resolveBackendName(job, blessedBackends[0]))?.credentialCustody === "layer" && Number.isSafeInteger(post.judged?.placeholders) && Number.isSafeInteger(post.judged?.plain)) {
 				bundleFacts.bundle.placeholders = post.judged.placeholders;
 				bundleFacts.bundle.plain = post.judged.plain;
+				bundleFacts.bundle.placeholderNames = post.judged.placeholderNames;
 			}
 			log("secret_bundle_applied", { kind: job.kind ?? null, bundle: bundleBinding.id, count: bundleFacts.bundle.variables.length, shadowed: merged.shadowed.length });
 			return null;
