@@ -159,3 +159,20 @@ test("a detached or aborted container never publishes an immutable completed sou
 		assert.equal(published, 0);
 	}
 });
+
+
+test("forks cannot park into the original issue's answer namespace", async () => {
+	const f = fixture();
+	const result = await runJob({ ...f.job, awaitInput: true }, f.deps);
+	assert.equal(result.reason, "fork-await-input-unsupported");
+	assert.equal(result.budgetReserved, false);
+	assert.deepEqual(f.calls, []);
+});
+
+test("recovery env continues the checkpoint rather than branching the source a second time", () => {
+	const env = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: { ANTHROPIC_API_KEY: "fake" }, fork, recover: true, recovering: true, thinkingLevel: "high" });
+	assert.equal(env.PI_FORK_ENTRY, undefined);
+	assert.equal(env.PI_FORK_POSITION, undefined);
+	assert.equal(env.PI_RECOVERING, "1");
+	assert.equal(env.PI_THINKING_LEVEL, "high");
+});

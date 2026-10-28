@@ -1216,23 +1216,28 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// talking to people), and the stale marker is cleared so the next comment is not routed here again.
 		if (job.fork !== undefined) {
 			try { validateFork(job.fork); } catch { return await forkRefusal("fork-request-invalid"); }
-			if (job.kind === "local" || job.target?.type !== "issue" || job.command || job.replica !== undefined || job.replicas !== undefined || isRecovery) return await forkRefusal("fork-target-unsupported");
+			if (job.kind === "local" || job.target?.type !== "issue" || job.command || job.replica !== undefined || job.replicas !== undefined) return await forkRefusal("fork-target-unsupported");
 			const venue = resolveBackendName(job, blessedBackends[0]);
 			if (venue === "openshell") return await forkRefusal("openshell-fork-unsupported");
-			if (!forkStore) return await forkRefusal("fork-source-store-unset");
+			if (job.awaitInput === true) return await forkRefusal("fork-await-input-unsupported");
+			if (!isRecovery && !forkStore) return await forkRefusal("fork-source-store-unset");
 			const policy = await checkForkPolicy(job);
 			if (policy?.ok !== true) return await forkRefusal(policy?.refused ?? "fork-policy-unavailable");
 			const expected = job.forkReserveMicros;
 			if (expected !== null && (!Number.isSafeInteger(expected) || expected < 0)) return await forkRefusal("fork-request-invalid");
 			if (expected !== null && !zeroRatedFor(job, { modelEndpoints, builtinModel }).zeroRated && (expected === 0 || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros > expected)) return await forkRefusal("fork-reservation-changed");
-			forkSource = await forkStore.readPoint({ runId: job.fork.fromJob, sourceDigest: job.fork.sourceDigest, entryId: job.fork.fromEntry, position: job.fork.position });
-			if (forkSource?.unavailable) throw new InfraRetry("the fork source could not be read just now", { reason: "container-never-started", budgetReserved: false });
-			if (!forkSource?.ok) return await forkRefusal(forkSource?.refused ?? "fork-source-unavailable");
 			const sourceKey = sessionKeyFor({ ...job, fork: undefined });
-			if (sourceKey !== job.fork.rootKey || forkSource.manifest.sessionKey !== sourceKey) return await forkRefusal("fork-source-target-mismatch");
-			if (forkSource.manifest.piVersion !== piVersion) return await forkRefusal("fork-source-pi-version-mismatch");
-			if (forkSource.manifest.venue !== venue) return await forkRefusal("fork-source-venue-mismatch");
-			if (hostName && forkSource.manifest.host !== normalizeHost(hostName)) return await forkRefusal("fork-source-host-mismatch");
+			if (sourceKey !== job.fork.rootKey) return await forkRefusal("fork-source-target-mismatch");
+			// A recovery continues THIS fork's checkpoint; selecting the parent's original point again loses its work.
+			if (!isRecovery) {
+				forkSource = await forkStore.readPoint({ runId: job.fork.fromJob, sourceDigest: job.fork.sourceDigest, entryId: job.fork.fromEntry, position: job.fork.position });
+				if (forkSource?.unavailable) throw new InfraRetry("the fork source could not be read just now", { reason: "container-never-started", budgetReserved: false });
+				if (!forkSource?.ok) return await forkRefusal(forkSource?.refused ?? "fork-source-unavailable");
+				if (forkSource.manifest.sessionKey !== sourceKey) return await forkRefusal("fork-source-target-mismatch");
+				if (forkSource.manifest.piVersion !== piVersion) return await forkRefusal("fork-source-pi-version-mismatch");
+				if (forkSource.manifest.venue !== venue) return await forkRefusal("fork-source-venue-mismatch");
+				if (hostName && forkSource.manifest.host !== normalizeHost(hostName)) return await forkRefusal("fork-source-host-mismatch");
+			}
 		}
 		if (job.thinkingLevel !== undefined && (!FORK_THINKING_LEVELS.includes(job.thinkingLevel) || !(await checkThinking(job)))) return await forkRefusal("thinking-level-unsupported");
 		if (job.parkedReply === true && !isParked(job)) {

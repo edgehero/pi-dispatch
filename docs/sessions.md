@@ -361,3 +361,9 @@ window. Temporary storage failures are retried as infrastructure failures; expir
 A run's optional `forkSource` record says whether its source was saved and, when it was not, gives a closed reason
 such as capacity, unsafe extensions or not completed. A skipped final workspace point can be recorded beside a
 saved source. Archiving failure lets the original job finish; the record explains why a later fork may be unavailable.
+
+Triggers enabling `run.awaitInput` cannot start managed forks in this release: they return
+`fork-await-input-unsupported` before spend, because parked-answer jobs still rebuild the canonical namespace.
+An existing managed fork can use durable crash recovery: it restores its own checkpoint and continues its own
+lineage, rather than selecting the original source point again. Recovery-attempt records are not published as new
+fork sources. Ordinary parked answers remain unchanged.

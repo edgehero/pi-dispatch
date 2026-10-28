@@ -333,8 +333,11 @@ cannot be paired with the latest files. Successful issue runs that opted into se
 quiet workspace point even with recovery off. Opted-out runs have no managed fork source. Intermediate points need
 recovery's live checkpoint path, so the archive does not promise a checkpoint at every entry. Failed and recovery
 attempts are not published as managed fork sources. Missing, expired or incompatible sources are refused by name.
-Cron/local runs, pull request targets, commands, replicas and recovery requests are outside this managed action;
-copy-mode OpenShell returns `openshell-fork-unsupported`.
+Cron/local runs, pull request targets, commands and replicas are outside this managed action. A trigger that enables
+`run.awaitInput` is refused before spend as `fork-await-input-unsupported`, because parked replies cannot safely
+resume a fork namespace yet. Recovery-attempt records are not new fork sources. An existing managed fork can
+recover from its own durable checkpoint without re-forking the original source. Copy-mode OpenShell returns
+`openshell-fork-unsupported`.
 
 `--fork` keeps its existing meaning: open a private transcript copy in your own local pi. Managed `--fork-as-job`
 cannot be combined with `--fork`, `--force`, `--tools` or `--pi`. The managed mode sends no raw stored transcript to
