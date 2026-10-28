@@ -284,6 +284,7 @@ async function verbCall(fn, name, ms) {
  */
 export function makeRunCheckpointer({
 	checkpointer,
+	forkStore = null,
 	redis = null,
 	hostName = "unknown",
 	hostQueue = null,
@@ -360,7 +361,17 @@ export function makeRunCheckpointer({
 				if (result?.skipped !== "stale-seq") break;
 				nextSeq = seq + 2 ** i;
 			}
-			if (result?.ok && isInt(result.seq, 1)) nextSeq = result.seq + 1;
+			if (result?.ok && isInt(result.seq, 1)) {
+				nextSeq = result.seq + 1;
+				// Still frozen (or dead): taking this copy after thaw would bind old text to newer files.
+				// The archive has its own short deadline and point cap; a miss never invalidates recovery.
+				if (forkStore?.capturePoint) {
+					try {
+						const saved = await forkStore.capturePoint({ runId, workspace, baseSha, branch, secretValues, attempt, kind, quiesced, transcriptPath: sessionFile, offset, meta });
+						if (!saved?.ok) log("fork_checkpoint_skipped", { runId: id, reason: saved?.refused ?? saved?.skipped ?? "unavailable" });
+					} catch { log("fork_checkpoint_skipped", { runId: id, reason: "unavailable" }); }
+				}
+			}
 			return result ?? { skipped: "internal-error" };
 		};
 

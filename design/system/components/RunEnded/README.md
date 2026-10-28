@@ -2,7 +2,7 @@ The page of a finished run leads with its outcome, what happened and the next st
 
 **How a person uses it.** The outcome banner says "Completed: finished in 22m on mini1" and reminds the reader that merges are never automatic. Its buttons open the issue and preview a re-run. *Run* lists the record's facts in plain words: trigger, turns against maxTurns, attempt, exit code and recovery. *Actions* explains each next step in a sentence:
 - **Preview a re-run** (paid). Its confirm bar is shown open with the reservation against today's cap and an undo line.
-- **Fork from a point** links to the fork view.
+- **Preview a fork** (paid) selects a saved entry boundary and optional provider, permitted model, thinking level and follow-up message. Its preview names the reservation and independent branch. Unavailable source state is named.
 - **Terminal chat** and **sandbox** commands copy with one click.
 
 The side column has tokens and dollars (job cap as a bar with the soft-hold line), resources (peak memory against the size given), session and plan, and the chain as one line.

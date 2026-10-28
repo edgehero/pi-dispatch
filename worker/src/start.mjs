@@ -1,3 +1,6 @@
+import { createForkStore } from "./fork-store.mjs";
+import { makeCheckForkPolicy } from "./fork-policy.mjs";
+import { thinkingLevelAllowed } from "./thinking-level.mjs";
 import { readdirSync, readFileSync, statSync, watch } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { homedir, networkInterfaces, release as osRelease, userInfo } from "node:os";
@@ -1495,10 +1498,11 @@ export async function startWorker(
 	// is how long a paid job can sit frozen (its provider stream stalled, its tool timers running on the clock). A tree too
 	// big to walk in 20 s is skipped (`timeout`) and the run goes on, with its exit checkpoint as the fallback; 60 s of
 	// freeze per checkpoint would be long enough for a provider to drop the stream the agent is waiting on.
+	const forkStore = config.sessionsDir ? createForkStore({ dir: join(config.sessionsDir, ".fork-sources"), now, hostName: durableHost, hostQueue }) : null;
 	const workspaceCheckpointer = config.checkpointsDir ? makeWorkspaceCheckpointerFn({ storeDir: config.checkpointsDir, now, log, hostName: durableHost, limits: { snapshotTimeoutMs: 20_000 } }) : null;
 	const runCheckpointer =
 		workspaceCheckpointer && typeof runCheckpointModule?.makeRunCheckpointer === "function"
-			? runCheckpointModule.makeRunCheckpointer({ checkpointer: workspaceCheckpointer, redis, hostName: durableHost, hostQueue, now, log })
+			? runCheckpointModule.makeRunCheckpointer({ forkStore, checkpointer: workspaceCheckpointer, redis, hostName: durableHost, hostQueue, now, log })
 			: null;
 	// The per-run dollar ledger (run-budget-ledger.mjs): on every host, since a recovery settles the crashed attempt's hold
 	// wherever it runs, and an unarmed job never calls it.
@@ -2907,6 +2911,9 @@ export async function startWorker(
 			// Issue #645 (durable runs), built above. Null where this host has no store (`recover-store-unset` refuses an
 			// armed job before it spends); the ledger, the pointer read and the enqueue exist on every host.
 			workspaceCheckpointer,
+			forkStore,
+			checkForkPolicy: makeCheckForkPolicy({ triggersPath: onceTriggersFile }),
+			checkThinking: (job) => thinkingLevelAllowed(job, { models: readOverlayModels(config.globalPiDir), builtinModel }),
 			runCheckpointer,
 			runBudgetLedger,
 			readCheckpointPointer,
@@ -3178,11 +3185,12 @@ export async function startWorker(
 		// active list could change no verdict. A run waiting for its recovery is bounded the same way: the host-lost sweep
 		// gives up on it at RECOVERY_MAX_WAIT_MS, which IS that TTL. (The processor's running list holds job ids, not run
 		// ids, so passing it would also name a `.rN` job's store wrongly.)
+		const reapForkSources = forkStore ? () => forkStore.sweep() : null;
 		const reapCheckpoints = workspaceCheckpointer ? async () => void (await workspaceCheckpointer.sweep()) : null;
 		const reapHostLost = async () => void (await sweepHostLost());
 		// NOT awaited: the host-lost sweep's first command waits for Valkey however long it is away, and the boot must not.
 		// Each settles into its own log line; neither can reject unhandled.
-		for (const [name, reap] of [["recovery_host_lost", reapHostLost], ...(reapCheckpoints ? [["checkpoint", reapCheckpoints]] : [])]) {
+		for (const [name, reap] of [["recovery_host_lost", reapHostLost], ...(reapForkSources ? [["fork_source", reapForkSources]] : []), ...(reapCheckpoints ? [["checkpoint", reapCheckpoints]] : [])]) {
 			void Promise.resolve()
 				.then(reap)
 				.catch((err) => log(`${name}_reaper_skipped`, { reason: scrubCredentials(err?.message) }));
@@ -3196,6 +3204,7 @@ export async function startWorker(
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "sandbox", reap: reapSandboxes },
 					{ name: "session", reap: () => sessionStore.reapSessions() },
+					...(reapForkSources ? [{ name: "fork_source", reap: reapForkSources }] : []),
 					{ name: "recovery_host_lost", reap: reapHostLost },
 					...(reapCheckpoints ? [{ name: "checkpoint", reap: reapCheckpoints }] : []),
 				],

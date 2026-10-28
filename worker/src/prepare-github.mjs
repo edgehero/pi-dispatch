@@ -1,3 +1,4 @@
+import { managedForkPrompt } from "./fork-job.mjs";
 /*
  * prepare-github.mjs — build the read-only /job inputs for a GitHub-triggered job by cloning the
  * serviced repo AT A PINNED SHA onto the host, then materialising its .pi/ and writing the prompt.
@@ -214,7 +215,7 @@ export async function prepareGithubWorkspace(
 		// one from before the crashed run, under the same path. The PR head above is still resolved, and handed back as
 		// `recoveryResolved`, so the staged checkpoint transcript gets the same key and is promoted on completion as a
 		// resume job's would be.
-		const session = job.resume === true && pin === null ? resolveSession(job, { jobDir, resolved, piVersion }) : null;
+		const session = job.resume === true && !job.fork && pin === null ? resolveSession(job, { jobDir, resolved, piVersion }) : null;
 
 		// Issue text is DATA: it enters the USER prompt (buildGithubPrompt), never a system prompt.
 		//
@@ -238,7 +239,7 @@ export async function prepareGithubWorkspace(
 			// they move together will widen the wrong one.
 			job.command
 				? `/${job.command}`
-				: buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions }),
+				: managedForkPrompt(job, buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions, fork: job.fork })),
 			{ mode: 0o444 },
 		);
 

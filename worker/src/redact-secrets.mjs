@@ -135,6 +135,9 @@ export function makeRedactor({ values = [], extraPatterns = [] } = {}) {
 export const NON_SECRET_ENV_KEYS = new Set([
 	"PI_PROVIDER",
 	"PI_MODEL",
+	"PI_FORK_ENTRY",
+	"PI_FORK_POSITION",
+	"PI_THINKING_LEVEL",
 	"PI_MAX_TURNS",
 	"PI_MAX_TOKENS",
 	"PI_MAX_COST_MICROS",

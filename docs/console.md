@@ -1461,6 +1461,30 @@ that forge, a command, or no `run.resume`), and a run whose record could not be 
 was queued: try again). The audit log records the run and a hash of your answer, never the text.
 Answering needs a worker of the same release as the console: an older worker runs the answer but posts no comment.
 
+### Forking a retained completed issue run
+
+A run's Actions panel offers **Fork this run** where the operator can read an eligible retained source. Select a
+listed before/at entry position and optionally a provider, model, thinking level and message, then preview the paid
+job and confirm it. The fork starts on its source host with a separate branch, pull request, session and budget
+accounting. The original attempt stays intact. Unsupported sources show their named refusal instead of an action
+that cannot work.
+
+Before the first user message explicitly starts from the original base. Other positions need a retained quiet
+transcript/workspace pair; not every transcript entry has one. The source archive is immutable and bounded, and
+selection is checked against the trigger's current policy at preview, confirmation and worker pickup. Model and
+thinking choices cannot widen that policy. Cron/local jobs, pull request targets, commands, replicas and recovery
+requests are unsupported; copy-mode OpenShell returns `openshell-fork-unsupported`.
+
+`GET /api/fork-points?id=<run-id>` is operator-only and returns entry ids, parent ids, type/role metadata and supported
+positions. It returns no message text, raw stored transcript or archive path. The paid `run-fork` action uses
+`POST /api/act/run-fork/preview` and its existing confirmation route. It accepts `jobId`, `entry`, `position` and
+optional `provider`, `model`, `thinking`, `message`; the form may send its combined `point` instead of separate entry
+and position fields. Confirmation is single-use and audited before enqueue. Message text is excluded from the audit
+row and run record. The preview fixes the selected provider/model and positive cost ceiling. If a zero-cost
+preview becomes paid or the paid reservation would grow before pickup, the worker refuses with
+`fork-reservation-changed`; preview again to authorize the new amount. The run's optional `forkSource` record
+explains a failed archive or skipped workspace point. The terminal's [`--fork-as-job`](chat.md#fork-as-a-managed-job) uses these same routes.
+
 ### Re-running a run
 
 Re-run on a run's page queues the same work again:

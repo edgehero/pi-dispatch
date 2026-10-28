@@ -98,6 +98,13 @@ const QUIESCED = new Set(["frozen", "dead"]);
 const GIT_STATES = new Set(["parsed", "unreadable", "none"]);
 const META_FIELDS = ["piVersion", "imageDigest", "venue", "provider", "model"];
 const COMMITTER = "pi-dispatch <checkpoint@pi-dispatch.invalid>";
+const TRANSIENT_STORE_CODES = new Set(["EIO", "EAGAIN", "EMFILE", "ENFILE", "ETIMEDOUT", "EINTR"]);
+
+/** Infrastructure misses must be retried; a damaged or expired artifact is a determinate refusal. */
+export function retryableStoreError(error) {
+	const code = typeof error === "string" ? error : error?.code;
+	return TRANSIENT_STORE_CODES.has(code) ? code : null;
+}
 
 /** The directory name for a run: a hash, so no run id can name `..`, a slash or another run's directory. */
 export function checkpointKey(runId) {
@@ -233,6 +240,8 @@ export function makeWorkspaceCheckpointer({
 	now = Date.now,
 	log = () => {},
 	limits = {},
+	// Fork archives retain bounded entry-addressable history; crash recovery still keeps only two.
+	keepHistory = false,
 	hostName = osHostname(),
 	statfs = (dir) => nodeFsp.statfs(dir),
 	procFdDir = "/proc/self/fd",
@@ -775,6 +784,7 @@ export function makeWorkspaceCheckpointer({
 
 	async function readCurrent(paths) {
 		const cur = await readRegular(paths.current, 32);
+		if (keepHistory && retryableStoreError(cur.error)) return { unavailable: cur.error };
 		if (cur.error === "ENOENT") return { absent: true };
 		if (!cur.buf) return { invalid: "current-unreadable" };
 		const m = /^([1-9][0-9]{0,8})\n$/.exec(cur.buf.toString("latin1"));
@@ -824,9 +834,11 @@ export function makeWorkspaceCheckpointer({
 				const tree = await runGit(paths, ["ls-tree", "-r", "-z", "--full-tree", "refs/pi-dispatch/base"], { signal });
 				if (tree.code !== 0) return { skipped: "base-fetch-failed" };
 				const baseOids = new Set();
+				let baseHasExtensions = false;
 				for (const rec of tree.stdout.toString("latin1").split("\0")) {
 					const m = /^\d+ blob ([0-9a-f]+)\t/.exec(rec);
 					if (m) baseOids.add(m[1]);
+					if (/^\d+ (?:blob|commit) [0-9a-f]+\t\.pi\/extensions(?:\/|$)/i.test(rec)) baseHasExtensions = true;
 				}
 				const state = runState(runId);
 				state.objectFormat = objectFormat;
@@ -840,7 +852,7 @@ export function makeWorkspaceCheckpointer({
 					if (baseOids.has(oid)) state.cache.set(f.path, cacheEntry(f.st, oid));
 				}
 				log("checkpoint_base_primed", { files: walk.files.length, cached: state.cache.size });
-				return { ok: true, files: walk.files.length, cached: state.cache.size };
+				return { ok: true, files: walk.files.length, cached: state.cache.size, baseHasExtensions };
 			});
 		} catch (err) {
 			log("checkpoint_failed", { phase: "prime", code: err?.code ?? "internal" });
@@ -1206,7 +1218,7 @@ export function makeWorkspaceCheckpointer({
 		await atomicWrite(dir, "manifest.json", `${JSON.stringify(manifest)}\n`);
 		await atomicWrite(paths.run, "CURRENT", `${seq}\n`);
 		log("checkpoint_snapshot", { seq, files: counts.files, newBytes: counts.newBytes, partial: counts.partial, ignoredDropped });
-		await pruneOld(paths, seq, cur.seq ?? null);
+		if (!keepHistory) await pruneOld(paths, seq, cur.seq ?? null);
 		return { ok: true, seq, manifest };
 	}
 
@@ -1319,16 +1331,19 @@ export function makeWorkspaceCheckpointer({
 	 * against the manifest, because the resume feeds it to a paid model and a truncated one resumes a
 	 * different conversation.
 	 */
-	async function readManifest(runId) {
+	async function readManifest(runId, { seq } = {}) {
 		try {
 			if (typeof runId !== "string" || !runId) return { invalid: true, reason: "bad-args" };
 			const paths = runPaths(runId);
 			// lstat, and a real directory: a link at the run's name is not this run's store, whatever it points at.
 			if (!(await lstatOrNull(paths.run))?.isDirectory()) return { absent: true };
-			const cur = await readCurrent(paths);
+			if (seq !== undefined && (!keepHistory || !isInt(seq, 1, 999_999_999))) return { invalid: true, reason: "bad-seq" };
+			const cur = seq === undefined ? await readCurrent(paths) : { seq };
+			if (cur.unavailable) return cur;
 			if (cur.absent) return { absent: true };
 			if (cur.invalid) return { invalid: true, reason: cur.invalid };
 			const raw = await readRegular(join(paths.cp(cur.seq), "manifest.json"), MiB);
+			if (keepHistory && retryableStoreError(raw.error)) return { unavailable: raw.error };
 			if (!raw.buf) return { invalid: true, reason: "manifest-unreadable" };
 			let manifest;
 			try {
@@ -1340,13 +1355,17 @@ export function makeWorkspaceCheckpointer({
 			if (problem) return { invalid: true, reason: `field:${problem}` };
 			if (manifest.seq !== cur.seq) return { invalid: true, reason: "seq-mismatch" };
 			const transcriptPath = join(paths.cp(cur.seq), "transcript.jsonl");
-			const got = await hashFile(transcriptPath).catch(() => null);
+			const got = await hashFile(transcriptPath).catch((error) => {
+				if (keepHistory && retryableStoreError(error)) throw error;
+				return null;
+			});
 			if (!got || got.bytes !== manifest.transcript.bytes || got.sha256 !== manifest.transcript.sha256) {
 				return { invalid: true, reason: "transcript-mismatch" };
 			}
 			return { ok: true, manifest, transcriptPath };
 		} catch (err) {
 			log("checkpoint_failed", { phase: "read", code: err?.code ?? "internal" });
+			if (keepHistory && retryableStoreError(err)) return { unavailable: err.code };
 			return { invalid: true, reason: "internal-error" };
 		}
 	}
@@ -1356,6 +1375,29 @@ export function makeWorkspaceCheckpointer({
 	/** `file://` URL of a run's store, for the caller's `fetch --depth=1 <url> <baseSha>` (needs `protocol.file.allow=always`). */
 	function baseSourceUrl(runId) {
 		return pathToFileURL(runPaths(runId).repo).href;
+	}
+
+	/** A fork may select the base without any snapshot yet; prove its clone source still exists pre-spend. */
+	async function readBase(runId) {
+		try {
+			if (typeof runId !== "string" || !runId) return { absent: true };
+			const paths = runPaths(runId);
+			if (!(await lstatOrNull(paths.run))?.isDirectory() || !(await lstatOrNull(paths.repo))?.isDirectory()) return { absent: true };
+			const result = await runGit(paths, ["rev-parse", "--verify", "refs/pi-dispatch/base"]);
+			const baseSha = result.stdout.toString("utf8").trim();
+			if (result.aborted || result.code === -1) return { unavailable: result.aborted ? "ETIMEDOUT" : "git-unavailable" };
+			if (result.code !== 0 || !ANY_HEX_OID.test(baseSha)) return { absent: true };
+			// A loose ref survives deletion of its objects. Verify both objects before the worker mints
+			// credentials for a clone that otherwise could only fail on this same missing base.
+			for (const kind of ["commit", "tree"]) {
+				const object = await runGit(paths, ["cat-file", "-e", `${baseSha}^{${kind}}`]);
+				if (object.aborted || object.code === -1) return { unavailable: object.aborted ? "ETIMEDOUT" : "git-unavailable" };
+				if (object.code !== 0) return { absent: true };
+			}
+			return { ok: true, baseSha };
+		} catch (error) {
+			return retryableStoreError(error) ? { unavailable: error.code } : { absent: true };
+		}
 	}
 
 	/** Parse `diff-tree -r -z --raw` output into `{ srcMode, dstMode, dstOid, status, path }` records. */
@@ -1668,5 +1710,5 @@ export function makeWorkspaceCheckpointer({
 		}
 	}
 
-	return { primeBase, snapshot, restore, remove, sweep, usage, readManifest, writeTranscript, baseSourceUrl };
+	return { primeBase, snapshot, restore, remove, sweep, usage, readManifest, writeTranscript, baseSourceUrl, readBase };
 }

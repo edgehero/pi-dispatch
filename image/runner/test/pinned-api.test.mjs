@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, IMAGE_RESIZE_MAX, piOwnPackageDir, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
 import * as catalogModels from "./helpers/catalog-models.mjs";
 import { captureTerminal, classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
-import { jobSettings } from "../src/config.mjs";
+import { jobSettings, THINKING_LEVELS } from "../src/config.mjs";
 import { createJobModelRuntime, jobModelRuntimeOptions, loadPiAuthStorage } from "../src/model-runtime.mjs";
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
@@ -2345,4 +2345,15 @@ test("a message renderer is read only by the interactive TUI, so the inbox needs
 	};
 	walk(dist);
 	assert.deepEqual(readers.sort(), [join("core", "extensions", "runner.js"), join("modes", "interactive", "interactive-mode.js")], "a renderer is read off the TUI now: re-read whether another extension's renderer for pi-dispatch-inbox can change what a job sees");
+});
+
+test("managed forks use pinned public tree and thinking contracts (#648)", { skip }, async () => {
+	for (const method of ["getEntry", "getEntries", "getBranch", "getHeader", "getSessionFile", "createBranchedSession", "newSession", "appendModelChange", "appendThinkingLevelChange"]) assert.equal(typeof mod.SessionManager.prototype[method], "function", `SessionManager.${method} is required for an isolated fork`);
+	const managerTypes = agentDistFile("core", "session-manager.d.ts");
+	assert.match(managerTypes, /createBranchedSession\(leafId: string\): string \| undefined;/);
+	assert.match(managerTypes, /getBranch\(fromId\?: string\): SessionEntry\[\];/);
+	assert.match(agentDistFile("core", "sdk.d.ts"), /thinkingLevel\?: ThinkingLevel;/);
+	const compat = await import("@earendil-works/pi-ai/compat");
+	assert.equal(typeof compat.clampThinkingLevel, "function");
+	assert.deepEqual(compat.getSupportedThinkingLevels({ reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }), THINKING_LEVELS, "the fork thinking vocabulary must follow the pinned provider's complete level list");
 });

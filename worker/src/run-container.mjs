@@ -315,6 +315,8 @@ export function makeRunContainer({
 		const env = beforeSpawn(() => buildContainerEnv({
 			provider: job.provider,
 			model: job.model,
+			fork: job.fork ?? null,
+			thinkingLevel: job.thinkingLevel ?? null,
 			maxTurns: job.maxTurns,
 			maxTokens: job.maxTokens, // optional per-job token budget (issue #25); undefined => runner meter only
 			maxCostMicros: job.maxCostMicros ?? null, // issue #501: effectiveJobOf's min of trigger and deployment; null => no cap

@@ -1,3 +1,4 @@
+import { validateFork } from "./fork-job.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
@@ -397,7 +398,7 @@ export async function enqueueLateForgeJob(queue, kind, fields) {
 }
 
 /** The forge job's id, its data (an explicit field list, see `enqueueForgeJob`) and its semantic dedup id. Throws on a bad delivery id or console name. */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, recover, steer, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
 	// else. Rebuilt from the one field rather than copied, `parkedReply`'s rule for durable job data, and refused when the
@@ -497,6 +498,8 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// Conditional for the same reason packages/image/resume are: an unflagged job's data must keep
 		// exactly the keys it has today. `replica` is this job's 1-based index and `replicas` the set size;
 		// both are integers, so the run record they land in stays PII-free by construction.
+		...(fork !== undefined && { fork: validateFork(fork), forkPolicy, forkReserveMicros }),
+		...(thinkingLevel !== undefined && { thinkingLevel }),
 		...(replica !== undefined && { replica }),
 		...(replicas !== undefined && { replicas }),
 	};
@@ -521,7 +524,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 	// `cmd:` prefix keeps a command named X from coalescing against a flow named X -- `:` is outside
 	// the skill-name charset, so no real flow can spell the prefixed form -- and a flow job's key
 	// stays byte-identical to before the feature.
-	const dedupId = `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${replica !== undefined ? `:r${replica}` : ""}`;
+	const dedupId = `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${fork !== undefined ? `:fork:${fork.id}` : ""}${replica !== undefined ? `:r${replica}` : ""}`;
 	return { jobId, data, dedupId };
 }
 

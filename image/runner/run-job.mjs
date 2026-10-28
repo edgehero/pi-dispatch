@@ -46,6 +46,7 @@ import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
 import { createChildWatch } from "./src/child-watch.mjs";
 import { precheckAtExit } from "./src/plan-check.mjs";
 import { openSessionManager } from "./src/session.mjs";
+import { assertThinkingLevel, openForkSessionManager, recordForkSettings } from "./src/fork.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
 import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
@@ -239,6 +240,7 @@ async function main() {
 	const model = modelRuntime.getModel(cfg.provider, cfg.model);
 	if (!model) throw configError(`unknown model: ${cfg.provider}/${cfg.model}`);
 	if (!modelRuntime.hasConfiguredAuth(model.provider)) throw configError(`no configured auth for ${cfg.provider}`);
+	assertThinkingLevel(model, cfg.thinkingLevel);
 
 	// Retry pinned, cache warming off, telemetry off: every key and why, in src/config.mjs jobSettings.
 	const settingsManager = SettingsManager.inMemory(jobSettings(cfg.retry));
@@ -249,7 +251,9 @@ async function main() {
 	// undefined root would file every call as unattributed and hide the fanout the meter exists to see.
 	// Persisted when the trigger armed run.resume and the host resolved a key, in-memory otherwise --
 	// and openSessionManager is TOTAL, so the hoist below holds on every path including a degraded one.
-	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
+	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = cfg.fork
+		? openForkSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, fork: cfg.fork })
+		: openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
 	const rootSessionId = sessionManager.getSessionId();
 	// Issue #645: a recovery attempt resumes the checkpoint the worker staged, or it does not run. An empty or quarantined
 	// one (openSessionManager degrades an unparseable file to a fresh session) would send the recovery prompt to a model
@@ -467,6 +471,7 @@ async function main() {
 		modelRuntime,
 		model,
 		settingsManager,
+		...(cfg.thinkingLevel !== null && { thinkingLevel: cfg.thinkingLevel }),
 		sessionManager,
 		resourceLoader,
 		// The trigger's tool denylist (issue #291), enforced by pi structurally: the excluded names are
@@ -476,6 +481,7 @@ async function main() {
 		// behave the same, but it stores an empty Set on the session, and a future pi may distinguish.
 		...(cfg.excludeTools.length > 0 && { excludeTools: cfg.excludeTools }),
 	}));
+	if (cfg.fork) recordForkSettings(sessionManager, model, session.thinkingLevel);
 
 	// Issue #645: a job armed with run.recover runs its tools one at a time. pi-agent-core's parallel executor (the
 	// default, and createAgentSession sets nothing else) persists a batch's results only after the WHOLE batch, so a

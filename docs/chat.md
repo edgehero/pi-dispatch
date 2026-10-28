@@ -301,3 +301,48 @@ chat screen or the fork's question; 1 for a refusal (also a fork with no termina
 
 The rules are `REQ-TERMINAL-CHAT` in [`specs/requirements.md`](../specs/requirements.md) and the design and its rejected
 alternatives `DES-TERMINAL-CHAT` in [`specs/design.md`](../specs/design.md).
+
+## Fork as a managed job
+
+To try a retained completed issue run again in a budgeted container, use the managed fork mode. First list the available
+entry ids and positions:
+
+```sh
+pi-dispatch chat <run-id> --fork-as-job
+```
+
+Then select a point, optionally changing provider, model, thinking level or the message:
+
+```sh
+pi-dispatch chat <run-id> --fork-as-job --entry <entry-id> --position before \
+  --provider anthropic --model <allowed-model-id> --thinking high \
+  --message 'Try the other approach.'
+```
+
+The command uses the console's paid preview and confirmation and needs an operator on a writable console. A run id
+selects that retained run; an issue URL resolves its newest run. A session key cannot select a managed fork. `--yes`
+accepts the paid confirmation, so use it only when you intend to queue the job.
+
+The fork gets its own branch, pull request, session and budget accounting. The original attempt stays intact. Model
+choices follow the current trigger and deployment policy; thinking levels are accepted only where the chosen model
+supports them. A fork may itself be forked later.
+
+Only listed positions are available. Before the first user message means restart from the source's original base.
+Other positions require a retained workspace snapshot paired with that exact transcript point; an older transcript
+cannot be paired with the latest files. Successful issue runs that opted into session retention, and explicitly requested managed forks, can keep a final
+quiet workspace point even with recovery off. Opted-out runs have no managed fork source. Intermediate points need
+recovery's live checkpoint path, so the archive does not promise a checkpoint at every entry. Failed and recovery
+attempts are not published as managed fork sources. Missing, expired or incompatible sources are refused by name.
+Cron/local runs, pull request targets, commands, replicas and recovery requests are outside this managed action;
+copy-mode OpenShell returns `openshell-fork-unsupported`.
+
+`--fork` keeps its existing meaning: open a private transcript copy in your own local pi. Managed `--fork-as-job`
+cannot be combined with `--fork`, `--force`, `--tools` or `--pi`. The managed mode sends no raw stored transcript to
+your terminal. Its contract is `REQ-MANAGED-RUN-FORK` and `INT-MANAGED-FORK-CONTRACT` in the specs.
+
+The source archive's size limit does not prove that the selected transcript fits a different model's context
+window. The original model's stored occupancy estimate is not reused as that proof.
+
+The paid preview fixes the selected provider/model and positive per-job cost ceiling. A widened reservation or a
+zero-cost preview becoming paid is refused as `fork-reservation-changed`; run the preview again to authorize the
+changed amount.

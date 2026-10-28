@@ -16,7 +16,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { scrubCredentials } from "./redact.mjs";
-import { SESSION_KEY_PATTERN, sessionKeyFor } from "./session-key.mjs";
+import { FORK_SESSION_KEY_PATTERN, SESSION_KEY_PATTERN, sessionKeyFor } from "./session-key.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { MODEL_REF_PATTERN } from "./model-ref.mjs";
@@ -566,6 +566,7 @@ export function makeSessionStore({
 			}
 
 			const dir = keyDir(session.key);
+			if (!ensureForkParents(session.key)) return { promoted: false, reason: "key-not-a-directory" };
 			// LSTAT BEFORE CREATE, and again after (issue #375). Recursive `mkdir` succeeds silently on an
 			// existing link to a directory, so asking it first and checking afterwards would accept exactly the
 			// shape this refuses; asking first means nothing already at the name is ever handed to `mkdir` at all,
@@ -865,7 +866,18 @@ export function makeSessionStore({
 	}
 
 	function keyDir(key) {
+		const fork = FORK_SESSION_KEY_PATTERN.exec(key);
+		if (fork) return join(sessionsDir, fork[1], "forks", fork[2]);
+		if (!SESSION_KEY_PATTERN.test(key)) throw new Error("invalid session key");
 		return join(sessionsDir, key);
+	}
+	function forkParents(key) {
+		const fork = FORK_SESSION_KEY_PATTERN.exec(key);
+		return fork ? [join(sessionsDir, fork[1]), join(sessionsDir, fork[1], "forks")] : [];
+	}
+	function ensureForkParents(key) {
+		for (const dir of forkParents(key)) if (ensureKeyDir(dir) === null) return false;
+		return true;
 	}
 	function canonicalFile(key) {
 		return join(keyDir(key), SESSION_FILE_NAME);
@@ -950,6 +962,7 @@ export function makeSessionStore({
 	function inspectKeyDir(key) {
 		let st;
 		try {
+			for (const dir of forkParents(key)) if (!fs.lstatSync(dir).isDirectory()) return { ok: false, reason: "key-not-a-directory" };
 			st = fs.lstatSync(keyDir(key));
 		} catch {
 			// EVERY failure reads as `absent`, not only ENOENT, and that is this edge's posture rather than an
@@ -1285,6 +1298,7 @@ export function makeSessionStore({
 					log("session_not_reaped", { key: name, reason: "key-not-a-directory" });
 					continue;
 				}
+				const retainForks = reapForks(name, dir, cutoff);
 				let mtimeMs;
 				try {
 					mtimeMs = fs.lstatSync(join(dir, SESSION_FILE_NAME)).mtimeMs;
@@ -1311,7 +1325,7 @@ export function makeSessionStore({
 					// readable transcript -- the sweep's decision then came from a file outside the store entirely.
 					mtimeMs = dst.mtimeMs;
 				}
-				if (mtimeMs < cutoff) {
+				if (mtimeMs < cutoff && !retainForks) {
 					// ONE recursive remove, on the transcript's age where there is one and the directory's own where
 					// there is not (above). Removing the
 					// transcript first (so an absent stamp, which reads as `local`, can never sit beside a readable
@@ -1328,6 +1342,30 @@ export function makeSessionStore({
 		}
 	}
 
+	/** Forks have their own expiry clock; an old original must never recursively remove a newer fork. */
+	function reapForks(rootKey, rootDir, cutoff) {
+		const dir = join(rootDir, "forks");
+		let st;
+		try { st = fs.lstatSync(dir); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+		if (!st.isDirectory()) return true;
+		for (const id of fs.readdirSync(dir)) {
+			if (!/^[0-9a-f]{32}$/.test(id)) continue;
+			const child = join(dir, id);
+			try {
+				const entry = fs.lstatSync(child);
+				if (!entry.isDirectory()) continue;
+				let modified;
+				try { modified = fs.lstatSync(join(child, SESSION_FILE_NAME)).mtimeMs; }
+				catch (error) { if (error.code !== "ENOENT") throw error; modified = entry.mtimeMs; }
+				if (modified < cutoff) {
+					fs.rmSync(child, { recursive: true, force: true });
+					log("reaped_session", { key: `${rootKey}.${id}` });
+				}
+			} catch (error) { log("session_reaper_skipped", { key: `${rootKey}.${id}`, reason: scrubCredentials(error?.message) }); }
+		}
+		return fs.readdirSync(dir).length > 0;
+	}
+
 	/**
 	 * Whether the key a job resolves to holds a `parked` mark (issue #625): the TRUTH the worker gates a phrase-free reply
 	 * on, where the forge label was only the receiver's hint. Free, read-only and never throws, so it can answer before
@@ -1340,7 +1378,7 @@ export function makeSessionStore({
 		const key = sessionKeyFor(job);
 		if (!key) return false;
 		try {
-			if (!fs.lstatSync(keyDir(key)).isDirectory()) return false;
+			if (!inspectKeyDir(key).ok) return false;
 		} catch {
 			return false;
 		}

@@ -1,3 +1,6 @@
+import { validateFork, forkBranch, forkArchiveFact, FORK_THINKING_LEVELS } from "./fork-job.mjs";
+import { sessionKeyFor } from "./session-key.mjs";
+import { join } from "node:path";
 import { ABSENT, OPENSHELL_BIND_LINGERING, backendFor, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, OPENSHELL_GATEWAY_LOCAL, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
@@ -305,10 +308,12 @@ export async function runJob(job, deps) {
 	const durable = durableOf(job);
 	// Issue #704: what this attempt did with the project's secret bundle, for the record (`bundle` or `bundleSkipped`).
 	const bundleFacts = { bundle: null, bundleSkipped: null };
+	const archiveFacts = { value: null };
 	let result;
 	try {
-		result = await runAttempt(job, deps, durable, bundleFacts);
+		result = await runAttempt(job, deps, durable, bundleFacts, archiveFacts);
 	} catch (e) {
+		try { if (archiveFacts.value && e && typeof e === "object") e.forkSource = archiveFacts.value; } catch {}
 		tagDurable(e, durable);
 		tagBundle(e, bundleFacts);
 		// A RECOVERY job has one attempt (recovery-queue.mjs), so a never-started retry would fail it for good over a
@@ -328,7 +333,7 @@ export async function runJob(job, deps) {
 	// and not `recovery-superseded`: that one is decided on a pointer read that came back empty, and an empty read must
 	// never be the reason another run's store is deleted; the run that settled cleaned up after itself.
 	if (durable.armed && result?.reason !== RECOVERY_ENQUEUED && result?.reason !== RECOVERY_SUPERSEDED) await endDurableRun(durable, deps);
-	return withBundle(withDurable(result, durable), bundleFacts);
+	return withBundle(withDurable(archiveFacts.value ? { ...result, forkSource: archiveFacts.value } : result, durable), bundleFacts);
 }
 
 /**
@@ -352,7 +357,7 @@ function tagBundle(e, b) {
 	}
 }
 
-async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bundleSkipped: null }) {
+async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bundleSkipped: null }, archiveFacts = { value: null }) {
 	const {
 		redis,
 		caps, // { day, week, month }; week/month null when that window is disabled (REQ-SPEND-CAPS-MULTI-WINDOW)
@@ -589,6 +594,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// processor's `{ list() }` of the jobs running on this host, and `hostName` this worker's name, as the checkpoint
 		// manifest records it.
 		workspaceCheckpointer = null,
+		forkStore = null,
+		checkForkPolicy = async () => ({ refused: "fork-policy-unavailable" }),
+		checkThinking = async () => false,
 		runBudgetLedger = null,
 		readCheckpointPointer = null,
 		enqueueRecovery = null,
@@ -612,6 +620,14 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 	const { runId, isRecovery } = durable;
 	// The checkpoint a recovery job restores, read and judged among the free gates below.
 	let manifest = null;
+	let forkSource = null;
+	let sourcePrimed = false;
+	let sourceRunId = null;
+	try { sourceRunId = forgeDeliveryJobId(job.kind, job.trigger?.deliveryId, job.replica); } catch {}
+	const forkRefusal = async (reason) => {
+		await comment(job, `Refused: ${reason}. No fork container was started. Check the source run, current trigger policy and retained workspace points.`);
+		return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+	};
 	let transcriptPath = null;
 	// Whether this attempt's dollar hold has a durable record (`recordHold`): only then do its settle and release go through
 	// the ledger's compare-and-set. A hold that failed to be recorded is given back directly, since no one else can see it.
@@ -1198,6 +1214,27 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// mark beside its transcript, and it is free to read, so it is asked here, before the mint and before any spend.
 		// Without it the reply is ordinary conversation on an issue: refused, silently (no comment, since the person was
 		// talking to people), and the stale marker is cleared so the next comment is not routed here again.
+		if (job.fork !== undefined) {
+			try { validateFork(job.fork); } catch { return await forkRefusal("fork-request-invalid"); }
+			if (job.kind === "local" || job.target?.type !== "issue" || job.command || job.replica !== undefined || job.replicas !== undefined || isRecovery) return await forkRefusal("fork-target-unsupported");
+			const venue = resolveBackendName(job, blessedBackends[0]);
+			if (venue === "openshell") return await forkRefusal("openshell-fork-unsupported");
+			if (!forkStore) return await forkRefusal("fork-source-store-unset");
+			const policy = await checkForkPolicy(job);
+			if (policy?.ok !== true) return await forkRefusal(policy?.refused ?? "fork-policy-unavailable");
+			const expected = job.forkReserveMicros;
+			if (expected !== null && (!Number.isSafeInteger(expected) || expected < 0)) return await forkRefusal("fork-request-invalid");
+			if (expected !== null && !zeroRatedFor(job, { modelEndpoints, builtinModel }).zeroRated && (expected === 0 || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros > expected)) return await forkRefusal("fork-reservation-changed");
+			forkSource = await forkStore.readPoint({ runId: job.fork.fromJob, sourceDigest: job.fork.sourceDigest, entryId: job.fork.fromEntry, position: job.fork.position });
+			if (forkSource?.unavailable) throw new InfraRetry("the fork source could not be read just now", { reason: "container-never-started", budgetReserved: false });
+			if (!forkSource?.ok) return await forkRefusal(forkSource?.refused ?? "fork-source-unavailable");
+			const sourceKey = sessionKeyFor({ ...job, fork: undefined });
+			if (sourceKey !== job.fork.rootKey || forkSource.manifest.sessionKey !== sourceKey) return await forkRefusal("fork-source-target-mismatch");
+			if (forkSource.manifest.piVersion !== piVersion) return await forkRefusal("fork-source-pi-version-mismatch");
+			if (forkSource.manifest.venue !== venue) return await forkRefusal("fork-source-venue-mismatch");
+			if (hostName && forkSource.manifest.host !== normalizeHost(hostName)) return await forkRefusal("fork-source-host-mismatch");
+		}
+		if (job.thinkingLevel !== undefined && (!FORK_THINKING_LEVELS.includes(job.thinkingLevel) || !(await checkThinking(job)))) return await forkRefusal("thinking-level-unsupported");
 		if (job.parkedReply === true && !isParked(job)) {
 			log("refused_not_parked", { kind: job.kind ?? null });
 			await parkedLabel(job, false);
@@ -1735,7 +1772,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `podmanStore` (issue #429) only where the venue's job user carried one: the podman store the container ran in.
 		// `portfolio` (issue #505) only for a job the gate above confirmed: prepare then writes /job/portfolio.json, after
 		// asking the live file once more. Absent otherwise, so every other job's prepare call is unchanged.
-		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}), ...(isRecovery ? { pin: { sha: manifest.workspace.baseSha, from: workspaceCheckpointer.baseSourceUrl(runId) } } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
+		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}), ...(isRecovery ? { pin: { sha: manifest.workspace.baseSha, from: workspaceCheckpointer.baseSourceUrl(runId) } } : forkSource ? { pin: { sha: forkSource.manifest.baseSha, from: forkStore.baseSourceUrl(job.fork.fromJob) } } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
@@ -1764,6 +1801,14 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			}
 		}
 
+		// The archive's base is copied before agent-written git state exists. Never mount the archive itself.
+		if (forkStore && sourceRunId && (job.resume === true || job.fork !== undefined) && sessionKeyFor(job) && prepared.sha && !isRecovery) {
+			let primed;
+			try { primed = await forkStore.primeBase({ runId: sourceRunId, workspace: prepared.workspace, baseSha: prepared.sha }); } catch { primed = { refused: "fork-source-unavailable" }; }
+			sourcePrimed = primed?.ok === true;
+			archiveFacts.value = forkArchiveFact({ reason: sourcePrimed ? "not-completed" : primed?.refused ?? primed?.skipped });
+			if (!sourcePrimed) log("fork_source_skipped", { reason: primed?.refused ?? primed?.skipped ?? "base-unavailable" });
+		}
 		// Issue #645: A BASE WITH `.pi/extensions/` IS NOT RECOVERABLE. A merge-gated extension may import a file outside
 		// `.pi/` (`../lib/x.js`) or a bare package resolved from the workspace's `node_modules`, and in a recovered run
 		// those come from the restored tree, which the agent wrote. The trust reset puts `.pi/` back but cannot enumerate
@@ -1836,6 +1881,20 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			durable.recovered = { from: manifest.kind, n: durable.recovery, fromAttempt: manifest.attempt, checkpointSeq: manifest.seq, orphans: null, replayed: null, interrupted: null, notStarted: null };
 		}
 
+		if (forkSource) {
+			const baseSha = forkSource.manifest.baseSha;
+			const unsafe = await baseHasExtensions({ workspace: prepared.workspace, baseSha });
+			if (unsafe === true) return await forkRefusal("fork-unsafe-extensions");
+			if (unsafe !== false) throw new InfraRetry("the fork base could not be inspected", { reason: "container-never-started", budgetReserved: false });
+			const restored = await forkStore.restorePoint({ runId: job.fork.fromJob, sourceDigest: job.fork.sourceDigest, entryId: job.fork.fromEntry, position: job.fork.position, intoWorkspace: prepared.workspace });
+			if (restored?.unavailable || restored?.skipped) throw new InfraRetry("the fork workspace could not be restored just now", { reason: "container-never-started", budgetReserved: false });
+			if (!restored?.ok) return await forkRefusal(restored?.refused ?? "fork-workspace-unavailable");
+			await resetTrustPaths({ workspace: prepared.workspace, baseSha });
+			const staged = await stageRecovered?.({ jobDir: prepared.jobDir, transcriptPath: forkSource.transcriptPath, piVersion, job: { ...job, resume: true } });
+			if (!staged?.key) throw new InfraRetry("the fork transcript could not be staged", { reason: "container-never-started", budgetReserved: false });
+			prepared = { ...prepared, session: staged };
+			await comment(job, `Fork of run \`${job.fork.fromJob}\`, ${job.fork.position} entry \`${job.fork.fromEntry}\`, using \`${job.provider}/${job.model}\` on \`${forkBranch(job)}\`. The original attempt is preserved.`);
+		}
 		// Daily TOKEN cap (issue #25): the deliberate check-AFTER control. Token cost is only known
 		// post-run, so this cannot check-and-increment before the spend the way the job-count cap does
 		// (CONST-BUDGET-BEFORE-TOKENS). It is a read-only GET of prior jobs' recorded spend -- it consumes
@@ -2114,6 +2173,25 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		containerRan = true;
+		if (sourcePrimed && !lingering && !detached && !aborted && code === EXIT_COMPLETED) {
+			const rootKey = sessionKeyFor(job).split(".")[0];
+			const transcriptPath = join(prepared.session?.hostDir ?? prepared.live?.hostDir ?? join(prepared.jobDir, "session"), "current.jsonl");
+			let pointSkipped = null;
+			// Dead-container snapshots also make the completed boundary available without live recovery.
+			if (typeof forkStore.capturePoint === "function") {
+				try {
+					const captured = await forkStore.capturePoint({ runId: sourceRunId, workspace: prepared.workspace, baseSha: prepared.sha, quiesced: "dead", kind: "exit", attempt: durable.seq ?? 0, transcriptPath, offset: lstatSync(transcriptPath).size, secretValues: [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== ""), meta: { piVersion, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } });
+					if (!captured?.ok) {
+						pointSkipped = captured?.refused ?? captured?.skipped ?? "checkpoint-unavailable";
+						log("fork_checkpoint_skipped", { reason: pointSkipped });
+					}
+				} catch { pointSkipped = "checkpoint-unavailable"; log("fork_checkpoint_skipped", { reason: "unavailable" }); }
+			}
+			let saved;
+			try { saved = forkStore.publish({ runId: sourceRunId, sessionKey: rootKey, transcriptPath: join(prepared.session?.hostDir ?? prepared.live?.hostDir ?? join(prepared.jobDir, "session"), "current.jsonl"), baseSha: prepared.sha, venue: resolveBackendName(job, blessedBackends[0]), piVersion, attempt: durable.seq ?? 0 }); } catch { saved = { refused: "fork-source-unavailable" }; }
+			archiveFacts.value = forkArchiveFact({ saved: saved?.ok === true, reason: saved?.refused, pointSkipped });
+			log("fork_source_saved", saved?.ok ? { saved: true } : { saved: false, reason: saved?.refused ?? "unavailable" });
+		}
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
 		resources = ranResources ?? null;

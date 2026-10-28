@@ -7597,3 +7597,5 @@ export async function readJobInbox({ redis, queues, jobId, timeoutMs = FLEET_REA
     return { unreachable: true };
   }
 }
+
+export { readForkPoints, planRunFork, enqueueRunFork } from "./run-fork.mjs";

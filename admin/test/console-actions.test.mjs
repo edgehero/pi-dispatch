@@ -302,6 +302,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "remove-failed": "failed-remove",
     "retry-all-failed": "failed-retry-all",
     "remove-all-failed": "failed-remove-all",
+    "run-fork": "run-fork",
     rerun: "run-rerun",
     "parked-answer": "parked-answer",
     steer: "steer",
@@ -333,7 +334,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "priorities-set": "priorities-set",
     "allocation-revert": "allocation-revert",
   });
-  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "steer"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-fork", "steer"]);
   assert.deepEqual(ACTIONS.filter((a) => a.bulk).map((a) => a.name).sort(), ["cancel-all-held", "remove-all-failed", "retry-all-failed"]);
   assert.equal(BULK_MAX, RM.BULK_MAX, "the console's bulk bound is job-actions' own");
 });
@@ -345,6 +346,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
   const FIELDS = {
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
+    "run-fork": ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
     rerun: ["jobId"], "parked-answer": ["jobId", "text"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
     "fleet-pause": [], "fleet-resume": [], "queue-pause": ["queue"], "queue-resume": ["queue"],
     "pause-windows": ["windows"], "trigger-add": ["trigger"], "trigger-edit": ["index", "flow", "backend", "provider", "model"], "trigger-delete": ["index"],
@@ -355,7 +357,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "project-add": ["id", "name", "members"], "project-edit": ["id", "name", "members"], "project-delete": ["id"],
     "envelope-set": ["envelope"], "priorities-set": ["projects", "validDays"], "allocation-revert": ["index"],
   };
-  assert.equal(ACTIONS.length, 38);
+  assert.equal(ACTIONS.length, 39);
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
     assert.ok(Object.isFrozen(a.fields) && a.fields.every((f) => typeof f === "string"), `${a.name}: fields is a frozen list of names`);
@@ -411,6 +413,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   const windows = { scope: "*", from: "01:00", to: "02:00", tz: "UTC" };
   // [action, out, undo, inverse (or null), label, done, done's result for a bulk act]
   const rows = [
+    ["run-fork", { target: "gh-f", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Fork for up to $2.00", "Queued a fork of gh-f"],
     ["cancel-active", { payload: { jobId: "gh-1" } }, twice(U.cancelled), null, "Cancel the run", "Cancelled running job gh-1"],
     ["cancel-held", { payload: { jobId: "gh-2" } }, twice(U.held), null, "Cancel the held job", "Cancelled held job gh-2"],
     ["cancel-all-held", bulk([null, null]), twice(U.held), null, "Cancel 2 held jobs", "Cancelled 2 held jobs", { done: 2, count: 2 }],
@@ -504,7 +507,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   }
   // A re-run's way back is the cancel of the job it queued, asked again at the confirm with the apply's answer
   // (`atConfirm`); no other rule is, and no bulk one can be (a bulk confirm asks no rule again).
-  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["rerun"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-fork", "rerun"]);
   assert.ok(ACTIONS.every((a) => typeof a.atConfirm === "boolean" && !(a.atConfirm && a.bulk)), "atConfirm is a single act's, and a boolean on every action");
   const rerun = ACTIONS.find((a) => a.name === "rerun");
   const landed = { ok: true, jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" };
@@ -1632,6 +1635,37 @@ test("cancel-queued refusals: the planner's sentence as it is, a Valkey that did
   assert.equal(unsure.confirm.status, 409);
   assert.match(unsure.confirm.json().html, /The change did not finish/);
   assert.ok(!unsure.confirm.json().html.includes("Nothing was changed"), unsure.confirm.json().html);
+});
+
+test("managed forks use single-use paid confirmation, preserve point binding and redact the message from audit", async () => {
+  const { paths } = deployment();
+  const message = "fork-message-canary-secret";
+  let applied = 0;
+  const rm = { ...RM,
+    planRunFork: async (args) => {
+      assert.deepEqual([args.jobId, args.entry, args.position, args.message], ["gh-source", "abc123", "before", message]);
+      return { plan: { queue: "pi-jobs", branch: "pi/issue-7-fork-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", job: { fork: { id: "a".repeat(32), fromEntry: args.entry, position: args.position } }, reserve: { slots: 1, dollarsMicros: 2_000_000 }, request: args } };
+    },
+    enqueueRunFork: async (plan) => {
+      applied++;
+      assert.equal(plan.request.message, message);
+      return { ok: true, jobId: "gh-fork", queue: "pi-jobs" };
+    },
+  };
+  const c = await start({ paths, a: { rm } });
+  const viewer = await c.cookieFor(VIEW_TOKEN);
+  assert.equal((await c.act("run-fork", { jobId: "gh-source", point: "abc123:before", message }, viewer)).status, 403);
+  const p = await c.act("run-fork", { jobId: "gh-source", point: "abc123:before", message });
+  assert.equal(p.status, 200, p.text);
+  assert.match(p.json().summary.join("\n"), /Branch pi\/issue-7-fork-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+  assert.equal(applied, 0);
+  const ticket = p.json().ticket;
+  const done = await c.confirm("run-fork", ticket);
+  assert.equal(done.status, 200, done.text);
+  assert.deepEqual(done.json().change.inverse, { action: "cancel-queued", body: { jobId: "gh-fork", queue: "pi-jobs" } });
+  assert.equal((await c.confirm("run-fork", ticket)).status, 409);
+  assert.equal(applied, 1);
+  assert.doesNotMatch(JSON.stringify(c.audit.rows), new RegExp(message));
 });
 
 test("a re-run's Undo is decided at the confirm: the bar says the banner will offer it, and the banner's Undo is a cancel-queued form for the job it queued", async () => {

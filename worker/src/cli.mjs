@@ -69,6 +69,7 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
                            - reads the text from stdin. Prints the message id and its state, never the text
   pi-dispatch steer --withdraw <jobId> <msgId>
                            take a message back: guaranteed while it is queued, best effort once written
+  pi-dispatch chat <run-id | issue-url> --fork-as-job [--entry <id>] [--position before|at] [--provider <id>] [--model <id>] [--thinking <level>] [--message <text>] [--yes]
   pi-dispatch chat <run-id | issue-or-PR-url | session-key> [--fork] [--force] [--tools] [--pi <path>] [--console <addr>] [--yes]
                            open a run's chat here, through the operator console (PI_CONSOLE_TOKEN, else a prompt):
                            a running job is followed live and steered (Enter; /later <text>; /withdraw <id>;

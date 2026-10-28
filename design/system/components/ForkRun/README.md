@@ -1,23 +1,21 @@
-A finished run's page in fork mode (#648): pick a transcript entry, choose the model and thinking level, see the estimated cost against the job cap, and start a fork on its own branch.
+# Fork a run
+
+The operator's managed fork controls in the finished run's Actions panel, built by #648.
 
 ## How a person uses it
-- The *Forks of this run* tree at the top shows the original run and its forks. Each node gives the fork point, the model, and the cost or elapsed time, so earlier attempts are visible before starting another.
-- In the transcript, every entry has **Fork from here**. The chosen entry is ringed in violet and marked *fork point*; tool results stay folded.
-- The *Fork this run* card holds the rest:
-  - the chosen point, with Change;
-  - before-or-at the entry;
-  - the model, from the deployment's allowed models, and the thinking level;
-  - an optional message to the agent;
-  - the cost estimate as a range, with a bar against the job cap (attention when it nears the cap);
-  - the new branch name;
-  - a note that earlier edits come back from the run's checkpoint.
-- **Start fork** sits behind a paid preview. The preview says what is reserved before the first token, that the original pull request is untouched, and that a comment links both attempts.
+
+Choose a saved entry and position. Before the first user message uses the run's original base. Other offered points have an exact retained workspace snapshot. Optionally choose a provider, permitted model, supported thinking level and follow-up message, then preview the reservation before confirming a separate paid job and branch. The original attempt remains unchanged.
+
+Unavailable, expired, unsupported-venue and unsafe sources show their named reason. Viewer pages expose no fork action or entry metadata. Source text and filesystem paths never enter this form.
 
 ## Panels
-`p-forks`, `p-transcript`, `p-fork`.
+
+`p-actions`, embedded in the run page.
 
 ## The server provides
-The promoted session's transcript entries with ids and kinds, existing forks (`fork: {fromJob, fromEntry, model}`), the allowed models, a cost estimate from past runs of the same flow and repository per model, the job cap and today's dollar window, the branch name it will use, and whether a workspace checkpoint exists for the chosen point.
+
+Run identity and safe entry positions from an immutable source, current model policy, the reservation estimate and a single-use paid confirmation. The worker rechecks the source and current trigger at pickup.
 
 ## Fixture note
-All fork content is sample, because forking is planned for 5.0.0: gh-b3d7 is shown as completed (in the fixture it is still running), and gh-b3d7-f1, gh-b3d7-f2, the transcript entries 10 to 18, the costs and the estimate are illustrative. Entry 14's text and the first read come from the fixture's live transcript.
+
+The run is the completed gh-9575 on acme/web#490. Entry identifiers and saved positions illustrate the control; no raw transcript or provider call is used by this card.
