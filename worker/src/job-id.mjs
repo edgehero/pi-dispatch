@@ -12,11 +12,13 @@ import { forgeSpec } from "./forges.mjs";
  * Kept free of any bullmq import so the dedup logic is testable everywhere, not only where the
  * queue's dependencies are installed.
  */
-export function localJobId({ folder, flow, task, minute, provider, model, models }) {
+export function localJobId({ folder, flow, task, minute, provider, model, models, fallbackModels }) {
 	// The model fields join the key (issue #544): two runs that differ only in the model are two runs, and with the
 	// key blind to them the second was dropped as a duplicate. Appended only when one is set, so a job that names no
 	// model keeps the id it always had. `models` is JSON so a list cannot collide with a differently split one.
-	const modelFields = provider === undefined && model === undefined && models === undefined ? [] : [provider ?? "", model ?? "", models === undefined ? "" : JSON.stringify(models)];
+	const modelFields = provider === undefined && model === undefined && models === undefined && fallbackModels === undefined ? [] : [provider ?? "", model ?? "", models === undefined ? "" : JSON.stringify(models)];
+	// The ordered fallback policy changes which model may run, so it is part of local identity too.
+	if (fallbackModels !== undefined) modelFields.push(JSON.stringify(fallbackModels));
 	// NUL-delimited so {folder:'a',task:'bc'} and {folder:'ab',task:'c'} cannot collide.
 	const digest = createHash("sha256").update([folder, flow ?? "", task ?? "", minute, ...modelFields].join("\0")).digest("hex");
 	return `local-${digest.slice(0, 16)}`;

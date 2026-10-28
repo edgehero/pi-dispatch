@@ -57,6 +57,7 @@ import { assertSteerReady, createInbox } from "./src/inbox.mjs";
 import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/steer-frames.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
+import { createToolStartLatch, installProviderFailureObserver, providerReplaySafe } from "./src/provider-failure.mjs";
 import { LAYOUT } from "./src/layout.mjs";
 import { applyBundleEnv } from "./src/bundle-env.mjs";
 import { createTranscriptMirror, transcriptMirrorWanted } from "./src/transcript-mirror.mjs";
@@ -297,6 +298,7 @@ async function main() {
 	let childWatch = null;
 	const stopHandler = meterStopHandler({ onTokenAbort, abort: () => void session?.abort() });
 
+	const failureObserver = installProviderFailureObserver({ ModelRuntime, rootSessionId });
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
 		maxCostMicros: cfg.maxCostMicros,
@@ -591,11 +593,13 @@ async function main() {
 	// outcome arrives. captureTerminal handles both event shapes (agent_end carries messages[],
 	// turn_end carries message).
 	let terminal;
+	const toolStarts = createToolStartLatch();
 	// Whether one of pi's own auto-retries is under way: set by auto_retry_start, cleared by auto_retry_end.
 	// classifyPromptRejection reads it, because a prompt() that rejects mid-retry is pi failing to resume
 	// work already paid for, not a preflight fault (issue #509).
 	let retryInFlight = false;
 	const unsubscribeTerminal = session.subscribe((event) => {
+		toolStarts.observe(event);
 		terminal = captureTerminal(terminal, event);
 		if (event.type === "auto_retry_start") {
 			retryInFlight = true;
@@ -626,7 +630,7 @@ async function main() {
 		}
 		return { steer: inbox.counts() };
 	};
-	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField(), ...steerField({ closing: true }) });
+	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, toolsStarted: toolStarts.toolsStarted, ...recoveryField(), ...steerField({ closing: true }) });
 	// What this transcript already delivered (a resumed or recovered run) is never handed over again.
 	inbox?.seed(sessionManager);
 
@@ -671,6 +675,7 @@ async function main() {
 		// -- but REQ-JOB-TIMEOUT-30M is a backstop, not a teardown plan, and a timer left running past
 		// the session it was metering is exactly the kind of thing that becomes one.
 		usageMeter.uninstall();
+		failureObserver.uninstall();
 		unsubscribeTerminal();
 		unsubscribeCommandErrors?.();
 		// Captured ABOVE dispose() rather than read at the exit line, and the reason is smaller than it
@@ -738,6 +743,9 @@ async function main() {
 	// `usage` is, so an exit line with nothing to say stays byte-identical to what every existing consumer
 	// already parses -- and the host gate reads that absence as "no measurement" rather than as zero.
 	const context = Number.isFinite(contextUsage?.tokens) && Number.isFinite(contextUsage?.contextWindow) && contextUsage.contextWindow > 0 ? { tokens: contextUsage.tokens, window: contextUsage.contextWindow } : null;
+	const providerFailure = outcome.code === EXIT_INFRA && outcome.reason === "error" ? failureObserver.failure(terminal) : null;
+	// A root event bus cannot prove that a child or another session ran no tools. Unknown is never replay-safe.
+	const replaySafe = providerReplaySafe({ toolsStarted: toolStarts.toolsStarted, observer: failureObserver, tokens });
 	// Issue #505: a read-only look at /outbox/priorities.json, logged as enum tokens so the job's log says what the host
 	// is likely to make of the plan. Its result is DISCARDED and it never throws: the host decides after exit, and nothing
 	// a plan file holds may change this exit code or this exit line.
@@ -746,7 +754,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), ...recoveryField(), ...steerField() });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...recoveryField(), ...steerField() });
 	return outcome.code;
 }
 

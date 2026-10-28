@@ -166,9 +166,9 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 		.replace(/\/\*[\s\S]*?\*\//g, "")
 		.replace(/\/\/[^\n]*/g, "");
 	assert.deepEqual(code.match(/\brecordRun\b/g) ?? [], [], "no recordRun reference below the gate");
-	// Eight: the never-fits refusal moved ABOVE the wait gate (issue #596) and records the same pickup project
-	// and size by hand there (pinned below).
-	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 8, "exactly the 8 post-gate record paths use it; a new one must be counted here");
+	// Nine: the failover candidate refusal joins the eight existing post-gate paths. The never-fits refusal
+	// remains above the wait gate and carries the pickup project and size by hand (pinned below).
+	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 9, "exactly the 9 post-gate record paths use it; a new one must be counted here");
 	const above = src.slice(src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), at);
 	assert.deepEqual(above.match(/recordRun\(\{ job, result, startedAt: at, endedAt: new Date\(\)\.toISOString\(\), project, size, earlier \}\)/g)?.length, 1, "the never-fits refusal carries the pickup project and size, and the earlier attempts (#599)");
 });
@@ -204,7 +204,7 @@ test("BY SHAPE: the pickup project is resolved right above the pause gate, so ev
 	};
 	// After the lost-lock gate and the earlier attempts' read, which stay first; before the first deferral gate.
 	assert.ok(at("await settledRecord(job.id,") < at("const nowMs = now();"));
-	assert.ok(at("earlierFrom(await previousRecord(job.id))") < at("const nowMs = now();"));
+	assert.ok(at("earlierFrom(priorAttemptRecord)") < at("const nowMs = now();"));
 	assert.ok(at("const nowMs = now();") < at("const pickupProjects = projects();"));
 	assert.ok(at("const project = projectOf(job.data, pickupProjects);") < at("const until = pauseUntil(job.data, nowMs);"));
 	assert.match(body, /if \(until && until > nowMs \+ 1000\) await deferTo\(job, token, until, "pause-window", \{ project \}\);/);

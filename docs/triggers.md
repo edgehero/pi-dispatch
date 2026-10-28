@@ -1,5 +1,7 @@
 # Triggers: the full reference
 
+For an operator-reviewed next-attempt model fallback list, see [Model failover](model-failover.md).
+
 This page is the detail behind the [Triggers](../README.md#triggers) section of the README. A trigger is
 one entry in `triggers.json`. It says what starts a job and what that job runs.
 

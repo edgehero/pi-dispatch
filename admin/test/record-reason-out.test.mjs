@@ -88,3 +88,21 @@ test("/api/run and /api/state hand out a record's reason only when it is a token
     assert.deepEqual(state.refusals24h, { count: 11, top: [{ reason: "scope-cap", count: 1 }] });
   }
 });
+
+test("modelRunRecord rebuilds failover facts for model reads and lists (#716)", async () => {
+  const { MODEL_WHY, PROVIDER_FAILURE_KINDS } = await import("@edgehero/pi-dispatch/model-failover-protocol");
+  for (const list of [false, true]) {
+    for (const modelWhy of MODEL_WHY) for (const kind of PROVIDER_FAILURE_KINDS) {
+      const out = modelRunRecord({ jobId: "gh-1", modelWhy, providerFailure: { kind, resetAt: 1234, message: "PRIVATE-PROVIDER-ERROR" } }, { list });
+      assert.equal(out.modelWhy, modelWhy);
+      assert.deepEqual(out.providerFailure, { kind, resetAt: 1234 });
+      assert.equal(JSON.stringify(out).includes("PRIVATE-PROVIDER-ERROR"), false);
+    }
+    for (const providerFailure of ["PRIVATE-PROVIDER-ERROR", { kind: "PRIVATE-PROVIDER-ERROR" }, { kind: "rate-limited", resetAt: -1 }, { kind: "rate-limited", resetAt: "123" }]) {
+      const out = modelRunRecord({ jobId: "gh-1", modelWhy: "PRIVATE-PROVIDER-ERROR", providerFailure }, { list });
+      assert.equal(out.modelWhy, undefined);
+      assert.equal(out.providerFailure, undefined);
+      assert.equal(JSON.stringify(out).includes("PRIVATE-PROVIDER-ERROR"), false);
+    }
+  }
+});

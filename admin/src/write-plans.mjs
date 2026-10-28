@@ -366,7 +366,8 @@ function unknownTriggerField(params, kind) {
 
 /**
  * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap),
- * `run.models` (the models its jobs may call) and `run.mcp` (the MCP servers they connect, below). Each one decides
+ * `run.models` (the models its jobs may call), `run.fallbackModels` (their reviewed retry order) and
+ * `run.mcp` (the MCP servers they connect, below). Each one decides
  * what a trigger's jobs can spend or reach, and removing or widening it is a widening, so it is written by hand in the
  * reviewed triggers file and never by a model's call, even behind a confirm. Neither tool's schema names them, and
  * that alone is not the guard: a schema does not refuse extra keys, and a field silently dropped would let the model
@@ -377,7 +378,7 @@ function unknownTriggerField(params, kind) {
  * touched: the add tool builds entries without these keys and the edit tool spreads the entry's own `run` under the
  * fields it sets.
  */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.mcp"]);
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp"]);
 /**
  * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
  * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the
@@ -399,7 +400,7 @@ export function wideningFieldRefusal(params, tool) {
       const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key);
       if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
       const what =
-        meant === "run.models" ? "allowed-model list" : meant === "run.mcp" ? "list of MCP servers" : "per-job dollar cap";
+        meant === "run.fallbackModels" ? "fallback-model list" : meant === "run.models" ? "allowed-model list" : meant === "run.mcp" ? "list of MCP servers" : "per-job dollar cap";
       return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${what} is set by hand in the triggers file, never by a tool`;
     }
   }

@@ -498,6 +498,8 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
  */
 export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	Object.freeze({ key: "models", authored: (v) => Array.isArray(v) && v.length > 0 }),
+	// A stale receiver dropping the reviewed retry order must not silently disable failover.
+	Object.freeze({ key: "fallbackModels", authored: (v) => Array.isArray(v) && v.length > 0 }),
 	// Issue #501: a trigger's per-job dollar cap. Dropped by a receiver from before #501 (which tolerated the key as
 	// unknown), the job would run under the deployment's wider cap, or with none, on a clean record. Any present
 	// value counts as authored; whether it is a valid amount is the loader's question, not this one.

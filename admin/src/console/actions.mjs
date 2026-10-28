@@ -903,6 +903,7 @@ export function runFieldsLines(f, lead) {
     ...(f.flow !== null && f.flow !== undefined ? [`flow ${fieldText(f.flow)}`] : []),
     `model ${f.model !== null && f.model !== undefined ? fieldText(f.model) : "the deployment's default"}`,
     ...(f.models !== null && f.models !== undefined ? [`allowed models ${fieldText(f.models)}`] : []),
+    ...(Array.isArray(f.fallbackModels) && f.fallbackModels.length > 0 ? [`fallbacks ${fieldText(f.fallbackModels)}`] : []),
     `per-job cap ${f.maxCostUsd !== null && f.maxCostUsd !== undefined ? `$${fieldText(f.maxCostUsd)}` : "the deployment's"}`,
     ...(f.secretsProfile !== null && f.secretsProfile !== undefined ? [`secret profile ${fieldText(f.secretsProfile)}`] : []),
     ...(f.image !== null && f.image !== undefined ? [`image ${fieldText(f.image)}`] : []),

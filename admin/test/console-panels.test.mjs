@@ -1975,3 +1975,24 @@ test("#739 run panels: running without stream, expired parked stream, cancelled 
     assert.doesNotMatch(text, c.absent, c.name);
   }
 });
+
+test("configuration shows the reviewed fallback list in order and escapes its text (#716)", async () => {
+  const s = { ...snapshot(), triggers: { triggers: [{ type: "label", any: ["pi"], flow: "fix", fallbackModels: ["anthropic/first", "openai/second<"] }] } };
+  const out = (await pagePanels("config", ctxOf("viewer", { snapshot: s }))).map((p) => p.html).join("");
+  assert.match(out, /fallbacks anthropic\/first, openai\/second&lt;/);
+});
+
+test("the run summary shows selected model and closed provider failure facts (#716)", async () => {
+  const { runSummary } = await import("../src/console/panels/run.mjs");
+  const record = { jobId: "gh-model", kind: "github", target: "a/b#1", outcome: "failed", reason: "error", provider: "openai", model: "fallback", modelWhy: "fallback-cooldown", providerFailure: { kind: "quota-exhausted", resetAt: NOW + 60_000, message: "PRIVATE-ERROR-TEXT" } };
+  const view = { role: "viewer", now: NOW, data: { run: { record } }, env: {} };
+  const out = String(runSummary(view));
+  for (const fact of ["openai / fallback", "Model choice", "fallback-cooldown", "Provider failure", "quota-exhausted", "Provider reset"]) assert.ok(out.includes(fact), fact);
+  assert.equal(out.includes("PRIVATE-ERROR-TEXT"), false);
+  record.modelWhy = "PRIVATE-ERROR-TEXT";
+  record.providerFailure = { kind: "PRIVATE-ERROR-TEXT" };
+  const bad = String(runSummary(view));
+  assert.equal(bad.includes("PRIVATE-ERROR-TEXT"), false);
+  assert.equal(bad.includes("Model choice"), false);
+  assert.equal(bad.includes("Provider failure"), false);
+});

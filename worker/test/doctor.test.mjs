@@ -5722,6 +5722,24 @@ test("doctor names, end to end: a cron trigger's unknown model, a cap below the 
 	assert.ok(!forwarded.some((c) => /no credential this deployment hands its jobs/.test(c.label)), "forwarded and set");
 });
 
+test("doctor reads cron failover cooldowns with its injected clock and reports an unavailable read", async () => {
+	const model = "claude-sonnet-5-5";
+	const path = triggersFile(undefined, undefined, { provider: "anthropic", model, models: [`anthropic/${model}`, "openai/gpt-4o"], fallbackModels: ["openai/gpt-4o"] });
+	const at = Date.UTC(2026, 9, 28, 12);
+	const env = { VALKEY_URL: "redis://x", PI_TRIGGERS_FILE: path, PI_SETTINGS_FILE: noOverlay() };
+	const reads = [];
+	const checks = await collectChecks(env, fleetSeams([], { wallClock: () => at, readModelCooldowns: async (url, refs, { now }) => {
+		reads.push({ url, refs, at: now() });
+		return [{ ref: refs[0], kind: "quota-exhausted", until: now() + 60_000 }];
+	} }));
+	assert.equal(reads.length, 1);
+	assert.deepEqual(reads[0].refs, [`anthropic/${model}`, "openai/gpt-4o"]);
+	assert.equal(reads[0].at, at);
+	assert.ok(checks.some((c) => c.warn && /cooling down until 2026-10-28T12:01:00.000Z/.test(c.label)));
+	const unread = await collectChecks(env, fleetSeams([], { wallClock: () => at, readModelCooldowns: async () => null }));
+	assert.ok(unread.some((c) => c.warn && c.label === "Model cooldowns could not be read"));
+});
+
 test("an overlay the reader refuses before reading it (a link, an unreadable file, a pipe) is never compared, and never blamed on .env (PR #553)", async () => {
 	const disagrees = async () => ({ version: "0.99.1", pinned: "0.99.1", read: async () => ({ loads: false, has: () => false }) });
 	const doc = JSON.stringify({ providers: { ollama: { baseUrl: "http://gpu:11434/v1", api: "openai-completions", models: [{ id: "qwen" }] } } });

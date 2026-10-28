@@ -1,3 +1,4 @@
+import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
 import { forkArchiveFact, recordedFork } from "./fork-job.mjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import * as nodeFs from "node:fs";
@@ -258,6 +259,21 @@ export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap
  * only beside a `cost-cap` reason, where it becomes the record's `why`: the worst a forged line can do is name the
  * wrong rule of the three.
  */
+export function parseExitProviderFailure(text) {
+	const parsed = decisiveExitLine(text);
+	return parsed?.code === 1 ? providerFailureOf(parsed.providerFailure) : null;
+}
+
+export function parseExitReplaySafe(text) {
+	const parsed = decisiveExitLine(text);
+	return typeof parsed?.replaySafe === "boolean" ? parsed.replaySafe : null;
+}
+
+export function parseExitToolsStarted(text) {
+	const parsed = decisiveExitLine(text);
+	return typeof parsed?.toolsStarted === "boolean" ? parsed.toolsStarted : null;
+}
+
 export function parseExitWhy(text) {
 	const parsed = decisiveExitLine(text);
 	if (parsed === null) return null;
@@ -964,6 +980,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		usage: source.usage ?? null,
 		provider: source.provider ?? null,
 		model: source.model ?? null,
+		...(MODEL_WHY.includes(source.modelWhy) ? { modelWhy: source.modelWhy } : {}),
+		...(providerFailureOf(source.providerFailure) ? { providerFailure: providerFailureOf(source.providerFailure) } : {}),
 		budgetReserved: source.budgetReserved ?? null,
 		// The ATTEMPT NUMBER, 1-based: the first run of a job is 1, its retry 2 (ledger item, issue #464 round). Every
 		// record is written while the job is still processing, where BullMQ's `attemptsMade` counts the attempts FINISHED
@@ -1456,6 +1474,9 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const approval = parseExitApproval(exitText);
 			const exitLineCode = parseExitCode(exitText);
 			const exitWhy = parseExitWhy(exitText);
+			const providerFailure = keyed && exitAuth === "verified" ? parseExitProviderFailure(exitText) : null;
+			const toolsStarted = keyed && exitAuth === "verified" ? parseExitToolsStarted(exitText) : null;
+			const replaySafe = keyed && exitAuth === "verified" ? parseExitReplaySafe(exitText) : null;
 			const turns = parseExitTurns(exitText);
 			const tokens = parseExitTokens(exitText);
 			const session = parseExitSession(exitText);
@@ -1494,7 +1515,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

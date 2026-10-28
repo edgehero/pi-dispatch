@@ -4,6 +4,7 @@
  * deterministic renderer per region, every value through `html`, the role and run-text rule, the action controls and
  * the PATHS rule) are stated once, in `../panels.mjs`'s header.
  */
+import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import { refusedBeforeSpend } from "../../costs.mjs";
 import { FORK_THINKING_LEVELS } from "../../run-fork.mjs";
 import { forkArchiveFact } from "@edgehero/pi-dispatch/fork-job";
@@ -674,6 +675,9 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Project", cell(r.project)],
 
     ["Provider and model", [r.provider, r.model].filter(Boolean).join(" / ") || "-"],
+    ["Model choice", MODEL_WHY.includes(r.modelWhy) ? r.modelWhy : null],
+    ["Provider failure", providerFailureOf(r.providerFailure)?.kind],
+    ["Provider reset", providerFailureOf(r.providerFailure)?.resetAt !== undefined ? timeHtml(r.providerFailure.resetAt) : null],
     ["Turns", `${cell(r.turns)}${Number.isSafeInteger(r.maxTurns) ? ` of ${r.maxTurns}` : ""}`],
     ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${view.data?.trigger ? `: ${[view.data.trigger.phrase, view.data.trigger.label, view.data.trigger.pattern].filter(Boolean).join(", ")} (as the triggers file says now)` : ""}` : "-"],
     ["MCP", view.data?.trigger ? `${view.data.trigger.mcp?.length ? view.data.trigger.mcp.join(", ") : "none"} (as the triggers file says now; the record does not say which connected)` : null],

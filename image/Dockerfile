@@ -368,6 +368,9 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # a call to a model the list does not name. An older runner handed the variable would ignore it and call any model,
 # reporting a clean exit: a model choice quietly not enforced. The worker sends the list only to an image declaring this
 # token; verify-image.sh runs an offline job with a fake key and a list that lacks its model to prove the claim.
+# `modelFailover` (issue #716) tells the worker this runner emits signed terminal provider-failure details,
+# a run-wide tool-start latch and conservative replay-safety evidence. The worker refuses opted-in jobs on older
+# images before spend; verify-image.sh runs the real runner against an offline fake 429 and checks the signed line.
 # `exitAuth` (issue #545) tells the worker this runner reads a per-job key from stdin (PI_EXIT_AUTH=stdin), signs its exit
 # line with it, writes a real exit line on SIGTERM, and runs under the exec-only node above, so the job's own tools can
 # neither read the key nor sign a line. The worker hands a key only to an image declaring it, and then reads only a
@@ -441,7 +444,7 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # that starts the supervisor and the runner from it on PI_RUNNER_OBSERVABLE=1, which an OpenShell venue needs before any
 # connection of the job can be made. A gate on those venues only: an image without it is refused there before spend.
 # verify-image.sh holds the copy to runner-node's bytes, its mode, its label entry, and both key holders to it.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork"
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

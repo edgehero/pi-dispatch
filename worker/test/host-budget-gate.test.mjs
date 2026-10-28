@@ -393,7 +393,7 @@ test("BY SHAPE: every hold is given back through the ONE releaseAllHolds, and no
 		.slice(start, end)
 		.replace(/\/\*[\s\S]*?\*\//g, "")
 		.replace(/\/\/[^\n]*/g, "");
-	const defAt = body.indexOf("const releaseAllHolds = ({ orphan = false } = {}) => {");
+	const defAt = body.indexOf("const releaseAllHolds = ({ orphan = false, candidateEndpoints = null } = {}) => {");
 	assert.notEqual(defAt, -1, "the one release exists");
 	const defEnd = body.indexOf("\n\t\t};", defAt);
 	const inside = body.slice(defAt, defEnd);
@@ -408,7 +408,7 @@ test("BY SHAPE: every hold is given back through the ONE releaseAllHolds, and no
 	assert.equal(drains, 2, "inFlight.release in the scope drain and endpointSlots.release in the endpoint drain, nowhere else");
 	// Every exit calls it: the scope deferral, the endpoint deferral, the budget deferral, the setup guard and the finally
 	// (with the orphan flag). The never-fits check is above the wait gate and every hold: it holds nothing.
-	assert.equal((outside.match(/releaseAllHolds\(/g) ?? []).length, 5, "five calls; a new exit must be counted here");
+	assert.equal((outside.match(/releaseAllHolds\(/g) ?? []).length, 9, "five exits, the all-candidate deferral, and three candidate endpoint rollbacks; new sites must be counted here");
 	// Issue #599, phase 2: the running-jobs entry is given back there too, and nowhere else; it is added once, at admission.
 	assert.ok(/runningJobs\.remove\(/.test(inside), "the running entry is removed inside releaseAllHolds");
 	assert.deepEqual(outside.match(/runningJobs\.remove\(/g) ?? [], [], "and nowhere else");

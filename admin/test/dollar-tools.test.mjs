@@ -47,7 +47,7 @@ function tmpFile(name, value, envName) {
 
 // --- no widening by tool -----------------------------------------------------------------------------------
 
-const GUARDED = { triggers: [{ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", provider: "openai", model: "gpt-x", models: ["openai/gpt-x", "openai/gpt-y"], maxCostUsd: "1.50" } }] };
+const GUARDED = { triggers: [{ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", provider: "openai", model: "gpt-x", models: ["openai/gpt-x", "openai/gpt-y"], fallbackModels: ["openai/gpt-y"], maxCostUsd: "1.50" } }] };
 
 // `mcp` (REQ-MCP-OPERATOR-SERVERS) rides the same guard: which outside systems a trigger's jobs reach is set by hand.
 for (const field of ["maxCostUsd", "models", "mcp"]) {
@@ -93,6 +93,7 @@ test("an approved trigger edit carries the entry's models and maxCostUsd through
   assert.equal(run.flow, "review");
   assert.equal(run.model, "gpt-y");
   assert.deepEqual(run.models, ["openai/gpt-x", "openai/gpt-y"]);
+  assert.deepEqual(run.fallbackModels, ["openai/gpt-y"]);
   assert.equal(run.maxCostUsd, "1.50");
 });
 
@@ -100,9 +101,11 @@ test("dispatch_triggers and the plain trigger line show the models and the per-j
   tmpFile("triggers.json", GUARDED, "PI_TRIGGERS_FILE");
   const [t] = textOf(await toolByName("dispatch_triggers").execute("id", {}, undefined, undefined, undefined));
   assert.deepEqual(t.models, ["openai/gpt-x", "openai/gpt-y"]);
+  assert.deepEqual(t.fallbackModels, ["openai/gpt-y"]);
   assert.equal(t.maxCostUsd, "1.50");
   const text = renderTriggers({ schedulers: [], triggers: { triggers: [t] } });
   assert.match(text, /\[models openai\/gpt-x, openai\/gpt-y\]  \[max \$1\.50\]/);
+  assert.match(text, /\[fallbacks openai\/gpt-y\]/);
   // A trigger that sets neither keeps exactly its keys and its line.
   tmpFile("triggers.json", { triggers: [{ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix" } }] }, "PI_TRIGGERS_FILE");
   const [plain] = textOf(await toolByName("dispatch_triggers").execute("id", {}, undefined, undefined, undefined));
@@ -257,13 +260,13 @@ test("dispatch_costs carries the dollar windows and the per-run dollars beside t
 
 // --- PR #550's review ----------------------------------------------------------------------------------------
 
-for (const extra of [{ MaxCostUsd: "9" }, { max_cost_usd: "9" }, { maxcostusd: "9" }, { "maxCostUsd ": "9" }, { allowedModels: ["a/b"] }, { run: { maxCostUsd: "9" } }, { run: { models: ["a/b"] } }, { on: { maxCostUsd: "9" } }, { "m\u0430xCostUsd": "9" }]) {
+for (const extra of [{ fallbackModels: ["a/b"] }, { fallback_models: ["a/b"] }, { run: { fallbackModels: null } }, { on: { fallbackModels: [] } }, { MaxCostUsd: "9" }, { max_cost_usd: "9" }, { maxcostusd: "9" }, { "maxCostUsd ": "9" }, { allowedModels: ["a/b"] }, { run: { maxCostUsd: "9" } }, { run: { models: ["a/b"] } }, { on: { maxCostUsd: "9" } }, { "m\u0430xCostUsd": "9" }]) {
   test(`a near miss of a tool-proof field is refused too, before any confirm: ${JSON.stringify(extra)}`, async () => {
     const path = tmpFile("triggers.json", GUARDED, "PI_TRIGGERS_FILE");
     const before = readFileSync(path, "utf8");
     for (const [name, args] of [["dispatch_trigger_add", { kind: "label", flow: "fix", labels: ["bug"] }], ["dispatch_trigger_edit", { index: 0, flow: "fix" }]]) {
       const { ctx, shown } = toolCtx({ answer: true });
-      await assert.rejects(() => toolByName(name).execute("id", { ...args, ...extra }, undefined, undefined, ctx), /cannot set run\.(maxCostUsd|models)/);
+      await assert.rejects(() => toolByName(name).execute("id", { ...args, ...extra }, undefined, undefined, ctx), /cannot set run\.(maxCostUsd|models|fallbackModels)/);
       assert.equal(shown.length, 0);
     }
     assert.equal(readFileSync(path, "utf8"), before);

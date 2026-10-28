@@ -62,7 +62,7 @@ export function providerIdProblem(value) {
 }
 
 /**
- * Validate the optional `run.provider`, `run.model`, `run.maxTurns` and `run.models` of one trigger (issue #502) and return
+ * Validate the optional `run.provider`, `run.model`, `run.maxTurns`, `run.models` and `run.fallbackModels` of one trigger (issue #502) and return
  * the fields that were present, so a normalizer can spread them and an absent field stays absent. Shared by
  * the trigger loader and the console, so both refuse with the same words.
  *
@@ -116,6 +116,19 @@ export function validateModelRef(run, at, path) {
 			throw configError(`${at}: run.models does not list this trigger's own run.provider/run.model, so every job it starts would be refused: ${path}`);
 		}
 		out.models = [...run.models];
+	}
+	// Fallbacks are operator-reviewed candidates, never an implicit widening of the allowed list.
+	// The deployment list is checked at pickup when this pure loader cannot see it.
+	if (run?.fallbackModels != null) {
+		const problem = modelListProblem(run.fallbackModels);
+		if (problem !== null) throw configError(`${at}: run.fallbackModels ${problem}: ${path}`);
+		for (const entry of run.fallbackModels) {
+			const ref = splitModelEntry(entry);
+			if (out.models !== undefined && !modelOnList(out.models, ref.provider, ref.model)) {
+				throw configError(`${at}: run.models does not list a run.fallbackModels entry: ${path}`);
+			}
+		}
+		out.fallbackModels = [...run.fallbackModels];
 	}
 	return out;
 }

@@ -309,6 +309,14 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare approval gates (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.gates\`. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 
+	Object.freeze({
+		token: "modelFailover",
+		needed: (job) => job?.fallbackModels !== undefined,
+		result: "modelFailoverUnsupported",
+		reason: "job-image-model-failover-unsupported",
+		event: "refused_image_model_failover_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare model-failover support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner cannot report the authenticated failure and replay evidence this job requires. Rebuild the image from a version that has this feature. Not run.`,
+	}),
 ]);
 
 /**

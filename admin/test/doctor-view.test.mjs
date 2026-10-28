@@ -73,6 +73,15 @@ test("the console's Doctor panel escapes a hostile label and scrubs its control 
   assert.doesNotMatch(out, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮]/);
 });
 
+test("the console shows the published cooldown's model, cause, reset and observation age", () => {
+  const label = "Model anthropic/primary is cooling down until 2026-10-21T10:00:00.000Z (quota-exhausted)";
+  const row = { ...ROWS[0], checks: [{ id: "models.1", level: "warn", label, fix: "new jobs use only the reviewed fallback list" }], counts: { ok: 1, warn: 1, fail: 0 } };
+  const out = render(fleetDoctor, snapshot({ hosts: [row], more: 0 }));
+  assert.match(out, /Doctor ran 3h 0m ago/);
+  assert.ok(out.includes(label));
+  assert.match(out, /reviewed fallback list/);
+});
+
 test("the console's Doctor panel: nothing published, an unreadable read, and a capped index each say what they are", () => {
   assert.match(render(fleetDoctor, snapshot({ hosts: [], more: 0 })), /No host has published doctor results yet\. Each worker runs doctor a minute after it starts/);
   assert.match(render(fleetDoctor, snapshot({ unreachable: "timeout" })), /The published doctor results could not be read\./);

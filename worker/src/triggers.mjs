@@ -506,7 +506,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -1648,6 +1648,7 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
 	provider: "run.provider", providers: "run.provider", providerid: "run.provider", providerids: "run.provider", providername: "run.provider",
 	model: "run.model", modelid: "run.model", modelname: "run.model",
 	models: "run.models", modelids: "run.models", modelnames: "run.models", allowedmodels: "run.models", allowedmodel: "run.models",
+	fallbackmodels: "run.fallbackModels", fallbackmodel: "run.fallbackModels", fallbackmodelid: "run.fallbackModels", fallbackmodelids: "run.fallbackModels", fallbackmodelname: "run.fallbackModels", fallbackmodelnames: "run.fallbackModels",
 	maxturns: "run.maxTurns", maxturn: "run.maxTurns",
 	maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
 });
@@ -1673,7 +1674,7 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
  * were refused here before it was.
  */
 function validateRunModel(on, run, at, path) {
-	const exact = new Set(["provider", "model", "maxTurns", "models", "maxCostUsd"]);
+	const exact = new Set(["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd"]);
 	for (const [label, source, exactIsLegal] of [
 		["run", run, true],
 		["on", on, false],

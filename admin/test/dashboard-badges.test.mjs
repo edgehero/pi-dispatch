@@ -582,3 +582,9 @@ test("TRIGGER_DETAIL says what a portfolio trigger's jobs write, and only on tha
   const rows = (await openDetail(plain, {}, THEME)).map((l) => stripAnsi(l));
   assert.ok(!rows.some((r) => r.includes(" portfolio ")), "no row for a trigger without the flag");
 });
+
+test("the trigger list and detail show reviewed fallback order (#716)", async () => {
+  const trigger = { type: "label", any: ["bug"], flow: "fix", forge: "github", fallbackModels: ["anthropic/claude-x", "openai/gpt-x"] };
+  assert.match((await renderList([trigger], 200)).map(stripAnsi).join("\n"), /\[fallbacks anthropic\/claude-x, openai\/gpt-x\]/);
+  assert.equal(kvValues(await openDetail(trigger, {}), "fallbacks").join(""), "anthropic/claude-x, openai/gpt-x");
+});

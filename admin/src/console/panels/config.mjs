@@ -74,6 +74,7 @@ function triggerNotes(t, bundles = null) {
     t.image ? `image ${t.image}` : null,
     t.backend ? `venue ${t.backend}` : null,
     t.maxCostUsd ? `job cap $${t.maxCostUsd}` : null,
+    Array.isArray(t.fallbackModels) && t.fallbackModels.length > 0 ? `fallbacks ${t.fallbackModels.join(", ")}` : null,
     t.portfolio ? "writes the budget split" : null,
   ].filter(Boolean).join("; ");
 }

@@ -186,6 +186,7 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					provider: job.data?.provider,
 					model: job.data?.model,
 					models: job.data?.models,
+					fallbackModels: job.data?.fallbackModels,
 					// Issue #501's per-job dollar cap, by the same narrowing rule: a child that dropped it would run
 					// uncapped. Passed through whenever the parent's data carries it; absent stays absent.
 					maxCostUsd: job.data?.maxCostUsd,

@@ -1147,3 +1147,27 @@ test("awaitInput rides forge job data only when armed, and never moves a dedup k
 		assert.equal(captured.opts.deduplication.id, dedup);
 	}
 });
+
+test("reviewed fallback lists ride local and forge jobs and distinguish local identities (#716)", async () => {
+	const { enqueueLocalJob, enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const queue = { add: (name, data, opts) => ((captured = { data, opts }), { id: opts.jobId }) };
+	const fallbackModels = ["anthropic/claude-x", "openai/gpt-x"];
+	const base = { folder: "/proj", flow: "tidy", now: new Date("2026-07-16T12:00:00Z") };
+	await enqueueLocalJob(queue, { ...base, fallbackModels });
+	assert.deepEqual(captured.data.fallbackModels, fallbackModels);
+	const first = captured.opts.jobId;
+	await enqueueLocalJob(queue, { ...base, fallbackModels: [...fallbackModels].reverse() });
+	assert.notEqual(captured.opts.jobId, first);
+	await enqueueLocalJob(queue, base);
+	assert.notEqual(captured.opts.jobId, first);
+	assert.equal("fallbackModels" in captured.data, false);
+	const forge = { repo: "owner/repo", target: { type: "issue", number: 7 }, flow: "fix", trigger: { event: "issues", action: "labeled", deliveryId: "fallback-test", sender: { id: 42 }, matched: { index: 0, type: "label", label: "bug" } } };
+	await enqueueGitHubJob(queue, { ...forge, fallbackModels });
+	assert.deepEqual(captured.data.fallbackModels, fallbackModels);
+	assert.equal("fallbackModels" in captured.data.trigger, false);
+	const dedup = captured.opts.deduplication.id;
+	await enqueueGitHubJob(queue, forge);
+	assert.equal(captured.opts.deduplication.id, dedup);
+	assert.equal("fallbackModels" in captured.data, false);
+});

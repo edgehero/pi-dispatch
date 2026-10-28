@@ -61,6 +61,7 @@
     "./model-endpoints": "./src/model-endpoints.mjs",
     "./model-catalog": "./src/model-catalog.mjs",
     "./model-ref": "./src/model-ref.mjs",
+    "./model-failover-protocol": "./src/model-failover-protocol.mjs",
     "./schedules": "./src/schedules.mjs",
     "./env-file": "./src/env-file.mjs",
     "./service-env": "./src/service-env.mjs",

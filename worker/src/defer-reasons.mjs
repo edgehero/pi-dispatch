@@ -61,6 +61,8 @@ export const DEFER_WHYS = Object.freeze({
 	"scope-repo": Object.freeze({ bucket: "slot", sentence: "Its repository's concurrent limit is full" }),
 	"scope-project": Object.freeze({ bucket: "slot", sentence: "Its project's concurrent limit is full" }),
 	endpoint: Object.freeze({ bucket: "slot", sentence: "Every slot of model endpoint {endpoint} is taken" }),
+	"model-cooldown": Object.freeze({ bucket: "check", sentence: "No reviewed model is available; a model is cooling down. Asks again at {until}" }),
+	"model-window": Object.freeze({ bucket: "check", sentence: "No reviewed model is available; a model's dollar window is full. Asks again at {until}" }),
 	"host-budget": Object.freeze({ bucket: "slot", sentence: "{host}'s budget has no room for it yet" }),
 	"bundle-profile": Object.freeze({ bucket: "slot", sentence: "Waits for a host that serves its secret bundle profile" }),
 	chained: Object.freeze({ bucket: "run", sentence: "Chained after {holder}; starts when its folder is free" }),

@@ -362,3 +362,24 @@ test("a malformed run.maxCostUsd refuses the file on every kind, naming the trig
 	assert.throws(() => parse([withRun(KINDS.cron, { maxCostUsd: "x" })]), (e) => /^cron trigger "nightly": run\.maxCostUsd/.test(e.message));
 	assert.throws(() => parse([KINDS.cron, withRun(KINDS.label, { maxCostUsd: "x" })]), (e) => /trigger at index 1: run\.maxCostUsd/.test(e.message));
 });
+
+// #716: all trigger kinds share the same reviewed fallback policy.
+test("fallbackModels keeps order on every trigger kind and checks the trigger's allowlist", () => {
+	const list = ["anthropic/Claude-X", "openai/gpt-x"];
+	for (const entry of Object.values(KINDS)) {
+		const [t] = parse([withRun(entry, { models: list, fallbackModels: list })]);
+		assert.deepEqual(t.run.fallbackModels, list);
+		assert.notEqual(t.run.fallbackModels, list);
+		for (const absent of [{}, { fallbackModels: null }]) assert.equal(parse([withRun(entry, absent)])[0].run.fallbackModels, undefined);
+		for (const bad of [[], "openai/x", ["x"], ["openai/x", "openai/X"], Array.from({ length: 17 }, (_, i) => `openai/m${i}`)]) {
+			refused(withRun(entry, { fallbackModels: bad }), /run\.fallbackModels/);
+		}
+		for (const allowed of [["openai/other"], ["anthropic/claude-x"], ["other/Claude-X"]]) {
+			refused(withRun(entry, { models: allowed, fallbackModels: [list[0]] }), /does not list a run\.fallbackModels entry/);
+		}
+		// Only the worker knows the deployment allowlist, so the pure loader defers that check.
+		assert.deepEqual(parse([withRun(entry, { fallbackModels: list })])[0].run.fallbackModels, list);
+		for (const key of ["fallback_models", "FallbackModels", "fallbackModel", "fallbackModelIds", "fallback_model_names", "fallbackM\u043Edels"]) refused(withRun(entry, { [key]: list }), /did you mean run\.fallbackModels/);
+		refused({ ...entry, on: { ...entry.on, fallbackModels: list } }, /did you mean run\.fallbackModels/);
+	}
+});

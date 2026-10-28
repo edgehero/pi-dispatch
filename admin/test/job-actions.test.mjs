@@ -453,13 +453,14 @@ test("a forge re-run takes its authority from the trigger NOW: deleted, replaced
     assert.match((await plan()).refusal, /changed or is gone/);
     // Narrowed: the same trigger with a smaller cap, one model, no secret profile, the default image. The re-run takes
     // exactly those, never the retained wide ones.
-    forgeTriggers(triggersPath, [cron, { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix", maxCostUsd: "0.5", models: ["anthropic/claude-sonnet-5-5"] } }]);
+    forgeTriggers(triggersPath, [cron, { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix", maxCostUsd: "0.5", models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-sonnet-5-5"] } }]);
     const narrowed = await plan();
     assert.ok(narrowed.plan, JSON.stringify(narrowed));
     assert.equal(narrowed.plan.job.maxCostUsd, "0.5");
     assert.deepEqual(narrowed.plan.job.models, ["anthropic/claude-sonnet-5-5"]);
+    assert.deepEqual(narrowed.plan.job.fallbackModels, ["anthropic/claude-sonnet-5-5"]);
     for (const k of ["secretsProfile", "image", "console"]) assert.equal(k in narrowed.plan.job, false, `${k} is not replayed from the retained job`);
-    assert.deepEqual(narrowed.plan.runFields, { flow: "fix", model: null, models: ["anthropic/claude-sonnet-5-5"], maxCostUsd: "0.5", secretsProfile: null, image: null, backend: null });
+    assert.deepEqual(narrowed.plan.runFields, { flow: "fix", model: null, models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-sonnet-5-5"], maxCostUsd: "0.5", secretsProfile: null, image: null, backend: null });
     assert.equal(narrowed.plan.reserve.capMicros, 500_000, "the reserve is the narrowed cap");
     assert.equal(narrowed.plan.queue, "pi-jobs", "no secret profile any more: the shared queue");
     assert.deepEqual([narrowed.plan.job.repo, narrowed.plan.job.target, narrowed.plan.job.trigger.matched], [data.repo, data.target, data.trigger.matched], "the where is the retained job's");
