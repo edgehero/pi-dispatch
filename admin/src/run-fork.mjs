@@ -41,6 +41,7 @@ export async function planRunFork({ jobId, entry, position = "before", provider,
   const p = got.plan;
   if (p.kind !== "forge" || p.job?.target?.type !== "issue") return { refusal: "fork-target-unsupported" };
   if (p.job.replica !== undefined || p.job.replicas !== undefined) return { refusal: "fork-replicas-unsupported" };
+  if (p.job.awaitInput === true) return { refusal: "fork-await-input-unsupported" };
   const id = forkId ?? (deps.random ?? randomBytes)(16).toString("hex");
   if (!/^[0-9a-f]{32}$/.test(id)) return { refusal: "fork-id-invalid" };
   // The paid preview names one model. Freeze it in both queue data and the confirmation request so a later

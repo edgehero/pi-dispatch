@@ -118,3 +118,11 @@ test("a zero-rated preview is pinned in queue data and cannot become a paid rese
   const got = await enqueueRunFork(plan, { ...d, modelEndpoints: null, enqueueFn: () => { throw new Error("must not queue a newly paid fork"); } });
   assert.match(got.refusal, /changed since/);
 });
+
+
+test("await-input triggers refuse managed forks until parked answers can preserve their independent namespace", async () => {
+  const d = deps();
+  const basePlan = await d.planRerunFn();
+  const got = await planRunFork({ ...request, ...d, planRerunFn: async () => ({ plan: { ...basePlan.plan, job: { ...basePlan.plan.job, awaitInput: true } } }) });
+  assert.equal(got.refusal, "fork-await-input-unsupported");
+});

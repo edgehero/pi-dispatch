@@ -1472,8 +1472,11 @@ that cannot work.
 Before the first user message explicitly starts from the original base. Other positions need a retained quiet
 transcript/workspace pair; not every transcript entry has one. The source archive is immutable and bounded, and
 selection is checked against the trigger's current policy at preview, confirmation and worker pickup. Model and
-thinking choices cannot widen that policy. Cron/local jobs, pull request targets, commands, replicas and recovery
-requests are unsupported; copy-mode OpenShell returns `openshell-fork-unsupported`.
+thinking choices cannot widen that policy. Cron/local jobs, pull request targets, commands and replicas are
+unsupported. Triggers enabling `run.awaitInput` refuse before spend as `fork-await-input-unsupported`; parked replies
+cannot safely resume a fork namespace yet. Recovery-attempt records are not new fork sources, while an existing
+managed fork can recover from its own checkpoint without re-forking the original source. Copy-mode OpenShell returns
+`openshell-fork-unsupported`.
 
 `GET /api/fork-points?id=<run-id>` is operator-only and returns entry ids, parent ids, type/role metadata and supported
 positions. It returns no message text, raw stored transcript or archive path. The paid `run-fork` action uses

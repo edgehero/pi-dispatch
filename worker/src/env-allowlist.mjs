@@ -386,8 +386,8 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	const env = {
 		PI_PROVIDER: provider,
 		PI_MODEL: model,
-		PI_FORK_ENTRY: fork?.fromEntry,
-		PI_FORK_POSITION: fork?.position,
+		PI_FORK_ENTRY: recovering === true ? undefined : fork?.fromEntry,
+		PI_FORK_POSITION: recovering === true ? undefined : fork?.position,
 		PI_THINKING_LEVEL: thinkingLevel ?? undefined,
 		PI_MAX_TURNS: String(maxTurns),
 		// The optional per-job token budget (issue #25). Absent/null => variable omitted (docker-run skips
