@@ -20,7 +20,13 @@ test("provider classifications are closed; successful, parameter, auth and unkno
 		["enforced_spend_limit_reached", { status: 429 }, { kind: "quota-exhausted" }],
 		["You have reached your specified API usage limits", null, { kind: "quota-exhausted" }],
 		["RESOURCE_EXHAUSTED quota exceeded", null, { kind: "quota-exhausted" }],
+		["Throttling error: request throughput exceeded", null, { kind: "quota-exhausted" }],
+		["ThrottlingException: retry later", null, { kind: "quota-exhausted" }],
+		["TooManyRequestsException: retry later", null, { kind: "quota-exhausted" }],
+		["ServiceQuotaExceededException: account capacity", null, { kind: "quota-exhausted" }],
 		["overloaded", null, { kind: "overloaded" }],
+		["Service unavailable: try again", null, { kind: "overloaded" }],
+		["Internal server error: try again", null, { kind: "overloaded" }],
 		["unavailable", { status: 503 }, { kind: "overloaded" }],
 		["context_length_exceeded", null, { kind: "context-overflow" }],
 		["invalid_parameter quota exceeded", null, null],
@@ -34,6 +40,11 @@ test("provider classifications are closed; successful, parameter, auth and unkno
 	]) assert.deepEqual(classifyProviderFailure(error(message), measured), expected, message);
 	assert.equal(classifyProviderFailure({ stopReason: "stop", errorMessage: "429" }, { status: 429 }), null);
 	assert.equal(classifyProviderFailure({ ...error("429"), role: "toolResult" }), null);
+	const bedrock = (message, status) => ({ ...error(message), diagnostics: [{ type: "bedrock_response_failure", details: { status, requestId: "never-recorded" } }] });
+	assert.equal(classifyProviderFailure(bedrock("Service unavailable quota exceeded", 403)), null, "measured auth refusal wins over incidental retry words");
+	assert.equal(classifyProviderFailure(bedrock("rate limit", 400)), null, "measured parameter refusal never switches");
+	assert.deepEqual(classifyProviderFailure(bedrock("request failed", 429)), { kind: "quota-exhausted" });
+	assert.deepEqual(classifyProviderFailure(bedrock("request failed", 503)), { kind: "overloaded" });
 });
 
 test("reset evidence uses injected time, accepts header dates/seconds, caps and rejects invalid/past resets", () => {
@@ -140,6 +151,9 @@ test("replay safety refuses tools, child/loose/non-root calls, missing coverage 
 });
 
 test("pinned SDK prompt resolves on 429 yet terminal events retain reset evidence and root-only replay proof", { skip: !pi }, async () => {
+	const bedrock = readFileSync(new URL("./api/bedrock-converse-stream.js", import.meta.resolve("@earendil-works/pi-ai")), "utf8");
+	assert.match(bedrock, /type: "bedrock_response_failure"/);
+	assert.match(bedrock, /details\.status = metadata\.httpStatusCode/);
 	const root = tempDir("pi-failure-sdk-");
 	const AuthStorage = await loadPiAuthStorage();
 	const runtime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, AuthStorage, agentDir: root, modelsPath: join(root, "models.json"), readFile: () => "{}" });
