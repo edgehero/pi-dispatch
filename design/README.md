@@ -29,7 +29,7 @@ python3 design/tools/build.py          # about a minute
 The build runs every generator, then `fix_markers.py`, which sets each card's group, its design status ribbon and its measured height. Then it runs two checks, and fails if either finds a problem:
 
 - `check_fixture.py` names any card that draws a run with another target, host or venue than `fixture.py`, or a venue its host does not run.
-- `check.py` opens every card in both themes, at its own width and at 390 px. It fails on an inline `style=` or a `<script>` (the console's CSP allows neither), a page wider than its card, a console error, or a marker height more than 60 px off.
+- `check.py` opens every card in both themes, at its own width and at 390 px. It fails on an inline `style=`, a `<script>`, a web font, an `@import`, a `<link>` or a `url()` that leaves the page (the console's CSP allows none of them), a page wider than its card, a console error, or a marker height more than 60 px off.
 
 Screenshots and the harness pages go to `design/.shots/`, which git ignores. `python3 design/tools/shoot.py RunLive RunLive:390` shoots single cards.
 
