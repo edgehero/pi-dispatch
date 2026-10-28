@@ -145,8 +145,7 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", cop
  * A new image-gated feature (`costCap`, `modelPolicy`) is a row here, not another branch in two files. Order
  * is the order the branches had, so a job carrying several features is refused for the same one as before.
  */
-export const CAPABILITY_GATES = Object.freeze([
-	// REQ-REPLICA-RUNS: an image built before it bakes a HARD_RULES.md whose rule 3 hard-codes `pi/issue-<n>`
+export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image built before it bakes a HARD_RULES.md whose rule 3 hard-codes `pi/issue-<n>`
 	// as a SYSTEM rule, which the model treats as authoritative over the user prompt naming `pi/issue-<n>-r2`.
 	// Both replicas would push to one branch: the push race the feature exists to avoid, two runs billed.
 	Object.freeze({
@@ -301,6 +300,15 @@ export const CAPABILITY_GATES = Object.freeze([
 		event: "refused_image_fork_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare managed session forks (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore the selected entry or thinking level. Rebuild the image from a version that has this feature. Not run.`,
 	}),
+	Object.freeze({
+		token: "approvalGates",
+		needed: (job) => Array.isArray(job?.gates) && job.gates.length > 0,
+		result: "approvalGatesUnsupported",
+		reason: "job-image-approval-gates-unsupported",
+		event: "refused_image_approval_gates_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare approval gates (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.gates\`. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+
 ]);
 
 /**

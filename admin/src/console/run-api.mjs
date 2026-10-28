@@ -28,7 +28,7 @@ import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { SESSION_NOT_SAVED } from "@edgehero/pi-dispatch/record-reason";
-import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
+import { approvalRecordOf, recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
 import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
@@ -122,6 +122,7 @@ export function safeRunOf(id, record) {
     flow: str(r.flow, SKILL_NAME_RE),
     outcome: str(r.outcome, OUTCOME_RE),
     reason: recordReason(r),
+    ...(approvalRecordOf(r.approval) ? { approval: approvalRecordOf(r.approval) } : {}),
     startedAt: iso(r.startedAt),
     finishedAt: iso(r.endedAt),
     provider: str(r.provider, RUN_PROVIDER_RE),
@@ -384,7 +385,7 @@ export async function chatFactsOf(fleet, id, record, { searchNewer = "always", n
   const jobState = typeof status.state === "string" ? status.state : null;
   const activeJobId = jobState === "active" ? id : str(status.continuesAs, RUN_ID_RE);
   const queuedJobId = activeJobId === null ? str(status.queuedAs, RUN_ID_RE) : null;
-  const parkedRecord = record?.outcome === "completed" && record?.reason === "awaiting-input";
+  const parkedRecord = record?.outcome === "completed" && ["awaiting-input", "awaiting-approval"].includes(record?.reason);
   const cached = searchNewer === "parked" || searchNewer === "saved";
   let newer = searchNewer === "always" ? await newerRunOf(fleet, record) : cached && (parkedRecord || (searchNewer === "saved" && sessionSavedOf(record) && chatModeOf({ state: jobState, record, activeJobId, queuedJobId }).mode === "fork")) ? await newerRunCached(fleet, id, record, now) : { known: false, jobId: null };
   let parked = null;

@@ -587,6 +587,8 @@ Evidence convention as in `constitution.md`.
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 **container → worker, secret resolver → worker, and wait profile → worker.**
 
 **Three participants, and one table each.** The vocabulary was one table with footnotes while every
@@ -1276,6 +1278,8 @@ refactor apart.
   obvious implementation gets silently wrong.
 
 ## INT-CONTAINER-JOB-INPUTS
+
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
 **worker → container.**
 
@@ -4094,6 +4098,8 @@ with it: no delivery-id header, two actor representations, tags as a string, and
 
 ## INT-TRIGGERS-FILE-CONTRACT
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 **operator → worker + receiver.** One unified file, read by both services; each validates the WHOLE file
 and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`, `pull_request`, `issue`).
 
@@ -5557,6 +5563,8 @@ validator rather than a second copy of it.
 
 ## INT-RUN-HISTORY-FILE-CONTRACT
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 **worker → admin extension.**
 
 - **Contract**:
@@ -5572,7 +5580,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -6908,6 +6916,8 @@ validator rather than a second copy of it.
   to the audit file or `alloc:log`.
 
 ## INT-SESSION-STORE-CONTRACT
+
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
 **worker <-> host store <-> container.**
 
@@ -10362,6 +10372,8 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 
 ## INT-CONSOLE-STATE-API
 
+**Extension (#649):** `/api/run` and parked folds may carry optional validated id-only `approval` audit metadata under `INT-APPROVAL-STATE-CONTRACT`. The existing parked-answer action accepts optional approve/decline decisions, converted to command text before its shared planner; request binding and worker authority remain mandatory.
+
 **The console → scripts and later integrations.** `GET /api/state`: the deployment's live snapshot as JSON, so a
 script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONSOLE`,
 `REQ-OPERATOR-CONSOLE-SCREENS` (k)).
@@ -11381,10 +11393,55 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   refusal results and exact pinned APIs, copy only their own transcript, log no message text, and create separate
   reviewable pull requests without any merge action.
 
+## INT-APPROVAL-STATE-CONTRACT
+
+- **Declaration**: `run.gates` is a nonempty distinct string array, maximum 32 entries, maximum 80 characters per
+  action, matching `^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$`. `run.gateTimeout` optionally declares integer days 1..365;
+  `run.gateBudgetRaiseUsd` is an absolute one-container cap, strictly above `run.maxCostUsd`, only beside
+  `budget-raise`. All three travel at job level through normalized triggers, every forge filter and the queue.
+  They never become event payload fields. Gate declarations require resumable forge flows and arm `awaitInput`.
+- **Container input**: internal `PI_APPROVAL_GATES` is a JSON string array; internal `PI_APPROVAL_DECISION` is JSON
+  `{requestId, action, toolCallId, decision}` with no human text. `decision` is approved, declined or question. The accepted human text is staged in the existing read-only `event.json` comment body; the runner reads it once before extensions or provider calls and combines it with the decision metadata. Only the host-owned
+  decision reaches this input: a queued `approvalDecision` is discarded. Both variables are reserved from secrets.
+  Gate jobs require image capabilities `approvalGates` AND `exitAuth` before mint or reservation.
+- **Runner output**: authenticated exit 0 / `awaiting-approval` carries `approval: {action, toolCallId}` only when
+  the run ends on its own successful terminating approval tool. Unknown actions and shadowed tools cannot park.
+  Runner exit-2 reasons: `approval-config-invalid`, `approval-without-session`, `approval-shadowed`,
+  `approval-decision-invalid`. Summary and decision text never enter the exit metadata or public record.
+- **Private state**: `run:approval:request:<requestId>` stores version 1 normalized request identity, state, and
+  optional immutable decision and claimed job ID. `requestId` is SHA-256 of requesting queue job ID, NUL, tool-call ID.
+  Request identity binds run ID, forge/repository/target, action, call ID, config digest, session key, exact canonical SHA-256 transcript digest, host, optional declared host queue, created
+  time and optional expiry plus private original queue data. The target key is derived from forge/repository/type/
+  number; `run:approval:due` is a sorted deadline index, with a hashed per-host deadline index to prevent a down host starving another host. No pending key TTL implements expiry. Terminal infrastructure failures finish their same-job claim; nonterminal retries retain it, and pending bounded terminal finalizers join worker shutdown before Redis closes. Unknown/missing versions or malformed state are determinate refusals, never authority. State transitions are
+  pending to decided to claimed to finished; withdrawn live policy may retire an unanswered/decided request or the same job's claim directly to finished, preserving any accepted decision; the first decision wins, same-decision delivery and same-job claim are
+  idempotent, another claim refuses. Finish removes the active target mapping and retains the immutable decision for 32 days (longer than queue retention).
+  Private decision text is bounded to the existing 8 KiB answer limit and is never logged as metadata.
+- **Reply binding**: the queue binds a gated comment to the active request observed at ingress; an explicitly named
+  different request is rejected before enqueue. A reply that arrived before publication stays unbound until the
+  held-reply path enqueues it after publication. The worker refuses an unbound decision. The console carries the
+  request ID read from its original parked record; its preview and confirmation cannot approve a later request.
+- **Session binding**: host preflight checks a real key directory, a bounded regular canonical transcript, age/TTL/
+  lineage limits and the unanswered original call before spending. Reused provider tool-call IDs cannot transfer a decision to different transcript bytes. The normal session resolver must still stage a
+  resumed session with the request's exact key; pi's projected context is independently checked in the runner.
+- **Public record**: optional `approval` is rebuilt as `{requestId, action, decision?, actorKind?, actorId?, decidedAt?}`.
+  Request IDs are 64 hex; actions must be declaration tokens. A decided record carries approved/declined/question,
+  forge/operator/panel/system actor kind, SHA-256 actor identifier (or `expiry`/`revocation` for system), and integer milliseconds.
+  Model summaries, human reasons, names and arbitrary nested fields are discarded. No approval is inferred from
+  job data when building a record.
+- **Expiry**: only a persisted system decline and the exact `approval-expiry-<requestId>` job, carrying the same
+  request ID and `expiry-<requestId>` delivery ID, can continue an expired request. The host checks due state each
+  minute, including overdue declines left by enqueue failure. A deterministic queue ID prevents repeated sweeps
+  making multiple continuations. The comment marker is a private NX key retained for 32 days; failure to post remains the existing
+  adapter's named failure. A later policy refusal finishes the request without granting authority to another job.
+- **Traces to**: `REQ-APPROVAL-GATES`, `DES-APPROVAL-DECISION-IS-HOST-AUTHORITY`,
+  `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `INT-SESSION-STORE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-28 (#649) | Issue #649: added `INT-APPROVAL-STATE-CONTRACT`; trigger fields, container env, authenticated exit metadata and optional id-only run audit extend their existing contracts. Run-record reason enum amended. `INT-SESSION-STORE-CONTRACT` derivation, promotion and cold-start rules UNCHANGED, checked; approval continuations refuse any cold start. |
 | 2026-10-28 (#648) | NEW `INT-MANAGED-FORK-CONTRACT`: managed issue-run forks use immutable source identity, exact retained transcript/workspace boundaries, independently derived branches and session lineage, current policy and normal admission. Console and terminal share paid preview/confirm/audit. Pinned pi tree semantics, model/thinking recording, named unavailable points/venues, bounded private retention and new zero-spend/worker/UI tests are specified. Existing host-local chat fork and recovery newest-two retention remain unchanged. Relevant constitutional constraints UNCHANGED, checked as recorded in `INT-MANAGED-FORK-CONTRACT`. Final cross-feature checks: `run.awaitInput` managed forks refuse before spend as `fork-await-input-unsupported`; recovery of an existing managed fork restores its checkpoint without re-forking, while recovery-attempt records are not new sources. `REQ-AWAIT-INPUT` and ordinary canonical reply behavior UNCHANGED, checked. |
 | 2026-08-30 | Issue #57, the identity slice. **NEW `INT-HOST-REGISTRY-CONTRACT`**: the `host:` keyspace -- a live SET plus one PEXPIRE'd HASH per worker, every row a host's own self-description and none of it an instruction to anybody. Three of its clauses are the load-bearing ones. The CONTENT RULE (names, integers and digests; never a path, a credential-bearing URL, a repository name or operator free text) is `targetFor`'s `local:<basename>` discipline applied to a Valkey value, and it earns its strictness from the READER: the panel is where an operator screenshots and doctor prints these rows. The TTL is refreshed on every beat, which REVERSES `budget.mjs`'s stated set-once rule, and the reversal is recorded with its reason rather than left to be discovered -- a counter whose TTL refreshes stops being a window, while a lease's expiry IS its liveness claim, and the in-repo precedent (`wait-state.hold` re-expiring the supersede lease) is lease-shaped. And the falsification test any later addition must pass: delete the whole `host:*` keyspace while the fleet runs, and every host must behave exactly as it did before -- which is what distinguishes this from the Redis-side toggle `OQ-008` refuses, since deleting THAT loses the operator's edit. `tz` is carried because a cron pattern has none: `triggers.json` has no `tz` field on a cron entry and BullMQ hands the pattern to cron-parser with no zone, so one pattern is two different instants on two hosts in different zones -- unlike `pause-windows.json`, whose every window is already zone-explicit and therefore already fleet-correct. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record gains `host` as key 25, additive, nullable, unconditional and in tail position. The admissibility paragraph engages this record's own sentences rather than sidestepping them -- `host` holds no attacker-chosen string absolutely (no path from any payload reaches it, it is fixed once at boot, and its charset excludes the separators that would let it be path-shaped), but it is NOT anonymous, since the default is a hostname and a personal machine's hostname is often a person's name. The honest word is operator-disclosed, and `PI_WORKER_NAME` is the documented answer for anyone who wants something else. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the worker name is environment-only and deliberately not an overlay key -- the registry publishes it before the first per-job settings read, and a name the panel could change mid-flight would rename a host between two of its own log lines. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no mount, flag or env var moves, and the name never enters the container. **Code evidence**: worker/src/host-registry.mjs -> makeHostRegistry, readLiveHosts; worker/src/config.mjs -> WORKER_NAME_RE, sanitizeWorkerName, defaultWorkerName; worker/src/run-history.mjs -> buildRecord; worker/src/start.mjs -> startWorker (the log closure, recordRun, the registry wiring); worker/src/image-preflight.mjs -> parseLabels. |
 | 2026-08-30 | v1.6.1, two corrections found by an adversarial pass over the #57 plan rather than by a failure. Both are places where a contract this file states was true of the code one level up and false one level down. **`INT-WAIT-PROFILES-CONTRACT` CORRECTED**: the check lease is released on every exit from the polled arm. It was acquired before the supersede claim and released only around the check loop, so both of the claim's exits -- the `wait-superseded` return and the unverified-holder re-defer -- left holding it. At the shipped default of one slot that wedged every wait check on the worker until restart, and it pointed at the wrong culprit: later held jobs throttled and recorded `wait-expired`/`max-wait-unchecked`, blaming deployment capacity for a leak. Reproduced by driving the real `makeProcessor`, and pinned by two tests whose mutation is the pre-fix block structure. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED, twice, and the pair is one finding**: this file has always said the record is PII-free by construction and that `session.reason` is a CLOSED enum, and neither was enforced where the container's copy is admitted. `parseExitTokens` returned the container's object VERBATIM whenever `total` was numeric, so an invented key -- a path, a branch name, a string read out of the workspace -- reached the durable record; `parseExitSession` accepted any string as `reason`. Both now rebuild: `tokens` from a closed twelve-key list in the runner's own emission order, so a conformant object round-trips byte-identically and an omitted key stays omitted rather than becoming a measured zero; `reason` against the enum this file publishes. The asymmetry that made this findable is that `usage` was already given exactly this treatment (`parseExitUsage`'s rebuild, with the reason written on it) and its two siblings were not -- an oversight, not a decision. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: all three fields stay read-only telemetry feeding no classification, and no exit code moves. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no mount, flag or env var moves, and a conformant image's exit line is accepted exactly as before. **Code evidence**: worker/src/index.mjs -> makeProcessor (the polled arm's try/finally); worker/src/run-history.mjs -> rebuildTokens, SESSION_REASONS, parseExitTokens, parseExitSession. |

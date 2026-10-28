@@ -5,9 +5,9 @@
  * run-text rule, the action controls and the PATHS rule) are stated once, in `../panels.mjs`'s header. Drawn in the
  * Pulse kit's markup: the screen left the legacy layer with this module.
  *
- * ONE PANEL, `p-questions` (`parkedQuestions`): the Questions tab with its count, then a card per parked run nobody has
- * answered (`ui.questionCard`), newest first as the snapshot lists them, and beside them how answers work. Approvals
- * are issue #649's, so the page has no Approvals tab and no approval card.
+ * ONE PANEL, `p-questions` (`parkedQuestions`): questions and approval requests in one inbox with its count, then a
+ * card per parked run nobody has answered, newest first, and beside them how answers work. Approval choices reuse
+ * the same audited answer action; their model-written request remains on the forge and in the run transcript.
  *
  * NO QUESTION TEXT (REQ-CONSOLE-SECURITY clause l). The question is the run's last assistant message, which is
  * transcript text, and transcript text is shown only in the run page's transcript section. The parked fold reads run
@@ -149,7 +149,7 @@ function answerOf(p, i, view) {
   // Its own key only: a run id may be `__proto__`, which a plain object's lookup would answer with its prototype.
   const checks = view.data?.parkedChecks;
   const check = checks !== null && typeof checks === "object" && Object.hasOwn(checks, p.jobId) ? checks[p.jobId] : null;
-  if (check?.ok === true) return ui.answerForm({ jobId: p.jobId, id: `answer-${i + 1}`, hint: PARKED_ANSWER_HINT, runHref: hrefTo(view, "run", { id: p.jobId }) });
+  if (check?.ok === true) return p.reason === "awaiting-approval" ? ui.approvalForms({ jobId: p.jobId, id: `approval-${i + 1}` }) : ui.answerForm({ jobId: p.jobId, id: `answer-${i + 1}`, hint: PARKED_ANSWER_HINT, runHref: hrefTo(view, "run", { id: p.jobId }) });
   if (typeof check?.refusal === "string") {
     const said = check.refusal.trim();
     return ui.banner({ status: "attention", title: PARKED_ELSEWHERE_TITLE, body: `${capitalised(said)}${/[.!?]$/.test(said) ? "" : "."}` });
@@ -167,7 +167,7 @@ function cardOf(p, i, view) {
     project: projectOf(p),
     target: targetOf(p, view.env),
     where: whereOf(p),
-    body: PARKED_QUESTION_WHERE,
+    body: p.reason === "awaiting-approval" ? html`<p>Awaiting approval for <span class="code">${p.approval?.action ?? "unknown action"}</span>.</p><p>${p.approval?.action === "budget-raise" ? "Worker-enforced: approval permits the declared run cap, subject to deployment and scoped budgets." : "Advisory: the worker does not enforce this external action."}</p><p>${PARKED_QUESTION_WHERE}</p>` : PARKED_QUESTION_WHERE,
     answer: answerOf(p, i, view),
   });
 }
@@ -180,7 +180,8 @@ export function parkedQuestions(view) {
   const s = view?.data?.snapshot ?? null;
   const unread = s === null ? OVERVIEW_UNREAD_TEXT : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? parkedUnreadText(s.parkedUnreachable) : null;
   const rows = s !== null && unread === null && Array.isArray(s.parked) ? s.parked : [];
-  const tabs = ui.tabs([{ label: "Questions", count: unread === null ? rows.length : null, href: hrefTo(view, "parked"), current: true }], { label: "Parked" });
+  const approvals = rows.filter((p) => p.reason === "awaiting-approval").length;
+  const tabs = ui.tabs([{ label: approvals > 0 ? "Questions and approvals" : "Questions", count: unread === null ? rows.length : null, href: hrefTo(view, "parked"), current: true }], { label: "Parked" });
   const main = unread !== null
     ? ui.banner({ status: "attention", title: unread })
     : rows.length === 0

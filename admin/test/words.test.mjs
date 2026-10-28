@@ -53,6 +53,7 @@ test("REASON_WORDS: every key is a catalog reason, each qualifies one outcome, a
   const completed = Object.entries(REASON_WORDS).filter(([, q]) => q.outcome === "completed").map(([t]) => t).sort();
   assert.deepEqual(completed, [...RUNNER_COMPLETED_REASONS].sort());
   assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.word])), {
+    "awaiting-approval": "awaiting approval",
     "awaiting-input": "awaiting input",
     "operator-cancel": "cancelled",
     "recovery-cap": "failed",
@@ -62,6 +63,7 @@ test("REASON_WORDS: every key is a catalog reason, each qualifies one outcome, a
   // Whether the word says why (issue #737): "awaiting input" and "cancelled" do, so a row adds no sentence; "failed"
   // does not, so a recovery end keeps its reason's sentence.
   assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.says])), {
+    "awaiting-approval": true,
     "awaiting-input": true,
     "operator-cancel": true,
     "recovery-cap": false,
@@ -102,7 +104,7 @@ test("outcomeWord says whether the word says why: a qualified word that names it
 });
 
 test("the outcome keys: the five words a badge says, as query values, each with its word and status, and the record's raw values mapped onto them (issue #737)", () => {
-  assert.deepEqual([...OUTCOME_KEYS], ["completed", "refused", "failed", "awaiting-input", "cancelled"]);
+  assert.deepEqual([...OUTCOME_KEYS], ["completed", "refused", "failed", "awaiting-input", "awaiting-approval", "cancelled"]);
   assert.ok(Object.isFrozen(OUTCOME_KEYS) && Object.isFrozen(OUTCOME_KEY_WORDS));
   // Every word a known record can be given has a key, and every key is a word one can be given: both ways.
   const words = [...new Set([...Object.values(OUTCOME_WORDS), ...Object.values(REASON_WORDS)].map((w) => w.word))].sort();
@@ -112,6 +114,7 @@ test("the outcome keys: the five words a badge says, as query values, each with 
     refused: ["refused", "refused"],
     failed: ["failed", "failed"],
     "awaiting-input": ["awaiting input", "parked"],
+    "awaiting-approval": ["awaiting approval", "parked"],
     cancelled: ["cancelled", "cancelled"],
   });
   for (const k of OUTCOME_KEYS) assert.equal(k, OUTCOME_KEY_WORDS[k].word.replace(/ /g, "-"), "a key is its word as a query value");
@@ -171,7 +174,7 @@ test("the console's status (issue #737): completed ok, refused refused, failed f
   assert.deepEqual(STATUS_KINDS, ["running", "parked", "failed", "refused", "attention", "ok", "idle", "cancelled"]);
   assert.ok(Object.isFrozen(STATUS_KINDS));
   assert.deepEqual(Object.fromEntries(Object.entries(OUTCOME_WORDS).map(([k, v]) => [k, v.status])), { completed: "ok", policy: "refused", failed: "failed" });
-  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.status])), { "awaiting-input": "parked", "operator-cancel": "cancelled", "recovery-cap": "failed", "recovery-checkpoint-absent": "failed", "recovery-unsafe-extensions": "failed" });
+  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.status])), { "awaiting-approval": "parked", "awaiting-input": "parked", "operator-cancel": "cancelled", "recovery-cap": "failed", "recovery-checkpoint-absent": "failed", "recovery-unsafe-extensions": "failed" });
   // outcomeWord hands the status on, and a qualifier changes it only under its own outcome, as it does the word.
   const status = (o, r) => outcomeWord(o, r).status;
   assert.equal(status("completed"), "ok");

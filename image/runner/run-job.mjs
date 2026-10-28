@@ -50,6 +50,7 @@ import { assertThinkingLevel, openForkSessionManager, recordForkSettings } from 
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
 import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
+import { applyApprovalDecision, approvalDecisionFromEvent, approvalShadow, approvalTerminal, createRequestApproval } from "./src/request-approval.mjs";
 import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
 import { assertSteerReady, createInbox } from "./src/inbox.mjs";
@@ -169,6 +170,7 @@ async function main() {
 	// bind mount did not land, not that there is nothing to resume. INT-SESSION-STORE-CONTRACT.
 	assertSessionMountReady(cfg.sessionFile);
 	assertAwaitInputHasSession(cfg);
+	if (cfg.approvalGates.length && !cfg.sessionFile) throw configError("approval gates require a session", "approval-without-session");
 	// Same moment, same exit code (issue #646): a steer-armed job with no readable /inbox, or no exit key to sign its
 	// acks with, would run while every message sent to it waited unread. The worker arms steer only with both.
 	// On the stdin frame channel (issue #686) the channel is checked instead of /inbox.
@@ -254,6 +256,7 @@ async function main() {
 	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = cfg.fork
 		? openForkSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, fork: cfg.fork })
 		: openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
+	applyApprovalDecision(sessionManager, approvalDecisionFromEvent(cfg.approvalDecision, { jobDir: JOB_DIR }));
 	const rootSessionId = sessionManager.getSessionId();
 	// Issue #645: a recovery attempt resumes the checkpoint the worker staged, or it does not run. An empty or quarantined
 	// one (openSessionManager degrades an unparseable file to a fresh session) would send the recovery prompt to a model
@@ -362,6 +365,7 @@ async function main() {
 	// The tool a job armed with run.awaitInput may end on (issue #625). Null otherwise, so an unarmed job's loader
 	// options are byte-identical to before the feature.
 	const awaitInput = cfg.awaitInput ? createAwaitInput() : null;
+	const requestApproval = cfg.approvalGates.length ? createRequestApproval(cfg.approvalGates) : null;
 	// The tool a job armed with run.progress reports its phases with (issue #644), on the same terms.
 	const reportProgress = cfg.reportProgress ? createReportProgress() : null;
 	// The run's inbox (issue #646, src/inbox.mjs), on the same terms. The acks are signed with the exit key and name the
@@ -371,14 +375,14 @@ async function main() {
 	// parked, so it reads the await tool's flag.
 	// env-internal PI_JOB_ID: set by the worker on the container (its container name, `pi-job-<queue id>`).
 	// Issue #686: on a copying venue its messages come as frames on stdin (`frames`), else from the /inbox mount.
-	const inbox = cfg.steer ? createInbox({ exitKey: exitKey.key, runId: process.env.PI_JOB_ID, log, isParked: () => awaitInput?.state.called === true, ...(exitKey.frames === true ? { frames: frameChannel } : {}) }) : null;
+	const inbox = cfg.steer ? createInbox({ exitKey: exitKey.key, runId: process.env.PI_JOB_ID, log, isParked: () => awaitInput?.state.called === true || requestApproval?.state.called === true, ...(exitKey.frames === true ? { frames: frameChannel } : {}) }) : null;
 	// Issue #686: the frame channel (fd 3) is open from here on, the moment the inbox exists: the key left the pipe at the
 	// top of this file, and a frame is only verified and held, never run. It is read synchronously at the inbox's own
 	// moments (steer-frames.mjs openFrameReader says why), so a frame the worker wrote at the spawn is read at the first
 	// agent_start at the latest; the seed below drops whatever the transcript already delivered. A no-op on the mount
 	// transport.
 	inbox?.listen();
-	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(reportProgress?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
+	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
 	const resourceLoader = await buildLoadedResourceLoader({
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
@@ -514,6 +518,7 @@ async function main() {
 	// connects on session_start, which this runner never emits for every extension: lifecycle fires it for MCP alone.
 	// The tool a parked run ends on answers only for the job (issue #625): another extension registering its name would
 	// end the run in its name, or keep it from ending. Refused before the prompt, while nothing was spent on the task.
+	if (requestApproval && approvalShadow(session.getAllTools())) throw configError("another extension registers request_approval", "approval-shadowed");
 	if (awaitInput) {
 		const shadow = awaitInputShadow(session.getAllTools());
 		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job may`, "await-input-shadowed");
@@ -689,6 +694,7 @@ async function main() {
 		session.dispose();
 	}
 
+	const approval = approvalTerminal(terminal, requestApproval?.state);
 	const outcome = decideExit({
 		budgetAborted: budget.state.aborted,
 		budgetTurns: budget.state.turns,
@@ -703,6 +709,7 @@ async function main() {
 		isRetryable,
 		rejected,
 		// Armed AND ended on the tool's own result: a call batched with a tool that kept the loop going did not park.
+		approval: approval !== null,
 		parked: awaitInput !== null && parkedTerminal(terminal),
 	});
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
@@ -737,7 +744,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...recoveryField(), ...steerField() });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), ...recoveryField(), ...steerField() });
 	return outcome.code;
 }
 

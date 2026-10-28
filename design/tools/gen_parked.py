@@ -190,9 +190,9 @@ def parked_phone():
 </section>"""
     a = f"""<p class="pp-sect">1 approval also waits</p>
 <section class="card pp-card pp-appr" id="p-approvals" data-panel aria-labelledby="pp-ap">
-  <p class="pp-top"><span class="tile tile--sm tone-parked">{ic('shield', 'ic ic--sm')}</span><b id="pp-ap"><span class="code">gh-7b21</span> asks to push to main</b><span class="pp-wait">12m</span></p>
-  <p class="pp-meta">{tag('web')}<a class="link" href="#">acme/web#415</a><span>3 commits, 4 files</span></p>
-  <p class="pp-risk">{ic('shield', 'ic ic--sm')}Worker-enforced: push scope only after you approve.</p>
+  <p class="pp-top"><span class="tile tile--sm tone-parked">{ic('shield', 'ic ic--sm')}</span><b id="pp-ap"><span class="code">gh-7b21</span> asks to raise its run cap</b><span class="pp-wait">12m</span></p>
+  <p class="pp-meta">{tag('web')}<a class="link" href="#">acme/web#415</a><span>budget-raise</span></p>
+  <p class="pp-risk">{ic('shield', 'ic ic--sm')}Worker-enforced: the declared cap only after approval.</p>
   <div class="pp-act">{btn("Approve", "primary", "done", sm=False)}{btn("Decline", "danger", "", sm=False)}</div>
 </section>"""
     inner = q + a
@@ -219,7 +219,7 @@ def parked_phone():
 The Parked page at phone width: each parked question is a card with the question, its target and wait time, and an answer box one tap from the preview.
 
 ## How a person uses it
-- The person opens the console from a notification. A tab switch splits *Questions* from *Approvals*, each with its count.
+- The person opens the console from a notification. Questions and approvals share the inbox and its count.
 - The question card shows who asked, the project and target, how long it has waited and the question in large text.
 - **Preview answer** opens the same two-step confirm as the run page. Nothing is posted until they confirm.
 - Below the questions, a compact card shows the approval that also waits (#649): the action, the target, the risk line, and Approve or Decline as full-width buttons.
@@ -232,7 +232,7 @@ The Parked page at phone width: each parked question is a card with the question
 Parked runs (questions and approval requests) with their target, project, wait time, question or gate text (untrusted, escaped) and whether an answer can be built here.
 
 ## Fixture note
-From the fixture: gh-2f6a, acme/api#131, triage on mini1, parked 26 minutes. The question text and the approval gh-7b21 (push to main on acme/web#415) are sample content; approvals are planned for 5.0.0.
+From the fixture: gh-2f6a, acme/api#131, triage on mini1, parked 26 minutes. The question text and the budget-raise approval are sample content. Approval controls are built by #649.
 """)
 
 # ======================================================================
@@ -241,111 +241,40 @@ From the fixture: gh-2f6a, acme/api#131, triage on mini1, parked 26 minutes. The
 SEG_A = '<div class="seg" role="group" aria-label="Show"><button aria-pressed="false">Questions <b>1</b></button><button aria-pressed="true">Approvals <b>2</b></button></div>'
 
 def approval():
-    files = [("src/checkout/PayButton.tsx", "+18", "-4"), ("api/payments.ts", "+52", "-6"),
-             ("api/payments.test.ts", "+16", "-0"), ("migrations/0042_idempotency.sql", "+12", "-0")]
-    file_rows = "".join(f'<li><span class="code">{f}</span><span class="ap-add">{a}</span><span class="ap-del">{d}</span></li>' for f, a, d in files)
-    main = f"""<section class="card card--ring tone-parked ap-card" id="p-approval" data-panel aria-labelledby="ap-h">
-  <div class="card__head">
-    <span class="tile tone-parked">{ic('shield')}</span>
-    <h2 id="ap-h"><span class="code ap-code">gh-7b21</span> asks to push to main</h2>
-    <span class="end">{chip('waiting 12m', 'parked', 'clock')}<span class="ap-decl">{ic('hourglass', 'ic ic--sm')}declines by itself in 2d 23h</span></span>
-  </div>
-  <p class="ap-who">{tag('web')}<a class="link" href="#">acme/web#415</a><span>fix on mini1, trigger 3, a comment by @rob, asked at 15:27 UTC</span></p>
-  <div class="ap-gate">
-    <div class="ap-gate__h"><span class="ap-gname">Gate <span class="code">push</span></span><span class="muted">push to the default branch</span></div>
-    {facts([("Action", "Push 3 commits to <b>main</b>"), ("Branch", '<span class="code">pi/issue-415</span> into <span class="code">main</span>'),
-            ("Commits", '<span class="code">a1f2c3d</span> <span class="code">9e8b7f0</span> <span class="code">44c1d2e</span>'), ("Files", "4 changed, +98 -10"),
-            ("Agent's summary", '<span class="ap-untrusted">Adds an idempotency key to POST /payments and disables Pay while a request is in flight.</span>'),
-            ("Risk", f'<span class="ap-risk">{ic("shield", "ic ic--sm")}Worker-enforced: the resumed run gets push scope for main only after you approve.</span>')], cols=1)}
-    <ul class="ap-files" aria-label="Files changed">{file_rows}</ul>
-  </div>
-  <div class="ap-act">{btn("Approve push", "primary", "done", sm=False)}{btn("Decline", "danger", "", sm=False)}{btn("Ask a question back", "ghost", "parked", sm=False)}</div>
-  <div class="ap-decline">
-    <div class="field">
-      <label for="ap-r">Reason for declining</label>
-      <textarea id="ap-r" class="textarea" rows="2">Keep this on a branch and open a pull request; main is protected during the release freeze.</textarea>
-      <span class="field__hint">Sent to the agent as the result of its request, so it can change course. Not an error.</span>
-    </div>
-    {confirm("danger", "Preview: decline the push", [
-        "Records your decision (ops, now) on gh-7b21 and in the audit log",
-        "Resumes the run with <b>declined</b> and your reason as the result of <span class=\"code\">request_approval</span>",
-        "Posts a comment on <b>acme/web#415</b> naming you and the reason",
-    ], "None once the run resumes; until then, approve from this page instead", "Decline push")}
+    main = f"""<section class="card card--ring tone-parked" id="p-questions" data-panel>
+  <div class="card__head"><span class="tile tone-parked">{ic('shield')}</span><h2><span class="code">gh-3c90</span> asks</h2><span class="end">{chip('waiting 12m', 'parked', 'clock')}</span></div>
+  <p>{tag('billing')} acme/billing#261</p>
+  <p>Awaiting approval for <span class="code">budget-raise</span>.</p>
+  <p>Worker-enforced: approval permits the declared run cap, subject to deployment and scoped budgets.</p>
+  <p class="muted">Read the agent's request on its issue or on its run page. Model text is never copied into this inbox.</p>
+  <div class="stack">{btn('Preview approval', 'primary', 'done', sm=False)}
+    <label for="approval-reason">Reason for declining (optional)</label><textarea id="approval-reason" class="textarea" rows="2" placeholder="Why should the agent change course?"></textarea>
+    {btn('Preview decline', 'danger', sm=False)}
+    <label for="approval-question">Your question</label><textarea id="approval-question" class="textarea" rows="3" placeholder="Write your question"></textarea>
+    {btn('Preview the answer', 'answer', 'comment', sm=False)}
+    <p class="muted">Ask a question back: the run resumes with your question and no approval is granted.</p>
   </div>
 </section>"""
-    others = card("Also waiting", f"""<ul class="rows">
-    <li class="rowpill tone-parked">{ic('shield', 'ic ic--sm')}{tag('billing')}<span class="code">gh-3c90</span><span>budget-raise</span><a class="rowpill__act" href="#">Review</a></li>
-    <li class="rowpill tone-parked">{ic('parked', 'ic ic--sm')}{tag('api')}<span class="code">gh-2f6a</span><span>question, 26m</span><a class="rowpill__act" href="#">Answer</a></li>
-  </ul>
-  <div class="ap-mini">
-    <p class="ap-mini__h"><span class="tile tile--sm tone-parked">{ic('spend', 'ic ic--sm')}</span><b><span class="code">gh-3c90</span> asks to raise its run cap</b><span class="faint">4m</span></p>
-    <p class="ap-mini__s">{tag('billing')} acme/billing#261, fix on build3. Raise the run cap from <b>$2.00</b> to <b>$3.50</b>; it has spent $1.84 and has 2 of 4 phases left.</p>
-    <p class="ap-risk">{ic('shield', 'ic ic--sm')}Worker-enforced: the cap only rises after you approve.</p>
-    <div class="ap-act">{btn("Approve", "primary", "done")}{btn("Decline", "danger")}</div>
-  </div>""", id_="p-others")
-    history = card("Decided recently", f"""<ul class="rows">
-    <li class="rowpill">{ic('done', 'ic ic--sm')}{tag('web')}<span class="code">gh-71aa</span><span>push approved by ops</span><span class="end faint">14:02</span></li>
-    <li class="rowpill">{ic('failed', 'ic ic--sm')}{tag('ops')}<span class="code">gh-0c4e</span><span>deploy:staging declined by ops</span><span class="end faint">yesterday</span></li>
-    <li class="rowpill">{ic('hourglass', 'ic ic--sm')}{tag('api')}<span class="code">gh-55d2</span><span>budget-raise timed out</span><span class="end faint">Mon</span></li>
-  </ul>""", end=btn("Audit", "ghost"), id_="p-history")
-    inner = f'<div class="cols"><div class="stack">{main}</div><div class="stack">{others}{history}</div></div>'
-    body = shell("Parked", inner, "Parked", sub="Runs that stopped to wait for a person", end=SEG_A, parked=3)
-    style = COMMON + """
-.ap-card { display: grid; gap: var(--space-4); }
-.ap-card .card__head { margin-bottom: 0; }
-.ap-code { font-size: 17px; font-weight: 700; }
-.ap-decl { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-muted); }
-.ap-who { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--ink-muted); }
-.ap-gate { display: grid; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-radius: var(--radius-md); background: var(--surface-2); }
-.ap-gate .fact { border-bottom-color: var(--line); }
-.ap-gate__h { display: flex; align-items: baseline; gap: 10px; }
-.ap-gname { font-size: 17px; font-weight: 750; }
-.ap-gname .code { font-size: 16px; font-weight: 700; padding: 1px 8px; border-radius: 6px; background: var(--parked-tint); color: var(--parked-ink); }
-.ap-untrusted { display: block; padding: 8px 10px; border-radius: 10px; background: var(--surface); color: var(--ink); }
-.ap-risk { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-weight: 600; }
-.ap-files { display: grid; gap: 2px; }
-.ap-files li { display: grid; grid-template-columns: minmax(0, 1fr) 48px 40px; gap: 8px; padding: 6px 10px; border-radius: 10px; background: var(--surface); font-size: 12px; }
-.ap-files .code { font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-.ap-add { color: var(--ok-ink); font-weight: 700; text-align: right; }
-.ap-del { color: var(--failed-ink); font-weight: 700; text-align: right; }
-.ap-act { display: flex; gap: 8px; flex-wrap: wrap; }
-.ap-decline { display: grid; gap: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--line); }
-.ap-mini { display: grid; gap: 8px; margin-top: var(--space-3); padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); }
-.ap-mini__h { display: flex; align-items: center; gap: 10px; font-size: 14px; }
-.ap-mini__h b { flex: 1; }
-.ap-mini__h .code { font-size: 13px; font-weight: 700; }
-.ap-mini__s { font-size: 13px; line-height: 19px; color: var(--ink-muted); }
-.ap-mini__s b { color: var(--ink); }
-.ap-mini .ap-risk { font-size: 12px; }
-.seg b { font-weight: 800; }
-"""
-    write("ApprovalRequest", card_marker("Planned for 5.0.0", 1240, 1440, "Approval gates (#649): the agent asks permission for a named action; approve, or decline with a reason"),
-          "Parked, approvals", body, style)
+    how = card("How decisions work", "<p>Every decision previews and confirms through the existing audited answer action. The run resumes in a new container after all budget and policy checks.</p><p>External actions such as deploy:staging are advisory. Push to the default branch and PR-open gates are refused until they can be enforced.</p>")
+    body = shell("Parked", f'<div class="cols"><div class="stack">{main}</div><div class="stack">{how}</div></div>', "Parked", sub="Runs that stopped to wait for a person", end='<span class="muted">1 question, 2 approvals</span>', parked=3)
+    write("ApprovalRequest", card_marker("Screens", 1200, 1440, "Approval gates (#649): preview an approval, decline or question"), "Parked, approvals", body, COMMON)
     readme("ApprovalRequest", """
-The Parked page with the Approvals tab (#649): the agent asks permission for a named action, the run parks, and a person approves, declines with a reason or asks a question back.
+The Parked page shows typed approval requests alongside parked questions. The gate action and its enforcement boundary are visible; the agent's summary stays on its issue and run transcript.
 
 ## How a person uses it
-- The request card names the run, the gate and the action in one line ("gh-7b21 asks to push to main"), with the project, target, trigger author and how long it has waited. A chip shows when an unanswered gate declines itself.
-- The gate block lists:
-  - the action and its arguments (branch, commits, files with line counts);
-  - the agent's own summary, set apart as untrusted text;
-  - the risk line, which says whether the worker enforces the gate or it is advisory.
-- **Approve push** is the primary action. **Decline** is a danger outline; here it is expanded with a reason field, and the danger preview says the reason goes back to the agent as the result of `request_approval`, not as an error. **Ask a question back** keeps the run parked.
-- The side column lists what else waits (a budget-raise request in compact form, and the parked question). It also shows recent decisions with who decided and when.
+- Read the request on the forge or run page, then preview approval, preview a decline with an optional reason, or ask a question.
+- Every choice uses the existing audited preview and confirmation action. A question resumes the agent without granting approval.
+- Budget raises use the trigger's declared cap within deployment and scoped limits. External actions are advisory. Default-branch pushes and PR-open gates are refused until they can be enforced.
+- Viewers and read-only consoles show the request without decision controls.
 
 ## Panels
-`p-approval`, `p-others`, `p-history`.
+`p-questions`.
 
 ## The server provides
-Per request: run, gate name and its declared kind (worker-enforced or advisory), action and arguments, the agent's summary (untrusted, escaped), the trigger author, asked-at time, the optional `gateTimeout`, and who may decide. Plus recent decisions from the audit log.
-
-## Why it works this way
-- A trigger declares its gates (`run.gates`). When the agent asks, the run parks like a question.
-- Push to the default branch, pull request and budget raise are enforced by the worker. Deploy gates are advisory to the skill.
-- Only people who pass the trigger's author gate can decide.
+Run id, target, project, parked time, declared gate action and whether the existing answer planner permits a reply. Model text is never stored in the run record or copied into the inbox.
 
 ## Fixture note
-All approval content is sample, because approval gates are planned for 5.0.0: gh-7b21, gh-3c90, gh-71aa, gh-0c4e, gh-55d2, the commits, files, summary, reason and @rob as trigger author. gh-2f6a and its question count come from the fixture. The Parked count in the nav is 3: 1 question and 2 approvals.
+The budget-raise request is illustrative. The production inbox uses the existing question-card and answer-form kit, and shows both request kinds together rather than hiding either behind a tab.
 """)
 
 # ======================================================================

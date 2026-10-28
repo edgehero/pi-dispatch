@@ -146,11 +146,11 @@ test("the form's fields are the parked-answer action's own, as the script and th
   const snap = { parked: [row("gh-1"), row("gh-2")] };
   const out = draw("operator", snap, { parkedChecks: { "gh-1": OK, "gh-2": OK } });
   const fields = ACTIONS.find((a) => a.name === "parked-answer").fields;
-  assert.deepEqual([...fields], ["jobId", "text"]);
+  assert.deepEqual([...fields], ["jobId", "text", "decision"]);
   const ids = [];
   for (const [i, form] of forms(out).entries()) {
     const names = [...form.matchAll(/\sname="([^"]+)"/g)].map((m) => m[1]);
-    assert.deepEqual(names.sort(), [...fields].sort(), "every named control is a field the action takes, and each field is sent");
+    assert.deepEqual(names.sort(), [...fields].filter((f) => f !== "decision").sort(), "every named control is a field the action takes, and each field is sent");
     assert.match(form, new RegExp(`<input type="hidden" name="jobId" value="gh-${i + 1}">`));
     const area = /<textarea[^>]*>/.exec(form)?.[0] ?? "";
     assert.ok(/\sname="text"/.test(area) && /\srequired/.test(area) && /\smaxlength="8192"/.test(area), area);

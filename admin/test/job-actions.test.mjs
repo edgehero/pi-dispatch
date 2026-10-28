@@ -31,6 +31,7 @@ import {
   steerAuditTarget,
 } from "../src/read-model.mjs";
 import { createHash } from "node:crypto";
+import { makeApprovalStore } from "../../worker/src/approval-state.mjs";
 import { closeInbox, listInboxPublic, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, enqueueForgeJob, enqueueLateForgeJob, forgeDeliveryJobId, manualTriggerJobId } from "@edgehero/pi-dispatch/queue";
@@ -641,6 +642,51 @@ function parkedTriggers(path, kind) {
 
 const ISSUE = { number: 7, title: "Flaky test", body: "It fails on Mondays" };
 const PARKED = "pi-awaiting-input";
+
+for (const targetType of ["issue", "pull_request"]) {
+  test(`an approval decision on ${targetType} is bound to its original request and current gate declaration`, live, async () => {
+  const v = await freshValkey();
+  const dir = tempDir("pd-649-approval-");
+  const logsDir = join(dir, "logs");
+  const triggersPath = join(dir, "triggers.json");
+  const gateFields = { gates: ["budget-raise", "deploy:staging"], gateTimeout: 3, maxCostUsd: 2, gateBudgetRaiseUsd: 3.5 };
+  try {
+    writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: targetType === "issue" ? { type: "comment", phrase: "@pi" } : { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "fix", resume: true, ...gateFields } }] }));
+    const shared = await v.q("pi-jobs");
+    const { jobId } = await enqueueForgeJob(shared, "github", { repo: "org/repo", target: { type: targetType, ...ISSUE, ...(targetType === "pull_request" ? { head: "fix/gated" } : {}) }, flow: "fix", resume: true, trigger: { event: "issue_comment", action: "created", deliveryId: "approval-orig", sender: { id: 5 }, matched: targetType === "issue" ? { index: 0, type: "comment", phrase: "@pi" } : { index: 0, type: "pull_request", action: "opened" }, comment: { body: "@pi fix", author_association: "OWNER" } }, ...gateFields });
+    await shared.removeDeduplicationKey("org/repo#7:fix");
+    writeRecord(logsDir, { jobId, kind: "github", target: "org/repo#7", outcome: "completed", reason: "awaiting-approval", approval: { requestId: "a".repeat(64), action: "budget-raise" }, endedAt: "2026-10-15T10:00:00.000Z" });
+    const missing = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "/approve", by: "alice", triggersPath, runsFn: async () => [], now: () => Date.parse("2026-10-15T11:00:00Z") });
+    assert.match(missing.refusal, /approval request is no longer pending/);
+    const store = makeApprovalStore({ redis: v.redis, now: () => Date.parse("2026-10-15T11:00:00Z") });
+    const published = await store.publish({ requestId: "a".repeat(64), runId: jobId, kind: "github", repo: "org/repo", target: { type: targetType, number: ISSUE.number }, action: "budget-raise", toolCallId: "call-1", configDigest: "digest", sessionKey: "session", host: "worker", hostQueue: "pi-jobs@worker", createdAt: Date.parse("2026-10-15T10:00:00Z") });
+    assert.equal(published.ok, true, JSON.stringify(published));
+    const owner = await v.q("pi-jobs@worker");
+    const got = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "/approve", by: "alice", triggersPath, runsFn: async () => [], now: () => Date.parse("2026-10-15T11:00:00Z") });
+    assert.ok(got.plan, JSON.stringify(got));
+    assert.equal(got.plan.queue, "pi-jobs@worker", "preview reads the authoritative private session owner queue");
+    assert.equal(got.plan.job.trigger.comment.body, "/approve");
+    assert.equal(got.plan.job.approvalRequestId, "a".repeat(64));
+    assert.equal(got.plan.reserve.capMicros, 3_500_000, "approval previews the raised reservation without changing the original policy fields");
+    for (const [key, value] of Object.entries(gateFields)) assert.deepEqual(got.plan.job[key], value, key);
+    assert.deepEqual(got.plan.job.console, { by: "alice" });
+    assert.equal(got.plan.job.target.type, targetType);
+    assert.equal(got.plan.job.parkedReply, targetType === "issue");
+    if (targetType === "pull_request") assert.equal(got.plan.job.target.head, "fix/gated");
+    const queued = await enqueueParkedAnswer({ ...got.plan, queue: "pi-jobs" }, { url: URL12 });
+    assert.equal(queued.ok, true, JSON.stringify(queued));
+    assert.equal(queued.queue, "pi-jobs@worker", "confirmation reports the actual destination even when an older preview selected shared");
+    assert.equal((await owner.getJob(queued.jobIds[0])).data.approvalRequestId, "a".repeat(64));
+    assert.equal(await shared.getJob(queued.jobIds[0]), undefined);
+    assert.equal((await store.decide({ requestId: "a".repeat(64), decisionId: "decision-1", decision: "approved", actor: { kind: "operator", id: "b".repeat(64) } })).ok, true);
+    const decided = await planParkedAnswer({ url: URL12, logsDir, jobId, text: "/decline", by: "alice", triggersPath, runsFn: async () => [], now: () => Date.parse("2026-10-15T11:00:00Z") });
+    assert.match(decided.refusal, /approval request is no longer pending/);
+  } finally {
+    await v.done();
+  }
+});
+
+}
 
 /** What each forge's receiver arm makes of a phrase-free reply on the parked issue: the real filter over the real config. */
 function receiverReply(kind, triggersPath, body) {

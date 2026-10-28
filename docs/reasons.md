@@ -15,7 +15,7 @@ The run record's `outcome` says how the run ended:
 - `policy`: the worker refused the job, or stopped it on purpose. It is never retried, because a retry would meet the
   same answer. Most refusals happen before anything is spent; the entry says when that is not so.
 - `failed`: something in the infrastructure went wrong. The queue retried it, and the record is the last attempt.
-- `completed`: the run finished. Only one completed run carries a reason: `awaiting-input`.
+- `completed`: the run finished. Completed runs may carry `awaiting-input` or `awaiting-approval` while waiting for a person.
 
 A record may also carry `why`, a second fixed word with more detail (for example `overlay-link` beside
 `model-unknown`). Some records carry nested reasons as well: why a conversation did not continue, why a run was not
@@ -1126,3 +1126,153 @@ A record's `liveSkipped` says why a run had no live transcript, and so no live p
 | `venue-copies` | The venue copies the job's files and does not stream the transcript back. |
 | `no-capability` | The venue streams the transcript only from a job image that declares it, and this one does not. |
 | `no-exit-key` | The job image cannot verify a streamed transcript. |
+
+### awaiting-approval
+
+Approval requested. Reply /approve, /decline followed by an optional reason, or ask a question. Only an authorized reply can continue the saved run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-config-invalid
+
+Stopped: the approval gate configuration is invalid. Check the trigger declarations and rebuild a matching worker and job image. Not retried.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-without-session
+
+Stopped: approval gates need a persisted session. Check the session store and job image. Not retried.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-shadowed
+
+Stopped: another extension registered the reserved approval tool. Remove the conflicting registration and run again. Not retried.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-decision-invalid
+
+Stopped: the decision does not match the parked tool result. Check the retained session and request before starting another run. Not retried.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-author-missing
+
+Refused: this approval reply has no authorized actor identifier. Reply through an authenticated operator surface or the forge. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-expired
+
+Refused: this approval expired. Its durable decline is continued by the expiry job. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-expiry-invalid
+
+Refused: the expiry job does not match a durable system decline. Check the approval store. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-host-mismatch
+
+Refused: the saved approval session belongs to another worker host. Route the reply to that host. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-job-id-missing
+
+Refused: the approval continuation has no queue identifier. Check the worker wiring. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-park-invalid
+
+The approval request did not match a declared gate and saved session. No approval is armed. Check the runner and trigger declaration.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-pending
+
+Refused: this run is waiting for an approval decision. Approve, decline, or ask a question before starting more work. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-policy-changed
+
+Refused: the approval declaration changed. Start a new authorized run under the current trigger policy. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-policy-unavailable
+
+Refused: the current approval declaration could not be read. Check the triggers file before trying again. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-request-conflict
+
+The saved approval request conflicts with this conversation. No new approval is armed. Check the session and durable request.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-request-stale
+
+Refused: this reply names an approval request that is no longer pending. Reload the current request before answering. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-request-unbound
+
+Refused: this reply is not bound to the pending approval request. Reply again after the approval is published. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-state-conflict
+
+Refused: the approval was already decided, consumed, or superseded. Check its recorded decision before starting another run. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-state-unavailable
+
+The approval could not be saved durably. No approval is armed. Check the session store and Valkey before starting another run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-store-unavailable
+
+Refused: this worker has no durable approval store. Check the worker configuration. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-finish-unavailable
+
+The approval continuation ended but its durable completion could not be saved. Check Valkey and the request before starting another run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-session-not-saved
+
+The approval conversation could not be saved. No approval is armed. Check the retained session before starting another run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### approval-session-unavailable
+
+Refused: the approved session could not be resumed. No approval can be transferred to a new conversation. Check the retained session and its limits.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### job-image-approval-gates-unsupported
+
+Refused: the job image does not declare approval gates. Rebuild the job image with approval support. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### job-image-approval-auth-unsupported
+
+Refused: approval gates need an image with authenticated runner exits (exitAuth). Rebuild the job image. Not run.
+
+Check the current approval, its saved session, and the trigger declaration; reload before replying again.

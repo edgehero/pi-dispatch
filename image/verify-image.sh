@@ -431,6 +431,12 @@ PROBE
 					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "await_human_input" /app/image/runner/src/await-input.mjs 2>/dev/null \
 					|| fail "the image declares 'awaitInput' but its baked runner never reads PI_AWAIT_INPUT or carries the await_human_input tool"
 				;;
+			approvalGates)
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_APPROVAL_GATES" /app/image/runner/src/request-approval.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "appendContextEdit" /app/image/runner/src/request-approval.mjs 2>/dev/null \
+					&& docker run --rm --entrypoint grep "$IMAGE_REF" -q "applyApprovalDecision" /app/image/runner/run-job.mjs 2>/dev/null \
+					|| fail "the image declares approvalGates but lacks its tool or decision replay"
+				;;
 			reportProgress)
 				# Same evidence style as 'awaitInput': the baked runner must read the variable and carry the tool.
 				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_REPORT_PROGRESS" /app/image/runner/src/config.mjs 2>/dev/null \

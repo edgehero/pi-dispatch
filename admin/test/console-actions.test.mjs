@@ -347,7 +347,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
     "run-fork": ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
-    rerun: ["jobId"], "parked-answer": ["jobId", "text"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
+    rerun: ["jobId"], "parked-answer": ["jobId", "text", "decision"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
     "fleet-pause": [], "fleet-resume": [], "queue-pause": ["queue"], "queue-resume": ["queue"],
     "pause-windows": ["windows"], "trigger-add": ["trigger"], "trigger-edit": ["index", "flow", "backend", "provider", "model"], "trigger-delete": ["index"],
     "setting-set": ["key", "value"], "setting-unset": ["key"],
@@ -527,7 +527,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
 });
 
 /** A value for each body key the preview may read, so a preview reads on past it (an index a number, an id its charset). */
-const SAMPLE_BODY = { index: 0, validDays: 1, jobId: "gh-1", id: "a".repeat(32), mode: "steer", text: "x", windows: [], trigger: {}, limit: {}, envelope: {}, projects: [{ id: "p", weight: 1 }], members: ["m"], days: ["mon"] };
+const SAMPLE_BODY = { decision: "decline", index: 0, validDays: 1, jobId: "gh-1", id: "a".repeat(32), mode: "steer", text: "x", windows: [], trigger: {}, limit: {}, envelope: {}, projects: [{ id: "p", weight: 1 }], members: ["m"], days: ["mon"] };
 /** A dependency that is anything: every property and every call is another one, so a preview runs until it needs a real value. */
 function anything() {
   return new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : anything()), apply: () => anything() });
@@ -2532,7 +2532,7 @@ test("parked-answer on Valkey: the queued job is the plan's, by the session's to
     // A body naming its own author is refused by name (issue #737): `by` is the session's, never the body's.
     const claimed = await c.act("parked-answer", { jobId, text: `${ANSWER}\n<b>bold</b>`, by: "mallory" });
     assert.equal(claimed.status, 400);
-    assert.equal(claimed.json().error, "parked-answer takes jobId, text only; by is not one of them, so nothing was changed");
+    assert.equal(claimed.json().error, "parked-answer takes jobId, text, decision only; by is not one of them, so nothing was changed");
     const p = await c.act("parked-answer", { jobId, text: `${ANSWER}\n<b>bold</b>` });
     assert.equal(p.status, 200, p.text);
     const pj = p.json();

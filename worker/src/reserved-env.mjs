@@ -49,7 +49,7 @@ export const CONTAINER_ENV_NAMES = new Set([
 	"PI_FLOW",
 	"PI_COMMAND",
 	"PI_EXCLUDE_TOOLS",
-	"PI_AWAIT_INPUT",
+	"PI_AWAIT_INPUT", "PI_APPROVAL_GATES", "PI_APPROVAL_DECISION",
 	// Issue #644: a trigger binding it through run.secrets would offer itself a tool the operator did not arm.
 	"PI_REPORT_PROGRESS",
 	// Issue #645: a trigger binding either through run.secrets would arm checkpoints the operator did not, or make a fresh

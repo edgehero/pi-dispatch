@@ -53,6 +53,7 @@ export const OUTCOME_WORD_OF = Object.freeze(Object.fromEntries(Object.entries(O
  * draws no reason sentence beside them; "failed" does not, so a recovery end keeps its sentence.
  */
 export const REASON_WORDS = Object.freeze({
+  "awaiting-approval": Object.freeze({ outcome: "completed", word: "awaiting approval", glyph: "✔", tone: "warning", status: "parked", says: true }),
   "awaiting-input": Object.freeze({ outcome: "completed", word: "awaiting input", glyph: "✔", tone: "warning", status: "parked", says: true }),
   "operator-cancel": Object.freeze({ outcome: "policy", word: "cancelled", glyph: "⚠", tone: "warning", status: "cancelled", says: true }),
   "recovery-cap": Object.freeze({ outcome: "policy", word: "failed", glyph: "✘", tone: "error", status: "failed", says: false }),
@@ -81,8 +82,8 @@ export function outcomeWord(outcome, reason) {
 }
 
 /** The five outcomes a person filters and counts by (issue #737): each word `outcomeWord` gives, as a query value. */
-export const OUTCOME_KEYS = Object.freeze(["completed", "refused", "failed", "awaiting-input", "cancelled"]);
-const KEY_OF_WORD = Object.freeze({ completed: "completed", refused: "refused", failed: "failed", "awaiting input": "awaiting-input", cancelled: "cancelled" });
+export const OUTCOME_KEYS = Object.freeze(["completed", "refused", "failed", "awaiting-input", "awaiting-approval", "cancelled"]);
+const KEY_OF_WORD = Object.freeze({ completed: "completed", refused: "refused", failed: "failed", "awaiting input": "awaiting-input", "awaiting approval": "awaiting-approval", cancelled: "cancelled" });
 
 /** A record's outcome key (`OUTCOME_KEYS`) from its outcome and reason; null for an outcome this release does not know. */
 export function outcomeKey(outcome, reason) {

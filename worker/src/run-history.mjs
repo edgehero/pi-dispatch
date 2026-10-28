@@ -194,7 +194,7 @@ export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"
  * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
  */
 export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -205,7 +205,7 @@ export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap
  * only inside its exit-0 branch, so the worst a forged line can do on a real exit 0 is mark a completed run parked: the
  * worker then posts one fixed sentence and writes a marker beside a transcript the job already promoted.
  */
-export const RUNNER_COMPLETED_REASONS = new Set(["awaiting-input"]);
+export const RUNNER_COMPLETED_REASONS = new Set(["awaiting-input", "awaiting-approval"]);
 
 /**
  * The reason off the decisive exit line (`decisiveExitLine`), or `null`: a member of `RUNNER_POLICY_REASONS`
@@ -225,6 +225,21 @@ export function parseExitReason(text) {
 	if (parsed === null) return null;
 	if (parsed?.code === 0 && RUNNER_COMPLETED_REASONS.has(parsed?.reason)) return parsed.reason;
 	return parsed?.code === 2 && RUNNER_POLICY_REASONS.has(parsed?.reason) ? parsed.reason : null;
+}
+
+/** Only authenticated runner metadata, never the model's summary. The worker still checks the declared action. */
+export function parseExitApproval(text) {
+	const line = decisiveExitLine(text);
+	const value = line?.approval;
+	if (line?.code !== 0 || line.reason !== "awaiting-approval" || !value || typeof value.action !== "string" || !/^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(value.action) || value.action.length > 80 || typeof value.toolCallId !== "string" || !/^[A-Za-z0-9_.:|/-]{1,256}$/.test(value.toolCallId)) return null;
+	return { action: value.action, toolCallId: value.toolCallId };
+}
+
+/** The audit contains host-validated identifiers only; rebuild it so tool arguments cannot add text. */
+export function approvalRecordOf(value) {
+	if (!value || !/^[0-9a-f]{64}$/.test(value.requestId ?? "") || typeof value.action !== "string" || !/^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(value.action) || value.action.length > 80) return null;
+	if (value.decision !== undefined && (!["approved", "declined", "question"].includes(value.decision) || !["forge", "operator", "panel", "system"].includes(value.actorKind) || !/^(?:[0-9a-f]{64}|expiry|revocation)$/.test(value.actorId ?? "") || !Number.isSafeInteger(value.decidedAt) || value.decidedAt < 0)) return null;
+	return { requestId: value.requestId, action: value.action, ...(value.decision !== undefined ? { decision: value.decision, actorKind: value.actorKind, actorId: value.actorId, decidedAt: value.decidedAt } : {}) };
 }
 
 /**
@@ -1037,6 +1052,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// settled (`metered` | `floor` | `refunded`, null when the job held none). Null when no dollar window applied to the job (no dollar setting, or a
 		// refusal before the reservation step), which is every record of a deployment that sets none.
 		dollars: dollarsOf(source.dollars),
+		...(approvalRecordOf(source.approval) ? { approval: approvalRecordOf(source.approval) } : {}),
 		// The refusal's detail (PR #558, the end-of-round check of #501 and #502): which rule of the reason refused the job, the same fixed token
 		// the worker's log line carries, e.g. `overlay-link` under `model-unknown`, so the drill-in can tell the
 		// deployment's file from the job's model. Additive, nullable, an explicit literal, TAIL position after `dollars`
@@ -1437,6 +1453,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const exitText = keyed ? authenticExitLines(tail, exitKey) : tail;
 			const exitAuth = exitText === "" ? "unverified" : "verified";
 			const exitReason = parseExitReason(exitText);
+			const approval = parseExitApproval(exitText);
 			const exitLineCode = parseExitCode(exitText);
 			const exitWhy = parseExitWhy(exitText);
 			const turns = parseExitTurns(exitText);
@@ -1477,7 +1494,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

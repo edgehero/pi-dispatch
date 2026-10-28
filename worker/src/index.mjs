@@ -1348,6 +1348,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 
 			const result = await runJob(effectiveJob, {
+				queueJobId: String(job.id),
+				deploymentMaxCostUsd: settings.maxCostUsd,
+				rawApprovalJob: job.data,
 				redis,
 				// The three spend windows (week/month null when disabled) and the soft-hold band, resolved this
 				// job-start under overlay > env. reserveBudget checks them before the container.

@@ -774,6 +774,7 @@ async function runCard({ role = "operator", rec = record({ jobId: "gh-pulse", ma
 const RUN_CARD_STATES = {
   "run-chat-live.operator": () => runCard({ rec: null, chat: { state: "active", mode: "live", jobState: "active" }, transcript: { exists: false }, activeRun: { target: "acme/web#42", kind: "github", host: "mini1", project: "web", backend: "podman", flow: "fix", provider: "anthropic", model: "claude-sonnet-5-5", maxTurns: 40, queue: "pi-jobs@mini1", startedAt: new Date(NOW - 2 * MIN).toISOString() }, inbox: { found: true, steer: true, state: "active", open: true, entries: [] } }),
   "run-chat-reply.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-input", session: { resumed: false, reason: "absent", bytes: 4096 } }), chat: { state: "parked", mode: "reply", jobState: "completed" }, transcript: { exists: true, ended: true, outcome: "completed" } }),
+  "run-chat-approval.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-approval", approval: { requestId: "a".repeat(64), action: "budget-raise" }, session: { resumed: false, reason: "absent", bytes: 4096 } }), chat: { state: "awaiting-approval", mode: "reply", jobState: "completed" }, chatAnswer: { ok: true }, transcript: { exists: true, ended: true, outcome: "completed" } }),
   "run-chat-expired.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-input" }), chat: { state: "parked", mode: "reply", jobState: "completed" } }),
   "run-chat-fork.operator": () => runCard({ rec: record({ jobId: "gh-pulse", session: { resumed: false, reason: "absent", bytes: 4096 } }), forkPoints: { ok: true, entries: [{ id: "1a2b3c4d", parentId: null, type: "message", role: "user", positions: ["before"] }, { id: "2b3c4d5e", parentId: "1a2b3c4d", type: "message", role: "assistant", positions: ["at"] }] } }),
   "run-chat-none.operator": () => runCard({ chat: { state: "finished", mode: "none", says: "This run's trigger keeps no session (no run.resume), so there is no transcript to fork." } }),
@@ -947,6 +948,8 @@ const DRAW = {
   "runs-unknown-reason.viewer": async () => runsLive({ page: { runs: [record({ jobId: "gh-77aa", outcome: "failed", reason: "hold-tight" })], mirror: "ok", next: null }, session: VIEWER }),
   // ParkedPhone: a question answerable here, one the planner refuses here, one a run is answering, one whose answer
   // scan could not tell, and nothing parked.
+  "parked-approval.operator": async () => parkedLive([parkedRow({ reason: "awaiting-approval", approval: { requestId: "a".repeat(64), action: "budget-raise" } })]),
+  "parked-approval.viewer": async () => parkedLive([parkedRow({ reason: "awaiting-approval", approval: { requestId: "b".repeat(64), action: "deploy:staging" } })], { session: VIEWER }),
   "parked-answerable.operator": async () => parkedLive([parkedRow({})]),
   "parked-unanswerable.operator": async () => parkedLive([parkedRow({})], { check: { refusal: "gh-2f6a parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge" } }),
   "parked-being-answered.operator": async () => parkedLive([parkedRow({ pendingScan: { jobId: "gh-3c88" } })]),

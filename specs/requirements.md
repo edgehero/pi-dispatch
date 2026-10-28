@@ -2164,7 +2164,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     for a GET that did not complete, and everything else as before (#737)").
   - (d) **Parked inbox** (`/parked`). **REWRITTEN 2026-10-26 (#737 PR 4a): the parked runs as question cards** (the
     ParkedPhone card, and on a wide screen the Parked page the ApprovalRequest card frames, its Questions tab alone:
-    approvals are #649's). It replaces the table #641, #642 and #647 wrote (the revision history keeps what each said)
+    typed approvals now share this inbox under `REQ-APPROVAL-GATES` (#649)). It replaces the table #641, #642 and #647 wrote (the revision history keeps what each said)
     and keeps every fact they pinned. The page is one panel, `p-questions` (`parkedQuestions`,
     `admin/src/console/panels/parked.mjs`), drawn in the Pulse markup with no `.legacy` wrapper ((i)): the Questions tab
     with its count (`ui.tabs`; a count only where the list was read whole), then in the main column a card per parked
@@ -2817,6 +2817,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `.github/scripts/console-width-check.mjs --require`.
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
+
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
 - **Statement**: The operator console shall do everything the `/dispatch` TUI and the pi extension's tools can do,
   and the job actions they lack: retry and remove a failed job, re-run a finished run, answer a parked run, send a
@@ -3698,7 +3700,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     it.
 - **A touch.** A run is touched when a person:
   - answered its parked question, by a forge reply that resumed it or the console's `parked-answer`;
-  - decided its approval (once #649 exists);
+  - decided its approval (`REQ-APPROVAL-GATES`, #649);
   - re-ran it after a failure or a refusal (`run-rerun`, `failed-retry`, `failed-retry-all`);
   - changed configuration because of its refusal (a configuration write started from that refusal);
   - steered it (`steer`);
@@ -5704,6 +5706,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-AWAIT-INPUT
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 - **Statement**: A forge trigger may set `run.awaitInput: true` beside `run.resume: true`. Its jobs are then offered
   one tool, `await_human_input`, with which the agent, after posting a question on the issue or pull request itself,
   ends the run to wait for a person's answer. Such a run shall end as a **completed** run with the reason
@@ -7523,10 +7527,63 @@ instead of drifting.
   `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-MODEL-POLICY` gain this additive managed-fork surface; their existing paths
   and policy precedence remain unchanged.
 
+## REQ-APPROVAL-GATES
+
+- **Statement** (issue #649): a resumable forge flow may declare `run.gates`, a nonempty list of distinct action
+  tokens. The runner offers `request_approval({action, summary})` only for these declarations. A successful terminal
+  call ends its container with exit 0 and `awaiting-approval`; a completed session is promoted before a durable
+  request is published. No container stays alive while a human decides. The summary is model output, kept in the
+  private transcript and posted by the agent on the forge, never in runner exit metadata or run records.
+- **Declarations**: `run.resume: true` is required and gates arm `awaitInput` internally. Commands, cron, replicas,
+  recovery and fork jobs are unsupported. `run.awaitInput: false` beside gates is refused. At most 32 distinct action
+  tokens, each at most 80 characters, match the shared gate grammar. `budget-raise` requires a base `maxCostUsd` and
+  `gateBudgetRaiseUsd` greater than it, an absolute cap for ONE resumed container. The resumed cap remains the smaller
+  of that declaration and the live deployment ceiling; deployment, project, repository and model/window ledgers still
+  reserve normally. Decline, question and expiry grant no elevation. Previously spent dollars are never refunded or
+  reused as approval credit. Other accepted action names are advisory to flows/skills: existing shell credentials
+  remain available. `push`, `push-default-branch`, `pr-open`, `open-pr`, `merge` and `approve` are refused declarations,
+  because the existing credentials cannot enforce approval for these effects. No bypass credential is minted.
+- **Decisions**: an admitted forge comment `/approve` approves; `/decline` with an optional reason declines; other
+  text asks a question and resumes without authority for the action. Existing phrase requirements on pull requests
+  remain. Forge authors still pass `CONST-TRIGGER-AUTHOR-GATE`. Authenticated console operators and the terminal panel
+  use their existing operator authority; their identity is hashed into an audit identifier rather than impersonating
+  a forge user. Per-gate stricter author lists are not supported in this version. The console can decide a typed
+  request on an issue or pull request using the original retained trigger; ordinary untyped PR answers retain their
+  existing refusal. The parked inbox and run chat name the gate, and terminal chat explains the decision commands.
+- **Durability**: request IDs bind the requesting queue job and tool-call ID. Private Valkey state binds the action,
+  host, session key, exact canonical transcript digest and declaration digest. First decision wins atomically, claims are exclusive to one queue job,
+  and retrying that same infrastructure-failed job reuses the original decision. Ingress binds replies to the active
+  request; unbound or stale queued replies cannot decide a later request. A label routes but never authorizes.
+  The worker rechecks both the initiating and reply declarations and the canonical transcript before mint/clone/reservation; the staged session
+  must actually resume the same key. The runner checks pi's projected original tool result before any provider call.
+  A policy refusal closes a claimed continuation without retry; the immutable decision remains auditable, and a new
+  authorized run must request any capability again. An infrastructure failure preserves the claim while the queue will retry; exhausting retries closes it, so another authorized run must request fresh approval. Terminal-finalization faults are named `approval_terminal_finish_failed`; shutdown joins pending bounded finalizers before closing Redis.
+- **Failure**: an image must declare `approvalGates` and `exitAuth`. Failure to publish AFTER a paid container has
+  completed returns a named policy result with its saved transcript and a fixed actionable comment; it never reruns
+  the container merely to publish the request. Failed state reads before a job are infrastructure failures and retry.
+  Session expiry, missing or compacted target, changed policy and stale decisions are determinate policy refusals.
+- **Labels and timeout**: typed parks carry `pi-awaiting-approval` alongside `pi-awaiting-input` (Azure tags). Labels
+  are best-effort hints. Optional `run.gateTimeout` is 1 to 365 days. The session host polls due requests every minute;
+  expiry atomically records a system decline, then queues one deterministic continuation. An enqueue failure leaves
+  the decline due so a later sweep retries. Human decisions race expiry through the same atomic transition. The
+  fixed expiry comment is attempted once per request; a forge failure is logged by the existing comment adapter.
+  Host downtime delays expiry processing until the service resumes. Boot also arms the sweep for retained deadlines after declaration withdrawal; revoked requests retire without a model call. Per-host deadline indexes prevent a down host starving another host. Private state is not deleted by the deadline; finished requests retain their audit for 32 days.
+- **Acceptance**: runner tests use the pinned pi artifact and scripted fake models to prove park, process restart,
+  persisted context edit and original-call result delivery for approved, declined and question. Live Valkey tests
+  prove competing decisions, replay, restart, exact expiry boundaries, enqueue retry and request binding. Processor
+  tests prove refusal before spend, signed-image requirements, cold-start refusal, cap ceilings and all dollar
+  ledgers, promotion/publication ordering and policy closure. Console tests prove operator-only decisions, immutable
+  request binding, PR routing, raised reserve previews and redacted public metadata. Existing untyped parks continue
+  unchanged. Every clock/window test injects its clock, and all workspace and required CI checks must pass.
+- **Traces to**: `REQ-AWAIT-INPUT`, `REQ-RESUMABLE-SESSION`, `REQ-OPERATOR-CONSOLE-ACTIONS`,
+  `DES-APPROVAL-DECISION-IS-HOST-AUTHORITY`, `INT-APPROVAL-STATE-CONTRACT`, `CONST-BUDGET-BEFORE-TOKENS`,
+  `CONST-RETRY-INFRA-ONLY`, `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-TRIGGER-AUTHOR-GATE`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-28 (#649) | Issue #649: added `REQ-APPROVAL-GATES`, typed durable park/decide/resume with bounded budget elevation, advisory external gates, expiry and all operator surfaces. `REQ-AWAIT-INPUT` and console actions extended by reference; ordinary parked-input behavior UNCHANGED, checked. |
 | 2026-10-28 (#648) | NEW `REQ-MANAGED-RUN-FORK`: managed issue-run forks use immutable source identity, exact retained transcript/workspace boundaries, independently derived branches and session lineage, current policy and normal admission. Console and terminal share paid preview/confirm/audit. Pinned pi tree semantics, model/thinking recording, named unavailable points/venues, bounded private retention and new zero-spend/worker/UI tests are specified. Existing host-local chat fork and recovery newest-two retention remain unchanged. Relevant constitutional constraints UNCHANGED, checked as recorded in `INT-MANAGED-FORK-CONTRACT`. Final cross-feature checks: `run.awaitInput` managed forks refuse before spend as `fork-await-input-unsupported`; recovery of an existing managed fork restores its checkpoint without re-forking, while recovery-attempt records are not new sources. `REQ-AWAIT-INPUT` and ordinary canonical reply behavior UNCHANGED, checked. |
 | 2026-10-28 (#737) | Issue #737: the design system moves into the repository (`design/`). Words only, no requirement changes. **`REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-ZERO-TOUCH-RATE` and `REQ-PARKED-ANSWERER` AMENDED**, their Status lines: each names its cards by path (`design/system/components/<Card>`), with the viewer and phone cards drawn since. **`REQ-OPERATOR-CONSOLE-SCREENS` (n) UNCHANGED, checked**: the contrast test reads the pasted tokens, which are the design's `tokens.json` byte for byte (`admin/test/design-folder.test.mjs`). **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the cards keep the console's CSP (no inline style, no script, no web font, no outside load), which `design/tools/check.py` holds for every card. |
 | 2026-10-27 (#753) | Issue #753, spec only: nothing ships, and no test holds these entries yet. Three PROPOSED requirements, the acceptance surface the builds will be held to, each naming the design system card it was drawn from. **NEW `REQ-SANDBOX-FROM-THE-CONSOLE`**: a kept run's sandbox, and one prepared for a repository with no run as one trigger's jobs would see it, open in the operator's own terminal from the console through a `pi-dispatch-open://` opener that builds the command from a closed list of verbs (open, and attach as today's refusal names it), an id and a known host, and runs nothing before Enter; the remote command must carry the deployment's sandbox settings (`OQ-038`); the console starts no container and holds no shell; a prepared sandbox is cloned on the host with the worker's git hardening and a credential that never enters a container, then kept and swept like a run's, a pull request's head admitted because a sandbox runs no agent; open shells announced by the process that holds them, under a key with an expiry, and ended through a request key; kept workspaces published per host; operators only. **NEW `REQ-ZERO-TOUCH-RATE`**: the share of runs that needed a person out of the runs with a record that ended in the window, per project and repository or folder; jobs stopped before they started counted beside it; a touch is an answer, an approval's decision, a re-run after a failure or refusal, a configuration change started from a refusal, a steer or a cancel while running, counted once per run; merging never counts (`CONST-MERGE-NEVER-AUTOMATIC`); sending a draft is a touch; touches written fleet wide as closed words (on the run's record, or in a touch index in Valkey) because audit logs are per host; windows bounded by what `PI_LOG_RETENTION_DAYS` and the run mirror keep, a longer one drawn as partial; question groups assigned by a decision model run as a job and named by a person, with no question text on any page; fixes linked to the cause they were started from. **NEW `REQ-PARKED-ANSWERER`**: a hand-written answer rule (as `TOOL_PROOF_FIELDS` are) starts a draft job when a run of its projects parks: an ordinary forge job with no status comments that classifies, then drafts from cited sources (standing answers, the repository at its default branch, earlier replies read with its own scoped token), in allowed categories only, never product decisions, security, money, scope or an approval; a person sends through the existing `parked-answer` confirm; the question and the draft stay on the run pages; a send with no person's confirm is not proposed and is `OQ-051`. **To be AMENDED by the builds, named here so none is called unchanged**: `REQ-RESURRECTABLE-SANDBOX` (a prepared sandbox has no run, and the console is a new place to open from), `REQ-CONSOLE-SECURITY` (l) (a prepared answer form on the parked run's page carries a draft), `REQ-JOB-STATUS-COMMENTS` (a draft job posts none), `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-OPERATOR-CONSOLE-SCREENS` (the prepare, End and Name actions, and the new tab). **UNCHANGED, checked**: `REQ-AWAIT-INPUT` (a park and its resume are as they were; a person still answers), `REQ-DURABLE-RUN-HISTORY` (its retention bounds the touch rate's windows and is not changed by it). |

@@ -165,15 +165,15 @@ export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth
 	 * when it is added, so there is nothing to create first. Removing a label the issue does not carry is a 404, which is
 	 * the state asked for. The caller treats any throw as fail-open: the session store's sidecar, not this label, decides.
 	 */
-	async function setParkedLabel(repo, target, on, token) {
+	async function setParkedLabel(repo, target, on, token, label = PARKED_LABEL) {
 		const [owner, name] = splitRepo(repo);
 		const octokit = octokitFor(token);
 		if (on) {
-			await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", { owner, repo: name, issue_number: target?.number, labels: [PARKED_LABEL] });
+			await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", { owner, repo: name, issue_number: target?.number, labels: [label] });
 			return;
 		}
 		try {
-			await octokit.request("DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}", { owner, repo: name, issue_number: target?.number, name: PARKED_LABEL });
+			await octokit.request("DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}", { owner, repo: name, issue_number: target?.number, name: label });
 		} catch (error) {
 			if (error?.status !== 404) throw error;
 		}

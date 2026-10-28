@@ -1026,6 +1026,13 @@ export function answerForm({ jobId, id, hint, runHref = null }) {
   return html`<form class="act qform" data-action="parked-answer" autocomplete="off">${hiddenOf(["jobId", plainOf(jobId, "a job id", "answerForm")])}${field}<div class="qform__act">${btn({ type: "submit", kind: "answer", icon: "comment", label: "Preview the answer" })}${open}</div>${said}</form>`;
 }
 
+/** Typed approval decisions use the existing preview, confirmation and audited answer funnel. */
+export function approvalForms({ jobId, id }) {
+  const fid = idOf(id, "approvalForms");
+  const hidden = hiddenOf(["jobId", plainOf(jobId, "a job id", "approvalForms")]);
+  return html`<form class="act qform" data-action="parked-answer" autocomplete="off">${hidden}${hiddenOf(["decision", "approve"])}${btn({ type: "submit", kind: "primary", icon: "done", label: "Preview approval" })}</form><form class="act qform" data-action="parked-answer" autocomplete="off">${hidden}${hiddenOf(["decision", "decline"])}<label for="${fid}">Reason for declining (optional)</label>${textarea({ id: fid, name: "text", rows: 2, maxlength: ANSWER_MAX, placeholder: "Why should the agent change course?" })}${btn({ type: "submit", kind: "danger", label: "Preview decline" })}</form>${answerForm({ jobId, id: `${fid}-question`, hint: "Ask a question back: the run resumes with your question and no approval is granted." })}`;
+}
+
 /**
  * A link out of the console (a run's issue on its forge, a reasons docs page): `href` an http(s) URL in its own
  * canonical form with no user name (`outHrefOf`; every link `forgeLinkOf` and `docsHref` build is one), drawn as the

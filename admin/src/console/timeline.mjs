@@ -508,7 +508,7 @@ function collect({ now, start, runs, active, hostJobs, waiting, parked }) {
     if (!Number.isFinite(endAt)) continue;
     const startAt = Math.min(s ?? endAt, endAt);
     const base = { jobId: r.jobId, target: str(r.target), project: str(r.project), host: str(r.host), startAt, endAt };
-    if (r.outcome === "completed" && r.reason === "awaiting-input") {
+    if (r.outcome === "completed" && ["awaiting-input", "awaiting-approval"].includes(r.reason)) {
       if (unanswered.has(r.jobId)) {
         unanswered.delete(r.jobId);
         out.push({ kind: "parked", ...base, word: TIMELINE_WORDS.parked });

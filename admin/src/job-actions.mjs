@@ -25,6 +25,7 @@
 import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
+import { makeApprovalStore } from "@edgehero/pi-dispatch/approval-state";
 import { QUEUE, makeQueue, enqueueForgeJob, enqueueLocalJobReporting, enqueueTriggerRunReporting, forgeDeliveryJobId, hostQueueName, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
 import { jobNeeds, routeForgeJob } from "@edgehero/pi-dispatch/capabilities";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
@@ -426,6 +427,9 @@ function runFieldsOf(run, flow) {
     ...(run.instructions !== undefined ? { instructions: run.instructions } : {}),
     ...(run.resume !== undefined ? { resume: run.resume } : {}),
     ...(run.awaitInput === true ? { awaitInput: true } : {}),
+    ...(run.gates !== undefined ? { gates: run.gates } : {}),
+    ...(run.gateTimeout !== undefined ? { gateTimeout: run.gateTimeout } : {}),
+    ...(run.gateBudgetRaiseUsd !== undefined ? { gateBudgetRaiseUsd: run.gateBudgetRaiseUsd } : {}),
     ...(run.progress === true ? { progress: true } : {}),
     ...(run.statusComment === true ? { statusComment: true } : {}),
     ...(run.recover === true ? { recover: true } : {}),
@@ -1183,11 +1187,20 @@ function commentTriggerFor(triggersPath, kind, fs) {
  * Chat panel offers the reply form exactly where `planParkedAnswer` would plan it, and shows this sentence where it
  * would not; whether the run is parked and still unanswered is the caller's (the record and `chatModeOf`).
  */
-export function parkedAnswerRefusalOf({ jobId, data, triggersPath, fs = nodeFs }) {
+export function parkedAnswerRefusalOf({ jobId, data, triggersPath, approval = false, fs = nodeFs }) {
   if (data === null || data === undefined) return { refusal: `the queue no longer holds ${jobId}'s data (a forge job's data is kept 31 days), so the reply cannot be built; answer on the forge instead` };
   const kind = data.kind;
   const delivery = COMMENT_DELIVERY[kind];
   if (!isForgeKind(kind) || !delivery) return { refusal: `${jobId} is a ${String(kind)} run; only a forge issue's parked run is answered this way` };
+  if (approval && !Array.isArray(data.gates)) return { refusal: "the approval's retained job has no gate declaration; nothing was queued" };
+  if (approval && Array.isArray(data.gates)) {
+    const loaded = loadTriggerEntries(triggersPath, fs);
+    if (loaded.refusal) return loaded;
+    const index = data.trigger?.matched?.index;
+    const entry = loaded.entries[index];
+    if (!entry || entry.run.kind !== kind || entry.on.type !== data.trigger?.matched?.type || !entry.run.gates || entry.run.resume !== true) return { refusal: "the approval's original trigger no longer declares resumable gates; nothing was queued" };
+    return { kind, delivery, rule: { index, run: entry.run }, approval: true };
+  }
   if (data.target?.type !== "issue") return { refusal: `${jobId} parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge` };
   if (typeof triggersPath !== "string" || triggersPath === "") return { refusal: "the triggers file is not known here (PI_TRIGGERS_FILE), so the reply cannot be built as the receiver builds it" };
   const rule = commentTriggerFor(triggersPath, kind, fs);
@@ -1262,7 +1275,7 @@ export async function planParkedAnswer({
     const read = await readRunById(redis, { logsDir, jobId, fs, timeoutMs });
     if (!read.record) return { refusal: recordReadRefusal(read, jobId, "answered") };
     const record = read.record;
-    if (record.outcome !== "completed" || record.reason !== "awaiting-input") return { refusal: notParkedRefusal(jobId, record) };
+    if (record.outcome !== "completed" || !["awaiting-input", "awaiting-approval"].includes(record.reason)) return { refusal: notParkedRefusal(jobId, record) };
     // Answered = a LATER run on the same kind and target (readParkedRuns' rule): the newest runs of this host and the
     // mirror, the fleet reader's wide window, which holds any run newer than this one.
     const runs = runsFn ? await runsFn() : await answeredWindow(redis, { logsDir, fs, now, timeoutMs });
@@ -1273,9 +1286,20 @@ export async function planParkedAnswer({
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId);
     const data = found?.job?.data ?? null;
-    const judged = parkedAnswerRefusalOf({ jobId, data, triggersPath, fs });
+    const approval = record.reason === "awaiting-approval";
+    if (approval && !/^[a-f0-9]{64}$/.test(record.approval?.requestId ?? "")) return { refusal: "the approval request has no valid durable identifier; nothing was queued" };
+    const judged = parkedAnswerRefusalOf({ jobId, data, triggersPath, approval, fs });
     if (judged.refusal) return { refusal: judged.refusal };
     const { kind, delivery, rule } = judged;
+    let approvalQueue = null;
+    if (approval) {
+      const current = await within(makeApprovalStore({ redis, now }).read(record.approval.requestId), timeoutMs, () => ({ error: "timeout" }));
+      if (!current.ok) return { refusal: "the durable approval request could not be read; nothing was queued, try again" };
+      if (!current.request || current.request.state !== "pending" || current.request.runId !== jobId) return { refusal: "the approval request is no longer pending for this run; nothing was queued" };
+      // Only the worker's private request knows where its canonical session lives. A host name in a public record
+      // is display data, not a routing declaration; inferring a queue from it could resume on the wrong filesystem.
+      approvalQueue = current.request.hostQueue ?? null;
+    }
     // Issue #647: an answer already queued or running has no record yet, so the later-run check above cannot see it.
     const pending = await readPendingAnswer({ queues: fleet.names.map((n) => fleet.queueOf(n)), kind: record.kind, target: record.target, runId: jobId, budget: pendingBudget, timeoutMs });
     if (pending.jobId) return { refusal: `${jobId} is being answered: ${pending.jobId} is queued or running on ${String(record.target)}` };
@@ -1296,20 +1320,21 @@ export async function planParkedAnswer({
       repo: data.repo,
       ...(data.projectId !== undefined ? { projectId: data.projectId } : {}),
       ...(data.azure !== undefined ? { azure: data.azure } : {}),
-      target: { type: "issue", number: data.target.number, title: data.target.title, body: data.target.body },
+      target: approval ? { ...data.target } : { type: "issue", number: data.target.number, title: data.target.title, body: data.target.body },
       ...runFieldsOf(rule.run, rule.run.flow),
-      parkedReply: true,
+      parkedReply: !(approval && data.target.type !== "issue"),
+      ...(approval ? { approvalRequestId: record.approval.requestId } : {}),
       console: { by: who },
       trigger: {
         event: delivery.event,
         action: delivery.action,
         deliveryId,
         sender: { id: null },
-        matched: { index: rule.index, type: "comment", phrase: rule.phrase },
+        matched: approval ? { ...data.trigger.matched } : { index: rule.index, type: "comment", phrase: rule.phrase },
         comment: { body: bounded.text, ...(delivery.association ? { author_association: CONSOLE_ASSOCIATION } : {}) },
       },
     };
-    return { plan: { kind: "parked-answer", jobId, forge: kind, deliveryId, queue: forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), reserve: estimateReserve(job, { overlay, env, modelEndpoints, builtinModel }) } };
+    return { plan: { kind: "parked-answer", jobId, forge: kind, deliveryId, queue: approvalQueue ?? forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), ...(approval ? { approval: { requestId: record.approval.requestId, action: record.approval.action, cap: rule.run.gateBudgetRaiseUsd ?? null } } : {}), reserve: estimateReserve(approval && record.approval.action === "budget-raise" && bounded.text.trim() === "/approve" ? { ...job, maxCostUsd: rule.run.gateBudgetRaiseUsd } : job, { overlay, env, modelEndpoints, builtinModel }) } };
   } catch (err) {
     return { refusal: `could not read the parked run or its job (${boundedText(err?.message ?? String(err))}); nothing was queued` };
   } finally {
@@ -1336,14 +1361,14 @@ async function answeredWindow(redis, { logsDir, fs, now, timeoutMs }) {
  * already queued or running), `{ refusal }` for a plan that is not one, `{ unreachable }`.
  */
 export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection } = {}) {
-  if (plan?.kind !== "parked-answer" || plan.job?.parkedReply !== true || !COMMENT_DELIVERY[plan.forge]) return { refusal: "not a parked-answer plan" };
+  if (plan?.kind !== "parked-answer" || !(plan.job?.parkedReply === true || /^[a-f0-9]{64}$/.test(plan.job?.approvalRequestId ?? "")) || !COMMENT_DELIVERY[plan.forge]) return { refusal: "not a parked-answer plan" };
   if (typeof plan.queue !== "string" || !(plan.queue === QUEUE || plan.queue.startsWith(`${QUEUE}@`))) return { refusal: "the plan names no queue" };
   let queue = null;
   try {
     queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: plan.queue });
     const res = await enqueueForgeJob(queue, plan.forge, plan.job);
     if (res.deduplicated) return { refusal: `an answer to this issue is already queued or running (job ${res.survivingJobId}), so the queue's semantic window took this one as a duplicate and nothing was queued`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
-    return { ok: true, jobIds: [res.jobId], queue: plan.queue };
+    return { ok: true, jobIds: [res.jobId], queue: res.queue ?? plan.queue };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {

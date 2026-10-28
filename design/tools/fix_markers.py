@@ -44,7 +44,7 @@ STATUS = {
     "TriggerDetail": (PLANNED, "#750."), "TriggerEditor": (PLANNED, "#750."), "ConfigScreen": (PLANNED, "#750."),
     **{n: (PLANNED, "#751.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
-    "ApprovalRequest": (PLANNED, "#649, approval gates."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),
+    "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),
     "ModelsScreen": (PLANNED, "#717 roles, #716 failover, #693 the Radius gateway."),
     "WatchScreen": (PLANNED, "#735, watch triggers."), "WatchBoard": (PLANNED, "#743, watch decisions and a board."),
     "DispatchersScreen": (PROPOSED, "No issue yet; it grew out of #735."), "DispatcherScreen": (PROPOSED, "No issue yet; it grew out of #735."),
