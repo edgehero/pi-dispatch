@@ -162,5 +162,10 @@
     "repeated_macos_runs": 20,
     "repeated_linux_oracle_runs": 10,
     "result": "passed; full-suite TMPDIR left empty."
+  },
+  "transcript_expiry_regression": {
+    "behavior": "A fresh server transcript-state panel replaces the prior entry status, including not-kept/expiry reasons, and later panel swaps preserve it.",
+    "tests": "Real browser-script regression plus full required-flag Valkey suite; 10688 passed, zero failures, empty TMPDIR.",
+    "runner_counts": "console-run-stream: 13 child-run tests == 13 in-process tests."
   }
 }

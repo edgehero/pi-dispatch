@@ -1445,6 +1445,9 @@ ${FIT_JS}
     var keep = focusIn(el);
     outside(function () {
       el.innerHTML = markup;
+      // This panel's fresh server state is authoritative (including expiry/not-kept reasons). A previous entry's
+      // connection status must not overwrite it when question/tail slots are refilled after another panel swap.
+      if (el.id === "p-transcript") tstate = null;
       try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
       try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
       try { foldBars(el); } catch (e) { /* the swapped panel's filters stay shown */ }
