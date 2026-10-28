@@ -11,6 +11,7 @@ import { makeProcessor } from "../src/index.mjs";
 import { parseExitProviderFailure, parseExitReplaySafe, parseExitToolsStarted, buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { modelDollarRows, parseScopedLimits, makeInFlight } from "../src/scoped-limits.mjs";
 import { dayKey } from "../src/budget.mjs";
+import { makeCollectChain } from "../src/outbox.mjs";
 
 const NOW = Date.parse("2026-10-28T12:00:00Z");
 const primary = "openai/primary";
@@ -343,4 +344,30 @@ test("post-exit cooldown persistence failure remains spent infrastructure with t
 		return true;
 	});
 	assert.equal(fixture.records[0].error.providerFailure.kind, "rate-limited");
+});
+
+test("a selected parent gives its outbox child the original reviewed ceiling, keeping inherited failover usable", async () => {
+	const children = [];
+	const request = JSON.stringify({ flow: "ok", task: "follow up", models: ["attacker/off-list"], fallbackModels: ["attacker/off-list"], reviewedModels: ["attacker/off-list"] });
+	const collect = makeCollectChain({
+		queue: {}, enqueue: async (_queue, child) => { children.push(child); return child.jobId; },
+		readFlowGate: async () => ({ gate: "allow" }), config: { chainMaxPerJob: 2, chainDepthMax: 1 },
+		fs: { readdirSync: () => ["request-1.json"], statSync: () => ({ size: Buffer.byteLength(request) }), lstatSync: () => ({ isFile: () => true }), readFileSync: () => request },
+	});
+	const fixture = pickupFixture({ data: { kind: "local", folder: "/srv/repo", flow: "ok", task: "parent" }, extraDeps: {
+		prepareWorkspace: async () => ({ workspace: "/srv/repo", workspaceDir: "/srv/repo", jobDir: "/j", sha: "base" }),
+		collectChain: collect,
+	} });
+	await markModelCooldown(fixture.redis, primary, { kind: "rate-limited", resetAt: NOW + 120_000 }, { now: () => NOW });
+	assert.equal((await fixture.run()).outcome, "completed");
+	const parentContainer = fixture.seen.find((entry) => typeof entry === "object");
+	assert.equal(parentContainer.model, "fallback");
+	assert.deepEqual(parentContainer.models, [fallback], "the executable policy stays narrow");
+	assert.equal(children.length, 1);
+	assert.deepEqual(children[0].models, [primary, fallback], "index binds the real queue job to the collector, preserving reviewed authorization");
+	assert.deepEqual(children[0].fallbackModels, [fallback]);
+	assert.equal(JSON.stringify(children[0]).includes("attacker"), false);
+	const childChoice = await selectFailoverJob({ ...children[0], maxCostMicros: 100 }, { redis: fixture.redis, id: "queue:child", now: () => NOW, checkCandidate: async () => null });
+	assert.equal(childChoice.ref, fallback, "the inherited fallback remains eligible under its inherited reviewed list");
+	assert.deepEqual(childChoice.job.models, [fallback]);
 });
