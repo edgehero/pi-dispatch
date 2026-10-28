@@ -885,7 +885,7 @@ test("RUN_DETAIL names the reason's detail after it, and points an unboundable c
   };
   const row = (value) => `│ ${value.padEnd(66)} │`;
   // The outcome reads in the console's word since issue #710: `policy` is "refused".
-  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "unboundable" }), row("⚠ refused · cost-cap (unboundable: see compat.maxTokensField)"));
+  assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "unboundable" }), row("⚠ refused · cost-cap (unboundable: run doctor)"));
   assert.equal(await header({ outcome: "policy", reason: "cost-cap", why: "over-cap" }), row("⚠ refused · cost-cap (over-cap)"));
   assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "overlay-link" }), row("⚠ refused · model-unknown (overlay-link)"));
   assert.equal(await header({ outcome: "policy", reason: "model-unknown", why: "unboundable" }), row("⚠ refused · model-unknown (unboundable)"), "the pointer is cost-cap's alone");

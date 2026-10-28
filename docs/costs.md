@@ -371,7 +371,7 @@ is an open issue.
   same table. The run record says which rule
   refused in its `why`: `unboundable` for these, `over-cap` when the call's bound would pass the cap, and `external`
   when the subprocesses' spend could not be read. The run detail shows it after the reason, as
-  `cost-cap (unboundable: see compat.maxTokensField)`. A `cost-cap` stop with no `why` came from a subprocess, an
+  `cost-cap (unboundable: run doctor)`. A `cost-cap` stop with no `why` came from a subprocess, an
   unmetered child or a displaced compat entry, not from a refused call of the runner's own, or it ran on an older
   image or its exit line could not be verified.
 - **Sampling parameters count at every thinking level.** A model in `models.json` may carry `samplingParams` and,
@@ -508,6 +508,25 @@ setting only from the global `settings.json` in the agent folder the child uses.
 does not change it, and neither does the pi-dispatch overlay, which a job mounts somewhere else. In a job that agent
 folder is part of the job image (`/home/pi/.pi/agent`). So turning warming off for children takes a custom job
 image with `"cacheWarming": "off"` in that file, or a spawning package that sets it for the children it starts.
+
+## pi 1.4.0 summaries and Radius
+
+Compaction and branch summaries now use the model's own maximum output limit. `reserveTokens` controls
+when compaction starts or how much input fits; it does not reduce the summary's output bound. A main
+turn may fit your dollar cap while the next summary does not. The runner refuses that summary before
+calling the provider and ends the job with `cost-cap` / `over-cap`. Allow enough remaining budget for
+the full summary bound, or select a model with a smaller output limit or lower verified rates.
+
+**Radius is refused under a local dollar cap.** Its `pi-messages` protocol reports server-calculated cost
+and can rewrite input. Sending an output limit and reading catalog prices does not establish a safe
+local billing bound. The runner returns `cost-cap` / `unboundable` before provider dispatch, including
+for zero-priced hosted routes, a custom gateway, and calls from pi children. This refusal happens inside
+the container; it is not a worker preflight refusal. `pi-dispatch doctor` names Radius and explains the
+protocol. Changing `compat.maxTokensField` cannot fix it.
+
+There is no implicit fallback to Radius organization budgets. API-key use without a local cap retains
+its existing behavior; Radius OAuth credentials are still refused. Supporting a bounded Radius call
+requires verified billing, routing and input/output-limit guarantees beyond a few successful probes.
 
 ## Honest limits
 

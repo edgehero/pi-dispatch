@@ -12,10 +12,10 @@
 export const GPT_5_4 = Object.freeze({"id":"gpt-5.4","api":"openai-responses","provider":"openai","baseUrl":"https://api.openai.com/v1","cost":{"input":2.5,"output":15,"cacheRead":0.25,"cacheWrite":0,"tiers":[{"inputTokensAbove":272000,"input":5,"output":22.5,"cacheRead":0.5,"cacheWrite":0}]},"contextWindow":272000,"maxTokens":128000});
 /** openai.json openai-responses chat:gpt-5.5 */
 export const GPT_5_5 = Object.freeze({"id":"gpt-5.5","api":"openai-responses","provider":"openai","baseUrl":"https://api.openai.com/v1","cost":{"input":5,"output":30,"cacheRead":0.5,"cacheWrite":0,"tiers":[{"inputTokensAbove":272000,"input":10,"output":45,"cacheRead":1,"cacheWrite":0}]},"contextWindow":272000,"maxTokens":128000});
-/** openai-codex.json openai-codex-responses chat:gpt-5.5 */
-export const GPT_5_5_CODEX = Object.freeze({"id":"gpt-5.5","api":"openai-codex-responses","provider":"openai-codex","baseUrl":"https://chatgpt.com/backend-api","cost":{"input":5,"output":30,"cacheRead":0.5,"cacheWrite":0,"tiers":[{"inputTokensAbove":272000,"input":10,"output":45,"cacheRead":1,"cacheWrite":0}]},"contextWindow":272000,"maxTokens":128000});
-/** openai-codex.json openai-codex-responses chat:gpt-5.3-codex-spark */
-export const CODEX_SPARK = Object.freeze({"id":"gpt-5.3-codex-spark","api":"openai-codex-responses","provider":"openai-codex","baseUrl":"https://chatgpt.com/backend-api","cost":{"input":1.75,"output":14,"cacheRead":0.175,"cacheWrite":0},"contextWindow":128000,"maxTokens":128000});
+/** openai-codex.json openai-codex-responses chat:gpt-6.1-sol */
+export const GPT_6_1_CODEX = Object.freeze({"id":"gpt-6.1-sol","api":"openai-codex-responses","provider":"openai-codex","baseUrl":"https://chatgpt.com/backend-api","cost":{"input":2,"output":10,"cacheRead":0.1,"cacheWrite":2.5,"tiers":[{"inputTokensAbove":272000,"input":4,"output":15,"cacheRead":0.2,"cacheWrite":5}]},"contextWindow":500000,"maxTokens":128000});
+/** openai-codex.json openai-codex-responses chat:gpt-6-luna */
+export const CODEX_LUNA = Object.freeze({"id":"gpt-6-luna","api":"openai-codex-responses","provider":"openai-codex","baseUrl":"https://chatgpt.com/backend-api","cost":{"input":0.1,"output":0.5,"cacheRead":0.01,"cacheWrite":0.125,"tiers":[{"inputTokensAbove":272000,"input":0.2,"output":0.75,"cacheRead":0.02,"cacheWrite":0.25}]},"contextWindow":272000,"maxTokens":128000});
 /** azure.json azure-openai-responses chat:gpt-5.4 */
 export const AZURE_GPT_5_4 = Object.freeze({"id":"gpt-5.4","api":"azure-openai-responses","provider":"azure","baseUrl":"","cost":{"input":2.5,"output":15,"cacheRead":0.25,"cacheWrite":0},"contextWindow":1050000,"maxTokens":128000});
 /** anthropic.json anthropic-messages chat:claude-sonnet-4-5-20250929 */
@@ -26,8 +26,8 @@ export const FABLE_5 = Object.freeze({"id":"claude-fable-5","api":"anthropic-mes
 export const CATALOG_ROWS = Object.freeze({
 	GPT_5_4: ["openai", "openai-responses", "gpt-5.4"],
 	GPT_5_5: ["openai", "openai-responses", "gpt-5.5"],
-	GPT_5_5_CODEX: ["openai-codex", "openai-codex-responses", "gpt-5.5"],
-	CODEX_SPARK: ["openai-codex", "openai-codex-responses", "gpt-5.3-codex-spark"],
+	GPT_6_1_CODEX: ["openai-codex", "openai-codex-responses", "gpt-6.1-sol"],
+	CODEX_LUNA: ["openai-codex", "openai-codex-responses", "gpt-6-luna"],
 	AZURE_GPT_5_4: ["azure", "azure-openai-responses", "gpt-5.4"],
 	SONNET_4_5: ["anthropic", "anthropic-messages", "claude-sonnet-4-5-20250929"],
 	FABLE_5: ["anthropic", "anthropic-messages", "claude-fable-5"],

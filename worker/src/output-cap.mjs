@@ -22,6 +22,7 @@ export const COMPLETIONS_CATALOG_HOSTS = Object.freeze([
 	"api.fireworks.ai",
 	"api.groq.com",
 	"api.individual.githubcopilot.com",
+	"api.kimi.com",
 	"api.moonshot.ai",
 	"api.moonshot.cn",
 	"api.together.ai",

@@ -50,6 +50,8 @@ const MAXIMAL = {
 			authHeader: true,
 			compat: {
 				supportsStore: false,
+				imageInput: "assets",
+				sendImageOptInHeader: true,
 				maxTokensField: "max_tokens",
 				thinkingFormat: "qwen",
 				chatTemplateKwargs: { enable_thinking: { $var: "thinking.enabled", omitWhenOff: true }, budget: { $var: "thinking.budget" }, temp: 1, flag: null },
@@ -171,13 +173,27 @@ function corpus() {
  * a review forced for nothing teaches people to bump the pin unread. Re-transcribed at 1.0.3: model-config.js gained
  * samplingParamsByThinkingLevel under models[] and modelOverrides; provider-composer.js merges it per level.
  */
+// Re-verified at 1.4.0: model-config/model-schema add descriptions and defaults without
+// changing acceptance; compat adds System One image fields. provider-composer now merges
+// classifier compat, which changes no chat-model existence verdict in overlayProviderProblem.
 const MIRRORED_PI_FILES = Object.freeze({
-	"dist/core/model-config.js": "602795a0db074909e325e65c6b34c9120d0d2eb39f678e453a5ceffbbb37984b",
-	"dist/core/provider-composer.js": "b088d1babb75360da6bf1bcbe8e140ce600e1db15f51345f1965d3d1e9f267ef",
+	"dist/core/model-config.js": "b4ecb1165c328fdb5f8b767519f2b632c31737f86d0ce1d7a05959e7c8354d93",
+	"dist/core/provider-composer.js": "7ec4af06726158fa34377bed34fbb378d2d39c5c9d51ae5640ac459a4c78bec4",
 	// Since 1.2.0 model-config.js imports its compat, cost, prompt-cache, input-limit and thinking-map schemas from
 	// pi-ai, so the two files they live in are part of what the mirror transcribes. Relative to PI: the hoisted pi-ai.
-	"../pi-ai/dist/providers/compat-schema.js": "424a688c89282b3f27d6648d0b7c55ccd13c896950496caded1ae42a26b65c9c",
-	"../pi-ai/dist/providers/model-schema.js": "0205aa9edd78ce9c4c3590fac2937ad7fbfcd54b325ee5c546501759dd0cfe69",
+	"../pi-ai/dist/providers/compat-schema.js": "c1f0ee32fd1fb32a003d38b38e5b369bb4088e596050b0fce4b25fe1173cea8f",
+	"../pi-ai/dist/providers/model-schema.js": "cab7de29fa76728a436979e228c41e8c6abce999477f2c98fa7e2c97b6ef3cf7",
+});
+
+test("System One image compat accepts every transport and rejects malformed values before spend", () => {
+	for (const imageInput of ["assets", "images", "state-image-urls"]) {
+		for (const sendImageOptInHeader of [true, false]) {
+			assert.ok(parseModelsJson(JSON.stringify({ providers: { classifier: { compat: { imageInput, sendImageOptInHeader } } } })).value);
+		}
+	}
+	for (const compat of [{ imageInput: "urls" }, { imageInput: true }, { sendImageOptInHeader: "true" }, { sendImageOptInHeader: 1 }]) {
+		assert.ok(parseModelsJson(JSON.stringify({ providers: { classifier: { compat } } })).error);
+	}
 });
 
 test("the mirror is transcribed from the pinned pi's own files: a file that changed must be re-transcribed, then its hash moved", { skip }, () => {

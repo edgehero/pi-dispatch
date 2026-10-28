@@ -648,7 +648,7 @@ test("the runner's first pi-ai candidate IS the copy pi hands its extensions, wh
 	const agentDeps = JSON.parse(readFileSync(join(agentPackageDir(), "package.json"), "utf8")).dependencies;
 	for (const name of ["pi-ai", "pi-agent-core"]) {
 		const version = JSON.parse(readFileSync(join(piOwnPackageDir(name), "package.json"), "utf8")).version;
-		assert.equal(`^${version}`, agentDeps[`@earendil-works/${name}`], `${name}: the copy pi's lookup finds is not the release pi depends on`);
+		assert.equal(version, agentDeps[`@earendil-works/${name}`], `${name}: the copy pi's lookup finds is not the release pi depends on`);
 	}
 });
 
@@ -1856,9 +1856,9 @@ test("compaction and branch summaries reuse the session's streamFunction, under 
 	assert.match(branch[1], /\n\s*streamFn: this\.agent\.streamFunction,/, "branch summaries no longer reuse the session's streamFunction");
 	assert.doesNotMatch(branch[1], /sessionId/, "branch summaries now carry a session id -- re-check where their spend lands");
 	// The call site alone cannot see an id that arrives through the auth spread, so pin the receiving side: the branch
-	// summary builds its request options from five named fields (no session id) and hands its streamFn on.
+	// summary builds its request options from four named fields (no session id or maxTokens) and hands its streamFn on.
 	const branchSummary = agentDistFile("core", "compaction", "branch-summarization.js");
-	assert.match(branchSummary, /\n {4}const requestOptions = \{ apiKey, headers, env, signal, maxTokens \};\n {4}const response = await completeSummarization\(model, context, requestOptions, streamFn, retry, callbacks\);/, "a branch summary now sends a session id or drops the session's streamFn");
+	assert.match(branchSummary, /\n {4}const requestOptions = \{ apiKey, headers, env, signal \};\n {4}const response = await completeSummarization\(model, context, requestOptions, streamFn, retry, callbacks\);/, "a branch summary now sends a session id or drops the session's streamFn");
 	// 3. The one summarisation choke point: a missing id becomes a fresh uuidv7 (one new `sessions` id per call), and
 	//    pi-ai's compat completeSimple is reached only when no streamFn is given at all.
 	const compaction = agentDistFile("core", "compaction", "compaction.js");
@@ -2161,6 +2161,7 @@ test("pi's agent loop: the parallel executor persists after the whole batch, the
 	const parallel = piFunction(loop, "executeToolCallsParallel");
 	assert.match(parallel, /const orderedFinalizedCalls = await Promise\.all\([\s\S]*?for \(const finalized of orderedFinalizedCalls\) \{[\s\S]*?await emitToolResultMessage\(/, "the parallel executor now emits results before the whole batch settles: re-read whether run.recover still needs sequential");
 	assert.match(piFunction(loop, "emitToolResultMessage"), /await emit\(\{ type: "message_end", message: toolResultMessage \}\);/);
+	// pi 1.4.0 adds request identity; executor choice and persistence ordering are unchanged.
 	const loopConfig = piMethod(agent, "createLoopConfig");
 	assert.match(loopConfig, /\n {12}toolExecution: this\.toolExecution,\n {12}beforeToolCall: this\.beforeToolCall,\n {12}afterToolCall: this\.afterToolCall,/, "Agent no longer reads toolExecution and the hooks off itself at each run");
 	assert.match(agent, /\n {8}this\.toolExecution = runtimeOptions\.toolExecution \?\? "parallel";\n/, "the default is no longer parallel");
@@ -2180,7 +2181,7 @@ test("pi's agent loop: the parallel executor persists after the whole batch, the
 			executeToolCalls: "c74a7a024a3dd029c49239d8082845557291d5baa0f5e2f212cc2fca01ad2f0a",
 			executeToolCallsSequential: "7bddf4983cc0cc970a8c7e917454818aa6fabdaae6f04d9fb9e5609ac2af8f79",
 			executeToolCallsParallel: "4e32722424ca76f291134029ecb001309c5b711ba69f97a15498d5ad32c7de1c",
-			createLoopConfig: "1b82239c8db59bca81b1939bd2e6fe82045f1acaaa4d9a4c198b8b69a860e72e",
+			createLoopConfig: "6d601c0f9a1d4870e46da7f85029f6bae7a951aa4ea31e64d375ab0be3eb5aa7",
 		},
 		"a function run.recover's sequential execution rests on changed at this pin: re-read it and src/recover.mjs",
 	);
@@ -2222,7 +2223,8 @@ test("pi-ai answers an orphaned tool call with \"No result provided\" and drops 
 	assert.match(fn, /else if \(msg\.role === "system"\) \{\n\s*if \(pendingToolCalls\.length > 0\) \{\n\s*heldSystemMessages\.push\(msg\);/, "system messages are no longer transparent to an open batch");
 	// Agent.continue() refuses a trailing assistant, one reason recovery prompts rather than continues.
 	assert.match(piMethod(agentCoreDistFile("agent.js"), "async continue"), /throw new Error\("Cannot continue from message role: assistant"\);/);
-	assert.equal(sha256(fn), "763e70ef425f0e3bc19918beb7b2d709fa6955dba5b4a901bb7bbea71a911fcd", "pi-ai's orphan handling changed at this pin: re-read it and findOrphans (src/recover.mjs)");
+	// pi 1.4.0 drops cross-model thinking; orphan accounting below that transform is unchanged.
+	assert.equal(sha256(fn), "cba9050d91ddbfa47c6148e3bbb34993aec1d49ae539d824344701bae2695829", "pi-ai's orphan handling changed at this pin: re-read it and findOrphans (src/recover.mjs)");
 });
 
 test("pi persists each message on message_end and finds a persisted entry by identity, then by position (issue #645)", { skip }, () => {
@@ -2267,6 +2269,7 @@ test("pi delivers an extension's custom message as a queued steer or follow-up w
 	assert.match(session, /if \(event\.message\.role === "custom"\) \{\n\s*\/\/ Persist as CustomMessageEntry\n\s*entryId = this\.sessionManager\.appendCustomMessageEntry\(event\.message\.customType, event\.message\.content, event\.message\.display, event\.message\.details\);/);
 	assert.match(agentDistFile("core", "messages.js"), /case "custom": \{\n\s*const content = typeof m\.content === "string" \? \[\{ type: "text", text: m\.content \}\] : m\.content;\n\s*return \{\n\s*role: "user",/);
 	assert.match(piMethod(agentDistFile("core", "session-manager.js"), "appendCustomMessageEntry"), /type: "custom_message",\n\s*customType,\n\s*content,\n\s*display,\n\s*details,/, "the entry seed() reads changed shape");
+	// pi 1.4.0 compaction reads the canonical projection instead of saved tool results; queued delivery is unchanged.
 	assert.deepEqual(
 		{
 			sendCustomMessage: sha256(send),
@@ -2277,7 +2280,7 @@ test("pi delivers an extension's custom message as a queued steer or follow-up w
 		{
 			sendCustomMessage: "d6bca70e5fc1ba90d5bfa7a2968d12ffa844e517803fc202ddb601e328221696",
 			_runBeforeSettleBoundary: "3c9e980b7580502e25becd2743658d208ea03c17130f38d100f95840b14becc7",
-			_handlePostAgentRun: "98eff4922ed59a4216b7ac123a052bec5fa3e1fd65046702e52b478c73733639",
+			_handlePostAgentRun: "9ea6abc86e0b9e3b7826841b91601c2ffd338cd38aa6c8f26996ea7e43a9328e",
 			_buildBoundaryContext: "e2ab1960f79da4ab71d78d3404891dde4ffa723f199a7f7308b88099939861ec",
 		},
 		"a function the inbox's delivery rules rest on changed at this pin: re-read it and src/inbox.mjs's header",

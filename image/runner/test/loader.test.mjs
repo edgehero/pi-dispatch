@@ -1285,7 +1285,7 @@ test("run.excludeTools' enforcement contract at the pin: structural removal, rea
 });
 
 test("an excluded tool stays excluded on a resumed session whose transcript restores it as pending (issue #587)", { skip }, async () => {
-	// pi 1.0.3 restores a transcript's tool loadout (the replayed system messages' toolsAdded) as PENDING tools,
+	// pi 1.4.0 restores a transcript's tool loadout (the replayed system messages' toolsAdded) as PENDING tools,
 	// activated when they register (agent-session's _restoreToolsFromTranscript and _refreshToolRegistry). A thread job
 	// resumes a transcript written before its trigger excluded a tool, so the transcript can name one. It must not
 	// come back: not at construction, not after the tree is navigated (which restores the loadout), not after the
@@ -1313,7 +1313,7 @@ test("an excluded tool stays excluded on a resumed session whose transcript rest
 	const excludedIn = (names) => names.filter((name) => name === "bash" || name === "edit");
 	try {
 		assert.deepEqual(excludedIn(session.getActiveToolNames()), [], "at construction");
-		assert.ok(!session.getActiveToolNames().includes("grep"), "the premise: grep is not a default tool");
+		assert.ok(session.getActiveToolNames().includes("grep"), "resume restores a recorded non-default builtin at construction");
 		// Navigating the tree restores the transcript's loadout (pending tools included).
 		await session.navigateTree(systemId, { summarize: false });
 		assert.deepEqual(excludedIn(session.getActiveToolNames()), [], "after a tree navigation restored the transcript's loadout");
@@ -1325,6 +1325,48 @@ test("an excluded tool stays excluded on a resumed session whose transcript rest
 		session.setActiveToolsByName(["read", "bash", "edit"]);
 		assert.deepEqual(excludedIn(session.getActiveToolNames()), [], "after a by-name re-enable");
 		assert.deepEqual(excludedIn(session.getAllTools().map((t) => t.name)), [], "the registry itself lacks them");
+	} finally {
+		session.dispose();
+	}
+});
+
+test("resume keeps recorded builtins across compaction and activates unmentioned or late extension tools (issue #693)", { skip }, async () => {
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const f = fixture();
+	let registerLate;
+	const tool = (name) => ({ name, label: name, description: "resume fixture", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }) });
+	const factories = [function resumeTools(api) {
+		api.registerTool(tool("outbox_fixture"));
+		registerLate = () => {
+			api.registerTool(tool("mcp__fixture__late"));
+			api.registerTool(tool("mcp__fixture__new"));
+		};
+	}];
+	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, outboxProtocolPath: f.outboxProtocolPath, extensionFactories: factories });
+	const agentDir = tempDir("pi-resume-agent-");
+	const sessionDir = tempDir("pi-resume-tools-");
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
+	const writer = pi.SessionManager.create(f.workspace, sessionDir);
+	const declared = (name) => ({ name, description: name, parameters: { type: "object", properties: {} } });
+	// A previous trigger excluded edit, so the recorded loadout never added it. The new trigger allows it,
+	// but resume must keep that omission, and a non-default tool activated in the session must survive.
+	writer.appendMessage({ role: "system", content: "", toolsAdded: ["read", "grep", "mcp__fixture__late"].map(declared), timestamp: 1 });
+	const kept = writer.appendMessage({ role: "user", content: "keep this turn", timestamp: 2 });
+	writer.appendMessage({ role: "assistant", content: [{ type: "text", text: "done" }], api: "openai-completions", provider: "p", model: "m", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 3 });
+	writer.appendCompaction("earlier work summarized", kept, 100);
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager: pi.SettingsManager.inMemory({}), resourceLoader: loader, sessionManager: writer });
+	try {
+		const active = session.getActiveToolNames();
+		assert.ok(active.includes("grep"), "recorded non-default builtin survives a compaction before resume");
+		assert.ok(!active.includes("edit"), "lifting a trigger exclusion does not silently widen a recorded loadout");
+		assert.ok(session.getAllTools().some((t) => t.name === "edit"), "edit is allowed by this trigger, just inactive");
+		assert.ok(active.includes("outbox_fixture"), "an extension tool unmentioned by the transcript starts active");
+		assert.ok(!active.includes("mcp__fixture__late"), "recorded late tool has not registered yet");
+		registerLate();
+		session._refreshToolRegistry();
+		assert.ok(session.getActiveToolNames().includes("mcp__fixture__late"), "recorded pending MCP tool activates when it registers");
+		assert.ok(session.getActiveToolNames().includes("mcp__fixture__new"), "new unmentioned MCP tool activates on registration");
+		assert.ok(!session.getActiveToolNames().includes("edit"), "registry refresh preserves the builtin loadout");
 	} finally {
 		session.dispose();
 	}

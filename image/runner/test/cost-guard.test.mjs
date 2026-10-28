@@ -24,7 +24,7 @@ import {
 } from "../src/usage-meter.mjs";
 import { COST_CAP, COST_REFUSALS, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
-import { AZURE_GPT_5_4, CODEX_SPARK, FABLE_5, GPT_5_4, GPT_5_5, GPT_5_5_CODEX, SONNET_4_5 } from "./helpers/catalog-models.mjs";
+import { AZURE_GPT_5_4, CODEX_LUNA, FABLE_5, GPT_5_4, GPT_5_5, GPT_6_1_CODEX, SONNET_4_5 } from "./helpers/catalog-models.mjs";
 
 /**
  * Issue #501, part 2: the per-job cost cap, checked before every provider call (REQ-TOKEN-ACCOUNTING-AND-CAPS (d),
@@ -94,12 +94,12 @@ test("callCostBound: the synthetic long-context tier above 200k on the two Anthr
 	assert.equal(callCostBound("streamSimple", { ...FLAT, maxTokens: 10 }, inputOf(300_000), {}, NO_ENV), 300_000 + 20);
 });
 
-test("callCostBound: gpt-5.5 is multiplied by 2.5 on responses and on codex; codex never sends maxTokens", () => {
+test("callCostBound: gpt-5.5 uses the responses multiplier; current codex models never send maxTokens", () => {
 	const gpt55 = (200_000 * 5 + 128_000 * 30) * 2.5;
 	assert.equal(callCostBound("streamSimple", GPT_5_5, inputOf(200_000), {}, NO_ENV), gpt55);
-	assert.equal(callCostBound("streamSimple", GPT_5_5_CODEX, inputOf(200_000), {}, NO_ENV), gpt55);
-	assert.equal(callCostBound("streamSimple", GPT_5_5_CODEX, inputOf(200_000), { maxTokens: 100 }, NO_ENV), gpt55, "codex puts no max_output_tokens on the request");
-	assert.equal(callCostBound("streamSimple", CODEX_SPARK, inputOf(10_000), {}, NO_ENV), (10_000 * 1.75 + 128_000 * 14) * 2, "any other codex model: x 2");
+	assert.equal(callCostBound("streamSimple", GPT_6_1_CODEX, inputOf(200_000), {}, NO_ENV), (200_000 * 2.5 + 128_000 * 10) * 2);
+	assert.equal(callCostBound("streamSimple", GPT_6_1_CODEX, inputOf(200_000), { maxTokens: 100 }, NO_ENV), (200_000 * 2.5 + 128_000 * 10) * 2, "codex puts no max_output_tokens on the request");
+	assert.equal(callCostBound("streamSimple", CODEX_LUNA, inputOf(10_000), {}, NO_ENV), (10_000 * 0.125 + 128_000 * 0.5) * 2, "any other codex model: x 2");
 });
 
 test("callCostBound: azure applies no service-tier multiplier, and raises the output to 16 like openai-responses", () => {
@@ -1132,4 +1132,29 @@ test("spend() reports spent and in-flight; the snapshot, and so the exit line, i
 	assert.deepEqual(Object.keys(policy.snapshot()), ["costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]);
 	assert.deepEqual(policy.spend(), { spentMicros: 0, inflightMicros: 0 });
 	assert.deepEqual(createPolicyGuard({ allowedModels: [{ provider: "p", model: "m" }] }).spend(), { spentMicros: 0, inflightMicros: 0 }, "zeros without a cap");
+});
+
+
+test("Radius routes, zero-rate rows and custom gateways never dispatch under a local cost cap (#693)", async () => {
+	for (const [id, baseUrl, cost] of [
+		["balanced", "https://radius.pi.dev/v1", FLAT.cost],
+		["recursive/flint", "https://radius.pi.dev/v1", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }],
+		["cheap", "https://custom.invalid/v1", FLAT.cost],
+	]) {
+		const model = { ...FLAT, provider: "radius", api: "pi-messages", id, baseUrl, cost };
+		const { FakeRuntime, calls } = fakeRuntimeClass((stream) => stream.end(message(0)));
+		const meter = createUsageMeter({ maxCostMicros: 1_000_000_000 });
+		const guard = createCostGuard({ capMicros: 1_000_000_000 });
+		const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+		const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop, guard });
+		try {
+			const result = await new FakeRuntime().streamSimple(model, {}, { maxTokens: 1 }).result();
+			assert.equal(result.stopReason, "aborted");
+			assert.equal(meter.state.stopReason, COST_CAP);
+			assert.equal(guard.refusedWhy(), "unboundable");
+			assert.deepEqual(calls, [], `${id}: no provider dispatch even with a large cap and tiny requested output`);
+		} finally {
+			layer.restore();
+		}
+	}
 });

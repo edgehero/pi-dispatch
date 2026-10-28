@@ -166,3 +166,22 @@ none.
 Managed forks require the `fork` image capability. The worker refuses an older image before spend as `job-image-fork-unsupported`. This capability covers `PI_FORK_ENTRY`, `PI_FORK_POSITION` and `PI_THINKING_LEVEL`; the image verification runs the baked branching module against an offline session fixture.
 
 `approvalGates` declares the terminating `request_approval` tool and persisted decision replay. Gate jobs also require `exitAuth` so only authenticated runner metadata can park an approval. See [approval gates](approval-gates.md).
+
+## pi 1.4.0 upgrade (issue #693)
+
+This image pins pi 1.4.0. Deploy a job image built with pi 1.4.0 together with the updated worker;
+updating host pi alone does not change queued jobs' image. Verify the image digest and its conformance
+checks before replacing your deployment's pinned image. The release notes must name pi 1.4.0.
+
+The worker sets `PI_CODEMODE_MAX_WORKERS` from each job's resolved memory: one worker per 512 MiB,
+rounded down, with a minimum of one. The default 4 GiB job gets eight; project memory overrides change
+that count. Doctor displays the deployment default. This reserves at least half the memory outside
+codemode's 256 MiB QuickJS heaps as a sizing heuristic; worker RSS can be larger, child pi processes have
+separate pools, and the container remains the hard memory limit. Scripts can wait up to 60 seconds for
+a worker, counted against their timeout. Trigger secrets and forwarded host settings cannot override
+the count.
+
+The overlay validator also accepts pi 1.4.0's `compat.imageInput` (`assets`, `images`, or
+`state-image-urls`) and boolean `compat.sendImageOptInHeader`. Summary cost-cap behavior and Radius's
+named refusal are documented in [costs](costs.md#pi-140-summaries-and-radius); resumed tool loadouts are
+in [sessions](sessions.md#tools-on-resume).

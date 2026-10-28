@@ -351,7 +351,7 @@ is then `4g` (10% would be more than the `4g` maximum) and 1 CPU, so the budget 
 lines, before any run and before the CPU quota is set:
 
 ```text
-✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)
+✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)
 ✓ local: any one job may use at most 15 of this runtime's 16 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)
 ✓ Host budget: memory 60108m (auto: 64204m here, 4g kept for the host), CPUs 15 (auto: 16 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host
 ✓ The budget counts each job's cpus as CPU reserved for it, although the runtime uses them as a weight (a busy job may use idle cores beyond them): so a job's cpus must fit the CPU budget beside what runs, even on an idle host

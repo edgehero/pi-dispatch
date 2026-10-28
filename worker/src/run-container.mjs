@@ -313,6 +313,7 @@ export function makeRunContainer({
 			}
 		};
 		const env = beforeSpawn(() => buildContainerEnv({
+			size,
 			provider: job.provider,
 			model: job.model,
 			fork: job.fork ?? null,

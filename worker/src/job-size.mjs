@@ -90,6 +90,22 @@ export const DEFAULT_JOB_CPUS = "2";
 /** Where a resolved size came from: the job's project row, the deployment's `PI_JOB_*` settings, or the built-in default. */
 export const JOB_SIZE_SOURCES = Object.freeze(["project", "env", "default"]);
 
+/** pi 1.4.0's QuickJS heap limit per codemode worker, held against its artifact by codemode-workers.pinned.test.mjs. */
+export const CODEMODE_WORKER_HEAP_MIB = 256;
+
+/**
+ * Issue #693: reserve half the job's memory for pi, tools and worker overhead; divide the rest by pi's QuickJS
+ * heap limit. This is a concurrency sizing heuristic, NOT an RSS guarantee: the VM heap excludes worker overhead,
+ * and extensions may create sessions in other processes. The container's memory bound remains the hard limit.
+ * At the 512 MiB floor one worker fits; sizes between whole slots round down rather than borrowing the reserve.
+ */
+export function codemodeWorkersOf(memMiB) {
+	if (!Number.isSafeInteger(memMiB) || memMiB < JOB_MEMORY_FLOOR_MIB || memMiB > JOB_MEMORY_CEILING_MIB) {
+		throw new Error("codemode worker sizing requires a valid job memory in MiB");
+	}
+	return Math.max(1, Math.floor(memMiB / (2 * CODEMODE_WORKER_HEAP_MIB)));
+}
+
 /** The scope prefix of a project row, as `scoped-limits.mjs` spells it (`PROJECT_SCOPE_PREFIX`; a test holds them equal). */
 const PROJECT_ROW_PREFIX = "project:";
 

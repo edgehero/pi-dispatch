@@ -469,6 +469,8 @@ async function main() {
 	const isRetryable = await loadRetryPredicate({ module: usageMeter.ok ? usageMeter.module : null, candidates: resolvePiAiCompat() });
 	if (!isRetryable) log("retry_predicate_unavailable", {});
 
+	// Resume uses the transcript's loadout, including tools activated during an earlier attempt. Passing
+	// an explicit tools set would discard it. Current exclusions still filter the registry (issue #693).
 	({ session } = await createAgentSession({
 		cwd: WORKSPACE,
 		agentDir,

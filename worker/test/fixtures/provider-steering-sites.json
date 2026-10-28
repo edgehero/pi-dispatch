@@ -122,8 +122,8 @@
 		"dBedrockCredentials(env) { const accessKeyI": 1
 	},
 	"@earendil-works/pi-ai/dist/api/google-vertex.js": {
-		", options?.headers, options?.env); let param": 1,
-		"on, optionsHeaders, env) { const googleAuth": 1,
+		", options?.headers, options?.env, options?.identity);": 1,
+		"on, optionsHeaders, env, identity) { const": 1,
 		"ldGoogleAuthOptions(env); return new Google": 1,
 		"ldGoogleAuthOptions(env) { const keyFilenam": 1
 	},
@@ -207,7 +207,7 @@
 		"= resolution.env || options?.env ? { ...(resolution.env": 1,
 		"ptions?.env ? { ...(resolution.env ?? {}), ...(options?.en": 1,
 		"ion.env ?? {}), ...(options?.env ?? {}) } : undefined;": 1,
-		"s, apiKey, headers, env }; return { req": 1
+		"eaders, env, ...(identi": 1
 	},
 	"@earendil-works/pi-ai/dist/providers/amazon-bedrock.js": {
 		"y\", env: { AWS_PROFILE: await i": 1,
@@ -298,7 +298,7 @@
 	},
 	"@earendil-works/pi-coding-agent/dist/core/compaction/branch-summarization.js": {
 		"l, apiKey, headers, env, signal, customInstruct": 1,
-		"{ apiKey, headers, env, signal, maxTokens };": 1
+		"{ apiKey, headers, env, signal }; const re": 1
 	},
 	"@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js": {
 		"l, apiKey, headers, env, sessionId }; if (m": 1

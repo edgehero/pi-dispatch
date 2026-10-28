@@ -1023,11 +1023,13 @@ test("issue #596: the size handed to runContainer is the size on the argv, never
 	const result = await runContainer({ job, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true, size: { memMiB: 1536, cpuCenti: 50, source: "project" }, hostCpus: 14 });
 	const sized = rec.args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a));
 	assert.deepEqual(sized, ["--memory=1536m", "--memory-swap=1536m", "--cpus=13", "--cpu-shares=512", "--shm-size=768m"]);
+	assert.ok(rec.args.includes("PI_CODEMODE_MAX_WORKERS=3"), "codemode follows the resolved size, not job.data or the host default (#693)");
 	assert.equal(result.memoryLimit, 1536 * 1024 ** 2, "the 90% OOM rule compares with the size this container really got");
 	assert.deepEqual(logs, [], "a CPU count was known, so nothing to say");
 	// No size: the built-in 4g and 2. No CPU count: no --cpus, said once per job.
 	await runContainer({ job: JOB, prepared: PREPARED, name: "j2", signal: new AbortController().signal });
 	assert.deepEqual(rec.args.filter((a) => /^--(?:memory|memory-swap|cpus|cpu-shares|shm-size)=/.test(a)), ["--memory=4g", "--memory-swap=4g", "--cpu-shares=2048", "--shm-size=1g"]);
+	assert.ok(rec.args.includes("PI_CODEMODE_MAX_WORKERS=8"), "the built-in 4g size derives eight workers (#693)");
 	assert.deepEqual(logs, [["cpu_ceiling_unknown", { container: "j2" }]]);
 });
 

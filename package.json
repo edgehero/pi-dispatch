@@ -18,7 +18,6 @@
     "test": "node --test \"image/runner/test/*.test.mjs\" \"worker/test/*.test.mjs\" \"receiver/test/*.test.mjs\" \"admin/test/*.test.mjs\""
   },
   "overrides": {
-    "@earendil-works/chord": "1.4.0",
     "@earendil-works/pi-agent-core": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-codemode": "1.4.0",

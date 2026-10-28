@@ -22,6 +22,14 @@ That file has no key, is never copied into `PI_SESSIONS_DIR`, is never handed to
 deleted with the job folder when the run ends. Its run record still reads `"reason": "disabled"`. What
 `resume` adds is everything below: a key, the store, and the next job continuing from the last.
 
+## Tools on resume
+
+With pi 1.4.0, a resumed thread, parked job or recovered job keeps the transcript's builtin tool
+loadout, including tools activated during the session and declarations before compaction. Current
+`run.excludeTools` entries still remove tools from the registry, so recorded tools cannot bypass them.
+Removing an exclusion on a later trigger does not itself activate a builtin missing from the recorded
+loadout. New extension tools stay available; recorded MCP tools become active when they register.
+
 ## Setup
 
 `PI_SESSIONS_DIR` has **no default**, deliberately. `PI_LOGS_DIR` and `PI_SETTINGS_FILE` fall back to

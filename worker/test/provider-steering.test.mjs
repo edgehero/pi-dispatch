@@ -63,14 +63,16 @@ const RUNTIME_NOT_PROVIDER = ["HOME", "PATH", "APPDATA", "USERPROFILE", "XDG_CON
 // ever replaced wholesale from the failure message, after reading what changed.
 const SITES_FILE = new URL("./fixtures/provider-steering-sites.json", import.meta.url);
 
+// 1.4.0 adds sessionId as an ordinary request option: the scanner conservatively sees
+// `options && "sessionId" in options`; it is not an environment variable. WINDIR is no longer read.
 const OUTSIDE_PI_NAMESPACE = [
 	"CI", "COLORFGBG", "COLORTERM", "COLUMNS", "DISPLAY", "EDITOR", "GHOSTTY_RESOURCES_DIR", "HF_HOME",
 	"HF_TOKEN", "HF_TOKEN_PATH", "HTTPS_PROXY", "HTTP_PROXY", "ITERM_SESSION_ID", "KITTY_WINDOW_ID", "LINES",
 	"LLAMA_API_KEY", "LLAMA_BASE_URL", "MOSH_CONNECTION", "PNPM_HOME", "ProgramFiles", "SHELL", "SSH_CLIENT",
 	"SSH_CONNECTION", "SSH_TTY", "STY", "SystemRoot", "TERM", "TERMINAL_EMULATOR", "TERMUX_VERSION",
 	"TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "VISUAL", "WARP_SESSION_ID", "WARP_TERMINAL_SESSION_UUID",
-	"WAYLAND_DISPLAY", "WEZTERM_PANE", "WINDIR", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP", "WT_SESSION",
-	"XDG_CACHE_HOME", "XDG_SESSION_TYPE", "ZELLIJ", "error", "hasError", "off", "stack",
+	"WAYLAND_DISPLAY", "WEZTERM_PANE", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP", "WT_SESSION",
+	"XDG_CACHE_HOME", "XDG_SESSION_TYPE", "ZELLIJ", "error", "hasError", "off", "sessionId", "stack",
 ];
 
 /** Every .js/.mjs/.cjs file under `dir`, ignoring nested dependencies and any path `skipDir` names. */
@@ -560,7 +562,7 @@ test("the copy of pi this bolt resolves and the copy the runner dispatches throu
 	if (runnerRoot === hoisted.packages[0].root) {
 		const declared = JSON.parse(readFileSync(`${codingAgentRoot}/package.json`, "utf8")).dependencies["@earendil-works/pi-ai"];
 		const { version } = JSON.parse(readFileSync(`${runnerRoot}/package.json`, "utf8"));
-		assert.equal(declared, `^${version}`, "one pi-ai copy, but not the release pi-coding-agent declares: the overrides drifted");
+		assert.equal(declared, version, "one pi-ai copy, but not the release pi-coding-agent declares: the overrides drifted");
 		return;
 	}
 	assert.deepEqual(

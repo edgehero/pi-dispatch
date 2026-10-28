@@ -4321,10 +4321,10 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   let head = styler.bold(styler.fg(w.tone, `${w.glyph} ${oc}`));
   // The reason's detail (the record's `why`, a fixed token, PR #558) in parentheses after it, so a refusal says WHICH
   // rule refused: `model-unknown (overlay-link)`, and since issue #507 `cost-cap (unboundable)`. That one carries a
-  // pointer too, because its usual cause is one models.json field (docs/egress.md, "Local model servers"): a run the
-  // cap stopped at $0 otherwise reads as a cap set too low. Absent on a record with no `why`, which renders as before.
+  // pointer to doctor, which distinguishes an unsupported protocol such as Radius from an output-cap
+  // compatibility field. A refusal at $0 otherwise reads as a cap set too low. Absent when `why` is absent.
   const why = typeof r.why === "string" && r.why !== "" ? r.why : null;
-  const hint = r.reason === "cost-cap" && why === "unboundable" ? ": see compat.maxTokensField" : "";
+  const hint = r.reason === "cost-cap" && why === "unboundable" ? ": run doctor" : "";
   // Only a reason that is a token: an older worker's record may hold an error's own words, which no surface shows.
   const reasonShown = recordReason(r);
   if (reasonShown) head += styler.fg("dim", ` · ${show(reasonShown)}${why !== null ? ` (${show(why)}${hint})` : ""}`);

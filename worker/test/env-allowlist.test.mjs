@@ -200,6 +200,7 @@ test("the container env is a CLOSED set: only the provider key, never the whole 
 			"ANTHROPIC_API_KEY",
 			"GH_TOKEN",
 			"GITHUB_TOKEN",
+			"PI_CODEMODE_MAX_WORKERS",
 			"PI_JOB_ID",
 			"PI_MAX_TURNS",
 			"PI_MODEL",
@@ -1496,4 +1497,20 @@ test("PI_JOB_LAYOUT (#683): written only for a copying venue's sandbox layout, a
 	assert.equal(mod.buildContainerEnv({ ...secretsBase, layout: "sandbox" }).PI_JOB_LAYOUT, "sandbox");
 	for (const layout of ["Sandbox", "", null, "/sandbox"]) assert.throws(() => mod.buildContainerEnv({ ...secretsBase, layout }), /unknown job layout/, String(layout));
 	assert.ok(CONTAINER_ENV_NAMES.has("PI_JOB_LAYOUT"), "reserved, so run.secrets cannot bind it");
+});
+
+
+test("codemode workers follow the resolved job size and cannot be replaced through host forwarding or secrets (#693)", { skip }, () => {
+	assert.ok(CONTAINER_ENV_NAMES.has("PI_CODEMODE_MAX_WORKERS"));
+	assert.equal(buildContainerEnv(secretsBase).PI_CODEMODE_MAX_WORKERS, "8");
+	for (const memMiB of [512, 1023, 1024, 1536]) {
+		const env = buildContainerEnv({
+			...secretsBase,
+			size: { memMiB, cpuCenti: 200, source: "project" },
+			hostEnv: { ...secretsBase.hostEnv, PI_CODEMODE_MAX_WORKERS: "9999" },
+			forwardEnv: ["PI_CODEMODE_MAX_WORKERS"],
+			secrets: { PI_CODEMODE_MAX_WORKERS: "7777" },
+		});
+		assert.equal(env.PI_CODEMODE_MAX_WORKERS, String(Math.floor(memMiB / 512)));
+	}
 });

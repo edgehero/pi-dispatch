@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { containerSpec, memoryBytes, memoryBytesOfArgs } from "../src/container-spec.mjs";
 import { buildDockerRunArgs, buildPodmanRunArgs, dockerArgsFromSpec } from "../src/docker-run.mjs";
 import {
+	codemodeWorkersOf,
+	CODEMODE_WORKER_HEAP_MIB,
 	cpuRangeRefusal,
 	unenforcedSizeFlags,
 	CPU_SHARES_MAX,
@@ -221,4 +223,16 @@ test("issue #596, phase 2: the --cpus ceiling is the host's CPU budget capped at
 	for (const [hostCpus, budget, ceiling] of rows) assert.equal(cpuCeilingCenti(hostCpus, budget), ceiling, `${hostCpus} CPUs, budget ${budget}`);
 	assert.equal(containerSizing({ memMiB: 4096, cpuCenti: 200 }, 8, 330).cpus, "3.3");
 	assert.equal(containerSizing({ memMiB: 4096, cpuCenti: 200 }, 8).cpus, "7");
+});
+
+
+test("codemode concurrency leaves half the job memory for pi, tools and worker overhead (#693)", () => {
+	assert.equal(CODEMODE_WORKER_HEAP_MIB, 256);
+	for (const [memory, workers] of [[512, 1], [513, 1], [1023, 1], [1024, 2], [1535, 2], [1536, 3], [4096, 8], [JOB_MEMORY_CEILING_MIB, 2048]]) {
+		assert.equal(codemodeWorkersOf(memory), workers, `${memory} MiB`);
+		assert.ok(workers * CODEMODE_WORKER_HEAP_MIB <= memory / 2);
+	}
+	for (const memory of [null, "512", 511, 512.5, NaN, Infinity, JOB_MEMORY_CEILING_MIB + 1]) {
+		assert.throws(() => codemodeWorkersOf(memory), /valid job memory/);
+	}
 });
