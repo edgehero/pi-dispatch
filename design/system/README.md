@@ -221,7 +221,7 @@ Proposed only, not asked for: a browser terminal through a separate sandbox gate
   - `t-body` (14/20) as the default;
   - `t-small` (12/16) for meta;
   - `t-code` (13 mono) for identifiers.
-- Set numbers in tabular figures, and only numbers: counts, money, times and table figures (`.kpi b`, `.count`, `.num`, `.tnum` and the like). On running text, tabular figures also widen hyphens, so an id like gh-2f6a reads "gh - 2f6a".
+- Set numbers in tabular figures, and only numbers: counts, money, times, table figures and the timeline's times (`.kpi b`, `.count`, `.tbl td.num`, `.tax`, `.tp-sub` and the like). `.tnum` sets them on any other number. On running text, tabular figures also widen hyphens, so an id like gh-2f6a reads "gh - 2f6a".
 
 ## Shape and space
 

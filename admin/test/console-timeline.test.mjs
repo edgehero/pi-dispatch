@@ -29,7 +29,7 @@ import {
 } from "../src/console/timeline.mjs";
 
 // Issue #737: the overview's timeline, a pure module. The model is pinned by its numbers and words, the markup by the
-// TimelineAndWaitlists card's own sample (copied here as the card's bytes: the design files are not in this repository),
+// TimelineAndWaitlists card's own sample (copied here as the card's bytes from design/system, which this test does not read),
 // with only what a drawing of other data must change taken out (positions, titles) and the kit's one spelling applied
 // (the card closes `<use>` with `/>`, the console with `</use>`).
 

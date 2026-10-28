@@ -8,7 +8,7 @@ html { color-scheme: light; }
 [data-theme="dark"] { color-scheme: dark; }
 body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--font-sans); font-size: 14px; line-height: 20px; -webkit-font-smoothing: antialiased; }
 /* Tabular figures on numbers only: on running text they also widen hyphens, so an id like gh-2f6a reads "gh - 2f6a". */
-.kpi b, .big__n, .count, .cap__v, .meterrow__v, .ticket b, .tx__t, .tbl .num, .tbl .when, .wl__t, time, .tnum { font-variant-numeric: tabular-nums; }
+.kpi b, .big__n, .count, .cap__v, .meterrow__v, .ticket b, .tx__t, .tbl td.num, .tbl .when, .wb-t, .tax, .tnowcap-t, .tp-sub, .tp-sub2, .tp-sub3, time, .tnum { font-variant-numeric: tabular-nums; }
 a { color: inherit; }
 button, input, textarea, select { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

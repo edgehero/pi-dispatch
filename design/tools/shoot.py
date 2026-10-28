@@ -11,7 +11,7 @@ def harness(src: pathlib.Path, theme: str) -> pathlib.Path:
     text = text.replace("<html lang=\"en\">", f"<html lang=\"en\" data-theme=\"{theme}\">", 1)
     if "data-theme" not in text:
         text = text.replace("<html>", f"<html data-theme=\"{theme}\">", 1)
-    inject = f'<link rel="stylesheet" href="file://{SHOTS}/tokens.css"><link rel="stylesheet" href="file://{BUNDLE}">'
+    inject = f'<link rel="stylesheet" href="{(SHOTS / "tokens.css").as_uri()}"><link rel="stylesheet" href="{BUNDLE.as_uri()}">'
     text = text.replace("<head>", "<head>" + inject, 1)
     out = SHOTS / f"{src.parent.name}-{theme}.html"
     out.write_text(text)
@@ -32,7 +32,7 @@ def main():
                 pg = b.new_page(viewport={"width": w, "height": 900}, device_scale_factor=1)
                 errs = []
                 pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
-                pg.goto(f"file://{h}")
+                pg.goto(h.as_uri())
                 pg.wait_for_timeout(150)
                 sw = pg.evaluate("document.documentElement.scrollWidth")
                 sh = pg.evaluate("document.documentElement.scrollHeight")
