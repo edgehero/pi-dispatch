@@ -6591,6 +6591,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-AWAIT-INPUT-ENDS-THE-JOB
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 - **Decision** (issue #625, `REQ-AWAIT-INPUT`): an agent that needs a person's answer ENDS its job. It posts the
   question, calls the job's own `await_human_input` tool, whose result carries pi's `terminate`, and the runner exits
   `0` / `awaiting-input`. The worker promotes the transcript, marks the key `parked` and posts one fixed sentence. The
@@ -11900,6 +11902,8 @@ a tunnel.
 
 ## DES-OPERATOR-CONSOLE
 
+**Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
+
 - **Status**: issue #640, the security model and hardened skeleton of the console epic (#650); issue #641, the
   screens, the live updates and `/api/state` (the bullets from "The screens" to "Wiring" below); issue #642, the
   writes and actions (the bullets from "The action table" to "The sandbox, shown and not run" below, and the four
@@ -14310,7 +14314,7 @@ a tunnel.
     transcript section, and a parked row carries none by construction; so each card says where the question is read
     (`PARKED_QUESTION_WHERE`), for both roles; the ParkedPhone card draws the question in large text, and the page does
     not. The desktop page is the Parked frame the ApprovalRequest card draws, with its Questions tab alone and no
-    Approvals tab: approvals are #649's, and ApprovalRequest is a planned card, which may carry no element ledger.
+    Approvals tab. **AMENDED 2026-10-28 (#649):** ApprovalRequest is Built; typed requests share this inbox, whose title says Questions and approvals when they are present. Gate identifiers are public, summaries stay in the private transcript.
   - **The answer form follows the planner's own check.** A box that refuses after the answer is typed wastes the typing,
     and a pull request's park, expired job data and a comment trigger that would not route a reply are refused by the
     planner whatever the page draws. So the page reads `parkedAnswerCheckOf` (the predicate `planParkedAnswer` asks
@@ -15874,10 +15878,50 @@ a tunnel.
   private run-source artifacts. `DES-TERMINAL-CHAT` keeps its host-local fork semantics. The existing recovery
   retention and current model-policy precedence are unchanged.
 
+## DES-APPROVAL-DECISION-IS-HOST-AUTHORITY
+
+- **Decision** (issue #649): extend the parked-job lifecycle, not pi's planning loop. The runner's reserved inline
+  tool terminates, its authenticated exit names only action and call ID, and the host publishes an approval only
+  after successful transcript promotion and a parked sidecar. Valkey compare-and-set holds the durable request and
+  first decision. A label and a queue-supplied decision are never authority. The approved budget is derived again
+  from the live declaration, bounded by the live deployment cap, before normal ledger reservations.
+- **Pinned result delivery**: pi 1.2.0's public `SessionManager.appendContextEdit` writes an append-only edit of the
+  original `request_approval` tool result on the staged per-job transcript BEFORE `createAgentSession` projects it.
+  The raw pending result remains intact for audit. The action, original call, terminal projected result and absence
+  of a previous edit must match; a fully compacted or superseded request refuses. This uses public API verified by
+  actual scripted-model tests against the pin, not source copied from upstream HEAD.
+- **Rejected**: waiting in a live container; replacing the canonical transcript; appending a duplicate tool result;
+  passing a decision as a new user prompt; trusting `parked`'s best-effort timestamp as approval; accepting a stale
+  console preview for a later request; reopening a request after a queue failure. The existing session-key derivation
+  remains unchanged: the approval target index is queue authority, not a replacement session index.
+- **Private decision transport**: the environment contains only decision identifiers and fixed vocabulary. Accepted
+  human text travels through the existing read-only event file, with the canonical stored text substituted only in
+  the staged job; the retained command remains available for the console's forge trail. The runner reads that body
+  once before extensions or provider calls. Both OpenShell exec modes carry only non-secret metadata, so their
+  gateway argv logs cannot acquire the human's question or decline reason.
+- **Enforcement boundary**: arbitrary action names are advisory. PAT/CLI credentials already have their configured
+  role, and installation permission classes cannot scope pushes to one branch. Accordingly this release refuses
+  built-in push/default-branch/PR-opening declarations rather than weakening branch protection. `budget-raise` is
+  enforced by the worker and runner's existing dollar guard, with no change to aggregate limits or token roles.
+- **Question semantics**: a question consumes this request and resumes with a question result. The agent can answer
+  and ask a new gate. The old planned card's claim that asking leaves the request parked is superseded.
+- **Decision admission**: authorized replies are first persisted as ordinary durable queue messages, bound to the
+  pending request at ingress. The session host atomically accepts and claims the decision at pickup, before spending,
+  after rereading both the initiating declaration and reply declaration. This keeps host-local policy authoritative;
+  a queue failure reports no accepted decision, and a restart cannot lose a successfully queued reply. Persisting an
+  accepted decision at the receiver before queueing was rejected because that edge cannot validate the host's current
+  file and would need a second dispatcher to recover accepted-but-never-enqueued decisions.
+- **Failure tradeoffs**: free unavailable-state reads retry; a paid completed park whose publication fails is saved
+  but refused loudly, with no automatic paid replay. Terminal policy refusals close claimed requests, retaining their
+  accepted decisions but freeing the target. Infrastructure retry retains the same claim until attempts are exhausted, when the terminal failed-job listener closes it. Expiry is a durable system
+  decline with deterministic enqueue retry and an attempted-once fixed comment, independent of retention sweeps.
+- **Traces to**: `REQ-APPROVAL-GATES`, `DES-AWAIT-INPUT-ENDS-THE-JOB`, `INT-APPROVAL-STATE-CONTRACT`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-28 (#649) | Issue #649: added `DES-APPROVAL-DECISION-IS-HOST-AUTHORITY`: pinned public context-edit replay, durable first-decision authority, request binding and explicit enforcement limits. `DES-AWAIT-INPUT-ENDS-THE-JOB` and session-key derivation UNCHANGED, checked; typed gates extend the lifecycle without a live wait. |
 | 2026-10-28 (#648) | NEW `DES-MANAGED-FORK-IS-A-NEW-LINEAGE`: managed issue-run forks use immutable source identity, exact retained transcript/workspace boundaries, independently derived branches and session lineage, current policy and normal admission. Console and terminal share paid preview/confirm/audit. Pinned pi tree semantics, model/thinking recording, named unavailable points/venues, bounded private retention and new zero-spend/worker/UI tests are specified. Existing host-local chat fork and recovery newest-two retention remain unchanged. Relevant constitutional constraints UNCHANGED, checked as recorded in `INT-MANAGED-FORK-CONTRACT`. Final cross-feature checks: `run.awaitInput` managed forks refuse before spend as `fork-await-input-unsupported`; recovery of an existing managed fork restores its checkpoint without re-forking, while recovery-attempt records are not new sources. `REQ-AWAIT-INPUT` and ordinary canonical reply behavior UNCHANGED, checked. |
 | 2026-08-30 | Issue #57, the shared-bounds slice. **NEW `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`**: the two ceilings that describe a DEPLOYMENT rather than a process gain a fleet-wide layer beneath the unchanged in-process one. The entry's substance is what it owes `OQ-008` and this file's own refusal of Redis-held in-flight counts, and the two halves answer it differently. The check lease claims no container at all -- a subprocess this process spawned, bounded by a configured timeout, holding no folder and spending nothing -- so all three properties that made the container count wrong invert, and its TTL is derived rather than guessed. The scope claim really is for a container, so the refusal lands, and the answer is the boot reaper: it establishes that this host holds no containers, so deleting a claim that names this host is the same source of truth writing down what it just established. That argument has a PRECONDITION and the precondition is checked -- `makeReaper` catches its own `docker ps` failure, and on that path nothing was enumerated, so the sweep is skipped rather than freeing slots for containers that may still be running on a machine that would then be joined by another. Local scopes deliberately never claim, because the key would be a hash of a path string and `/srv/site` on two machines is usually two different repositories. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: its rejection of Redis in-flight counters is NARROWED rather than reversed, and the narrowing is stated in the Rejected list itself so a reader meets it where the refusal is. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the one-worker-per-daemon invariant and the process-memory argument for the folder mutex are untouched. **Code evidence**: worker/src/fleet-lease.mjs -> makeFleetLease, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor (the check and scope arms); worker/src/start.mjs -> startWorker, makeReaper. |
 | 2026-08-30 | Issue #57, the placement slice. **`DES-CONCURRENCY-3` AMENDED**: `PI_CONCURRENCY` is restored as a bound on the MACHINE. A worker that drains a host-affine queue as well as the shared one runs two BullMQ Workers, and BullMQ's concurrency is per Worker, so two at 3 would run six containers and break the RAM and provider-throttle reasoning this entry rests on. An in-process semaphore at the pickup gate caps the sum, deferring the excess at the scope gate's cadence -- and process memory is still the CORRECT store for this entry's own unchanged reason, since it counts this host's containers and the boot reaper clears survivors before draining. The one-worker-per-docker-daemon invariant is untouched; multi-host means one worker per host, never two per daemon. **`DES-CRON-VIA-BULLMQ-SCHEDULER` AMENDED**: a host's schedulers live on its own queue, which makes the orphan prune correct by construction rather than by agreement. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked, and the check is the interesting one**: the folder mutex stays an in-process count, and ROUTING is what keeps it complete across hosts -- a local folder exists on exactly one machine, so only that machine's worker ever runs jobs for it. Affinity preserves the mutex rather than being bolted beside it. The residual is a folder present on two hosts through a shared mount, which the registry can detect and nothing yet does. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: the worker is still a host process shelling out to a local docker, and every bind mount is still a path on its own filesystem -- which is precisely why placement is a routing problem rather than a scheduling one. **Code evidence**: worker/src/index.mjs -> createWorker, makeProcessor; worker/src/queue.mjs -> hostQueueName; worker/src/schedules.mjs -> loadSchedules, servedSchedules. |

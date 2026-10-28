@@ -83,7 +83,7 @@ test("the outcome filter takes the five words a row says and the record's policy
   assert.deepEqual([...RUN_OUTCOME_VALUES], [...OUTCOME_KEYS, "policy"]);
   for (const o of RUN_OUTCOME_VALUES) assert.deepEqual(parseRunFilter({ outcome: o }).filter, { outcome: o });
   for (const value of ["vapour", "__proto__", "constructor", "Completed", "awaiting input", "awaiting_input", "operator-cancel", "toString"]) {
-    assert.equal(parseRunFilter({ outcome: value }).refusal, "outcome must be one of completed, refused, failed, awaiting-input, cancelled (or policy, the record's value for refused, cancelled and recovery failures)", value);
+    assert.equal(parseRunFilter({ outcome: value }).refusal, "outcome must be one of completed, refused, failed, awaiting-input, awaiting-approval, cancelled (or policy, the record's value for refused, cancelled and recovery failures)", value);
   }
   // problems takes 1 alone.
   for (const value of ["0", "true", "yes", "11", "1 "]) assert.equal(parseRunFilter({ problems: value }).refusal, "problems must be 1 (only problems)", value);
@@ -1239,9 +1239,9 @@ test("createFleetReader: runsWindow counts the last 24 hours by outcome key, pro
   const w = await reader.runsWindow();
   assert.equal(w.at, AT);
   assert.deepEqual([w.floor, w.partial], [false, false]);
-  assert.deepEqual(w.byOutcome, { completed: 3, refused: 1, failed: 3, "awaiting-input": 1, cancelled: 1, other: 1 }, "a recovery end is failed, a run awaiting input is not completed");
+  assert.deepEqual(w.byOutcome, { completed: 3, refused: 1, failed: 3, "awaiting-input": 1, "awaiting-approval": 0, cancelled: 1, other: 1 }, "a recovery end is failed, a run awaiting input is not completed");
   assert.deepEqual(w.byProject.map((p) => [p.project, p.count]), [[null, 5], ["web", 3], ["api", 2]], "by count, the records with no project id (or one that is no id) under null");
-  assert.deepEqual(w.byProject.find((p) => p.project === "api").byOutcome, { completed: 0, refused: 1, failed: 1, "awaiting-input": 0, cancelled: 0, other: 0 }, "a project's own outcome counts: its recovery end is a failure");
+  assert.deepEqual(w.byProject.find((p) => p.project === "api").byOutcome, { completed: 0, refused: 1, failed: 1, "awaiting-input": 0, "awaiting-approval": 0, cancelled: 0, other: 0 }, "a project's own outcome counts: its recovery end is a failure");
   assert.deepEqual(w.byProject.map((p) => [p.project, p.spentMicros, p.unpriced]), [[null, 0, 5], ["web", 1_500_000, 1], ["api", 250_000, 1]], "and its own settled spend");
   assert.equal(w.projectsMore, 0);
   assert.deepEqual(w.byReason, { "awaiting-input": 1, "container-lost": 1, "operator-cancel": 1, "recovery-cap": 1, "scope-cap": 1 }, "tokens only, sorted: a free-text reason is counted nowhere");
@@ -1271,7 +1271,7 @@ test("createFleetReader: runsWindow runs on the reader's clock: the window moves
   writeLocal(logsDir, rec("gh-2", AT - 10 * MIN));
   let now = AT;
   const reader = fleetOf(logsDir, emptyRedis(), { seams: { nowFn: () => now } });
-  assert.deepEqual((await reader.runsWindow()).byOutcome, { completed: 1, refused: 0, failed: 1, "awaiting-input": 0, cancelled: 0, other: 0 });
+  assert.deepEqual((await reader.runsWindow()).byOutcome, { completed: 1, refused: 0, failed: 1, "awaiting-input": 0, "awaiting-approval": 0, cancelled: 0, other: 0 });
   now = AT - 60 * MIN + 24 * 60 * MIN; // exactly a day after gh-1: the window's first instant, still in
   assert.equal((await reader.runsWindow()).byOutcome.failed, 1);
   now += 1;

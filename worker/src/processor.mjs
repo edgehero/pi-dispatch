@@ -1,3 +1,4 @@
+import { effectiveCostCapMicros } from "./money.mjs";
 import { validateFork, forkBranch, forkArchiveFact, FORK_THINKING_LEVELS } from "./fork-job.mjs";
 import { sessionKeyFor } from "./session-key.mjs";
 import { join } from "node:path";
@@ -33,7 +34,7 @@ import { answerTrailComment, consoleAnswerBy } from "./console-answer.mjs";
 import { forgeDeliveryJobId } from "./job-id.mjs";
 // The forge-comment tables (issue #710): every fixed sentence this file posts, in one leaf the reason catalog can import
 // without the job path. Re-exported below under the names they always had here.
-import { BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
+import { APPROVAL_COMMENTS, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -305,6 +306,35 @@ async function endDurableRun(d, deps) {
 }
 
 export async function runJob(job, deps) {
+	// Queue fields never confer approval authority. Resolve the host-owned decision before the mint or any reserve.
+	job = { ...job };
+	delete job.approvalDecision;
+	let approval = null;
+	if (job.gates !== undefined || job.approvalRequestId !== undefined || job.resume === true && deps.approvalRuntime) {
+		const id = deps.queueJobId ?? forgeDeliveryJobId(job.kind, job.trigger?.deliveryId, job.replica);
+		if (!deps.approvalRuntime) return { outcome: "policy", reason: "approval-store-unavailable", budgetReserved: false, exitCode: null, turns: null, tokens: null };
+		approval = await deps.approvalRuntime.before({ ...job, id });
+		if (approval.error) throw new InfraRetry("approval state could not be read", { reason: "container-never-started", budgetReserved: false });
+		if (!approval.ok) {
+			await deps.comment?.(job, `Refused: ${approval.refused}. Check the pending approval and current trigger declaration. Not run.`);
+			return { outcome: "policy", reason: approval.refused, ...(approval.audit ? { approval: approval.audit } : {}), budgetReserved: false, exitCode: null, turns: null, tokens: null };
+		}
+		if (approval.decision) {
+			job.approvalDecision = approval.decision;
+			// A phrase-prefixed /approve is a decision, not a new flow override. Continue the requesting flow.
+			if (typeof approval.request?.resumeJob?.flow === "string") job.flow = approval.request.resumeJob.flow;
+			if (deps.approvalSessionCheck) {
+				const session = deps.approvalSessionCheck(approval.request);
+				if (!session.ok) {
+					await deps.approvalRuntime.finish({ requestId: approval.request.requestId, jobId: id });
+					return { outcome: "policy", reason: "approval-session-unavailable", approval: approval.audit, budgetReserved: false, exitCode: null, turns: null, tokens: null };
+				}
+			}
+		}
+		if (approval.budgetCapUsd !== undefined) job.maxCostMicros = effectiveCostCapMicros(approval.budgetCapUsd, deps.deploymentMaxCostUsd ?? null);
+		deps = { ...deps, approvalRequest: approval.request ?? null, approvalJobId: id };
+	}
+
 	const durable = durableOf(job);
 	// Issue #704: what this attempt did with the project's secret bundle, for the record (`bundle` or `bundleSkipped`).
 	const bundleFacts = { bundle: null, bundleSkipped: null };
@@ -312,8 +342,14 @@ export async function runJob(job, deps) {
 	let result;
 	try {
 		result = await runAttempt(job, deps, durable, bundleFacts, archiveFacts);
+		if (approval?.audit && !result?.approval) result = { ...result, approval: approval.audit };
+		if (approval?.request && result?.outcome === "policy") {
+			const closed = await deps.approvalRuntime.finish({ requestId: approval.request.requestId, jobId: deps.approvalJobId });
+			if (!closed.ok) result = { ...result, reason: "approval-finish-unavailable" };
+		}
 	} catch (e) {
 		try { if (archiveFacts.value && e && typeof e === "object") e.forkSource = archiveFacts.value; } catch {}
+		if (approval?.audit && e && typeof e === "object") e.approval = approval.audit;
 		tagDurable(e, durable);
 		tagBundle(e, bundleFacts);
 		// A RECOVERY job has one attempt (recovery-queue.mjs), so a never-started retry would fail it for good over a
@@ -622,8 +658,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 	let manifest = null;
 	let forkSource = null;
 	let sourcePrimed = false;
-	let sourceRunId = null;
-	try { sourceRunId = forgeDeliveryJobId(job.kind, job.trigger?.deliveryId, job.replica); } catch {}
+	let sourceRunId = deps.queueJobId ?? null;
+	if (sourceRunId === null) { try { sourceRunId = forgeDeliveryJobId(job.kind, job.trigger?.deliveryId, job.replica); } catch {} }
 	const forkRefusal = async (reason) => {
 		await comment(job, `Refused: ${reason}. No fork container was started. Check the source run, current trigger policy and retained workspace points.`);
 		return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
@@ -940,6 +976,16 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			log("refused_image_forge_unsupported", { image: img.forgeUnsupported, kind: img.kind, declared: img.declared });
 			return { outcome: "policy", reason: "job-image-forge-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
+		if (deps.approvalRequest && deps.approvalSessionCheck) {
+			const ready = deps.approvalSessionCheck(deps.approvalRequest, { piVersion: img.piVersion, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider, modelId: job.model });
+			if (!ready.ok) return { outcome: "policy", reason: "approval-session-unavailable", exitCode: null, turns: null, tokens: null, budgetReserved: false };
+		}
+
+		if (job.gates && !(img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY)) {
+			await comment(job, APPROVAL_COMMENTS["job-image-approval-auth-unsupported"]);
+			return { outcome: "policy", reason: "job-image-approval-auth-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false };
+		}
+
 		// The image capability gates (one table, CAPABILITY_GATES in image-preflight.mjs): the image is present and
 		// does not declare a feature this job carries, so its runner would silently ignore it. Determinate, so a
 		// refusal rather than a retry, and pre-spend, because no version of this gets better by running. Like the
@@ -1777,7 +1823,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `podmanStore` (issue #429) only where the venue's job user carried one: the podman store the container ran in.
 		// `portfolio` (issue #505) only for a job the gate above confirmed: prepare then writes /job/portfolio.json, after
 		// asking the live file once more. Absent otherwise, so every other job's prepare call is unchanged.
-		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}), ...(isRecovery ? { pin: { sha: manifest.workspace.baseSha, from: workspaceCheckpointer.baseSourceUrl(runId) } } : forkSource ? { pin: { sha: forkSource.manifest.baseSha, from: forkStore.baseSourceUrl(job.fork.fromJob) } } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
+		// The existing read-only event file carries accepted human text. Environment/exec metadata stays id-only,
+		// including on gateways that log their exec argv. Keep the queued command for the operator's forge trail.
+		const stagedJob = job.approvalDecision ? { ...job, trigger: { ...job.trigger, comment: { ...job.trigger?.comment, body: job.approvalDecision.text ?? "" } } } : job;
+		prepared = await prepareWorkspace(stagedJob, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}), ...(isRecovery ? { pin: { sha: manifest.workspace.baseSha, from: workspaceCheckpointer.baseSourceUrl(runId) } } : forkSource ? { pin: { sha: forkSource.manifest.baseSha, from: forkStore.baseSourceUrl(job.fork.fromJob) } } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
@@ -1789,6 +1838,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// an exact $0 rather than a floor (REQ-COST-ANALYTICS (d)). After the spread, so no preparer can say otherwise.
 		if (prepared?.outcome === "policy") {
 			return { ...prepared, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+		}
+
+		if (deps.approvalRequest && (prepared.session?.key !== deps.approvalRequest.sessionKey || prepared.session?.resume !== true)) {
+			await comment(job, APPROVAL_COMMENTS["approval-session-unavailable"]);
+			return { outcome: "policy", reason: "approval-session-unavailable", exitCode: null, turns: null, tokens: null, budgetReserved: false };
 		}
 
 		// THE RESOLVED FOLDER'S PROJECT (issue #504 part B). The pickup decided the project, and so the share a job reserves
@@ -2176,7 +2230,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
 			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
 		}
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		containerRan = true;
 		if (sourcePrimed && !lingering && !detached && !aborted && code === EXIT_COMPLETED) {
 			const rootKey = sessionKeyFor(job).split(".")[0];
@@ -2434,8 +2488,25 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// exitReason is RUNNER_COMPLETED_REASONS-filtered and read only here, on code 0, so it cannot move a job
 				// between retry classes. Only a job armed with run.awaitInput may park: a line that says so on any other
 				// job is ignored, since that runner was never offered the tool.
-				const parked = exitReason === "awaiting-input" && job.awaitInput === true;
+				const approvalParked = exitReason === "awaiting-approval" && Array.isArray(job.gates) && job.gates.includes(approvalMetadata?.action);
+				const parked = (exitReason === "awaiting-input" || approvalParked) && job.awaitInput === true;
 				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked }) : null;
+				if (deps.approvalRequest) {
+					const ended = await deps.approvalRuntime.finish({ requestId: deps.approvalRequest.requestId, jobId: deps.approvalJobId });
+					if (!ended.ok) return { outcome: "policy", reason: "approval-finish-unavailable", exitCode: code, turns, tokens, budgetReserved: true, session: mergeSession(prepared, session, promoted) };
+				}
+				let approvalFacts = null;
+				if (approvalParked) {
+					// A failed publication must not re-run a paid container. Keep the saved transcript and name the repair.
+					const fingerprint = promoted?.promoted === true && deps.approvalSessionCheck?.fingerprint ? deps.approvalSessionCheck.fingerprint({ sessionKey: prepared.session.key, ...approvalMetadata }) : null;
+					const approvalSession = fingerprint?.ok ? { ...prepared.session, digest: fingerprint.digest } : prepared.session;
+					const published = promoted?.promoted === true && isParked(job) ? await deps.approvalRuntime.afterPark({ job: { ...job, id: deps.queueJobId ?? sourceRunId }, session: approvalSession, metadata: approvalMetadata, rawJob: deps.rawApprovalJob ?? job }) : { refused: "approval-session-not-saved" };
+					if (!published.ok) {
+						await comment(job, APPROVAL_COMMENTS["approval-state-unavailable"]);
+						return { outcome: "policy", reason: published.refused ?? "approval-state-unavailable", exitCode: code, turns, tokens, budgetReserved: true, session: mergeSession(prepared, session, promoted) };
+					}
+					approvalFacts = published.audit;
+				}
 				// THE PARK SEQUENCE (issue #638 reordered it): promote, marker ON, release the window, take the held replies,
 				// then the comment. Every step closes a gap the one before it leaves open:
 				//   - the marker AFTER the promotion (a reply it routes must find the `parked` mark and the transcript) and
@@ -2450,16 +2521,17 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// throws and is guarded anyway: a fault must not cost the person the comment that says how to continue. The
 				// marker: set on a park, cleared when a run on a key that could park ends without parking; it decides nothing,
 				// the sidecar the promotion just wrote does.
-				if (parked) await parkedLabel(job, true);
+				if (parked) await parkedLabel(job, true, approvalParked);
 				else if (job.awaitInput === true || job.parkedReply === true) await parkedLabel(job, false);
 				if (parked) await Promise.resolve().then(releaseParkedWindow).catch(() => {});
 				const taken = parked ? await Promise.resolve().then(takeHeldReplies).catch(() => null) : null;
 				// `taken` "other": a reply that got in between the release and the take already is the resumed job, so the
 				// comment says the run continues there too, never "Reply here" (review round 2).
-				if (parked) await comment(job, taken?.taken === "here" || taken?.taken === "other" || Number(taken?.resumed) > 0 ? HELD_TAKEN_COMMENT : parkedComment(job.target));
+				if (parked) await comment(job, approvalParked ? APPROVAL_COMMENTS["awaiting-approval"] : taken?.taken === "here" || taken?.taken === "other" || Number(taken?.resumed) > 0 ? HELD_TAKEN_COMMENT : parkedComment(job.target));
 				return {
 					outcome: "completed",
-					...(parked ? { reason: "awaiting-input" } : {}),
+					...(parked ? { reason: approvalParked ? "awaiting-approval" : "awaiting-input" } : {}),
+					...(approvalFacts ? { approval: approvalFacts } : {}),
 					exitCode: code,
 					turns,
 					tokens,

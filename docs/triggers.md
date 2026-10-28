@@ -717,3 +717,5 @@ everything that runs in every job.
 
 Read where a workflow's own state lives before you build on it. It differs between
 a cron job and a forge job. See [`docs/workflows.md`](workflows.md).
+
+Resumable forge flows may declare typed approval gates with `run.gates`, an optional `run.gateTimeout`, and a bounded `run.gateBudgetRaiseUsd` for budget raises. See [approval gates](approval-gates.md) for configuration, decision surfaces and enforcement limits.

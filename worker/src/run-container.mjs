@@ -366,6 +366,8 @@ export function makeRunContainer({
 			// runner refuses the flag without one (await-input-without-session), so a job whose resume degraded to no
 			// mount is not armed into that refusal.
 			awaitInput: job.awaitInput === true && prepared.session ? true : undefined,
+			approvalGates: job.gates ?? null,
+			approvalDecision: job.approvalDecision ?? null,
 			// Issue #644: whether the runner offers `report_progress`, off `job` like awaitInput (env-allowlist.mjs maps it to
 			// PI_REPORT_PROGRESS=1). The worker reads the phases it reports only for the same job (`job.progress` below).
 			reportProgress: job.progress === true ? true : undefined,
@@ -817,6 +819,7 @@ export function makeRunContainer({
 				// RUNNER_POLICY_REASONS set and to a line that itself said code 2. The processor still decides
 				// the retry class from `code` alone; this only picks the label inside exit 2.
 				let exitReason = null;
+				let approval = null;
 				// Issue #501 (PR #542's review, round 3): the decisive exit line's own `code` (decisiveExitLine), which the
 				// dollar settlement compares with the container's real exit code before it trusts that line's cost.
 				let exitLineCode = null;
@@ -838,7 +841,7 @@ export function makeRunContainer({
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -846,6 +849,7 @@ export function makeRunContainer({
 					usage = null;
 					context = null;
 					exitReason = null;
+					approval = null;
 					exitLineCode = null;
 					exitWhy = null;
 					resources = null;
@@ -864,6 +868,7 @@ export function makeRunContainer({
 					usage = null;
 					context = null;
 					exitReason = null;
+					approval = null;
 					exitLineCode = null;
 					exitWhy = null;
 					resources = null;
@@ -902,7 +907,7 @@ export function makeRunContainer({
 				const steered = steerAsked ? { ...(steerArmed && steerShown !== null ? { steer: steerShown } : {}), ...(steerSkipped !== null ? { steerSkipped } : {}) } : {};
 				// Issue #712: the named live-transcript skip, for the record's `liveSkipped`, only when there was one.
 				const liveShown = liveSkipped !== null ? { liveSkipped } : {};
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
 			});
 		});
 

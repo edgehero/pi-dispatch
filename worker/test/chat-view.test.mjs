@@ -374,6 +374,26 @@ test("the reply view shows the question and sends parked-answer; a refusal is pr
 	assert.deepEqual(client.calls.act.map((c) => c.body), [{ jobId: "j1", text: "main, please" }, { jobId: "j1", text: "main, please" }]);
 });
 
+test("an approval reply names its gate, explains typed decisions and sends the command through the existing confirmation", async () => {
+	for (const action of ["budget-raise", "deploy:staging"]) {
+		const client = fakeClient({ act: async (_name, _body, { confirm }) => (await confirm()) ? { ok: true, result: { jobIds: ["j2"] } } : { declined: true } });
+		let screen;
+		const terminal = new FakeTerminal(160, 24);
+		const info = { run: { jobId: "j1", reason: "awaiting-approval", approval: { requestId: "a".repeat(64), action } }, state: "awaiting-approval", mode: "reply" };
+		const view = runReplyView({ proc: fakeProc(), client, info, who: { role: "operator" }, question: { pointer: "Read the request on its issue." }, pi, terminal, theme: plain, onScreen: (s) => (screen = s) });
+		const text = drawn(screen, 160).join("\n");
+		assert.ok(text.includes(action));
+		assert.match(text, /\/approve, \/decline \[reason\], or a question \(no approval\)/);
+		assert.match(text, action === "budget-raise" ? /Worker-enforced/ : /Advisory/);
+		screen.editor.setText("/approve");
+		terminal.type("\r");
+		await tick();
+		terminal.type("y");
+		assert.equal((await view).answered, true);
+		assert.deepEqual(client.calls.act.map((c) => [c.name, c.body]), [["parked-answer", { jobId: "j1", text: "/approve" }]]);
+	}
+});
+
 test("questionOf: a viewer or a missing transcript points at the forge; an operator gets the last assistant entry", async () => {
 	const info = { run: { jobId: "j1" }, forgeLink: "https://github.com/o/r/issues/7", transcript: { exists: true } };
 	assert.deepEqual(await questionOf({ client: fakeClient(), info, who: { role: "viewer" } }), { pointer: "The question is on https://github.com/o/r/issues/7" });

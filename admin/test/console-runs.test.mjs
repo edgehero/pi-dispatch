@@ -228,6 +228,7 @@ test("the summary: the five outcome counts of the window, each a link to those r
     { n: 1, label: "refused", status: "refused", href: "/runs?outcome=refused", floor: false, hidePhone: false },
     { n: 2, label: "failed", status: "failed", href: "/runs?outcome=failed", floor: false, hidePhone: false },
     { n: 1, label: "awaiting input", status: "parked", href: "/runs?outcome=awaiting-input", floor: false, hidePhone: false },
+    { n: 0, label: "awaiting approval", status: "parked", href: "/runs?outcome=awaiting-approval", floor: false, hidePhone: false },
     { n: 1, label: "cancelled", status: "cancelled", href: "/runs?outcome=cancelled", floor: false, hidePhone: false },
   ]);
   for (const it of m.strip.items) runsLink(it.href);
@@ -242,7 +243,7 @@ test("the summary: the five outcome counts of the window, each a link to those r
 
 test("the summary keeps the chosen project in its links and counts that project's runs; a floor and a partial window say at least", () => {
   const web = runsSummaryModel(viewOf({ qs: "project=web&outcome=failed&problems=1", data: { runsWindow: WINDOW } }));
-  assert.deepEqual(web.strip.items.map((i) => [i.n, i.href]), [[9, "/runs?project=web&outcome=completed"], [0, "/runs?project=web&outcome=refused"], [1, "/runs?project=web&outcome=failed"], [0, "/runs?project=web&outcome=awaiting-input"], [1, "/runs?project=web&outcome=cancelled"]], "the project's own counts, so a count is what its link finds");
+  assert.deepEqual(web.strip.items.map((i) => [i.n, i.href]), [[9, "/runs?project=web&outcome=completed"], [0, "/runs?project=web&outcome=refused"], [1, "/runs?project=web&outcome=failed"], [0, "/runs?project=web&outcome=awaiting-input"], [0, "/runs?project=web&outcome=awaiting-approval"], [1, "/runs?project=web&outcome=cancelled"]], "the project's own counts, so a count is what its link finds");
   assert.deepEqual([web.spentMicros, web.unpriced], [2_000_000, 1], "and that project's spend");
   assert.deepEqual(web.show.map((s) => [s.href, s.on]), [["/runs?project=web&outcome=failed", false], ["/runs?project=web&outcome=failed&problems=1", true]]);
   // A project the window names every project of, and not this one, ran nothing in it.
@@ -251,7 +252,7 @@ test("the summary keeps the chosen project in its links and counts that project'
   assert.deepEqual([none.spentMicros, none.unpriced, none.notes], [0, 0, RUNS_WINDOW_TEXT]);
   // More projects ran than the window counts one by one: the whole counts, said so.
   const many = runsSummaryModel(viewOf({ qs: "project=ops", data: { runsWindow: { ...WINDOW, projectsMore: 3 } } }));
-  assert.deepEqual(many.strip.items.map((i) => i.n), [23, 1, 2, 1, 1]);
+  assert.deepEqual(many.strip.items.map((i) => i.n), [23, 1, 2, 1, 0, 1]);
   assert.equal(many.spentMicros, WINDOW.spentMicros);
   assert.equal(many.notes, `${RUNS_WINDOW_TEXT} ${RUNS_WINDOW_EVERY_PROJECT}`);
   // A floor: every count says at least; a partial window too, and why.

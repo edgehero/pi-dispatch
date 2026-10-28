@@ -1556,7 +1556,7 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// argument is the reason, the shape `configError(message, reason)` in outcome.mjs gives the exit line.
 	const mcpSrc = ["../../image/runner/src/mcp.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
 	// The run.awaitInput refusals (issue #625) are thrown the same way, where the env is checked and the session built.
-	const awaitSrc = ["../../image/runner/src/config.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
+	const awaitSrc = ["../../image/runner/src/config.mjs", "../../image/runner/src/request-approval.mjs", "../../image/runner/run-job.mjs"].map((p) => readFileSync(new URL(p, import.meta.url), "utf8")).join("\n");
 	// The run.steer refusals (issue #646) are thrown where the inbox is checked (image/runner/src/inbox.mjs).
 	const steerSrc = readFileSync(new URL("../../image/runner/src/inbox.mjs", import.meta.url), "utf8");
 	for (const reason of RUNNER_POLICY_REASONS) {
@@ -1564,7 +1564,7 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(steerSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
 		}
-		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason) || PROGRESS_RUNNER_REASONS.includes(reason)) {
+		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason) || PROGRESS_RUNNER_REASONS.includes(reason) || reason.startsWith("approval-")) {
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(awaitSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
 		}
@@ -1590,7 +1590,9 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// The run.steer refusals (issue #646), both ways.
 	const steerThrown = new Set([...steerSrc.matchAll(/configError\(.*, "(steer-[a-z-]+)"\)/g)].map((m) => m[1]));
 	assert.deepEqual([...steerThrown].sort(), [...STEER_RUNNER_REASONS].sort());
-	// The one completed reason the worker acts on is the runner's exported literal (issue #625).
+	const approvalThrown = new Set([...awaitSrc.matchAll(/configError\(.*, "(approval-[a-z-]+)"\)/g)].map((m) => m[1]));
+	assert.deepEqual([...approvalThrown].sort(), [...RUNNER_POLICY_REASONS].filter((reason) => reason.startsWith("approval-")).sort());
+	// Completed reasons the worker acts on are exported literals (issues #625, #649).
 	for (const reason of RUNNER_COMPLETED_REASONS) assert.match(runnerSrc, new RegExp(`export const [A-Z_]+ = "${reason}";`));
 	for (const reason of ["cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]) {
 		assert.ok(RUNNER_POLICY_REASONS.has(reason), `${reason} is a runner reason the worker keeps`);

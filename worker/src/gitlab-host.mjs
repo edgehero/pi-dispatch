@@ -209,7 +209,7 @@ export function makeGitLabHost({ apiUrl = "https://gitlab.com", fetchFn = fetch 
 	 * project label the project lacks, and `remove_labels` of one the issue does not carry changes nothing. The caller treats any throw as fail-open:
 	 * the session store's sidecar, not this label, decides whether a reply resumes anything.
 	 */
-	async function setParkedLabel(projectRef, target, on, token) {
+	async function setParkedLabel(projectRef, target, on, token, label = PARKED_LABEL) {
 		const id = projectId(projectRef);
 		const path = `/projects/${id}/issues/${encodeURIComponent(target?.number)}`;
 		let res;
@@ -217,7 +217,7 @@ export function makeGitLabHost({ apiUrl = "https://gitlab.com", fetchFn = fetch 
 			res = await fetchFn(`${root}${path}`, {
 				method: "PUT",
 				headers: { "PRIVATE-TOKEN": token, "content-type": "application/json" },
-				body: JSON.stringify(on ? { add_labels: PARKED_LABEL } : { remove_labels: PARKED_LABEL }),
+				body: JSON.stringify(on ? { add_labels: label } : { remove_labels: label }),
 				redirect: "error",
 			});
 		} catch (err) {

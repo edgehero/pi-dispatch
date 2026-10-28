@@ -33,7 +33,7 @@
  */
 
 import {
-	BUNDLE_COMMENTS,
+	APPROVAL_COMMENTS,	BUNDLE_COMMENTS,
 	MODEL_NOT_ALLOWED_COMMENTS,
 	FAILED_COMMENT_BY_REASON,
 	OPENSHELL_REFUSALS,
@@ -57,6 +57,7 @@ const REBUILD = "Rebuild the job image from a release that declares the feature,
  * table read is derived; a string literal is written here for one of the three reasons in the header.
  */
 const ROWS = [
+	...Object.entries(APPROVAL_COMMENTS).map(([token, sentence]) => [token, sentence, "Check the current approval, its saved session, and the trigger declaration; reload before replying again."]),
 	// ── Stopped while running ───────────────────────────────────────────────────────────────────────────────────────
 	["worker-abort", TERMINAL_COMMENTS["worker-abort"], "Check the worker log for the 30-minute limit or a shutdown, then run the job again if its work is still wanted."],
 	["operator-cancel", "Stopped: the operator cancelled this run. If it had started, partial work may exist; if it was cancelled before it started, nothing was spent. Not retried.", "Nothing to fix. Run the job again if its work is still wanted."],

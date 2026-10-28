@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -4690,7 +4690,7 @@ export function createFleetReader(
       try {
         const job = await retainedJob(jobId, lookup);
         if (job === undefined) return { unreachable: true };
-        const judged = parkedAnswerRefusalOf({ jobId, data: job?.data ?? null, triggersPath: paths.triggersPath ?? null, fs });
+        const judged = parkedAnswerRefusalOf({ jobId, data: job?.data ?? null, triggersPath: paths.triggersPath ?? null, approval: Array.isArray(job?.data?.gates), fs });
         return judged.refusal ? { refusal: judged.refusal } : { ok: true };
       } catch {
         return { unreachable: true };
@@ -6254,7 +6254,7 @@ export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs 
   }
   const out = [];
   for (const r of list) {
-    if (r.outcome !== "completed" || r.reason !== "awaiting-input") continue;
+    if (r.outcome !== "completed" || !["awaiting-input", "awaiting-approval"].includes(r.reason)) continue;
     const at = runAt(r);
     const known = typeof r.target === "string" && typeof r.kind === "string";
     const answered = known && Number.isFinite(at) && latest.get(targetKeyOf(r.kind, r.target)) > at;
@@ -6267,6 +6267,7 @@ export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs 
       parkedAt: Number.isFinite(at) ? at : null,
       ageMs: Number.isFinite(at) && Number.isFinite(nowMs) ? Math.max(0, nowMs - at) : null,
       answered,
+      ...(r.reason === "awaiting-approval" ? { reason: r.reason, approval: approvalRecordOf(r.approval) } : {}),
       chainCount: readChainCount(sessionsDir, sessionKeyOfRecord(r), fs),
     });
   }

@@ -225,7 +225,7 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 	 * this fix is cleared too. The duplicate repository labels themselves are left alone: deleting a repository's labels
 	 * is the operator's call, and a spare one carried by no issue routes nothing (docs/forgejo.md says how to tidy them).
 	 */
-	async function setParkedLabel(ref, target, on, token) {
+	async function setParkedLabel(ref, target, on, token, label = PARKED_LABEL) {
 		const [owner, name] = splitRepo(ref);
 		const send = async (method, path, body, accept = []) => {
 			let res;
@@ -243,17 +243,17 @@ export function makeForgejoHost({ apiUrl, fetchFn = fetch } = {}) {
 			return res;
 		};
 		const issue = `/repos/${owner}/${name}/issues/${encodeURIComponent(target?.number)}/labels`;
-		const markers = (labels) => (Array.isArray(labels) ? labels : []).filter((l) => l?.name === PARKED_LABEL && Number.isSafeInteger(l?.id)).map((l) => l.id);
+		const markers = (labels) => (Array.isArray(labels) ? labels : []).filter((l) => l?.name === label && Number.isSafeInteger(l?.id)).map((l) => l.id);
 		if (on) {
 			let ids = await repoLabelIds(owner, name, token, markers);
 			if (ids.length === 0) {
-				const res = await send("POST", `/repos/${owner}/${name}/labels`, { name: PARKED_LABEL, color: "#fbca04", description: "pi-dispatch: the last run is waiting for an answer" }, [409, 422]);
+				const res = await send("POST", `/repos/${owner}/${name}/labels`, { name: label, color: "#fbca04", description: "pi-dispatch: the last run is waiting for an answer" }, [409, 422]);
 				// A forge that DOES refuse the duplicate (409/422, a Gitea or a later Forgejo) raced another park to it: list
 				// again. A 201 hands back the label, so no second read is needed.
 				const created = res.ok ? await res.json().catch(() => null) : null;
 				ids = Number.isSafeInteger(created?.id) ? [created.id] : await repoLabelIds(owner, name, token, markers);
 			}
-			if (ids.length === 0) throw new InfraRetry(`forgejo-host: ${owner}/${name} has no ${PARKED_LABEL} label after creating it`);
+			if (ids.length === 0) throw new InfraRetry(`forgejo-host: ${owner}/${name} has no ${label} label after creating it`);
 			await send("POST", issue, { labels: [Math.min(...ids)] });
 			return;
 		}

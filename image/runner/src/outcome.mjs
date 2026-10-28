@@ -29,6 +29,7 @@ export const MODEL_POLICY_UNENFORCEABLE = "model-policy-unenforceable";
  * closed RUNNER_COMPLETED_REASONS cannot import this file and reads this source for `= "<reason>"`.
  */
 export const AWAITING_INPUT = "awaiting-input";
+export const AWAITING_APPROVAL = "awaiting-approval";
 
 /**
  * Which rule of the cost guard refused the call that stopped a `cost-cap` job (issue #507), as the exit line's `why`:
@@ -181,7 +182,7 @@ export function captureTerminal(previous, event) {
 // `parked` (issue #625) is true only when the job was armed with run.awaitInput AND the run ended on that tool's own
 // result (await-input.mjs parkedTerminal). It ranks below every budget stop and a classified rejection, which are the
 // better-named causes, and above everything else: a parked run is completed, and its reason is what the worker reads.
-export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, terminal, command = null, isRetryable = null, rejected = null, parked = false }) {
+export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, terminal, command = null, isRetryable = null, rejected = null, parked = false, approval = false }) {
 	if (budgetAborted) {
 		return { code: EXIT_POLICY, reason: "turn_budget", turns: budgetTurns };
 	}
@@ -192,6 +193,7 @@ export function decideExit({ budgetAborted, budgetTurns, meterStop = null, token
 		return { code: EXIT_POLICY, reason: TOKEN_BUDGET };
 	}
 	if (rejected) return rejected;
+	if (approval) return { code: EXIT_COMPLETED, reason: AWAITING_APPROVAL };
 	if (parked) return { code: EXIT_COMPLETED, reason: AWAITING_INPUT };
 	// A command job (issue #189, run.command): session.prompt("/name args") dispatches a registered
 	// extension command and returns with NO assistant message, so the no-terminal branch below would

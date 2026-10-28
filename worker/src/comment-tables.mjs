@@ -270,3 +270,34 @@ export const SIZE_REFUSAL_COMMENTS = Object.freeze({
 
 /** The comment for a job the operator cancelled before it started, where it would have been held or retried (gate of PR #479). */
 export const CANCELLED_BEFORE_START_COMMENT = "Stopped: the operator cancelled this run before it started. Nothing was spent. Not retried.";
+
+// Issue #649: all approval sentences are fixed; human summaries and reasons stay in the private session/store.
+export const APPROVAL_COMMENTS = {
+	"awaiting-approval": "Approval requested. Reply /approve, /decline followed by an optional reason, or ask a question. Only an authorized reply can continue the saved run.",
+	"approval-config-invalid": "Stopped: the approval gate configuration is invalid. Check the trigger declarations and rebuild a matching worker and job image. Not retried.",
+	"approval-without-session": "Stopped: approval gates need a persisted session. Check the session store and job image. Not retried.",
+	"approval-shadowed": "Stopped: another extension registered the reserved approval tool. Remove the conflicting registration and run again. Not retried.",
+	"approval-decision-invalid": "Stopped: the decision does not match the parked tool result. Check the retained session and request before starting another run. Not retried.",
+	"approval-author-missing": "Refused: this approval reply has no authorized actor identifier. Reply through an authenticated operator surface or the forge. Not run.",
+	"approval-expired": "Refused: this approval expired. Its durable decline is continued by the expiry job. Not run.",
+	"approval-expiry-invalid": "Refused: the expiry job does not match a durable system decline. Check the approval store. Not run.",
+	"approval-host-mismatch": "Refused: the saved approval session belongs to another worker host. Route the reply to that host. Not run.",
+	"approval-job-id-missing": "Refused: the approval continuation has no queue identifier. Check the worker wiring. Not run.",
+	"approval-park-invalid": "The approval request did not match a declared gate and saved session. No approval is armed. Check the runner and trigger declaration.",
+	"approval-pending": "Refused: this run is waiting for an approval decision. Approve, decline, or ask a question before starting more work. Not run.",
+	"approval-policy-changed": "Refused: the approval declaration changed. Start a new authorized run under the current trigger policy. Not run.",
+	"approval-policy-unavailable": "Refused: the current approval declaration could not be read. Check the triggers file before trying again. Not run.",
+	"approval-request-conflict": "The saved approval request conflicts with this conversation. No new approval is armed. Check the session and durable request.",
+	"approval-request-stale": "Refused: this reply names an approval request that is no longer pending. Reload the current request before answering. Not run.",
+	"approval-request-unbound": "Refused: this reply is not bound to the pending approval request. Reply again after the approval is published. Not run.",
+	"approval-state-conflict": "Refused: the approval was already decided, consumed, or superseded. Check its recorded decision before starting another run. Not run.",
+	"approval-state-unavailable": "The approval could not be saved durably. No approval is armed. Check the session store and Valkey before starting another run.",
+	"approval-store-unavailable": "Refused: this worker has no durable approval store. Check the worker configuration. Not run.",
+	"approval-finish-unavailable": "The approval continuation ended but its durable completion could not be saved. Check Valkey and the request before starting another run.",
+	"approval-session-not-saved": "The approval conversation could not be saved. No approval is armed. Check the retained session before starting another run.",
+	"approval-session-unavailable": "Refused: the approved session could not be resumed. No approval can be transferred to a new conversation. Check the retained session and its limits.",
+	"job-image-approval-gates-unsupported": "Refused: the job image does not declare approval gates. Rebuild the job image with approval support. Not run.",
+	"job-image-approval-auth-unsupported": "Refused: approval gates need an image with authenticated runner exits (exitAuth). Rebuild the job image. Not run."
+};
+
+for (const reason of ["approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]) TERMINAL_COMMENTS[reason] = APPROVAL_COMMENTS[reason];

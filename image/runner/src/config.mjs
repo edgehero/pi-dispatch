@@ -1,3 +1,4 @@
+import { parseApprovalEnv } from "./request-approval.mjs";
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { LAYOUT, LAYOUT_ENV, layoutName } from "./layout.mjs";
@@ -68,6 +69,7 @@ export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 		// await_human_input tool and may end as `awaiting-input`. `false` (the overwhelmingly common state) is
 		// byte-identical to every job before the feature.
 		awaitInput: parseAwaitInput(env, "PI_AWAIT_INPUT"),
+		...parseApprovalEnv(env),
 		// INT-CONTAINER-JOB-INPUTS (issue #644): the trigger's run.progress -- whether the job is offered the
 		// report_progress tool. `false` (the default) is byte-identical to every job before the feature.
 		reportProgress: parseReportProgress(env, "PI_REPORT_PROGRESS"),

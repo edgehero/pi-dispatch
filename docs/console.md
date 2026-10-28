@@ -1109,7 +1109,7 @@ run that was lost and could not be continued (`recovery-cap`, `recovery-checkpoi
 `recovery-unsafe-extensions`, recorded as `policy`) is **failed** ([durable-runs.md](durable-runs.md)). The record's
 `backend` is the **Venue**, the spend page is **Spend** (its insights are the page's content, still at `/insights`), and
 the jobs held on a wait are **Held**. The runs page filters and counts by those words: `outcome=` takes `completed`,
-`refused`, `failed`, `awaiting-input` and `cancelled`, so `outcome=failed` finds the lost durable runs too and
+`refused`, `failed`, `awaiting-input`, `awaiting-approval` and `cancelled`, so `outcome=failed` finds the lost durable runs too and
 `outcome=completed` leaves out the runs awaiting input, and it still takes the record's own `policy`, which lists every
 refused, cancelled and lost run, so an older link keeps working ([Finding runs](#finding-runs)). The field names stay
 the record's (`outcome`, `backend`).
@@ -1348,7 +1348,7 @@ The same filters can be written in the query string. Each one is matched exactly
 | `project` | project id |
 | `host` | worker name |
 | `backend` | venue, as the Venues panel on `/fleet` names it (a run recorded before venues were recorded counts as `local`) |
-| `outcome` | outcome, as the page words it: `completed`, `refused`, `failed`, `awaiting-input` or `cancelled`, or the record's own `policy` (every refused, cancelled and lost durable run); any other value is refused |
+| `outcome` | outcome, as the page words it: `completed`, `refused`, `failed`, `awaiting-input`, `awaiting-approval` or `cancelled`, or the record's own `policy` (every refused, cancelled and lost durable run); any other value is refused |
 | `reason` | reason, such as `awaiting-input` or `over-budget` |
 | `model` | model id |
 | `q` | target or job id, any part of it, ignoring case (`web#12`, `gh-2f6a`) |
@@ -1860,3 +1860,9 @@ The design and its rejected alternatives are `DES-OPERATOR-CONSOLE` in [`specs/d
 testable rules are `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS`,
 `REQ-LIVE-TRANSCRIPT` and `REQ-RUN-PROGRESS` in [`specs/requirements.md`](../specs/requirements.md); the threat model and
 what it does not defend are in [`SECURITY.md`](../SECURITY.md#the-operator-console).
+
+### Approval requests
+
+A run with declared gates can end as `awaiting-approval`. It leaves no container waiting. The Parked page and run chat show the named action, whether the worker enforces it, and operator controls to approve, decline with an optional reason, or ask a question. Every choice previews and confirms through the existing audited parked-answer action. A question resumes the agent without granting approval. Viewers and read-only consoles have no decision controls. The terminal chat uses `/approve`, `/decline [reason]`, or ordinary question text through the same API.
+
+`budget-raise` is worker-enforced and uses the cap declared by the trigger, within deployment and scoped limits. Other declared external actions are advisory. Push-to-default-branch and PR-open gates are refused until they can be enforced. Summary and reason text stay in the transcript and forge comment, never the run record.

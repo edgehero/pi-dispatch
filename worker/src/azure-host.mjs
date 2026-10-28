@@ -270,12 +270,12 @@ export function makeAzureHost({ orgUrl, fetchFn = fetch } = {}) {
 	 * whole, so this reads it, edits the one tag and writes the result; Azure creates a tag the project lacks. The caller treats any throw as fail-open:
 	 * the session store's sidecar, not this label, decides whether a reply resumes anything.
 	 */
-	async function setParkedLabel(ref, target, on, token) {
+	async function setParkedLabel(ref, target, on, token, label = PARKED_LABEL) {
 		const { project } = scopeOf(ref);
 		const path = `/${encodeURIComponent(project)}/_apis/wit/workitems/${encodeURIComponent(target?.number)}`;
 		const item = await get(`${path}?fields=System.Tags&api-version=${API_VERSION}`, token);
-		const tags = String(item?.fields?.["System.Tags"] ?? "").split(";").map((tag) => tag.trim()).filter((tag) => tag !== "" && tag !== PARKED_LABEL);
-		const value = (on ? [...tags, PARKED_LABEL] : tags).join("; ");
+		const tags = String(item?.fields?.["System.Tags"] ?? "").split(";").map((tag) => tag.trim()).filter((tag) => tag !== "" && tag !== label);
+		const value = (on ? [...tags, label] : tags).join("; ");
 		let res;
 		try {
 			res = await fetchFn(`${root}${path}?api-version=${API_VERSION}`, {

@@ -1239,8 +1239,10 @@ const jobActions = [
     bulk: false,
     needs: JOB_NEEDS,
     async preview(body, ctx) {
+      if (body.decision !== undefined && !["approve", "decline"].includes(body.decision)) return { refusal: "approval decision must be approve or decline; nothing was queued" };
       const jobId = jobIdOf(body);
-      const text = typeof body.text === "string" ? body.text : "";
+      const answerText = typeof body.text === "string" ? body.text : "";
+      const text = body.decision === "approve" ? "/approve" : body.decision === "decline" ? `/decline${answerText.trim() ? ` ${answerText.trim()}` : ""}` : answerText;
       const { rm, paths } = ctx.a;
       // `by` is the session's token name, never anything the body says: the trail comment names who answered.
       const got = planned(await rm.planParkedAnswer({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, text, by: ctx.session.name, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now }));
@@ -1253,7 +1255,7 @@ const jobActions = [
         reserve: p.reserve ?? null,
         // The answer's digest, never its text: the audit row's afterDigest (INT-CONSOLE-AUDIT-LOG).
         afterDigest: sha256(answer),
-        summary: [`Answer parked run ${jobId} on ${p.forge}, as ${ctx.session.name}`, `It resumes the parked transcript on queue ${p.queue}; once the job passes every check and reserve, the worker posts one comment on the issue saying the operator console answered, quoting the answer.`, ...runFieldsLines(p.runFields, "It runs as the comment trigger says now")],
+        summary: [`${p.approval ? "Decide approval for" : "Answer parked run"} ${jobId} on ${p.forge}, as ${ctx.session.name}`, ...(p.approval ? [`Gate ${p.approval.action}, request ${p.approval.requestId}`, p.approval.action === "budget-raise" ? `Approval permits an absolute resumed-job cap of $${p.approval.cap}, within deployment and scoped budgets; decline or a question grants no increase.` : "This external action is advisory; approval does not grant a new worker permission."] : []), `It resumes the parked transcript on queue ${p.queue}; once the job passes every check and reserve, the worker posts one comment on the issue saying the operator console answered, quoting the answer.`, ...runFieldsLines(p.runFields, p.approval ? "It runs as the original trigger says now" : "It runs as the comment trigger says now")],
         diff: textHtml(answer),
       };
     },
@@ -1793,7 +1795,7 @@ const WRITE_RULES = {
     confirmLabel: (out) => paidLabel("Re-run", out.reserve),
     done: (out) => `Queued a re-run of ${out.target}`,
   },
-  "parked-answer": { fields: ["jobId", "text"], danger: false, undo: say(UNDO_SENTENCES.answer), inverse: none, confirmLabel: (out) => paidLabel("Answer", out.reserve), done: (out) => `Answered parked run ${out.target}` },
+  "parked-answer": { fields: ["jobId", "text", "decision"], danger: false, undo: say(UNDO_SENTENCES.answer), inverse: none, confirmLabel: (out) => paidLabel("Answer", out.reserve), done: (out) => `Answered parked run ${out.target}` },
   steer: {
     fields: ["jobId", "mode", "text"],
     danger: false,
