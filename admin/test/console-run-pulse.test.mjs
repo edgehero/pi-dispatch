@@ -130,3 +130,12 @@ test("the parked question leads the main column while live steering stays in the
   const live = String((await renderPage("run", ctx("live"))).html);
   assert.match(live, /class="stack run-side"><section id="p-chat" data-panel>/);
 });
+
+
+test("queued jobs claim no sandbox and an unread live venue is unknown rather than a legacy local run", () => {
+  const data = { run: { missing: true }, activeRun: { target: "acme/web#42", host: null, backend: null }, chat: { state: "queued", jobState: "waiting" } };
+  assert.equal(String(runSandbox(view(data))), "");
+  const running = String(runSandbox(view({ ...data, chat: { state: "active", jobState: "active" } })));
+  assert.match(running, /venue could not yet be read/);
+  assert.doesNotMatch(running, /local run from before|Kept on|Who holds the credentials/);
+});

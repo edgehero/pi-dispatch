@@ -806,8 +806,11 @@ export function runActionsPanel(view) {
 }
 
 export function runSandbox(view) {
-  const r = recordOf(view) ?? view.data?.activeRun;
-  if (!r) return html``;
+  const record = recordOf(view);
+  const r = record ?? view.data?.activeRun;
+  if (!r || (!record && !runningWithoutRecord(view))) return html``;
+  // Only a historical record can predate venue attribution. Missing live facts are unknown, never legacy local.
+  if (!record && !r.backend) return titled("Sandbox", html`<p>This running job's venue could not yet be read. Its host's default is not known here.</p>`);
   const venue = r.backend ?? UNATTRIBUTED_BACKEND;
   const serves = servesOf(venue), custody = venueCustody(venue);
   const check = view.data?.sandboxCheck;
