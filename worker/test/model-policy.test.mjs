@@ -269,7 +269,7 @@ const skewFile = (run) => ({ readFileSync: () => JSON.stringify({ triggers: [{ o
 const arrived = (extra = {}) => ({ trigger: { matched: { index: 0, type: "label" } }, kind: "github", flow: "fix", ...extra });
 
 test("the skew check refuses a job whose AUTHORED trigger lists models it arrived without, and reads one row per field", async () => {
-	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "maxCostUsd", "mcp", "awaitInput", "progress", "statusComment", "recover", "steer"], "a new narrowing field is one row here");
+	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["models", "fallbackModels", "maxCostUsd", "mcp", "awaitInput", "progress", "statusComment", "recover", "steer"], "a new narrowing field is one row here");
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ models: ["openai/gpt-x"] }) });
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "models" }, "a stale receiver dropped the list");
 	assert.deepEqual(await check(arrived({ models: null })), { skewed: true, field: "models" }, "null is absent");
@@ -486,4 +486,12 @@ test("a model under an overlay provider pi would not compose is unknown, with it
 	// A builtin model of ANOTHER provider is untouched, and an entry with nothing pi could drop refuses nothing.
 	assert.deepEqual(checkModelsKnown([{ provider: "anthropic", id: "claude-haiku-4-5", main: true }], { readOverlay: () => broken }), { ok: true });
 	assert.deepEqual(checkModelsKnown([{ provider: "openai", id: "gpt-4o", main: true }], { readOverlay: () => ({ providers: { openai: {} } }) }), { ok: true });
+});
+
+test("the skew check refuses a dropped reviewed fallback list (#716)", async () => {
+	const fallbackModels = ["openai/gpt-x"];
+	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ fallbackModels }) });
+	for (const value of [undefined, null]) assert.deepEqual(await check(arrived({ fallbackModels: value })), { skewed: true, field: "fallbackModels" });
+	assert.deepEqual(await check(arrived({ fallbackModels })), { ok: true });
+	assert.deepEqual(await check(arrived({ flow: "other" })), { ok: true });
 });

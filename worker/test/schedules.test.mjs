@@ -267,3 +267,10 @@ test("an unflagged cron trigger's data grows no portfolio key: the stored schedu
 	assert.equal("portfolio" in s.data, false);
 	assert.equal(JSON.stringify(s.data), JSON.stringify({ kind: "local", folder: "/proj", flow: "tidy", task: "run the tidy pass", trigger: { id: "nightly-tidy", pattern: "0 3 * * *" } }));
 });
+
+test("cron fallbackModels reach scheduler data in reviewed order (#716)", () => {
+	const fallbackModels = ["anthropic/claude-x", "openai/gpt-x"];
+	const [s] = load([{ ...CRON, run: { ...CRON.run, fallbackModels } }]);
+	assert.deepEqual(s.data.fallbackModels, fallbackModels);
+	assert.equal("fallbackModels" in load([CRON])[0].data, false);
+});

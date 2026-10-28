@@ -22,6 +22,7 @@
  * a 503 with a fixed sentence (the mode would otherwise be judged on half the facts, and a wrong mode is worse than
  * none).
  */
+import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import { LIVE_OUTCOMES } from "@edgehero/pi-dispatch/live-transcript";
 import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
@@ -127,6 +128,8 @@ export function safeRunOf(id, record) {
     finishedAt: iso(r.endedAt),
     provider: str(r.provider, RUN_PROVIDER_RE),
     model: str(r.model, RUN_MODEL_RE),
+    ...(MODEL_WHY.includes(r.modelWhy) ? { modelWhy: r.modelWhy } : {}),
+    ...(providerFailureOf(r.providerFailure) ? { providerFailure: providerFailureOf(r.providerFailure) } : {}),
     host: str(r.host, WORKER_NAME_RE),
     backend: str(r.backend, BACKEND_RE),
     project: str(r.project, PROJECT_ID_RE),

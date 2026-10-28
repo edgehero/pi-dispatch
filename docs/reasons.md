@@ -304,6 +304,15 @@ The deployment has no usable credential for the job's AI provider. Nothing was s
 What to do: run `pi-dispatch doctor` on the worker. It names the variable to set. See
 [global-pi-overlay.md](global-pi-overlay.md).
 
+### model-failover-no-candidate
+
+None of the job's reviewed model candidates can run safely. No container started and nothing was spent. Temporary
+cooldowns, full model windows and busy endpoints defer instead; this refusal names a configuration or replay-safety
+problem that waiting cannot resolve.
+
+What to do: check `run.fallbackModels`, the effective allowed list, provider credentials, pricing and egress. The
+worker log names each skipped configured model and its fixed reason. See [model-failover.md](model-failover.md).
+
 ## The job image
 
 Each of these refusals happens before anything is spent. The image is present, but it lacks something this job needs.
@@ -341,6 +350,12 @@ See [exclude-tools.md](exclude-tools.md).
 ### job-image-model-policy-unsupported
 
 The image does not declare allowed model support, so its runner could not hold the job to its model list.
+
+### job-image-model-failover-unsupported
+
+The image does not declare `modelFailover`, so its runner cannot report the signed failure and replay-safety evidence
+needed for a reviewed next-attempt fallback. Rebuild the image before enabling `run.fallbackModels`. See
+[model-failover.md](model-failover.md).
 
 ### job-image-cost-cap-unsupported
 

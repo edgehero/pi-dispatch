@@ -179,7 +179,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, maxCostUsd, image, backend, excludeTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, image, backend, excludeTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -188,7 +188,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 	// vanish silently -- and the `cmd:` prefix keeps a command named X from colliding with a flow named X
 	// (`:` is outside the skill-name charset, so no real flow can spell the prefixed form). A flow job's
 	// key is byte-identical to before the feature.
-	const id = jobId ?? localJobId({ folder, flow: command !== undefined ? `cmd:${command}` : flow, task, minute, provider, model, models });
+	const id = jobId ?? localJobId({ folder, flow: command !== undefined ? `cmd:${command}` : flow, task, minute, provider, model, models, fallbackModels });
 	// image/chainDepth/parentJobId land on `data` only when present, so a plain non-chained job's data is
 	// byte-identical. `image` is the container image this job runs in (INT-TRIGGERS-FILE-CONTRACT); absent
 	// resolves the deployment default at job start, never a value frozen here.
@@ -207,6 +207,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		// Issue #502: the allowed-model list, conditional like `image`, so a job whose trigger named none keeps its
 		// data byte-identical. An outbox child carries its parent's (outbox.mjs), never one its request file names.
 		...(models !== undefined && { models }),
+		...(fallbackModels !== undefined && { fallbackModels }),
 		// Issue #501: the per-job dollar cap, passed through for the outbox child that inherits its parent's.
 		...(maxCostUsd !== undefined && { maxCostUsd }),
 		...(image !== undefined && { image }),
@@ -420,7 +421,7 @@ export async function enqueueLateForgeJob(queue, kind, fields) {
 }
 
 /** The forge job's id, its data (an explicit field list, see `enqueueForgeJob`) and its semantic dedup id. Throws on a bad delivery id or console name. */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (approvalRequestId !== undefined && (typeof approvalRequestId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(approvalRequestId))) throw new TypeError("approval-request-invalid");
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
@@ -456,6 +457,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// Issue #502: the allowed-model list, conditional like `packages` below so an unflagged trigger's job data is
 		// byte-identical, and at JOB level, never inside `trigger` (copied verbatim into /job/event.json).
 		...(models !== undefined && { models }),
+		...(fallbackModels !== undefined && { fallbackModels }),
 		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
 		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no

@@ -96,6 +96,7 @@ const ROWS = [
 	["wait-expired", "Not run: the job gave up waiting, because its condition did not clear within the maximum wait or number of checks.", "Run the job again once the condition holds, or allow a longer wait."],
 	// ── Models and providers ────────────────────────────────────────────────────────────────────────────────────────
 	["model-unknown", modelUnknownComment(null), "Check the trigger's model and provider names, or fix the overlay `models.json` that `pi-dispatch doctor` names."],
+	["model-failover-no-candidate", "Stopped before starting: none of this job's reviewed models can run safely, so no container was started and nothing was spent.", "Check the trigger's run.fallbackModels, its allowed list, provider credentials, pricing and egress. The worker log names each skipped model and its fixed reason."],
 	["provider-unconfigured", "Refused: this deployment has no usable credential for the job's AI provider, so no container was started and nothing was spent. Not run.", "Run `pi-dispatch doctor` on the worker: it names the variable to set."],
 	// ── The job image ───────────────────────────────────────────────────────────────────────────────────────────────
 	["job-image-missing", "Refused: the job image this job runs is not present on the worker host, so no container was started and nothing was spent. Not run.", "Pull or build the image on the worker, or set the trigger's `run.image` to one that is there."],
@@ -104,6 +105,7 @@ const ROWS = [
 	["job-image-commands-unsupported", imageRefusal("command support", "its runner would not dispatch `run.command`"), REBUILD],
 	["job-image-exclude-tools-unsupported", imageRefusal("exclude-tools support", "its runner would ignore `run.excludeTools`"), REBUILD],
 	["job-image-model-policy-unsupported", imageRefusal("allowed-model support", "its runner cannot hold this job to the models it may use"), REBUILD],
+	["job-image-model-failover-unsupported", imageRefusal("model-failover support", "its runner cannot report the signed provider failure and replay-safety evidence this job needs"), REBUILD],
 	["job-image-cost-cap-unsupported", imageRefusal("cost-cap support", "its runner would ignore the per-job dollar cap"), REBUILD],
 	["job-image-any-uid-unsupported", imageRefusal("`anyUid`", "it cannot run as this worker's own uid, which this host's container runtime requires"), REBUILD],
 	["job-image-mcp-unsupported", imageRefusal("MCP support", "its runner would not connect the servers `run.mcp` names"), REBUILD],

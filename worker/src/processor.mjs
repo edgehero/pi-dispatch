@@ -981,6 +981,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			if (!ready.ok) return { outcome: "policy", reason: "approval-session-unavailable", exitCode: null, turns: null, tokens: null, budgetReserved: false };
 		}
 
+		if (job.fallbackModels !== undefined && !(img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY)) {
+			const required = CAPABILITY_GATES.find((row) => row.token === "modelFailover");
+			await comment(job, required.comment(img.image ?? job.image ?? "selected image", "lacks authenticated exit support"));
+			return { outcome: "policy", reason: "job-image-model-failover-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false };
+		}
 		if (job.gates && !(img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY)) {
 			await comment(job, APPROVAL_COMMENTS["job-image-approval-auth-unsupported"]);
 			return { outcome: "policy", reason: "job-image-approval-auth-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false };
@@ -1401,7 +1406,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			const read = await workspaceCheckpointer.readManifest(runId);
 			const m = read?.ok === true ? read.manifest : null;
 			const venue = resolveBackendName(job, blessedBackends[0]);
-			const why = m === null ? (read?.absent ? "absent" : "invalid") : typeof hostName === "string" && hostName !== "" && m.host !== normalizeHost(hostName) ? "host" : piVersion === null || m.piVersion !== piVersion ? "pi-version" : m.venue !== venue ? "venue" : null;
+			const why = m === null ? (read?.absent ? "absent" : "invalid") : typeof hostName === "string" && hostName !== "" && m.host !== normalizeHost(hostName) ? "host" : piVersion === null || m.piVersion !== piVersion ? "pi-version" : m.venue !== venue ? "venue" : (m.provider !== job.provider || m.model !== job.model) ? "model" : null;
 			if (why !== null) {
 				await comment(job, RECOVERY_COMMENTS["recovery-checkpoint-absent"]);
 				// `why` is a fixed token, and `invalid`'s detail is the store's own fixed reason (`field:seq`, `transcript-mismatch`).

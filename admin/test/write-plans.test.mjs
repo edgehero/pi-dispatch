@@ -841,3 +841,15 @@ test("no confirm a planner builds says a change or a mapping with an arrow, on t
     restore();
   }
 });
+
+test("no trigger tool can carry fallbackModels or its near misses, even to clear it (#716)", () => {
+  for (const tool of ["dispatch_trigger_add", "dispatch_trigger_edit"]) {
+    for (const key of ["fallbackModels", "FallbackModels", "fallback_models", "fallbackModel", "fallbackModelIds", "fallback_model_names", "fallbackM\u043Edels"]) {
+      for (const value of [["openai/x"], [], null, undefined]) {
+        for (const params of [{ [key]: value }, { run: { [key]: value } }, { on: { [key]: value } }]) {
+          assert.match(plans.wideningFieldRefusal(params, tool), /cannot set run\.fallbackModels/);
+        }
+      }
+    }
+  }
+});

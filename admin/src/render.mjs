@@ -423,7 +423,7 @@ function triggerLine(t) {
   // The two spend narrowings no tool can set (issues #501 and #502): which models the trigger's jobs may call, and
   // its per-job dollar cap. Listed in full: the models a job can reach are not a fact to summarize as a count.
   // Absent when unset, appended last, so every existing line is byte-identical.
-  const pol = `${Array.isArray(t?.models) && t.models.length > 0 ? `  [models ${t.models.join(", ")}]` : ""}${t?.maxCostUsd ? `  [max $${t.maxCostUsd}]` : ""}`;
+  const pol = `${Array.isArray(t?.models) && t.models.length > 0 ? `  [models ${t.models.join(", ")}]` : ""}${t?.maxCostUsd ? `  [max $${t.maxCostUsd}]` : ""}${Array.isArray(t?.fallbackModels) && t.fallbackModels.length > 0 ? `  [fallbacks ${t.fallbackModels.join(", ")}]` : ""}`;
   // A portfolio trigger (issue #505) says so (issue #507): its jobs write the budget split every other project spends
   // under, and a trigger that sets the split must not read like one that only spends inside it. Cron only (the loader
   // refuses it elsewhere), the panel row's text (#482 parity), appended last so every other line is byte-identical.

@@ -512,12 +512,12 @@ test("a chained child inherits the PARENT'S provider, model, models and maxCostU
 	// Once a model is policy, a child on the deployment default escapes it: a listed parent would chain an
 	// unlisted child. The request file is agent-authored, so each key in it must be inert, whether it would
 	// switch the child's model, widen its list, or lift its cost cap.
-	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", provider: "MARKER-p", model: "MARKER-m", models: ["MARKER/x"], maxCostUsd: 999 }) } } });
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", provider: "MARKER-p", model: "MARKER-m", models: ["MARKER/x"], fallbackModels: ["MARKER/fallback"], maxCostUsd: 999 }) } } });
 	const cap = makeCapture();
 	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
 
 	const parent = localJob();
-	parent.data = { ...parent.data, provider: "openai", model: "qwen2.5:0.5b", models: ["openai/qwen2.5:0.5b"], maxCostUsd: 0.5 };
+	parent.data = { ...parent.data, provider: "openai", model: "qwen2.5:0.5b", models: ["openai/qwen2.5:0.5b"], fallbackModels: ["openai/qwen2.5:0.5b"], maxCostUsd: 0.5 };
 	await collect({ job: parent, prepared: PREPARED });
 
 	const { args } = cap.enqueued[0];
@@ -525,6 +525,7 @@ test("a chained child inherits the PARENT'S provider, model, models and maxCostU
 	assert.equal(args.model, "qwen2.5:0.5b");
 	assert.deepEqual(args.models, ["openai/qwen2.5:0.5b"], "the parent's list follows the child");
 	assert.equal(args.maxCostUsd, 0.5);
+	assert.deepEqual(args.fallbackModels, ["openai/qwen2.5:0.5b"]);
 	assert.equal(JSON.stringify(args).includes("MARKER"), false, "the request file's model keys are never read");
 	assert.equal(args.jobId, chainedJobId({ parentJobId: parent.id, flow: "ok", task: "do it" }), "the child's identity is unchanged by the inheritance");
 });
@@ -535,7 +536,7 @@ test("a parent whose trigger named no model chains a child with none either, so 
 	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
 	await collect({ job: localJob(), prepared: PREPARED });
 	const { args } = cap.enqueued[0];
-	for (const k of ["provider", "model", "models", "maxCostUsd"]) assert.equal(args[k], undefined, `${k}: byte-identical to a pre-issue chain`);
+	for (const k of ["provider", "model", "models", "fallbackModels", "maxCostUsd"]) assert.equal(args[k], undefined, `${k}: byte-identical to a pre-issue chain`);
 });
 
 test("a chained child of a portfolio job does not inherit run.portfolio, from the parent or from the request file (#505)", async () => {

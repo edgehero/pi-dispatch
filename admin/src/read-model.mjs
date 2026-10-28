@@ -15,6 +15,7 @@
  * `{ missing }` rather than throwing to the command handler.
  */
 
+import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import * as nodeFs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
@@ -2833,6 +2834,7 @@ export function normalizeTriggerForDisplay(entry) {
     // a dollar amount, the operator's own words, never a value a job chose. Spread only when present, so a trigger
     // that sets neither keeps exactly its keys.
     ...(Array.isArray(run.models) && run.models.length > 0 && run.models.every((m) => typeof m === "string") && { models: [...run.models] }),
+    ...(Array.isArray(run.fallbackModels) && run.fallbackModels.length > 0 && run.fallbackModels.every((m) => typeof m === "string") && { fallbackModels: [...run.fallbackModels] }),
     ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
     // The overlay MCP servers the jobs connect (REQ-MCP-OPERATOR-SERVERS), by name: the operator's own words, never a
     // server's definition or a credential. Shown for `secrets`' reason: what a job can reach is set only in this file.
@@ -6969,11 +6971,15 @@ export function modelRunRecord(record, { list = false } = {}) {
   const hasBundle = Object.hasOwn(record, "bundle");
   const hasOpenshell = Object.hasOwn(record, "openshell");
   const hasProfile = Object.hasOwn(record, "secretsProfile");
+  const hasFailover = Object.hasOwn(record, "modelWhy") || Object.hasOwn(record, "providerFailure");
   const freeReason = Object.hasOwn(record, "reason") && record.reason !== null && recordReason(record) === null;
-  if (!hasBundle && !hasOpenshell && !hasProfile && !freeReason) return record;
-  const { bundle: raw, openshell: _openshell, secretsProfile: _profile, ...rest } = record;
+  if (!hasBundle && !hasOpenshell && !hasProfile && !freeReason && !hasFailover) return record;
+  const { bundle: raw, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
   const out = { ...rest };
   if (freeReason) out.reason = null;
+  if (MODEL_WHY.includes(record.modelWhy)) out.modelWhy = record.modelWhy;
+  const providerFailure = providerFailureOf(record.providerFailure);
+  if (providerFailure !== null) out.providerFailure = providerFailure;
   if (hasBundle) {
     const b = recordedBundle(raw);
     if (b !== null) out.bundle = { id: b.id, received: b.variables.length, shadowed: b.shadowed.length, ...(Number.isSafeInteger(b.placeholders) ? { placeholders: b.placeholders, plain: b.plain } : {}) };

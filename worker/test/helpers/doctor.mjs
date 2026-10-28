@@ -22,9 +22,9 @@ export const NO_CONSOLE = async () => ({ state: "not-running", target: "127.0.0.
 export const NO_CAPACITY = async () => ({ records: [], coverage: { source: "local", reason: null, localHost: null, localHosts: [], local: null, mirror: null } });
 
 export function runDoctor(shellVars, deps = {}) {
-	return realRunDoctor(shellVars, { readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...deps });
+	return realRunDoctor(shellVars, { readModelCooldowns: async () => [], readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...deps });
 }
 
 export function collectChecks(shellVars, seams = {}) {
-	return realCollectChecks(shellVars, { readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...seams });
+	return realCollectChecks(shellVars, { readModelCooldowns: async () => [], readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...seams });
 }

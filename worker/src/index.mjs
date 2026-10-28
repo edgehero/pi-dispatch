@@ -1,3 +1,6 @@
+import { zeroRatedFor } from "./reserve-estimate.mjs";
+import { isTransientOverlayRead } from "./model-catalog.mjs";
+import { checkFailoverCandidate, markModelCooldown, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
 import { availableParallelism } from "node:os";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
@@ -318,11 +321,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// Issue #712: the OpenShell venues' policy facts (runContainer's `openshell`, backend-openshell.mjs), carried the same
 		// way and for the same reason; the record rebuilds them (run-history.mjs `recordedOpenshell`), so nothing is trusted here.
 		let openshellRan = null;
+		let selectedEffective = null;
+		let providerFailureRan = null;
 		const carryLiveSkip = (target) => {
 			if (target === null || typeof target !== "object") return;
 			try {
 				if (liveRan !== null && target.liveSkipped === undefined) target.liveSkipped = liveRan;
 				if (openshellRan !== null && target.openshell === undefined) target.openshell = openshellRan;
+				if (selectedEffective?.modelWhy) { target.modelWhy = selectedEffective.modelWhy; target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
+				if (providerFailureRan) target.providerFailure = providerFailureRan;
 			} catch {}
 		};
 		const settleSteer = async ({ result = null, error = null } = {}) => {
@@ -375,9 +382,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// it, and its slot interval (with the ones it carried) rides every record this pickup writes (`earlier`). Only on
 		// such a pickup, so a first attempt reads nothing; bounded by the reader, and a fault reads as none.
 		let earlier = null;
+		let priorAttemptRecord = null;
 		if (typeof previousRecord === "function" && ((Number.isInteger(job.attemptsMade) && job.attemptsMade > 0) || Number(job.stalledCounter) > 0)) {
 			try {
-				earlier = earlierFrom(await previousRecord(job.id));
+				priorAttemptRecord = await previousRecord(job.id);
+				earlier = earlierFrom(priorAttemptRecord);
 			} catch {
 				earlier = null;
 			}
@@ -837,12 +846,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		};
 		// THE ENDPOINT HOLDS (issue #503), `{ id, fleet }` each, in id order.
 		const endpointHolds = [];
-		const releaseEndpointHolds = () => {
-			const taken = endpointHolds.splice(0).reverse();
+		const releaseEndpointHolds = (subset = null) => {
+			const taken = subset === null ? endpointHolds.splice(0).reverse() : subset.splice(0).reverse();
 			for (const hold of taken) endpointSlots.release(hold.id);
 			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
 		};
-		const releaseAllHolds = ({ orphan = false } = {}) => {
+		const releaseAllHolds = ({ orphan = false, candidateEndpoints = null } = {}) => {
+			if (candidateEndpoints !== null) return releaseEndpointHolds(candidateEndpoints);
 			// The running-jobs entry first (issue #599, phase 2): this pickup no longer runs the job, orphan or not.
 			if (runningKey !== null) {
 				runningJobs.remove(runningKey);
@@ -983,6 +993,82 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			settingsError = error;
 		}
 
+		// Failover selection precedes endpoint leases and every paid gate. Capture failures here and report them
+		// inside the ordinary record/release try below; no early throw may strand the scope slots already held.
+		let selectionError = null;
+		let selectionRefused = null;
+		let selectionWait = null;
+		let failoverSnapshot = null;
+		let chosenModel = null;
+		const modelAttemptId = `${job.queueName ?? QUEUE}:${job.id}`;
+		if ((job.data?.fallbackModels !== undefined || (job.data?.recover === true && job.data?.recoveryOf)) && !settingsThrew && !settings?.invalid) {
+			try {
+				let effective = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null);
+				const endpoints = modelEndpoints?.() ?? [];
+				let models;
+				try { models = overlayModels(); }
+				catch (error) {
+					if (error?.piDispatchConfig || error?.overlayLink || error?.overlayNotAFile || (typeof error?.code === "string" && !isTransientOverlayRead(error.code))) {
+						error.modelSelectionRefused = true;
+					}
+					throw error;
+				}
+				failoverSnapshot = { endpoints, models, set: [] };
+				let recoveryModel = null;
+				if (effective.recover === true && effective.recoveryOf) {
+					if (!deps?.workspaceCheckpointer) { const error = new Error("the recovery store is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
+					const read = await deps.workspaceCheckpointer.readManifest(effective.recoveryOf);
+					if (read?.ok && read.manifest?.provider && read.manifest?.model) recoveryModel = `${read.manifest.provider}/${read.manifest.model}`;
+					// A missing checkpoint is refused by runJob's existing free gate, never replaced by a fresh model.
+					else { const error = new Error("the recovery model is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
+					const ref = splitModelEntry(recoveryModel);
+					if (!ref) { const error = new Error("the recovery model is invalid"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
+					effective = { ...effective, provider: ref.provider, model: ref.model };
+				}
+				const selection = effective.fallbackModels === undefined ? { job: effective } : await selectFailoverJob(effective, {
+					redis, id: modelAttemptId, retry: Number(job.attemptsMade) > 0 || Number(job.stalledCounter) > 0,
+					recoveryModel, retryNeverStarted: priorAttemptRecord?.reason === "container-never-started" && priorAttemptRecord?.budgetReserved === false && priorAttemptRecord?.exitCode === null, models, limits, now, log: deps?.log,
+					reservationFor: (candidate) => zeroRatedFor(candidate, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }).zeroRated ? 0 : candidate.maxCostMicros,
+					checkCandidate: (candidate) => deps?.checkFailoverCandidate ? deps.checkFailoverCandidate(candidate, { models, endpoints }) : checkFailoverCandidate(candidate, { models, endpoints, credential: deps?.checkProviderCredential, lookup: deps?.builtinModel }),
+					acquireEndpoints: async (candidate) => {
+						const set = [...new Map(endpointSetFor({ models, job: candidate, endpoints }).map((endpoint) => [endpoint.id, endpoint])).values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+						const held = [];
+						for (const endpoint of set) {
+							if (!endpointSlots.tryAcquire(endpoint.id, endpoint.slots)) {
+								await releaseAllHolds({ candidateEndpoints: held });
+								return false;
+							}
+							let fleet = null;
+							try { if (endpointLease && !isPerMachineHost(endpoint.host)) fleet = await endpointLease.acquire(job.id, { slots: endpoint.slots, keyArgs: [hash16(endpoint.id)] }); }
+							catch (error) { held.push({ id: endpoint.id, fleet: null }); await releaseAllHolds({ candidateEndpoints: held }); throw error; }
+							held.push({ id: endpoint.id, fleet });
+							if (endpointLease && !isPerMachineHost(endpoint.host) && !fleet) {
+								await releaseAllHolds({ candidateEndpoints: held });
+								return false;
+							}
+							if (fleet?.degraded) deps?.log?.("endpoint_lease_degraded", { jobId: job.id, endpoint: endpoint.id });
+						}
+						endpointHolds.push(...held);
+						failoverSnapshot.set = set;
+						return true;
+					},
+				});
+				selectedEffective = selection.job ?? null;
+				chosenModel = selection.ref ?? null;
+				if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy });
+				selectionRefused = selection.refused ?? null;
+				selectionWait = selection.wait ? selection : null;
+			} catch (error) {
+				if (error?.modelSelectionReason) selectionRefused = error.modelSelectionReason;
+				else if (error?.modelSelectionRefused) selectionRefused = "model-failover-no-candidate";
+				else selectionError = error instanceof InfraRetry ? error : new InfraRetry("the model candidates could not be read", { cause: error, reason: "container-never-started", budgetReserved: false });
+			}
+		}
+		if (selectionWait) {
+			await releaseAllHolds();
+			await deferTo(job, token, selectionWait.until, selectionWait.wait, { project });
+		}
+
 		// THE MODEL ENDPOINT GATE (issue #503, INT-MODEL-ENDPOINTS-FILE-CONTRACT). A declared local model server
 		// has a fixed number of parallel slots, and nothing else bounds how many jobs pile onto it: three per host
 		// on several hosts, each metering $0. So a job whose main model, or any model on its effective allowed-model
@@ -1010,8 +1096,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// One snapshot per pickup (the endpoints, the overlay models, the derived set), handed to runJob as
 		// `modelEndpoints` so a later gate reads the same declaration this one leased against. With no endpoints
 		// declared the overlay is not even read, and the job touches nothing new: no command, no key, no field.
-		let endpointSnapshot = null;
-		if (modelEndpoints && !settingsThrew && !settings?.invalid) {
+		let endpointSnapshot = failoverSnapshot;
+		if (job.data?.fallbackModels === undefined && !selectionError && !selectionRefused && modelEndpoints && !settingsThrew && !settings?.invalid) {
 			let endpoints = [];
 			let models = null;
 			let set = [];
@@ -1042,7 +1128,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// ONE hold per endpoint id: a set naming an endpoint twice would take its slot and then wait on itself,
 					// forever on `slots: 1`. Deduplicated before the sort, so the order rule sees each endpoint once.
 					const byId = new Map();
-					for (const e of endpointSetFor({ models, job: effectiveJobOf(job.data, settings, deps?.allowedModels ?? null), endpoints })) if (!byId.has(e.id)) byId.set(e.id, e);
+					for (const e of endpointSetFor({ models, job: selectedEffective ?? effectiveJobOf(job.data, settings, deps?.allowedModels ?? null), endpoints })) if (!byId.has(e.id)) byId.set(e.id, e);
 					set = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 				}
 			} catch (err) {
@@ -1293,6 +1379,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		try {
 			// The read itself happened once, above the endpoint gate; its throw lands HERE, where it always did.
 			if (settingsThrew) throw settingsError;
+			if (selectionError) throw selectionError;
+			if (selectionRefused) {
+				const result = { outcome: "policy", reason: selectionRefused, exitCode: null, turns: null, tokens: null, budgetReserved: false };
+				await settleSteer({ result });
+				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });
+				return result;
+			}
 			if (settings.invalid) {
 				// A present-but-invalid overlay is a POLICY refusal, RETURNED (never thrown) so BullMQ marks the
 				// job completed and does not retry a file that can never parse (CONST-RETRY-INFRA-ONLY). Resolved
@@ -1319,7 +1412,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// values reserveBudget checks, never when it runs.
 			// The one call that logs a malformed queued cap (#501): the endpoint gate above computes the same job and
 			// stays quiet, so it is reported once per pickup.
-			const effectiveJob = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields }));
+			const effectiveJob = selectedEffective ?? effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields }));
 			pickupMaxTurns = effectiveJob.maxTurns;
 
 			// THE ENVELOPE (issue #504 part B, DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE). With one loaded, every job is governed:
@@ -1404,7 +1497,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// the deployment's list. Only when the wiring supplies the check, so a bare processor keeps the default.
 				// The same for `maxCostUsd` (#501): `effectiveJobOf` keeps the arrived value under its own key and writes the
 				// resolved cap as `maxCostMicros`, but it is read off `job.data` here too, so no later fill can hide a drop.
-				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
+				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
 				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing
@@ -1436,16 +1529,31 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// left for a cancel to stop. A cancel acknowledged before that moment raced the exit and lost nothing it was
 				// promised: the run is recorded as that cancel (the existing path, "partial work may exist") even when the
 				// container happened to exit on its own, because the operator was told the record would say operator-cancel.
-				runContainer: (ctx) =>
+				runContainer: async (ctx) => {
+					if (chosenModel) {
+						try { await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy }); }
+						catch (cause) { throw new InfraRetry("the model attempt could not be recorded", { cause, reason: "container-never-started" }); }
+					}
 					// `jobId` (issue #643) names the live transcript stream. Since issue #645 it is the RUN id (`runIdOf`): a recovery
 					// (`.rN`) continues its run's stream, progress key and status comment, while its record stays its own.
 					// Issue #644: `onLive` hands over the attempt's publisher finish, so giving up on a container whose stop did not
 					// take also ends its progress key (outcome `unknown`: nothing saw it exit) instead of leaving its heartbeat to
 					// rewrite the key as running for as long as the worker lives.
-					boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: runIdOf(job), onLive: (finish) => (finishLive = finish) }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
+					return boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: runIdOf(job), onLive: (finish) => (finishLive = finish) }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
 						stopDidNotTake = true;
 						return finishLive?.("unknown");
 					}).then(async (r) => {
+						// Only signed, matching terminal metadata can permit a later cross-model replay. The pessimistic
+						// marker written before spawn survives crashes and tools that terminate the runner.
+						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.code === 1 && r?.aborted !== true) {
+							providerFailureRan = r.providerFailure ?? null;
+							try {
+								if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy, safe: r.toolsStarted === false && r.replaySafe === true && !!r.providerFailure, failure: r.providerFailure });
+								if (r.providerFailure) await markModelCooldown(redis, `${effectiveJob.provider}/${effectiveJob.model}`, r.providerFailure, { now });
+							} catch (cause) {
+								throw new InfraRetry("the provider failure could not be recorded", { cause, reason: "container-infra-exit", exitCode: r.code, turns: r.turns, tokens: r.tokens, usage: r.usage, provider: effectiveJob.provider, model: effectiveJob.model });
+							}
+						}
 						// Issue #646: what this attempt said about steering, for the record's `steerSkipped` (settleSteer above).
 						steerRan = r && typeof r === "object" ? { steerSkipped: r.steerSkipped ?? null } : null;
 						liveRan = r && typeof r === "object" && typeof r.liveSkipped === "string" ? r.liveSkipped : null;
@@ -1455,7 +1563,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });
 						const run = raced ? { ...r, aborted: true } : r;
 						return run?.aborted ? { ...run, abortReason: typeof signal.reason === "string" ? signal.reason : null } : run;
-					}),
+					});
+				},
 				// REQ-TRIGGER-SECRETS. The resolver runs INSIDE the 30-minute kill timer armed above, so it has
 				// to be abortable for the same reason runContainer does: a resolver blocking on an unreachable
 				// vault would otherwise hold its slot until its own timeout, and an abort landing mid-resolution

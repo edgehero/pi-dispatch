@@ -260,6 +260,30 @@ else
 				[ "$model_code" = 2 ] && echo "$model_exit" | grep -Eq '"reason":"model-not-allowed"[,}]' && echo "$model_exit" | grep -Eq '"modelRefused":1[,}]' \
 					|| fail "the image declares 'modelPolicy' but a job whose PI_ALLOWED_MODELS lacks its model was not stopped before its first call (exit $model_code: $model_exit)"
 				;;
+			modelFailover)
+				# Issue #716. Run the actual SDK runner through its normal entrypoint, replacing only fetch with an
+				# offline 429 fixture. A grep for a classifier cannot prove the signed fields reach the worker.
+				failover_job=$(mktemp -d)
+				echo "Reply with the single word ok." >"$failover_job/prompt.md"
+				chmod -R a+rX "$failover_job"
+				failover_key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+				failover_out=$(printf '%s\n' "$failover_key" | docker run -i --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges -v "$failover_job:/job:ro" \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_RETRY_MAX=1 -e PI_RETRY_BASE_MS=1 -e PI_EXIT_AUTH=stdin \
+					-e PI_ALLOWED_MODELS=anthropic/claude-sonnet-4-5-20250929 -e PI_MAX_COST_MICROS=100000000 \
+					-e NODE_OPTIONS=--import=/app/image/runner/test/fixtures/provider-failure-fetch.mjs \
+					"$IMAGE_REF" 2>&1) && failover_code=0 || failover_code=$?
+				rm -rf "$failover_job"
+				failover_exit=$(echo "$failover_out" | grep '"event":"exit"' | tail -1)
+				[ "$failover_code" = 1 ] && echo "$failover_exit" | grep -q '"providerFailure":{"kind":"rate-limited","resetAt":[0-9]' \
+					&& echo "$failover_exit" | grep -q '"toolsStarted":false' && echo "$failover_exit" | grep -q '"replaySafe":true' \
+					|| fail "the image declares 'modelFailover' but an offline provider 429 did not emit rate-limit/reset/replay evidence (exit $failover_code: $failover_exit)"
+				failover_mac=$(echo "$failover_exit" | sed -nE 's/.*,"auth":"([0-9a-f]{64})"\}$/\1/p')
+				failover_body=$(echo "$failover_exit" | sed -E 's/,"auth":"[0-9a-f]{64}"\}$/}/')
+				failover_want=$(printf '%s' "$failover_body" | openssl dgst -sha256 -hmac "$failover_key" | awk '{print $NF}')
+				[ -n "$failover_mac" ] && [ "$failover_mac" = "$failover_want" ] \
+					|| fail "the image declares 'modelFailover' but its provider failure evidence is not authenticated ($failover_exit)"
+				;;
 			mcp)
 				# REQ-MCP-OPERATOR-SERVERS. The claim is that the runner reads /job/mcp.json, connects the stdio server it
 				# names with only the environment it names, waits for it before the prompt, and closes it before it exits.

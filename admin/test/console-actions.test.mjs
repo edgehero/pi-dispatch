@@ -2214,11 +2214,11 @@ test("every reserve estimate gets the worker's zero-rated inputs: a job that can
 
 test("rerun and parked-answer previews show the forge run fields the plan takes from the trigger now, escaped, the secret profile by name only", async () => {
   const { paths } = deployment();
-  const runFields = { flow: "fix", model: "anthropic/claude-x", models: ["a/b", "c/d"], maxCostUsd: "1.25", secretsProfile: "prod<b>", image: "ghcr.io/acme/img:1", backend: "docker" };
+  const runFields = { flow: "fix", model: "anthropic/claude-x", models: ["a/b", "c/d"], fallbackModels: ["anthropic/first", "openai/second<"], maxCostUsd: "1.25", secretsProfile: "prod<b>", image: "ghcr.io/acme/img:1", backend: "docker" };
   const plan = (kind) => ({ plan: { kind, forge: "github", jobId: "gh-r", queue: "pi-jobs", replicas: 1, job: { flow: "fix", secrets: { T: "op://vault/secret-ref-canary" }, trigger: { comment: { body: "hi" } } }, runFields, reserve: { slots: 1, dollarsMicros: 1_250_000, capMicros: 1_250_000, zeroRated: false } } });
   const rm = { ...RM, planRerun: async () => plan("forge"), planParkedAnswer: async () => plan("parked-answer") };
   const c = await start({ paths, a: { rm } });
-  const fields = "flow fix; model anthropic/claude-x; allowed models a/b, c/d; per-job cap $1.25; secret profile prod&lt;b&gt;; image ghcr.io/acme/img:1; backend docker";
+  const fields = "flow fix; model anthropic/claude-x; allowed models a/b, c/d; fallbacks anthropic/first, openai/second&lt;; per-job cap $1.25; secret profile prod&lt;b&gt;; image ghcr.io/acme/img:1; backend docker";
   const re = (await c.act("rerun", { jobId: "gh-r" })).json();
   assert.ok(re.html.includes(`<li>It runs as its trigger says now: ${fields}</li>`), re.html);
   const pa = (await c.act("parked-answer", { jobId: "gh-r", text: "hi" })).json();
@@ -2227,7 +2227,7 @@ test("rerun and parked-answer previews show the forge run fields the plan takes 
   // A model and cap the job leaves to the deployment say so.
   runFields.model = null;
   runFields.maxCostUsd = null;
-  assert.match((await c.act("rerun", { jobId: "gh-r" })).json().html, /model the deployment&#39;s default; allowed models a\/b, c\/d; per-job cap the deployment&#39;s;/);
+  assert.match((await c.act("rerun", { jobId: "gh-r" })).json().html, /model the deployment&#39;s default; allowed models a\/b, c\/d; fallbacks anthropic\/first, openai\/second&lt;; per-job cap the deployment&#39;s;/);
 });
 
 // ---- the large diff ------------------------------------------------------------------------------------------------

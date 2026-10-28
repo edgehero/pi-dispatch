@@ -1,3 +1,4 @@
+import { checkFailoverCandidate, failoverEgressRequired } from "./model-failover.mjs";
 import { parseTriggers } from "./triggers.mjs";
 import { makeApprovalSessionCheck } from "./approval-session.mjs";
 import { makeApprovalStore } from "./approval-state.mjs";
@@ -2750,6 +2751,22 @@ export async function startWorker(
 			// job and only when a model is not builtin, so the operator's edits apply without a restart. The SAME file
 			// the endpoint gate reads, through the same reader, so absent, unreadable and unparseable mean one thing.
 			checkModelsKnown: (refs) => checkModelsKnown(refs, { readOverlay: () => readOverlayModels(config.globalPiDir) }),
+			checkFailoverCandidate: (job, { models, endpoints }) => {
+				const egress = failoverEgressRequired(job, { egress: config.egress, defaultBackend: config.backends[0] });
+				return checkFailoverCandidate(job, {
+					models, endpoints, egress, allowlist: egress ? readEgressAllowlist() : [],
+					credential: (candidate, { modelEndpoints }) => {
+						try {
+							resolveProviderCredential({ provider: candidate.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: config.forwardEnv, modelEndpoints });
+							return { ok: true };
+						} catch (error) {
+							if (error?.piDispatchTransient) return { unavailable: true };
+							if (error?.piDispatchConfig) return { ok: false };
+							throw error;
+						}
+					},
+				});
+			},
 			// Issue #503 part 7: the builtin catalog's model object, for the zero-rated check that lets a job on local
 			// zero-rated models reserve nothing in the dollar windows (processor.mjs, `zeroRatedVerdict`).
 			builtinModel,

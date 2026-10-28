@@ -826,6 +826,9 @@ export function makeRunContainer({
 				let exitLineCode = null;
 				// Issue #507: the cost guard's rule on a `cost-cap` line, already filtered by parseExitWhy to COST_CAP_WHYS.
 				let exitWhy = null;
+				let providerFailure = null;
+				let toolsStarted = null;
+				let replaySafe = null;
 				// Issue #545: null (no key issued), "verified" or "unverified" (a key, and no exit line carried it).
 				let exitAuthResult = null;
 				// Issue #596: what the container used, off its exit line (parseExitResources), or null.
@@ -842,7 +845,7 @@ export function makeRunContainer({
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -853,6 +856,9 @@ export function makeRunContainer({
 					approval = null;
 					exitLineCode = null;
 					exitWhy = null;
+					providerFailure = null;
+					toolsStarted = null;
+					replaySafe = null;
 					resources = null;
 					exitOomKilled = false;
 					recovery = null;
@@ -872,6 +878,9 @@ export function makeRunContainer({
 					approval = null;
 					exitLineCode = null;
 					exitWhy = null;
+					providerFailure = null;
+					toolsStarted = null;
+					replaySafe = null;
 					resources = null;
 					exitOomKilled = false;
 					recovery = null;
@@ -880,7 +889,7 @@ export function makeRunContainer({
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
 				// `exitWhy` only when the line named one, so every other run resolves the object it always did.
-				const why = exitWhy !== null ? { exitWhy } : {};
+				const why = { ...(exitWhy !== null ? { exitWhy } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
 				// `memoryLimit` only beside the OOM report, the one place it is read, for the same reason.
 				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };

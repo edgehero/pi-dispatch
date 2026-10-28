@@ -303,10 +303,17 @@ test("BY SHAPE: no module in worker/src moves a job to the delayed set except th
 
 test("BY SHAPE: every reason in the table is written by a site, and every site writes a reason from the table", () => {
 	const index = strip(readFileSync(join(SRC, "index.mjs"), "utf8"));
-	const sites = [...index.matchAll(/\bawait deferTo\(job, token, [^\n]*?, ("[^"]*"|why), /g)].map((m) => m[1]);
-	assert.equal(sites.length, 18, "18 deferTo calls, one of them deferScope's; a new deferral must be counted here");
-	assert.deepEqual(sites.filter((s) => s === "why"), ["why"], "only deferScope passes its caller's reason through");
-	const literal = new Set(sites.filter((s) => s !== "why").map((s) => JSON.parse(s)));
+	const sites = [...index.matchAll(/\bawait deferTo\(job, token, [^\n]*?, ("[^"]*"|why|selectionWait\.wait), /g)].map((m) => m[1]);
+	assert.equal(sites.length, 19, "19 deferTo calls, including scope and model-selection forwarding; a new deferral must be counted here");
+	assert.deepEqual(sites.filter((s) => !s.startsWith("\"")).sort(), ["selectionWait.wait", "why"], "only scope and model selection pass through a closed upstream reason");
+	const literal = new Set(sites.filter((s) => s.startsWith("\"")).map((s) => JSON.parse(s)));
+	// The selector returns only these three transient wait reasons. Include their actual assignments, not a
+	// second hand-written list that would pass after a writer stopped using one of them.
+	const failover = strip(readFileSync(join(SRC, "model-failover.mjs"), "utf8"));
+	const modelWhys = [...failover.matchAll(/wait \?\?= "([^"]+)"/g)].map((m) => m[1]);
+	assert.equal(modelWhys.length, 3, "cooldown, model window and endpoint checks assign a wait");
+	assert.match(index, /selectionWait = selection\.wait \? selection : null/);
+	for (const why of modelWhys) literal.add(why);
 	for (const m of index.matchAll(/\bawait deferScope\(("[^"]*"|scopeWhy), /g)) if (m[1] !== "scopeWhy") literal.add(JSON.parse(m[1]));
 	assert.equal([...index.matchAll(/\bawait deferScope\(/g)].length, 4, "four scope deferrals");
 	const scopeWhy = /const scopeWhy = ([^;]*);/.exec(index)?.[1];

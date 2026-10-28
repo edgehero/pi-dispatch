@@ -3679,6 +3679,16 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	// Read only configured model identities. A keyspace scan would expose retired configuration and make a
+	// doctor run's cost depend on everything else sharing this Valkey.
+	{
+		const refs = cooldownModelRefs(parseError ? [] : modelRuns, deploymentSettingsOf(env, settingsFilePath(env, home), fileExists));
+		if (refs.length > 0) {
+			const state = valkeyUsable ? await (seams.readModelCooldowns ?? defaultReadModelCooldowns)(valkeyTalkUrl, refs, { now: seams.wallClock ?? Date.now }) : null;
+			checks.push(...modelCooldownChecks(state));
+		}
+	}
+
 	section("secrets");
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
@@ -5540,6 +5550,40 @@ export async function defaultReadAppliedSplit(url) {
 	}
 }
 
+/** The configured failover models, never arbitrary keyspace members. Non-failover jobs add no read. */
+export function cooldownModelRefs(runs, deployment) {
+	const refs = new Set();
+	for (const run of runs) {
+		if (!Array.isArray(run.fallbackModels) || run.fallbackModels.length === 0) continue;
+		for (const ref of [`${run.provider ?? deployment.provider}/${run.model ?? deployment.model}`, ...run.fallbackModels]) {
+			if (splitModelEntry(ref)) refs.add(ref);
+		}
+	}
+	return [...refs];
+}
+
+/** A failed bounded read is visible, never reported as "no cooldown". */
+export async function defaultReadModelCooldowns(url, refs, options) {
+	try {
+		// Kept lazy like the other model checks: doctor must start even when pi cannot be imported.
+		const { readModelCooldowns } = await import("./model-failover.mjs");
+		return await withDoctorClient(url, (client) => boundedOp(readModelCooldowns(client, refs, options), DOCTOR_VALKEY_OP_TIMEOUT_MS));
+	} catch {
+		return null;
+	}
+}
+
+/** Warn lines are also published to the console's existing Doctor panel, with the observation's age. */
+export function modelCooldownChecks(rows) {
+	if (!Array.isArray(rows)) return [{ ok: false, warn: true, label: "Model cooldowns could not be read", fix: "check Valkey and re-run doctor; failover jobs retry infrastructure failures before they spend" }];
+	return rows.filter((row) => splitModelEntry(row?.ref) && ["rate-limited", "quota-exhausted", "overloaded"].includes(row.kind) && Number.isSafeInteger(row.until) && row.until >= 0 && row.until <= 253402300799999).map((row) => ({
+		ok: false,
+		warn: true,
+		label: `Model ${row.ref} is cooling down until ${new Date(row.until).toISOString()} (${row.kind})`,
+		fix: "new failover jobs skip this model until then and use only the reviewed fallback list; recovery keeps its checkpoint model",
+	}));
+}
+
 /**
  * A FAILURE per scoped-limits file that holds a `project:<id>` row whose id is not a project in `projects` (issue #499
  * part B): the worker refuses to start on it, and a live reload that would create one is kept out. Rows are named by
@@ -6338,6 +6382,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 				provider: typeof t.run.provider === "string" ? t.run.provider : undefined,
 				model: typeof t.run.model === "string" ? t.run.model : undefined,
 				models: Array.isArray(t.run.models) ? t.run.models : undefined,
+				fallbackModels: Array.isArray(t.run.fallbackModels) ? t.run.fallbackModels : undefined,
 				maxCostUsd: t.run.maxCostUsd ?? undefined,
 				secretNames: t.run.secrets !== undefined && t.run.secrets !== null ? Object.keys(t.run.secrets) : [],
 			})),

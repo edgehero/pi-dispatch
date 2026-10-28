@@ -2516,6 +2516,7 @@ function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: a
   // The spend narrowings no tool can set (issues #501 and #502): `accent`, the colour of an override that NARROWS
   // ([once], [image]), never amber. The model list is free text that may be clipped; the drill-in lists it whole.
   const mdl = Array.isArray(t?.models) && t.models.length > 0 ? rowBadge("accent", false, "[models ", cellOf(t.models.join(", ")), "]") : null;
+  const fallbacks = Array.isArray(t?.fallbackModels) && t.fallbackModels.length > 0 ? rowBadge("accent", false, "[fallbacks ", cellOf(t.fallbackModels.join(", ")), "]") : null;
   const cap = t?.maxCostUsd ? rowBadge("accent", false, "[max $", cellOf(t.maxCostUsd), "]") : null;
   // A portfolio trigger (issues #505 and #507): its jobs write the budget split. `accent`, NOT `warning`: amber marks
   // what raises the bill ([xN]), what a job can reach ([secrets]) or what leaves it ([resume]), and a plan can do none
@@ -2529,7 +2530,7 @@ function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: a
   // in `accent` on a trigger that opts out (`run.secretBundle: false`), a narrowing like [once]. Absent when the
   // deployment binds no bundle, so every row is byte-identical then.
   const bnd = bundle === null ? null : bundle.optedOut ? rowBadge("accent", false, "[no bundle]") : rowBadge("warning", true, "[bundle ", cellOf(bundle.id), "]");
-  const badges = [pkgs, img, skl, ins, res, rep, sec, bnd, mcp, shot, mdl, cap, pfo, health].filter((b): b is RowBadge => b !== null);
+  const badges = [pkgs, img, skl, ins, res, rep, sec, bnd, mcp, shot, mdl, cap, fallbacks, pfo, health].filter((b): b is RowBadge => b !== null);
   const match = matchColored(t, styler);
   return fitTriggerRow(`${cursor} ${badge} `, match, targetColored(t, styler), badges, inner, styler, rowFloorMatch(t, match, styler));
 }
@@ -3654,6 +3655,7 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   // the triggers file and by no tool. A row only when set, like provider and maxTurns above: absent, the jobs run
   // under the deployment's list and cap, and a trigger that sets neither keeps exactly the pane it had.
   if (Array.isArray(t.models) && t.models.length > 0) kvWrap("models", t.models.map((m: any) => cellOf(m)).join(", "), "accent");
+  if (Array.isArray(t.fallbackModels) && t.fallbackModels.length > 0) kvWrap("fallbacks", t.fallbackModels.map((m: any) => cellOf(m)).join(", "), "accent");
   if (t.maxCostUsd) out.push(kv("max cost", `$${cellOf(t.maxCostUsd)} per job`, "accent"));
   // The portfolio flag (issue #507), the row badge's fact in words: what the job may write back. A row only when set, so
   // every other pane is byte-identical; `accent` for the row badge's reason.

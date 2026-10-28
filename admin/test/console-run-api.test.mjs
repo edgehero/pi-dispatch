@@ -861,3 +861,23 @@ test("a fresh session may be saved, while explicit save failures never offer con
   }
   assert.equal(sessionSavedOf({ session: null }), false);
 });
+
+test("runDocument and safeRunOf keep only closed failover facts (#716)", async () => {
+  const { MODEL_WHY, PROVIDER_FAILURE_KINDS } = await import("@edgehero/pi-dispatch/model-failover-protocol");
+  for (const modelWhy of MODEL_WHY) {
+    for (const kind of PROVIDER_FAILURE_KINDS) {
+      const raw = record("gh-model", { modelWhy, providerFailure: { kind, resetAt: T0 + 60_000, message: CANARY, headers: { secret: CANARY } } });
+      const out = await runDocument(fakeFleet({ records: { "gh-model": raw } }), "gh-model");
+      assert.ok(out.doc);
+      assert.equal(out.doc.run.modelWhy, modelWhy);
+      assert.deepEqual(out.doc.run.providerFailure, { kind, resetAt: T0 + 60_000 });
+      assert.equal(JSON.stringify(out.doc).includes(CANARY), false);
+    }
+  }
+  for (const providerFailure of [null, "rate-limited", { kind: CANARY }, { kind: "rate-limited", resetAt: -1 }, { kind: "quota-exhausted", resetAt: "soon" }, { kind: "overloaded", resetAt: Infinity }]) {
+    const out = safeRunOf("gh-bad", { modelWhy: CANARY, providerFailure });
+    assert.equal(out.modelWhy, undefined);
+    assert.equal(out.providerFailure, undefined);
+    assert.equal(JSON.stringify(out).includes(CANARY), false);
+  }
+});
