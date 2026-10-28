@@ -820,15 +820,17 @@ test("a recovered managed fork resumes its own checkpoint and namespace without 
 	const target = { type: "issue", number: 7 };
 	const rootKey = sessionKeyFor({ ...job, target });
 	const fork = { id: "a".repeat(32), rootKey, fromJob: "gh-parent", fromEntry: "1234abcd", position: "at", sourceDigest: "b".repeat(64) };
-	const j = { ...recoveryJob(), target, fork, forkReserveMicros: null, forkPolicy: "c".repeat(64), resume: true };
-	const { deps: d, calls } = deps({
-		sessionsDir: "/sessions", checkForkPolicy: async () => ({ ok: true }),
-		forkStore: { readPoint: async () => { throw new Error("must not reopen original source"); } },
-		stageRecovered: async (args) => { assert.equal(args.job.fork.id, fork.id); return { hostDir: "/j/session", key: `${rootKey}.${fork.id}`, resume: true, reason: "recovered" }; },
-		runContainer: async (ctx) => { assert.equal(ctx.recovering, true); assert.equal(ctx.prepared.session.key, `${rootKey}.${fork.id}`); assert.deepEqual(ctx.job.fork, fork); return { code: 0, aborted: false }; },
-	});
-	const result = await runJob(j, d);
-	assert.equal(result.outcome, "completed");
-	assert.equal(result.recovered.n, 1);
-	assert.equal(names(calls).includes("restore"), true);
+	for (const resume of [true, false, undefined]) {
+		const j = { ...recoveryJob(), target, fork, forkReserveMicros: null, forkPolicy: "c".repeat(64), resume };
+		const { deps: d, calls } = deps({
+			sessionsDir: "/sessions", checkForkPolicy: async () => ({ ok: true }),
+			forkStore: { readPoint: async () => { throw new Error("must not reopen original source"); } },
+			stageRecovered: async (args) => { assert.equal(args.job.fork.id, fork.id); assert.equal(args.job.resume, resume); return { hostDir: "/j/session", key: `${rootKey}.${fork.id}`, resume: true, reason: "recovered" }; },
+			runContainer: async (ctx) => { assert.equal(ctx.recovering, true); assert.equal(ctx.prepared.session.key, `${rootKey}.${fork.id}`); assert.deepEqual(ctx.job.fork, fork); return { code: 0, aborted: false }; },
+		});
+		const result = await runJob(j, d);
+		assert.equal(result.outcome, "completed");
+		assert.equal(result.recovered.n, 1);
+		assert.equal(names(calls).includes("restore"), true);
+	}
 });

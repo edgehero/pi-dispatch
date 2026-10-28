@@ -60,15 +60,20 @@ test("fork promotion, stamps and resume never modify the original canonical sess
 	assert.equal(readFileSync(join(resumed.hostDir, "current.jsonl"), "utf8"), body("fork"));
 });
 
-test("restored fork staging promotes into the fork namespace", () => {
-	const { root, store, body, originalDir } = fixture();
-	const transcriptPath = join(root, "checkpoint.jsonl");
-	writeFileSync(transcriptPath, body("restored"));
-	const staged = store.stageRecovered({ jobDir: join(root, "job"), transcriptPath, job, piVersion });
-	assert.equal(staged.key, `${rootKey}.${forkId}`);
-	assert.equal(store.promoteSession(staged, { piVersion }).promoted, true);
-	assert.equal(readFileSync(join(originalDir, "forks", forkId, "current.jsonl"), "utf8"), body("restored"));
-	assert.equal(readFileSync(join(originalDir, "current.jsonl"), "utf8"), body("original"));
+test("restored fork staging promotes into its namespace independently of ordinary resume consent", () => {
+	for (const resume of [true, false, undefined]) {
+		const { root, store, body, originalDir } = fixture();
+		const transcriptPath = join(root, "checkpoint.jsonl");
+		writeFileSync(transcriptPath, body("restored"));
+		const original = readFileSync(join(originalDir, "current.jsonl"));
+		const recoveredJob = { ...job, resume };
+		if (resume === undefined) delete recoveredJob.resume;
+		const staged = store.stageRecovered({ jobDir: join(root, "job"), transcriptPath, job: recoveredJob, piVersion });
+		assert.equal(staged.key, `${rootKey}.${forkId}`, `explicit fork, resume=${resume}`);
+		assert.equal(store.promoteSession(staged, { piVersion }).promoted, true);
+		assert.equal(readFileSync(join(originalDir, "forks", forkId, "current.jsonl"), "utf8"), body("restored"));
+		assert.deepEqual(readFileSync(join(originalDir, "current.jsonl")), original);
+	}
 });
 
 test("a linked fork parent is refused on both read and promotion without writing through it", () => {

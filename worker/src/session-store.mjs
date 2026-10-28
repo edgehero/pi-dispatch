@@ -1398,8 +1398,8 @@ export function makeSessionStore({
 	 * chain, context, venue, pi version) applies: the processor already refused a checkpoint from another pi version or
 	 * venue before calling this.
 	 *
-	 * A KEY ONLY FOR A RESUME JOB. `job.resume === true` with a key gives the session the key, model and venue a resume
-	 * job's has, so a completed recovery promotes into the store exactly as the crashed run would have (`promoteSession`
+	 * A KEY FOR A RESUME JOB OR AN EXPLICIT MANAGED FORK. Either consent, with a valid derived key, gives the session
+	 * its key, model and venue, so a completed recovery promotes exactly as the crashed run would have (`promoteSession`
 	 * is unchanged). Any other job gets `key: null`: its transcript is the live file, nothing is promoted, and the
 	 * processor hands it over as `prepared.live`, not as a session. `resolved` is the pull request head the preparer
 	 * resolved from the forge (`recoveryResolved`), never a payload field: the same rule `resolveSession` keys on.
@@ -1429,7 +1429,9 @@ export function makeSessionStore({
 				return null;
 			}
 			copyFromDescriptor(fd, staged, opened.size);
-			const key = sessionsDir && job?.resume === true ? sessionKeyFor(job, resolved ?? {}) : null;
+			// An explicit managed fork is retention consent in its own right. A recovery keeps that fork's namespace
+			// even when the trigger did not opt ordinary runs into canonical resume; sessionKeyFor validates its root/id.
+			const key = sessionsDir && (job?.resume === true || job?.fork !== undefined) ? sessionKeyFor(job, resolved ?? {}) : null;
 			log("session_resolved", { key, resume: true, reason: "recovered" });
 			return {
 				hostDir,
