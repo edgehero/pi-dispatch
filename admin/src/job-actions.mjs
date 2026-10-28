@@ -134,7 +134,8 @@ async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }
  * The words for a job no fleet queue knows, naming a blind registry when there is one. The registry read's own error is
  * never in them: it is a client's, which can name a host, and this sentence reaches a page and the audit.
  */
-function notInFleet(jobId, fleet) {
+function notInFleet(jobId, fleet, action = null) {
+  if (action !== null) return `${action}: no job in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${fleet.blind ? " (the host registry could not be read; a host that is not registered may still hold it)" : ""}; job ${jobId}`;
   return `no job ${jobId} in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${fleet.blind ? " (the host registry could not be read; a host that is not registered may still hold it)" : ""}`;
 }
 
@@ -158,12 +159,12 @@ function targetOf(data) {
  * ("it changed since the preview": retried, removed, or failed again since).
  */
 async function actOnFailed(found, jobId, expect, act) {
-  if (!found) return { invalid: `no job ${jobId}: it changed since the preview (it was removed or retried and finished)` };
+  if (!found) return { invalid: `Nothing was done: it changed since the preview (it was removed or retried and finished); job ${jobId}` };
   const state = await found.job.getState().catch(() => "unknown");
-  if (state !== "failed") return { invalid: `job ${jobId} is ${state} now, not failed: it changed since the preview. Nothing was done` };
+  if (state !== "failed") return { invalid: `Nothing was done: it is ${state} now, not failed; it changed since the preview; job ${jobId}` };
   const now = failedFingerprint(found.job);
   if (now.attemptsMade !== expect.attemptsMade || now.finishedOn !== expect.finishedOn) {
-    return { invalid: `job ${jobId} failed again since the preview (it changed since the preview). Nothing was done; look again` };
+    return { invalid: `Nothing was done: it failed again since the preview (it changed since the preview); look again; job ${jobId}` };
   }
   await act(found.job);
   return { ok: true, jobId, queue: found.queue };
@@ -260,7 +261,7 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
       fleet ??= await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
       try {
         const found = await fleet.find(jobId, entry.queue);
-        const res = found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, act) : { invalid: `${notInFleet(jobId, fleet)}: it changed since the preview` };
+        const res = found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, act) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
         results.push(res.ok ? res : { jobId, invalid: res.invalid });
       } catch (err) {
         // One job's Valkey error is that job's result; a bulk action reports per job and goes on.
@@ -1366,7 +1367,7 @@ async function findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, t
   const fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
   fleetHolder.fleet = fleet;
   const found = await fleet.find(jobId);
-  if (!found) return { refusal: `${notInFleet(jobId, fleet)}; nothing was sent` };
+  if (!found) return { refusal: notInFleet(jobId, fleet, "Nothing was sent") };
   return { job: found.job, queue: found.queue, runId: runIdOf(found.job), fleet };
 }
 
@@ -1426,22 +1427,22 @@ export async function planSteer({
     const state = await found.job.getState().catch(() => "unknown");
     if (state !== "active") {
       const next = await activeJobOfRun((id) => found.fleet.find(id), found.runId, jobId);
-      if (!next) return { refusal: `job ${jobId} is ${state}: only a running job takes messages. Nothing was sent` };
+      if (!next) return { refusal: `Nothing was sent: it is ${state}; only a running job takes messages; job ${jobId}` };
       found = { job: next.job, queue: next.queue, runId: runIdOf(next.job), fleet: found.fleet };
     }
     const target = String(found.job.id);
-    if (found.job.data?.steer !== true) return { refusal: `job ${target} is not steer-armed (its trigger does not set run.steer), so it takes no messages. Nothing was sent` };
+    if (found.job.data?.steer !== true) return { refusal: `Nothing was sent: it is not steer-armed (its trigger does not set run.steer), so it takes no messages; job ${target}` };
     redis = redisFn(url);
     redis.on?.("error", () => {});
     const open = await steerInbox.isOpen({ redis, runId: found.runId });
     if (open !== true) {
-      if (open === false) return { refusal: "the run is not accepting messages: it is not steer-armed, not running, or its venue cannot deliver. Nothing was sent" };
-      return { refusal: `the run's inbox could not be read (Valkey said ${String(open?.error ?? "nothing")}); nothing was sent` };
+      if (open === false) return { refusal: "Nothing was sent: the run is not accepting messages; it is not steer-armed, not running, or its venue cannot deliver" };
+      return { refusal: `Nothing was sent: the run's inbox could not be read (Valkey said ${String(open?.error ?? "nothing")})` };
     }
     const kept = norm.entry.text;
     return { plan: { kind: "steer", jobId: target, queue: found.queue, runId: String(found.runId), id, mode, source, by: who, text: kept, bytes: Buffer.byteLength(kept, "utf8"), digest: sha256Hex(kept) } };
   } catch (err) {
-    return { refusal: `could not read the job or its inbox (${boundedText(err?.message ?? String(err))}); nothing was sent` };
+    return { refusal: `Nothing was sent: could not read the job or its inbox (${boundedText(err?.message ?? String(err))})` };
   } finally {
     await holder.fleet?.close();
     try {
@@ -1469,11 +1470,11 @@ export async function enqueueSteer(plan, { url, redisFn = makeRedisClient, now =
     if (pushed?.error === "refused") return { refusal: `${pushed.reason}` };
     if (pushed?.error) return { unreachable: `Valkey said ${pushed.error}` };
     if (pushed === "ok") return { ok: true, jobId: plan.jobId, id: plan.id, mode: plan.mode, state: "queued" };
-    if (pushed === "gone") return { refusal: "the run stopped accepting messages before this one arrived (it ended, or its worker stopped refreshing it). Nothing was sent" };
-    if (pushed === "closed") return { refusal: "the run has finished and its inbox is closed. Nothing was sent" };
-    if (pushed === "full") return { refusal: `the run's inbox is full (at most ${steerInbox.STEER_MAX_MESSAGES} messages and ${steerInbox.STEER_TOTAL_MAX_BYTES} bytes per run, withdrawn ones included). Nothing was sent` };
-    if (pushed === "dup") return { refusal: `message ${plan.id} is already in the run's inbox; nothing new was sent` };
-    return { refusal: `the inbox answered ${String(pushed)}; nothing was sent` };
+    if (pushed === "gone") return { refusal: "Nothing was sent: the run stopped accepting messages before this one arrived (it ended, or its worker stopped refreshing it)" };
+    if (pushed === "closed") return { refusal: "Nothing was sent: the run has finished and its inbox is closed" };
+    if (pushed === "full") return { refusal: `Nothing was sent: the run's inbox is full (at most ${steerInbox.STEER_MAX_MESSAGES} messages and ${steerInbox.STEER_TOTAL_MAX_BYTES} bytes per run, withdrawn ones included)` };
+    if (pushed === "dup") return { refusal: `Nothing new was sent: the message is already in the run's inbox; message ${plan.id}` };
+    return { refusal: `Nothing was sent: the inbox answered ${String(pushed)}` };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -1527,7 +1528,7 @@ export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisCli
   const holder = { fleet: null };
   try {
     const found = await findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder: holder });
-    if (found.refusal) return { refusal: found.refusal.replace(/; nothing was sent$/, "; nothing was changed") };
+    if (found.refusal) return { refusal: found.refusal.replace(/^Nothing was sent:/, "Nothing was changed:") };
     redis = redisFn(url);
     redis.on?.("error", () => {});
     const prior = await steerInbox.messageState({ redis, runId: found.runId, id });

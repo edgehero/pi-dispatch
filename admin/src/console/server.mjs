@@ -510,7 +510,7 @@ async function getEvents(ctx) {
   const parsed = pageQueryOr400(ctx, name, rest);
   if (!parsed) return;
   const presented = req.headers["last-event-id"];
-  const lastEventId = typeof presented === "string" && EVENT_ID_RE.test(presented) ? presented : null;
+  const lastEventId = typeof presented === "string" && (name === "run" ? TRANSCRIPT_ID_RE : EVENT_ID_RE).test(presented) ? presented : null;
   return openStream(ctx, () => deps.hub.subscribe({ res, sessionId: session.id, session: { name: session.name, role: session.role }, page: name, query: parsed.query, lastEventId }));
 }
 

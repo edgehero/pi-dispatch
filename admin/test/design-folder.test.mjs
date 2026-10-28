@@ -22,7 +22,7 @@ import { PULSE_TOKENS_SHA256 } from "../src/console/pulse-tokens.mjs";
  * because on running text they also widen hyphens, so an id like gh-2f6a read "gh - 2f6a". Before, `body` set them
  * for all text. The paste re-measures what the console sizes by hand on tabular digits (DES-OPERATOR-CONSOLE).
  */
-const DESIGN_CSS_WAITING_SHA256 = "c94d6fe9f9513ace1f42bfff05f3058ddb5a845c85a606b9899e14653d4f7a8f";
+const DESIGN_CSS_WAITING_SHA256 = "db8ec1ddcbf41ff5161648ac8d25ddebf3a27bc51b939177caa3478ce667d2db";
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const designFile = (path) => readFileSync(new URL(`../../design/system/${path}`, import.meta.url));

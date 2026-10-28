@@ -1,0 +1,128 @@
+{
+  "card": "RunLive",
+  "pr": 5,
+  "panels": [
+    "p-progress",
+    "p-transcript",
+    "p-record",
+    "p-chat",
+    "p-terminal",
+    "p-run"
+  ],
+  "elements": [
+    {
+      "el": "p-progress",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runProgress",
+      "golden": [
+        "panels/run-chat-live.operator"
+      ]
+    },
+    {
+      "el": "p-transcript",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runTranscriptState",
+      "golden": [
+        "panels/run-chat-live.operator"
+      ]
+    },
+    {
+      "el": "p-record",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runRecord",
+      "golden": [
+        "panels/run-chat-live.operator"
+      ]
+    },
+    {
+      "el": "p-chat",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat",
+      "golden": [
+        "panels/run-chat-live.operator"
+      ]
+    },
+    {
+      "el": "p-terminal",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runTerminal",
+      "golden": [
+        "panels/run-chat-live.operator"
+      ]
+    },
+    {
+      "el": "p-run",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary",
+      "golden": [
+        "panels/run-chat-live.operator"
+      ]
+    },
+    {
+      "el": "The live run page leads with progress and the live transcript; steering and the terminal command sit beside them, and everything that only exists after the run ends collapses to one line.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runProgress"
+    },
+    {
+      "el": "**How a person uses it.** The Progress card answers \"how far along is it\":",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runProgress"
+    },
+    {
+      "el": "elapsed timecode, turn 7 of 40, 12 steps with 1 failed;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "the tool running now and for how long;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "phase 2 of 4 as chapters, with 3 of 10 ticks on the current phase;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runProgress"
+    },
+    {
+      "el": "the run's own note and the three most recent steps.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "The live transcript streams below. Tool arguments and results fold; a failed result opens by default; the running call says how long it has run. The side column has the Steer card (steer now, queue a follow-up, an inbox with Withdraw), the terminal chat command and the run's facts. Cancel run is in the title bar, outlined until its confirm step.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runInbox"
+    },
+    {
+      "el": "**The server provides.** Progress events (turn, steps, running tool, phase names, item counts, note) and transcript entries with kind, time and a truncated flag, over the live stream. Whether the trigger sets `run.steer`, and the queued and delivered steering messages.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runProgress"
+    },
+    {
+      "el": "A run whose trigger sets no run.steer takes no messages. Its side column then shows \"This run takes no messages: its trigger sets no run.steer. Watch it here instead, or continue it in a terminal once it ends.\" in place of the Steer card (drawn on RunChatStates as *Not steer-armed*).",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "**Fixture note.** Progress, recent steps and the transcript's entry kinds and times are the fixture (gh-b3d7). The tool arguments, the read result, the test failure text, the bash command and the inbox messages are sample copy. The fixture run is not steer-armed, so on the fixture its Chat panel would show the not-armed sentence instead of the Steer card.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "#747 excludes point-in-time forking (#648), Watch (#735), and exact sample fixture text and marker timestamps. Production uses real records and catalog words; the card\u2019s sample values are not runtime contracts."
+    }
+  ]
+}

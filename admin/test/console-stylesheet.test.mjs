@@ -32,7 +32,7 @@ const read = (css) => new Set([...css.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) =
 const declarationsOf = (css) => cssBlocks(css).flatMap(({ prelude, body }) => (prelude.startsWith("@") ? declarationsOf(body) : [body]));
 
 test("bundle.css and tokens.json are pasted verbatim: each module's text hashes to the design file's", () => {
-  assert.equal(PULSE_CSS_SHA256, "22564c875ed87b0c5af350d31770f995486737e2fe814a4e7458c031f2391ae6", "the pin is the file's, measured when it was pasted");
+  assert.equal(PULSE_CSS_SHA256, "4bbc2e83b01f498b375bc6d7aa313f28aa1ca9832bf0a72b78683ad69539a2de", "the pin is the file's, measured when it was pasted");
   assert.equal(sha256(PULSE_CSS), PULSE_CSS_SHA256, "PULSE_CSS is bundle.css, every byte");
   assert.equal(PULSE_TOKENS_SHA256, "23a272327010840ed86e4138c3d2c904831b7a33a24d7a9dcb67a58cb1c1c868");
   assert.equal(sha256(JSON.stringify(PULSE_TOKENS, null, 1)), PULSE_TOKENS_SHA256, "PULSE_TOKENS is tokens.json, every value");
@@ -84,7 +84,7 @@ test("the shell's rules and the legacy layer's declarations hold no colour liter
 
 test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR 3: the overview; PR 4: runs, parked), each served only under its own body", () => {
   assert.ok(Object.isFrozen(PAGE_CSS));
-  assert.deepEqual(Object.keys(PAGE_CSS), ["login", "login-code", "error", "audit", "overview", "runs", "parked"]);
+  assert.deepEqual(Object.keys(PAGE_CSS), ["login", "login-code", "error", "audit", "overview", "run", "runs", "parked"]);
   assert.equal(PAGE_CSS.runs, RUNS_CSS);
   assert.equal(PAGE_CSS.parked, PARKED_CSS);
   assert.equal(PAGE_CSS.login, PAGE_CSS["login-code"], "the two sign-in pages are one card's rules");
@@ -92,7 +92,7 @@ test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR
   assert.ok(PAGE_CSS.audit.endsWith(PAGE_CSS.error), "the audit page carries the error card's rules too");
   const served = pageCss();
   assert.ok(CONSOLE_CSS.includes(served));
-  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:login|login-code|error|audit|overview|runs|parked)"\](?:$|[ >])/, sel);
+  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:login|login-code|error|audit|overview|run|runs|parked)"\](?:$|[ >])/, sel);
   for (const name of Object.keys(PAGE_CSS)) assert.ok(served.includes(`body[data-page="${name}"] `), name);
   assert.equal(scopeCss('body[data-page="runs"]', ".x .y{color:var(--ink)}\nbody{gap:0}"), 'body[data-page="runs"] .x .y{color:var(--ink)}\nbody[data-page="runs"]{gap:0}');
 });
@@ -537,7 +537,7 @@ test("the parts a page draws hidden take no space until they show; a page shown 
     }
   }
   // It outweighs the legacy layer's own panel ground (the layer comes last in the stylesheet, so weight must win).
-  assert.match(LEGACY_CSS, /\n\.legacy>section\[data-panel\],\.legacy>section\.transcript-section\{[^}]*background:var\(--surface\)/);
+  assert.match(LEGACY_CSS, /\n\.legacy>section\[data-panel\]\{[^}]*background:var\(--surface\)/);
   assert.ok(specificity("main.stale .legacy>section[data-panel]") > specificity(".legacy>section[data-panel]"));
   assert.deepEqual(SHELL.top[".titlebar__end .drawn"], { display: "inline-flex", "align-items": "center", gap: "8px", "font-size": "13px", color: "var(--ink-muted)" });
   // On a phone the drawn note takes its own line, and Reload (the ghost button shellHtml draws right after it, as
@@ -614,7 +614,7 @@ test("the legacy layer: a card per wrapper, the charts' own font, readable field
   assert.doesNotMatch(LEGACY_CSS, /login-form/);
   // Each old panel is a wrapper of its own, a cell of main's grid, so the card has no margin: the grid's gap
   // spaces the cards, 16px (12px on a phone, main's own), what one wrapper's margins gave them.
-  assert.deepEqual(LEGACY.top[".legacy>section[data-panel],.legacy>section.transcript-section"], { "max-width": "none", "min-width": "0", margin: "0", padding: "var(--space-5)", border: "0", "border-radius": "var(--radius-lg)", background: "var(--surface)" });
+  assert.deepEqual(LEGACY.top[".legacy>section[data-panel]"], { "max-width": "none", "min-width": "0", margin: "0", padding: "var(--space-5)", border: "0", "border-radius": "var(--radius-lg)", background: "var(--surface)" });
   assert.equal(LEGACY.top[".legacy>:last-child"], undefined, "no last-child margin to take back");
   assert.deepEqual([SHELL.top.main.gap, SHELL.media[PHONE].main.gap], ["var(--space-4)", "12px"]);
   // The charts keep the insights font their labels were sized for (label-fit-check.mjs measured cuts without it).
@@ -623,7 +623,7 @@ test("the legacy layer: a card per wrapper, the charts' own font, readable field
   assert.equal(LEGACY.top[".legacy textarea,.legacy form.act textarea"]["font-weight"], "400", "a field's text is not its label's bold");
   assert.deepEqual(LEGACY.top[".legacy button[disabled]"], { opacity: ".45", cursor: "not-allowed" });
   const phone = LEGACY.media[PHONE];
-  assert.deepEqual(phone[".legacy>section[data-panel],.legacy>section.transcript-section"], { padding: "var(--space-4)", "border-radius": "22px" });
+  assert.deepEqual(phone[".legacy>section[data-panel]"], { padding: "var(--space-4)", "border-radius": "22px" });
   assert.deepEqual(phone[".legacy table.grid td:not([colspan]):not(:has(br))"], { "white-space": "nowrap" }, "a model or an id never breaks at its hyphens in a cell");
   assert.deepEqual([4, 6, 9].map((n) => phone[`.legacy table.grid:has(thead th:nth-child(${n}))`]["min-width"]), ["520px", "720px", "960px"]);
 });
@@ -647,7 +647,6 @@ test("the neutraliser keeps each selector's own specificity: one :is() per speci
   assert.deepEqual(Object.fromEntries(NEUTRALISED.map((s) => [s, tuple(specificity(s))])), {
     ".badge": [0, 1, 0],
     ".banner": [0, 1, 0],
-    ".big": [0, 1, 0],
     ".cap": [0, 1, 0],
     ".code": [0, 1, 0],
     ".facts": [0, 1, 0],
@@ -655,10 +654,6 @@ test("the neutraliser keeps each selector's own specificity: one :is() per speci
     ".kpi b": [0, 1, 1],
     ".kpi span": [0, 1, 1],
     ".note": [0, 1, 0],
-    ".phases": [0, 1, 0],
-    ".phases .bar": [0, 2, 0],
-    ".phases .bar i": [0, 2, 1],
-    ".phases li": [0, 1, 1],
     ".wl": [0, 1, 0],
   });
   assert.ok(specificity(".x") > specificity("a b c d e"), "one class outweighs any run of types");

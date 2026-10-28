@@ -22,6 +22,7 @@
 import { BTN_KINDS } from "./kit.mjs";
 import { PARKED_CSS } from "./parked-css.mjs";
 import { PULSE_CSS } from "./pulse-css.mjs";
+import { RUN_CSS } from "./run-css.mjs";
 import { RUNS_CSS } from "./runs-css.mjs";
 
 /** A selector's start that names the document itself: replaced by the scope. */
@@ -755,7 +756,7 @@ main>.cards-4>section>.card{height:100%}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, runs: RUNS_CSS, parked: PARKED_CSS });
+export const PAGE_CSS = Object.freeze({ login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS });
 
 /**
  * Every page's rules, each confined to `body[data-page="<page>"]`, in the table's order. `table` is `PAGE_CSS`; a test

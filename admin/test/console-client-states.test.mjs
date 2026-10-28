@@ -62,7 +62,7 @@ function gridPage() {
 function runPage() {
   const view = { role: "operator", query: { id: "gh-1" }, data: { transcript: { exists: true, ended: false } } };
   const ctx = { session: OPERATOR, readOnly: false, data: { parkedCount: 0, now: NOW }, query: { id: "gh-1" }, theme: null, maxStreams: 4 };
-  const inner = html`${legacyWrap("run", html`<section id="p-run" data-panel><h2>Run</h2></section>`)}${legacyWrap("run", html`<section id="transcript" class="transcript-section">${runTranscriptSection(view)}</section>`)}`;
+  const inner = html`<section id="p-run" data-panel><h2>Run</h2></section><section id="p-transcript" data-panel><p data-transcript-status>waiting</p></section><section id="transcript">${runTranscriptSection(view)}</section>`;
   return String(page({ title: "pi-dispatch console: Run", name: "run", body: shellHtml("run", ctx, inner), live: "run", query: "id=gh-1" }));
 }
 
@@ -738,8 +738,8 @@ stateTest(T.pill, async () => {
   // The transcript's line the same way: a stream the browser reconnects by itself (CONNECTING, 0) is "reconnecting",
   // never "live", and nothing is asked; it is live again when it opens.
   const run = boot(runPage(), { url: "/run?id=gh-1" });
-  const transcript = run.streams[1];
-  transcript.emit("open");
+  const transcript = run.streams[0];
+  transcript.emit("entry", { html: "<article data-kind=\"assistant\"><pre>hello</pre></article>" });
   assert.equal(tstatus(run), "live");
   transcript.readyState = 0;
   transcript.emit("error");
@@ -787,21 +787,21 @@ stateTest(T.unreachable, async () => {
   // The console stopping, on a run page: the page under the retry note and the transcript's line reconnecting, at once.
   const muteStop = boot(runPage(), { url: "/run?id=gh-1", fetch: null });
   muteStop.streams[0].emit("open");
-  muteStop.streams[1].emit("open");
-  muteStop.streams[1].emit("end", { ended: STREAM_SHUTDOWN });
-  assert.ok(muteStop.streams[0].closed && muteStop.streams[1].closed, "both streams closed by the script");
+  muteStop.streams[0].emit("open");
+  muteStop.streams[0].emit("end", { ended: STREAM_SHUTDOWN });
+  assert.ok(muteStop.streams[0].closed && muteStop.streams[0].closed, "both streams closed by the script");
   assert.deepEqual([pill(muteStop).word, notes(muteStop), tstatus(muteStop), muteStop.timers.pending()], ["Reconnecting", ["retry"], "reconnecting", 0]);
   // On a run page with no fetch, a transcript the browser closed says so on its own line and leaves the page's pill as
   // it was: what it knows is said by the stream that asked. The page's stream closed after it says its own, not dropped.
   const muteRun = boot(runPage(), { url: "/run?id=gh-1", fetch: null });
   muteRun.streams[0].emit("open");
-  muteRun.streams[1].emit("open");
-  muteRun.streams[1].readyState = 2;
-  muteRun.streams[1].emit("error");
-  assert.deepEqual([pill(muteRun).word, notes(muteRun), tstatus(muteRun)], ["Live", [], "not live: reload after closing another console tab"]);
+  muteRun.streams[0].emit("open");
   muteRun.streams[0].readyState = 2;
   muteRun.streams[0].emit("error");
-  assert.deepEqual([pill(muteRun).word, notes(muteRun), tstatus(muteRun), muteRun.timers.pending()], ["Not live", [], "not live: reload after closing another console tab", 0]);
+  assert.deepEqual([pill(muteRun).word, notes(muteRun), tstatus(muteRun)], ["Not live", [], "reconnecting"]);
+  muteRun.streams[0].readyState = 2;
+  muteRun.streams[0].emit("error");
+  assert.deepEqual([pill(muteRun).word, notes(muteRun), tstatus(muteRun), muteRun.timers.pending()], ["Not live", [], "reconnecting", 0]);
 });
 
 stateTest(T.shutdown, async () => {
@@ -948,8 +948,10 @@ stateTest(T.ended, async () => {
   assert.deepEqual(wedged.location.assigned, ["/login"], "a 200 after the timeout is the sign-out, and goes to sign-in");
   // One handler for the page's stream and the transcript's: either end closes both, once.
   const run = boot(runPage(), { url: "/run?id=gh-1" });
-  const [page, transcript] = run.streams;
-  assert.deepEqual([page.url, transcript.url], ["/api/events?page=run&id=gh-1&as=ops.operator", "/api/transcript?id=gh-1&as=ops.operator"], "both streams say the page's person");
+  const [page] = run.streams;
+  const transcript = page;
+  assert.equal(run.streams.length, 1, "one page stream carries the transcript");
+  assert.equal(page.url, "/api/events?page=run&id=gh-1&as=ops.operator", "the stream says the page's person");
   transcript.emit("end", { ended: "max" });
   page.emit("end", { ended: "max" });
   assert.deepEqual([page.closed, transcript.closed, run.location.assigned], [true, true, ["/login?ended=max"]]);
@@ -957,27 +959,27 @@ stateTest(T.ended, async () => {
   assert.ok(ENDED_REASONS.includes("max"));
   // The end on the transcript stream alone: it is the page's end too, closing both.
   const alone = boot(runPage(), { url: "/run?id=gh-1" });
-  alone.streams[1].emit("end", { ended: "revoked" });
-  assert.deepEqual([alone.streams[0].closed, alone.streams[1].closed, alone.location.assigned, pill(alone).word], [true, true, ["/login?ended=revoked"], "Signed out"]);
+  alone.streams[0].emit("end", { ended: "revoked" });
+  assert.deepEqual([alone.streams[0].closed, alone.streams[0].closed, alone.location.assigned, pill(alone).word], [true, true, ["/login?ended=revoked"], "Signed out"]);
   // A transcript stream the browser closed (a 401, a 429 or a 503: it cannot tell) is asked about as the page's own is,
   // saying "reconnecting" on its line meanwhile and leaving the page's pill alone: a session that ended goes to sign-in
   // with its reason, another person to sign-in as switched, and only a 200 for the page's person is the stream limit.
   for (const [answer, to] of [[[401, { error: "sign in first", ended: "idle" }], "/login?ended=idle"], [[200, { name: "mallory", role: "operator" }], "/login?ended=switched"]]) {
     const w = boot(runPage(), { url: "/run?id=gh-1" });
     w.streams[0].emit("open");
-    w.streams[1].emit("open");
-    w.streams[1].readyState = 2;
-    w.streams[1].emit("error");
-    assert.deepEqual([tstatus(w), pill(w).word], ["reconnecting", "Live"], "asking: its own line, not the page's pill");
+    w.streams[0].emit("open");
+    w.streams[0].readyState = 2;
+    w.streams[0].emit("error");
+    assert.deepEqual([tstatus(w), pill(w).word], ["reconnecting", "Reconnecting"], "the shared stream updates both statuses");
     await w.fetch.open("/api/whoami").answer(...answer);
     assert.deepEqual(w.location.assigned, [to], JSON.stringify(answer));
   }
   const limited = boot(runPage(), { url: "/run?id=gh-1" });
   limited.streams[0].emit("open");
-  limited.streams[1].readyState = 2;
-  limited.streams[1].emit("error");
+  limited.streams[0].readyState = 2;
+  limited.streams[0].emit("error");
   await limited.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
-  assert.deepEqual([tstatus(limited), pill(limited).word, notes(limited), limited.location.assigned], ["not live: reload after closing another console tab", "Live", [], []], "the stream limit, on the transcript's line alone");
+  assert.deepEqual([tstatus(limited), pill(limited).word, notes(limited), limited.location.assigned], ["not live: reload after closing another console tab", "Not live", ["limit"], []], "the shared stream limit");
   // A preview or a confirm answered 401 is the session behind the page ending, not the write's refusal: the slot says
   // nothing was changed and the console is being asked (never the 401's own text), then sign-in with the reason (the
   // console's answer's, else the write's).
@@ -1084,7 +1086,8 @@ stateTest(T.bothClosed, async () => {
   // or the line "reconnecting" for good.
   const run = () => boot(runPage(), { url: "/run?id=gh-1" });
   const closeBoth = (w, order) => {
-    const streams = { page: w.streams[0], transcript: w.streams[1] };
+    const streams = { page: w.streams[0], transcript: w.streams[0] };
+    assert.equal(w.streams.length, 1, "the transcript has no second connection");
     for (const name of order) {
       streams[name].readyState = 2;
       streams[name].emit("error");
@@ -1106,10 +1109,10 @@ stateTest(T.bothClosed, async () => {
   // browser closes later asks a question of its own and is said the stream limit, never left Reconnecting.
   const apart = run();
   for (const s of apart.streams) s.emit("open");
-  apart.streams[1].readyState = 2;
-  apart.streams[1].emit("error");
+  apart.streams[0].readyState = 2;
+  apart.streams[0].emit("error");
   await apart.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
-  assert.deepEqual([tstatus(apart), pill(apart).word], ["not live: reload after closing another console tab", "Live"], "the transcript's line alone");
+  assert.deepEqual([tstatus(apart), pill(apart).word], ["not live: reload after closing another console tab", "Not live"], "the shared stream");
   apart.streams[0].readyState = 2;
   apart.streams[0].emit("error");
   assert.equal(calls(apart, "/api/whoami").length, 2, "the page's stream asks again");

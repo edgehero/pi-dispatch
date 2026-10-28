@@ -314,7 +314,7 @@ export function shellHtml(name, ctx, inner, { headline = null } = {}) {
   const glyphs = Object.entries(LIVE_GLYPHS).map(([state, glyph]) => liveGlyph(state, glyph));
   const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
   const back = name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : null;
-  const heading = name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${meta.title} ${ctx.query.id}` : meta.title;
+  const heading = name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : meta.title;
   const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;
   const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload) : null;
   const readOnly = Boolean(ctx?.readOnly);
@@ -323,7 +323,7 @@ export function shellHtml(name, ctx, inner, { headline = null } = {}) {
   const notes = meta.live ? liveNoteHtml({ maxStreams: ctx?.maxStreams, reload }) : null;
   const writes = role === "operator" && !readOnly && ctx?.slot !== false ? confirmSlotHtml() : null;
   const held = meta.live ? html`<template id="held-note">${heldNoteHtml()}</template>` : null;
-  const sub = headline === null ? null : html`<p class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></p>`;
+  const sub = headline === null ? null : name === "run" ? html`<div class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></div>` : html`<p class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></p>`;
   return html`<a class="skip" href="#main">Skip to content</a>
 ${SPRITE}
 <div class="page">

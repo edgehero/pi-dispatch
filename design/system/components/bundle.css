@@ -389,7 +389,7 @@ kbd { padding: 1px 7px; border-radius: 6px; background: var(--surface-2); font: 
 .tx__e { position: relative; display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 4px var(--space-3); align-items: start; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); }
 .tx__k { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--tone-ink, var(--ink-muted)); white-space: nowrap; }
 .tx__k .code { font-size: 12px; color: var(--ink); }
-.tx__t { font-size: 11px; color: var(--ink-faint); white-space: nowrap; text-align: right; }
+.tx__t { font-size: 11px; color: var(--ink-muted); white-space: nowrap; text-align: right; }
 .tx__b { min-width: 0; font-size: 13px; line-height: 19px; overflow-wrap: anywhere; }
 .tx__b pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 10px; background: var(--surface); font-family: var(--font-mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; color: var(--ink-muted); }
 .tx__b details summary { cursor: pointer; color: var(--ink-muted); font-size: 12px; font-weight: 600; list-style: none; }

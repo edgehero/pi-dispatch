@@ -254,7 +254,7 @@ async function runConsole(fleet, { env = ENV } = {}) {
 }
 
 const TOP_KEYS = ["activeJobId", "forgeLink", "mode", "newerRunOnTarget", "pendingRunOnTarget", "progress", "run", "says", "state", "steer", "transcript", "version"];
-const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "model", "outcome", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
+const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "maxTurns", "model", "outcome", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
 
 test("/api/run: the keys, a finished run's fork, and no free text, job data or session key for either role", { timeout: 20_000 }, async () => {
   const fleet = fakeFleet({ records: { "gh-1": record("gh-1") } });
@@ -287,6 +287,7 @@ test("/api/run: the keys, a finished run's fork, and no free text, job data or s
     attempt: 1,
     exitCode: 0,
     turns: 9,
+    maxTurns: null,
     parentJobId: null,
     recoveryOf: null,
     session: { kept: true, resumed: false },
@@ -667,7 +668,7 @@ test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pen
   const now = () => t;
   const tick = async (rec = parked) => {
     const facts = await chatFactsOf(fleet, "gh-park2", rec, { searchNewer: "parked", now });
-    return { facts, check: await parkedAnswerCheckOf(fleet, "gh-park2", rec, { now }) };
+    return { facts, check: await parkedAnswerCheckOf(fleet, "gh-park2", rec, { now, lookup: { live: true } }) };
   };
   for (let i = 0; i < 5; i += 1) {
     const got = await tick();
@@ -822,4 +823,41 @@ test("resolveRunChat (the one resolution /api/run and /dispatch chat share): the
   const missing = await resolveRunChat(fleet, { id: "nope" });
   assert.equal(missing.status, 404);
   assert.equal(missing.doc, undefined);
+});
+
+test("a request retries an unreadable planner answer cached by a live load; live loads still share it (#747)", async () => {
+  let calls = 0;
+  const fleet = { parkedAnswerCheck: async () => (++calls === 1 ? { unreachable: true } : { ok: true }) };
+  const parked = record("gh-refresh", { reason: "awaiting-input" });
+  const options = { now: () => T0, lookup: { live: true } };
+  assert.deepEqual(await parkedAnswerCheckOf(fleet, "gh-refresh", parked, options), { unreachable: true });
+  assert.deepEqual(await parkedAnswerCheckOf(fleet, "gh-refresh", parked, options), { unreachable: true });
+  assert.equal(calls, 1);
+  assert.deepEqual(await parkedAnswerCheckOf(fleet, "gh-refresh", parked, { now: () => T0, lookup: { asked: 0 } }), { ok: true });
+  assert.equal(calls, 2, "a request never reuses an answer made from an unreadable queue set");
+});
+
+test("finished saved sessions search for later turns with the same bounded cache as parked runs (#747)", async () => {
+  const finished = record("gh-fork", { target: "acme/web#80", session: { resumed: false, reason: "absent", transcriptBytes: 20 } });
+  const fleet = fakeFleet({ records: { "gh-fork": finished, "gh-new": record("gh-new", { target: finished.target, endedAt: iso(T0 + 1000) }) }, jobs: { "gh-fork": { found: true, state: "completed", continuesAs: null } } });
+  const options = { searchNewer: "saved", now: () => T0 };
+  const first = await chatFactsOf(fleet, "gh-fork", finished, options);
+  assert.equal(first.mode, "fork");
+  assert.equal(first.newer.jobId, "gh-new");
+  await chatFactsOf(fleet, "gh-fork", finished, options);
+  assert.equal(fleet.calls.runsPage.length, 1);
+  await chatFactsOf(fleet, "gh-fork", { ...finished, session: null }, options);
+  assert.equal(fleet.calls.runsPage.length, 1, "no saved session needs no fork warning lookup");
+});
+
+test("a fresh session may be saved, while explicit save failures never offer continuation lookup (#747)", async () => {
+  const { sessionSavedOf } = await import("../src/console/run-api.mjs");
+  const { SESSION_NOT_SAVED } = await import("@edgehero/pi-dispatch/record-reason");
+  const { SESSION_REASON_TEXT } = await import("@edgehero/pi-dispatch/reason-catalog");
+  for (const reason of ["absent", "expired", "resumed", "venue-changed"]) assert.equal(sessionSavedOf({ session: { reason } }), true, reason);
+  for (const reason of SESSION_NOT_SAVED) {
+    assert.ok(Object.hasOwn(SESSION_REASON_TEXT, reason), "the reason remains part of the worker's catalog");
+    assert.equal(sessionSavedOf({ session: { reason } }), false, reason);
+  }
+  assert.equal(sessionSavedOf({ session: null }), false);
 });

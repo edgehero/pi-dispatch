@@ -765,7 +765,36 @@ function longQueuesSnapshot(paused) {
  * Every panel golden, `<state>.<role>`, in the order the cards name them, each a function drawing its whole page. A
  * closed list: a file under `panels/` that is not one of these fails `console-panel-goldens.test.mjs`.
  */
+/** The run cards' states, rendered through the production panel table without transcript text. */
+async function runCard({ role = "operator", rec = record({ jobId: "gh-pulse", maxTurns: 40, turns: 14, triggerIndex: 0, triggerType: "comment" }), chat = { state: "finished", mode: "fork", jobState: "completed" }, transcript = { exists: false }, ...extra } = {}) {
+  const data = { now: NOW, env: {}, run: rec ? { record: rec, source: "local" } : { missing: true }, chat, transcript, children: [], childrenSearched: 50, ...extra };
+  const result = await renderPage("run", { query: { id: rec?.jobId ?? "gh-pulse" }, session: role === "operator" ? OPERATOR : VIEWER, data });
+  return String(result.html);
+}
+const RUN_CARD_STATES = {
+  "run-chat-live.operator": () => runCard({ rec: null, chat: { state: "active", mode: "live", jobState: "active" }, transcript: { exists: false }, activeRun: { target: "acme/web#42", kind: "github", host: "mini1", project: "web", backend: "podman", flow: "fix", provider: "anthropic", model: "claude-sonnet-5-5", maxTurns: 40, queue: "pi-jobs@mini1", startedAt: new Date(NOW - 2 * MIN).toISOString() }, inbox: { found: true, steer: true, state: "active", open: true, entries: [] } }),
+  "run-chat-reply.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-input", session: { resumed: false, reason: "absent", bytes: 4096 } }), chat: { state: "parked", mode: "reply", jobState: "completed" }, transcript: { exists: true, ended: true, outcome: "completed" } }),
+  "run-chat-expired.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-input" }), chat: { state: "parked", mode: "reply", jobState: "completed" } }),
+  "run-chat-fork.operator": () => runCard({ rec: record({ jobId: "gh-pulse", session: { resumed: false, reason: "absent", bytes: 4096 } }) }),
+  "run-chat-none.operator": () => runCard({ chat: { state: "finished", mode: "none", says: "This run's trigger keeps no session (no run.resume), so there is no transcript to fork." } }),
+  "run-refused.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "policy", reason: "job-image-missing", tokens: null, dollars: null, budgetReserved: false, exitCode: null }) }),
+  "run-cancelled-before-start.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "policy", reason: "operator-cancel", tokens: null, dollars: null, budgetReserved: false, exitCode: null }) }),
+  "run-recovering.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "failed", reason: "recovery-enqueued", checkpoints: { written: 4, failed: 1, skipped: 2 }, recovered: { from: "gh-before", n: 1, fromAttempt: 1, checkpointSeq: 4, replayed: 2, interrupted: 1, notStarted: 1 } }), chat: { state: "active", mode: "live", activeJobId: "gh-pulse.r1", jobState: "failed" } }),
+  "run-sandbox-openshell.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "openshell", openshell: { mode: "copy", providers: 2, placeholders: 2, ruleHosts: ["api.example.com"], ruleHostCount: 1 }, secretsProfile: "forge", bundle: { id: "web-ci", variables: ["API_TOKEN", "CONFIG"], shadowed: [], placeholders: 1, plain: 1, placeholderNames: ["API_TOKEN"] } }) }),
+  "run-sandbox-openshell-bind.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "openshell-bind" }) }),
+  "run-sandbox-kept.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: true, until: NOW + 23 * HOUR } }),
+  "run-sandbox-past-window.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: false, why: "past-window" } }),
+  "run-sandbox-swept.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: false, why: "swept" } }),
+  "run-sandbox-replica.operator": () => runCard({ rec: record({ jobId: "gh-pulse-r2", replica: 2, replicas: 3 }), siblings: [record({ jobId: "gh-pulse-r1", outcome: "failed" }), record({ jobId: "gh-pulse-r3" })] }),
+  "run-failed-no-reason.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "failed", reason: null }) }),
+  "run-failed-no-reason.viewer": () => runCard({ role: "viewer", rec: record({ jobId: "gh-pulse", outcome: "failed", reason: null }) }),
+  "run-unknown-reason.viewer": () => runCard({ role: "viewer", rec: record({ jobId: "gh-pulse", outcome: "failed", reason: "future-refusal" }) }),
+  "run-long-cron.operator": () => runCard({ rec: record({ jobId: `repeat:${"long-trigger".repeat(10)}:1791450000000`, kind: "local", target: "/workspace/repo", session: null }) }),
+};
+export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
+
 const DRAW = {
+  ...RUN_CARD_STATES,
   // ConfirmStates: the slot in every state, after the card that asked.
   "confirm-previewing.operator": async () => openSlotAfter(await fleetLive(), "p-queues", { label: "Pause the fleet" }),
   "confirm-preview.operator": async () => {

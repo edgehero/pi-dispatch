@@ -12,7 +12,7 @@
  */
 
 /** The sha256 of `PULSE_CSS` as UTF-8, which is the sha256 of `components/bundle.css` itself. */
-export const PULSE_CSS_SHA256 = "22564c875ed87b0c5af350d31770f995486737e2fe814a4e7458c031f2391ae6";
+export const PULSE_CSS_SHA256 = "4bbc2e83b01f498b375bc6d7aa313f28aa1ca9832bf0a72b78683ad69539a2de";
 
 /** `components/bundle.css`, every byte. */
 export const PULSE_CSS = `/* pi-dispatch console, Pulse. One stylesheet for every page.
@@ -404,7 +404,7 @@ kbd { padding: 1px 7px; border-radius: 6px; background: var(--surface-2); font: 
 .tx__e { position: relative; display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 4px var(--space-3); align-items: start; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); }
 .tx__k { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--tone-ink, var(--ink-muted)); white-space: nowrap; }
 .tx__k .code { font-size: 12px; color: var(--ink); }
-.tx__t { font-size: 11px; color: var(--ink-faint); white-space: nowrap; text-align: right; }
+.tx__t { font-size: 11px; color: var(--ink-muted); white-space: nowrap; text-align: right; }
 .tx__b { min-width: 0; font-size: 13px; line-height: 19px; overflow-wrap: anywhere; }
 .tx__b pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 10px; background: var(--surface); font-family: var(--font-mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; color: var(--ink-muted); }
 .tx__b details summary { cursor: pointer; color: var(--ink-muted); font-size: 12px; font-weight: 600; list-style: none; }

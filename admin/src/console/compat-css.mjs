@@ -56,7 +56,6 @@ import { scopeCss, selectorsOf } from "./page-css.mjs";
 export const NEUTRALISED = Object.freeze([
   ".badge",
   ".banner",
-  ".big",
   ".cap",
   ".code",
   ".facts",
@@ -64,10 +63,6 @@ export const NEUTRALISED = Object.freeze([
   ".kpi b",
   ".kpi span",
   ".note",
-  ".phases",
-  ".phases .bar",
-  ".phases .bar i",
-  ".phases li",
   ".wl",
 ]);
 
@@ -146,7 +141,6 @@ p{margin:4px 0}
 .warn{color:var(--pd-amber)}
 .bad{color:var(--pd-danger)}
 .good{color:var(--pd-green)}
-.big{font-size:22px;font-weight:600}
 .facts{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;font-size:13px}
 .facts dt{color:var(--pd-dim)}
 .facts dd{margin:0;overflow-wrap:anywhere}
@@ -181,16 +175,6 @@ details.editor>summary{font-size:13px;color:var(--pd-accent)}
 .preview-area{flex-basis:100%;margin-top:6px;padding:8px;border:1px solid var(--pd-border);border-radius:6px;background:var(--pd-canvas);font-size:12px}
 pre.answer{margin:6px 0;overflow-x:auto;font-size:12px;line-height:1.4}
 code.mono{padding:1px 4px;border:1px solid var(--pd-border);border-radius:4px;background:var(--pd-canvas)}
-section.transcript-section{margin:0 0 16px;padding:12px 14px;background:var(--pd-panel);border:1px solid var(--pd-border);border-radius:6px}
-section.transcript-section h2{font-size:14px;margin:0 0 8px}
-.t-status{font-size:12px;color:var(--pd-dim)}
-.t-status.on{color:var(--pd-green)}
-.t-status.off{color:var(--pd-amber)}
-.transcript{max-height:70vh;overflow-y:auto;padding:4px 8px;border:1px solid var(--pd-border);border-radius:6px;background:var(--pd-canvas)}
-.t-entry{padding:6px 0;border-bottom:1px solid var(--pd-border)}
-.t-entry header{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:12px;color:var(--pd-dim)}
-.t-entry .t-kind{font-weight:600;color:var(--pd-fg)}
-.t-entry pre{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.4}
 @media (max-width:640px){.facts{grid-template-columns:1fr}}
 `;
 
@@ -234,8 +218,8 @@ export function insightsFont(css = INSIGHTS_CSS) {
 const PULSE_LOOK = `
 body{display:contents;color:var(--ink);font:inherit}
 svg{font:${insightsFont()}}
-body>section[data-panel],body>section.transcript-section{max-width:none;min-width:0;margin:0;padding:var(--space-5);border:0;border-radius:var(--radius-lg);background:var(--surface)}
-section[data-panel] h2,section.transcript-section h2{margin:0 0 var(--space-3);font-size:17px;line-height:24px;font-weight:650;color:var(--ink)}
+body>section[data-panel]{max-width:none;min-width:0;margin:0;padding:var(--space-5);border:0;border-radius:var(--radius-lg);background:var(--surface)}
+section[data-panel] h2{margin:0 0 var(--space-3);font-size:17px;line-height:24px;font-weight:650;color:var(--ink)}
 section[data-panel] section{margin:var(--space-5) 0 0;padding-top:var(--space-4);border-top:1px solid var(--line)}
 section[data-panel] section:first-of-type{margin-top:var(--space-3);padding-top:0;border-top:0}
 section[data-panel] section h2{margin-bottom:var(--space-2);font-size:15px;line-height:20px}
@@ -246,7 +230,6 @@ a{color:var(--focus);font-weight:600;text-decoration:none}
 a:hover{text-decoration:underline}
 .note,.dim{color:var(--ink-muted)}
 .note{font-size:12px;line-height:16px}
-.big{font-size:28px;line-height:34px;font-weight:800;letter-spacing:-0.02em}
 .mono,code.mono,form.act textarea{font-family:var(--font-mono)}
 .mono{font-size:13px}
 code.mono{padding:1px 6px;border:0;border-radius:6px;background:var(--surface-2)}
@@ -282,9 +265,6 @@ details.editor[open]>summary{background:var(--primary);color:var(--on-primary)}
 .range a[aria-current="page"]{background:var(--primary);color:var(--on-primary)}
 .preview-area{margin-top:var(--space-2);padding:var(--space-3) var(--space-4);border:0;border-radius:var(--radius-md);background:var(--surface);box-shadow:inset 0 0 0 2px var(--primary);font-size:13px}
 pre.answer{padding:8px 14px;border-radius:var(--radius-md);background:var(--surface-2);font-family:var(--font-mono);font-size:12.5px;line-height:20px}
-.transcript{padding:4px 14px;border:0;border-radius:var(--radius-md);background:var(--surface-2)}
-.t-entry{border-bottom-color:var(--line)}
-.t-entry:last-child{border-bottom:0}
 #windows{margin:0 0 var(--space-3)}
 #kpis{gap:var(--space-3)}
 .kpi,.plan,#budget,#split,.bl,#legend,#dollars{border:0;border-radius:var(--radius-md);background:var(--surface-2)}
@@ -358,7 +338,7 @@ function svgPaint() {
  */
 const PHONE_CSS = `
 @media (max-width: 760px){
-body>section[data-panel],body>section.transcript-section{padding:var(--space-4);border-radius:22px}
+body>section[data-panel]{padding:var(--space-4);border-radius:22px}
 #grid,#flows,#sizes{grid-template-columns:minmax(0,1fr)}
 section[data-panel] section{overflow-x:auto}
 svg[viewBox]{max-width:100%;height:auto}

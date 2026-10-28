@@ -1706,7 +1706,7 @@ export async function startWorker(
 			// The comment decides nothing: a failure here costs a stale comment, never the record path.
 		}
 	};
-	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null }) => {
+	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null, maxTurns = null }) => {
 		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
 		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
 		// path that ends BEFORE the pickup gate (the wait gate's refusals) passes none, and resolves from the live ref
@@ -1716,7 +1716,7 @@ export async function startWorker(
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
 		// The default venue rides the same way and for the same reason (#277): it is the value the registry
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier });
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier, maxTurns });
 		writeRecord(record);
 		// Issue #644: the status comment's last edit, from the record's classification. An infrastructure failure the queue
 		// will retry says the attempt ended and is being retried, not "finished": BullMQ retries an error that is not

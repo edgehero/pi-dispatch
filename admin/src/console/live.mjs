@@ -28,7 +28,8 @@
  *      regroup one snapshot, so every overview query shares one load; any other page's is its whole query;
  *   4. `pagePanels` renders each view (page + whole query + the viewer's role and name: the role rule makes a viewer's
  *      panels differ from an operator's), and only the panels whose digest changed are written, each as
- *      `id: <seq>`, `event: panel`, `data: {"id","html"}`.
+ *      `id: <seq>`, `event: panel`, `data: {"id","html"}`. Run-page panels have no event id: only transcript entries
+ *      advance that page's reconnect cursor, and a reconnect always receives its panels whole.
  *
  * A NEW STREAM gets every panel of its view after its state (below), unless its `Last-Event-ID` is the view's current
  * seq (it already holds exactly this). The seq carries a per-process epoch, so an id from before a restart never
@@ -67,6 +68,10 @@
  * saw is the next tick's to say again, if it still holds. Transcript streams never get either: their entries are a log,
  * not a picture that can go out of date.
  *
+ * RUN PAGES ALSO CARRY THEIR TRANSCRIPT (issue #747). After a successful load reports its stream exists, an
+ * operator's page joins the transcript fan-out below using its own Last-Event-ID. Its completion is `tdone`, which
+ * leaves the page connection open. A viewer never joins. No transcript text enters a panel or cached view.
+ *
  * A SECOND SUBSCRIPTION TYPE, THE LIVE TRANSCRIPT (issue #643, `subscribeTranscript`): one run's transcript stream for
  * an operator. It shares everything above that is not a page: the slots (the server takes them for both kinds alike),
  * the session re-check with `peek` and its `event: end`, the 2 MiB cut, the ping and the one timer. Its own step 5:
@@ -77,8 +82,7 @@
  *      `transcriptEntryJson` rebuilds). Streams at the tip, however many, cost one read; a stream that came
  *      in behind (a reconnect with an old `Last-Event-ID`, or none) is caught up a few pages per tick
  *      (`transcriptPagesPerTick`), the others waiting at most those ticks. A stream whose cursor reaches the `end`
- *      entry gets `event: done` with `{"outcome"}` and is closed (the browser closes its EventSource on it, so it is
- *      not reopened). A read that is unreachable skips that job this tick, logged once, as a failing page is.
+ *      entry gets `event: done` with `{"outcome"}` and is closed (the terminal client stops reconnecting). A read that is unreachable skips that job this tick, logged once, as a failing page is.
  *
  * Transcript text never enters a view, a panel or `/api/state`: it goes from the read to the one stream that asked.
  *
@@ -90,8 +94,8 @@ import { beatAgeOf } from "../doctor-view.mjs";
 import { scrubControls } from "../panel.mjs";
 import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
-import { compareTranscriptIds, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
-import { recordReason } from "../words.mjs";
+import { compareTranscriptIds, TRANSCRIPT_ID_RE, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
+import { outcomeWord, recordReason } from "../words.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { STREAM_SHUTDOWN, streamEndOf } from "./session-ends.mjs";
 import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
@@ -331,10 +335,10 @@ export function makeLiveHub({
     send(sub, "event: fresh\ndata: {}\n\n");
   }
 
-  const panelEvent = (seq, id, html) => `id: ${seq}\nevent: panel\ndata: ${JSON.stringify({ id, html })}\n\n`;
+  const panelEvent = (seq, id, html) => `${seq === null ? "" : `id: ${seq}\n`}event: panel\ndata: ${JSON.stringify({ id, html })}\n\n`;
 
   function sendFull(sub, view) {
-    for (const [id, p] of view.panels) if (!send(sub, panelEvent(view.seq, id, p.html))) return;
+    for (const [id, p] of view.panels) if (!send(sub, panelEvent(sub.page === "run" ? null : view.seq, id, p.html))) return;
     sub.needsFull = false;
   }
 
@@ -355,7 +359,7 @@ export function makeLiveHub({
       drawn.set(p.id, digest);
       if (was.get(p.id) === digest) continue;
       seq ??= nextSeq();
-      if (!send(sub, panelEvent(seq, p.id, html))) return;
+      if (!send(sub, panelEvent(sub.page === "run" ? null : seq, p.id, html))) return;
     }
     sub.degraded = drawn;
   }
@@ -387,6 +391,7 @@ export function makeLiveHub({
     // A key nobody shows any more is forgotten, failing or not, so a long-running console holds only what is open. The
     // tokens file's failure is the console's, not a key's: it is kept until the file reads again, so it is said once.
     const shown = new Set(["tokens", ...[...subs].flatMap((sub) => (isPage(sub) ? [`data\n${dataKeyOfSub(sub)}`, `view\n${viewKeyOf(sub)}`] : [`transcript\n${sub.jobId}`]))]);
+    for (const sub of subs) if (isPage(sub) && sub.jobId && !sub.transcriptDone) shown.add(`transcript\n${sub.jobId}`);
     for (const key of [...failing]) if (!shown.has(key)) failing.delete(key);
     for (const dk of [...loaded.keys()]) if (!shown.has(`data\n${dk}`)) loaded.delete(dk);
     // The keep-alive, so a proxy or the browser does not take a quiet stream for a dead one.
@@ -456,6 +461,24 @@ export function makeLiveHub({
           continue;
         }
         recovered(`view\n${vk}`, `console: live panels for page ${page} render again`);
+        // Only a successful page load and render authorizes an attachment. The page's own subscription owns it,
+        // including its cursor and lifetime: it takes no second slot and can appear after the initial page load.
+        for (const sub of live) {
+          if (sub.page !== "run" || sub.session.role !== "operator") continue;
+          const record = data?.run?.record;
+          const word = record ? outcomeWord(record.outcome, record.reason).word ?? (typeof record.outcome === "string" ? scrubControls(record.outcome).slice(0, 64) : "unknown") : null;
+          const changedWord = word !== null && word !== sub.recordWord;
+          sub.recordWord = word;
+          // The worker closes its transcript before recording the final classification. Correct an end already sent
+          // when the authoritative record arrives, without replaying entries or closing the page stream.
+          if (sub.transcriptDone && changedWord) send(sub, `event: tdone\ndata: ${JSON.stringify({ outcome: word })}\n\n`);
+          if (data?.transcript?.exists === true) {
+            sub.jobId = sub.query.id;
+            // A cached pre-end snapshot is not a new attempt. Re-arm only once metadata proves entries past the
+            // completed cursor, as after a recovery replaces the run's stream.
+            if (typeof data.transcript.lastId === "string" && TRANSCRIPT_ID_RE.test(data.transcript.lastId) && compareTranscriptIds(data.transcript.lastId, sub.cursor) > 0) sub.transcriptDone = false;
+          }
+        }
         const view = views.get(vk) ?? { seq: null, at: null, panels: new Map() };
         const changed = [];
         for (const p of Array.isArray(rendered) ? rendered : []) {
@@ -475,7 +498,7 @@ export function makeLiveHub({
           markFresh(sub);
           if (!subs.has(sub)) continue;
           if (sub.needsFull) sendFull(sub, view);
-          else for (const id of changed) if (!send(sub, panelEvent(view.seq, id, view.panels.get(id).html))) break;
+          else for (const id of changed) if (!send(sub, panelEvent(sub.page === "run" ? null : view.seq, id, view.panels.get(id).html))) break;
           if (subs.has(sub)) sub.holds = true;
         }
       }
@@ -489,8 +512,13 @@ export function makeLiveHub({
   const entryEvent = (id, data) => `id: ${id}\nevent: entry\ndata: ${JSON.stringify(data)}\n\n`;
   const ENTRY_DATA = Object.freeze({ html: (entry) => ({ html: String(transcriptEntryHtml(entry)) }), json: (entry) => transcriptEntryJson(entry) });
 
-  /** The run is over for this stream: `event: done` with the outcome, then close; the browser closes its EventSource. */
+  /** A page ends only its transcript (tdone); the terminal endpoint completes (done) and closes its connection. */
   function done(sub, outcome) {
+    if (isPage(sub)) {
+      sub.transcriptDone = true;
+      send(sub, `event: tdone\ndata: ${JSON.stringify({ outcome: sub.recordWord ?? (outcomeWord(outcome).word ?? "unknown") })}\n\n`);
+      return;
+    }
     remove(sub);
     try {
       sub.res.write(`event: done\ndata: ${JSON.stringify({ outcome: typeof outcome === "string" ? outcome : "unknown" })}\n\n`);
@@ -509,13 +537,13 @@ export function makeLiveHub({
     if (typeof transcriptSince !== "function") return;
     const byJob = new Map();
     for (const sub of subs) {
-      if (sub.kind !== "transcript") continue;
+      if (sub.kind !== "transcript" && !(isPage(sub) && sub.jobId && !sub.transcriptDone)) continue;
       if (!byJob.has(sub.jobId)) byJob.set(sub.jobId, []);
       byJob.get(sub.jobId).push(sub);
     }
     for (const [jobId, group] of byJob) {
       for (let page = 0; page < transcriptPagesPerTick; page += 1) {
-        const live = group.filter((s) => subs.has(s));
+        const live = group.filter((s) => subs.has(s) && !s.transcriptDone);
         if (live.length === 0) break;
         const from = live.reduce((min, s) => (compareTranscriptIds(s.cursor, min) < 0 ? s.cursor : min), live[0].cursor);
         let read;
@@ -531,13 +559,15 @@ export function makeLiveHub({
         recovered(`transcript\n${jobId}`, "console: a live transcript is read again");
         // Rendered once per entry and format, whichever streams it goes to, and only in the formats a stream asked for.
         const rendered = new Map();
-        const eventsIn = (format) => {
-          if (!rendered.has(format)) rendered.set(format, read.entries.map((entry) => ({ id: entry.id, event: entryEvent(entry.id, ENTRY_DATA[format](entry)) })));
-          return rendered.get(format);
+        const eventsIn = (format, word = null) => {
+          const key = `${format}:${word ?? ""}`;
+          if (!rendered.has(key)) rendered.set(key, read.entries.map((entry) => ({ id: entry.id, event: entryEvent(entry.id,
+            format === "html" && word !== null ? { html: String(transcriptEntryHtml(entry, { outcomeWord: word })) } : ENTRY_DATA[format](entry)) })));
+          return rendered.get(key);
         };
         for (const sub of live) {
           if (!subs.has(sub)) continue;
-          for (const r of eventsIn(sub.format)) {
+          for (const r of eventsIn(sub.format, isPage(sub) ? sub.recordWord : null)) {
             if (compareTranscriptIds(r.id, sub.cursor) <= 0) continue;
             if (!send(sub, r.event)) break;
             sub.cursor = r.id;
@@ -587,7 +617,7 @@ export function makeLiveHub({
       // `degraded`: what it was last drawn from a failed load, while it holds nothing (see the header).
       // `dquery`/`dkey`: the part of the query the page's data depends on and its canonical text (`dataQueryOf`,
       // `dataKeyOf`), which the load is shared by; `qkey` keys the view.
-      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), dquery: dataQueryOf(page, query), dkey: String(dataKeyOf(page, query)), needsFull: true, holds: typeof lastEventId === "string", said: null, degraded: null };
+      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), dquery: dataQueryOf(page, query), dkey: String(dataKeyOf(page, query)), needsFull: true, holds: typeof lastEventId === "string", said: null, degraded: null, cursor: page === "run" && typeof lastEventId === "string" && TRANSCRIPT_ID_RE.test(lastEventId) ? lastEventId : null, format: "html", jobId: null, transcriptDone: false, recordWord: null };
       subs.add(sub);
       startTimer();
       const view = views.get(viewKeyOf(sub));
@@ -596,9 +626,10 @@ export function makeLiveHub({
         // that says whether it is current (the data's and the render's to say, not the tokens file's: see the header).
         if (failingNow(sub)) markStale(sub, view.at, "data");
         else markFresh(sub);
-        if (typeof lastEventId === "string" && lastEventId === view.seq) sub.needsFull = false;
+        if (page !== "run" && typeof lastEventId === "string" && lastEventId === view.seq) sub.needsFull = false;
         else sendFull(sub, view);
         sub.holds = true;
+        if (page === "run") void tick();
       } else {
         // No view yet: the tick draws it now (the panels; for a failed load, the degraded panels, or stale for a stream
         // that holds panels), rather than leave the page blank for a tick.
@@ -810,7 +841,7 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
         next: num(x?.next),
         overdue: num(x?.overdueMs) !== null && x.overdueMs > 0,
         overdueMs: num(x?.overdueMs),
-        stalls: num(Number(s.schedulerStalls?.[name] ?? 0)) ?? 0,
+        stalls: name === null ? null : num(Number(s.schedulerStalls?.[name] ?? 0)) ?? 0,
       };
     }),
     schedulerStallMax: num(s.schedulerStallMax),

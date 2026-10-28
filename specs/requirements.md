@@ -1453,6 +1453,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `admin/test/console-doc-tables.test.mjs` ("docs/console.md's table of error pages: one row per ERROR_KINDS member,
     by the status the server answers it with").
 
+- **AMENDED 2026-10-28 (#747), clause (l), the run page.** A record's reason reaches this page only through
+  `recordReason`, a token or null, including the Outcome and Run panels. Agent-written transcript text appears only
+  in operator `entry` events on `/api/events?page=run` and `/api/transcript`, and in the operator browser's transcript,
+  parked-question and last-three-entry slots (`p-chat` and `p-tail`). Those slots are empty in server-rendered HTML
+  and panel events; the browser fills them from escaped entries and refills them after swaps. A viewer's HTML and
+  page stream carry no transcript entry, question, phase name, note, failure text, form or command. The split is
+  server-side, never CSS. Running facts are copied from a queue job by a named, validated allowlist; arbitrary data,
+  including a forge comment body, never rides along. Tests: `admin/test/console-transcript.test.mjs`,
+  `admin/test/console-panels.test.mjs`, `admin/test/console-pages.test.mjs`, and browser-script tests using
+  `admin/test/helpers/script-dom.mjs`. This supersedes the older run-markup exception in clause (l).
+
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
 - **Statement**: The operator console shall show the whole deployment on eight read pages (overview, runs, run
@@ -2784,6 +2795,27 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `admin/test/console-stylesheet.test.mjs` (the breakpoints, the bar's grid, the phone row and the live pill's phone
     form), and (o), which holds the layout in a real browser.
 
+- **AMENDED 2026-10-28 (#747), clause (c), the Pulse run page.** `/run?id=` uses the Pulse main/side grid and a
+  fixed set of panels, empty panels hidden as a run changes state. The static transcript box is inside that grid and
+  outside every swapped panel. Its title is the wrapping job id, an outcome badge and a live-swapped headline of
+  project, target, flow, host and start/end. A queued run has a waiting transcript state and attaches without reload.
+  Live progress shows elapsed time, turn/budget, failed steps, running tool duration, phase chapters/item ticks or
+  no-progress stripes, and three recent steps. A refusal before start collapses unused panels and says nothing ran.
+  A park leads with its question, populated by operator entry events alone, and the existing answer planner. A
+  recovery that is queued or active reads Recovering/Failed, continuing; ended recovery reasons, cancellation and
+  parked status use `outcomeWord(outcome, reason)` everywhere, the transcript end and stream status included.
+  Sandbox facts derive capabilities and credential custody from the worker venue table; local retention says its
+  deadline or why the workspace cannot open. Saved-session fork eligibility and later-session warnings use the same
+  chat rule as the terminal. Inbox meters count withdrawn messages; each state has a glyph and a word.
+  The ten card ledgers and panel goldens cover chat modes, refusal, recovery, sandbox, viewer and unknown states;
+  actual-browser width/CSP checks cover every new state, both themes and long cron ids. This supersedes clause (c)'s
+  legacy markup, raw-reason, queued-transcript and nested-token descriptions. Job lookups forget a remembered absence
+  after any answer other than confirmed absence, and HTTP requests never reuse incomplete queue lookup answers;
+  live loads still never start discovery scans. Tests: `admin/test/console-panels.test.mjs`,
+  `admin/test/console-pages.test.mjs`, `admin/test/console-ledger.test.mjs`, `admin/test/read-model-pages.test.mjs`,
+  `admin/test/console-kit.test.mjs`, `admin/test/console-contrast.test.mjs`, and
+  `.github/scripts/console-width-check.mjs --require`.
+
 ## REQ-OPERATOR-CONSOLE-ACTIONS
 
 - **Statement**: The operator console shall do everything the `/dispatch` TUI and the pi extension's tools can do,
@@ -3381,6 +3413,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `worker/test/cancel-state.test.mjs` (the `removeQueuedJob` tests, and "removeHeldJob: a first delete Valkey
     refused, with the hold read back in place, carries no mark; a refused resend of a delete that ran keeps it").
 
+- **AMENDED 2026-10-28 (#747), Cancel on the run page.** An active job's title bar offers `cancel-active` to an
+  operator on a mutable console, outlined destructive styling until its existing preview and Confirm step. Viewers,
+  read-only consoles and ended jobs receive no Cancel. The action uses the existing funnel, ticket, audit and
+  re-check, with no new write protocol. A written-message withdrawal preview says there is no undo once the agent
+  read it; the queued-message guarantee stays distinct. Failed-job and steering refusals put the result before a
+  possibly long job id, so an audit row's cut cannot hide Nothing was done/sent. Tests:
+  `admin/test/console-actions.test.mjs`, `admin/test/console-panels.test.mjs`, `admin/test/job-actions.test.mjs`.
+
 ## REQ-LIVE-TRANSCRIPT
 
 - **Statement**: An operator shall be able to watch a running job's transcript live (what the agent said, which
@@ -3462,6 +3502,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `worker/test/live-transcript.test.mjs` (the stdio source), `worker/test/run-container-stdio.test.mjs`,
     `worker/test/backend-openshell.test.mjs`, `worker/test/start-wiring.test.mjs`, and live in
     `.github/scripts/openshell-conformance.mjs`.
+
+- **AMENDED 2026-10-28 (#747), clauses (b) and (f).** A delivered `pi-dispatch-inbox` custom message is `steer`,
+  retaining the delivered text and sender attribution under the same redaction and caps; other custom messages and
+  unknown kinds remain notes. The operator run page carries entries on its existing page stream, one connection per
+  tab; attachment begins after a successful page-data load reports the stream exists, including queued-to-live
+  transitions. Only entries carry SSE ids; run-page panels have none and are resent whole on reconnect. `tdone`
+  marks transcript completion without closing page updates. `/api/transcript` keeps its existing `done` and closure
+  for terminal clients. Each actual connection still consumes a cap slot. Transcript controls offer All/Messages/Tools,
+  following/newest, running-call elapsed time and failed results open. Tests: `worker/test/live-transcript.test.mjs`,
+  `admin/test/console-transcript.test.mjs`, `admin/test/console-live.test.mjs` and browser-script tests. Retention,
+  redaction, size bounds and terminal JSON fields are UNCHANGED, checked.
 
 ## REQ-RUN-PROGRESS
 
@@ -7714,3 +7765,4 @@ instead of drifting.
 | 2026-10-14 | Issue #640, the operator console's security model. **NEW `REQ-CONSOLE-SECURITY`**: the console is a separate process on loopback or a 0600 unix socket; every request but `/healthz` and login needs a named token's session; a write is same-origin, JSON, by the operator role, on a console that is not read-only, behind a single-use ticket bound to the previewed diff, through the read model's funnels; one header set on every response and every value escaped; every write, refusal and sign-in in a hash-chained audit log; no token, code, cookie or body in a log, a row or a page. Acceptance clauses (a) to (j) each name the test files that hold them (`admin/test/console-*.test.mjs`, `worker/test/console-tokens.test.mjs`, `worker/test/console-audit.test.mjs`, `worker/test/doctor-console.test.mjs`). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, one sentence in the confirm rule: the console's equivalent of the confirm dialog is the single-use, diff-bound ticket (`REQ-CONSOLE-SECURITY` (g)); the model-callable tool list is untouched. UNCHANGED, checked: `REQ-INSIGHTS-HTML-EXPORT` (the static file keeps zero external requests and binds nothing), `REQ-TOPOLOGY-GRAPH` (its "no port" is the graph surface's, which is still the artifact), `REQ-SCOPED-PAUSE-WINDOWS` (the console's pause-window write reaches the same validated `writePauseWindows`), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, and `constitution.md` (no port clause, checked). |
 | 2026-10-14 | Issue #641, the operator console's screens and live updates. **NEW `REQ-OPERATOR-CONSOLE-SCREENS`**: eight read pages and `/api/state`, all read through the one fleet reader the `/dispatch` panel uses (`createFleetReader`, moved from `dashboard.ts`), with acceptance per screen: the overview (failures in 24 hours shown as a floor when the window is short), the runs with ten exact filters plus a target substring, a score cursor stable while runs land and a 2000 record examine cap, the run detail (404 for an unknown id, a forge link from the deployment's own instance URL or none), the parked inbox (answered derived from a later run, the chain count unknown rather than 0), insights by range, the fleet (every active job, failed jobs listed without reason text), the configuration (secret profiles by name only) and the audit (operator only, broken lines shown in place); byte-pinned render fixtures; live updates within about two seconds; and the panel's new PARKED view. **`REQ-CONSOLE-SECURITY` AMENDED**: the Statement gains the stream and role rules, the Scope no longer calls the screens future work, and two clauses are added: (k) an event stream ends with its session (logout at once; revoke, rotate, role change, end-all and expiry within a tick) and never extends one, with the per-session and global stream caps answered 429; (l) the role and run-text rule per page, held by a test that walks every page as a viewer with hostile values. Clauses (a) to (j) UNCHANGED, checked. **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: the file and its zero external requests stay; the console renders the same sections from the same assembly. **`REQ-AWAIT-INPUT` UNCHANGED, checked**: parked runs are read, never changed. |
 | 2026-10-15 | Issue #642, writes and actions from the operator console. **NEW `REQ-OPERATOR-CONSOLE-ACTIONS`**: the console does everything the `/dispatch` TUI and the tools do, plus retry and remove a failed job, re-run a finished run, answer a parked run, and three bulk actions (retry every failed job, remove every failed job, cancel every held job); each action a preview and a confirm through the panel's own funnel and planner, re-checked at the confirm, a paid action showing the reserve the worker will hold, every action audited; acceptance per action, naming the funnel tests and the console's HTTP suite `admin/test/console-actions.test.mjs`, over the routes `POST /api/act/<name>/preview` and `/confirm`. **`REQ-CONSOLE-SECURITY` AMENDED**: (g) generalised from the pause-windows write to every entry of the action table (the ticket holds payload, `expect`, targets and reserve; audit before the funnel, a `failed` row after a refusal; the tests loop over the table); Scope names the new requirement. **`REQ-OPERATOR-JOB-CANCEL` AMENDED**: the console is a third surface (per job and in bulk), on the CLI's channel; a held job is looked for on every fleet queue, which fixed the panel's funnel refusing a held job on a host queue as gone. **`REQ-AWAIT-INPUT` AMENDED**: the console as an answer source, under an operator session and a single-use ticket, the reply job the receiver would have built with the answer as data, the `not-parked` gate and the reserve unchanged, and the worker's one trail comment; a pull request's park is still answered on the forge. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the console's confirm is the ticket and reaches the same planners; every extension write appends a `panel` audit row before it writes and is refused when it cannot; the wizard is the one exception. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, wording: the parked inbox's answer box and the pages' controls are held by the new requirement. UNCHANGED, checked: `REQ-RESURRECTABLE-SANDBOX` (the console shows the command and starts no container, so the surfaces it lists are unchanged), `REQ-DELEGATED-ALLOCATION` (the priorities and revert actions use its funnels unchanged), `REQ-TRIGGER-AUTHOR-GATE` (the receiver's gate is untouched; the operator door is `CONST-TRIGGER-AUTHOR-GATE`'s new clause). |
+| 2026-10-28 (#747) | **`REQ-CONSOLE-SECURITY` (l), `REQ-OPERATOR-CONSOLE-SCREENS` (c), `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-LIVE-TRANSCRIPT` AMENDED**: the Pulse run page uses fixed state panels, one operator page/transcript connection, late attachment and nonclosing tdone; transcript-filled question/tail slots are empty on the server and absent for viewers; running facts use a validated allowlist; Cancel uses the existing preview/confirm funnel. Tests cover state transitions, role separation, hostile text, lookup correctness, action-first audit sentences, sandbox declarations, retention, card ledgers and browser width/CSP. **`REQ-RUN-PROGRESS` UNCHANGED, checked**: the turn budget is read beside the progress key, never added to it. |

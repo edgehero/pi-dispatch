@@ -591,7 +591,7 @@ readers ([Live updates](#live-updates)).
 |---|---|
 | `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) with the caps under it, and beside them the waiting jobs by reason ([Waitlists](#waitlists)) and the hosts. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
-| `/run?id=<job id>` | One run, led by its **Outcome**: the outcome word, what the reason means, what to do about it, and a link to the reason's entry in [reasons.md](reasons.md) on GitHub ([The run page's outcome](#the-run-pages-outcome)). Then the run's record: outcome, reason, tokens and dollars, resources, session, chain, and a link to the issue or pull request on its forge. In a project with a secret bundle, the variable names the run received and from which bundle, the names its trigger's `run.secrets` shadowed and, on an OpenShell venue, how many were placeholders; or why it ran without the bundle. It says whether the record came from this host or from the mirror. Its **Chat** panel, between Progress and Inbox, says what chat the run can have now ([The Chat panel](#the-chat-panel)). For a steer-armed job, its inbox ([Steering a running job](#steering-a-running-job)). For an operator, the run's live transcript below it ([The live transcript](#the-live-transcript)). |
+| `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status and numbers with a banner explaining what is hidden. |
 | `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
 | `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules (each by its trigger's id) with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
@@ -1125,7 +1125,7 @@ a parenthesis. Hover it for the reason's word itself; click it to list every run
 reason this console does not know (from a newer worker) is shown as its word with "no explanation yet". A run whose
 record names no reason word says "No reason was recorded": a record written by a worker older than the reasons for
 infrastructure exits may name none, or may keep an error's own words where the reason belongs, which the runs list does
-not show ([reasons.md](reasons.md)); the run page still shows such a record's reason as it was recorded. Only the
+not show ([reasons.md](reasons.md)); the run page follows the same rule. Only the
 record's reason word is ever shown in a list, never a job's own failure text. In pi, the panel's list row says the word
 and puts the reason's word last (`✘ failed · 3t · 12.3k · container-never-started`), so a narrow terminal cuts the
 reason before the counts, and its run detail prints the whole sentence and the next step under the reason.
@@ -1197,7 +1197,7 @@ ago on a queue it had not seen yet (a host that started, took a run onto its own
 opening or reloading the page looks again: its live updates do not, and keep what the page was told when it opened
 about a job it did not find. A
 queued or running job's sentence is a grey note (nothing is wrong, the record comes at its end); the others are
-amber. A queued job's page has no live transcript section either: reload once it runs, and the section is there.
+amber. A queued job's page shows the waiting transcript state. When its worker starts publishing, the transcript attaches without a reload.
 
 For a run waiting for an answer, **What to do** names answering from the console only where the page's Chat panel can
 take the answer; when it cannot (for example, the queue no longer holds the job's data), it says to reply on the issue
@@ -1206,8 +1206,19 @@ or pull request instead.
 A run **refused before it started** (refused, with no tokens, no exit code and no budget slot held, which is what most
 refusals before any spend write) never had a container, so its page has no Progress, Chat or live transcript section.
 
-The Session and plan panel and the Recovery row say what their words mean too: `fresh (absent): No saved conversation:
-...`, the plan's reason with its sentence, and `recovery skipped (local): A folder job is never recovered, ...`.
+The Session and plan panel and the Recovery row use the catalog's plain sentences. A saved session says it is kept for the next run; session transcript size is shown in KB.
+
+The title shows the wrapping job id, status and a line of project, target, flow, host and start/end. A running job
+has **Cancel run** in that title bar for an operator on a console that takes changes; its preview and Confirm use the
+same cancellation checks as Fleet. Progress shows elapsed time, turns against the pickup budget, running tool time,
+phase chapters or no-progress stripes and three recent steps. A lost attempt with a queued or active recovery reads
+**Recovering** and **Failed, continuing**, with a link to the recovery. Recovery policy ends read failed, an operator
+cancel reads cancelled and a park reads awaiting input in the banner, transcript end and stream status alike.
+
+An ended run has its record, cost, per-model usage, resources, session and chain facts. A run refused before it
+started collapses the unused panels into one sentence, explains the host rule and offers Fleet and an eligible re-run.
+A viewer banner explains the hidden transcript, phase names, notes, failure details and actions; no form or command
+is sent to a viewer. Every reason shown on this page must be a reason token, so an older worker's error text is hidden.
 
 ### Doctor results
 
@@ -1236,7 +1247,7 @@ its hosts view (`u`).
 Every running job shows where it is. The fleet page's running jobs have a Progress column (the overview draws each
 running job on its timeline, without one): the
 turn, the steps done and failed, the tool running now and for how long, and the phase (2 of 4) when the job reports
-phases. The run page has a Progress panel at the top: the same counters, the tools running, the last steps with how
+phases. The run page has a Progress panel at the top: elapsed time, turns against the budget, the same counters, the tool running and its duration, the three most recent steps with how
 long each took, and the phase as numbers ("Phase 2 of 4: 3 of 10 done"). An operator also sees the phase names the
 agent gave, a bar for the current phase and the note the agent gave with its latest report (a report without a note
 clears it); a viewer sees the numbers and the tool names only. A finished run shows the summary its run record
@@ -1245,8 +1256,7 @@ longer than the run), the longest step and the "Longest interrupted step" (a ste
 running when the run ended, such as a command that hung until the job timeout). A job that resumed a session shows
 what the earlier runs did as "Earlier runs of this session". A job with nothing yet says "No live progress: not published
 (PI_RUN_PROGRESS=0), expired, or no step has been recorded yet." The panel updates itself about every 2 seconds, so a
-run page is now a live page: with the live transcript open, an operator's run tab holds two of your token's
-live-page slots.
+run page is a live page: its panels and transcript share one connection and one of your token's live-page slots.
 
 - **The counts are automatic.** They need no trigger change and no new job image: the worker reads them from the
   job's transcript.
@@ -1277,7 +1287,7 @@ An operator's run page shows what the run is doing: what the agent said, each to
 and what the tool returned, as the run goes. It works for a run on any host, because each worker publishes its
 running jobs' transcripts to Valkey, and for 24 hours after the run ends. New entries appear about a second after
 the agent writes them; the view follows the bottom unless you scroll up, and says whether the run is live or ended,
-and how it ended. Tool calls and their results are folded; open one to read it. A viewer sees "Transcripts are shown
+and how it ended. Tool arguments and results are folded; a failed result is open. All, Messages and Tools filters narrow the entries. A running call shows its elapsed time; Following and the newest-entry button let you return after scrolling up. A viewer sees "Transcripts are shown
 to operators only." A run with no transcript says "No live transcript: not published (PI_LIVE_TRANSCRIPTS=0), expired,
 or not started yet."
 
@@ -1303,7 +1313,7 @@ or not started yet."
   row (the hosts its network policy admitted, from your allowlist, model endpoints and the forge; up to 32 listed, the
   rest counted). A run that armed `run.secrets` shows a "Secrets profile" row with the profile's name. The `/dispatch`
   panel's run detail has the same lines. Whether an MCP server connected is not recorded on any venue, so no row says it.
-- The transcript holds one of your token's live-page slots while it is open, like any live page.
+- The transcript shares the run page's one live connection. A queued run attaches when its transcript appears, without reload. Reconnect resumes entries from their cursor and refreshes every panel. Transcript completion leaves the page connection open for later state updates.
 
 The `/dispatch` panel's live tail (`l`) reads the same transcript.
 
@@ -1540,20 +1550,20 @@ limit whatever Valkey does. The audit log's line has the kind `cancel-queued`.
 ### Steering a running job
 
 The page of a running job whose trigger has `steer` has an **Inbox** panel: the messages sent to the run (id, steer
-or follow-up, where it came from, state, when, size), never their text, for both roles. An operator also gets a
+or follow-up, where it came from, state, when, size), never their text, for both roles. Meters show messages against 16 and bytes against 65,536, with withdrawn messages still counted. Late means the run ended before the agent received the message; ended inboxes are kept for an hour. An operator also gets a
 **Steer** and a **Follow-up** form while the job is running and its run takes messages, and a **Withdraw** button on
 each message that is still queued or written. The preview shows your message as the run will get it and says that it
 spends from the run's existing reservation; Confirm sends it, signed with your token's name. The console refuses,
 before sending, what `pi-dispatch steer` refuses (the job is not running, the run takes no messages, the text is empty
 or above 8 KiB), and a confirm after the run finished is refused with nothing sent. A withdraw is guaranteed for a
-queued message and best effort for a written one, and its preview says which. The audit log records the job, the
+queued message and best effort for a written one, and its preview says which. Once the agent read a written message, there is no undo. The audit log records the job, the
 message id and a hash of the message, never the text. In the `/dispatch` panel the same is `t` (steer) and `T` (follow-up) on the
 ACTIVE row, offered only while the run's inbox takes a message (a steer-armed run whose loop has not started, has
 ended, or whose venue or image cannot deliver says so instead). All of it is in [`steering.md`](steering.md#from-the-console-and-the-panel).
 
 ### The Chat panel
 
-A run's page has a **Chat** panel, between Progress and Inbox, that says what the run is (running, queued, parked,
+A run's page has a **Chat** panel, that says what the run is (running, queued, parked,
 answered by a later run, being answered, finished or unknown) and offers the chat it can have now, by the same rule
 `pi-dispatch chat` uses ([`chat.md`](chat.md)):
 
@@ -1563,13 +1573,13 @@ answered by a later run, being answered, finished or unknown) and offers the cha
   A run that is not steer-armed, or whose inbox is closed, says so instead, and when the run's inbox could not be
   read at all the panel warns that it cannot tell (rather than saying "not steer-armed").
 - **A parked run**: the answer form, the very one the parked page draws ([Answering a parked run](#answering-a-parked-run)),
-  and a pointer to the question. The form is drawn only where the console would accept the answer: for a pull
+  and the question from its last assistant transcript entry while that transcript is kept. After expiry, read it on the forge thread. The form is drawn only where the console would accept the answer: for a pull
   request's park, job data that has expired, or a comment trigger that would not route a reply, the panel shows the
   sentence the console would refuse with instead of the form (and no terminal command). When that check could not be
   read, the form stays and the panel says the preview will check again.
 - **A finished run**: the command `pi-dispatch chat <job id>`, to copy and run on the host that keeps the session
   store, which opens the run's stored conversation in your own pi as a fork. When the run's trigger kept no session,
-  or the run was a pull request (whose session the record cannot name), the panel says why instead.
+  or the run was a pull request (whose session the record cannot name), the panel says why instead. If a later run continued that target's session, the panel links it and warns that its turns are in the session too.
 - **Queued, unknown, answered or being answered**: one sentence saying why there is nothing to chat with. A park
   being answered links the run taking the answer, and a run whose [recovery](durable-runs.md) job is queued links
   that job.
@@ -1580,14 +1590,14 @@ read the panel says so rather than guess.
 
 ### Opening a sandbox
 
-A run's page shows the command that reopens its sandbox, `pi-dispatch sandbox <job id>`, to copy and run in a shell on
+An operator's run page shows the command that reopens its sandbox, `pi-dispatch sandbox <job id>`, to copy and run in a shell on
 the host that ran the job. Only for a run whose venue has a sandbox shell (`local` and `podman`): an `openshell` run says "Its workspace is not
 reopenable (openshell has no sandbox shell)" instead, and an `openshell-bind` run "Its workspace is not reopenable
 (openshell-bind has no sandbox shell)", the words the panel's sandbox pane uses. A run refused before it started has
 no workspace, and says so. For a run of the console's own host, the page also reads the run's sandbox manifest, as the
 panel's sandbox pane does, at most every 15 seconds: a workspace that was swept, never kept (retention off), moved or
 belongs to another run says so instead of the command, and one past its retention window gets the command with
-`--pin`. For a run of another host the console cannot see the manifest, so it shows the command and the CLI on that
+`--pin`. A kept workspace names its deadline and the `PI_SANDBOX_RETENTION_HOURS` window (24 hours by default; 0 keeps none). The Sandbox panel derives each venue's transcript, steering, recovery and sandbox-shell capabilities and credential custody from the worker's declarations. Its policy names the admitted rule hosts. Replicas link their sibling sandboxes. The Secrets panel names the profile, bundle and received variables, marking placeholders when the record names them, never showing a secret value. For a run of another host the console cannot see the manifest, so it shows the command and the CLI on that
 host decides. The console also never decides which venues your shell may open: that is the `PI_BACKENDS` of the shell
 you run the command in, which the console does not read, so a `podman` run always gets its command and
 `pi-dispatch sandbox` refuses it there, by name, if that shell does not bless `podman`. The console never opens a shell or starts a container itself: a terminal in the browser
@@ -1596,7 +1606,7 @@ would put an interactive shell one stolen session away from anyone.
 ## Live updates
 
 The overview, runs, parked, fleet and run pages update themselves while open; the run page reads its data about
-every 2 seconds, for its progress ([Run progress](#run-progress)), and its live transcript streams on its own
+every 2 seconds, for its progress ([Run progress](#run-progress)), and its live transcript shares the page stream
 ([The live transcript](#the-live-transcript)). Insights, configuration and the audit log are drawn once per load:
 their title bar says when ("Drawn at" and the time, with your date and in your own time zone once the page's script
 has run) and that they are not live, beside **Reload**, which opens the same page again. The live pill in the top bar
@@ -1659,9 +1669,7 @@ the line under the overview's title included.
 A live page holds one connection open. Each token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all
 its sign-ins, and the console 32 in all, of which 8 are kept for operators. A page opened past either limit still loads, but stays still until you reload it after closing
 another tab; its pill then says Not live, and its note says how many live tabs one token may hold, with Reload. A
-run page with its transcript open counts as two. When both of its streams are refused at once, the page asks the
-console one question for both and each says the answer: the pill says Not live and the transcript's line says "not
-live: reload after closing another console tab", whichever was refused first.
+run page with its transcript open counts as one, so two run tabs leave two slots spare at the default limit. The terminal chat's separate `/api/transcript` connection also counts as one.
 
 **An open page does not keep you signed in.** Only a page load or a request counts as activity. A page left open
 signs out after `PI_CONSOLE_IDLE_MINUTES`, and its updates stop and send you to the sign-in page when:

@@ -1,0 +1,150 @@
+{
+  "card": "RunParked",
+  "pr": 5,
+  "panels": [
+    "p-chat",
+    "p-run",
+    "p-spend",
+    "p-tail"
+  ],
+  "elements": [
+    {
+      "el": "p-chat",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat",
+      "golden": [
+        "panels/run-chat-reply.operator"
+      ]
+    },
+    {
+      "el": "p-run",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary",
+      "golden": [
+        "panels/run-chat-reply.operator"
+      ]
+    },
+    {
+      "el": "p-spend",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runCostPanel",
+      "golden": [
+        "panels/run-chat-reply.operator"
+      ],
+      "as": "p-cost",
+      "reason": "A catalogue state of the fixed panel set, or the transcript status panel beside the static browser-owned box; #747 names the production mapping."
+    },
+    {
+      "el": "p-tail",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runTail",
+      "golden": [
+        "panels/run-chat-reply.operator"
+      ]
+    },
+    {
+      "el": "The run page for a parked run: the agent's question is the hero, with the answer box and the two-step confirm right under it.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "## How a person uses it",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "The question card shows who asked (gh-2f6a, `api`, acme/api#131), how long it has waited and the question in large text.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "The person writes an answer and previews it. The preview says it is posted to acme/api#131 as a reply and resumes the run, that the session continues, and what is reserved before the first token. **Post answer and resume** confirms; the undo line says how to take it back.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "A terminal route stays available: `pi-dispatch chat gh-2f6a`.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "When the queue no longer holds the run's data, the answer box is replaced by an attention banner that sends the person to the issue, where a reply still resumes the run. Both states are shown on this card.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "The side column holds the run facts, tokens and dollars against the job cap, and the last three transcript entries.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runCostPanel"
+    },
+    {
+      "el": "## Panels",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "`p-chat` (question, answer, preview), `p-run`, `p-spend`, `p-tail`.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "## The server provides",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "The parked run record, the question (the last assistant entry, untrusted text, escaped), whether the queue still holds the job's data (so an answer can be built here), the session-keeping trigger, the job cap and the reservation, and the transcript tail.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "## Fixture note",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runSummary"
+    },
+    {
+      "el": "From the fixture: gh-2f6a, acme/api#131, triage on mini1, local, trigger 7 (index 6 in the fixture file; label pi:triage, keeps a session, MCP linear), 11 turns, $0.21 (settled $0.209633), 74,953 in, 5,523 out, 125,448 total, 11 model calls, 14:52 to 15:13 UTC, and the \"cannot be answered here\" state. The question, the typed answer and the transcript tail are sample copy.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat"
+    },
+    {
+      "el": "The question slot is empty on the server; operator entry events fill it in the browser",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runChat",
+      "panel": "p-chat",
+      "golden": [
+        "panels/run-chat-reply.operator"
+      ],
+      "shows": "<div data-run-question></div>"
+    },
+    {
+      "el": "The last-three entries slot is empty on the server",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runTail",
+      "panel": "p-tail",
+      "golden": [
+        "panels/run-chat-reply.operator"
+      ],
+      "shows": "<div data-run-tail></div>"
+    }
+  ]
+}

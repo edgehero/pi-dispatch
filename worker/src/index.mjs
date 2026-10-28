@@ -897,7 +897,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// `capacity` (issue #599) rides the same binding, and is null until the job is admitted below (where `startedAt` is
 		// set): every record of a refusal before that point says, by its null, that the job never held a slot.
 		let capacity = null;
-		const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier });
+		let pickupMaxTurns = null;
+		const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier, maxTurns: pickupMaxTurns });
 
 		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
 		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
@@ -1319,6 +1320,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// The one call that logs a malformed queued cap (#501): the endpoint gate above computes the same job and
 			// stays quiet, so it is reported once per pickup.
 			const effectiveJob = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields }));
+			pickupMaxTurns = effectiveJob.maxTurns;
 
 			// THE ENVELOPE (issue #504 part B, DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE). With one loaded, every job is governed:
 			// its project's, or `_other`'s, share of the applied split narrows the dollar ledgers below, read ONCE here

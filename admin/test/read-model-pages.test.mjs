@@ -1921,3 +1921,77 @@ test("createFleetReader: a switch preview reads at most 200 of the queues the sw
     await reader.dispose();
   }
 });
+
+test("a later unclear lookup clears a remembered absence, and live loads never start the discovery rescan (#747)", async () => {
+  let incomplete = false;
+  let at = AT;
+  const counts = {};
+  const { reader } = lookupFleet({ counts, now: () => at, scan: () => ({ names: [], incomplete: incomplete ? "scan incomplete" : null }) });
+  try {
+    assert.equal((await reader.jobStatus("gh-unclear")).found, false);
+    incomplete = true;
+    assert.equal((await reader.jobStatus("gh-unclear")).found, null);
+    const scanned = counts.scan;
+    at += WAITING_DISCOVERY_TTL_MS * 3;
+    assert.equal((await reader.jobStatus("gh-unclear", { live: true })).found, null, "an old absence is not retained after an unclear request");
+    await reader.parkedAnswerCheck("gh-unclear", { live: true });
+    assert.equal(counts.scan, scanned, "neither live lookup starts even an expired discovery window's rescan");
+  } finally {
+    await reader.dispose();
+  }
+});
+
+test("the live run facts allowlist excludes queue payload text, validates fields and resolves the host's venue (#747)", async () => {
+  const logsDir = tempDir("pd-747-live-facts-");
+  const settingsFile = join(logsDir, "settings.json");
+  writeFileSync(settingsFile, JSON.stringify({ maxTurns: 40, provider: "anthropic", model: "claude" }));
+  const projectsPath = join(logsDir, "projects.json");
+  writeFileSync(projectsPath, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  const job = { id: "gh-live", name: "github", queueName: "pi-jobs@mini", data: { kind: "github", repo: "acme/web", target: { number: 8 }, flow: "fix", body: "PRIVATE COMMENT", maxTurns: 12, provider: "bad provider", extra: { text: "PRIVATE COMMENT" } }, timestamp: AT - 2000, processedOn: AT, opts: {} };
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, settingsFile, projectsPath }, {
+    makeQueueFn: () => ({ name: "pi-jobs", getJob: async () => job, close: async () => {} }), parseConnectionFn: () => ({}),
+    redisFn: () => emptyRedis(), readLiveHostsFn: async () => ({ hosts: [{ name: "mini", jobs: [{ id: "gh-live", p: null, at: AT }], backends: "blessed=podman,local" }] }), discoverHostQueuesFn: async () => [], nowFn: () => AT,
+  });
+  try {
+    const facts = await reader.runLiveFacts("gh-live", { live: true });
+    assert.equal(facts.target, "acme/web#8");
+    assert.equal(facts.backend, "podman");
+    assert.equal(facts.maxTurns, 12);
+    assert.equal(facts.provider, null, "invalid job override does not silently use the overlay");
+    assert.equal(facts.model, "claude");
+    assert.equal(facts.project, "shop");
+    assert.equal(facts.host, "mini");
+    assert.equal(facts.startedAt, new Date(AT).toISOString());
+    assert.equal(facts.queuedAt, new Date(AT - 2000).toISOString());
+    assert.equal(facts.queue, "pi-jobs@mini");
+    assert.deepEqual(Object.keys(facts).sort(), ["target", "kind", "flow", "backend", "provider", "model", "maxTurns", "project", "host", "queue", "queuedAt", "startedAt"].sort());
+    assert.ok(!JSON.stringify(facts).includes("PRIVATE"));
+    delete job.data.maxTurns;
+    assert.equal((await reader.runLiveFacts("gh-live", { live: true })).maxTurns, 40);
+  } finally {
+    await reader.dispose();
+  }
+});
+
+test("run context reads only the matching trigger's attribution and bounded safe dollar holds (#747)", async () => {
+  const logsDir = tempDir("pd-747-context-");
+  const triggersPath = join(logsDir, "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "/fix" }, run: { flow: "fix", resume: true, recover: true, mcp: ["forge", "bad name"], instructions: "PRIVATE INSTRUCTIONS", secrets: { TOKEN: "PRIVATE REFERENCE" } } }] }));
+  const asked = [];
+  const { runBudgetKeyFor } = await import("@edgehero/pi-dispatch/run-budget-ledger");
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath }, {
+    makeQueueFn: () => ({ name: "pi-jobs", close: async () => {} }), parseConnectionFn: () => ({}), readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => AT,
+    redisFn: () => ({ ...emptyRedis(), hgetall: async (key) => (asked.push(key), { seq: "2", slot: "held", s1: "settled", h1: JSON.stringify({ amountMicros: 50, keys: ["PRIVATE KEY"] }), s2: "held", h2: JSON.stringify({ amountMicros: 70 }), s3: "PRIVATE TEXT", h3: JSON.stringify({ amountMicros: 90 }) }) }),
+  });
+  try {
+    assert.deepEqual(await reader.runTrigger(0, "comment"), { index: 0, type: "comment", phrase: "/fix", label: null, pattern: null, mcp: ["forge"], resume: true, recover: true });
+    assert.equal(await reader.runTrigger(0, "cron"), null, "a changed row's kind cannot be attributed to an older run");
+    assert.equal(await reader.runTrigger(-1, "comment"), null);
+    const holds = await reader.runHolds("gh-base.r1", { recoveryOf: "gh-base" });
+    assert.deepEqual(holds, [{ seq: 1, state: "settled", amountMicros: 50 }, { seq: 2, state: "held", amountMicros: 70 }]);
+    assert.deepEqual(asked, [runBudgetKeyFor("gh-base")]);
+    assert.ok(!JSON.stringify(holds).includes("PRIVATE"));
+  } finally {
+    await reader.dispose();
+  }
+});

@@ -20,12 +20,12 @@ import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
-import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
-import { FORGE_MCP_SERVER_NAME, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
+import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
@@ -45,6 +45,7 @@ import { OTHER, PLAN_VERSION, envelopeEntries, scopeRef } from "@edgehero/pi-dis
 import { ALLOC_EXPECTED_KEY, ALLOC_LOG_KEY, ALLOC_PLAN_KEY, makeAllocationAudit, makeAllocationState, parseState } from "@edgehero/pi-dispatch/allocation";
 import { DOLLAR_KEY_PREFIX } from "@edgehero/pi-dispatch/dollar-budget";
 import { removeHeldJob, requestCancel } from "@edgehero/pi-dispatch/cancel-state";
+import { makeRunBudgetLedger } from "@edgehero/pi-dispatch/run-budget-ledger";
 import { RECOVERY_CAP, recoveryJobId, runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerIsOpen, listInboxPublic } from "@edgehero/pi-dispatch/steer-inbox";
 import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
@@ -84,9 +85,9 @@ import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packa
 // keepOnlyDeclaredSkills drops a subtree that declares no SKILL.md -- re-deriving either here is how
 // the graph would show a skill the job path can never materialise.
 import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/materialize";
-import { FORGES, isForgeKind } from "@edgehero/pi-dispatch/forges";
+import { FORGES, RUN_KINDS, isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { hasControls, scrubControls } from "./panel.mjs";
-import { parseRunFilter, runMatches, runVenueOf, triggerValueOf } from "./run-filter.mjs";
+import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, triggerValueOf } from "./run-filter.mjs";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
 import { parseSkillMeta, findSiblingMentions, findLoopHints, triggerMatchLabel } from "./graph-model.mjs";
@@ -4138,7 +4139,7 @@ export function createFleetReader(
   const toldAbsent = new Set();
   const tell = (key, verdict) => {
     if (typeof key !== "string") return;
-    if (verdict === true) toldAbsent.delete(key);
+    if (verdict !== false) toldAbsent.delete(key);
     if (verdict !== false) return;
     toldAbsent.delete(key);
     toldAbsent.add(key);
@@ -4171,20 +4172,30 @@ export function createFleetReader(
   const lookUp = async (ask, found, { key = null, live = false, asked = null, tellAbsent = true } = {}) => {
     const since = Number.isSafeInteger(asked) && asked >= 0 && asked <= scans ? asked : scans;
     const told = live === true && typeof key === "string" && toldAbsent.has(key);
+    const answerOf = async (set) => {
+      try {
+        return await ask(set);
+      } catch (error) {
+        if (!live) tell(key, null);
+        throw error;
+      }
+    };
     let kept;
     try {
       kept = await jobQueues(live === true);
     } catch {
-      return ask({ queues: lastNames.map((n) => pool.get(n)), whole: told });
+      const answer = await answerOf({ queues: lastNames.map((n) => pool.get(n)), whole: told });
+      if (!live) tell(key, found(answer));
+      return answer;
     }
-    if (live === true) return ask({ queues: kept.queues, whole: told });
+    if (live === true) return answerOf({ queues: kept.queues, whole: told });
     const current = kept.seq > since;
-    let answer = await ask({ queues: kept.queues, whole: kept.whole && current });
+    let answer = await answerOf({ queues: kept.queues, whole: kept.whole && current });
     if (!current && tellAbsent && found(answer) === null) {
       const set = await withTimeout(scanSince(since), 2 * FLEET_READ_TIMEOUT_MS, null)
         .then((got) => (got === null ? null : lookupSetOf(kept.registry, kept.registryRead, got)))
         .catch(() => null);
-      if (set !== null) answer = await ask(set);
+      if (set !== null) answer = await answerOf(set);
     }
     tell(key, found(answer));
     return answer;
@@ -4600,6 +4611,63 @@ export function createFleetReader(
       const ask = ({ queues, whole }) => readJobStatus({ queues, jobId, whole, timeoutMs: FLEET_READ_TIMEOUT_MS });
       return lookUp(ask, (got) => got?.found, { ...questionOf({ live, asked }), key: jobId, tellAbsent: tellAbsent !== false }).catch(() => ({ unreachable: true }));
     },
+    // Only the current row's display attribution, and only while its kind still matches the recorded one. No
+    // instructions, secret references, environment values or job payload can leave through this read (#747).
+    async runTrigger(index, kind) {
+      if (!Number.isSafeInteger(index) || index < 0 || typeof kind !== "string") return null;
+      let source = null;
+      const view = readTriggers({ triggersPath: paths.triggersPath, fs: { readFileSync: (path, encoding) => (source = fs.readFileSync(path, encoding)) } });
+      const row = view.triggers?.find((t) => t.index === index && t.type === kind);
+      if (!row) return null;
+      let raw;
+      try { raw = JSON.parse(source).triggers?.[index]; } catch { return null; }
+      const text = (v) => typeof v === "string" ? scrubControls(v).slice(0, 2000) : null;
+      return { index, type: row.type, phrase: text(row.phrase), label: text(row.label ?? (row.type === "label" ? [...(row.any ?? []), ...(row.all ?? [])].join(", ") : null)), pattern: text(row.pattern),
+        mcp: Array.isArray(row.mcp) ? row.mcp.slice(0, 64).filter((n) => typeof n === "string" && MCP_SERVER_NAME_RE.test(n)) : [],
+        resume: row.resume === true, recover: raw?.run?.recover === true };
+    },
+    // A durable run's active dollar holds, read-only and numbers only; ledger keys and arbitrary hash fields stay here.
+    async runHolds(jobId, record = null) {
+      const base = recordedRecoveryOf(record?.recoveryOf) ?? jobId;
+      if (typeof base !== "string" || !RUN_ID_RE.test(base)) return null;
+      try {
+        const got = await withTimeout(makeRunBudgetLedger({ redis, now: nowFn }).read(base), FLEET_READ_TIMEOUT_MS, null);
+        if (!Array.isArray(got?.holds)) return null;
+        return got.holds.filter((h) => Number.isSafeInteger(h.seq) && h.seq >= 1 && ["held", "settled", "released", "settled-crashed"].includes(h.state))
+          .slice(0, 2 + RECOVERY_CAP).map((h) => ({ seq: h.seq, state: h.state, amountMicros: Number.isSafeInteger(h.amountMicros) && h.amountMicros >= 0 ? h.amountMicros : null }));
+      } catch {
+        return null;
+      }
+    },
+    // The live run's facts, rebuilt by name before queue data leaves this reader (#747). The target is derived by
+    // the record writer, so a local folder contributes its basename only; payload text has no route through here.
+    async runLiveFacts(jobId, lookup = {}) {
+      if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return null;
+      try {
+        const job = await retainedJob(jobId, lookup);
+        if (!job) return null;
+        const data = job.data ?? {};
+        const text = (v, re) => typeof v === "string" && re.test(v) ? v : null;
+        const settings = readSettingsView({ settingsFile: paths.settingsFile, fs }).overlay ?? {};
+        const projects = readProjects({ projectsPath: paths.projectsPath, fs }).projects ?? [];
+        const host = lastHosts.find((h) => parseLiveJobs(h?.jobs).jobs?.some((j) => j.id === jobId));
+        const kind = RUN_KINDS.includes(data.kind ?? job.name) ? (data.kind ?? job.name) : null;
+        const backend = data.backend ?? parseHostBackends(typeof host?.backends === "string" ? host.backends : null)?.default ?? null;
+        const instant = (v) => Number.isSafeInteger(v) && v >= 0 && v <= 8.64e15 ? new Date(v).toISOString() : null;
+        const maxTurns = data.maxTurns ?? settings.maxTurns;
+        return {
+          target: text(targetFor(kind, data), /^[A-Za-z0-9._:/#! -]{1,300}$/), kind,
+          flow: text(data.flow, SKILL_NAME_RE), backend: text(backend, /^[a-z][a-z-]{0,31}$/),
+          provider: text(data.provider ?? settings.provider, RUN_PROVIDER_RE), model: text(data.model ?? settings.model, RUN_MODEL_RE),
+          maxTurns: Number.isSafeInteger(maxTurns) && maxTurns > 0 ? maxTurns : null,
+          project: text(projectOf(data, projects), PROJECT_ID_RE), host: text(host?.name, WORKER_NAME_RE),
+          queue: text(job.queueName ?? job.queue?.name, /^[A-Za-z0-9@._-]{1,200}$/),
+          queuedAt: queuedAtOf(job), startedAt: instant(job.processedOn),
+        };
+      } catch {
+        return null;
+      }
+    },
     // A request's question for the by-id lookups of one page load (issue #737, `lookUp`): `{ asked }`, how many keyspace
     // scans this reader had started when it was asked, which the load hands each of them (`jobStatus`,
     // `parkedAnswerCheck`, `rerunCheck`), so a scan one of them waits for answers the others: one in all.
@@ -4660,7 +4728,7 @@ export function createFleetReader(
         if (host !== null && host !== self) return { elsewhere: true };
         if (typeof sandboxRetentionFn !== "function") return { elsewhere: true };
         const got = sandboxRetentionFn(paths, jobId, { now: nowFn, venuePolicy: "unknown" });
-        return got.retained ? { retained: true, why: null } : { retained: false, why: got.why, reason: got.reason };
+        return got.retained ? { retained: true, why: null, until: typeof got.until === "string" && Number.isFinite(Date.parse(got.until)) ? new Date(got.until).toISOString() : Number.isSafeInteger(got.until) && got.until >= 0 ? got.until : null } : { retained: false, why: got.why, reason: got.reason };
       } catch {
         return { elsewhere: true };
       }
@@ -6879,6 +6947,7 @@ export function openshellHostsText(o) {
 export function recordBundle(record) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return null;
   const bundle = Object.hasOwn(record, "bundle") ? recordedBundle(record.bundle) : null;
+  if (bundle !== null && !OPENSHELL_BACKENDS.includes(record.backend)) delete bundle.placeholderNames;
   const bundleSkipped = Object.hasOwn(record, "bundleSkipped") && BUNDLE_SKIPPED_REASONS.includes(record.bundleSkipped) ? record.bundleSkipped : null;
   return bundle === null && bundleSkipped === null ? null : { bundle, bundleSkipped };
 }
