@@ -501,3 +501,30 @@ test("a peer that predates fpProjects is named only when projects are in use som
 	const there = fleetProjectsChecks(EMPTY_PROJECTS_FINGERPRINT, [...old, { name: "new1", fpProjects: inUse }]);
 	assert.equal(there.length, 2, "a peer with projects makes the silent ones worth naming (and it disagrees)");
 });
+
+
+test("Radius capped main, listed, zero-rate and custom gateway models are diagnosed by name (#693)", () => {
+	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	const modelOf = () => ({ api: "pi-messages", maxTokens: 32768, cost: zero, baseUrl: "https://custom.invalid/v1" });
+	const subjects = modelSubjects({
+		deployment: { provider: "radius", model: "recursive/flint", maxCostUsd: "50" },
+		runs: [{ label: "child route", provider: "other", model: "main", models: ["custom/route"], secretNames: [] }],
+	});
+	const checks = costCapFitChecks(subjects, modelOf);
+	assert.equal(checks.length, 1);
+	assert.equal(checks[0].warn, true);
+	assert.match(checks[0].label, /Radius \(pi-messages\)/);
+	assert.match(checks[0].label, /radius\/recursive\/flint \(the main model/);
+	assert.match(checks[0].label, /custom\/route/);
+	assert.match(checks[0].label, /zero-rate routes and custom gateways/);
+	assert.match(checks[0].fix, /raising the cap or changing catalog rates cannot bound Radius/);
+	assert.deepEqual(costCapFitChecks(subjects.map((subject) => ({ ...subject, cap: null })), modelOf), []);
+	// A composed overlay may have no floor model. Its protocol still makes the diagnosis possible.
+	assert.equal(costCapFitChecks(subjects, () => null, { apiOf: () => "pi-messages" }).length, 1);
+});
+
+
+test("a Radius-named overlay on a verified priced protocol is judged by its protocol (#693)", () => {
+	const subjects = modelSubjects({ deployment: { provider: "radius", model: "custom", maxCostUsd: "50" } });
+	assert.deepEqual(costCapFitChecks(subjects, () => ({ api: "openai-completions", cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, maxTokens: 1000 })), []);
+});

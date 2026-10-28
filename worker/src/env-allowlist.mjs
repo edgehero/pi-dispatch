@@ -29,6 +29,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { findEnvKeys } from "@earendil-works/pi-ai/compat";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
+import { codemodeWorkersOf, DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { egressEnv } from "./egress.mjs";
 import { RECEIVER_ONLY_VARS, forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
@@ -374,7 +375,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null }) {
+export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -604,6 +605,11 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	// env-internal PI_RUNNER_OBSERVABLE: written into the job's closed env map here, never read from the worker's environment.
 	if (observableRunner === true) env.PI_RUNNER_OBSERVABLE = "1";
 	else delete env.PI_RUNNER_OBSERVABLE;
+
+	// Issue #693: only the resolved container size chooses this concurrency limit. Set after forwarding and secrets
+	// so even a caller bypassing their reservation cannot replace it with a host or trigger value.
+	// env-internal PI_CODEMODE_MAX_WORKERS: written into the job's closed env map here, never read from the worker's environment.
+	env.PI_CODEMODE_MAX_WORKERS = String(codemodeWorkersOf(size.memMiB));
 
 	// Issue #500: the runner sets these in its own environment, for its child processes, and no value from outside
 	// may arrive first. Both lists refuse them upstream (config.mjs for PI_FORWARD_ENV, the triggers loader for

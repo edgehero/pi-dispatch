@@ -100,7 +100,7 @@ import { urlShown, valkeyContextFromResolution, valkeyPasswordFor, valkeyUrlProb
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedConsoleUnitPath, installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
-import { DEFAULT_JOB_SIZE, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
+import { DEFAULT_JOB_SIZE, codemodeWorkersOf, cpuCeilingCenti, formatCpus, formatMemory, jobSizeDefaults, resolveJobSize } from "./job-size.mjs";
 import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "./size-suggest.mjs";
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
@@ -3667,7 +3667,7 @@ export async function collectChecks(shellVars, seams) {
 			// the one line (issue #673, review round 1).
 			const envShapeBad = envShapeProblem.PI_MODEL !== null || envShapeProblem.PI_PROVIDER !== null;
 			checks.push(...unknownModelChecks(envShapeBad ? subjects.filter((s) => s.deployment !== true) : subjects, catalog.checkModelsKnown, readOverlayDoc));
-			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })) }));
+			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })), apiOf: (ref) => outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })?.api }));
 			checks.push(
 				...listedProviderCredentialChecks(subjects, {
 					candidatesOf: (name) => (typeof oracle?.providerKeyCandidates === "function" ? oracle.providerKeyCandidates(name) : []),
@@ -5912,10 +5912,13 @@ export function cappedModelNames(env, { runs, deployment }) {
  * Issue #507: `unboundable(ref)` says the runner cannot bound the model's output at all (`outputUnboundable`,
  * output-cap.mjs: openai-completions to a server off the trusted hosts without `compat.maxTokensField: "max_tokens"`),
  * so every call to it is refused under any cap. Such a model gets a line of its own, grouped by model, and no floor.
+ * Radius and every composed pi-messages model have a separate diagnosis: their server-reported billing and input
+ * rewrites are not bounded by the catalog, including rows whose listed rates are zero (issue #693).
  */
-export function costCapFitChecks(subjects, modelOf, { unboundable = () => false } = {}) {
+export function costCapFitChecks(subjects, modelOf, { unboundable = () => false, apiOf = (ref) => modelOf(ref)?.api } = {}) {
 	const groups = new Map();
 	const unbounded = new Map();
+	const radius = new Map();
 	for (const s of subjects) {
 		if (s.cap === null || s.cap === undefined) continue;
 		const seen = new Set();
@@ -5923,6 +5926,15 @@ export function costCapFitChecks(subjects, modelOf, { unboundable = () => false 
 			const name = `${ref.provider}/${ref.id}`;
 			if (seen.has(name)) continue;
 			seen.add(name);
+			// The gateway reports its own prices and may rewrite input, so even a zero-rate catalog row is no bound.
+			const api = apiOf(ref);
+			if (api === "pi-messages" || (api === undefined && ref.provider === "radius")) {
+				if (!radius.has(name)) radius.set(name, { main: false, labels: [] });
+				const r = radius.get(name);
+				r.main ||= ref === s.main;
+				r.labels.push(s.label);
+				continue;
+			}
 			if (unboundable(ref)) {
 				if (!unbounded.has(name)) unbounded.set(name, { main: false, labels: [] });
 				const u = unbounded.get(name);
@@ -5939,6 +5951,15 @@ export function costCapFitChecks(subjects, modelOf, { unboundable = () => false 
 		}
 	}
 	const out = [];
+	if (radius.size > 0) {
+		const items = [...radius].map(([name, r]) => `${printable(name)}${r.main ? " (the main model, so such a job makes no call at all)" : ""} (${r.labels.join(", ")})`);
+		out.push({
+			ok: false,
+			warn: true,
+			label: `Radius (pi-messages) has no verified local cost bound, including zero-rate routes and custom gateways, so the runner refuses every call under a per-job cost cap as unboundable: ${items.join("; ")}`,
+			fix: "use a provider with a locally bounded API for capped jobs; raising the cap or changing catalog rates cannot bound Radius: docs/costs.md",
+		});
+	}
 	if (unbounded.size > 0) {
 		const items = [...unbounded].map(([name, u]) => `${printable(name)}${u.main ? " (the main model, so such a job makes no call at all)" : ""} (${u.labels.join(", ")})`);
 		out.push({
@@ -8484,7 +8505,7 @@ export function jobSizeChecks(env, { daemon = undefined, podman = undefined, cpu
 		return [{ ok: false, label: `job size does not parse: ${error.message}, so the worker REFUSES TO START`, fix: "set PI_JOB_MEMORY like 512m, 1536m or 4g and PI_JOB_CPUS like 0.5 or 2 (or unset them for 4g and 2), then re-run doctor" }];
 	}
 	const where = d.memSet || d.cpuSet ? "PI_JOB_MEMORY and PI_JOB_CPUS" : "the built-in default";
-	const checks = [{ ok: true, label: `Job size: ${formatMemory(d.memMiB)} of memory with no swap beyond it, and the CPU weight of ${formatCpus(d.cpuCenti)} CPUs, per job (${where}; a project row's memory and cpus override it, docs/scoped-limits.md)` }];
+	const checks = [{ ok: true, label: `Job size: ${formatMemory(d.memMiB)} of memory with no swap beyond it, and the CPU weight of ${formatCpus(d.cpuCenti)} CPUs, per job (${where}; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: ${codemodeWorkersOf(d.memMiB)} (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)` }];
 	const venues = [];
 	// `reason` is the reader's own token (`timeout`, `unparseable`, ...), never the runtime's text.
 	const reasonOf = (read) => (typeof read?.reason === "string" && /^[a-z0-9-]{1,40}$/.test(read.reason) ? read.reason : "not read");

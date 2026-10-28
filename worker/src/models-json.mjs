@@ -163,7 +163,7 @@ const posInt = T.int({ minimum: 1 });
 const ImageResize = T.obj({ maxWidth: opt(posInt), maxHeight: opt(posInt), maxBytes: opt(posInt), jpegQuality: opt(T.int({ minimum: 1, maximum: 100 })) });
 const ModelInputLimits = T.obj({ maxRequestBytes: opt(posInt), images: opt(T.obj({ resize: opt(ImageResize), maxPerMessage: opt(posInt), maxPerRequest: opt(posInt) })) });
 // compat-schema.js's ProviderCompatSchema: the merged properties of the OpenAI completions, OpenAI responses, Anthropic
-// messages, Bedrock and Mistral schemas. A key two of them share takes pi's generic override, which for every shared
+// messages, Bedrock, Mistral and System One schemas. A key two of them share takes pi's generic override, which for every shared
 // key here is the same type as each api's own (a boolean, or the three-way affinity format), so the superset is exact.
 const bool = opt(T.bool());
 const ProviderCompat = T.obj({
@@ -209,6 +209,9 @@ const ProviderCompat = T.obj({
 	supportsStrictTools: bool,
 	supportsMidConvoEffort: bool,
 	supportsMidConvoToolChanges: bool,
+	// System One classifier image transport, checked before pi reads the overlay.
+	imageInput: opt(T.union(T.lit("assets"), T.lit("images"), T.lit("state-image-urls"))),
+	sendImageOptInHeader: bool,
 	allowedFallbackModels: opt(T.arr(T.obj({ provider: req(T.str({ minLength: 1 })), model: req(T.str({ minLength: 1 })), cost: req(ModelCost) }), { maxItems: 3 })),
 });
 const nonEmpty = T.str({ minLength: 1 });

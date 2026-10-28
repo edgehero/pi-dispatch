@@ -183,6 +183,7 @@ test("one run: create sized and labelled under the generated policy, read it bac
 	assert.ok(!tail.includes("/sandbox/job"), "never the job inputs");
 	const env = Object.fromEntries(execCall.flatMap((a, i) => (a === "--env" ? [execCall[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
 	assert.equal(env.PI_JOB_LAYOUT, "sandbox");
+	assert.equal(env.PI_CODEMODE_MAX_WORKERS, "4", "the 2g job carries its derived codemode concurrency as structural exec env (#693)");
 	assert.equal(env.PI_SESSION_FILE, "/sandbox/session/current.jsonl");
 	assert.equal(env.HOME, "/home/pi");
 	assert.equal(env.PI_EXIT_AUTH, "stdin");

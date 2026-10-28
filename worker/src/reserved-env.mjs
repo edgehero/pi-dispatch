@@ -35,6 +35,8 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// Issue #730: the worker's choice of the readable runner node on the OpenShell venues (image/entrypoint.sh). Reserved,
 	// so neither `run.secrets` nor `PI_FORWARD_ENV` can make a job's key holders readable on any venue.
 	"PI_RUNNER_OBSERVABLE",
+	// Issue #693: derived from the resolved job memory, never chosen by a trigger or forwarded host value.
+	"PI_CODEMODE_MAX_WORKERS",
 	"PI_PROVIDER",
 	"PI_MODEL",
 	"PI_FORK_ENTRY",

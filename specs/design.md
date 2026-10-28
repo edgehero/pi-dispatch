@@ -314,6 +314,25 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   guess at an average job, is what bounds memory.
 - **Traces to**: `OQ-002`, `REQ-QUEUE-BURST-NO-DROP`, `REQ-SCOPED-LIMITS`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-HOST-BUDGET`
 
+## DES-CODEMODE-WORKERS
+
+- **Decision** (issue #693): the worker always sets `PI_CODEMODE_MAX_WORKERS` from the job's resolved
+  `memMiB`: `max(1, floor(memMiB / 512))`. The same resolved size feeds the container limit and the
+  environment; project overrides therefore affect both. The name belongs to `CONTAINER_ENV_NAMES`, so
+  trigger secrets cannot set it and forwarded environment cannot override it. Doctor reports the deployment
+  default's count with the same helper and explains project overrides.
+- **Why**: pi 1.4.0 codemode uses a 256 MiB QuickJS heap limit per worker, queues concurrent scripts for up
+  to 60 seconds, and charges that wait against the script timeout. This policy leaves at least half of the
+  container's memory outside those heaps for pi, tools and worker overhead. It is a concurrency heuristic,
+  not an RSS guarantee: a worker process can use memory outside its QuickJS heap. The cap is per pi process;
+  child processes have separate pools. The container memory limit remains the hard boundary.
+- **Rejected**: new size classes (`DES-HOST-BUDGET` already resolves exact sizes); a trigger-selected worker
+  count (it could contradict its container's size); treating the heap limit as total process memory.
+- **Evidence**: npm `@earendil-works/pi-coding-agent@1.4.0`,
+  `dist/extensions/codemode/execute.js`; `worker/test/codemode-workers.pinned.test.mjs` executes its admission
+  functions and pins its heap, FIFO ceiling, environment parsing and timeout accounting.
+- **Traces to**: `DES-HOST-BUDGET`, `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`.
+
 ## DES-HOST-BUDGET
 
 - **Decision** (issue #596, phase 2): each worker keeps ONE ledger of the sizes its running jobs were started at, and
@@ -4623,6 +4642,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `OQ-010`, `OQ-011`
 
 ## DES-DOLLAR-RESERVE-AND-SETTLE
+
+**pi 1.4.0 summary and Radius policy (issue #693).** Compaction and branch summaries retain pi's own
+output limit, `model.maxTokens`; `reserveTokens` controls compaction/input preparation, not summary output.
+We do not inject a smaller summary cap. With reasoning disabled as well as enabled, the existing guard
+bounds the actual request and refuses before provider dispatch when the remaining cap cannot cover it.
+A tight cap can therefore terminate a job at compaction, even after affordable main turns. Real pinned-SDK
+integration tests with fake providers measure admitted and refused compaction and branch summaries, with
+session thinking off and high. Compaction forwards the thinking level; pi's branch summary omits it.
+
+Radius's `pi-messages` protocol stays outside `PRICED_APIS`. Its server supplies `event.usage` cost and may
+rewrite input. Catalog prices and a sent `maxTokens` do not prove an upper billing bound, so capped calls
+are refused before provider dispatch as `cost-cap`, `why: "unboundable"`, including zero-rate routes and
+custom gateways, in the root and child meter. This is a runner refusal, not a new worker preflight.
+Doctor names Radius and the protocol and directs operators to `docs/costs.md`; no unbounded org-budget
+mode is introduced. API keys still work without a local cap; OAuth credentials remain refused.
+Rejected: adding `pi-messages` to the source-derived priced set, treating a hosted zero-rate route as a
+free local model, or using a few successful live probes as proof of every routing/billing outcome.
+
 
 - **Decision**: A per-job dollar cap (`PI_MAX_COST_MICROS`, integer micro-dollars) is enforced by the RUNNER,
   before every provider call, by a cost guard on the usage meter's guard seam (`createCostGuard`,
@@ -9027,6 +9064,15 @@ a tunnel.
   -> `liveChecks`; `worker/src/config.mjs` -> `jobsDirPath` (#278)
 
 ## DES-PER-TRIGGER-TOOL-EXCLUSIONS
+
+**Resume loadout policy (issue #693).** Thread, parked and recovered jobs accept pi 1.4.0's recorded
+transcript loadout, including builtin tools activated mid-session and declarations before a compaction.
+The runner passes no explicit `tools` set: doing so would lose those activations. Current trigger
+exclusions still filter the registry, including pending registrations, so a transcript cannot restore an
+excluded tool. Lifting an exclusion later does not itself activate a builtin absent from the recorded
+loadout. Extension tools never mentioned by the transcript remain active, and recorded late MCP tools
+activate when registered. `image/runner/test/loader.test.mjs` verifies these cases against the real SDK.
+
 
 - **Decision**: A trigger may name built-in pi tools its jobs' sessions must not have
   (`run.excludeTools`, issue #291), and the runner passes the list to `createAgentSession` as
@@ -15921,6 +15967,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | Issue #693: add `DES-CODEMODE-WORKERS`, memory-derived per-process concurrency with heap/RSS distinction; amend `DES-DOLLAR-RESERVE-AND-SETTLE` with full-limit summary acceptance and named Radius refusal; amend `DES-PER-TRIGGER-TOOL-EXCLUSIONS` with transcript loadouts on resume. `DES-HOST-BUDGET` admission and exact-size policy UNCHANGED, checked. Evidence: pinned npm 1.4.0 code, loader and usage-meter integration tests, codemode artifact tests, job-size/env/container/doctor tests. |
 | 2026-10-28 (#649) | Issue #649: added `DES-APPROVAL-DECISION-IS-HOST-AUTHORITY`: pinned public context-edit replay, durable first-decision authority, request binding and explicit enforcement limits. `DES-AWAIT-INPUT-ENDS-THE-JOB` and session-key derivation UNCHANGED, checked; typed gates extend the lifecycle without a live wait. |
 | 2026-10-28 (#648) | NEW `DES-MANAGED-FORK-IS-A-NEW-LINEAGE`: managed issue-run forks use immutable source identity, exact retained transcript/workspace boundaries, independently derived branches and session lineage, current policy and normal admission. Console and terminal share paid preview/confirm/audit. Pinned pi tree semantics, model/thinking recording, named unavailable points/venues, bounded private retention and new zero-spend/worker/UI tests are specified. Existing host-local chat fork and recovery newest-two retention remain unchanged. Relevant constitutional constraints UNCHANGED, checked as recorded in `INT-MANAGED-FORK-CONTRACT`. Final cross-feature checks: `run.awaitInput` managed forks refuse before spend as `fork-await-input-unsupported`; recovery of an existing managed fork restores its checkpoint without re-forking, while recovery-attempt records are not new sources. `REQ-AWAIT-INPUT` and ordinary canonical reply behavior UNCHANGED, checked. |
 | 2026-08-30 | Issue #57, the shared-bounds slice. **NEW `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`**: the two ceilings that describe a DEPLOYMENT rather than a process gain a fleet-wide layer beneath the unchanged in-process one. The entry's substance is what it owes `OQ-008` and this file's own refusal of Redis-held in-flight counts, and the two halves answer it differently. The check lease claims no container at all -- a subprocess this process spawned, bounded by a configured timeout, holding no folder and spending nothing -- so all three properties that made the container count wrong invert, and its TTL is derived rather than guessed. The scope claim really is for a container, so the refusal lands, and the answer is the boot reaper: it establishes that this host holds no containers, so deleting a claim that names this host is the same source of truth writing down what it just established. That argument has a PRECONDITION and the precondition is checked -- `makeReaper` catches its own `docker ps` failure, and on that path nothing was enumerated, so the sweep is skipped rather than freeing slots for containers that may still be running on a machine that would then be joined by another. Local scopes deliberately never claim, because the key would be a hash of a path string and `/srv/site` on two machines is usually two different repositories. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: its rejection of Redis in-flight counters is NARROWED rather than reversed, and the narrowing is stated in the Rejected list itself so a reader meets it where the refusal is. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the one-worker-per-daemon invariant and the process-memory argument for the folder mutex are untouched. **Code evidence**: worker/src/fleet-lease.mjs -> makeFleetLease, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor (the check and scope arms); worker/src/start.mjs -> startWorker, makeReaper. |

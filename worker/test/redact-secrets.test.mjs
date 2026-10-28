@@ -90,7 +90,7 @@ test("secretValuesOf takes every env value but the structural keys, plus the ext
 	};
 	const workerSet = { HTTPS_PROXY: "http://pi-dispatch-egress:3128" };
 	assert.deepEqual(secretValuesOf(env, ["exit-key-hex", null, ""], { workerSet }), ["sk-ant-provider", "ghs_minted", "forwarded-value", "resolved-secret", "exit-key-hex"]);
-	for (const key of ["PI_PROVIDER", "PI_MODEL", "PI_SESSION_FILE", "HOME", "GITLAB_HOST", "GITEA_INSTANCE_URL", "PI_DISPATCH_KEYLESS"]) {
+	for (const key of ["PI_CODEMODE_MAX_WORKERS", "PI_PROVIDER", "PI_MODEL", "PI_SESSION_FILE", "HOME", "GITLAB_HOST", "GITEA_INSTANCE_URL", "PI_DISPATCH_KEYLESS"]) {
 		assert.ok(NON_SECRET_ENV_KEYS.has(key), key);
 	}
 	for (const key of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"]) assert.ok(!NON_SECRET_ENV_KEYS.has(key) && EGRESS_ENV_KEYS.includes(key), `${key}: structural per job only`);
@@ -132,6 +132,7 @@ test("NON_SECRET_ENV_KEYS covers every structural key buildContainerEnv writes",
 		home: "/home/pi",
 		exitAuth: true,
 	});
+	assert.equal(env.PI_CODEMODE_MAX_WORKERS, "8", "the memory-derived count is structural, including on OpenShell (#693)");
 	const workerSet = egressEnv({ armed: true });
 	const outside = Object.keys(env).filter((k) => env[k] !== undefined && !NON_SECRET_ENV_KEYS.has(k) && workerSet[k] !== env[k]).sort();
 	assert.deepEqual(outside, ["ANTHROPIC_API_KEY", "GITLAB_TOKEN", "GL_TOKEN"]);

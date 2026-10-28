@@ -4315,6 +4315,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-TOKEN-ACCOUNTING-AND-CAPS
 
+**pi 1.4.0 (issue #693).** The local cost cap must cover full-model-limit compaction and branch-summary
+requests, or refuse them before provider dispatch. Radius (`pi-messages`) remains unboundable under a
+local cap, including zero-rate hosted routes; doctor must identify that protocol and explain the refusal
+without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SETTLE` records the decision.
+
 - **Statement**: The harness shall (a) **account** every job's token usage **process-wide** — the runner
   wraps the model-calling methods of pi's `ModelRuntime` class (streamSimple, stream, streamDeferred,
   classify, generateImages) on its prototype, the one choke point every in-process session's model calls go
@@ -7583,6 +7588,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | Issue #693: clarify `REQ-TOKEN-ACCOUNTING-AND-CAPS` summary output bounds and named Radius doctor diagnosis. `REQ-RESUMABLE-SESSION` persistence/authorization UNCHANGED, checked; the resumed tool-loadout decision is recorded in `DES-PER-TRIGGER-TOOL-EXCLUSIONS`. Pinned 1.4.0 artifact and offline real-SDK tests verify behavior. |
 | 2026-10-28 (#649) | Issue #649: added `REQ-APPROVAL-GATES`, typed durable park/decide/resume with bounded budget elevation, advisory external gates, expiry and all operator surfaces. `REQ-AWAIT-INPUT` and console actions extended by reference; ordinary parked-input behavior UNCHANGED, checked. |
 | 2026-10-28 (#648) | NEW `REQ-MANAGED-RUN-FORK`: managed issue-run forks use immutable source identity, exact retained transcript/workspace boundaries, independently derived branches and session lineage, current policy and normal admission. Console and terminal share paid preview/confirm/audit. Pinned pi tree semantics, model/thinking recording, named unavailable points/venues, bounded private retention and new zero-spend/worker/UI tests are specified. Existing host-local chat fork and recovery newest-two retention remain unchanged. Relevant constitutional constraints UNCHANGED, checked as recorded in `INT-MANAGED-FORK-CONTRACT`. Final cross-feature checks: `run.awaitInput` managed forks refuse before spend as `fork-await-input-unsupported`; recovery of an existing managed fork restores its checkpoint without re-forking, while recovery-attempt records are not new sources. `REQ-AWAIT-INPUT` and ordinary canonical reply behavior UNCHANGED, checked. |
 | 2026-10-28 (#737) | Issue #737: the design system moves into the repository (`design/`). Words only, no requirement changes. **`REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-ZERO-TOUCH-RATE` and `REQ-PARKED-ANSWERER` AMENDED**, their Status lines: each names its cards by path (`design/system/components/<Card>`), with the viewer and phone cards drawn since. **`REQ-OPERATOR-CONSOLE-SCREENS` (n) UNCHANGED, checked**: the contrast test reads the pasted tokens, which are the design's `tokens.json` byte for byte (`admin/test/design-folder.test.mjs`). **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the cards keep the console's CSP (no inline style, no script, no web font, no outside load), which `design/tools/check.py` holds for every card. |

@@ -133,6 +133,8 @@ export function makeRedactor({ values = [], extraPatterns = [] } = {}) {
  * value the worker wrote: `secretValuesOf`'s `workerSet`, which `runContainer` fills from `egressEnv` for that job.
  */
 export const NON_SECRET_ENV_KEYS = new Set([
+	// Issue #693: a memory-derived concurrency count, never a credential; keep it in the structural venue env.
+	"PI_CODEMODE_MAX_WORKERS",
 	"PI_PROVIDER",
 	"PI_MODEL",
 	"PI_FORK_ENTRY",

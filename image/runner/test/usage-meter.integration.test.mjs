@@ -538,12 +538,17 @@ async function installCapped({ fx, capMicros, rootSessionId }) {
 	const stops = [];
 	const logged = [];
 	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: capMicros, rootSessionId, onStop: (reason) => stops.push(reason) });
-	const guard = createCostGuard({ capMicros, log: (event, fields) => logged.push({ event, fields }) });
+	const bounds = [];
+	const guard = createCostGuard({ capMicros, log: (event, fields) => logged.push({ event, fields }), bound: (method, model, context, options) => {
+		const bound = callCostBound(method, model, context, options);
+		bounds.push({ bound, maxTokens: options?.maxTokens, reasoning: options?.reasoning, modelMax: model.maxTokens });
+		return bound;
+	} });
 	const installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, guard, log: (event, fields) => logged.push({ event, fields }) });
 	assert.equal(installed.ok, true, `logged ${JSON.stringify(logged)}`);
 	assert.equal(installed.brake, true, "a cost cap needs its brake at the pin");
 	assert.deepEqual([...installed.enforces], ["cost-cap"]);
-	return { meter, guard, installed, stops, logged };
+	return { meter, guard, installed, stops, logged, bounds };
 }
 
 test("cost cap, sequential: the call whose bound would pass the cap is refused before dispatch, and the total stays under it", { skip }, async () => {
@@ -635,17 +640,14 @@ test("cost cap: session.compact() is a provider call like any other, and is refu
 		installed = capped.installed;
 		const calls = [];
 		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS });
-		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager, settings: { compaction: { keepRecentTokens: 1, reserveTokens: 20_000 } } });
+		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager, settings: { defaultThinkingLevel: "off", compaction: { keepRecentTokens: 1, reserveTokens: 2000 } } });
 		sessions.push(session);
 		await session.prompt("one");
 		await flush();
 		assert.equal(calls.length, 1);
 		assert.equal(capped.guard.state.spent, 400_000);
-		// The compaction's summarization call goes through the session's streamFn, so it is the runtime half's
-		// call to judge. With one exchange and keepRecentTokens 1 pi summarises the split turn's prefix, asking for
-		// maxTokens = min(0.5 x reserveTokens, model.maxTokens) = 10000 here, so its bound is a turn's (about 1.01) and
-		// 0.40 + 1.01 passes 1.30. (With pi's default reserve it asks for 8192, and its bound is smaller: the guard
-		// bounds what each call asks for, not a fixed worst case.)
+		// pi 1.4 uses model.maxTokens (10000), not reserveTokens (2000), with reasoning off.
+		// A summary bound therefore exceeds $1, and the settled $0.40 leaves too little under $1.30.
 		await session.compact();
 		await flush();
 		// MEASURED at the pin, and pinned here as a residual rather than a guarantee: pi does not reject compact()
@@ -660,6 +662,10 @@ test("cost cap: session.compact() is a provider call like any other, and is refu
 		assert.equal(calls.length, 1, "the compaction's call never reached the provider");
 		assert.deepEqual([capped.guard.state.refused, capped.meter.state.stopReason], [1, "cost-cap"]);
 		assert.equal(capped.guard.state.spent, 400_000);
+		assert.equal(capped.bounds.at(-1).maxTokens, undefined, "pi 1.4 summaries send no explicit output cap");
+		assert.equal(capped.bounds.at(-1).reasoning, undefined);
+		assert.equal(capped.bounds.at(-1).modelMax, 10_000);
+		assert.ok(capped.bounds.at(-1).bound > 1_000_000, "the summary reserves the model's whole output limit");
 	} finally {
 		for (const session of sessions) session.dispose();
 		installed?.uninstall();
@@ -1676,3 +1682,85 @@ test("PR #547's final review: a fallback provider whose forward failed and that 
 	assert.deepEqual([refused.served, refused.meter.state.stopReason], [[], "cost-cap"]);
 	assert.ok(refused.meter.state.cost >= 2, `the provider's own $2 is counted after the refusal: ${refused.meter.state.cost}`);
 });
+
+for (const thinkingLevel of ["off", "high"]) {
+	for (const kind of ["compaction", "branch"]) {
+		for (const fits of [true, false]) {
+			test(`pi 1.4 ${kind} summary with reasoning ${thinkingLevel} ${fits ? "fits" : "refuses"} its full model bound (#693)`, { skip }, async () => {
+				const fx = await fixture(PRICED_API, { ...PRICED_MODEL, reasoning: true });
+				let session;
+				let installed;
+				try {
+					const manager = pi.SessionManager.inMemory(fx.root);
+					const capped = await installCapped({ fx, capMicros: fits ? 2_500_000 : 1_500_000, rootSessionId: manager.getSessionId() });
+					installed = capped.installed;
+					const calls = [];
+					await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS });
+					session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: manager, settings: { defaultThinkingLevel: thinkingLevel, compaction: { keepRecentTokens: 1, reserveTokens: 2000 } } });
+					assert.equal(session.thinkingLevel, thinkingLevel, "the real SDK retained the requested thinking policy");
+					await session.prompt("one");
+					const firstReply = manager.getEntries().find((entry) => entry.type === "message" && entry.message.role === "assistant");
+					await session.prompt("two");
+					await flush();
+					const before = calls.length;
+					assert.equal(before, 2);
+					assert.equal(capped.bounds[0].reasoning, thinkingLevel === "off" ? undefined : thinkingLevel, "the main calls demonstrate enabled thinking actually reaches the guard");
+					if (kind === "compaction") await session.compact();
+					else await session.navigateTree(firstReply.id, { summarize: true });
+					await flush();
+					const summaryBounds = capped.bounds.slice(2);
+					assert.ok(summaryBounds.length > 0, "the real SDK attempted a summary");
+					for (const bound of summaryBounds) {
+						assert.equal(bound.maxTokens, undefined, "reserveTokens is not an output cap in pi 1.4");
+						// Compaction forwards thinking; pi's branch summarizer intentionally builds options without it.
+						assert.equal(bound.reasoning, kind === "compaction" && thinkingLevel !== "off" ? thinkingLevel : undefined);
+						assert.equal(bound.modelMax, 10_000);
+						assert.ok(bound.bound > 1_000_000, "output alone reserves $1 despite reserveTokens=2000");
+					}
+					if (fits) {
+						assert.ok(calls.length > before);
+						assert.equal(capped.meter.state.stopReason, null);
+						assert.equal(capped.guard.state.spent, calls.length * 400_000);
+						assert.ok(capped.meter.snapshot().otherTotal > 0, "summary spend is metered outside the root session");
+					} else {
+						assert.equal(calls.length, before, "the summary is refused before provider dispatch");
+						assert.equal(capped.meter.state.stopReason, "cost-cap");
+						assert.equal(capped.guard.state.spent, 800_000);
+						assert.equal(capped.guard.refusedWhy(), "over-cap");
+					}
+				} finally {
+					session?.dispose();
+					installed?.uninstall();
+					fx.cleanup();
+				}
+			});
+		}
+	}
+}
+
+for (const child of [false, true]) {
+	test(`Radius protocol in a ${child ? "child" : "root"} session is refused before fake-provider dispatch (#693)`, { skip }, async () => {
+		const fx = await fixture("pi-messages", { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+		let installed;
+		let session;
+		try {
+			const rootManager = pi.SessionManager.inMemory(fx.root);
+			const capped = await installCapped({ fx, capMicros: 1_000_000_000, rootSessionId: rootManager.getSessionId() });
+			installed = capped.installed;
+			const runtime = child ? await fx.runtime() : fx.modelRuntime;
+			const calls = [];
+			await registerFakeProvider({ modelRuntime: runtime, compat: installed.module, api: "pi-messages", calls });
+			session = await openSession({ fx, modelRuntime: runtime, sessionManager: child ? pi.SessionManager.inMemory(fx.root) : rootManager });
+			await session.prompt("one");
+			await flush();
+			assert.deepEqual(calls, [], "even a zero-rate route cannot dispatch under a local cap");
+			assert.equal(capped.guard.refusedWhy(), "unboundable");
+			assert.equal(capped.meter.state.stopReason, "cost-cap");
+			assert.equal(capped.guard.state.spent, 0);
+		} finally {
+			session?.dispose();
+			installed?.uninstall();
+			fx.cleanup();
+		}
+	});
+}

@@ -8366,7 +8366,7 @@ const MIXED_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
@@ -8444,7 +8444,7 @@ const MIXED_PIN = {
 			"⚠ podman: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (docker-not-found), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
@@ -8512,7 +8512,7 @@ const MIXED_PIN = {
 			"⚠ podman: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
@@ -8577,7 +8577,7 @@ const MIXED_PIN = {
 			"⚠ podman: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"⚠ local: `docker info` gave no answer that says its CPU count (unparseable), so the CPU ceiling is unknown and a job that runs gets no --cpus: it may use every core of the host (cpu_ceiling_unknown)",
 			"    → make `docker info` answer for the worker's account with its CPU count, then re-run doctor; the worker reads it with every job's user",
@@ -10515,7 +10515,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
@@ -10598,7 +10598,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
@@ -10687,7 +10687,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
@@ -10780,7 +10780,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
@@ -10873,7 +10873,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
-			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md)",
+			"✓ Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job (the built-in default; a project row's memory and cpus override it, docs/scoped-limits.md); codemode workers: 8 (PI_CODEMODE_MAX_WORKERS, half the memory reserved for pi, tools and worker overhead; a sizing heuristic, not an RSS guarantee)",
 			// Issue #596 (gate round 1): the CPU ceiling unknown is a warning per venue, since such a job runs with no --cpus.
 			"✓ local: any one job may use at most 3 of this runtime's 4 CPUs (--cpus); under contention a larger size gets more CPU than a smaller one (--cpu-shares)",
 			"✓ Host budget: memory 6913m (auto: 7937m here, 1g kept for the host), CPUs 3 (auto: 4 here, 1 kept for the host); a job starts only when its size fits beside what already runs on this host",
@@ -12468,6 +12468,10 @@ test("doctor names the default job size, the --cpus ceiling this runtime gives e
 	const plain = jobSizeChecks({}, { daemon: facts() });
 	assert.deepEqual(plain.map((c) => [c.ok, c.warn === true]), [[true, false], [true, false]]);
 	assert.match(plain[0].label, /^Job size: 4g of memory with no swap beyond it, and the CPU weight of 2 CPUs, per job \(the built-in default;/);
+	assert.match(plain[0].label, /codemode workers: 8 \(PI_CODEMODE_MAX_WORKERS, half the memory reserved/);
+	assert.match(jobSizeChecks({ PI_JOB_MEMORY: "512m" })[0].label, /codemode workers: 1 /);
+	assert.match(jobSizeChecks({ PI_JOB_MEMORY: "1536m" })[0].label, /codemode workers: 3 /);
+	assert.match(plain[0].label, /sizing heuristic, not an RSS guarantee/);
 	assert.match(plain[1].label, /^local: any one job may use at most 13 of this runtime's 14 CPUs \(--cpus\);/);
 	assert.doesNotMatch(plain[1].label, /kept for the host/, "the ceiling is per job and keeps no core free across jobs (measured)");
 	assert.match(jobSizeChecks({ PI_JOB_MEMORY: "1536m", PI_JOB_CPUS: "0.5" })[0].label, /^Job size: 1536m of memory .* weight of 0\.5 CPUs, per job \(PI_JOB_MEMORY and PI_JOB_CPUS;/);
@@ -12772,4 +12776,16 @@ test("a worker's own run records who ran it and the interval it runs at; a name 
 	await runDoctor({ ...publishEnv(triggers), PI_WORKER_NAME: "prod.json" }, publishDeps(capture().out, { publish: true, writeErr: (s) => errs.push(s), publishDoctor: async () => calls.push(1) }));
 	assert.equal(calls.length, 0);
 	assert.match(errs.join(""), /^doctor: results not published \(PI_WORKER_NAME is a name the worker refuses at boot\)/);
+});
+
+test("doctor collection names Radius's protocol refusal under a cap without compatibility-field advice (#693)", { skip: skipNoPi }, async () => {
+	const env = { PI_PROVIDER: "radius", PI_MODEL: "balanced", RADIUS_API_KEY: "literal-test-key", PI_MAX_COST_USD: "50" };
+	const checks = await collectChecks(env, secretsSeams());
+	const radius = checks.filter((check) => /^Radius \(pi-messages\) has no verified local cost bound/.test(check.label));
+	assert.equal(radius.length, 1, "the real catalog and composed output-cap view reach the protocol diagnosis");
+	assert.match(radius[0].label, /radius\/balanced \(the main model/);
+	assert.match(radius[0].fix, /raising the cap or changing catalog rates cannot bound Radius/);
+	assert.doesNotMatch(radius[0].fix, /maxTokensField/);
+	const uncapped = await collectChecks({ ...env, PI_MAX_COST_USD: "" }, secretsSeams());
+	assert.equal(uncapped.some((check) => /^Radius \(pi-messages\) has no verified local cost bound/.test(check.label)), false);
 });
