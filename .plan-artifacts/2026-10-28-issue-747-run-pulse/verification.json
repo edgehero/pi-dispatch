@@ -134,5 +134,25 @@
     "backend contracts, data bounds and stream security",
     "UI states, card coverage, viewer payloads and screenshot review",
     "tests, specifications, diagnostics and browser validation"
-  ]
+  ],
+  "clock_shifted_suite": {
+    "shift_days": 399,
+    "tests": 10694,
+    "passed": 10688,
+    "failed": 0,
+    "skipped": 6,
+    "includes": "Both late unknown-outcome and queued/unknown-venue regressions."
+  },
+  "test_count": {
+    "files": 417,
+    "result": "Every declared test reported.",
+    "latest_changed_module": "console-run-pulse.test.mjs also rechecked separately: 12 child-run tests == 12 in-process tests, zero failures."
+  },
+  "guards": {
+    "dated_fixture_test_files": 417,
+    "temp_dir_test_files": 417,
+    "revision_rows": 1193,
+    "tracked_conflict_checked_files": 1310,
+    "result": "passed"
+  }
 }
