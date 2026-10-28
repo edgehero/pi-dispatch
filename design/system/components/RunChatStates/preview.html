@@ -1,0 +1,255 @@
+<!-- @dsCard group="Runs" height=3250 width=1440 subtitle="Chat and Inbox in every state: modes, refusals, message states, withdraw and steer previews" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat and inbox states</title>
+<style>
+.run-id { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.03em; }
+.titlebar__sub .link { margin-left: 4px; }
+.titlebar__sub .muted { margin-left: 4px; }
+.run-prog { display: flex; align-items: flex-end; gap: var(--space-6); flex-wrap: wrap; margin-bottom: var(--space-4); }
+.run-big .kpi { margin: 0; }
+.run-tc { font-family: var(--font-mono); color: var(--running-ink); }
+.run-stats { display: flex; gap: var(--space-6); margin: 0 0 4px; flex-wrap: wrap; }
+.run-stats div { display: grid; gap: 2px; }
+.run-stats dt { font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.run-stats dd { margin: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--ink-muted); }
+.run-stats dd b { color: var(--ink); font-size: 16px; }
+.run-stats .tone-running dd b { color: var(--running-ink); }
+.run-phase { margin-bottom: 8px; font-size: 13px; font-weight: 650; color: var(--ink-muted); }
+.run-note { display: flex; align-items: center; gap: 8px; margin-top: var(--space-4); padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px; color: var(--ink-muted); }
+.run-sub { margin: var(--space-4) 0 8px; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.run-st { font-weight: 650; }
+.run-at { font-size: 12px; color: var(--ink-faint); white-space: nowrap; }
+.run-waiting { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; font-weight: 650; color: var(--running-ink); }
+.run-actrow { display: flex; gap: 8px; margin: 8px 0 var(--space-4); }
+.run-short { min-height: 64px; }
+.run-inbox { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#p-chat .rows > li { min-width: 0; }
+#p-chat .rowpill .end { flex: none; }
+.run-inbox b { margin-right: 4px; }
+.run-small .card__head { margin-bottom: var(--space-2); }
+.run-small .card__head h2 { font-size: 14px; color: var(--ink-muted); }
+.run-text { margin-bottom: var(--space-3); font-size: 13px; color: var(--ink-muted); }
+.run-kv { display: flex; align-items: baseline; gap: 10px; margin-bottom: var(--space-3); }
+.run-kv b { font-size: 32px; line-height: 36px; font-weight: 800; letter-spacing: -0.02em; }
+.run-kv span { color: var(--ink-muted); font-size: 13px; }
+.run-acts { display: grid; gap: var(--space-4); }
+.run-act { display: grid; gap: 8px; }
+.run-act__h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.run-act__h p { flex: 1 1 200px; font-size: 13px; color: var(--ink-muted); }
+.run-act__h p b { color: var(--ink); font-weight: 650; }
+.run-act + .run-act { padding-top: var(--space-4); border-top: 1px solid var(--line); }
+
+.rx-mono { font-family: var(--font-mono); font-weight: 650; }
+.rx-wrap { white-space: normal; overflow-wrap: anywhere; }
+.rx-meta { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rx-meta a { font-weight: 650; text-decoration: none; color: var(--ink); }
+.rx-lead { display: flex; align-items: center; gap: 10px; margin-bottom: var(--space-4); padding: 12px 16px; border-radius: var(--radius-md); background: var(--tone-tint); color: var(--tone-ink); font-size: 14px; font-weight: 650; }
+.rx-lead a { color: inherit; }
+.rx-lead .dot { background: var(--tone); }
+.rx-text { font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.rx-text b { color: var(--ink); font-weight: 650; }
+.rx-text + .rx-text { margin-top: 8px; }
+.rx-h3 { margin: var(--space-4) 0 8px; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.rx-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-4); }
+.rx-tile { display: grid; gap: 2px; padding: 12px 16px; border-radius: var(--radius-md); background: var(--surface-2); }
+.rx-tile b { font-size: 22px; line-height: 28px; font-weight: 800; letter-spacing: -0.02em; }
+.rx-tile span { font-size: 12px; line-height: 16px; color: var(--ink-muted); }
+.rx-track { display: block; width: 100%; overflow: visible; }
+.rx-ck { fill: var(--surface); stroke: var(--ink-muted); stroke-width: 1.8; }
+.rx-ck--exit { fill: var(--ink); stroke: var(--ink); }
+.rx-ck--skip { fill: none; stroke: var(--ink-faint); stroke-dasharray: 2 2; }
+.rx-l--failed { fill: var(--on-failed); }
+.rx-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 6px; font-size: 12px; color: var(--ink-muted); }
+.rx-lg { display: inline-flex; align-items: center; gap: 6px; }
+.rx-calls { display: grid; gap: 4px; }
+.rx-calls .rowpill { min-height: 36px; }
+.rx-calls .rowpill .end { font-size: 12px; }
+.rx-states { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3) var(--space-5); }
+.rx-state { display: grid; gap: 6px; align-content: start; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-2); }
+.rx-state .badge { justify-self: start; }
+.rx-state p { font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.rx-state p b { color: var(--ink); font-weight: 650; }
+.rx-hosts, .rx-tools { font-size: 13px; line-height: 22px; color: var(--ink-muted); overflow-wrap: anywhere; }
+.rx-hosts .code, .rx-tools .code { color: var(--ink); font-size: 12px; white-space: normal; }
+.rx-vars { display: grid; gap: 6px; }
+.rx-vars li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.rx-vars li .muted { font-size: 12px; }
+.rx-big { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: var(--space-3); }
+.rx-big b { font-size: 32px; line-height: 36px; font-weight: 800; letter-spacing: -0.02em; }
+.rx-big span { color: var(--ink-muted); font-size: 13px; }
+.rx-note { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.rx-note > .ic { flex: none; margin-top: 2px; }
+.rx-note b { color: var(--ink); font-weight: 650; }
+.rx-note + .rx-note, .rx-note + .cmd, .cmd + .rx-note, .banner + .cmd, .rx-text + .cmd, .rx-text + .rx-note, .rx-note + .rx-text { margin-top: 8px; }
+.rx-split { display: grid; gap: 6px; margin-top: var(--space-3); }
+.rx-split .rx-h3 { margin: 0; }
+.rx-split svg { display: block; width: 100%; }
+.rx-split__seg { fill: var(--running); }
+.rx-split__seg--2 { fill: var(--running); opacity: .55; }
+.rx-split__seg--3 { fill: var(--running); opacity: .3; }
+.rx-split__key { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-muted); }
+.rx-split__key b { color: var(--ink); font-weight: 650; }
+.rx-children { display: grid; gap: 4px; margin-top: 6px; }
+.rx-children .rowpill { min-height: 36px; }
+.rx-children .rowpill a { font-family: var(--font-mono); font-weight: 650; font-size: 12px; text-decoration: none; color: var(--ink); }
+.rx-tblsm td, .rx-tblsm th { padding-top: 8px; padding-bottom: 8px; }
+.rx-nw { white-space: nowrap; }
+.rx-model { display: grid; white-space: nowrap; font-weight: 600; }
+.rx-model small { font-size: 11px; font-weight: 500; color: var(--ink-muted); }
+.rx-tblsm th small { display: block; font-weight: 500; color: var(--ink-muted); }
+.rx-actrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.rx-status { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 14px; font-weight: 650; }
+.rx-status .dot { background: var(--tone, var(--idle)); }
+.rx-field { display: grid; gap: 6px; margin-top: 10px; }
+.rx-field .textarea { min-height: 64px; }
+.rx-mode .card__head { margin-bottom: var(--space-3); }
+.rx-mode .card__head h2 { font-size: 15px; }
+.rx-msg { font-family: var(--font-mono); font-size: 12px; font-weight: 650; }
+.rx-quote { margin: 8px 0 0; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface); font-size: 13px; color: var(--ink); white-space: pre-wrap; }
+.rx-meters { display: grid; gap: 8px; margin-bottom: var(--space-4); }
+.rx-foot { margin-top: var(--space-3); font-size: 12px; color: var(--ink-muted); }
+.rx-viewer { margin-bottom: 0; }
+.rx-locked { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: var(--space-8) var(--space-5); border-radius: var(--radius-md); background: var(--surface-2); text-align: center; color: var(--ink-muted); font-size: 13px; }
+.rx-locked b { color: var(--ink); font-size: 15px; font-weight: 650; }
+.rx-mini .card__head h2 { font-size: 15px; }
+.rx-mini .banner { margin-bottom: var(--space-3); }
+.rx-confirms { display: grid; gap: var(--space-3); }
+.rx-confirms .confirm { margin: 0; }
+.rx-chip-warn { margin-right: 4px; height: 22px; vertical-align: 1px; }
+@media (max-width: 760px) {
+  .rx-track { min-width: 640px; }
+  .rx-tiles { grid-template-columns: minmax(0, 1fr); }
+  .rx-states { grid-template-columns: minmax(0, 1fr); }
+  .rx-calls .rowpill { flex-wrap: wrap; padding: 8px 12px; border-radius: var(--radius-md); }
+  .rx-calls .rowpill .end { margin-left: 0; width: 100%; white-space: normal; }
+  .rx-children .rowpill { flex-wrap: wrap; padding: 8px 12px; border-radius: var(--radius-md); }
+  .rx-children .rowpill .end { margin-left: 0; }
+}
+</style>
+<style data-ds-status>
+.ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
+.ds-status__k { font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.ds-status__w { display: inline-flex; align-items: center; gap: 6px; font-weight: 750; color: var(--tone-ink); }
+.ds-status__n { color: var(--ink-muted); min-width: 0; }
+@media (max-width: 760px) { .ds-status { margin: 12px var(--space-4) 0; } }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs><symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol><symbol id="i-runs" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/></symbol><symbol id="i-parked" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.2 8.7a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.6-.8 1.1"/><circle cx="12" cy="13.6" r=".95" fill="currentColor"/></symbol><symbol id="i-spend" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16a8 8 0 1 1 16 0"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 16l3.5-4.5"/><circle cx="12" cy="16" r="1.4" fill="currentColor"/></symbol><symbol id="i-fleet" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="4.5" width="16" height="6" rx="1.6"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="13.5" width="16" height="6" rx="1.6"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/><circle cx="7.5" cy="16.5" r="1" fill="currentColor"/></symbol><symbol id="i-config" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 7h9M18 7h1M5 17h3M12 17h7M5 12h1M10 12h9"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="16" cy="7" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="10" cy="17" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="12" r="2"/></symbol><symbol id="i-audit" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5" y="4.5" width="14" height="16" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4.5V3.5h6v1M9 12l2 2 4-4"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="11" cy="11" r="6"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M20 20l-4.2-4.2"/></symbol><symbol id="i-chev" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 10l5 5 5-5"/></symbol><symbol id="i-chev-l" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 7l-5 5 5 5"/></symbol><symbol id="i-chev-r" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 7l5 5-5 5"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></symbol><symbol id="i-minus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor"/></symbol><symbol id="i-theme" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol><symbol id="i-git" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="9" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 11c0 3-3 4-10 5"/></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 7.5V12l3 2"/></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3.5" y="5" width="17" height="14" rx="2.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7.5 10l2.5 2-2.5 2M12.5 15h4"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5 19 6v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 12l2.2 2.2L15.5 10"/></symbol><symbol id="i-queue" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8l-8 4-8-4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12l8 4 8-4M4 16l8 4 8-4"/></symbol><symbol id="i-rerun" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19 12a7 7 0 1 1-2.1-5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.5V8H16"/></symbol><symbol id="i-done" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M5.5 12.5 10 17l8.5-9.5"/></symbol><symbol id="i-failed" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M7 7l10 10M17 7 7 17"/></symbol><symbol id="i-refused" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" cx="12" cy="12" r="7.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6.8 17.2 17.2 6.8"/></symbol><symbol id="i-attention" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 21 19.5H3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v4.2"/><circle cx="12" cy="16.9" r="1.1" fill="currentColor"/></symbol><symbol id="i-running" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></symbol><symbol id="i-hourglass" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 4h10M7 20h10M8 4v2.5l4 5.5-4 5.5V20M16 4v2.5L12 12l4 5.5V20"/></symbol><symbol id="i-beat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h3.5l2-5 3.5 10 2.4-6.2 1.3 1.2H21"/></symbol><symbol id="i-doctor" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4.5" y="4.5" width="15" height="15" rx="3"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 8.5v7M8.5 12h7"/></symbol><symbol id="i-cancel" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol><symbol id="i-slot-held" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 11V8a4 4 0 0 1 8 0v3"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5.5" y="11" width="13" height="9" rx="2"/></symbol><symbol id="i-logout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M14 8l4 4-4 4M18 12H9"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol><symbol id="i-fit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></symbol><symbol id="i-steer" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h11M11 7l5 5-5 5M20 5v14"/></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v5"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></symbol><symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 19l1.2-4.2L15.5 5.5l3 3-9.3 9.3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13.5 7.5l3 3"/></symbol><symbol id="i-chain" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol><symbol id="i-slot" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="7" width="16" height="10" rx="5"/><circle cx="9" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-key" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="15.5" r="3.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.5 13 19 4.5M15.5 8l2.5 2.5M17.5 6l2 2"/></symbol><symbol id="i-tag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 4.5h7.5l8 8-7 7L4 11z"/><circle cx="8.3" cy="8.8" r="1.3" fill="currentColor"/></symbol><symbol id="i-comment" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 9.5h8M8 12.5h5"/></symbol><symbol id="i-pr" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="18" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 16v-6a3 3 0 0 0-3-3h-3M13 4.5 10.5 7 13 9.5"/></symbol><symbol id="i-issue" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h16M12 4c2.4 2.3 3.5 5 3.5 8s-1.1 5.7-3.5 8c-2.4-2.3-3.5-5-3.5-8s1.1-5.7 3.5-8z"/></symbol><symbol id="i-plug" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 3.5V8M15 3.5V8M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5v4"/></symbol><symbol id="i-bell" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 20.5h4"/></symbol><symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.5l2 2.5H19A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol><symbol id="i-pie" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M15 3.8A8.5 8.5 0 0 1 20.2 9H15z"/></symbol><symbol id="i-flows" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3" y="4" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="15" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="4" width="7" height="5" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 6.5h4M17.5 9v6"/></symbol><symbol id="i-skill" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 3.5h8l4 4v13H6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3.5v4h4M9 12.5h6M9 16h4"/></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 21V4"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 4h11l-2.5 4L17 12H6"/></symbol><symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="3"/></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8.5 12 13 4 8.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12.5 12 17l8-4.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16.5 12 21l8-4.5"/></symbol><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-bg" width="6" height="6"/><rect class="hatch-ln" width="2" height="6"/></pattern></defs></svg>
+<svg class="sprite" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker></defs></svg>
+<div class="ds-status tone-running" role="note" aria-label="Design status: Planned"><span class="ds-status__k">Design status</span><span class="ds-status__w"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg>Planned</span><span class="ds-status__n">#747, the run page.</span></div>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" class="page">
+<header class="top">
+  <a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
+  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="1 waiting">1</span></a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
+  <div class="top__end">
+    <button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <span class="live" role="status"><span class="dot"></span>Live</span>
+    <button class="roundbtn" type="button" aria-label="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
+    <span class="who"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span>
+  </div>
+</header>
+
+<div class="titlebar">
+  <div class="titlebar__lead"><a class="back" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"/></svg>Runs</a><h1>Chat and inbox</h1><p class="titlebar__sub">What a run's Chat and Inbox panels say in each state, and every message state.</p></div>
+  
+</div>
+<div class="cards-3"><section class="card rx-mode" id="p-chat" data-panel>
+  <div class="card__head"><h2>Live</h2><span class="end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></span></div>
+  <p class="rx-status tone-running"><span class="dot"></span>This run is running.</p>
+  <p class="rx-text">Its live transcript is below.</p>
+  <div class="rx-field"><label class="field__l" for="cs-steer">Steer: read after the agent's current tool calls</label>
+    <textarea id="cs-steer" class="textarea" rows="2"></textarea></div>
+  <div class="rx-actrow"><button class="btn btn--sm btn--paid" type="button"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-steer"/></svg>Preview the steer</button></div>
+  <div class="rx-field"><label class="field__l" for="cs-follow">Follow-up: read once the agent would otherwise stop</label>
+    <textarea id="cs-follow" class="textarea" rows="2"></textarea></div>
+  <div class="rx-actrow"><button class="btn btn--sm btn--paid" type="button">Preview the follow-up</button></div>
+  <p class="rx-foot">Either one spends from the run's existing reservation.</p>
+  <div class="cmd"><code>pi-dispatch chat gh-b3d7</code><button class="btn btn--sm" type="button">Copy</button></div>
+</section><section class="card rx-mode">
+  <div class="card__head"><h2>Reply</h2><span class="end"><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span></span></div>
+  <p class="rx-status tone-parked"><span class="dot"></span>This run is parked, waiting for an answer.</p>
+  <p class="rx-text">Its question is the last assistant entry of its transcript below (kept 24 hours), and on <a class="link" href="#">acme/api#131</a>. An answer resumes it, as a reply there would.</p>
+  <div class="rx-field"><label class="field__l" for="cs-ans">Your answer, as the reply on the issue</label>
+    <textarea id="cs-ans" class="textarea" rows="3"></textarea></div>
+  <div class="rx-actrow"><button class="btn btn--sm btn--answer" type="button"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Preview the answer</button></div>
+  <div class="cmd"><code>pi-dispatch chat gh-2f6a</code><button class="btn btn--sm" type="button">Copy</button></div>
+</section><section class="card rx-mode">
+  <div class="card__head"><h2>Fork</h2><span class="end"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Finished</span></span></div>
+  <p class="rx-status tone-idle"><span class="dot"></span>This run is finished.</p>
+  <p class="rx-text">Continue it in your own pi as a fork, on a host that holds the session store. Its transcript goes to your pi's provider unredacted.</p>
+  <div class="cmd"><code>pi-dispatch chat gh-9575</code><button class="btn btn--sm" type="button">Copy</button></div>
+  <div class="rx-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span><b>The session holds a later run's turns too.</b> <a class="link rx-mono" href="#">gh-a01c</a> continued it on acme/web#490 after this run.</span></div>
+</section></div><div class="cards-4"><section class="card rx-mode">
+  <div class="card__head"><h2>Not steer-armed</h2><span class="end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></span></div>
+  <p class="rx-status tone-running"><span class="dot"></span>This run is running.</p>
+  <p class="rx-text">This run is not steer-armed (its trigger sets no run.steer), so it takes no message; watch it instead.</p>
+  <div class="cmd"><code>pi-dispatch chat gh-b3d7</code><button class="btn btn--sm" type="button">Copy</button></div>
+</section><section class="card rx-mode">
+  <div class="card__head"><h2>No session to fork</h2><span class="end"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Finished</span></span></div>
+  <p class="rx-status tone-idle"><span class="dot"></span>This run is finished.</p>
+  <p class="rx-text">This run's trigger keeps no session (no run.resume), so there is no transcript to fork.</p>
+  <p class="rx-text">On a pull request a fork refuses: its session cannot be found from the record.</p>
+</section><section class="card rx-mode">
+  <div class="card__head"><h2>Read-only console</h2><span class="end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></span></div>
+  <p class="rx-status tone-running"><span class="dot"></span>This run is running.</p>
+  <p class="rx-text">This console is read-only, so it sends nothing.</p>
+  <div class="cmd"><code>pi-dispatch chat gh-b3d7</code><button class="btn btn--sm" type="button">Copy</button></div>
+</section><section class="card rx-mode">
+  <div class="card__head"><h2>Viewer</h2><span class="end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></span></div>
+  <p class="rx-status tone-running"><span class="dot"></span>This run is running.</p>
+  <p class="rx-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-eye"/></svg><span>Chat is for operators; a viewer sees the run's status only.</span></p>
+</section></div><section class="card" id="p-chat-none" data-panel>
+  <div class="card__head"><h2>No chat yet, or none any more</h2><span class="card__sub">the Chat panel's status line and the rule's sentence</span></div>
+  <ul class="rx-states"><li class="rx-state"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>Queued</span><p>This run has not started yet (its job is queued), so there is nothing to chat with until it runs.</p></li><li class="rx-state"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg>Recovery queued</span><p>This run goes on as a recovery job that is queued and has not started yet, so there is nothing to chat with until it runs. The queued recovery job is <a class="link rx-mono" href="#">gh-5d10-r2.r1</a>.</p></li><li class="rx-state"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Answered by a later run</span><p>This run asked a question and a later run on the same target took the answer; open that run's chat instead: <a class="link rx-mono" href="#">gh-77e0</a>.</p></li><li class="rx-state"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Being answered</span><p>This run asked a question and a run on the same target is queued or running now, which takes the answer; open that run's chat instead. The run taking the answer is <a class="link rx-mono" href="#">gh-81b2</a>.</p></li><li class="rx-state"><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Unknown</span><p>This run asked a question, but whether it still waits for an answer cannot be told right now (the run history or the queue could not be read); try again.</p></li><li class="rx-state"><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Unknown</span><p>This run asked a question, but the queue holds too many jobs to check whether an answer is already on its way; answer it on the forge, or wait until the queue is shorter.</p></li><li class="rx-state"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-cancel"/></svg>Finished</span><p>This run's job has ended but its record is not in this host's history or the fleet's run mirror, so there is no session to open.</p></li><li class="rx-state"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-info"/></svg>Unknown</span><p>No run with that id is in this host's history, the fleet's run mirror or the queue.</p></li><li class="rx-state"><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Not read</span><p>The queue could not be read (is Valkey reachable?), so whether this run can chat is unknown. The next refresh tries again.</p></li><li class="rx-state"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Cannot answer here</span><p>It cannot be answered from here: gh-3e71 parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge.</p></li></ul>
+</section><div class="cols"><div class="stack"><section class="card" id="p-inbox" data-panel>
+  <div class="card__head"><h2>Inbox</h2><span class="card__sub">gh-b3d7, running</span></div>
+  <p class="rx-text">The run takes messages.</p>
+  <div class="rx-meters"><div class="meterrow"><span class="meterrow__l">Messages<small>withdrawn ones count</small></span><svg class="pbar tone-ok" height="10" role="meter" aria-valuenow="31" aria-valuemax="100" aria-label="Messages withdrawn ones count: 5 of 16"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="31.2%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg><span class="meterrow__v">5 <span>/ 16</span></span></div><div class="meterrow"><span class="meterrow__l">Bytes<small>of the run&#x27;s inbox</small></span><svg class="pbar tone-ok" height="10" role="meter" aria-valuenow="5" aria-valuemax="100" aria-label="Bytes of the run&#x27;s inbox: 3,412 of 65,536"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="5.2%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg><span class="meterrow__v">3,412 <span>/ 65,536</span></span></div></div>
+  <div class="tbl-wrap"><table class="tbl rx-tblsm"><thead><tr><th scope="col">Message</th><th scope="col">Mode</th><th scope="col">Source</th><th scope="col">State</th><th scope="col">Sent</th><th scope="col" class=num>Bytes</th><th scope="col"></th></tr></thead><tbody><tr><td><span class="rx-msg" title="9f2c41d0e7b35a18c6d2f0e94a7b1c35">9f2c41d0&hellip;</span></td><td><span class="rx-nw">follow-up</span></td><td>console</td><td><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>queued</span></td><td><span class="muted">15:36:02</span></td><td class="num">412</td><td class="act"><a class="rowpill__act" href="#">Withdraw</a></td></tr><tr><td><span class="rx-msg" title="3b7a0e95d21c4f6a8e0b7d93c5f2a11c">3b7a0e95&hellip;</span></td><td><span class="rx-nw">steer</span></td><td>cli</td><td><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-queue"/></svg>written</span></td><td><span class="muted">15:35:40</span></td><td class="num">1,204</td><td class="act"><a class="rowpill__act" href="#">Withdraw</a></td></tr><tr><td><span class="rx-msg" title="c0d8e211f5a94b7c2e6d0a8b3f1c97a4">c0d8e211&hellip;</span></td><td><span class="rx-nw">steer</span></td><td>console</td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>delivered</span></td><td><span class="muted">15:31:12</span></td><td class="num">688</td><td class="act"></td></tr><tr><td><span class="rx-msg" title="51e9b7aa0c3d2f8e6b4a1d7c9e5f200f">51e9b7aa&hellip;</span></td><td><span class="rx-nw">follow-up</span></td><td>panel</td><td><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-cancel"/></svg>withdrawn</span></td><td><span class="muted">15:29:47</span></td><td class="num">530</td><td class="act"></td></tr><tr><td><span class="rx-msg" title="d77f20b4a8e1c6935f0d2b7e4a9c1e66">d77f20b4&hellip;</span></td><td><span class="rx-nw">steer</span></td><td>forge</td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>delivered</span></td><td><span class="muted">15:28:19</span></td><td class="num">578</td><td class="act"></td></tr></tbody></table></div>
+  <p class="rx-foot">At most 8,192 bytes per message.</p>
+</section><section class="card">
+  <div class="card__head"><h2>Inbox after the run</h2><span class="card__sub">gh-9575, completed</span></div>
+  <p class="rx-text">The job is completed, not running, so it takes no message; its inbox is kept for an hour after its run.</p>
+  <div class="tbl-wrap"><table class="tbl rx-tblsm"><thead><tr><th scope="col">Message</th><th scope="col">Mode</th><th scope="col">Source</th><th scope="col">State</th><th scope="col">Sent</th><th scope="col" class=num>Bytes</th></tr></thead><tbody><tr><td><span class="rx-msg" title="c0d8e211f5a94b7c2e6d0a8b3f1c97a4">c0d8e211&hellip;</span></td><td><span class="rx-nw">steer</span></td><td>console</td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>delivered</span></td><td><span class="muted">15:31:12</span></td><td class="num">688</td></tr><tr><td><span class="rx-msg" title="e4a6f3c29b1d07e58a2c6f4d3b9e0a9d">e4a6f3c2&hellip;</span></td><td><span class="rx-nw">follow-up</span></td><td>forge</td><td><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg>late</span></td><td><span class="muted">15:12:40</span></td><td class="num">301</td></tr></tbody></table></div>
+  <p class="rx-foot">Late: the run ended before the message arrived, so the agent never saw it.</p>
+</section></div><div class="stack"><section class="card" id="p-withdraw" data-panel>
+  <div class="card__head"><h2>Withdraw</h2></div>
+  <div class="rx-confirms"><div class="confirm" role="region" aria-live="polite" aria-label="Preview">
+  <p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Withdraw message 9f2c41d0&hellip; from job gh-b3d7</p>
+  <ul class="confirm__list"><li>It is queued: the worker has not written it into the run yet, so withdrawing it is <b>guaranteed</b> and the run never sees it.</li></ul>
+  
+  <p class="confirm__undo"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg>Undo: <b>send it again</b></p>
+  <div class="confirm__act"><button class="btn btn--confirm" type="button">Withdraw the message</button><button class="btn btn--ghost" type="button">Cancel</button><span class="ticket">Preview expires in <b>4:52</b></span></div>
+</div><div class="confirm" role="region" aria-live="polite" aria-label="Preview">
+  <p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Withdraw message 3b7a0e95&hellip; from job gh-b3d7</p>
+  <ul class="confirm__list"><li><span class="chip tone-attention rx-chip-warn"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>best effort</span> It is already written into the run's inbox, so withdrawing it is best effort: the agent may have read it before the worker removes it. The run's transcript says whether it did.</li></ul>
+  
+  <p class="confirm__undo"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg>Undo: <b>none: if the agent read it, it read it</b></p>
+  <div class="confirm__act"><button class="btn btn--confirm" type="button">Withdraw the message</button><button class="btn btn--ghost" type="button">Cancel</button><span class="ticket">Preview expires in <b>3:18</b></span></div>
+</div><div class="banner banner--sm tone-ok" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg></span>
+  <div><p class="banner__t">Withdrawn</p><p class="banner__s">Message 9f2c41d0&hellip; was queued, so the run never sees it (guaranteed).</p></div>
+  
+</div></div>
+</section><section class="card" id="p-steer-preview" data-panel>
+  <div class="card__head"><h2>Steer preview</h2><span class="card__sub">only the typing operator sees the text</span></div>
+  <div class="confirm confirm--paid" role="region" aria-live="polite" aria-label="Preview">
+  <p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Send a steer to running job gh-b3d7, as ops</p>
+  <ul class="confirm__list"><li>Message <span class='rx-msg'>7a1e04c2&hellip;</span>, 33 bytes. The agent reads it after its current tool calls, before its next model call.</li><li>It spends from this run's existing reservation: <b>no new reserve is taken</b>, and the run's turn, dollar and token caps still bind.</li><li>The audit log keeps the message's sha256, never its text.</li></ul>
+  <p class="rx-quote">Keep the button label unchanged.</p>
+  <p class="confirm__undo"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg>Undo: <b>withdraw it while it is queued</b></p>
+  <div class="confirm__act"><button class="btn btn--confirm-paid" type="button">Send the steer</button><button class="btn btn--ghost" type="button">Cancel</button><span class="ticket">Preview expires in <b>4:52</b></span></div>
+</div>
+</section></div></div><section class="card" id="p-msg-refusals" data-panel>
+  <div class="card__head"><h2>When a message is refused</h2></div>
+  <ul class="rx-states"><li class="rx-state"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Not sent</span><p>The run's inbox is full (at most 16 messages and 65536 bytes per run, withdrawn ones included). Nothing was sent.</p></li><li class="rx-state"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Not sent</span><p>The message is 9,214 bytes, above the 8192-byte limit; shorten it. Nothing was sent.</p></li><li class="rx-state"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Not sent</span><p>The run has finished and its inbox is closed. Nothing was sent.</p></li><li class="rx-state"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Not sent</span><p>The run stopped accepting messages before this one arrived (it ended, or its worker stopped refreshing it). Nothing was sent.</p></li><li class="rx-state"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Not withdrawn</span><p>Message c0d8e211&hellip; was already delivered: the agent has received it, so it cannot be withdrawn. Nothing was changed.</p></li><li class="rx-state"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Not withdrawn</span><p>Message e4a6f3c2&hellip; arrived after the run had ended (late): the agent never saw it, and there is nothing to withdraw.</p></li><li class="rx-state"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-info"/></svg>Not accepting</span><p>The run is not accepting messages: it has not started its loop yet, it has finished, or its venue cannot deliver (bind mounts, an exit key and an image with the steer capability).</p></li><li class="rx-state"><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Not read</span><p>Whether the run takes messages could not be read.</p></li></ul>
+</section>
+</main>
+</body>
+</html>

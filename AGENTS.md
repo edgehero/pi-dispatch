@@ -32,6 +32,7 @@ Two consequences worth internalising before you design anything:
 | `deploy/` | service units, wrappers and the compose file; `worker/deploy/` is the published mirror |
 | `specs/` | constitution, requirements, design, interfaces, open questions. The source of truth |
 | `docs/` | operator-facing reference, one file per feature or forge |
+| `design/` | the console's design system (#737): `system/` is the published cards, tokens and stylesheet; `tools/` the Python generators that build them (`design/README.md`) |
 | `launch/` | launch copy and the demo recording recipe. Maintainer material, deliberately not in `docs/` |
 
 ## Read these before changing behaviour
@@ -84,6 +85,17 @@ Two consequences worth internalising before you design anything:
   the most valuable line in the file.
 - **Both READMEs avoid dashes as punctuation** (no em dash, no ` - `). Use commas, colons or parentheses.
   Keep the images: they carry more than the prose does.
+
+## The design folder
+
+- **Edit a generator, never a card.** `design/system/components/<Card>/` is written by `design/tools/gen_*.py`, and
+  `python3 design/tools/build.py` rebuilds and checks every card (Python and Playwright, not part of `npm test`).
+  Commit the generator and the rebuilt cards together.
+- **The console pastes, it never reads.** A change to the look lands in `design/` first, and a console pull request
+  pastes `tokens.json` or `bundle.css` into `pulse-tokens.mjs` or `pulse-css.mjs` with its new hash
+  (`DES-OPERATOR-CONSOLE`, "The visual system").
+- **A card's design status is a claim about this repository.** When a pull request builds a planned screen, move its
+  card to *Built* in `STATUS` (`design/tools/fix_markers.py`) in the same pull request.
 
 ## Tests and CI
 
@@ -159,7 +171,9 @@ Two consequences worth internalising before you design anything:
   against the actions whose write rules set `danger`, and `docs/triggers.md`'s
   `pull_request` fields against the trigger add's `TRIGGER_ADD_FIELDS.pull_request`; and `INT-DEFER-REASON-KEY`'s
   reason table, fields block and bucket lists against `worker/src/defer-reasons.mjs`, both ways, in
-  `worker/test/defer-reasons.test.mjs`.
+  `worker/test/defer-reasons.test.mjs`; and the design folder's `tokens.json` and `components/bundle.css` against
+  the console's pasted copies (`admin/test/design-folder.test.mjs`: the tokens equal, the stylesheet equal or exactly
+  the version recorded as waiting to be pasted).
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.

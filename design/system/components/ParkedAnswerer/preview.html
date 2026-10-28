@@ -1,0 +1,267 @@
+<!-- @dsCard group="Planned and proposed" height=1810 width=1440 subtitle="Parked with an answer rule: a draft job drafts answers from what you already decided and cites its sources; you send them" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parked, with an answer rule</title>
+<style>
+.seg b { font-weight: 800; }
+.pa-sect { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 4px -4px; font-size: 14px; color: var(--ink); }
+.pa-sect__n { font-weight: 800; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.pa-sect__note { font-size: 12px; color: var(--ink-muted); }
+.pa-q { display: grid; gap: var(--space-4); }
+.pa-q .card__head { margin-bottom: 0; }
+.pa-q h2 .code { font-size: 17px; font-weight: 700; }
+.pa-who { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--ink-muted); }
+.pa-quote { padding: 16px 20px; border-radius: var(--radius-md); background: var(--parked-tint); font-size: 20px; line-height: 29px; font-weight: 600; letter-spacing: -0.01em; }
+.pa-quote--sm { font-size: 17px; line-height: 25px; }
+.pa-pass { display: flex; align-items: flex-start; gap: 8px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.pa-pass > .ic { flex: none; margin-top: 2px; color: var(--ink); }
+.pa-pass b { color: var(--ink); }
+.pa-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.pa-check input { flex: none; width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--primary); }
+.pa-act { display: flex; gap: 8px; flex-wrap: wrap; }
+.pa-draft { display: grid; gap: 10px; padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); box-shadow: inset 3px 0 0 var(--running); }
+.pa-draft__h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+.pa-draft__t { font-size: 15px; line-height: 22px; font-weight: 650; color: var(--ink); }
+.pa-draft__s { font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-where, .pa-onrun { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.pa-where .ic, .pa-onrun .ic { flex: none; margin-top: 3px; }
+.pa-onrun { font-size: 12px; line-height: 18px; }
+.pa-onrun b { color: var(--ink); font-weight: 650; }
+.pa-srcs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pa-srcs__l { font-size: 12px; font-weight: 650; color: var(--ink-muted); margin-right: 2px; }
+.pa-src { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 3px 10px; border-radius: var(--radius-pill); background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 600; text-decoration: none; box-shadow: inset 0 0 0 1px var(--line); }
+.pa-src .ic { flex: none; color: var(--running-ink); }
+.pa-src:hover { box-shadow: inset 0 0 0 1px var(--line-strong); }
+.pa-wait { display: grid; gap: 6px; }
+.pa-wait__t { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--ink); }
+.pa-wait__t > .ic { color: var(--running-ink); }
+.pa-wait__t .faint { margin-left: auto; font-size: 12px; }
+.pa-wait .pbar { width: 100%; display: block; }
+.pa-why { display: grid; gap: 10px; padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.pa-why__h { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; color: var(--ink); }
+.pa-why__h > .ic { color: var(--running-ink); }
+.pa-why__g { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: var(--space-5); }
+.pa-why__q { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: 12px; color: var(--ink-muted); }
+.pa-why__q .code { font-size: 12px; color: var(--ink); }
+.pa-why__n { font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-why .wb-p { grid-template-columns: 124px minmax(0, 1fr) 34px; }
+.pa-post { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-post > .ic { flex: none; margin-top: 2px; }
+.pa-post b { color: var(--ink); font-weight: 600; }
+.pa-done { display: grid; gap: 10px; }
+.pa-done__r { display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; font-size: 13px; color: var(--ink); }
+.pa-done__m { display: inline-flex; align-items: center; gap: 8px; }
+.pa-done__m .code { font-weight: 700; }
+.pa-done__q { font-weight: 650; }
+.pa-done__end { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; font-size: 12px; }
+.pa-done__a { display: grid; gap: 2px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px; line-height: 19px; color: var(--ink); }
+.pa-done__a .faint { font-size: 12px; }
+.pa-done__n { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-done__n > .ic { flex: none; margin-top: 2px; }
+.wb-probs { display: grid; gap: 6px; }
+.wb-p { display: grid; grid-template-columns: 92px minmax(0, 1fr) 34px; gap: 8px; align-items: center; font-size: 12px; color: var(--ink-muted); }
+.wb-p__o { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-p--on .wb-p__o { color: var(--ink); font-weight: 700; }
+.wb-p--on .ic { color: var(--running-ink); flex: none; }
+.wb-p__b { width: 100%; display: block; }
+.wb-p__bed { fill: var(--surface-3); }
+.wb-p__fill { fill: var(--ink-faint); }
+.wb-p--on .wb-p__fill { fill: var(--running); }
+.wb-p b { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+#p-answerer .card__head h2 { display: inline-flex; align-items: center; gap: 8px; }
+#p-answerer .card__head h2 .ic { color: var(--running-ink); }
+.pa-purpose { margin-bottom: var(--space-3); font-size: 15px; line-height: 22px; font-weight: 600; color: var(--ink); }
+.pa-list { display: grid; gap: 2px; }
+.pa-list b { font-variant-numeric: tabular-nums; }
+.pa-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; font-weight: 700; color: var(--ink); }
+.pa-h--top { margin-top: var(--space-4); }
+.pa-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.pa-stats li { display: grid; gap: 2px; align-content: start; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 11px; line-height: 15px; color: var(--ink-muted); }
+.pa-stats b { font-size: 24px; line-height: 28px; font-weight: 750; color: var(--ink); font-variant-numeric: tabular-nums; }
+.pa-rate { display: flex; align-items: flex-start; gap: 8px; margin-top: var(--space-3); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-rate > .ic { flex: none; margin-top: 2px; }
+.pa-rate b { color: var(--ink); }
+.pa-lvlrow { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: center; margin-bottom: 8px; }
+.pa-lvl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--surface-2); }
+.pa-lvl li { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 34px; padding: 4px 8px; border-radius: 10px; font-size: 12px; line-height: 15px; font-weight: 650; color: var(--ink-muted); text-align: center; }
+.pa-lvl li.pa-lvl--locked { color: var(--ink-faint); box-shadow: inset 0 0 0 1px var(--line); }
+.pa-locked { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0 var(--space-3); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-locked .ic { flex: none; margin-top: 2px; color: var(--ink); }
+.pa-locked b { color: var(--ink); }
+.pa-lvl li[aria-current] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), inset 0 0 0 1.5px var(--running); }
+.pa-lvl li[aria-current] .ic { flex: none; color: var(--running-ink); }
+.pa-cats { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px 10px; align-items: center; margin: var(--space-4) 0; }
+.pa-cats__l { font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.pa-cats__c { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.pa-cat { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--ink); }
+.pa-cat .ic { color: var(--tone-ink); }
+.pa-ro { display: flex; align-items: flex-start; gap: 8px; margin-top: var(--space-3); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-ro > .ic { flex: none; margin-top: 2px; }
+.pa-sts { display: grid; }
+.pa-st { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.pa-st:first-child { border-top: 0; padding-top: 0; }
+.pa-st__n { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); }
+.pa-st__n .ic { flex: none; color: var(--ink-muted); }
+.pa-st__a { color: var(--ink); }
+.pa-st__m { font-size: 12px; color: var(--ink-muted); }
+.pa-more { margin-top: 6px; font-size: 13px; }
+.pa-prop { display: grid; gap: 8px; margin-top: var(--space-4); padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); box-shadow: inset 3px 0 0 var(--parked); }
+.pa-prop__h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; color: var(--ink); }
+.pa-prop__a { font-size: 15px; font-weight: 600; color: var(--ink); }
+.pa-prop__why { font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-foot { margin-top: var(--space-3); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pa-foot b { color: var(--ink); }
+@media (max-width: 760px) {
+  .pa-quote { font-size: 17px; line-height: 25px; padding: 12px 14px; }
+  .pa-quote--sm, .pa-draft__t { font-size: 16px; line-height: 23px; }
+  .pa-why__g { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
+  .pa-act .btn { flex: 1 1 auto; }
+  .pa-wait__t .faint { margin-left: 0; width: 100%; }
+  .pa-done__end { margin-left: 0; }
+  .pa-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pa-lvlrow { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .pa-lvl { grid-template-columns: minmax(0, 1fr); }
+  .pa-lvl li { justify-content: flex-start; }
+  .pa-cats { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .pa-st { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .pa-st__m { white-space: normal; }
+  .titlebar__end { flex-wrap: wrap; }
+  #p-level .diff__b > span { white-space: pre-wrap; }
+}
+</style>
+<style data-ds-status>
+.ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
+.ds-status__k { font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.ds-status__w { display: inline-flex; align-items: center; gap: 6px; font-weight: 750; color: var(--tone-ink); }
+.ds-status__n { color: var(--ink-muted); min-width: 0; }
+@media (max-width: 760px) { .ds-status { margin: 12px var(--space-4) 0; } }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs><symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol><symbol id="i-runs" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/></symbol><symbol id="i-parked" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.2 8.7a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.6-.8 1.1"/><circle cx="12" cy="13.6" r=".95" fill="currentColor"/></symbol><symbol id="i-spend" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16a8 8 0 1 1 16 0"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 16l3.5-4.5"/><circle cx="12" cy="16" r="1.4" fill="currentColor"/></symbol><symbol id="i-fleet" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="4.5" width="16" height="6" rx="1.6"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="13.5" width="16" height="6" rx="1.6"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/><circle cx="7.5" cy="16.5" r="1" fill="currentColor"/></symbol><symbol id="i-config" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 7h9M18 7h1M5 17h3M12 17h7M5 12h1M10 12h9"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="16" cy="7" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="10" cy="17" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="12" r="2"/></symbol><symbol id="i-audit" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5" y="4.5" width="14" height="16" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4.5V3.5h6v1M9 12l2 2 4-4"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="11" cy="11" r="6"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M20 20l-4.2-4.2"/></symbol><symbol id="i-chev" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 10l5 5 5-5"/></symbol><symbol id="i-chev-l" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 7l-5 5 5 5"/></symbol><symbol id="i-chev-r" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 7l5 5-5 5"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></symbol><symbol id="i-minus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor"/></symbol><symbol id="i-theme" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol><symbol id="i-git" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="9" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 11c0 3-3 4-10 5"/></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 7.5V12l3 2"/></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3.5" y="5" width="17" height="14" rx="2.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7.5 10l2.5 2-2.5 2M12.5 15h4"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5 19 6v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 12l2.2 2.2L15.5 10"/></symbol><symbol id="i-queue" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8l-8 4-8-4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12l8 4 8-4M4 16l8 4 8-4"/></symbol><symbol id="i-rerun" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19 12a7 7 0 1 1-2.1-5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.5V8H16"/></symbol><symbol id="i-done" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M5.5 12.5 10 17l8.5-9.5"/></symbol><symbol id="i-failed" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M7 7l10 10M17 7 7 17"/></symbol><symbol id="i-refused" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" cx="12" cy="12" r="7.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6.8 17.2 17.2 6.8"/></symbol><symbol id="i-attention" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 21 19.5H3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v4.2"/><circle cx="12" cy="16.9" r="1.1" fill="currentColor"/></symbol><symbol id="i-running" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></symbol><symbol id="i-hourglass" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 4h10M7 20h10M8 4v2.5l4 5.5-4 5.5V20M16 4v2.5L12 12l4 5.5V20"/></symbol><symbol id="i-beat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h3.5l2-5 3.5 10 2.4-6.2 1.3 1.2H21"/></symbol><symbol id="i-doctor" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4.5" y="4.5" width="15" height="15" rx="3"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 8.5v7M8.5 12h7"/></symbol><symbol id="i-cancel" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol><symbol id="i-slot-held" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 11V8a4 4 0 0 1 8 0v3"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5.5" y="11" width="13" height="9" rx="2"/></symbol><symbol id="i-logout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M14 8l4 4-4 4M18 12H9"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol><symbol id="i-fit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></symbol><symbol id="i-steer" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h11M11 7l5 5-5 5M20 5v14"/></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v5"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></symbol><symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 19l1.2-4.2L15.5 5.5l3 3-9.3 9.3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13.5 7.5l3 3"/></symbol><symbol id="i-chain" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol><symbol id="i-slot" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="7" width="16" height="10" rx="5"/><circle cx="9" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-key" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="15.5" r="3.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.5 13 19 4.5M15.5 8l2.5 2.5M17.5 6l2 2"/></symbol><symbol id="i-tag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 4.5h7.5l8 8-7 7L4 11z"/><circle cx="8.3" cy="8.8" r="1.3" fill="currentColor"/></symbol><symbol id="i-comment" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 9.5h8M8 12.5h5"/></symbol><symbol id="i-pr" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="18" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 16v-6a3 3 0 0 0-3-3h-3M13 4.5 10.5 7 13 9.5"/></symbol><symbol id="i-issue" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h16M12 4c2.4 2.3 3.5 5 3.5 8s-1.1 5.7-3.5 8c-2.4-2.3-3.5-5-3.5-8s1.1-5.7 3.5-8z"/></symbol><symbol id="i-plug" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 3.5V8M15 3.5V8M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5v4"/></symbol><symbol id="i-bell" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 20.5h4"/></symbol><symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.5l2 2.5H19A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol><symbol id="i-pie" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M15 3.8A8.5 8.5 0 0 1 20.2 9H15z"/></symbol><symbol id="i-flows" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3" y="4" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="15" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="4" width="7" height="5" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 6.5h4M17.5 9v6"/></symbol><symbol id="i-skill" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 3.5h8l4 4v13H6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3.5v4h4M9 12.5h6M9 16h4"/></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 21V4"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 4h11l-2.5 4L17 12H6"/></symbol><symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="3"/></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8.5 12 13 4 8.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12.5 12 17l8-4.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16.5 12 21l8-4.5"/></symbol><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-bg" width="6" height="6"/><rect class="hatch-ln" width="2" height="6"/></pattern></defs></svg>
+<svg class="sprite" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker></defs></svg>
+<div class="ds-status tone-idle" role="note" aria-label="Design status: Proposed"><span class="ds-status__k">Design status</span><span class="ds-status__w"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Proposed</span><span class="ds-status__n">#753. Sending with no person's confirm is not proposed: OQ-051.</span></div>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" class="page">
+<header class="top">
+  <a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
+  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="2 waiting">2</span></a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
+  <div class="top__end">
+    <button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <span class="live" role="status"><span class="dot"></span>Live</span>
+    <button class="roundbtn" type="button" aria-label="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
+    <span class="who"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span>
+  </div>
+</header>
+
+<div class="titlebar">
+  <div class="titlebar__lead"><h1>Parked</h1><p class="titlebar__sub">Runs that stopped to wait for a person. An answer rule may draft answers; you send them.</p></div>
+  <div class="titlebar__end"><div class="seg" role="group" aria-label="Show"><button aria-pressed="true">Questions <b>2</b></button><button aria-pressed="false">Approvals</button></div></div>
+</div>
+<div class="cols"><div class="stack"><p class="pa-sect"><span class="tile tile--sm tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg></span><b>Yours to answer</b><span class="pa-sect__n">1</span></p><section class="card card--ring tone-parked pa-q" id="p-yours" data-panel aria-labelledby="pa-a">
+  <div class="card__head">
+    <span class="tile tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg></span>
+    <h2 id="pa-a"><span class="code">gh-2f6a</span> asked a question</h2>
+    <span class="end"><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>waiting 26m</span></span>
+  </div>
+  <p class="pa-who"><span class="ptag">api</span><a class="link" href="#">acme/api#131</a><span>triage on mini1, parked at 15:13 UTC</span></p>
+  <p class="pa-where"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>The question is the run's last message: read it on <a class="link" href="#">acme/api#131</a>, or on <a class="link" href="#">its run page</a>.</span></p>
+  <p class="pa-pass"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-bolt"/></svg><span><b>Not answered for you: a product decision.</b> Yours to answer. <span class="faint">draft run <span class="code">gh-91d4</span>, Jev: product_decision 0.88</span></span></p>
+  <div class="field">
+    <label for="pa-ta">Your answer</label>
+    <textarea id="pa-ta" class="textarea" rows="3" placeholder="Write your answer"></textarea>
+    <span class="field__hint">Posted as you to acme/api#131 after you confirm. It resumes the run.</span>
+  </div>
+  <label class="pa-check"><input type="checkbox" id="pa-keep"><span>Keep it as a standing answer, so the next draft can cite it</span></label>
+  <div class="pa-act"><a class="btn btn--answer" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Preview answer</a><a class="btn btn--ghost" href="#">Open run</a></div>
+</section><p class="pa-sect"><span class="tile tile--sm tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg></span><b>Drafted for you</b><span class="pa-sect__n">1</span><span class=pa-sect__note>waiting for you to send</span></p><section class="card card--ring tone-running pa-q" id="p-drafted" data-panel aria-labelledby="pa-b">
+  <div class="card__head">
+    <span class="tile tone-running"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg></span>
+    <h2 id="pa-b"><span class="code">gh-6e1d</span> asked a question</h2>
+    <span class="end"><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>waiting 4m</span></span>
+  </div>
+  <p class="pa-who"><span class="ptag">web</span><a class="link" href="#">acme/web#512</a><span>fix on mini2, parked at 15:35 UTC</span></p>
+  <div class="pa-draft">
+    <p class="pa-draft__h"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>Drafted for you</span><span class="faint">by draft run <a class="link code" href="#">gh-a07c</a> at 15:37 UTC, $0.004</span></p>
+    <p class="pa-draft__t">The question and the draft are on the run page, beside the transcript.</p>
+    <div class="pa-srcs"><span class="pa-srcs__l">From</span><a class="pa-src" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg><span>docs/CONTRIBUTING.md at main</span></a><a class="pa-src" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"/></svg><span>your answer on acme/web#477, 2 Oct</span></a><a class="pa-src" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg><span>standing answer &ldquo;test command&rdquo;</span></a></div>
+  </div>
+  <p class="pa-wait__t"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><span><b>Waiting for you to send it.</b></span><span class="faint">drafted 2 minutes ago</span></p>
+  <div class="pa-why">
+    <p class="pa-why__h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span>Why it may draft: Jev, 2 questions, $0.00002</span></p>
+    <div class="pa-why__g">
+      <div><p class="pa-why__q"><span class="code">category</span><span>choice</span></p>
+        <ul class="wb-probs"><li class="wb-p wb-p--on"><span class="wb-p__o"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>convention</span><svg class="wb-p__b" height="8" role="img" aria-label="convention: 0.86"><rect class="wb-p__bed" width="100%" height="8" rx="4"/><rect class="wb-p__fill" width="86.0%" height="8" rx="4"/></svg><b>0.86</b></li><li class="wb-p"><span class="wb-p__o">product_decision</span><svg class="wb-p__b" height="8" role="img" aria-label="product_decision: 0.06"><rect class="wb-p__bed" width="100%" height="8" rx="4"/><rect class="wb-p__fill" width="6.0%" height="8" rx="4"/></svg><b>0.06</b></li><li class="wb-p"><span class="wb-p__o">security</span><svg class="wb-p__b" height="8" role="img" aria-label="security: 0.02"><rect class="wb-p__bed" width="100%" height="8" rx="4"/><rect class="wb-p__fill" width="2.0%" height="8" rx="4"/></svg><b>0.02</b></li><li class="wb-p"><span class="wb-p__o">other</span><svg class="wb-p__b" height="8" role="img" aria-label="other: 0.06"><rect class="wb-p__bed" width="100%" height="8" rx="4"/><rect class="wb-p__fill" width="6.0%" height="8" rx="4"/></svg><b>0.06</b></li></ul></div>
+      <div><p class="pa-why__q"><span class="code">answerable_from_sources</span><span>yes or no</span></p>
+        <ul class="wb-probs"><li class="wb-p wb-p--on"><span class="wb-p__o"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>yes</span><svg class="wb-p__b" height="8" role="img" aria-label="yes: 0.91"><rect class="wb-p__bed" width="100%" height="8" rx="4"/><rect class="wb-p__fill" width="91.0%" height="8" rx="4"/></svg><b>0.91</b></li><li class="wb-p"><span class="wb-p__o">no</span><svg class="wb-p__b" height="8" role="img" aria-label="no: 0.09"><rect class="wb-p__bed" width="100%" height="8" rx="4"/><rect class="wb-p__fill" width="9.0%" height="8" rx="4"/></svg><b>0.09</b></li></ul></div>
+    </div>
+    <p class="pa-why__n">It drafted because the category is allowed for web and both answers reach 0.80.</p>
+  </div>
+  <p class="pa-post"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"/></svg><span>When you send it, it posts to acme/web#512 as yours: <b>&ldquo;Answered from the operator console by ops&rdquo;</b>, naming the draft run it came from.</span></p>
+  <div class="pa-act">
+    <a class="btn btn--answer" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg>Open the draft</a><a class="btn btn--ghost" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Answer myself</a>
+    <a class="btn btn--ghost" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Don't draft these</a>
+  </div>
+  <p class="pa-onrun"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg><span>On the run page the draft fills the answer box.</span></p>
+</section><p class="pa-sect"><span class="tile tile--sm tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg></span><b>Sent from a draft today</b><span class="pa-sect__n">1</span></p><section class="card pa-done" id="p-answered" data-panel aria-labelledby="pa-c">
+  <h2 class="sr" id="pa-c">Answered for you today</h2>
+  <div class="pa-done__r">
+    <span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Sent from a draft</span>
+    <span class="pa-done__m"><span class="code">gh-5a02</span><span class="ptag">web</span><a class="link" href="#">acme/web#498</a></span>
+    <span class="pa-done__q">from standing answer &ldquo;UI components&rdquo;</span>
+
+  </div>
+  <p class="pa-done__a"><span>Read the question and its answer on <a class="link" href="#">acme/web#498</a> or the run page.</span><span class="faint">Sent by ops at 14:10 UTC, as drafted, 3 minutes after the draft. The run completed at 14:31 UTC.</span></p>
+</section></div><div class="stack"><section class="card" id="p-answerer" data-panel>
+  <div class="card__head"><h2><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Answer rule, row 11</h2><span class="card__sub">drafts, you send</span><span class="end"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>On</span></span></div>
+  
+  <p class="pa-purpose">Draft answers to how-to and convention questions for api and web from what is already decided.</p>
+  <dl class="facts facts--1"><div class="fact"><dt>When</dt><dd>a run of <span class="ptag">api</span> or <span class="ptag">web</span> parks</dd></div><div class="fact"><dt>Starts</dt><dd>a draft job: flow <span class="code">draft-answer</span>, <span class="code">claude-haiku-5-5</span>, read-only tools, $0.05 a job, no status comments</dd></div><div class="fact"><dt>Classifies</dt><dd>with Jev, a tool call inside the job's reserve</dd></div><div class="fact"><dt>Sources</dt><dd><ul class="pa-list"><li>standing answers you adopted <b>14</b></li><li>the repository at its default branch</li><li>earlier replies on the repository's issues</li></ul></dd></div></dl>
+  <p class="pa-h pa-h--top"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pie"/></svg>Last 30 days</p>
+  <ul class="pa-stats"><li><b>11</b><span>sent as drafted</span></li><li><b>4</b><span>edited, then sent</span></li><li><b>2</b><span>dropped for your own</span></li><li><b>9</b><span>passed to you</span></li></ul>
+  <p class="pa-rate"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span><b>11 of 17 drafts sent as written.</b> 26 draft jobs in 30 days cost $0.38.</span></p>
+
+</section><section class="card" id="p-level" data-panel>
+  <div class="card__head"><h2>How much it may do</h2><span class="card__sub">per project, set by you</span></div>
+  
+  <div class="pa-lvlrow"><span class="pa-lvlrow__p"><span class="ptag">api</span></span><ol class="pa-lvl" aria-label="api: Draft for me"><li><span>Classify only</span></li><li aria-current="true"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Draft for me</span></li><li class=pa-lvl--locked><svg class="ic ic--sm" aria-hidden="true"><use href="#i-shield"/></svg><span>Send without me</span></li></ol></div>
+  <div class="pa-lvlrow"><span class="pa-lvlrow__p"><span class="ptag">web</span></span><ol class="pa-lvl" aria-label="web: Draft for me"><li><span>Classify only</span></li><li aria-current="true"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Draft for me</span></li><li class=pa-lvl--locked><svg class="ic ic--sm" aria-hidden="true"><use href="#i-shield"/></svg><span>Send without me</span></li></ol></div>
+  <p class="pa-locked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-shield"/></svg><span><b>Send without me</b> is not allowed: <a class="link" href="#">OQ-051</a>.</span></p>
+  <div class="pa-cats">
+    <p class="pa-cats__l">May draft</p><p class="pa-cats__c"><span class="pa-cat tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>conventions</span><span class="pa-cat tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>how-to</span><span class="pa-cat tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>already decided</span></p>
+    <p class="pa-cats__l">Never</p><p class="pa-cats__c"><span class="pa-cat tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>product decisions</span><span class="pa-cat tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>security</span><span class="pa-cat tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>money</span><span class="pa-cat tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>scope</span></p>
+  </div>
+  <div class="diff"><div class="diff__h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>triggers.json, row 11, the answer rule</div><div class="diff__b"><span class="d-ctx">&quot;answer&quot;: { &quot;projects&quot;: [&quot;api&quot;, &quot;web&quot;], &quot;mode&quot;: &quot;draft&quot;,</span><span class="d-ctx">  &quot;allow&quot;: [&quot;convention&quot;, &quot;how-to&quot;, &quot;decided&quot;],</span><span class="d-ctx">  &quot;minConfidence&quot;: 0.8 },</span><span class="d-ctx">&quot;run&quot;: { &quot;flow&quot;: &quot;draft-answer&quot;, &quot;maxCostUsd&quot;: 0.05 }</span></div></div>
+  <p class="pa-ro"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg><span>Read only here. <a class="link" href="#">Edit in triggers.json</a></span></p>
+
+</section><section class="card" id="p-standing" data-panel>
+  <div class="card__head"><h2>Standing answers</h2><span class="card__sub">adopted by you</span></div>
+  
+  <ul class="pa-sts"><li class="pa-st">
+  <span class="pa-st__n"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg><b>test command</b></span>
+  <span class="pa-st__a">pnpm test:ci for the CI suite; never the watch mode</span>
+  <span class="pa-st__m">adopted 2 Oct · used 6 times</span>
+</li><li class="pa-st">
+  <span class="pa-st__n"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg><b>branch names</b></span>
+  <span class="pa-st__a">pi/issue-&lt;number&gt;, one branch per issue</span>
+  <span class="pa-st__m">adopted 12 Sep · used 9 times</span>
+</li><li class="pa-st">
+  <span class="pa-st__n"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg><b>UI components</b></span>
+  <span class="pa-st__a">reuse components/ from the design system; no new UI library</span>
+  <span class="pa-st__m">adopted 20 Sep · used 4 times</span>
+</li><li class="pa-st">
+  <span class="pa-st__n"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg><b>migrations</b></span>
+  <span class="pa-st__a">one migration per pull request; never edit an old one</span>
+  <span class="pa-st__m">adopted 28 Sep · used 2 times</span>
+</li></ul>
+  <p class="pa-more"><a class="link" href="#">All 14 standing answers</a></p>
+  <div class="pa-act"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plus"/></svg>Add a standing answer</a></div>
+  <p class="pa-foot">Add one by hand, or tick <i>Keep it as a standing answer</i> when you send one.</p>
+
+</section></div></div>
+</main>
+</body>
+</html>
