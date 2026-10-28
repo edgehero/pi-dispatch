@@ -2,7 +2,8 @@
 
 A card fails on: an inline style= attribute, a <script>, a web font, an @import, a <link> or a url() that leaves the
 page (the console's CSP allows none of them); a page wider than the card at its own width, or wider than 390 px on a
-phone; a console error; or a marker height more than 60 px off the measured page. Prints one line per card and exits 1 if any card fails. Run after build.py (it runs this itself)."""
+phone; a console error; or a marker height more than 60 px off the measured page. Prints one line per card and exits
+1 if any card fails. build.py runs it after every build."""
 import re, sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from shoot import harness
