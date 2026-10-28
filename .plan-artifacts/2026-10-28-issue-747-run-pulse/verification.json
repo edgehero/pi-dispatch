@@ -18,8 +18,8 @@
     ]
   },
   "full_suite": {
-    "tests": 10692,
-    "passed": 10686,
+    "tests": 10694,
+    "passed": 10688,
     "failed": 0,
     "skipped": 6,
     "skips": "Linux-only /proc, podman init and systemd checks; exercised by Linux CI."
@@ -146,7 +146,7 @@
   "test_count": {
     "files": 417,
     "result": "Every declared test reported.",
-    "latest_changed_module": "console-run-pulse.test.mjs also rechecked separately: 12 child-run tests == 12 in-process tests, zero failures."
+    "latest_changed_module": "console-run-pulse.test.mjs also rechecked separately: 12 child-run tests == 12 in-process tests, zero failures. Cleanup test modules also rechecked: report-progress 8 == 8, temp-dir-settle 2 == 2; zero failures."
   },
   "guards": {
     "dated_fixture_test_files": 417,
@@ -154,5 +154,13 @@
     "revision_rows": 1193,
     "tracked_conflict_checked_files": 1310,
     "result": "passed"
+  },
+  "cleanup_regression": {
+    "cause": "pi ModelRuntime.registerProvider starts an unawaited refresh that can recreate auth.json after fixture cleanup.",
+    "fix": "report-progress tests use the existing trackPiRefreshes helper; cleanup helper and CI oracle remain unchanged.",
+    "regression": "A deterministic deferred gate proves tracked writes finish before removal, while the untracked control recreates its directory.",
+    "repeated_macos_runs": 20,
+    "repeated_linux_oracle_runs": 10,
+    "result": "passed; full-suite TMPDIR left empty."
   }
 }
