@@ -1385,7 +1385,7 @@ refactor apart.
   store's own `file://` URL by sha with no token and no default-branch resolve (`pin`, `prepareGithubWorkspace`), with
   the checkpoint's tree written over it and the trust paths reset to the base (`DES-RECOVERY-TRUST-PATHS-FROM-BASE`);
   `/session/current.jsonl` is the checkpoint's transcript, copied by `stageRecovered` (reason `recovered`; a resume
-  job's carries its key, so a completed recovery promotes it). No input names the checkpoint: the container sees a
+  job or explicitly requested managed fork carries its own key, so a completed recovery promotes it). No input names the checkpoint: the container sees a
   workspace and a transcript, never the store, a path into it or a run directory name. The job's prompt file is
   written as for any job and not read by a recovering runner, which sends the fixed recovery prompt instead.
 - **`/inbox` is a steer-armed attempt's inbox, and deliberately NOT a `/job` input either** (issue #646,
