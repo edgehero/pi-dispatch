@@ -1,0 +1,269 @@
+<!-- @dsCard group="Triggers" height=2340 width=1440 subtitle="Triggers in plain words: when this happens, run that, with each rule&#x27;s status, a week of schedules and a check for which rule an event starts" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Triggers</title>
+<style>
+.tr-tabs { margin: var(--space-2) 0 var(--space-2); }
+.tr-tabs .count { background: var(--surface-3); color: var(--ink-muted); }
+.tr-tabs a[aria-current="page"] .count { background: var(--on-primary); color: var(--primary); }
+.tr-kp { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--ink-muted); }
+.tr-kp > span { display: inline-flex; align-items: center; gap: 5px; }
+.tr-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.tr-filters .fpill b { margin-left: 2px; }
+.tr-list { display: grid; }
+.tr { display: grid; grid-template-columns: 28px minmax(0, 1.25fr) 20px minmax(0, 1fr) 230px 40px; gap: 6px var(--space-3); align-items: start;
+      padding: var(--space-4) var(--space-5); border-top: 1px solid var(--line); }
+.tr-list .tr:first-child { border-top: 0; }
+.tr-n { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; background: var(--surface-2); color: var(--ink); font-size: 13px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.tr-n--sm { width: 22px; height: 22px; font-size: 11px; flex: none; }
+.tr-when { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; }
+.tr-kind { background: var(--surface-2); color: var(--ink); }
+.tr-k { font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.tr-s { font-size: 15px; line-height: 22px; font-weight: 650; color: var(--ink); }
+.tr-sub { font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.tr-arrow { color: var(--ink-faint); padding-top: 22px; }
+.tr-then { display: grid; gap: 4px; padding-top: 18px; }
+.tr-flow { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px 0 8px; border-radius: var(--radius-pill); background: var(--primary); color: var(--on-primary); font-size: 13px; font-weight: 700; vertical-align: 1px; }
+.tr-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.tr-status { display: grid; gap: 3px; padding-top: 2px; }
+.tr-status > p:first-child { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tr-t { font-size: 13px; font-weight: 600; color: var(--ink); }
+.tr-status .chip { height: 22px; vertical-align: middle; }
+.tr-act { padding-top: 2px; }
+.tr-note { grid-column: 2 / -1; display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.tr-note .ic { flex: none; margin-top: 2px; color: var(--ink); }
+.tr--spent { background: repeating-linear-gradient(135deg, transparent 0 10px, var(--surface-2) 10px 11px); }
+.tr--spent .tr-flow { background: var(--surface-3); color: var(--ink); }
+.wk { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; margin-top: 34px; }
+.wk-labels { display: grid; grid-template-rows: repeat(3, 36px); align-items: center; }
+.wk-labels p { display: grid; font-size: 12px; line-height: 15px; }
+.wk-labels b { color: var(--ink); font-weight: 700; }
+.wk-labels span { color: var(--ink-muted); }
+.wk-track { position: relative; min-width: 0; }
+.wk-svg { width: 100%; display: block; overflow: visible; }
+.wk-band { fill: var(--surface-2); }
+.wk-day { stroke: var(--line); stroke-width: 1; }
+.wk-quiet { fill: var(--surface-3); }
+.wk-ran { fill: var(--ink-faint); }
+.wk-next { fill: var(--surface); stroke: var(--running); stroke-width: 2; }
+.wk-l { font-size: 11px; font-weight: 650; fill: var(--ink-muted); }
+.wk-now { stroke: var(--ink); stroke-width: 2; }
+.wk-ax { font-size: 11px; fill: var(--ink-faint); }
+.wk-cap { position: absolute; top: -24px; left: 9.32%; transform: translateX(-50%); height: 20px; padding: 0 8px; border-radius: 10px; background: var(--primary); color: var(--on-primary); font-size: 11px; font-weight: 700; line-height: 20px; }
+.wk-k { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.wk-k--ran { background: var(--ink-faint); }
+.wk-k--next { box-shadow: inset 0 0 0 2px var(--running); }
+.wk-k--quiet { width: 18px; border-radius: 5px; background: var(--surface-3); }
+.tr-p { font-size: 13px; margin-bottom: var(--space-3); }
+.tr-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.tr-span { grid-column: 1 / -1; }
+.tr-btnrow { margin: var(--space-3) 0; }
+.tr-result { display: grid; gap: 8px; padding: var(--space-4); border-radius: var(--radius-md); background: var(--ok-tint); }
+.tr-res__h { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; color: var(--ink); }
+.tr-res__h .ic { color: var(--ok-ink); }
+.tr-res__s { font-size: 13px; line-height: 20px; color: var(--ink); }
+.tr-res__k { font-size: 12px; font-weight: 700; color: var(--ink); margin-top: 4px; }
+.tr-why { display: grid; gap: 6px; }
+.tr-why li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); }
+.tr-why .tr-n { background: var(--surface); }
+.tr-gates { display: grid; gap: 4px; }
+.tr-gates li { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 6px; align-items: baseline; font-size: 12px; color: var(--ink); }
+.tr-gates .ic { color: var(--ok-ink); align-self: center; }
+.tr-gates span { color: var(--ink); }
+@media (max-width: 1200px) { .tr { grid-template-columns: 28px minmax(0, 1fr) 20px minmax(0, 1fr) 40px; } .tr-status { grid-column: 2 / -2; } }
+@media (max-width: 760px) {
+  .tr { grid-template-columns: 28px minmax(0, 1fr) 36px; padding: var(--space-4); }
+  .tr-when { grid-column: 2; } .tr-act { grid-column: 3; grid-row: 1; }
+  .tr-arrow { display: none; }
+  .tr-then, .tr-status, .tr-note { grid-column: 2 / -1; padding-top: 0; }
+  .wk-scroll { overflow-x: auto; margin: 0 calc(-1 * var(--space-5)); padding: 0 var(--space-5); }
+  .wk { grid-template-columns: 110px minmax(0, 1fr); min-width: 600px; }
+  .tr-form { grid-template-columns: minmax(0, 1fr); }
+  .tr-tabs { flex-wrap: nowrap; overflow-x: auto; }
+  .tr-filters { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+}
+</style>
+<style data-ds-status>
+.ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
+.ds-status__k { font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.ds-status__w { display: inline-flex; align-items: center; gap: 6px; font-weight: 750; color: var(--tone-ink); }
+.ds-status__n { color: var(--ink-muted); min-width: 0; }
+@media (max-width: 760px) { .ds-status { margin: 12px var(--space-4) 0; } }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs><symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol><symbol id="i-runs" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/></symbol><symbol id="i-parked" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.2 8.7a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.6-.8 1.1"/><circle cx="12" cy="13.6" r=".95" fill="currentColor"/></symbol><symbol id="i-spend" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16a8 8 0 1 1 16 0"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 16l3.5-4.5"/><circle cx="12" cy="16" r="1.4" fill="currentColor"/></symbol><symbol id="i-fleet" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="4.5" width="16" height="6" rx="1.6"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="13.5" width="16" height="6" rx="1.6"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/><circle cx="7.5" cy="16.5" r="1" fill="currentColor"/></symbol><symbol id="i-config" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 7h9M18 7h1M5 17h3M12 17h7M5 12h1M10 12h9"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="16" cy="7" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="10" cy="17" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="12" r="2"/></symbol><symbol id="i-audit" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5" y="4.5" width="14" height="16" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4.5V3.5h6v1M9 12l2 2 4-4"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="11" cy="11" r="6"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M20 20l-4.2-4.2"/></symbol><symbol id="i-chev" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 10l5 5 5-5"/></symbol><symbol id="i-chev-l" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 7l-5 5 5 5"/></symbol><symbol id="i-chev-r" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 7l5 5-5 5"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></symbol><symbol id="i-minus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor"/></symbol><symbol id="i-theme" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol><symbol id="i-git" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="9" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 11c0 3-3 4-10 5"/></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 7.5V12l3 2"/></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3.5" y="5" width="17" height="14" rx="2.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7.5 10l2.5 2-2.5 2M12.5 15h4"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5 19 6v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 12l2.2 2.2L15.5 10"/></symbol><symbol id="i-queue" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8l-8 4-8-4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12l8 4 8-4M4 16l8 4 8-4"/></symbol><symbol id="i-rerun" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19 12a7 7 0 1 1-2.1-5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.5V8H16"/></symbol><symbol id="i-done" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M5.5 12.5 10 17l8.5-9.5"/></symbol><symbol id="i-failed" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M7 7l10 10M17 7 7 17"/></symbol><symbol id="i-refused" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" cx="12" cy="12" r="7.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6.8 17.2 17.2 6.8"/></symbol><symbol id="i-attention" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 21 19.5H3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v4.2"/><circle cx="12" cy="16.9" r="1.1" fill="currentColor"/></symbol><symbol id="i-running" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></symbol><symbol id="i-hourglass" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 4h10M7 20h10M8 4v2.5l4 5.5-4 5.5V20M16 4v2.5L12 12l4 5.5V20"/></symbol><symbol id="i-beat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h3.5l2-5 3.5 10 2.4-6.2 1.3 1.2H21"/></symbol><symbol id="i-doctor" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4.5" y="4.5" width="15" height="15" rx="3"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 8.5v7M8.5 12h7"/></symbol><symbol id="i-cancel" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol><symbol id="i-slot-held" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 11V8a4 4 0 0 1 8 0v3"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5.5" y="11" width="13" height="9" rx="2"/></symbol><symbol id="i-logout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M14 8l4 4-4 4M18 12H9"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol><symbol id="i-fit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></symbol><symbol id="i-steer" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h11M11 7l5 5-5 5M20 5v14"/></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v5"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></symbol><symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 19l1.2-4.2L15.5 5.5l3 3-9.3 9.3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13.5 7.5l3 3"/></symbol><symbol id="i-chain" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol><symbol id="i-slot" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="7" width="16" height="10" rx="5"/><circle cx="9" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-key" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="15.5" r="3.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.5 13 19 4.5M15.5 8l2.5 2.5M17.5 6l2 2"/></symbol><symbol id="i-tag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 4.5h7.5l8 8-7 7L4 11z"/><circle cx="8.3" cy="8.8" r="1.3" fill="currentColor"/></symbol><symbol id="i-comment" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 9.5h8M8 12.5h5"/></symbol><symbol id="i-pr" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="18" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 16v-6a3 3 0 0 0-3-3h-3M13 4.5 10.5 7 13 9.5"/></symbol><symbol id="i-issue" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h16M12 4c2.4 2.3 3.5 5 3.5 8s-1.1 5.7-3.5 8c-2.4-2.3-3.5-5-3.5-8s1.1-5.7 3.5-8z"/></symbol><symbol id="i-plug" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 3.5V8M15 3.5V8M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5v4"/></symbol><symbol id="i-bell" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 20.5h4"/></symbol><symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.5l2 2.5H19A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol><symbol id="i-pie" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M15 3.8A8.5 8.5 0 0 1 20.2 9H15z"/></symbol><symbol id="i-flows" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3" y="4" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="15" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="4" width="7" height="5" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 6.5h4M17.5 9v6"/></symbol><symbol id="i-skill" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 3.5h8l4 4v13H6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3.5v4h4M9 12.5h6M9 16h4"/></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 21V4"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 4h11l-2.5 4L17 12H6"/></symbol><symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="3"/></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8.5 12 13 4 8.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12.5 12 17l8-4.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16.5 12 21l8-4.5"/></symbol><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-bg" width="6" height="6"/><rect class="hatch-ln" width="2" height="6"/></pattern></defs></svg>
+<svg class="sprite" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker></defs></svg>
+<div class="ds-status tone-running" role="note" aria-label="Design status: Planned"><span class="ds-status__k">Design status</span><span class="ds-status__w"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg>Planned</span><span class="ds-status__n">#750. Its Watch and Dispatchers tabs are planned and proposed elsewhere.</span></div>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" class="page">
+<header class="top">
+  <a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
+  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="1 waiting">1</span></a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
+  <div class="top__end">
+    <button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <span class="live" role="status"><span class="dot"></span>Live</span>
+    <button class="roundbtn" type="button" aria-label="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
+    <span class="who"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span>
+  </div>
+</header>
+
+<div class="titlebar">
+  <div class="titlebar__lead"><h1>Triggers</h1><p class="titlebar__sub">What starts a job, in plain words. 7 rules in <span class="code">…/deploy/triggers.json</span>.</p></div>
+  <div class="titlebar__end"><a class="btn btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plus"/></svg>Add a trigger</a></div>
+</div>
+<nav class="tabs tr-tabs" aria-label="Triggers views"><a href="#" aria-current="page"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Rules<span class="count">7</span></a><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-eye"/></svg>Watch<span class="count">planned</span></a><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"/></svg>Dispatchers<span class="count">planned</span></a></nav><div class="cards-3">
+<section class="card" id="p-tr-count" data-panel>
+  <div class="card__head"><h2>Set up</h2></div>
+  <p class="kpi"><b>7</b><span>2 on a schedule, 5 from forges</span></p><p class="tr-kp"><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>1 spent one-shot</span><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>1 waiting for an answer</span></p>
+</section>
+<section class="card" id="p-tr-next" data-panel>
+  <div class="card__head"><h2>Next to fire</h2></div>
+  <p class="kpi"><b>11h 21m</b><span>until nightly-tidy</span></p><p class="tr-kp">03:00 UTC tomorrow, in <span class="code">site</span> on mini1</p>
+</section>
+<section class="card" id="p-tr-spend" data-panel>
+  <div class="card__head"><h2>Started this week</h2></div>
+  <p class="kpi"><b>$27.71</b><span>by these rules</span></p><p class="tr-kp">plus nightly-tidy on plan:kimi · $33.07 for the whole deployment</p>
+</section>
+</div><div class="cols"><div class="stack"><div class="tr-filters" role="group" aria-label="Show rules">
+  <button class="fpill fpill--on" type="button" aria-pressed="true">All <b>7</b></button>
+  <button class="fpill" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg>Schedules <b>2</b></button>
+  <button class="fpill" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-tag"/></svg>Labels <b>2</b></button>
+  <button class="fpill" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"/></svg>Comments <b>1</b></button>
+  <button class="fpill" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pr"/></svg>Pull requests <b>1</b></button>
+  <button class="fpill" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-issue"/></svg>Issues <b>1</b></button>
+</div><section class="card" id="p-tr-week" data-panel>
+  <div class="card__head"><h2>When schedules fire</h2><span class="card__sub">this week, UTC</span></div>
+  <div class="wk-scroll"><div class="wk">
+  <div class="wk-labels"><p><b>1 · nightly-tidy</b><span>daily 03:00</span></p><p><b>6 · pm-weekly</b><span>Mon 06:00</span></p><p><b>Quiet hours</b><span>github:acme/web</span></p></div>
+  <div class="wk-track"><span class="wk-cap">now</span>
+    <svg class="wk-svg" height="128" role="img" aria-label="This week: nightly-tidy fires every day at 03:00 UTC, today's run is done; pm-weekly fires Monday at 06:00 UTC; quiet hours for github:acme/web run 20:00 to 04:00 UTC on weekday nights."><rect class="wk-band" x="0" y="5" width="100%" height="26" rx="13"/><rect class="wk-band" x="0" y="41" width="100%" height="26" rx="13"/><rect class="wk-band" x="0" y="77" width="100%" height="26" rx="13"/><line class="wk-day" x1="14.286%" x2="14.286%" y1="0" y2="108"/><line class="wk-day" x1="28.571%" x2="28.571%" y1="0" y2="108"/><line class="wk-day" x1="42.857%" x2="42.857%" y1="0" y2="108"/><line class="wk-day" x1="57.143%" x2="57.143%" y1="0" y2="108"/><line class="wk-day" x1="71.429%" x2="71.429%" y1="0" y2="108"/><line class="wk-day" x1="85.714%" x2="85.714%" y1="0" y2="108"/><rect class="wk-quiet" x="0.000%" y="80" width="2.381%" height="20" rx="10"/><rect class="wk-quiet" x="11.905%" y="80" width="4.762%" height="20" rx="10"/><rect class="wk-quiet" x="26.190%" y="80" width="4.762%" height="20" rx="10"/><rect class="wk-quiet" x="69.048%" y="80" width="4.762%" height="20" rx="10"/><rect class="wk-quiet" x="83.333%" y="80" width="4.762%" height="20" rx="10"/><rect class="wk-quiet" x="97.619%" y="80" width="2.381%" height="20" rx="10"/><circle class="wk-ran" cx="1.786%" cy="18.0" r="6"/><circle class="wk-next" cx="16.071%" cy="18.0" r="6"/><circle class="wk-next" cx="30.357%" cy="18.0" r="6"/><circle class="wk-next" cx="44.643%" cy="18.0" r="6"/><circle class="wk-next" cx="58.929%" cy="18.0" r="6"/><circle class="wk-next" cx="73.214%" cy="18.0" r="6"/><circle class="wk-next" cx="87.500%" cy="18.0" r="6"/><circle class="wk-next" cx="60.714%" cy="54.0" r="6"/><text class="wk-l" x="61.914%" y="58.0">Mon 06:00</text><line class="wk-now" x1="9.315%" x2="9.315%" y1="-4" y2="110"/><text class="wk-ax" x="7.143%" y="124" text-anchor="middle">Thu 8</text><text class="wk-ax" x="21.429%" y="124" text-anchor="middle">Fri 9</text><text class="wk-ax" x="35.714%" y="124" text-anchor="middle">Sat 10</text><text class="wk-ax" x="50.000%" y="124" text-anchor="middle">Sun 11</text><text class="wk-ax" x="64.286%" y="124" text-anchor="middle">Mon 12</text><text class="wk-ax" x="78.571%" y="124" text-anchor="middle">Tue 13</text><text class="wk-ax" x="92.857%" y="124" text-anchor="middle">Wed 14</text></svg>
+  </div>
+</div></div>
+<p class="keyrow"><span><i class="wk-k wk-k--ran"></i>ran</span><span><i class="wk-k wk-k--next"></i>will fire</span><span><i class="wk-k wk-k--quiet"></i>quiet hours: forge jobs for acme/web wait, schedules are not affected</span></p>
+</section><section class="card card--flush" id="p-tr-schedule" data-panel>
+  <div class="card__head"><h2>On a schedule</h2><span class="card__sub">each runs in a folder, on the host that has it</span></div>
+  <ol class="tr-list">
+<li class="tr">
+  <span class="tr-n" aria-label="Trigger 1">1</span>
+  <div class="tr-when">
+    <span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></span>
+    <div><p class="tr-k">Schedule</p><p class="tr-s">Every day at 03:00 UTC</p><p class="tr-sub">in the folder <span class="code">site</span> on mini1 · <span class="code">0 3 * * *</span></p></div>
+  </div>
+  <span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <div class="tr-then"><p class="tr-s">runs <span class="tr-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>tidy</span></p><p class="tr-sub">kimi-for-coding on plan:kimi · local venue</p><p class="tr-chips"><span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>edits site in place</span></p></div>
+  <div class="tr-status"><p><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="tr-t">today 03:11</span></p><p class="tr-sub">Next: 03:00 tomorrow, in 11h 21m · <span class="chip tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>on time</span></p><p class="tr-sub">30 runs in 30 days · plan:kimi</p></div>
+  <div class="tr-act"><a class="btn btn--sm btn--ghost" href="#" aria-label="Open trigger 1"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></a></div>
+  
+</li>
+<li class="tr">
+  <span class="tr-n" aria-label="Trigger 6">6</span>
+  <div class="tr-when">
+    <span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></span>
+    <div><p class="tr-k">Schedule</p><p class="tr-s">Every Monday at 06:00 UTC</p><p class="tr-sub">in the folder <span class="code">pm</span> on mini1 · <span class="code">0 6 * * 1</span></p></div>
+  </div>
+  <span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <div class="tr-then"><p class="tr-s">runs <span class="tr-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>portfolio-manager</span></p><p class="tr-sub">claude-haiku-5-5 · local venue</p><p class="tr-chips"><span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>may write the budget split</span></p></div>
+  <div class="tr-status"><p><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="tr-t">Mon 5 Oct, 06:02</span></p><p class="tr-sub">Next: Mon 12 Oct 06:00, in 3d 14h</p><p class="tr-sub">4 runs in 30 days · $0.06 this week</p></div>
+  <div class="tr-act"><a class="btn btn--sm btn--ghost" href="#" aria-label="Open trigger 6"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></a></div>
+  
+</li>
+</ol>
+</section><section class="card card--flush" id="p-tr-github" data-panel>
+  <div class="card__head"><h2>From GitHub</h2><span class="card__sub">4 rules · webhooks from acme/web, acme/api and acme/billing</span></div>
+  <ol class="tr-list">
+<li class="tr">
+  <span class="tr-n" aria-label="Trigger 2">2</span>
+  <div class="tr-when">
+    <span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-tag"/></svg></span>
+    <div><p class="tr-k">Label</p><p class="tr-s">The label <span class="code">pi:frontend</span> is added to an issue</p><p class="tr-sub">by someone with write access, in any repository wired to this deployment</p></div>
+  </div>
+  <span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <div class="tr-then"><p class="tr-s">runs <span class="tr-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>frontend-fix</span></p><p class="tr-sub">deployment default model · skills from pi-skills</p><p class="tr-chips"><span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>2 runs per label: 2 replicas</span></p></div>
+  <div class="tr-status"><p><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="tr-t">7 Oct, 17:41</span></p><p class="tr-sub">12 runs in 30 days</p><p class="tr-sub">$2.89 this week</p></div>
+  <div class="tr-act"><a class="btn btn--sm btn--ghost" href="#" aria-label="Open trigger 2"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></a></div>
+  <p class="tr-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>GitHub matches the issue's whole label set, so re-labelling or reopening the issue fires it again: a paid run each time, times two.</span></p>
+</li>
+<li class="tr">
+  <span class="tr-n" aria-label="Trigger 3">3</span>
+  <div class="tr-when">
+    <span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-comment"/></svg></span>
+    <div><p class="tr-k">Comment</p><p class="tr-s">A comment contains <span class="code">@pi</span></p><p class="tr-sub">on an issue or pull request, by someone with write access · GitHub's one comment rule</p></div>
+  </div>
+  <span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <div class="tr-then"><p class="tr-s">runs <span class="tr-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>fix</span></p><p class="tr-sub">deployment default model · standing instructions above the issue text</p><p class="tr-chips"><span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>keeps a session</span></p></div>
+  <div class="tr-status"><p><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span><span class="tr-t">today 15:30</span></p><p class="tr-sub"><span class="code">gh-e9a0</span> on acme/billing#260</p><p class="tr-sub">104 runs in 30 days · $21.85 this week</p></div>
+  <div class="tr-act"><a class="btn btn--sm btn--ghost" href="#" aria-label="Open trigger 3"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></a></div>
+  <p class="tr-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A comment can pick another rule's flow: <span class="code">@pi triage</span> runs flow triage (rule 7's), <span class="code">@pi frontend-fix</span> runs rule 2's. Everything else still comes from this rule.</span></p>
+</li>
+<li class="tr">
+  <span class="tr-n" aria-label="Trigger 7">7</span>
+  <div class="tr-when">
+    <span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-tag"/></svg></span>
+    <div><p class="tr-k">Label</p><p class="tr-s">The label <span class="code">pi:triage</span> is added to an issue</p><p class="tr-sub">by someone with write access, in any repository wired to this deployment</p></div>
+  </div>
+  <span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <div class="tr-then"><p class="tr-s">runs <span class="tr-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>triage</span></p><p class="tr-sub">deployment default model</p><p class="tr-chips"><span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>keeps a session</span><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>may ask you a question</span><span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>reaches Linear through MCP</span></p></div>
+  <div class="tr-status"><p><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span><span class="tr-t">today 15:13</span></p><p class="tr-sub"><span class="code">gh-2f6a</span> asked a question on acme/api#131</p><p class="tr-sub">4 runs in 30 days · $0.65 this week</p></div>
+  <div class="tr-act"><a class="btn btn--sm btn--ghost" href="#" aria-label="Open trigger 7"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></a></div>
+  
+</li>
+<li class="tr tr--spent">
+  <span class="tr-n" aria-label="Trigger 5">5</span>
+  <div class="tr-when">
+    <span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-issue"/></svg></span>
+    <div><p class="tr-k">Issue closed</p><p class="tr-s">Issue <span class="code">#40</span> is closed</p><p class="tr-sub">by someone with write access · once, then it is spent</p></div>
+  </div>
+  <span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <div class="tr-then"><p class="tr-s">runs <span class="tr-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>deploy</span></p><p class="tr-sub">deployment default model</p><p class="tr-chips"><span class="chip tone-running"><svg class="ic" aria-hidden="true"><use href="#i-fit"/></svg>only issue #40</span><span class="chip tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>spent by gh-40a1</span></p></div>
+  <div class="tr-status"><p><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="tr-t">2 Oct, 11:20</span></p><p class="tr-sub">Matches nothing now</p><p class="tr-sub">1 run, ever</p></div>
+  <div class="tr-act"><a class="btn btn--sm btn--ghost" href="#" aria-label="Open trigger 5"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></a></div>
+  <p class="tr-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>It ran once (<span class="code">gh-40a1</span>) and is kept so history keeps its number. Delete <span class="code">on.disarmed</span> in the file to arm it again.</span></p>
+</li>
+</ol>
+</section><section class="card card--flush" id="p-tr-gitlab" data-panel>
+  <div class="card__head"><h2>From GitLab</h2><span class="card__sub">1 rule</span></div>
+  <ol class="tr-list">
+<li class="tr">
+  <span class="tr-n" aria-label="Trigger 4">4</span>
+  <div class="tr-when">
+    <span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-pr"/></svg></span>
+    <div><p class="tr-k">Pull request</p><p class="tr-s">A merge request is opened or updated</p><p class="tr-sub">by someone with write access, in any project wired to this deployment</p></div>
+  </div>
+  <span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <div class="tr-then"><p class="tr-s">runs <span class="tr-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>review</span></p><p class="tr-sub">deployment default model</p><p class="tr-chips"><span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>a run on every push</span></p></div>
+  <div class="tr-status"><p><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="tr-t">today 13:49</span></p><p class="tr-sub"><span class="code">gl-9a2c</span> on acme/billing-ui!405</p><p class="tr-sub">13 runs in 30 days · $2.26 this week</p></div>
+  <div class="tr-act"><a class="btn btn--sm btn--ghost" href="#" aria-label="Open trigger 4"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></a></div>
+  <p class="tr-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>On GitLab, adding a label to a merge request counts as an update and fires this rule. A merge does not fire a close.</span></p>
+</li>
+</ol>
+</section></div><div class="stack"><section class="card" id="p-tr-check" data-panel>
+  <div class="card__head"><h2>Which rule would run?</h2><span class="card__sub">reads the triggers file and the gates as they are now</span></div>
+  <p class="muted tr-p">Describe an event and see which rule starts a job, and why the others do not. Nothing is sent or spent.</p>
+<div class="tr-form">
+  <div class="field"><label for="tc-f">Forge</label><select id="tc-f" class="select"><option>GitHub</option></select></div>
+  <div class="field"><label for="tc-r">Repository</label><input id="tc-r" class="input input--code" value="acme/web"></div>
+  <div class="field tr-span"><label for="tc-e">What happens</label><select id="tc-e" class="select"><option>A comment on an issue</option></select></div>
+  <div class="field tr-span"><label for="tc-t">Comment</label><input id="tc-t" class="input" value="@pi triage the flaky checkout test"></div>
+  <div class="field tr-span"><label for="tc-w">From</label><select id="tc-w" class="select"><option>a collaborator with write access</option></select></div>
+</div>
+<div class="tr-btnrow"><a class="btn btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-search"/></svg>Check</a></div>
+<div class="tr-result" role="region" aria-live="polite" aria-label="Result">
+  <p class="tr-res__h"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Rule 3 starts a job with flow <b>triage</b></p>
+  <p class="tr-res__s">The comment contains <span class="code">@pi</span>, so rule 3 matches. Its next word, <b>triage</b>, is rule 7's flow, so the job runs triage. Everything else comes from rule 3: it keeps a session, and its instructions go above the issue text.</p>
+  <p class="tr-res__k">The other rules</p>
+  <ul class="tr-why">
+    <li><span class="tr-n tr-n--sm">1</span><span>a schedule, not an event</span></li><li><span class="tr-n tr-n--sm">6</span><span>a schedule, not an event</span></li>
+    <li><span class="tr-n tr-n--sm">2</span><span>adding a label, and this is a comment</span></li><li><span class="tr-n tr-n--sm">7</span><span>adding a label; only its flow is borrowed</span></li>
+    <li><span class="tr-n tr-n--sm">5</span><span>spent, and only for closing #40</span></li><li><span class="tr-n tr-n--sm">4</span><span>GitLab only</span></li>
+  </ul>
+  <p class="tr-res__k">Checks it still passes when it arrives</p>
+  <ul class="tr-gates"><li><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><b>Signature</b><span>the delivery is from the forge</span></li><li><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><b>Bot loop</b><span>not one of our own comments</span></li><li><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><b>Write access</b><span>the person who acted has it</span></li><li><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><b>Duplicates</b><span>same target and flow within 10 minutes</span></li><li><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><b>Quiet hours</b><span>acme/web: 20:00 to 04:00 UTC, weekdays</span></li><li><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><b>Job image</b><span>present on the host</span></li><li><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><b>Spend caps</b><span>today $15.04 of $25.00</span></li></ul>
+</div>
+</section></div></div>
+</main>
+</body>
+</html>

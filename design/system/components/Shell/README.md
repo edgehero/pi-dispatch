@@ -1,0 +1,3 @@
+The shell every page shares: a top bar with the pi-dispatch pill, pill navigation, the live state and the signed-in person, then a title bar with the page's filters.
+
+Use `shell(active, inner, title, sub, end)` from the kit. Navigation order is Overview, Runs, Parked, Triggers, Fleet, Spend, Configuration, then More (Models, and Audit for operators). Watch is a tab of Triggers. The Parked count is violet and counts questions and approvals together. The live pill says Live, Reconnecting or Not live. A viewer sees no Audit and no action buttons. At 390 the nav becomes a pill row that scrolls inside itself.

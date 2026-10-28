@@ -1,0 +1,57 @@
+<!-- @dsCard height=288 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pi-dispatch console</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--canvas); color: var(--ink); font-family: var(--font-sans); overflow: hidden; }
+  .cover { position: relative; width: 960px; height: 288px; overflow: hidden; }
+  .art { position: absolute; top: 0; left: 480px; width: 480px; height: 288px; overflow: hidden; }
+  .art svg { display: block; width: 480px; height: 288px; }
+  .card { fill: var(--surface); rx: var(--radius-xl); }
+  .ink { fill: var(--primary); }
+  .run { fill: var(--running); }
+  .park { fill: var(--parked); }
+  .ok { fill: var(--ok); }
+  .warn { fill: var(--attention); }
+  .soft { fill: var(--surface-3); }
+  .words { position: absolute; left: var(--space-6); bottom: var(--space-6); max-width: 440px; }
+  .name { margin: 0; font-size: 64px; line-height: .95; font-weight: 750; letter-spacing: -0.03em; color: var(--ink); }
+  .tag { margin: var(--space-2) 0 0 3px; font-size: 14px; line-height: 20px; color: var(--ink-muted); }
+</style>
+</head>
+<body>
+<div class="cover">
+<div class="art" aria-hidden="true">
+<svg viewBox="0 0 480 288" width="480" height="288">
+<!--
+  blocks      surface card 440x272 bleeding off the right (radius-xl) · primary pill 192x48 (the one solid action, the largest) · running pill · parked pill · ok pill · a short attention pill: about 40% of 960x288
+  arrangement one tall card holding a stack of unequal pills on a left edge, like the timeline and the action pills, with a single primary pill on top
+  pattern     "soft, friendly, large radii": pills from radius-pill, 32px tall at a 44px pitch (space-8 plus space-3), plus one row of five discs as slot dots
+  scales      pill height space-8, gaps space-3 and space-4, discs 16 (space-4), corners radius-xl on the card and radius-pill on everything inside
+-->
+<rect class="card" x="24" y="8" width="472" height="272" rx="28"/>
+<rect class="ink" x="56" y="36" width="192" height="48" rx="24"/>
+<rect class="run" x="56" y="100" width="248" height="32" rx="16"/>
+<rect class="soft" x="320" y="100" width="88" height="32" rx="16"/>
+<rect class="soft" x="56" y="144" width="104" height="32" rx="16"/>
+<rect class="park" x="176" y="144" width="152" height="32" rx="16"/>
+<rect class="soft" x="56" y="188" width="72" height="32" rx="16"/>
+<rect class="ok" x="144" y="188" width="208" height="32" rx="16"/>
+<rect class="warn" x="368" y="188" width="56" height="32" rx="16"/>
+<circle class="run" cx="64" cy="248" r="8"/>
+<circle class="run" cx="88" cy="248" r="8"/>
+<circle class="soft" cx="112" cy="248" r="8"/>
+<circle class="soft" cx="136" cy="248" r="8"/>
+<circle class="park" cx="160" cy="248" r="8"/>
+</svg>
+</div>
+<div class="words">
+<h1 class="name">pi-dispatch console</h1>
+<p class="tag">A calm control room for agent runs.</p>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,234 @@
+<!-- @dsCard group="Planned and proposed" height=2520 width=1440 subtitle="A dispatcher: reads git changes and infra streams, and only starts jobs and proposes triggers with the right flow and model; a Jev loop or an LLM flow" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>infra-dispatch</title>
+<style>
+.tr-tabs { margin: var(--space-2) 0 var(--space-2); }
+.tr-tabs .count { background: var(--surface-3); color: var(--ink-muted); }
+.tr-tabs a[aria-current="page"] .count { background: var(--on-primary); color: var(--primary); }
+.titlebar__end { display: flex; align-items: center; gap: 10px; }
+.dp-kp { font-size: 13px; color: var(--ink-muted); }
+.dp-flow { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 10px 0 8px; border-radius: var(--radius-pill); background: var(--primary); color: var(--on-primary); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.dp-bound { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-5); }
+.dp-col { display: grid; align-content: start; gap: 10px; min-width: 0; }
+.dp-h { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: var(--ink); }
+.dp-h2 { margin-top: var(--space-2); }
+.dp-in { display: grid; gap: 8px; }
+.dp-in li { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; align-items: start; }
+.dp-in li > .dp-k { justify-self: start; padding-top: 1px; }
+.dp-in div { display: grid; font-size: 13px; color: var(--ink); }
+.dp-in div span { font-size: 12px; color: var(--ink-muted); }
+.dp-may { display: grid; gap: 8px; }
+.dp-may li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 12px; }
+.dp-why { width: 100%; color: var(--ink-muted); }
+.dp-caps { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--ink); }
+.dp-caps > span { display: inline-flex; align-items: center; gap: 5px; }
+.dp-caps .ic { color: var(--ink-muted); }
+.dp-k { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.dp-k.tone-running .ic { color: var(--tone-ink); }
+.dp-p { font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.dp-off { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.dp-off .ic { flex: none; margin-top: 2px; color: var(--ink); }
+.dp-off b { color: var(--ink); }
+.dp-seg { margin-bottom: var(--space-4); }
+.dp-eng { display: grid; gap: 10px; }
+.dp-e { display: grid; gap: 10px; padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); }
+.dp-e--on { box-shadow: inset 0 0 0 2px var(--running); }
+.dp-e__h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 15px; color: var(--ink); }
+.dp-e__h .badge, .dp-e__h .chip, .dp-e__h .dp-k { margin-left: auto; }
+.dp-filt { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--space-3); }
+.dp-filt .fpill b { margin-left: 2px; }
+.dp-feed { display: grid; }
+.dp-ev { display: grid; grid-template-columns: 48px minmax(0, 1fr) 230px; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); align-items: start; }
+.dp-ev__t { font-size: 12px; font-weight: 650; color: var(--ink-muted); font-variant-numeric: tabular-nums; padding-top: 4px; }
+.dp-ev__b { display: grid; gap: 4px; min-width: 0; }
+.dp-ev__h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--ink); }
+.dp-ev__d { font-size: 12px; color: var(--ink-muted); }
+.dp-ev__q { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; font-size: 12px; color: var(--ink-muted); }
+.dp-ev__q > .ic { color: var(--running-ink); }
+.dp-dq { display: inline-flex; align-items: center; gap: 6px; }
+.dp-dq b { color: var(--ink); }
+.dp-ev__a { display: grid; gap: 6px; justify-items: start; font-size: 12px; color: var(--ink-muted); }
+.dp-ev__w { line-height: 18px; }
+.dp-foot { font-size: 12px; line-height: 18px; color: var(--ink-muted); margin-top: var(--space-3); }
+.dp-props { display: grid; gap: 12px; }
+.dp-prop { display: grid; gap: 8px; padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); box-shadow: inset 3px 0 0 var(--parked); }
+.dp-prop__h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; color: var(--ink); }
+.dp-prop__why { font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.dp-prop .diff { background: var(--surface); }
+.dp-prop__n { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: var(--ink-muted); }
+.dp-prop__n .ic { flex: none; margin-top: 2px; }
+.dp-prop__act { display: flex; flex-wrap: wrap; gap: 8px; }
+.dp-jobs .rowpill { gap: 10px; }
+.dp-jobs .rowpill > span:last-child { color: var(--ink-muted); font-size: 13px; }
+@media (max-width: 760px) {
+  .tr-tabs { flex-wrap: nowrap; overflow-x: auto; }
+  .titlebar__end { flex-wrap: wrap; }
+  .dp-bound { grid-template-columns: minmax(0, 1fr); }
+  .dp-ev { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .dp-filt { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+}
+</style>
+<style data-ds-status>
+.ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
+.ds-status__k { font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.ds-status__w { display: inline-flex; align-items: center; gap: 6px; font-weight: 750; color: var(--tone-ink); }
+.ds-status__n { color: var(--ink-muted); min-width: 0; }
+@media (max-width: 760px) { .ds-status { margin: 12px var(--space-4) 0; } }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs><symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol><symbol id="i-runs" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/></symbol><symbol id="i-parked" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.2 8.7a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.6-.8 1.1"/><circle cx="12" cy="13.6" r=".95" fill="currentColor"/></symbol><symbol id="i-spend" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16a8 8 0 1 1 16 0"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 16l3.5-4.5"/><circle cx="12" cy="16" r="1.4" fill="currentColor"/></symbol><symbol id="i-fleet" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="4.5" width="16" height="6" rx="1.6"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="13.5" width="16" height="6" rx="1.6"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/><circle cx="7.5" cy="16.5" r="1" fill="currentColor"/></symbol><symbol id="i-config" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 7h9M18 7h1M5 17h3M12 17h7M5 12h1M10 12h9"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="16" cy="7" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="10" cy="17" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="12" r="2"/></symbol><symbol id="i-audit" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5" y="4.5" width="14" height="16" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4.5V3.5h6v1M9 12l2 2 4-4"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="11" cy="11" r="6"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M20 20l-4.2-4.2"/></symbol><symbol id="i-chev" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 10l5 5 5-5"/></symbol><symbol id="i-chev-l" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 7l-5 5 5 5"/></symbol><symbol id="i-chev-r" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 7l5 5-5 5"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></symbol><symbol id="i-minus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor"/></symbol><symbol id="i-theme" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol><symbol id="i-git" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="9" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 11c0 3-3 4-10 5"/></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 7.5V12l3 2"/></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3.5" y="5" width="17" height="14" rx="2.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7.5 10l2.5 2-2.5 2M12.5 15h4"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5 19 6v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 12l2.2 2.2L15.5 10"/></symbol><symbol id="i-queue" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8l-8 4-8-4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12l8 4 8-4M4 16l8 4 8-4"/></symbol><symbol id="i-rerun" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19 12a7 7 0 1 1-2.1-5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.5V8H16"/></symbol><symbol id="i-done" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M5.5 12.5 10 17l8.5-9.5"/></symbol><symbol id="i-failed" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M7 7l10 10M17 7 7 17"/></symbol><symbol id="i-refused" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" cx="12" cy="12" r="7.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6.8 17.2 17.2 6.8"/></symbol><symbol id="i-attention" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 21 19.5H3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v4.2"/><circle cx="12" cy="16.9" r="1.1" fill="currentColor"/></symbol><symbol id="i-running" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></symbol><symbol id="i-hourglass" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 4h10M7 20h10M8 4v2.5l4 5.5-4 5.5V20M16 4v2.5L12 12l4 5.5V20"/></symbol><symbol id="i-beat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h3.5l2-5 3.5 10 2.4-6.2 1.3 1.2H21"/></symbol><symbol id="i-doctor" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4.5" y="4.5" width="15" height="15" rx="3"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 8.5v7M8.5 12h7"/></symbol><symbol id="i-cancel" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol><symbol id="i-slot-held" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 11V8a4 4 0 0 1 8 0v3"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5.5" y="11" width="13" height="9" rx="2"/></symbol><symbol id="i-logout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M14 8l4 4-4 4M18 12H9"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol><symbol id="i-fit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></symbol><symbol id="i-steer" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h11M11 7l5 5-5 5M20 5v14"/></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v5"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></symbol><symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 19l1.2-4.2L15.5 5.5l3 3-9.3 9.3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13.5 7.5l3 3"/></symbol><symbol id="i-chain" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol><symbol id="i-slot" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="7" width="16" height="10" rx="5"/><circle cx="9" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-key" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="15.5" r="3.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.5 13 19 4.5M15.5 8l2.5 2.5M17.5 6l2 2"/></symbol><symbol id="i-tag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 4.5h7.5l8 8-7 7L4 11z"/><circle cx="8.3" cy="8.8" r="1.3" fill="currentColor"/></symbol><symbol id="i-comment" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 9.5h8M8 12.5h5"/></symbol><symbol id="i-pr" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="18" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 16v-6a3 3 0 0 0-3-3h-3M13 4.5 10.5 7 13 9.5"/></symbol><symbol id="i-issue" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h16M12 4c2.4 2.3 3.5 5 3.5 8s-1.1 5.7-3.5 8c-2.4-2.3-3.5-5-3.5-8s1.1-5.7 3.5-8z"/></symbol><symbol id="i-plug" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 3.5V8M15 3.5V8M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5v4"/></symbol><symbol id="i-bell" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 20.5h4"/></symbol><symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.5l2 2.5H19A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol><symbol id="i-pie" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M15 3.8A8.5 8.5 0 0 1 20.2 9H15z"/></symbol><symbol id="i-flows" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3" y="4" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="15" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="4" width="7" height="5" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 6.5h4M17.5 9v6"/></symbol><symbol id="i-skill" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 3.5h8l4 4v13H6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3.5v4h4M9 12.5h6M9 16h4"/></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 21V4"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 4h11l-2.5 4L17 12H6"/></symbol><symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="3"/></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8.5 12 13 4 8.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12.5 12 17l8-4.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16.5 12 21l8-4.5"/></symbol><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-bg" width="6" height="6"/><rect class="hatch-ln" width="2" height="6"/></pattern></defs></svg>
+<svg class="sprite" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker></defs></svg>
+<div class="ds-status tone-idle" role="note" aria-label="Design status: Proposed"><span class="ds-status__k">Design status</span><span class="ds-status__w"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Proposed</span><span class="ds-status__n">No issue yet; it grew out of #735.</span></div>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" class="page">
+<header class="top">
+  <a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
+  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="1 waiting">1</span></a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
+  <div class="top__end">
+    <button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <span class="live" role="status"><span class="dot"></span>Live</span>
+    <button class="roundbtn" type="button" aria-label="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
+    <span class="who"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span>
+  </div>
+</header>
+
+<div class="titlebar">
+  <div class="titlebar__lead"><a class="back" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"/></svg>Dispatchers</a><h1>infra-dispatch</h1><p class="titlebar__sub">Purpose: turn infra alarms and log findings into read-only triage. One of 5 dispatchers; it only starts jobs from its list and proposes watch rules.</p></div>
+  <div class="titlebar__end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Jev loop, running</span><a class="btn btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Pause</a></div>
+</div>
+<nav class="tabs tr-tabs" aria-label="Triggers views"><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Rules<span class="count">7</span></a><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-eye"/></svg>Watch<span class="count">planned</span></a><a href="#" aria-current="page"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"/></svg>Dispatchers<span class="count">planned</span></a></nav><div class="cards-4">
+<section class="card" id="p-dp-events" data-panel>
+  <div class="card__head"><h2>Events read, 24h</h2></div>
+  <p class="kpi"><b>1,227</b><span>from 4 inputs</span></p><p class="dp-kp">1,204 infra events from 3 streams · 23 merged commits for context</p>
+</section>
+<section class="card" id="p-dp-decisions" data-panel>
+  <div class="card__head"><h2>Decisions</h2></div>
+  <p class="kpi"><b>186</b><span>by Jev</span></p><p class="dp-kp">$0.008 in 24h</p>
+</section>
+<section class="card" id="p-dp-jobs" data-panel>
+  <div class="card__head"><h2>Jobs started</h2></div>
+  <p class="kpi"><b>3</b><span>of 10 a day</span></p><p class="dp-kp">$0.42 of its $3.00 a day · all from its list</p>
+</section>
+<section class="card" id="p-dp-props" data-panel>
+  <div class="card__head"><h2>Trigger proposals</h2></div>
+  <p class="kpi"><b>2</b><span>wait for you</span></p><p class="dp-kp">both from today</p>
+</section>
+</div><section class="card" id="p-dp-bound" data-panel>
+  <div class="card__head"><h2>What it may do</h2><span class="card__sub">the sandbox: set by hand in triggers.json, like any trigger</span></div>
+  <div class="dp-bound">
+  <div class="dp-col"><p class="dp-h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-search"/></svg>It reads</p>
+    <ul class="dp-in"><li><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>infra</span><div><b>aws-cloudwatch</b><span>alarms in eu-west-1, pushed through EventBridge, signed</span></div></li><li><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-queue"/></svg>infra</span><div><b>prod-logs</b><span>Vector findings, as #735 describes</span></div></li><li><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"/></svg>infra</span><div><b>deploys</b><span>deployments from the forges</span></div></li><li><span class="dp-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-git"/></svg>git</span><div><b>acme/web, acme/api</b><span>merged commits on the default branch, read for context only</span></div></li></ul></div>
+  <div class="dp-col"><p class="dp-h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>It may start</p>
+    <ul class="dp-may"><li><span class="dp-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>triage-incident</span><span class="code">claude-haiku-5-5</span><span class="dp-why">read-only, on an alarm or finding</span></li><li><span class="dp-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>db-health</span><span class="code">kimi-for-coding</span><span class="dp-why">read-only, when the database looks involved</span></li></ul>
+    <p class="dp-caps"><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg>10 jobs a day</span><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg>$3.00 a day</span><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg>1 per target an hour</span></p>
+    <p class="dp-h dp-h2"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>It may propose</p>
+    <p class="dp-p">New or tuned watch rules, for you to adopt.</p>
+    <p class="dp-off"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg><span><b>Apply proposals without me: off.</b></span></p></div>
+</div>
+</section><div class="cols"><div class="stack"><section class="card" id="p-dp-live" data-panel>
+  <div class="card__head"><h2>What it saw and did</h2><span class="card__sub">each event, the questions Jev answered, and the one thing it did · newest first, UTC</span><span class="end"><span class="live" role="status"><span class="dot"></span>Live</span></span></div>
+  <div class="dp-filt" role="group" aria-label="Show">
+  <button class="fpill fpill--sm fpill--on" type="button" aria-pressed="true">All</button>
+  <button class="fpill fpill--sm" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Started <b>3</b></button>
+  <button class="fpill fpill--sm" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Proposed <b>2</b></button>
+  <button class="fpill fpill--sm" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-minus"/></svg>Nothing <b>181</b></button>
+  <button class="fpill fpill--sm" type="button" aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg>Held by rules <b>1,041</b></button>
+</div>
+<ol class="dp-feed"><li class="dp-ev">
+  <span class="dp-ev__t">15:35</span>
+  <div class="dp-ev__b">
+    <p class="dp-ev__h"><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>infra</span><b>aws-cloudwatch · alarm CheckoutLatencyHigh is ALARM</b></p>
+    <p class="dp-ev__d">eu-west-1, p99 over 2 s for 5 minutes · 55 minutes after deploy 4a1f</p>
+    <p class="dp-ev__q"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span class="dp-dq"><span class="code">act</span><b>investigate 0.74</b></span><span class="faint">$0.00003</span></p>
+  </div>
+  <div class="dp-ev__a"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Started</span><span class="dp-ev__w"><span class="dp-flow"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>triage-incident</span> read-only · <span class="code">local-8b02</span></span></div>
+</li><li class="dp-ev">
+  <span class="dp-ev__t">15:24</span>
+  <div class="dp-ev__b">
+    <p class="dp-ev__h"><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-queue"/></svg>infra</span><b>prod-logs · new fingerprint payments/HTTPError/capture</b></p>
+    <p class="dp-ev__d">3 events in 10 minutes, and no watch rule matches it</p>
+    <p class="dp-ev__q"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span class="dp-dq"><span class="code">needs_watch_rule</span><b>yes 0.81</b></span><span class="dp-dq"><span class="code">which_flow</span><b>triage-incident 0.77</b></span><span class="faint">$0.00003</span></p>
+  </div>
+  <div class="dp-ev__a"><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>Proposed</span><span class="dp-ev__w">a watch rule <span class="code">payments-5xx</span>, below</span></div>
+</li><li class="dp-ev">
+  <span class="dp-ev__t">15:20</span>
+  <div class="dp-ev__b">
+    <p class="dp-ev__h"><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-queue"/></svg>infra</span><b>prod-logs · checkout TimeoutError, 412 events</b></p>
+    <p class="dp-ev__d">the fingerprint is in its 6h cooldown</p>
+    <p class="dp-ev__q"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span class="muted">no decision: the rules held it</span></p>
+  </div>
+  <div class="dp-ev__a"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>Held</span><span class="dp-ev__w">by the watch rule's cooldown, before any decision</span></div>
+</li><li class="dp-ev">
+  <span class="dp-ev__t">14:50</span>
+  <div class="dp-ev__b">
+    <p class="dp-ev__h"><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>infra</span><b>aws-cloudwatch · alarm CheckoutLatencyHigh is OK</b></p>
+    <p class="dp-ev__d">the alarm cleared</p>
+    <p class="dp-ev__q"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span class="dp-dq"><span class="code">act</span><b>ignore 0.95</b></span><span class="faint">$0.00002</span></p>
+  </div>
+  <div class="dp-ev__a"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-minus"/></svg>Nothing</span><span class="dp-ev__w">ignore at 0.90 or more</span></div>
+</li><li class="dp-ev">
+  <span class="dp-ev__t">14:40</span>
+  <div class="dp-ev__b">
+    <p class="dp-ev__h"><span class="dp-k tone-running"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"/></svg>infra</span><b>deploys · acme/web <span class="code">4a1f</span> to production</b></p>
+    <p class="dp-ev__d">touches checkout and the database pool</p>
+    <p class="dp-ev__q"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span class="dp-dq"><span class="code">risky_change</span><b>medium 1.4</b></span><span class="faint">$0.00004</span></p>
+  </div>
+  <div class="dp-ev__a"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-minus"/></svg>Nothing</span><span class="dp-ev__w">kept as a fact for later decisions: 4a1f touched checkout</span></div>
+</li><li class="dp-ev">
+  <span class="dp-ev__t">13:58</span>
+  <div class="dp-ev__b">
+    <p class="dp-ev__h"><span class="dp-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-git"/></svg>git</span><b>acme/api · 3 commits merged to main</b></p>
+    <p class="dp-ev__d">dependency bumps only</p>
+    <p class="dp-ev__q"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg><span class="dp-dq"><span class="code">touches_infra</span><b>no 0.91</b></span><span class="faint">$0.00003</span></p>
+  </div>
+  <div class="dp-ev__a"><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-minus"/></svg>Nothing</span><span class="dp-ev__w">read for context; nothing to do</span></div>
+</li></ol>
+<p class="dp-foot">Each line opens the decision's full record.</p>
+</section></div><div class="stack"><section class="card" id="p-dp-engine" data-panel>
+  <div class="card__head"><h2>Engine</h2><span class="card__sub">the same boundary for both</span></div>
+  <div class="seg dp-seg" role="group" aria-label="Engine"><button aria-pressed="true"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg>Jev loop</button><button aria-pressed="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>LLM flow</button></div>
+<div class="dp-eng">
+  <div class="dp-e dp-e--on">
+    <p class="dp-e__h"><b>Jev loop</b><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>running for 3d 4h on mini1</span></p>
+    <dl class="facts facts--1"><div class="fact"><dt>Decisions</dt><dd>186 in 24h, $0.008</dd></div><div class="fact"><dt>Context</dt><dd>none: each decision sees one event</dd></div><div class="fact"><dt>Cursor</dt><dd>per input, in Valkey</dd></div></dl>
+  </div>
+  <div class="dp-e">
+    <p class="dp-e__h"><b>LLM flow</b><span class="dp-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg>every 10 minutes today</span></p>
+    <dl class="facts facts--1"><div class="fact"><dt>Each run</dt><dd>at most 30 minutes, from <span class="code">previousRunAt</span></dd></div><div class="fact"><dt>Tools</dt><dd>read-only git and streams, Jev's decide tool, an outbox</dd></div></dl>
+  </div>
+</div>
+</section><section class="card" id="p-dp-jobs-card" data-panel>
+  <div class="card__head"><h2>Jobs it started</h2><span class="card__sub">3 in 24h, 1 refused</span></div>
+  <ul class="rows dp-jobs">
+  <li class="rowpill"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span><span class="code">local-8b02</span><span class="ptag">shop</span><span>triage-incident, read-only</span></li>
+  <li class="rowpill"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="code">local-7f21</span><span class="ptag">shop</span><span>triage-incident · $0.11</span></li>
+  <li class="rowpill"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="code">local-6c10</span><span class="ptag">shop</span><span>db-health · $0.06</span></li>
+  <li class="rowpill"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span><span class="code">local-6c3a</span><span class="ptag">shop</span><span>triage-incident: over its 1 per target an hour</span></li>
+</ul>
+</section></div></div><section class="card" id="p-dp-props-card" data-panel>
+  <div class="card__head"><h2>Trigger proposals</h2><span class="card__sub">it proposes, a person adopts</span></div>
+  <ol class="dp-props">
+  <li class="dp-prop">
+    <p class="dp-prop__h"><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>Proposed</span><span class="dp-k">15:24</span><b>Add a watch rule for payments errors</b></p>
+    <p class="dp-prop__why">A new fingerprint, payments/HTTPError/capture, reached 3 in 10 minutes and no watch rule covers it. Jev: needs a watch rule, yes 0.81; flow triage-incident, 0.77.</p>
+    <div class="diff"><div class="diff__h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>triggers.json, new row 9</div><div class="diff__b"><span class="d-gap">…</span><span class="d-add">{ &quot;on&quot;: { &quot;type&quot;: &quot;watch&quot;, &quot;id&quot;: &quot;payments-5xx&quot;, &quot;source&quot;: &quot;prod-alerts&quot;,</span><span class="d-add">          &quot;match&quot;: { &quot;severity&quot;: [&quot;error&quot;, &quot;critical&quot;], &quot;labels&quot;: { &quot;service&quot;: [&quot;payments&quot;] } },</span><span class="d-add">          &quot;fingerprint&quot;: [&quot;service&quot;, &quot;error.type&quot;, &quot;frame.top&quot;], &quot;minCount&quot;: 5, &quot;window&quot;: &quot;10m&quot;,</span><span class="d-add">          &quot;cooldown&quot;: &quot;6h&quot;, &quot;maxPerDay&quot;: 4 },</span><span class="d-add">  &quot;run&quot;: { &quot;kind&quot;: &quot;local&quot;, &quot;folder&quot;: &quot;/srv/shop&quot;, &quot;flow&quot;: &quot;triage-incident&quot;, &quot;mode&quot;: &quot;investigate&quot; } }</span><span class="d-gap">…</span></div></div>
+    <p class="dp-prop__n"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>It copies shop-5xx's caps and read-only mode.</span></p>
+    <div class="dp-prop__act"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>Adopt</a><a class="btn btn--sm btn--ghost" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Edit first</a><a class="btn btn--sm btn--ghost" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-cancel"/></svg>Dismiss</a></div>
+  </li>
+  <li class="dp-prop">
+    <p class="dp-prop__h"><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>Proposed</span><span class="dp-k">09:40</span><b>Raise shop-5xx's threshold from 5 to 8 in 10 minutes</b></p>
+    <p class="dp-prop__why">36 of its 41 findings in 24 hours were held by cooldown. Over 30 days, a threshold of 8 would have started the same jobs and held 52 fewer findings.</p>
+    <div class="diff"><div class="diff__h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>triggers.json, row 8</div><div class="diff__b"><span class="d-gap">…</span><span class="d-del">          &quot;minCount&quot;: 5, &quot;window&quot;: &quot;10m&quot;,</span><span class="d-add">          &quot;minCount&quot;: 8, &quot;window&quot;: &quot;10m&quot;,</span><span class="d-gap">…</span></div></div>
+    <div class="dp-prop__act"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>Adopt</a><a class="btn btn--sm btn--ghost" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-cancel"/></svg>Dismiss</a></div>
+  </li>
+</ol>
+<p class="dp-foot">Adopt opens a preview with this diff, then Confirm.</p>
+</section>
+</main>
+</body>
+</html>

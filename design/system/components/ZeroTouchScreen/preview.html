@@ -1,0 +1,316 @@
+<!-- @dsCard group="Planned and proposed" height=2390 width=1440 subtitle="Zero touch: how often a run needed a person, per project and repository, why, which questions keep coming back, and the fixes that brought the rate down" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero touch</title>
+<style>
+.zt-tabs { margin: var(--space-2) 0; }
+.zt-tabs .count { background: var(--surface-3); color: var(--ink-muted); }
+.zt-tabs a[aria-current="page"] .count { background: var(--on-primary); color: var(--primary); }
+.zt-kp { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: var(--space-3); }
+.zt-kt { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.zt-kt--ok { color: var(--ok-ink); }
+.zt-cause { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.zt-cause .ic { color: var(--tone-ink); }
+.zt-q__d { font-size: 12px; color: var(--ink-muted); margin-left: 6px; }
+.zt-kps { font-size: 13px; line-height: 19px; color: var(--ink-muted); margin-top: 6px; }
+.zt-kps b { color: var(--ink); }
+.zt-spark { display: block; width: 100%; height: 64px; overflow: visible; }
+.zt-spark__goal { stroke: var(--ok); stroke-width: 1.5; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.zt-spark__l { fill: none; stroke: var(--ink); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.zt-spark__d { fill: var(--ink); }
+.zt-spark__ax { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: 11px; color: var(--ink-faint); }
+
+/* by project */
+.zt-tbl { padding: 0 0 var(--space-2); }
+.zt-row { display: grid; grid-template-columns: 18px minmax(0, 1.1fr) minmax(0, 1.4fr) 128px 104px 110px minmax(0, 1.25fr); gap: var(--space-3); align-items: center; padding: 12px var(--space-5); }
+.zt-row--head { padding-top: 0; padding-bottom: 8px; font-size: 11px; line-height: 14px; font-weight: 650; color: var(--ink-faint); border-bottom: 1px solid var(--line); }
+.zt-list > li { border-bottom: 1px solid var(--line); }
+.zt-p > summary { list-style: none; cursor: pointer; }
+.zt-p > summary::-webkit-details-marker { display: none; }
+.zt-p > summary:hover { background: var(--surface-2); }
+.zt-chev { color: var(--ink-faint); display: inline-flex; }
+.zt-chev .ic { transition: transform .15s; }
+.zt-p[open] > summary .zt-chev .ic { transform: rotate(90deg); }
+.zt-name { display: grid; min-width: 0; }
+.zt-name b { font-size: 15px; font-weight: 700; }
+.zt-name small { font-size: 12px; line-height: 16px; color: var(--ink-muted); overflow-wrap: anywhere; }
+.zt-m { display: grid; gap: 4px; min-width: 0; }
+.zt-goal { stroke: var(--ink); stroke-width: 2; }
+.zt-mv { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.zt-mv b { font-size: 15px; font-weight: 750; }
+.zt-lv { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 650; color: var(--tone-ink); }
+.zt-tr { display: inline-grid; grid-template-columns: auto auto; justify-content: start; gap: 0 5px; align-items: center; font-size: 13px; color: var(--tone-ink, var(--ink-muted)); }
+.zt-tr b { font-weight: 650; }
+.zt-tr small { grid-column: 2; font-size: 11px; color: var(--ink-muted); }
+.zt-n { font-size: 13px; color: var(--ink-muted); }
+.zt-n b { color: var(--ink); font-weight: 700; }
+.zt-st { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--ink); }
+.zt-st.tone-parked { color: var(--tone-ink); font-weight: 650; }
+.zt-c { min-width: 0; }
+.zt-c .chip b { color: inherit; }
+.zt-subs { background: var(--surface-2); }
+.zt-row--sub { padding-top: 10px; padding-bottom: 10px; border-top: 1px solid var(--line); }
+.zt-row--sub .zt-name { padding-left: 4px; }
+.zt-foot { display: flex; gap: 8px; align-items: flex-start; padding: var(--space-3) var(--space-5) var(--space-3); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.zt-foot .ic { flex: none; margin-top: 2px; }
+.zt-foot--in { padding: var(--space-3) 0 0; }
+
+/* causes */
+.zt-bars { display: grid; gap: 10px; }
+.zt-cb { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: var(--space-3); align-items: center; }
+.zt-cb__n { display: grid; font-size: 13px; line-height: 16px; }
+.zt-cb__n small { font-size: 11px; color: var(--ink-muted); }
+.zt-cb__t { display: none; }
+#p-zt-causes .zt-cb { grid-template-columns: 64px minmax(0, 1fr); gap: 8px; }
+#p-zt-causes .zt-seg .ic { display: none; }
+#p-zt-causes .zt-cb__t { display: block; grid-column: 2; margin-top: -4px; font-size: 11px; line-height: 15px; color: var(--ink-muted); }
+#p-zt-causes .zt-whys { grid-template-columns: minmax(0, 1fr); }
+#p-zt-causes .zt-why--sum { grid-column: 1; }
+.zt-bar { display: flex; gap: 3px; height: 28px; }
+.zt-seg { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-width: 0; border-radius: 8px; background: var(--tone); color: var(--on-tone); font-size: 12px; overflow: hidden; }
+.zt-seg b { font-weight: 750; }
+.zt-seg--rest { background: transparent; }
+.zt-w1 { flex: 1 1 0; } .zt-w2 { flex: 2 1 0; } .zt-w3 { flex: 3 1 0; } .zt-w4 { flex: 4 1 0; } .zt-w5 { flex: 5 1 0; } .zt-w6 { flex: 6 1 0; }
+.zt-w7 { flex: 7 1 0; } .zt-w8 { flex: 8 1 0; } .zt-w9 { flex: 9 1 0; } .zt-w10 { flex: 10 1 0; } .zt-w11 { flex: 11 1 0; } .zt-w12 { flex: 12 1 0; } .zt-w13 { flex: 13 1 0; }
+.zt-whys { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px var(--space-5); margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.zt-why { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 6px 0; }
+.zt-why > span:nth-child(2) { display: grid; font-size: 13px; line-height: 17px; }
+.zt-why small { font-size: 12px; line-height: 16px; color: var(--ink-muted); }
+.zt-why__n { font-size: 17px; font-weight: 750; min-width: 24px; text-align: right; }
+.zt-why .tile { background: var(--tone); color: var(--on-tone); }
+.zt-why--sum { grid-column: 2; border-top: 1px solid var(--line-strong); }
+.zt-why--sum > span:first-child { width: 28px; }
+.zt-merge { display: flex; gap: 8px; align-items: flex-start; margin-top: var(--space-4); padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.zt-merge .ic { flex: none; margin-top: 3px; color: var(--ink); }
+.zt-merge b { color: var(--ink); }
+
+/* questions */
+p.zt-intro { font-size: 13px; color: var(--ink-muted); margin-bottom: var(--space-3); }
+.zt-qs { display: grid; }
+.zt-q { display: grid; gap: 10px; padding: var(--space-4) 0; border-top: 1px solid var(--line); }
+.zt-q__h { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: var(--space-3); align-items: start; }
+.zt-q__n { display: inline-flex; align-items: center; justify-content: center; height: 34px; border-radius: 12px; background: var(--surface-2); font-size: 15px; font-weight: 800; }
+.zt-q__t { font-size: 15px; line-height: 21px; font-weight: 700; }
+.zt-q__s { font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.zt-q__s .code { font-size: 12px; color: var(--ink); }
+.zt-said { display: flex; gap: 8px; align-items: flex-start; margin-left: calc(48px + var(--space-3)); font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.zt-said .ic { flex: none; margin-top: 3px; }
+.zt-said .link.code { font-size: 12px; }
+.zt-q__t--un { color: var(--ink-muted); font-weight: 650; }
+.zt-q__act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-left: calc(48px + var(--space-3)); }
+.zt-q .confirm { margin-left: calc(48px + var(--space-3)); }
+.zt-q .diff__b > span { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* side */
+.zt-fxs { display: grid; gap: var(--space-4); }
+.zt-fx { display: grid; gap: 4px; padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.zt-fx:first-child { padding-top: 0; border-top: 0; }
+.zt-fx__d { font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.zt-fx__w { font-size: 14px; line-height: 20px; font-weight: 650; }
+.zt-fx__m { font-size: 12px; line-height: 17px; color: var(--ink-muted); margin-bottom: 4px; }
+.zt-fx__m .code { font-size: 12px; }
+.zt-ba { display: grid; grid-template-columns: 52px minmax(0, 1fr) 24px; gap: 10px; align-items: center; font-size: 12px; color: var(--ink-muted); }
+.zt-ba b { color: var(--ink); text-align: right; }
+
+@media (max-width: 1200px) {
+  .zt-row { grid-template-columns: 18px minmax(0, 1fr) minmax(0, 1.3fr) 120px minmax(0, 1fr); }
+  .zt-row > .zt-st, .zt-row > .zt-c { grid-column: 3 / -1; }
+  .zt-row--head > :nth-child(n+6) { display: none; }
+}
+@media (max-width: 760px) {
+  .zt-tabs { flex-wrap: nowrap; overflow-x: auto; }
+  .zt-row--head { display: none; }
+  .zt-row { grid-template-columns: 18px minmax(0, 1fr) auto; gap: 6px 10px; padding: 12px var(--space-4); }
+  .zt-row > .zt-m { grid-column: 2 / -1; }
+  .zt-row > .zt-tr { grid-column: 2; }
+  .zt-row > .zt-n { grid-column: 3; grid-row: 1; text-align: right; }
+  .zt-row > .zt-st { grid-column: 3; grid-row: 3; justify-self: end; }
+  .zt-row > .zt-c { grid-column: 2 / -1; }
+  .zt-foot { padding: var(--space-3) var(--space-4); }
+  .zt-cb { grid-template-columns: 64px minmax(0, 1fr); gap: 8px; }
+  .zt-seg .ic { display: none; }
+  .zt-cb__t { display: block; grid-column: 2; margin-top: -4px; font-size: 11px; line-height: 15px; color: var(--ink-muted); }
+  .zt-whys { grid-template-columns: minmax(0, 1fr); }
+  .zt-why--sum { grid-column: 1; }
+  .zt-q__h { grid-template-columns: 40px minmax(0, 1fr); }
+  .zt-q__st { grid-column: 2; }
+  .zt-said, .zt-q__act, .zt-q .confirm { margin-left: 0; }
+  .zt-q .confirm { padding: var(--space-4); }
+}
+</style>
+<style data-ds-status>
+.ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
+.ds-status__k { font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.ds-status__w { display: inline-flex; align-items: center; gap: 6px; font-weight: 750; color: var(--tone-ink); }
+.ds-status__n { color: var(--ink-muted); min-width: 0; }
+@media (max-width: 760px) { .ds-status { margin: 12px var(--space-4) 0; } }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs><symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol><symbol id="i-runs" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/></symbol><symbol id="i-parked" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.2 8.7a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.6-.8 1.1"/><circle cx="12" cy="13.6" r=".95" fill="currentColor"/></symbol><symbol id="i-spend" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16a8 8 0 1 1 16 0"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 16l3.5-4.5"/><circle cx="12" cy="16" r="1.4" fill="currentColor"/></symbol><symbol id="i-fleet" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="4.5" width="16" height="6" rx="1.6"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="13.5" width="16" height="6" rx="1.6"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/><circle cx="7.5" cy="16.5" r="1" fill="currentColor"/></symbol><symbol id="i-config" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 7h9M18 7h1M5 17h3M12 17h7M5 12h1M10 12h9"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="16" cy="7" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="10" cy="17" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="12" r="2"/></symbol><symbol id="i-audit" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5" y="4.5" width="14" height="16" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4.5V3.5h6v1M9 12l2 2 4-4"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="11" cy="11" r="6"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M20 20l-4.2-4.2"/></symbol><symbol id="i-chev" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 10l5 5 5-5"/></symbol><symbol id="i-chev-l" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 7l-5 5 5 5"/></symbol><symbol id="i-chev-r" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 7l5 5-5 5"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></symbol><symbol id="i-minus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor"/></symbol><symbol id="i-theme" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol><symbol id="i-git" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="9" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 11c0 3-3 4-10 5"/></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 7.5V12l3 2"/></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3.5" y="5" width="17" height="14" rx="2.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7.5 10l2.5 2-2.5 2M12.5 15h4"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5 19 6v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 12l2.2 2.2L15.5 10"/></symbol><symbol id="i-queue" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8l-8 4-8-4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12l8 4 8-4M4 16l8 4 8-4"/></symbol><symbol id="i-rerun" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19 12a7 7 0 1 1-2.1-5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.5V8H16"/></symbol><symbol id="i-done" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M5.5 12.5 10 17l8.5-9.5"/></symbol><symbol id="i-failed" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M7 7l10 10M17 7 7 17"/></symbol><symbol id="i-refused" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" cx="12" cy="12" r="7.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6.8 17.2 17.2 6.8"/></symbol><symbol id="i-attention" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 21 19.5H3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v4.2"/><circle cx="12" cy="16.9" r="1.1" fill="currentColor"/></symbol><symbol id="i-running" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></symbol><symbol id="i-hourglass" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 4h10M7 20h10M8 4v2.5l4 5.5-4 5.5V20M16 4v2.5L12 12l4 5.5V20"/></symbol><symbol id="i-beat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h3.5l2-5 3.5 10 2.4-6.2 1.3 1.2H21"/></symbol><symbol id="i-doctor" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4.5" y="4.5" width="15" height="15" rx="3"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 8.5v7M8.5 12h7"/></symbol><symbol id="i-cancel" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol><symbol id="i-slot-held" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 11V8a4 4 0 0 1 8 0v3"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5.5" y="11" width="13" height="9" rx="2"/></symbol><symbol id="i-logout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M14 8l4 4-4 4M18 12H9"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol><symbol id="i-fit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></symbol><symbol id="i-steer" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h11M11 7l5 5-5 5M20 5v14"/></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v5"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></symbol><symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 19l1.2-4.2L15.5 5.5l3 3-9.3 9.3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13.5 7.5l3 3"/></symbol><symbol id="i-chain" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol><symbol id="i-slot" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="7" width="16" height="10" rx="5"/><circle cx="9" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-key" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="15.5" r="3.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.5 13 19 4.5M15.5 8l2.5 2.5M17.5 6l2 2"/></symbol><symbol id="i-tag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 4.5h7.5l8 8-7 7L4 11z"/><circle cx="8.3" cy="8.8" r="1.3" fill="currentColor"/></symbol><symbol id="i-comment" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 9.5h8M8 12.5h5"/></symbol><symbol id="i-pr" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="18" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 16v-6a3 3 0 0 0-3-3h-3M13 4.5 10.5 7 13 9.5"/></symbol><symbol id="i-issue" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h16M12 4c2.4 2.3 3.5 5 3.5 8s-1.1 5.7-3.5 8c-2.4-2.3-3.5-5-3.5-8s1.1-5.7 3.5-8z"/></symbol><symbol id="i-plug" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 3.5V8M15 3.5V8M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5v4"/></symbol><symbol id="i-bell" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 20.5h4"/></symbol><symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.5l2 2.5H19A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol><symbol id="i-pie" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M15 3.8A8.5 8.5 0 0 1 20.2 9H15z"/></symbol><symbol id="i-flows" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3" y="4" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="15" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="4" width="7" height="5" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 6.5h4M17.5 9v6"/></symbol><symbol id="i-skill" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 3.5h8l4 4v13H6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3.5v4h4M9 12.5h6M9 16h4"/></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 21V4"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 4h11l-2.5 4L17 12H6"/></symbol><symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="3"/></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8.5 12 13 4 8.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12.5 12 17l8-4.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16.5 12 21l8-4.5"/></symbol><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-bg" width="6" height="6"/><rect class="hatch-ln" width="2" height="6"/></pattern></defs></svg>
+<svg class="sprite" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker></defs></svg>
+<div class="ds-status tone-idle" role="note" aria-label="Design status: Proposed"><span class="ds-status__k">Design status</span><span class="ds-status__w"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Proposed</span><span class="ds-status__n">#753.</span></div>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" class="page">
+<header class="top">
+  <a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
+  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="1 waiting">1</span></a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
+  <div class="top__end">
+    <button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <span class="live" role="status"><span class="dot"></span>Live</span>
+    <button class="roundbtn" type="button" aria-label="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
+    <span class="who"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span>
+  </div>
+</header>
+
+<div class="titlebar">
+  <div class="titlebar__lead"><h1>Zero touch</h1><p class="titlebar__sub">How often a run needed a person, per project and repository. The goal is zero.</p></div>
+  <div class="titlebar__end"><div class="seg" role="group" aria-label="Window"><button type="button" aria-pressed="false">7 days</button><button type="button" aria-pressed="true">30 days</button><button type="button" aria-pressed="false">90 days</button></div></div>
+</div>
+<nav class="tabs zt-tabs" aria-label="Runs views"><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>All runs</a><a href="#" aria-current="page"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg>Zero touch<span class=count>18%</span></a><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"/></svg>Sandboxes<span class=count>2 open</span></a></nav><div class="cards-4">
+<section class="card" id="p-zt-rate" data-panel>
+  <div class="card__head"><h2>Touch rate, 30 days</h2></div>
+  <p class="kpi"><b>18%</b><span>38 of 214 runs needed a person</span></p><svg class="zt-spark" viewBox="-4 -4 208 64" preserveAspectRatio="none" role="img" aria-label="Rolling 30-day touch rate, each week for 8 weeks: from 31 percent to 18 percent. Goal under 5 percent.">
+  <line class="zt-spark__goal" x1="0" x2="200" y1="47.2" y2="47.2"/>
+  <polyline class="zt-spark__l" points="0.0,1.8 28.6,3.5 57.1,7.0 85.7,14.0 114.3,15.8 142.9,19.2 171.4,22.8 200.0,24.5"/>
+  <circle class="zt-spark__d" cx="200.0" cy="24.5" r="3.5"/>
+</svg>
+<p class="zt-spark__ax"><span>8 weeks ago, 31%</span><span>goal, dashed</span><span>now</span></p><p class="zt-kp"><span class="zt-kt"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg>goal under 5%</span><span class="zt-kt zt-kt--ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>down 6 points</span></p>
+</section>
+<section class="card" id="p-zt-streak" data-panel>
+  <div class="card__head"><h2>Zero-touch streak</h2></div>
+  <p class="kpi"><b>9 days</b><span>ops, the longest now</span></p><p class="zt-kp"><span class="zt-kt">shop 4 days</span><span class="zt-kt">web 2 days</span><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>api waiting now</span></p>
+</section>
+<section class="card" id="p-zt-wait" data-panel>
+  <div class="card__head"><h2>Waiting for a person</h2></div>
+  <p class="kpi"><b>41h</b><span>runs waited on a person in 30 days</span></p><p class="zt-kps">Median wait for an answer <b>34m</b></p><p class="zt-kp"><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>waiting: gh-2f6a, 26m</span></p>
+</section>
+<section class="card" id="p-zt-handled" data-panel>
+  <div class="card__head"><h2>Answered from a draft</h2></div>
+  <p class="kpi"><b>11</b><span>of 17 answers you sent</span></p><p class="zt-kps">drafted by an answer rule, sent by you. Median 2 minutes to answer.</p>
+</section>
+</div><div class="cols"><div class="stack"><section class="card card--flush" id="p-zt-projects" data-panel>
+  <div class="card__head"><h2>By project</h2><span class="card__sub">38 of 214 runs needed a person</span><span class="end"><a class="link" href="#">Open as runs</a></span></div>
+  <div class="zt-tbl"><div class="zt-row zt-row--head" aria-hidden="true"><span></span><span>Project</span><span>Touch rate, goal tick at 5%</span>
+<span>Against the 30 days before</span><span>Needed a person</span><span>Since the last touch</span><span>Most often</span></div><ul class="zt-list"><li><details class="zt-p"><summary class="zt-row" aria-label="web: 16 percent, show where"><span class="zt-chev"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <span class="zt-name"><b>web</b><small>acme/web</small></span>
+  <div class="zt-m"><svg class="pbar tone-attention" height="10" role="meter" aria-valuenow="16" aria-valuemin="0" aria-valuemax="100" aria-label="web: 16 percent of runs needed a person, goal under 5 percent"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="40.0%" height="10" rx="5"/><line class="zt-goal" x1="12.50%" x2="12.50%" y1="-4" y2="14"/></svg><p class="zt-mv"><b>16%</b><span class="zt-lv tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>Above goal</span></p></div>
+  <span class="zt-tr tone-ok"><svg class="ic ic--sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg><b>down 8 points</b><small>from 24%</small></span>
+  <span class="zt-n"><b>9</b> of 58 runs</span>
+  <span class="zt-st"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg>2 days</span>
+  <span class="zt-c"><span class="zt-cause tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Questions <b>5</b></span></span></summary></details></li><li><details class="zt-p" open><summary class="zt-row" aria-label="api: 20 percent, show its 2 repositories"><span class="zt-chev"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <span class="zt-name"><b>api</b><small>acme/api and acme/api-docs</small></span>
+  <div class="zt-m"><svg class="pbar tone-attention" height="10" role="meter" aria-valuenow="20" aria-valuemin="0" aria-valuemax="100" aria-label="api: 20 percent of runs needed a person, goal under 5 percent"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="50.0%" height="10" rx="5"/><line class="zt-goal" x1="12.50%" x2="12.50%" y1="-4" y2="14"/></svg><p class="zt-mv"><b>20%</b><span class="zt-lv tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>Above goal</span></p></div>
+  <span class="zt-tr tone-ok"><svg class="ic ic--sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg><b>down 13 points</b><small>from 33%</small></span>
+  <span class="zt-n"><b>13</b> of 64 runs</span>
+  <span class="zt-st tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>waiting now</span>
+  <span class="zt-c"><span class="zt-cause tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Questions <b>9</b></span></span></summary>
+<ul class="zt-subs"><li class="zt-row zt-row--sub"><span class="zt-chev"></span>
+  <span class="zt-name"><span class="code">acme/api</span><small>39 runs</small></span>
+  <div class="zt-m"><svg class="pbar tone-failed" height="10" role="meter" aria-valuenow="31" aria-valuemin="0" aria-valuemax="100" aria-label="acme/api: 31 percent of runs needed a person, goal under 5 percent"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="77.5%" height="10" rx="5"/><line class="zt-goal" x1="12.50%" x2="12.50%" y1="-4" y2="14"/></svg><p class="zt-mv"><b>31%</b><span class="zt-lv tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>High</span></p></div>
+  <span class="zt-tr tone-ok"><svg class="ic ic--sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg><b>down 11 points</b><small>from 42%</small></span>
+  <span class="zt-n"><b>12</b> of 39 runs</span>
+  <span class="zt-st tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>waiting now</span>
+  <span class="zt-c"><span class="zt-cause tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Questions <b>9</b></span></span></li><li class="zt-row zt-row--sub"><span class="zt-chev"></span>
+  <span class="zt-name"><span class="code">acme/api-docs</span><small>25 runs</small></span>
+  <div class="zt-m"><svg class="pbar tone-ok" height="10" role="meter" aria-valuenow="4" aria-valuemin="0" aria-valuemax="100" aria-label="acme/api-docs: 4 percent of runs needed a person, goal under 5 percent"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="10.0%" height="10" rx="5"/><line class="zt-goal" x1="12.50%" x2="12.50%" y1="-4" y2="14"/></svg><p class="zt-mv"><b>4%</b><span class="zt-lv tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>Under goal</span></p></div>
+  <span class="zt-tr tone-ok"><svg class="ic ic--sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg><b>down 5 points</b><small>from 9%</small></span>
+  <span class="zt-n"><b>1</b> of 25 runs</span>
+  <span class="zt-st"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg>12 days</span>
+  <span class="zt-c"><span class="zt-cause tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg>Failed, re-run <b>1</b></span></span></li></ul></details></li><li><details class="zt-p"><summary class="zt-row" aria-label="billing: 32 percent, show where"><span class="zt-chev"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <span class="zt-name"><b>billing</b><small>acme/billing and acme/billing-ui</small></span>
+  <div class="zt-m"><svg class="pbar tone-failed" height="10" role="meter" aria-valuenow="32" aria-valuemin="0" aria-valuemax="100" aria-label="billing: 32 percent of runs needed a person, goal under 5 percent"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="80.0%" height="10" rx="5"/><line class="zt-goal" x1="12.50%" x2="12.50%" y1="-4" y2="14"/></svg><p class="zt-mv"><b>32%</b><span class="zt-lv tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>High</span></p></div>
+  <span class="zt-tr tone-attention"><svg class="ic ic--sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 19V5M6 11l6-6 6 6"/></svg><b>up 4 points</b><small>from 28%</small></span>
+  <span class="zt-n"><b>13</b> of 41 runs</span>
+  <span class="zt-st"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg>1 day</span>
+  <span class="zt-c"><span class="zt-cause tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>Refused, fixed <b>5</b></span></span></summary></details></li><li><details class="zt-p"><summary class="zt-row" aria-label="ops: 3 percent, show where"><span class="zt-chev"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <span class="zt-name"><b>ops</b><small>folders site and pm on mini1</small></span>
+  <div class="zt-m"><svg class="pbar tone-ok" height="10" role="meter" aria-valuenow="3" aria-valuemin="0" aria-valuemax="100" aria-label="ops: 3 percent of runs needed a person, goal under 5 percent"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="7.5%" height="10" rx="5"/><line class="zt-goal" x1="12.50%" x2="12.50%" y1="-4" y2="14"/></svg><p class="zt-mv"><b>3%</b><span class="zt-lv tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg>Under goal</span></p></div>
+  <span class="zt-tr tone-ok"><svg class="ic ic--sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg><b>down 2 points</b><small>from 5%</small></span>
+  <span class="zt-n"><b>1</b> of 34 runs</span>
+  <span class="zt-st"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg>9 days</span>
+  <span class="zt-c"><span class="zt-cause tone-idle"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-cancel"/></svg>Cancelled <b>1</b></span></span></summary></details></li><li><details class="zt-p"><summary class="zt-row" aria-label="shop: 12 percent, show where"><span class="zt-chev"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"/></svg></span>
+  <span class="zt-name"><b>shop</b><small>jobs started by watch rules</small></span>
+  <div class="zt-m"><svg class="pbar tone-attention" height="10" role="meter" aria-valuenow="12" aria-valuemin="0" aria-valuemax="100" aria-label="shop: 12 percent of runs needed a person, goal under 5 percent"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="30.0%" height="10" rx="5"/><line class="zt-goal" x1="12.50%" x2="12.50%" y1="-4" y2="14"/></svg><p class="zt-mv"><b>12%</b><span class="zt-lv tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg>Above goal</span></p></div>
+  <span class="zt-tr tone-ok"><svg class="ic ic--sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg><b>down 9 points</b><small>from 21%</small></span>
+  <span class="zt-n"><b>2</b> of 17 runs</span>
+  <span class="zt-st"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flag"/></svg>4 days</span>
+  <span class="zt-c"><span class="zt-cause tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Questions <b>1</b></span></span></summary></details></li></ul></div><p class="zt-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A row opens to its repositories or folders.</span></p>
+</section><section class="card" id="p-zt-questions" data-panel>
+  <div class="card__head"><h2>Questions it keeps asking</h2><span class="card__sub">operator only</span></div>
+  <p class="zt-intro">Grouped by meaning. You name each group; read the questions on their run pages.</p>
+<ol class="zt-qs">
+<li class="zt-q">
+  <div class="zt-q__h"><span class="zt-q__n" aria-label="asked 6 times">6×</span>
+    <div><p class="zt-q__t">Test command</p><p class="zt-q__s"><span class="code">acme/api</span> · named by ops · all from runs of trigger 3 · last on 6 Oct</p></div>
+    <span class="zt-q__st"><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Open</span></span></div>
+  <p class="zt-said"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg><span>Asked in <a class="link code" href="#">gh-71c2</a>, <a class="link code" href="#">gh-6a0e</a>, <a class="link code" href="#">gh-5d19</a> and 3 more.</span></p>
+  <div class="zt-q__act"><a class="btn btn--sm btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Add to instructions</a><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"/></svg>Save standing answer</a></div>
+  <div class="confirm" role="region" aria-live="polite" aria-label="Preview">
+  <p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Add one sentence to trigger 3's instructions</p>
+  <ul class="confirm__list"><li>Writes <span class="code">…/deploy/triggers.json</span>: trigger 3's <span class="code">instructions</span> gains 80 characters, 149 of 2000 used</li><li>Every later run of trigger 3 reads it above the issue text, labelled as coming from you, in every repository the trigger serves</li><li>Nothing runs now and nothing is spent</li></ul>
+  <div class="diff"><div class="diff__h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>…/deploy/triggers.json · trigger 3</div><div class="diff__b"><span class="d-ctx">{ &quot;on&quot;: { &quot;type&quot;: &quot;comment&quot;, &quot;phrase&quot;: &quot;@pi&quot; },</span><span class="d-ctx">  &quot;run&quot;: { &quot;kind&quot;: &quot;github&quot;, &quot;flow&quot;: &quot;fix&quot;, &quot;resume&quot;: true,</span><span class="d-del">    &quot;instructions&quot;: &quot;This repo uses pnpm, not npm. Run the type check before opening a PR.&quot; } }</span><span class="d-add">    &quot;instructions&quot;: &quot;This repo uses pnpm, not npm. Run the type check before opening a PR. In acme/api, run pnpm test:unit; the e2e suite needs a database and runs in CI.&quot; } }</span></div></div>
+  <p class="confirm__undo"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg>Undo: <b>remove the sentence; the audit log keeps both versions</b></p>
+  <div class="confirm__act"><button class="btn btn--confirm" type="button">Add to trigger 3</button><button class="btn btn--ghost" type="button">Cancel</button><span class="ticket">Preview expires in <b>4:52</b></span></div>
+</div>
+</li>
+<li class="zt-q">
+  <div class="zt-q__h"><span class="zt-q__n" aria-label="asked 3 times">3×</span>
+    <div><p class="zt-q__t">Rate limit scope</p><p class="zt-q__s"><span class="code">acme/api</span> · named by ops · from triage runs of trigger 7 · one waiting now</p></div>
+    <span class="zt-q__st"><span class="chip tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-flag"/></svg>Product decision</span></span></div>
+  <p class="zt-said"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg><span>Asked in <a class="link code" href="#">gh-2f6a</a>, <a class="link code" href="#">gh-48b0</a>, <a class="link code" href="#">gh-3e77</a>.</span></p>
+  <div class="zt-q__act"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"/></svg>Draft it for me</a><a class="btn btn--sm btn--ghost" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Answer gh-2f6a</a></div>
+  
+</li>
+<li class="zt-q">
+  <div class="zt-q__h"><span class="zt-q__n" aria-label="asked 2 times">2×</span>
+    <div><p class="zt-q__t zt-q__t--un">2 similar questions, not named yet</p><p class="zt-q__s"><span class="code">acme/web</span> · from runs of trigger 2 · last on 30 Sep</p></div>
+    <span class="zt-q__st"><span class="chip tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Open</span></span></div>
+  <p class="zt-said"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg><span>Asked in <a class="link code" href="#">gh-1b9d</a>, <a class="link code" href="#">gh-0c4e</a>.</span></p>
+  <div class="zt-q__act"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Name this group</a><a class="btn btn--sm btn--ghost" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"/></svg>Save standing answer</a></div>
+  
+</li>
+<li class="zt-q">
+  <div class="zt-q__h"><span class="zt-q__n" aria-label="asked 5 times">5×</span>
+    <div><p class="zt-q__t">Package manager</p><p class="zt-q__s"><span class="code">acme/web</span> and <span class="code">acme/billing</span> · named by ops · from runs of trigger 3 · none since 24 Sep</p></div>
+    <span class="zt-q__st"><span class="chip tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Fixed</span><span class="zt-q__d">24 Sep</span></span></div>
+  <p class="zt-said"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg><span>Asked in <a class="link code" href="#">gh-09fa</a>, <a class="link code" href="#">gh-7f21</a> and 3 more.</span></p>
+  <div class="zt-q__act"><a class="link" href="#">See the fix</a></div>
+  
+</li>
+</ol>
+<p class="zt-foot zt-foot--in"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>16 of the 17 questions fall in a group; the 17th was asked once.</span></p>
+</section></div><div class="stack"><section class="card" id="p-zt-causes" data-panel>
+  <div class="card__head"><h2>What needed a person</h2><span class="card__sub">last 30 days, by project</span></div>
+  <ul class="zt-bars"><li class="zt-cb"><span class="zt-cb__n"><b>web</b><small>9 of 58</small></span><div class="zt-bar" role="img" aria-label="web: Questions 5, Approvals 1, Failed, then re-run 2, Steered 1"><span class="zt-seg zt-w5 tone-parked" title="Questions: 5"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><b>5</b><span class="sr">Questions</span></span><span class="zt-seg zt-w1 tone-attention" title="Approvals: 1"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-shield"/></svg><b>1</b><span class="sr">Approvals</span></span><span class="zt-seg zt-w2 tone-failed" title="Failed, then re-run: 2"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><b>2</b><span class="sr">Failed, then re-run</span></span><span class="zt-seg zt-w1 tone-running" title="Steered: 1"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-steer"/></svg><b>1</b><span class="sr">Steered</span></span><span class="zt-seg zt-seg--rest zt-w4" aria-hidden="true"></span></div><p class="zt-cb__t" aria-hidden="true">Questions 5 · Approvals 1 · Failed, re-run 2 · Steered 1</p></li><li class="zt-cb"><span class="zt-cb__n"><b>api</b><small>13 of 64</small></span><div class="zt-bar" role="img" aria-label="api: Questions 9, Approvals 2, Failed, then re-run 2"><span class="zt-seg zt-w9 tone-parked" title="Questions: 9"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><b>9</b><span class="sr">Questions</span></span><span class="zt-seg zt-w2 tone-attention" title="Approvals: 2"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-shield"/></svg><b>2</b><span class="sr">Approvals</span></span><span class="zt-seg zt-w2 tone-failed" title="Failed, then re-run: 2"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><b>2</b><span class="sr">Failed, then re-run</span></span></div><p class="zt-cb__t" aria-hidden="true">Questions 9 · Approvals 2 · Failed, re-run 2</p></li><li class="zt-cb"><span class="zt-cb__n"><b>billing</b><small>13 of 41</small></span><div class="zt-bar" role="img" aria-label="billing: Questions 2, Approvals 2, Failed, then re-run 3, Refused until config was fixed 5, Steered 1"><span class="zt-seg zt-w2 tone-parked" title="Questions: 2"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><b>2</b><span class="sr">Questions</span></span><span class="zt-seg zt-w2 tone-attention" title="Approvals: 2"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-shield"/></svg><b>2</b><span class="sr">Approvals</span></span><span class="zt-seg zt-w3 tone-failed" title="Failed, then re-run: 3"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><b>3</b><span class="sr">Failed, then re-run</span></span><span class="zt-seg zt-w5 tone-refused" title="Refused until config was fixed: 5"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg><b>5</b><span class="sr">Refused until config was fixed</span></span><span class="zt-seg zt-w1 tone-running" title="Steered: 1"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-steer"/></svg><b>1</b><span class="sr">Steered</span></span></div><p class="zt-cb__t" aria-hidden="true">Questions 2 · Approvals 2 · Failed, re-run 3 · Refused, fixed 5 · Steered 1</p></li><li class="zt-cb"><span class="zt-cb__n"><b>ops</b><small>1 of 34</small></span><div class="zt-bar" role="img" aria-label="ops: Cancelled 1"><span class="zt-seg zt-w1 tone-idle" title="Cancelled: 1"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-cancel"/></svg><b>1</b><span class="sr">Cancelled</span></span><span class="zt-seg zt-seg--rest zt-w12" aria-hidden="true"></span></div><p class="zt-cb__t" aria-hidden="true">Cancelled 1</p></li><li class="zt-cb"><span class="zt-cb__n"><b>shop</b><small>2 of 17</small></span><div class="zt-bar" role="img" aria-label="shop: Questions 1, Steered 1"><span class="zt-seg zt-w1 tone-parked" title="Questions: 1"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><b>1</b><span class="sr">Questions</span></span><span class="zt-seg zt-w1 tone-running" title="Steered: 1"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-steer"/></svg><b>1</b><span class="sr">Steered</span></span><span class="zt-seg zt-seg--rest zt-w11" aria-hidden="true"></span></div><p class="zt-cb__t" aria-hidden="true">Questions 1 · Steered 1</p></li></ul>
+<ul class="zt-whys"><li class="zt-why"><span class="tile tile--sm tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg></span>
+  <span><b>Questions</b><small>the run asked and stopped: reason awaiting-input, then a person answered</small></span><span class="zt-why__n">17</span></li><li class="zt-why"><span class="tile tile--sm tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg></span>
+  <span><b>Approvals</b><small>a person decided an approval the run asked for</small></span><span class="zt-why__n">5</span></li><li class="zt-why"><span class="tile tile--sm tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg></span>
+  <span><b>Failed, then re-run</b><small>outcome failed, and a person started it again</small></span><span class="zt-why__n">7</span></li><li class="zt-why"><span class="tile tile--sm tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg></span>
+  <span><b>Refused until config was fixed</b><small>outcome policy, then a person changed the configuration and re-ran it</small></span><span class="zt-why__n">5</span></li><li class="zt-why"><span class="tile tile--sm tone-running"><svg class="ic" aria-hidden="true"><use href="#i-steer"/></svg></span>
+  <span><b>Steered</b><small>a person sent the run a message while it worked</small></span><span class="zt-why__n">3</span></li><li class="zt-why"><span class="tile tile--sm tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-cancel"/></svg></span>
+  <span><b>Cancelled</b><small>reason operator-cancel</small></span><span class="zt-why__n">1</span></li><li class="zt-why zt-why--sum"><span></span><span><b>Runs that needed a person</b></span><span class="zt-why__n">38</span></li></ul>
+<p class="zt-merge"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pr"/></svg><span>Merging is never a touch. <a class="link" href="#">How touches are counted</a></span></p>
+</section><section class="card" id="p-zt-fixes" data-panel>
+  <div class="card__head"><h2>Fixes that worked</h2><span class="card__sub">what changed, and what it did</span></div>
+  <ol class="zt-fxs">
+<li class="zt-fx">
+  <p class="zt-fx__d">24 Sep · ops</p>
+  <p class="zt-fx__w">Added “This repo uses pnpm, not npm” to trigger 3's instructions</p>
+  <p class="zt-fx__m">Package manager questions, 2 weeks before and after</p>
+  <p class="zt-ba"><span>Before</span><svg class="pbar tone-attention" height="8" role="img" aria-label="Before: 5"><rect class="pbar__bed" width="100%" height="8" rx="4"/><rect class="pbar__fill" width="100.0%" height="8" rx="4"/></svg><b>5</b></p><p class="zt-ba"><span>After</span><svg class="pbar tone-ok" height="8" role="img" aria-label="After: 0"><rect class="pbar__bed" width="100%" height="8" rx="4"/></svg><b>0</b></p>
+</li>
+<li class="zt-fx">
+  <p class="zt-fx__d">29 Sep · ops</p>
+  <p class="zt-fx__w">Fixed the vault reference for <span class="code">STRIPE_KEY</span></p>
+  <p class="zt-fx__m"><span class="code">secret-unresolved</span> refusals on acme/billing, 9 days before and after</p>
+  <p class="zt-ba"><span>Before</span><svg class="pbar tone-attention" height="8" role="img" aria-label="Before: 4"><rect class="pbar__bed" width="100%" height="8" rx="4"/><rect class="pbar__fill" width="100.0%" height="8" rx="4"/></svg><b>4</b></p><p class="zt-ba"><span>After</span><svg class="pbar tone-ok" height="8" role="img" aria-label="After: 0"><rect class="pbar__bed" width="100%" height="8" rx="4"/></svg><b>0</b></p>
+</li>
+</ol>
+</section></div></div>
+</main>
+</body>
+</html>

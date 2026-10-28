@@ -4,8 +4,9 @@
  *
  * A VERBATIM COPY, PINNED BY ITS CONTENT HASH. `PULSE_TOKENS` is the design system's `tokens.json` as an object
  * literal: the same keys in the same order, the same values, the same `usage` sentences, generated from the file
- * rather than typed. The design folder is not in this repository, so nothing here can derive the copy from it, and
- * AGENTS.md's rule for a copy of an external file is that the copy is pinned by that file's content hash.
+ * rather than typed. The design folder is in this repository (`design/system/tokens.json`), but the console never
+ * reads it (`dist/console.mjs` ships as one file), so the copy stays, pinned by that file's content hash as AGENTS.md
+ * asks of a copy, and `admin/test/design-folder.test.mjs` holds the design's file to the same hash.
  * `PULSE_TOKENS_SHA256` is the hash of `tokens.json`, and `JSON.stringify(PULSE_TOKENS, null, 1)` reproduces the file
  * byte for byte, so `admin/test/console-contrast.test.mjs` holds the two together: a value edited here alone turns
  * it red, and a new `tokens.json` is pasted whole with its hash moved in the same commit. The `usage` sentences stay

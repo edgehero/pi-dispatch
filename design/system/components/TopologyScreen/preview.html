@@ -1,0 +1,421 @@
+<!-- @dsCard group="Spend" height=1350 width=1440 subtitle="Flows map: triggers, flows and chains by folder and forge, with a chip selected" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flows map</title>
+<style>
+.sp-range { background: var(--surface); height: 48px; align-items: center; padding: 0 5px; }
+.sp-range button { height: 38px; padding: 0 14px; font-size: 13px; }
+.sp-range [aria-pressed="true"] { background: var(--primary); color: var(--on-primary); box-shadow: none; }
+.sp-tabs { margin: var(--space-2) 0 var(--space-4); }
+.sp-tabs a .ic { opacity: .8; }
+.sp-kf { margin-top: 10px; font-size: 12px; color: var(--ink-muted); }
+.sp-kf b { color: var(--ink); }
+.sp-chart, .sp-hist, .sp-split { display: block; width: 100%; overflow: visible; }
+.sp-bar { fill: var(--ok); }
+.sp-held { fill: var(--ok-tint); stroke: var(--ok); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.sp-cap { stroke: var(--failed); stroke-width: 1.5; stroke-dasharray: 2 4; }
+.sp-hold { stroke: var(--ink-faint); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.sp-base { stroke: var(--line); }
+.sp-ll { font-size: 11px; font-weight: 650; fill: var(--ink-muted); }
+.sp-ll--cap { fill: var(--ink-muted); }
+.sp-v { font-size: 12px; font-weight: 750; fill: var(--ink); }
+.sp-d { font-size: 11px; font-weight: 600; fill: var(--ink-faint); }
+.sp-d--now { fill: var(--ink); font-weight: 750; }
+.sp-gap { font-size: 14px; font-weight: 700; fill: var(--ink-faint); }
+.sp-hbin { fill: var(--ink-muted); }
+.sp-capline { stroke: var(--failed); stroke-width: 2; stroke-dasharray: 3 3; }
+.sp-k { display: inline-block; width: 14px; height: 10px; border-radius: 4px; }
+.sp-k--bar { background: var(--ok); }
+.sp-k--held { background: var(--ok-tint); box-shadow: inset 0 0 0 1.5px var(--ok); }
+.sp-k--hold { height: 0; border-top: 2px dashed var(--ink-faint); border-radius: 0; }
+.sp-hbars { display: grid; gap: 14px; }
+.sp-hb { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 12px; font-size: 13px; }
+.sp-hb__l { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.sp-hb__l small { font-size: 11px; color: var(--ink-muted); }
+.sp-hb__bar { display: block; width: 100%; }
+.sp-hb__bed { fill: var(--dot-off); }
+.sp-hb__fill { fill: var(--ink-muted); }
+.sp-hb__v { text-align: right; white-space: nowrap; font-size: 13px; }
+.sp-note { margin-top: 10px; font-size: 12px; line-height: 17px; color: var(--ink-muted); }
+.sp-note--ic { display: flex; gap: 6px; align-items: flex-start; }
+.sp-note--ic .ic { margin-top: 1px; }
+.sp-note b { color: var(--ink); }
+.sp-note--wide { margin: 0 4px; }
+.sp-caps { display: grid; }
+.sp-caps .meterrow { grid-template-columns: minmax(0, 130px) minmax(0, 1fr) auto; border-bottom: 1px solid var(--line); }
+.sp-wiform { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.sp-wi__s { margin: var(--space-4) 0 var(--space-3); font-size: 15px; line-height: 22px; }
+.sp-wi { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 12px; font-size: 13px; }
+.sp-wi__l { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; font-weight: 650; margin-top: 6px; }
+.sp-wi__l small { font-weight: 500; font-size: 11px; color: var(--ink-muted); }
+.sp-wi b { text-align: right; white-space: nowrap; }
+.sp-mp { display: grid; gap: 6px; }
+.sp-mp li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); }
+.sp-mp__t { display: flex; flex-direction: column; min-width: 0; }
+.sp-mp__t small { font-size: 12px; color: var(--ink-muted); line-height: 16px; }
+.sp-mp__v { white-space: nowrap; }
+.sp-mp__k { min-width: 64px; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.sp-seg--0 { fill: var(--surface-3); } .sp-seg--1 { fill: var(--dot-off); }
+.sp-seg { stroke: var(--surface); stroke-width: 3; }
+.sp-seg__t { font-size: 12px; font-weight: 750; fill: var(--ink); }
+.sp-rows { display: grid; margin-top: 6px; }
+.sp-rows .meterrow { grid-template-columns: minmax(0, 200px) minmax(0, 1fr) auto; }
+@media (max-width: 760px) {
+  .sp-tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: var(--space-3); }
+  .sp-range { width: 100%; justify-content: space-between; }
+  .sp-wiform { grid-template-columns: minmax(0, 1fr); }
+  .sp-chart .sp-v { font-size: 10px; }
+  .sp-chart .sp-d { font-size: 10px; }
+  .sp-caps .meterrow, .sp-rows .meterrow { grid-template-columns: minmax(0, 104px) minmax(0, 1fr) auto; }
+}
+
+.sx-win { display: flex; align-items: center; gap: 6px; margin: -6px 4px 0; font-size: 12px; color: var(--ink-muted); }
+.sx-k { margin-top: 10px; font-size: 12px; line-height: 17px; color: var(--ink-muted); }
+.sx-k b { color: var(--ink); }
+.sx-lead { margin: 0 4px; font-size: 13px; line-height: 19px; color: var(--ink-muted); max-width: 980px; }
+.sx-note { margin-top: 10px; font-size: 12px; line-height: 17px; color: var(--ink-muted); }
+.sx-note b { color: var(--ink); }
+.sx-note--top { margin: 0 0 var(--space-3); }
+.sx-note--ic { display: flex; gap: 6px; align-items: flex-start; }
+.sx-note--ic .ic { margin-top: 1px; flex: none; }
+.sx-note.tone-attention { color: var(--attention-ink); font-weight: 600; }
+.sx-pad { padding: 0 var(--space-5); }
+.sx-pad--b { padding-bottom: var(--space-5); }
+.sx-lines { display: grid; gap: 8px; font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+.sx-lines li { padding-left: 14px; position: relative; }
+.sx-lines li::before { content: ""; position: absolute; left: 2px; top: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--ink-faint); }
+.sx-lines b { color: var(--ink); }
+.sx-states { display: grid; gap: 8px; }
+
+/* budget split */
+.al-env { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin-bottom: var(--space-4); font-size: 15px; }
+.al-env__h { margin-left: auto; font-size: 13px; color: var(--ink-muted); }
+.al-env__h b { color: var(--ink); }
+.al-rows { display: grid; gap: 4px; margin-top: var(--space-4); }
+.al-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.al-row:last-child { border-bottom: 0; }
+.al-row__l { display: flex; align-items: center; gap: 8px; }
+.al-row__l small, .al-row__v small { font-size: 11px; color: var(--ink-muted); }
+.al-row__v { display: flex; flex-direction: column; align-items: flex-end; font-size: 13px; color: var(--ink-muted); white-space: nowrap; }
+.al-row__v b { color: var(--ink); }
+.al-bar { display: block; width: 100%; overflow: visible; }
+.al-bar__track { fill: var(--surface-2); }
+.al-bar__alloc { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.5; }
+.al-bar__spent { fill: var(--ok); }
+.al-bar__spent--over { fill: var(--failed); }
+.al-bar__floor { stroke: var(--attention); stroke-width: 3; stroke-linecap: round; }
+.al-k { display: inline-block; width: 18px; height: 10px; border-radius: 5px; }
+.al-k--alloc { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.al-k--spent { background: var(--ok); }
+.al-k--floor { width: 3px; height: 14px; border-radius: 2px; background: var(--attention); }
+.al-k--over { background: var(--failed); }
+.al-sel td { background: var(--surface-2); }
+.pr-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
+.pr-row { display: grid; gap: 8px; padding: 12px; border-radius: var(--radius-md); background: var(--surface-2); }
+.pr-row .ptag { justify-self: start; }
+.pr-in { width: 100%; max-width: 120px; }
+.pr-share { font-size: 12px; color: var(--ink-muted); }
+.pr-foot { margin-top: var(--space-4); align-items: flex-end; }
+.cn-h { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; margin: 4px 0 8px; }
+.cn-h + .cn-l + .cn-h { margin-top: var(--space-4); }
+.cn-l { display: grid; gap: 4px; }
+.cn-l li { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px; }
+.rs-l { display: grid; gap: 8px; }
+.rs-l li { display: grid; gap: 6px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); }
+.rs-l .ptag { justify-self: start; }
+.rs-l q { font-size: 13px; line-height: 19px; color: var(--ink); quotes: "\201C" "\201D"; }
+
+/* capacity */
+.cp-trio { display: flex; gap: var(--space-5); margin: -6px 0 var(--space-3); }
+.cp-trio span { display: flex; align-items: baseline; gap: 6px; font-size: 13px; color: var(--ink-muted); }
+.cp-trio b { font-size: 28px; line-height: 32px; font-weight: 800; color: var(--ink); letter-spacing: -0.02em; }
+.cp-trio__0 b { color: var(--ink-faint); }
+.cp-chart { display: block; width: 100%; overflow: visible; margin-bottom: var(--space-4); }
+.cp-bar { fill: var(--running); }
+.cp-peak { fill: var(--ink); }
+.cp-slots { stroke: var(--ink-muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.cp-base { stroke: var(--line-strong); }
+.cp-grid { stroke: var(--line); }
+.cp-now { stroke: var(--ink); stroke-width: 1.5; }
+.cp-d { font-size: 11px; font-weight: 600; fill: var(--ink-muted); }
+.cp-ll { font-size: 11px; font-weight: 650; fill: var(--ink-muted); }
+.cp-ll--now { fill: var(--ink); }
+.cp-nd-bg { fill: var(--surface-2); }
+.cp-nd-ln { fill: var(--line-strong); opacity: .55; }
+.cp-key { display: grid; gap: 10px; }
+.cp-proj { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }
+.cp-proj > span { display: inline-flex; align-items: center; gap: 6px; font-weight: 650; }
+.cp-key li { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-muted); }
+.cp-key li b { color: var(--ink); margin-right: 4px; }
+.cp-key svg { flex: none; overflow: visible; }
+
+/* breakdown */
+.bk-chart, .bk-cum, .bk-mchart { display: block; width: 100%; overflow: visible; }
+.bk-bar { fill: var(--ok); }
+.bk-est { fill: var(--ok-tint); stroke: var(--ok); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.bk-floor { stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; }
+.bk-zero { fill: var(--ink-faint); }
+.bk-grid { stroke: var(--line); }
+.bk-base { stroke: var(--line-strong); }
+.bk-ax { font-size: 11px; font-weight: 600; fill: var(--ink-faint); }
+.bk-v { font-size: 12px; font-weight: 750; fill: var(--ink); }
+.bk-d { font-size: 11px; font-weight: 600; fill: var(--ink-muted); }
+.bk-d--now { fill: var(--ink); font-weight: 750; }
+.bk-cl { stroke: var(--ink-muted); stroke-width: 2; }
+.bk-cl--est { stroke-dasharray: 5 4; }
+.bk-cd { fill: var(--surface); stroke: var(--ink-muted); stroke-width: 2; }
+.bk-cum { margin-top: var(--space-2); }
+.bk-k { display: inline-block; width: 16px; height: 10px; border-radius: 4px; }
+.bk-k--bar { background: var(--ok); }
+.bk-k--est { background: var(--ok-tint); box-shadow: inset 0 0 0 1.5px var(--ok); }
+.bk-k--floor { height: 3px; background: var(--ink); }
+.bk-k--zero { height: 2px; background: var(--ink-faint); }
+.bk-mult { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
+.bk-mf { padding: 12px 12px 6px; border-radius: var(--radius-md); background: var(--surface-2); }
+.bk-mf figcaption { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; margin-bottom: 6px; }
+.bk-mf figcaption span { font-weight: 700; }
+.bk-sm { fill: var(--ink-muted); }
+.bk-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); }
+.bk-h { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+.bk-h--2 { margin-top: var(--space-5); }
+.bk-rows { display: grid; gap: 12px; }
+.bk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 12px; align-items: center; font-size: 13px; }
+.bk-row__l { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+.bk-row__l small { font-size: 11px; color: var(--ink-muted); }
+.bk-row__v { text-align: right; white-space: nowrap; }
+.bk-hb { display: block; width: 100%; }
+.bk-hb__bed { fill: var(--dot-off); }
+.bk-hb__fill { fill: var(--ink-muted); }
+.bk-hb__api { fill: none; stroke: var(--ink-muted); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.bk-hb__zero { stroke: var(--ink); stroke-width: 2; }
+.bk-tail { font-size: 12px; font-weight: 650; padding: 2px 8px; border-radius: var(--radius-pill); box-shadow: inset 0 0 0 1.5px var(--line-strong); color: var(--ink-muted); }
+.pl { padding: 14px; border-radius: var(--radius-md); background: var(--surface-2); }
+.pl + .pl { margin-top: 8px; }
+.pl__h { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.pl__h > div { flex: 1; min-width: 0; }
+.pl__t { font-size: 15px; font-weight: 700; }
+.pl .facts { gap: 8px; }
+.lg-l { display: grid; gap: 8px; }
+.lg-l li { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: center; font-size: 13px; color: var(--ink-muted); }
+.lg-l li b { color: var(--ink); }
+.lg-m { font-weight: 750; color: var(--ink); font-variant-numeric: tabular-nums; }
+.wf-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; }
+.wf-form .field:first-child { grid-column: 1 / -1; }
+.wf-ans { margin-top: var(--space-4); padding: 14px; border-radius: var(--radius-md); background: var(--surface-2); }
+.wf-ans__h { font-size: 13px; color: var(--ink-muted); }
+.wf-ans__n { margin: 4px 0 10px; font-size: 18px; line-height: 26px; }
+.wf-other { display: grid; gap: 8px; margin-top: var(--space-4); }
+.wf-other__h { font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.wf-o { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 12px; border-radius: var(--radius-md); box-shadow: inset 0 0 0 1px var(--line); font-size: 13px; }
+.wf-o__s { margin-top: 2px; font-size: 12px; color: var(--ink-muted); }
+
+/* flows map */
+.fm-wrap { overflow-x: auto; border-radius: var(--radius-md); background: var(--canvas); }
+.fm-svg { display: block; width: 100%; height: auto; }
+.fm-zoom { display: flex; gap: 6px; }
+.fm-zoom .roundbtn { width: 38px; height: 38px; background: var(--surface-2); }
+.fm-g__b { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+.fm-g__t { font-size: 14px; font-weight: 750; fill: var(--ink); }
+.fm-g__s { font-size: 11px; font-weight: 500; fill: var(--ink-muted); }
+.fm-trig__b { fill: var(--surface-2); stroke: var(--line-strong); stroke-width: 1.5; }
+.fm-flow__b { fill: var(--surface); stroke: var(--ink-muted); stroke-width: 1.5; }
+.fm-flow--unv .fm-flow__b { stroke-dasharray: 5 4; stroke: var(--line-strong); }
+.fm-flow--head .fm-flow__b { stroke-dasharray: 5 4; stroke: var(--attention); }
+.fm-flow--miss .fm-flow__b { stroke-dasharray: 5 4; stroke: var(--failed); }
+.fm-flow--orphan { opacity: .55; }
+.fm-flow--orphan .fm-flow__b { stroke-dasharray: 2 4; }
+.fm-trig--spent .fm-trig__b { stroke-dasharray: 2 4; fill: var(--surface); }
+.fm-ic { color: var(--ink-muted); }
+.fm-t { font-size: 14px; font-weight: 700; fill: var(--ink); }
+.fm-s { font-size: 11px; font-weight: 600; fill: var(--ink-muted); }
+.fm-e path { fill: none; stroke: var(--ink-faint); stroke-width: 1.6; }
+.fm-e--observed path { stroke: var(--ink-muted); stroke-width: 3.5; }
+.fm-e--potential path { stroke-dasharray: 6 5; }
+.fm-e--rearm path { stroke-dasharray: 3 4; }
+.fm-el { font-size: 11px; font-weight: 650; fill: var(--ink-muted); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+.fm-e .arrowhead, .fm-sw .arrowhead { fill: var(--ink-faint); }
+.fm-bd--risk { fill: var(--refused); stroke: var(--surface); stroke-width: 2; }
+.fm-bd--chain { fill: var(--surface); stroke: var(--ok); stroke-width: 3; }
+.fm-n:focus-visible { outline: none; }
+.fm-n:focus-visible rect:first-child { stroke: var(--focus); stroke-width: 3; }
+.is-dim { opacity: .45; }
+.is-sel .fm-trig__b { fill: var(--primary); stroke: var(--primary); }
+.is-sel .fm-t { fill: var(--on-primary); }
+.is-sel .fm-ic { color: var(--on-primary); }
+.is-sel.fm-e path { stroke: var(--ink); stroke-width: 2.2; }
+.is-near .fm-flow__b { stroke: var(--ink); stroke-width: 2.5; }
+.fm-lgs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-5); }
+.fm-lg__h { font-size: 12px; font-weight: 700; color: var(--ink-muted); margin-bottom: 8px; }
+.fm-lg__h--gap { margin-top: var(--space-4); }
+.fm-lg ul { display: grid; gap: 8px; }
+.fm-lg li { display: flex; align-items: center; gap: 10px; font-size: 12px; line-height: 16px; color: var(--ink-muted); }
+.fm-lg li b { color: var(--ink); margin-right: 3px; }
+.fm-sw { flex: none; overflow: visible; }
+.fm-caps { margin: var(--space-4) 0; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); font-size: 12px; font-weight: 600; }
+.fm-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-4); }
+.fm-selcard { box-shadow: inset 0 0 0 2px var(--primary); }
+
+@media (max-width: 760px) {
+  .al-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
+  .al-row .al-bar { grid-column: 1 / -1; grid-row: 2; }
+  .al-env__h { margin-left: 0; }
+  .pr-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sx-pad { padding: 0 var(--space-4); } .sx-pad--b { padding-bottom: var(--space-4); }
+  .cp-trio { gap: var(--space-4); }
+  .cp-trio b { font-size: 22px; line-height: 26px; }
+  .cp-d { font-size: 9px; }
+  .bk-mult { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bk-cols { grid-template-columns: minmax(0, 1fr); gap: var(--space-5); }
+  .bk-chart .bk-v { font-size: 10px; }
+  .bk-chart .bk-d { font-size: 10px; }
+  .wf-form { grid-template-columns: minmax(0, 1fr); }
+  .fm-svg { min-width: 820px; }
+  .fm-lgs { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .lg-l li { grid-template-columns: 84px minmax(0, 1fr); }
+}
+</style>
+<style data-ds-status>
+.ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
+.ds-status__k { font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.ds-status__w { display: inline-flex; align-items: center; gap: 6px; font-weight: 750; color: var(--tone-ink); }
+.ds-status__n { color: var(--ink-muted); min-width: 0; }
+@media (max-width: 760px) { .ds-status { margin: 12px var(--space-4) 0; } }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs><symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol><symbol id="i-runs" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/></symbol><symbol id="i-parked" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.2 8.7a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.6-.8 1.1"/><circle cx="12" cy="13.6" r=".95" fill="currentColor"/></symbol><symbol id="i-spend" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16a8 8 0 1 1 16 0"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 16l3.5-4.5"/><circle cx="12" cy="16" r="1.4" fill="currentColor"/></symbol><symbol id="i-fleet" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="4.5" width="16" height="6" rx="1.6"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="13.5" width="16" height="6" rx="1.6"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/><circle cx="7.5" cy="16.5" r="1" fill="currentColor"/></symbol><symbol id="i-config" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 7h9M18 7h1M5 17h3M12 17h7M5 12h1M10 12h9"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="16" cy="7" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="10" cy="17" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="12" r="2"/></symbol><symbol id="i-audit" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5" y="4.5" width="14" height="16" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4.5V3.5h6v1M9 12l2 2 4-4"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="11" cy="11" r="6"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M20 20l-4.2-4.2"/></symbol><symbol id="i-chev" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 10l5 5 5-5"/></symbol><symbol id="i-chev-l" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 7l-5 5 5 5"/></symbol><symbol id="i-chev-r" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 7l5 5-5 5"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></symbol><symbol id="i-minus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor"/></symbol><symbol id="i-theme" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol><symbol id="i-git" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="9" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 11c0 3-3 4-10 5"/></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 7.5V12l3 2"/></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3.5" y="5" width="17" height="14" rx="2.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7.5 10l2.5 2-2.5 2M12.5 15h4"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5 19 6v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 12l2.2 2.2L15.5 10"/></symbol><symbol id="i-queue" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8l-8 4-8-4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12l8 4 8-4M4 16l8 4 8-4"/></symbol><symbol id="i-rerun" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19 12a7 7 0 1 1-2.1-5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.5V8H16"/></symbol><symbol id="i-done" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M5.5 12.5 10 17l8.5-9.5"/></symbol><symbol id="i-failed" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M7 7l10 10M17 7 7 17"/></symbol><symbol id="i-refused" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" cx="12" cy="12" r="7.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6.8 17.2 17.2 6.8"/></symbol><symbol id="i-attention" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 21 19.5H3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v4.2"/><circle cx="12" cy="16.9" r="1.1" fill="currentColor"/></symbol><symbol id="i-running" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></symbol><symbol id="i-hourglass" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 4h10M7 20h10M8 4v2.5l4 5.5-4 5.5V20M16 4v2.5L12 12l4 5.5V20"/></symbol><symbol id="i-beat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h3.5l2-5 3.5 10 2.4-6.2 1.3 1.2H21"/></symbol><symbol id="i-doctor" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4.5" y="4.5" width="15" height="15" rx="3"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 8.5v7M8.5 12h7"/></symbol><symbol id="i-cancel" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol><symbol id="i-slot-held" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 11V8a4 4 0 0 1 8 0v3"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="5.5" y="11" width="13" height="9" rx="2"/></symbol><symbol id="i-logout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M14 8l4 4-4 4M18 12H9"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol><symbol id="i-fit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></symbol><symbol id="i-steer" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h11M11 7l5 5-5 5M20 5v14"/></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v5"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></symbol><symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M5 19l1.2-4.2L15.5 5.5l3 3-9.3 9.3z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M13.5 7.5l3 3"/></symbol><symbol id="i-chain" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol><symbol id="i-slot" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="4" y="7" width="16" height="10" rx="5"/><circle cx="9" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-key" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="8" cy="15.5" r="3.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10.5 13 19 4.5M15.5 8l2.5 2.5M17.5 6l2 2"/></symbol><symbol id="i-tag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 4.5h7.5l8 8-7 7L4 11z"/><circle cx="8.3" cy="8.8" r="1.3" fill="currentColor"/></symbol><symbol id="i-comment" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8 9.5h8M8 12.5h5"/></symbol><symbol id="i-pr" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="6" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="7" cy="18" r="2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="17" cy="18" r="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 8v8M17 16v-6a3 3 0 0 0-3-3h-3M13 4.5 10.5 7 13 9.5"/></symbol><symbol id="i-issue" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12h16M12 4c2.4 2.3 3.5 5 3.5 8s-1.1 5.7-3.5 8c-2.4-2.3-3.5-5-3.5-8s1.1-5.7 3.5-8z"/></symbol><symbol id="i-plug" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 3.5V8M15 3.5V8M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5v4"/></symbol><symbol id="i-bell" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 20.5h4"/></symbol><symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.5l2 2.5H19A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol><symbol id="i-pie" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M15 3.8A8.5 8.5 0 0 1 20.2 9H15z"/></symbol><symbol id="i-flows" viewBox="0 0 24 24"><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="3" y="4" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="15" width="7" height="5" rx="2.5"/><rect fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" x="14" y="4" width="7" height="5" rx="2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 6.5h4M17.5 9v6"/></symbol><symbol id="i-skill" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 3.5h8l4 4v13H6z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 3.5v4h4M9 12.5h6M9 16h4"/></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 21V4"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M6 4h11l-2.5 4L17 12H6"/></symbol><symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" cx="12" cy="12" r="3"/></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4 20 8.5 12 13 4 8.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12.5 12 17l8-4.5"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 16.5 12 21l8-4.5"/></symbol><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-bg" width="6" height="6"/><rect class="hatch-ln" width="2" height="6"/></pattern></defs></svg>
+<svg class="sprite" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker></defs></svg>
+<div class="ds-status tone-running" role="note" aria-label="Design status: Planned"><span class="ds-status__k">Design status</span><span class="ds-status__w"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg>Planned</span><span class="ds-status__n">#749, Spend.</span></div>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" class="page">
+<header class="top">
+  <a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
+  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="1 waiting">1</span></a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
+  <div class="top__end">
+    <button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <span class="live" role="status"><span class="dot"></span>Live</span>
+    <button class="roundbtn" type="button" aria-label="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
+    <span class="who"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span>
+  </div>
+</header>
+
+<div class="titlebar">
+  <div class="titlebar__lead"><h1>Spend</h1><p class="titlebar__sub">Which trigger starts which flow, what chains to what, and what nothing reaches.</p></div>
+  <div class="titlebar__end"><div class="seg sp-range" role="group" aria-label="Range"><button aria-pressed="true">7 days</button><button aria-pressed="false">30 days</button><button aria-pressed="false">Month to date</button></div><div class="projseg" role="group" aria-label="Project"><span class="projseg__l">Project</span><button type="button" aria-pressed="true">All</button><button type="button" aria-pressed="false"><span class="ptag">web</span></button><button type="button" aria-pressed="false"><span class="ptag">api</span></button><button type="button" aria-pressed="false"><span class="ptag">billing</span></button><button type="button" aria-pressed="false"><span class="ptag">ops</span></button></div></div>
+</div>
+<nav class="tabs sp-tabs" aria-label="Spend views"><a href="/insights"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="/insights/budget-split"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pie"/></svg>Budget split</a><a href="/insights/capacity"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg>Capacity</a><a href="/insights/breakdown"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Breakdown</a><a href="/insights/flows" aria-current="page"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"/></svg>Flows map</a></nav><p class="sx-win"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg><span>Map window: the last 30 days of run records. Spend window: last 7 days.</span></p><div class="cols"><section class="card" id="p-flows" data-panel>
+  <div class="card__head"><h2>Flows map</h2><span class="card__sub">what starts what, from the triggers file and run records</span><span class="end"><div class="seg" role="group" aria-label="View"><button aria-pressed="true">Map</button><button aria-pressed="false">List</button></div><div class="fm-zoom"><button class="roundbtn" type="button" aria-label="Zoom out"><svg class="ic" aria-hidden="true"><use href="#i-minus"/></svg></button><button class="roundbtn" type="button" aria-label="Zoom in"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button><button class="roundbtn" type="button" aria-label="Fit the map"><svg class="ic" aria-hidden="true"><use href="#i-fit"/></svg></button></div></span></div>
+  <div class="fm-wrap" tabindex="0" aria-label="Flows map, scrolls sideways on a small screen"><svg class="fm-svg" viewBox="0 0 1000 560" role="group" aria-label="Flows map: 7 triggers in 4 groups, the flows they run, and the chains between them. nightly-tidy is selected."><defs><marker id="arrow-thick" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="3.2" markerHeight="3.2" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker></defs><g class="fm-g is-dim"><rect class="fm-g__b" x="514" y="16" width="470" height="362" rx="18"/><text class="fm-g__t" x="532" y="44">github · forge</text><text class="fm-g__s" x="532" y="62">unverifiable from this host · ran against acme/web, acme/api, acme/billing</text></g><g class="fm-g is-dim"><rect class="fm-g__b" x="514" y="394" width="470" height="150" rx="18"/><text class="fm-g__t" x="532" y="422">gitlab · forge</text><text class="fm-g__s" x="532" y="440">unverifiable from this host · ran against acme/billing-ui</text></g><g class="fm-g "><rect class="fm-g__b" x="16" y="16" width="470" height="362" rx="18"/><text class="fm-g__t" x="34" y="44">site · HEAD 4c1e9a0</text><text class="fm-g__s" x="34" y="62">local folder · 4 skills</text></g><g class="fm-g is-dim"><rect class="fm-g__b" x="16" y="394" width="470" height="150" rx="18"/><text class="fm-g__t" x="34" y="422">pm · HEAD 9d02b7c</text><text class="fm-g__s" x="34" y="440">local folder · 1 skill</text></g><g class="fm-e fm-e--config is-dim"><path d="M728 95 L794 95" marker-end="url(#arrow)"/></g><a href="#" class="fm-n fm-trig is-dim " aria-label="label trigger pi:frontend">
+  <rect class="fm-trig__b" x="532" y="78" width="196" height="34" rx="17"/>
+  <use href="#i-tag" x="543" y="86" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="568" y="100">pi:frontend</text>
+  <text class="fm-s" x="546" y="130">12 runs · $2.89</text>
+</a><a href="#" class="fm-n fm-flow fm-flow--unv is-dim" aria-label="flow frontend-fix ×2">
+  <rect class="fm-flow__b" x="798" y="78" width="168" height="34" rx="10"/>
+  <use href="#i-skill" x="808" y="86" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="832" y="100">frontend-fix ×2</text>
+  
+</a><g class="fm-e fm-e--config is-dim"><path d="M728 171 L794 171" marker-end="url(#arrow)"/></g><a href="#" class="fm-n fm-trig is-dim " aria-label="comment trigger &quot;@pi&quot;">
+  <rect class="fm-trig__b" x="532" y="154" width="196" height="34" rx="17"/>
+  <use href="#i-comment" x="543" y="162" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="568" y="176">"@pi"</text>
+  <text class="fm-s" x="546" y="206">104 runs · $21.85</text>
+</a><a href="#" class="fm-n fm-flow fm-flow--unv is-dim" aria-label="flow fix">
+  <rect class="fm-flow__b" x="798" y="154" width="168" height="34" rx="10"/>
+  <use href="#i-skill" x="808" y="162" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="832" y="176">fix</text>
+  
+</a><g class="fm-e fm-e--config is-dim"><path d="M728 247 L794 247" marker-end="url(#arrow)"/></g><a href="#" class="fm-n fm-trig is-dim " aria-label="label trigger pi:triage">
+  <rect class="fm-trig__b" x="532" y="230" width="196" height="34" rx="17"/>
+  <use href="#i-tag" x="543" y="238" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="568" y="252">pi:triage</text>
+  <text class="fm-s" x="546" y="282">4 runs · $0.65</text>
+</a><a href="#" class="fm-n fm-flow fm-flow--unv is-dim" aria-label="flow triage">
+  <rect class="fm-flow__b" x="798" y="230" width="168" height="34" rx="10"/>
+  <use href="#i-skill" x="808" y="238" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="832" y="252">triage</text>
+  
+</a><g class="fm-e fm-e--config is-dim"><path d="M728 323 L794 323" marker-end="url(#arrow)"/></g><a href="#" class="fm-n fm-trig is-dim fm-trig--spent" aria-label="issue trigger closed #40 · once">
+  <rect class="fm-trig__b" x="532" y="306" width="196" height="34" rx="17"/>
+  <use href="#i-issue" x="543" y="314" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="568" y="328">closed #40 · once</text>
+  <text class="fm-s" x="546" y="358">spent by gh-40a1</text>
+</a><a href="#" class="fm-n fm-flow fm-flow--unv fm-flow--orphan is-dim" aria-label="flow deploy">
+  <rect class="fm-flow__b" x="798" y="306" width="168" height="34" rx="10"/>
+  <use href="#i-skill" x="808" y="314" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="832" y="328">deploy</text>
+  
+</a><g class="fm-e fm-e--config is-dim"><path d="M728 473 L794 473" marker-end="url(#arrow)"/></g><a href="#" class="fm-n fm-trig is-dim" aria-label="pull request trigger open, update">
+  <rect class="fm-trig__b" x="532" y="456" width="196" height="34" rx="17"/>
+  <use href="#i-git" x="543" y="464" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="568" y="478">open, update</text>
+  <text class="fm-s" x="546" y="508">13 runs · $2.26</text><circle class="fm-bd fm-bd--risk" cx="720" cy="460" r="5.5"><title>PR spend-loop risk: fires on opened and synchronize; a flow that pushes can loop with another bot</title></circle>
+</a><a href="#" class="fm-n fm-flow fm-flow--unv is-dim" aria-label="flow review">
+  <rect class="fm-flow__b" x="798" y="456" width="168" height="34" rx="10"/>
+  <use href="#i-skill" x="808" y="464" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="832" y="478">review</text>
+  
+</a><g class="fm-e fm-e--rearm is-sel"><path d="M78 128 C 56 76, 180 76, 158 126" marker-end="url(#arrow)"/><text class="fm-el" x="184" y="104">re-arms 0 3 * * *</text></g><g class="fm-e fm-e--config is-sel"><path d="M230 145 L296 145" marker-end="url(#arrow)"/></g><a href="#" class="fm-n fm-trig is-sel" aria-label="cron trigger nightly-tidy, selected">
+  <rect class="fm-trig__b" x="34" y="128" width="196" height="34" rx="17"/>
+  <use href="#i-clock" x="45" y="136" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="70" y="150">nightly-tidy</text>
+  <text class="fm-s" x="48" y="180">30 runs · plan:kimi</text>
+</a><a href="#" class="fm-n fm-flow is-near" aria-label="flow tidy">
+  <rect class="fm-flow__b" x="300" y="128" width="164" height="34" rx="10"/>
+  <use href="#i-skill" x="310" y="136" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="334" y="150">tidy</text>
+  <circle class="fm-bd fm-bd--chain" cx="460" cy="132" r="6"><title>chainable: ai-trigger allow</title></circle>
+</a><g class="fm-e fm-e--observed is-dim"><path d="M380 164 L380 222" marker-end="url(#arrow-thick)"/><text class="fm-el" x="330" y="198" text-anchor="middle">6× · 12h ago</text></g><a href="#" class="fm-n fm-flow is-dim" aria-label="flow tidy-report">
+  <rect class="fm-flow__b" x="300" y="226" width="164" height="34" rx="10"/>
+  <use href="#i-skill" x="310" y="234" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="334" y="248">tidy-report</text>
+  
+</a><g class="fm-e fm-e--potential is-dim"><path d="M380 262 L380 312" marker-end="url(#arrow)"/><text class="fm-el" x="340" y="291" text-anchor="middle">mention</text></g><a href="#" class="fm-n fm-flow is-dim" aria-label="flow deps-bump">
+  <rect class="fm-flow__b" x="300" y="316" width="164" height="34" rx="10"/>
+  <use href="#i-skill" x="310" y="324" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="334" y="338">deps-bump</text>
+  
+</a><a href="#" class="fm-n fm-flow fm-flow--orphan is-dim" aria-label="flow old-migrate">
+  <rect class="fm-flow__b" x="34" y="316" width="170" height="34" rx="10"/>
+  <use href="#i-skill" x="44" y="324" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="68" y="338">old-migrate</text>
+  <text class="fm-s" x="46" y="368">orphan: nothing reaches it</text>
+</a><g class="fm-e fm-e--config is-dim"><path d="M230 473 L296 473" marker-end="url(#arrow)"/></g><a href="#" class="fm-n fm-trig is-dim" aria-label="cron trigger pm-weekly">
+  <rect class="fm-trig__b" x="34" y="456" width="196" height="34" rx="17"/>
+  <use href="#i-clock" x="45" y="464" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="70" y="478">pm-weekly</text>
+  <text class="fm-s" x="48" y="508">4 runs · $0.06</text>
+</a><a href="#" class="fm-n fm-flow is-dim" aria-label="flow portfolio-manager">
+  <rect class="fm-flow__b" x="296" y="456" width="182" height="34" rx="10"/>
+  <use href="#i-skill" x="306" y="464" width="18" height="18" class="fm-ic"/>
+  <text class="fm-t" x="330" y="478">portfolio-manager</text>
+  <text class="fm-s" x="308" y="508">writes the budget split</text>
+</a></svg></div>
+</section><section class="card fm-selcard" id="p-flows-selected" data-panel>
+  <div class="card__head"><h2>nightly-tidy</h2><span class="card__sub">selected</span><span class="end"><span class="tile tile--sm tone-running"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></span></span></div>
+  <dl class="facts facts--1"><div class="fact"><dt>Trigger</dt><dd>cron <span class="code">nightly-tidy</span>, <span class="code">0 3 * * *</span> UTC</dd></div><div class="fact"><dt>Flow</dt><dd><b>tidy</b>, found at HEAD</dd></div><div class="fact"><dt>Folder</dt><dd><span class="code">site</span> · HEAD 4c1e9a0</dd></div><div class="fact"><dt>Runs</dt><dd>30 in 30 days · last <span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span> 12h ago</dd></div><div class="fact"><dt>Next</dt><dd>Fri 9 Oct, 03:00 UTC, in 11h 21m</dd></div><div class="fact"><dt>Spend</dt><dd><span class="code">plan:kimi</span> this window</dd></div><div class="fact"><dt>Chainable</dt><dd>yes: ai-trigger allow</dd></div><div class="fact"><dt>Chains to</dt><dd><b>tidy-report</b>, 6 times in 30 days</dd></div><div class="fact"><dt>Loops in the skill</dt><dd>none</dd></div></dl><p class="fm-acts"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Open trigger</a><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Runs from it</a></p>
+</section></div><div class="cols"><section class="card" id="p-flows-key" data-panel>
+  <div class="card__head"><h2>Key</h2></div>
+  <div class="fm-lgs"><div class="fm-lg"><p class="fm-lg__h">Wires</p><ul><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-e fm-e--config"><path d="M2 12 L52 12" marker-end="url(#arrow)"/></g></svg><span><b>config</b> the trigger names this flow</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-e fm-e--observed"><path d="M2 12 L52 12" marker-end="url(#arrow-thick)"/></g></svg><span><b>observed ×n</b> chained in run records</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-e fm-e--potential"><path d="M2 12 L52 12" marker-end="url(#arrow)"/></g></svg><span><b>potential</b> a text mention, not a promise</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-e fm-e--rearm"><path d="M10 20 C 2 0, 50 0, 42 20" marker-end="url(#arrow)"/></g></svg><span><b>cron re-arm</b> the schedule itself</span></li></ul></div><div class="fm-lg"><p class="fm-lg__h">Flows</p><ul><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-flow"><rect class="fm-flow__b" x="2" y="3" width="56" height="18" rx="6"/></g></svg><span><b>skill</b> found at HEAD</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-flow fm-flow--unv"><rect class="fm-flow__b" x="2" y="3" width="56" height="18" rx="6"/></g></svg><span><b>unverified</b> repo not readable from this host</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-flow fm-flow--head"><rect class="fm-flow__b" x="2" y="3" width="56" height="18" rx="6"/></g></svg><span><b>not at HEAD</b> not committed, or a tier not checkable</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-flow fm-flow--miss"><rect class="fm-flow__b" x="2" y="3" width="56" height="18" rx="6"/></g></svg><span><b>missing</b> absent in every checkable tier</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><g class="fm-flow fm-flow--orphan"><rect class="fm-flow__b" x="2" y="3" width="56" height="18" rx="6"/></g></svg><span><b>orphan or spent</b> nothing reaches it, or a one-shot that fired</span></li></ul></div><div class="fm-lg"><p class="fm-lg__h">Badges</p><ul><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><circle class="fm-bd fm-bd--risk" cx="30" cy="12" r="6"/></svg><span><b>dot</b> unread, injected ai-trigger, or PR spend-loop risk</span></li><li><svg class="fm-sw" viewBox="0 0 60 24" width="60" height="24" aria-hidden="true"><circle class="fm-bd fm-bd--chain" cx="30" cy="12" r="6.5"/></svg><span><b>ring</b> chainable: ai-trigger allow</span></li></ul></div></div>
+</section><section class="card" id="p-flows-honesty" data-panel>
+  <div class="card__head"><h2>Not on the map</h2></div>
+  <ul class="sx-lines">
+  <li><b>1</b> run unattributed: its record names no trigger.</li>
+  <li><b>2</b> chain requests refused, by the caps or the gate.</li>
+  <li><b>1</b> wire label in its tooltip only: there was no clear spot on the map.</li>
+</ul><p class="fm-lg__h fm-lg__h--gap">Instead of the map, when the triggers file will not load</p><div class="sx-states"><div class="banner banner--sm tone-failed" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg></span>
+  <div><p class="banner__t">No triggers file found</p><p class="banner__s">The map has nothing to draw. Configuration says where the file should be.</p></div>
+  
+</div><div class="banner banner--sm tone-failed" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg></span>
+  <div><p class="banner__t">Triggers file invalid</p><p class="banner__s">The loader's words are shown here, and nothing is drawn until it loads.</p></div>
+  
+</div></div>
+</section></div>
+</main>
+</body>
+</html>

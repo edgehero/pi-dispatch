@@ -121,3 +121,6 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# The design tools' screenshots and harness pages (design/tools/shoot.py). Rebuilt on every run.
+design/.shots/
