@@ -42,18 +42,18 @@ export function assistantMessage(content, { stopReason = content.some((part) => 
  * `contexts` so a test can read what the model was sent. `onCall(n)` (1-based), when given, runs before call n is
  * answered, so a test can change the world while that request is in flight (inbox.test.mjs writes a steer file there).
  */
-export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root, api, script, { onCall } = {}) {
+export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root, api, script, { onCall, reasoning = false } = {}) {
 	const agentDir = join(root, "agent");
 	mkdirSync(agentDir, { recursive: true });
 	const modelsPath = join(agentDir, "models.json");
-	const definition = { id: MODEL_ID, name: "fake", api, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 };
+	const definition = { id: MODEL_ID, name: "fake", api, reasoning, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 };
 	writeFileSync(modelsPath, `${JSON.stringify({ providers: { [PROVIDER]: { apiKey: "pi-dispatch-recover-fake-key", baseUrl: "http://127.0.0.1:1", api, models: [definition] } } })}\n`);
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath });
 	const contexts = [];
 	modelRuntime.registerProvider(PROVIDER, {
 		api,
-		streamSimple(model, context) {
-			contexts.push({ model, messages: context.messages.slice() });
+		streamSimple(model, context, options) {
+			contexts.push({ model, messages: context.messages.slice(), reasoning: options?.reasoning });
 			onCall?.(contexts.length);
 			const content = script[Math.min(contexts.length - 1, script.length - 1)];
 			const message = { ...assistantMessage(content, { api: model.api }), provider: model.provider, model: model.id };
@@ -67,15 +67,16 @@ export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root,
 }
 
 /** A real AgentSession over `sessionManager`, with the runner's loader and the given inline extension factories. */
-export async function scriptedSession(deps, f, { api, script, sessionManager, extensionFactories = [], excludeTools = [], onCall }) {
+export async function scriptedSession(deps, f, { api, script, sessionManager, extensionFactories = [], excludeTools = [], onCall, reasoning = false, thinkingLevel }) {
 	const { pi, loaderModule } = deps;
 	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, outboxProtocolPath: f.outboxProtocolPath, packagePaths: [], ...(extensionFactories.length > 0 && { extensionFactories }) });
-	const runtime = await scriptedRuntime(deps, f.root, api, script, { onCall });
+	const runtime = await scriptedRuntime(deps, f.root, api, script, { onCall, reasoning });
 	const { session } = await pi.createAgentSession({
 		cwd: f.workspace,
 		agentDir: runtime.agentDir,
 		modelRuntime: runtime.modelRuntime,
 		model: runtime.model,
+		...(thinkingLevel !== undefined && { thinkingLevel }),
 		settingsManager: pi.SettingsManager.inMemory({}),
 		sessionManager,
 		resourceLoader: loader,

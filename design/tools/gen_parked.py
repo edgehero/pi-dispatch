@@ -352,131 +352,33 @@ All approval content is sample, because approval gates are planned for 5.0.0: gh
 # 5. Fork a run (#648)
 # ======================================================================
 def fork_run():
-    tree = f"""<section class="card" id="p-forks" data-panel aria-labelledby="fk-t">
-  <div class="card__head"><h2 id="fk-t">Forks of this run</h2><span class="card__sub">each fork runs on its own branch; the original pull request is untouched</span></div>
-  <div class="fk-tree" role="img" aria-label="gh-b3d7, completed, has two forks: gh-b3d7-f1 completed and gh-b3d7-f2 running">
-    <div class="fk-node fk-node--root">
-      <p class="fk-n__h"><span class="code">gh-b3d7</span>{badge("completed")}</p>
-      <p class="fk-n__s">original, claude-sonnet-5-5, $0.42</p>
-    </div>
-    <svg class="fk-lines" width="96" height="132" viewBox="0 0 96 132" aria-hidden="true">
-      <path class="fk-line" d="M0 66 C48 66 48 30 96 30"/>
-      <path class="fk-line" d="M0 66 C48 66 48 102 96 102"/>
-    </svg>
-    <div class="fk-kids">
-      <div class="fk-node">
-        <p class="fk-n__h"><span class="code">gh-b3d7-f1</span>{badge("completed")}</p>
-        <p class="fk-n__s">from entry 9, claude-opus-5-5, $1.12</p>
-      </div>
-      <div class="fk-node fk-node--live">
-        <p class="fk-n__h"><span class="code">gh-b3d7-f2</span>{badge("running")}</p>
-        <p class="fk-n__s">from entry 14, kimi-for-coding, 4m</p>
-      </div>
-    </div>
-  </div>
-</section>"""
-
-    def n(k):
-        return f'<span class="fk-num">#{k}</span>'
-    entries = [
-        tx("call", "15:27:48", n(10) + '<span class="code">{"path": "src/checkout/PayButton.tsx"}</span>', label="read", fork=True),
-        tx("result", "15:27:49", n(11) + '<details><summary>142 lines</summary><pre>export function PayButton({ onPay }) {\n  return &lt;button onClick={onPay}&gt;Pay&lt;/button&gt;\n}</pre></details>', label="read", fork=True),
-        tx("call", "15:29:08", n(12) + '<span class="code">npm test -- checkout</span>', label="bash", fork=True),
-        tx("error", "15:29:10", n(13) + "1 failing: charges twice when Pay is pressed twice.", label="bash", fork=True),
-        tx("assistant", "15:29:48", n(14) + "The test confirms the double submit. I'll disable the button while the payment request is in flight and add an idempotency key on the server side.", forkpoint=True),
-        tx("call", "15:30:03", n(15) + '<span class="code">src/checkout/PayButton.tsx</span>, 2 hunks', label="edit", fork=True),
-        tx("result", "15:30:04", n(16) + "Applied.", label="edit", fork=True),
-        tx("compaction", "15:36:10", n(17) + "Context compacted from 61% to 18%.", fork=True),
-        tx("end", "15:52:31", n(18) + "Completed: 3 commits on pi/issue-415, pull request #512 opened."),
-    ]
-    transcript = f"""<section class="card" id="p-transcript" data-panel aria-labelledby="fk-tx">
-  <div class="card__head"><h2 id="fk-tx">Transcript</h2><span class="card__sub">pick an entry to fork from</span><span class="end">{btn("Entries 1 to 9", "ghost", "chev")}</span></div>
-  <ol class="tx fk-tx">{''.join(entries)}</ol>
-</section>"""
-    form = f"""<section class="card card--ring tone-parked fk-form" id="p-fork" data-panel aria-labelledby="fk-f">
-  <div class="card__head"><span class="tile tone-parked">{ic('git')}</span><h2 id="fk-f">Fork this run</h2></div>
-  <div class="rowpill fk-point">{ic('git', 'ic ic--sm')}<span>From <b>entry 14</b>, assistant 15:29:48</span><a class="rowpill__act" href="#">Change</a></div>
-  <div class="fk-pos"><span class="field__l">Position</span><div class="seg" role="group" aria-label="Position"><button aria-pressed="true">Before the entry</button><button aria-pressed="false">At the entry</button></div></div>
-  <div class="fk-two">
-    <div class="field"><label for="fk-m">Model</label><select id="fk-m" class="select"><option>claude-sonnet-5-5 (original)</option><option selected>claude-opus-5-5</option><option>kimi-for-coding</option></select></div>
-    <div class="field"><label for="fk-th">Thinking</label><select id="fk-th" class="select"><option>low</option><option>medium</option><option selected>high</option></select></div>
-  </div>
-  <div class="field"><label for="fk-msg">Message to the agent, optional</label><textarea id="fk-msg" class="textarea" rows="2">Try a server-side lock on the order id instead of an idempotency key.</textarea></div>
-  <div class="fk-est">
-    <p class="kpi"><b>$1.12 to $1.64</b><span>estimated, from 6 runs of fix on acme/web with this model</span></p>
-    {meterrow("Job cap", "high end", 1.64/2, "$1.64", "$2.00")}
-    <p class="fk-note">{ic('attention', 'ic ic--sm')}Close to the job cap. The run stops at $2.00.</p>
-  </div>
-  <div class="field"><span class="field__l">New branch</span>{cmd("pi/issue-415-fork-1")}</div>
-  <p class="fk-note fk-note--muted">{ic('clock', 'ic ic--sm')}Edits made before entry 14 are restored from the run's checkpoint, kept 7 days.</p>
-  {confirm("paid", "Preview: fork gh-b3d7", [
-        "Starts a new run from <b>before entry 14</b> on <b>claude-opus-5-5</b>, thinking high",
-        "Works on <b>pi/issue-415-fork-1</b>; the original pull request stays untouched",
-        "Reserves <b>$2.00</b>, the job cap, before the first token. Today: $15.04 of $25.00",
-        "Posts a comment on <b>acme/web#415</b> linking both attempts",
-    ], "Cancel the fork run; nothing merges automatically", "Start fork")}
-</section>"""
-    inner = f'{tree}<div class="cols"><div class="stack">{transcript}</div><div class="stack">{form}</div></div>'
-    end = '<div class="seg" role="group" aria-label="Mode"><button aria-pressed="false">Run</button><button aria-pressed="true">Fork</button></div>'
-    body = shell("Runs", inner, runtitle("gh-b3d7"),
-                 sub=meta(tag("web"), '<a href="#">acme/web#415</a>', badge("completed"), '<span class="faint">ended 15:52 UTC on mini1</span>'),
-                 end=end, back="Runs")
-    style = COMMON + """
-.fk-tree { display: flex; align-items: center; }
-.fk-node { display: grid; gap: 4px; width: 280px; height: 60px; padding: 9px 14px; border-radius: var(--radius-md); background: var(--surface-2); }
-.fk-node--root { box-shadow: inset 0 0 0 1.5px var(--line-strong); }
-.fk-node--live { box-shadow: inset 0 0 0 1.5px var(--running); }
-.fk-n__h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.fk-n__h .code { font-weight: 700; }
-.fk-n__s { font-size: 12px; line-height: 16px; color: var(--ink-muted); }
-.fk-lines { flex: none; display: block; }
-.fk-line { fill: none; stroke: var(--line-strong); stroke-width: 1.6; }
-.fk-kids { display: grid; gap: 12px; }
-@media (max-width: 760px) { .fk-tree { flex-direction: column; align-items: stretch; gap: 12px; } .fk-lines { display: none; } .fk-node { width: auto; height: auto; } .fk-kids { margin-left: 14px; padding-left: 16px; box-shadow: inset 2px 0 0 var(--line-strong); } }
-.fk-num { display: inline-block; min-width: 30px; margin-right: 6px; font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--ink-faint); }
-.fk-tx .tx__e { padding-right: 154px; }
-.fk-tx .tx__e--forkpoint { padding-right: 12px; }
-.fk-tx .tx__e--forkpoint .tx__t::after { content: "fork point"; display: block; margin-top: 4px; font-weight: 700; color: var(--parked-ink); }
-.fk-tx .tx__fork { top: 8px; }
-.fk-tx details { display: inline-block; }
-.fk-tx .tx__e .tx__t { margin-right: 0; }
-.fk-form { display: grid; gap: var(--space-4); }
-.fk-form .card__head { margin-bottom: 0; }
-.fk-point b { color: var(--ink); }
-.fk-pos { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.fk-two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
-.fk-est { display: grid; gap: 4px; padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); }
-.fk-est .kpi { margin-bottom: 4px; }
-.fk-est .kpi b { font-size: 28px; line-height: 32px; }
-.fk-note { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--attention-ink); }
-.fk-note--muted { color: var(--ink-muted); font-weight: 500; }
-"""
-    write("ForkRun", card_marker("Planned for 5.0.0", 1320, 1440, "Fork a run (#648): pick a transcript entry, choose a model, see the cost, start a fork on its own branch"),
-          "Fork gh-b3d7", body, style)
+    from gen_runs import fork_controls
+    inner = card("Actions", fork_controls(), id_="p-actions")
+    body = shell("Runs", inner, runtitle("gh-9575"),
+                 sub=meta(tag("web"), '<a href="#">acme/web#490</a>', badge("completed"), '<span class="faint">ended 15:12 UTC on mini1</span>'), back="Runs")
+    write("ForkRun", card_marker("Runs", 1000, 1440, "Managed fork controls on a finished run: a saved point, a permitted model, and a paid preview"), "Fork gh-9575", body, COMMON)
     readme("ForkRun", """
-A finished run's page in fork mode (#648): pick a transcript entry, choose the model and thinking level, see the estimated cost against the job cap, and start a fork on its own branch.
+# Fork a run
+
+The operator's managed fork controls in the finished run's Actions panel, built by #648.
 
 ## How a person uses it
-- The *Forks of this run* tree at the top shows the original run and its forks. Each node gives the fork point, the model, and the cost or elapsed time, so earlier attempts are visible before starting another.
-- In the transcript, every entry has **Fork from here**. The chosen entry is ringed in violet and marked *fork point*; tool results stay folded.
-- The *Fork this run* card holds the rest:
-  - the chosen point, with Change;
-  - before-or-at the entry;
-  - the model, from the deployment's allowed models, and the thinking level;
-  - an optional message to the agent;
-  - the cost estimate as a range, with a bar against the job cap (attention when it nears the cap);
-  - the new branch name;
-  - a note that earlier edits come back from the run's checkpoint.
-- **Start fork** sits behind a paid preview. The preview says what is reserved before the first token, that the original pull request is untouched, and that a comment links both attempts.
+
+Choose a saved entry and position. Before the first user message uses the run's original base. Other offered points have an exact retained workspace snapshot. Optionally choose a provider, permitted model, supported thinking level and follow-up message, then preview the reservation before confirming a separate paid job and branch. The original attempt remains unchanged.
+
+Unavailable, expired, unsupported-venue and unsafe sources show their named reason. Viewer pages expose no fork action or entry metadata. Source text and filesystem paths never enter this form.
 
 ## Panels
-`p-forks`, `p-transcript`, `p-fork`.
+
+`p-actions`, embedded in the run page.
 
 ## The server provides
-The promoted session's transcript entries with ids and kinds, existing forks (`fork: {fromJob, fromEntry, model}`), the allowed models, a cost estimate from past runs of the same flow and repository per model, the job cap and today's dollar window, the branch name it will use, and whether a workspace checkpoint exists for the chosen point.
+
+Run identity and safe entry positions from an immutable source, current model policy, the reservation estimate and a single-use paid confirmation. The worker rechecks the source and current trigger at pickup.
 
 ## Fixture note
-All fork content is sample, because forking is planned for 5.0.0: gh-b3d7 is shown as completed (in the fixture it is still running), and gh-b3d7-f1, gh-b3d7-f2, the transcript entries 10 to 18, the costs and the estimate are illustrative. Entry 14's text and the first read come from the fixture's live transcript.
+
+The run is the completed gh-9575 on acme/web#490. Entry identifiers and saved positions illustrate the control; no raw transcript or provider call is used by this card.
 """)
 
 if __name__ == "__main__":

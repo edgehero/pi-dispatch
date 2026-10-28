@@ -293,6 +293,14 @@ export const CAPABILITY_GATES = Object.freeze([
 		event: "refused_image_observable_runner_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare support for a venue whose sandbox must observe the runner to let it reach the network (\`dev.pi-dispatch.capabilities\` ${declared}), so the job could reach neither its model nor anything else. Rebuild the image from a version that has this feature. Not run.`,
 	}),
+	Object.freeze({
+		token: "fork",
+		needed: (job) => job?.fork !== undefined || job?.thinkingLevel !== undefined,
+		result: "forkUnsupported",
+		reason: "job-image-fork-unsupported",
+		event: "refused_image_fork_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare managed session forks (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore the selected entry or thinking level. Rebuild the image from a version that has this feature. Not run.`,
+	}),
 ]);
 
 /**

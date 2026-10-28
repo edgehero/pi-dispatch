@@ -5,6 +5,9 @@
  * the PATHS rule) are stated once, in `../panels.mjs`'s header.
  */
 import { refusedBeforeSpend } from "../../costs.mjs";
+import { FORK_THINKING_LEVELS } from "../../run-fork.mjs";
+import { forkArchiveFact } from "@edgehero/pi-dispatch/fork-job";
+import { modelIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND, servesOf, SERVES, declarationOf, BACKENDS } from "@edgehero/pi-dispatch/backends";
 import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleReceivedText, checkpointsText, isProgressSnapshot, progressStaleFor, recordBundle, recordRecovery, recoveredText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile, RUN_RECORD_UNREAD, runPlaces, runPlacesText, SERVES_TEXT, CUSTODY_TEXT, venueCustody, transcriptAbsentText, forgeLinkOf } from "../../read-model.mjs";
@@ -516,7 +519,7 @@ function chatDrawsSteer(view) {
  */
 function runActions(r, view) {
   if (view.role !== "operator" || typeof r.jobId !== "string" || !RUN_ID_RE.test(r.jobId)) return null;
-  return html`<h3>Actions</h3>${sandboxLine(r, view)}${rerunLine(r, view)}`;
+  return html`<h3>Actions</h3>${sandboxLine(r, view)}${rerunLine(r, view)}${forkLine(r, view)}`;
 }
 
 /**
@@ -641,6 +644,13 @@ function bundleRows(r) {
   ];
 }
 
+/** Lineage is identifiers only. A damaged record never supplies link targets or arbitrary text. */
+function forkRows(record) {
+  const f = record.fork;
+  if (!f || typeof f !== "object" || typeof f.id !== "string" || typeof f.fromJob !== "string" || typeof f.fromEntry !== "string" || !/^[0-9a-f]{32}$/.test(f.id ?? "") || !RUN_ID_RE.test(f.fromJob ?? "") || !/^[0-9a-f]{8}$/.test(f.fromEntry ?? "") || !["before", "at"].includes(f.position)) return [];
+  return [["Forked from", runLink(f.fromJob)], ["Fork point", `${f.position} ${f.fromEntry}`], ["Fork model", typeof f.model === "string" && modelIdProblem(f.model) === null ? f.model : null]];
+}
+
 const recordSummary = withRun("Run", (r, view, source) => {
   const started = msOf(r.startedAt);
   const ended = msOf(r.endedAt);
@@ -655,6 +665,7 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Exit code", cell(r.exitCode)],
     ["Attempt", cell(r.attempt)],
     ...recoveryRows(r),
+    ...forkRows(r),
     ["Host", cell(r.host)],
     [VENUE_LABEL, cell(r.backend)],
     ...skipRows(r, view),
@@ -802,7 +813,7 @@ export function runActionsPanel(view) {
   if (!r || view.role !== "operator" || !RUN_ID_RE.test(r.jobId ?? "")) return html``;
   const continuing = r.reason === "recovery-enqueued" && [view.data?.chat?.activeJobId, view.data?.chat?.queuedJobId].some((id) => typeof id === "string" && id !== r.jobId);
   if (continuing) return html``;
-  return titled("Actions", html`${rerunLine(r, view)}${String(r.jobId).startsWith("repeat:") ? html`<p>A cron run is fired again by hand from its trigger as the triggers file says now.</p>` : null}${sandboxLine(r, view)}`);
+  return titled("Actions", html`${rerunLine(r, view)}${forkLine(r, view)}${String(r.jobId).startsWith("repeat:") ? html`<p>A cron run is fired again by hand from its trigger as the triggers file says now.</p>` : null}${sandboxLine(r, view)}`);
 }
 
 export function runSandbox(view) {
@@ -891,4 +902,21 @@ export function runHost(view) {
 
 export function runViewer(view) {
   return view.role !== "operator" ? ui.banner({ status: "idle", sm: true, icon: "shield", title: "Signed in as a viewer", body: "Transcripts, chat, phase names, the run's note, failure reasons and every action are shown to operators only." }) : html``;
+}
+
+/** Only exact retained points are selectable; ids carry no transcript text into the page. */
+function forkLine(r, view) {
+  if (!canAct(view)) return null;
+  const points = view.data?.forkPoints;
+  if (!points?.ok) return html`<p>Fork unavailable: ${r.forkSource?.saved === false ? forkArchiveFact(r.forkSource).reason : points?.refusal ?? "fork-source-unavailable"}.</p>`;
+  const entries = points.entries.filter((e) => e.positions?.length);
+  if (!entries.length) return html`<p>Fork unavailable: no exact workspace point is retained.</p>`;
+  return html`<form class="act" data-action="run-fork" autocomplete="off"><input type="hidden" name="jobId" value="${r.jobId}">
+    <p><b>Fork this run.</b> Continue from a retained point on a separate branch and pull request.</p>
+    ${ui.field({ label: "Fork point", id: "fork-point", control: ui.select({ id: "fork-point", name: "point", options: entries.flatMap((e) => e.positions.map((position) => ({ value: `${e.id}:${position}`, label: `${position} ${e.id} (${e.role ?? e.type})` }))) }) })}
+    ${ui.field({ label: "Provider (optional)", id: "fork-provider", control: ui.input({ id: "fork-provider", name: "provider" }) })}
+    ${ui.field({ label: "Model (optional)", id: "fork-model", control: ui.input({ id: "fork-model", name: "model" }) })}
+    ${ui.field({ label: "Thinking level (optional)", id: "fork-thinking", control: ui.select({ id: "fork-thinking", name: "thinking", options: ["", ...FORK_THINKING_LEVELS] }) })}
+    ${ui.field({ label: "Message (optional)", id: "fork-message", control: ui.input({ id: "fork-message", name: "message" }) })}
+    ${ui.btn({ type: "submit", label: "Preview a fork", kind: ["sm", "paid"], icon: "rerun" })}</form>`;
 }

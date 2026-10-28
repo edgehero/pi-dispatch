@@ -90,7 +90,7 @@ function world({ runs = [{ status: 200, json: { run: { jobId: "j1" }, mode: "for
 		...(cwd === undefined ? { envTrust: () => null } : {}),
 	};
 	const run = (argv, env = { PI_CONSOLE_TOKEN: TOKEN }) => runChat(argv, { env, out: (l) => seen.out.push(l), err: (l) => seen.err.push(l), deploymentEnv: (e) => ({ env: { ...e, PI_SESSIONS_DIR: "/s", ...deploymentExtra } }), cwd, deps });
-	return { seen, run };
+	return { seen, run, client };
 }
 
 test("a session key always forks on this host, with no console at all", async () => {
@@ -240,4 +240,41 @@ test("the CLI hands chat its positional and writes its refusals to stderr", asyn
 	assert.equal(await main(["chat", "a b"], {}, { write: (c) => out.push(c), writeErr: (c) => errs.push(c) }), 1);
 	assert.deepEqual(errs, ["error: the argument is neither a run id (letters, digits and . _ : -), an issue or pull request URL, nor a 32-hex session key\n"]);
 	assert.deepEqual(out, []);
+});
+
+
+test("managed fork lists only supported source point metadata without invoking host pi", async () => {
+	const w = world();
+	w.client.getJson = async (path) => {
+		assert.equal(path, "/api/fork-points?id=j1");
+		return { status: 200, json: { entries: [{ id: "first", role: "user", positions: ["before"] }, { id: "unsafe", type: "message", positions: [] }] } };
+	};
+	assert.equal(await w.run(["j1", "--fork-as-job"]), 0);
+	assert.match(w.seen.out.join("\n"), /first user/);
+	assert.doesNotMatch(w.seen.out.join("\n"), /unsafe/);
+	assert.equal(w.seen.forks.length, 0);
+});
+
+test("managed fork uses the same paid preview and confirmation with explicit point and model", async () => {
+	const w = world({ answer: true });
+	w.client.act = async (action, body, opts) => {
+		assert.equal(action, "run-fork");
+		assert.deepEqual(body, { jobId: "j1", entry: "first", position: "before", provider: "test", model: "large", thinking: "high", message: "Try again" });
+		assert.equal(await opts.confirm(), true);
+		return { ok: true, result: { jobId: "fork-job" } };
+	};
+	assert.equal(await w.run(["j1", "--fork-as-job", "--entry", "first", "--provider", "test", "--model", "large", "--thinking", "high", "--message", "Try again"]), 0);
+	assert.equal(w.seen.forks.length, 0);
+	assert.match(w.seen.asks[0], /paid fork/);
+});
+
+test("managed fork refuses viewers and conflicts with host-fork options", async () => {
+	const viewer = world({ who: { role: "viewer" } });
+	assert.equal(await viewer.run(["j1", "--fork-as-job", "--entry", "first"]), 1);
+	assert.match(viewer.seen.err[0], /operator/);
+	for (const args of [[KEY, "--fork-as-job"], ["j1", "--fork-as-job", "--fork"], ["j1", "--model", "large"]]) {
+		const w = world();
+		assert.equal(await w.run(args), 1);
+		assert.equal(w.seen.clients, 0);
+	}
 });

@@ -1,3 +1,4 @@
+import { forkArchiveFact, recordedFork } from "./fork-job.mjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { scrubCredentials } from "./redact.mjs";
@@ -903,6 +904,7 @@ function rebuildUsage(u) {
  */
 export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null }) {
 	const data = job.data ?? {};
+	const fork = recordedFork(data.fork, sourceModel(result, error));
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
 	const progress = recordedProgress(source.progress);
@@ -1129,6 +1131,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(recovered !== null ? { recovered } : {}),
 		...(RECOVER_SKIPPED_REASONS.includes(source.recoverSkipped) ? { recoverSkipped: source.recoverSkipped } : {}),
 		...(checkpoints !== null ? { checkpoints } : {}),
+		...(fork !== null ? { fork } : {}),
+		...(source.forkSource && typeof source.forkSource.saved === "boolean" ? { forkSource: forkArchiveFact(source.forkSource) } : {}),
 		// Steering (issue #646, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after the durable-run keys, CONDITIONAL like
 		// them and only for a job whose data says `steer: true`, so every other record is byte-identical to before:
 		//   - `steered`: how many of the run's messages were delivered (a verified ack), late (the run ended first) and
@@ -1739,4 +1743,9 @@ export function makeLogReaper({ logsDir, retentionDays, fs = nodeFs, log = () =>
 			log("log_reaper_skipped", { reason: scrubCredentials(err?.message) });
 		}
 	};
+}
+
+function sourceModel(result, error) {
+	const model = (result ?? error)?.model;
+	return typeof model === "string" && USAGE_ID_PATTERN.test(model.toLowerCase()) ? model : null;
 }

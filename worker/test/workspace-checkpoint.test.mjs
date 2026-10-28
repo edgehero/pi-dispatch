@@ -1356,3 +1356,67 @@ test("a crash between the commit and the prune leaves CURRENT valid; the next sn
 	assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 4 })).ok, true);
 	assert.deepEqual(realFs.readdirSync(run).filter((n) => n.startsWith("cp-")).sort(), ["cp-3", "cp-4"]);
 });
+
+test("fork archive keeps entry-addressable snapshots while ordinary recovery still prunes", async () => {
+	const env = setup();
+	const { ck } = await primed(env, { keepHistory: true });
+	for (let seq = 1; seq <= 3; seq++) {
+		realFs.writeFileSync(join(env.ws, "a.txt"), `state ${seq}\n`);
+		const saved = await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq, quiesced: "dead" });
+		assert.equal(saved.ok, true);
+	}
+	const first = await ck.readManifest("run-1", { seq: 1 });
+	assert.equal(first.ok, true, "the third checkpoint must not discard the selected first point");
+	assert.equal(first.manifest.seq, 1);
+	const into = freshBase(ck, "run-1", env.baseSha);
+	const restored = await ck.restore({ runId: "run-1", manifest: first.manifest, intoWorkspace: into });
+	assert.equal(restored.written > 0, true);
+	assert.equal(realFs.readFileSync(join(into, "a.txt"), "utf8"), "state 1\n");
+	assert.equal((await ck.readManifest("run-1")).manifest.seq, 3);
+	assert.equal((await ck.readManifest("run-1", { seq: 0 })).reason, "bad-seq");
+	const ordinary = checkpointer(env.storeDir).ck;
+	assert.equal((await ordinary.readManifest("run-1", { seq: 1 })).reason, "bad-seq");
+});
+
+test("trusted base priming reports extensions even with case variants or a file instead of a directory", async () => {
+	for (const extensionPath of [".pi/extensions/file.mjs", ".PI/Extensions/file.mjs", ".pi/extensions"]) {
+		const env = setup({ "file.txt": "base", [extensionPath]: "export default () => {};\n" });
+		const { ck } = checkpointer(env.storeDir);
+		const primed = await ck.primeBase({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, objectFormat: "sha1" });
+		assert.equal(primed.ok, true);
+		assert.equal(primed.baseHasExtensions, true);
+	}
+});
+
+test("archive base validation rejects a dangling commit even while its valid-looking ref survives", async () => {
+	const env = setup();
+	const { ck } = await primed(env, { keepHistory: true });
+	assert.deepEqual(await ck.readBase("run-1"), { ok: true, baseSha: env.baseSha });
+	const repo = join(env.storeDir, checkpointKey("run-1"), "repo.git");
+	const packs = join(repo, "objects", "pack");
+	const pack = realFs.readdirSync(packs).find((name) => name.endsWith(".pack"));
+	if (pack) {
+		const contents = realFs.readFileSync(join(packs, pack));
+		for (const name of realFs.readdirSync(packs)) realFs.unlinkSync(join(packs, name));
+		storeGit(env.storeDir, "run-1", ["unpack-objects", "-q"], { input: contents });
+	}
+	const object = join(repo, "objects", env.baseSha.slice(0, 2), env.baseSha.slice(2));
+	assert.equal(realFs.existsSync(object), true);
+	realFs.unlinkSync(object);
+	assert.equal(realFs.readFileSync(join(repo, "refs", "pi-dispatch", "base"), "utf8").trim(), env.baseSha);
+	assert.deepEqual(await ck.readBase("run-1"), { absent: true });
+});
+
+test("history reads classify transient filesystem errors as unavailable without changing recovery's existing answer", async () => {
+	const env = setup();
+	const { ck } = await primed(env, { keepHistory: true });
+	assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1, quiesced: "dead" })).ok, true);
+	const fs = { ...realFsp, open: async (path, ...args) => {
+		if (String(path).endsWith("manifest.json")) throw Object.assign(new Error("temporary disk error"), { code: "EIO" });
+		return realFsp.open(path, ...args);
+	} };
+	const history = checkpointer(env.storeDir, { fs, keepHistory: true }).ck;
+	assert.deepEqual(await history.readManifest("run-1", { seq: 1 }), { unavailable: "EIO" });
+	const recovery = checkpointer(env.storeDir, { fs }).ck;
+	assert.deepEqual(await recovery.readManifest("run-1"), { invalid: true, reason: "manifest-unreadable" });
+});

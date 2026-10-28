@@ -25,6 +25,7 @@
  * panels out in the kit's grids (`PAGE_LAYOUT`) and have a line under its title that the stream swaps
  * (`PAGE_HEADLINES`).
  */
+import { readForkPoints } from "../run-fork.mjs";
 import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
 import { REPLICAS_MAX } from "@edgehero/pi-dispatch/triggers";
@@ -632,6 +633,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // does not read them every tick. Read for both roles, as all page data is; only an operator's page draws the actions.
     // A run refused before it started has no workspace, whatever a manifest says, so its sandbox check is not read.
     const record = data.run.record;
+    const forkPoints = await readForkPoints({ jobId: q.id, env: deps.env ?? {}, now: () => now });
+    data.forkPoints = forkPoints.ok ? { ok: true, entries: forkPoints.entries } : { refusal: forkPoints.refusal };
     data.rerunCheck = await rerunCheckOf(deps.fleet, q.id, record, { now: () => now, lookup });
     if (!refusedBeforeStart(record)) data.sandboxCheck = await sandboxCheckOf(deps.fleet, q.id, record, { now: () => now });
   };

@@ -1182,6 +1182,32 @@ const jobActions = [
   failedAll({ name: "retry-all-failed", kind: "failed-retry-all", verb: "Retry", fn: "retryFailedJobs" }),
   failedAll({ name: "remove-all-failed", kind: "failed-remove-all", verb: "Remove", fn: "removeFailedJobs" }),
   {
+    name: "run-fork",
+    kind: "run-fork",
+    paid: true,
+    bulk: false,
+    needs: JOB_NEEDS,
+    async preview(body, ctx) {
+      const jobId = jobIdOf(body);
+      const { rm, paths } = ctx.a;
+      const { entry, position, point: selectedPoint, provider, model, thinking, message } = body;
+      const point = typeof selectedPoint === "string" ? /^([A-Za-z0-9_-]{1,128}):(before|at)$/.exec(selectedPoint) : null;
+      if (selectedPoint !== undefined && (!point || entry !== undefined || position !== undefined)) return { refusal: "fork-point-invalid" };
+      const request = { jobId, entry: point ? point[1] : entry, position: point ? point[2] : position ?? "before", provider, model, thinking, message };
+      const got = planned(await rm.planRunFork({ ...request, url: paths.valkeyUrl, logsDir: paths.logsDir, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now }));
+      if (!got.plan) return got;
+      const p = got.plan;
+      return { target: jobId, payload: { plan: p }, reserve: p.reserve ?? null,
+        afterDigest: sha256(JSON.stringify(request)),
+        summary: [`Fork ${jobId} ${p.job.fork.position} entry ${p.job.fork.fromEntry}`, `Branch ${p.branch}: a separate pull request on queue ${p.queue}; the original run is preserved`, ...(p.job.thinkingLevel ? [`Thinking level: ${p.job.thinkingLevel}`] : []), ...runFieldsLines(p.runFields, "It runs as its trigger says now")] };
+    },
+    async apply(entry, ctx) {
+      const { rm, paths } = ctx.a;
+      const res = await rm.enqueueRunFork(entry.payload.plan, { url: paths.valkeyUrl, logsDir: paths.logsDir, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now });
+      return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
+    },
+  },
+  {
     name: "rerun",
     kind: "run-rerun",
     paid: true,
@@ -1745,6 +1771,15 @@ const WRITE_RULES = {
   "remove-failed": { fields: ["jobId", "queue"], danger: true, undo: say(UNDO_SENTENCES.removed), inverse: none, confirmLabel: () => "Remove the job", done: (out) => `Removed failed job ${out.payload.jobId}` },
   "retry-all-failed": { fields: ["queue", "repo"], danger: false, undo: say(UNDO_SENTENCES.retried), inverse: none, confirmLabel: (out) => bulkPaidLabel("Retry", out), done: bulkDone("Retried", "failed job") },
   "remove-all-failed": { fields: ["queue", "repo"], danger: true, undo: say(UNDO_SENTENCES.removed), inverse: none, confirmLabel: (out) => `Remove ${plural(out.targets?.length ?? 0, "job")}`, done: bulkDone("Removed", "failed job") },
+  "run-fork": {
+    fields: ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
+    danger: false,
+    atConfirm: true,
+    undo: (out, body, result) => (result === undefined ? UNDO_SENTENCES.rerunBefore : rerunCancel(result) ? `Cancel ${result.jobId} before it starts` : UNDO_SENTENCES.rerunUnnamed),
+    inverse: (out, body, result) => (rerunCancel(result) ? { action: "cancel-queued", body: { jobId: result.jobId, queue: result.queue } } : null),
+    confirmLabel: (out) => paidLabel("Fork", out.reserve),
+    done: (out) => `Queued a fork of ${out.target}`,
+  },
   rerun: {
     fields: ["jobId"],
     danger: false,

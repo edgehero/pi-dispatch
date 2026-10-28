@@ -91,6 +91,7 @@ import { isLoopbackAddress } from "./listen.mjs";
 import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { getRun } from "./run-api.mjs";
+import { getForkPoints } from "./fork-api.mjs";
 import * as realPages from "./pages.mjs";
 import { CONSOLE_SCRIPT } from "./script.mjs";
 import { endedReasonOf, PERSON_HEADER, PERSON_PARAM } from "./session-ends.mjs";
@@ -627,6 +628,7 @@ export const ROUTES = Object.freeze([
   } },
   { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
   // Issue #647: one run and the chat it can have (`run-api.mjs`); a viewer's, since the answer carries no text at all.
+  { method: "GET", path: "/api/fork-points", auth: "operator", write: false, handler: getForkPoints },
   { method: "GET", path: "/api/run", auth: "viewer", write: false, handler: getRun },
   // `noHead`: a HEAD would take a stream slot and hold it with no body ever sent, so it is 405 before anything runs.
   // `stream`: an event stream, which says its page's person in the query (`PERSON_PARAM`, see the header).

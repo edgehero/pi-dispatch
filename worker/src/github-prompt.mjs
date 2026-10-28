@@ -1,3 +1,4 @@
+import { forkBranch } from "./fork-job.mjs";
 /*
  * github-prompt.mjs — pure builder for a GitHub-triggered job's /job/prompt.md string.
  *
@@ -67,7 +68,7 @@ const RESUMED_DATA_HEADING = "## New activity on this pull request (data, not in
  *                                 `author_association` are event.json metadata, never interpolated here.
  * @returns {string} The full user prompt.
  */
-export function buildGithubPrompt({ flow, target, comment, resumed = false, replica, replicas, review, instructions }) {
+export function buildGithubPrompt({ flow, target, comment, resumed = false, replica, replicas, review, instructions, fork }) {
 	const type = target?.type;
 	// A third shape, selected by the HOST rather than by the runner. If the runner chose, the host could
 	// write the full envelope believing cold start while pi restored forty turns and sent it anyway --
@@ -82,7 +83,7 @@ export function buildGithubPrompt({ flow, target, comment, resumed = false, repl
 	// into buildIssuePrompt would create a branch nothing can reach.
 	if (resumed) return buildResumedPrompt(flow, target, comment, review, instructions);
 	if (type === "pull_request") return buildPullRequestPrompt(flow, target, comment, replica, replicas, review, instructions);
-	return buildIssuePrompt(flow, target, comment, replica, replicas, instructions);
+	return buildIssuePrompt(flow, target, comment, replica, replicas, instructions, fork);
 }
 
 /**
@@ -218,13 +219,13 @@ function buildResumedPrompt(flow, target, comment, review, instructions) {
 	return `${envelope}\n\n${dataRegion(RESUMED_DATA_HEADING, noun, target, comment, review)}\n`;
 }
 
-function buildIssuePrompt(flow, target, comment, replica, replicas, instructions) {
+function buildIssuePrompt(flow, target, comment, replica, replicas, instructions, fork) {
 	// The branch name derives solely from the issue number — a stable, host-assigned integer — plus, for a
 	// replica, its host-assigned index. It is never taken from the mutable title/body, so a re-run of the
 	// same issue always converges on the same branch. Minted by branch.mjs rather than inline: the session
 	// store keys on this same string, and a second copy here would drift into a key for a branch the agent
 	// was never told to push to (branch.mjs).
-	const branch = issueBranch(target?.number, replica);
+	const branch = fork ? forkBranch({ target, fork }) : issueBranch(target?.number, replica);
 	// The replica marker the PR title carries. AGENT-HONORED, not host-enforced: the branch name above is
 	// the only replica identity the harness actually mints, and this is a request in prompt text. It is
 	// still worth asking for — the pair is meant to be read side by side in a PR list.

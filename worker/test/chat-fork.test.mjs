@@ -47,6 +47,24 @@ function world({ stamp = "1.2.0", venue = "local", piVersion = "1.2.0", transcri
 
 const plan = (w, extra = {}) => planFork({ record: RECORD, env: w.env, pi: { path: w.pi }, piVersion: "1.2.0", ...extra });
 
+test("a managed fork record opens its own transcript, and a linked parent is refused", () => {
+	const w = world();
+	const id = "a".repeat(32);
+	const dir = join(w.dir, "forks", id);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, SESSION_FILE), "fork-only transcript\n");
+	writeFileSync(join(dir, PI_VERSION_FILE), "1.2.0\n");
+	const record = { ...RECORD, fork: { id } };
+	const planned = plan(w, { record });
+	assert.equal(planned.plan.file, join(dir, SESSION_FILE));
+	assert.equal(readFileSync(planned.plan.file, "utf8"), "fork-only transcript\n");
+	assert.equal(readFileSync(w.file, "utf8"), TRANSCRIPT);
+	const outside = join(w.root, "outside-forks");
+	nodeFs.renameSync(join(w.dir, "forks"), outside);
+	symlinkSync(outside, join(w.dir, "forks"));
+	assert.match(plan(w, { record }).refusal, /not a plain directory/);
+});
+
 test("the session store's names are the ones session-store.mjs writes", () => {
 	const store = readFileSync(new URL("../src/session-store.mjs", import.meta.url), "utf8");
 	assert.match(store, new RegExp(`export const SESSION_FILE_NAME = "${SESSION_FILE}";`));

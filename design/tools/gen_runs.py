@@ -346,6 +346,18 @@ def ended_session():
                   ("Transcript", "214 KB in the session store"), ("Plan", "none")], 1)
     return card("Session and plan", body, id_="p-session")
 
+def fork_controls():
+    return f"""<form class="stack" autocomplete="off">
+      <p><b>Fork from a saved point.</b> A separate branch and pull request preserve the original attempt.</p>
+      <div class="field"><label for="fork-point">Fork point</label><select id="fork-point" class="select"><option>before a1b2c3d4 (user, original base)</option><option>at e5f6a7b8 (assistant, saved workspace)</option></select></div>
+      <div class="field"><label for="fork-provider">Provider (optional)</label><input id="fork-provider" class="input" placeholder="Use the current trigger default"></div>
+      <div class="field"><label for="fork-model">Model (optional)</label><input id="fork-model" class="input" placeholder="Choose a permitted model"></div>
+      <div class="field"><label for="fork-thinking">Thinking level (optional)</label><select id="fork-thinking" class="select"><option>Use the session default</option><option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
+      <div class="field"><label for="fork-message">Message (optional)</label><input id="fork-message" class="input"></div>
+      <p class="muted">Only points with matching saved files are offered. Missing or expired state refuses before spend.</p>
+      <div>{btn("Preview a fork", "paid", "rerun", sm=False)}</div>
+    </form>"""
+
 def ended_actions():
     rerun_confirm = confirm("paid", "Re-run gh-9575",
         ["Runs <b>fix</b> on <b>acme/web#490</b> again with <b>claude-sonnet-5-5</b>",
@@ -355,7 +367,7 @@ def ended_actions():
     body = f"""<div class="run-acts">
   <div class="run-act"><div class="run-act__h"><p><b>Run it again.</b> Same issue, flow and model. You see the cost before it starts.</p>{btn("Preview a re-run", "paid", "rerun", sm=False)}</div>
     {rerun_confirm}</div>
-  <div class="run-act"><div class="run-act__h"><p><b>Fork from a point.</b> Pick a transcript entry and, optionally, another model.</p>{btn("Fork from a point", "", "git", sm=False)}</div></div>
+  <div class="run-act">{fork_controls()}</div>
   <div class="run-act"><div class="run-act__h"><p><b>Continue in a terminal</b> as a fork of its session. The session's transcript goes to your pi's provider, unredacted.</p></div>{cmd("pi-dispatch chat gh-9575")}</div>
   <div class="run-act"><div class="run-act__h"><p><b>Open its workspace</b> on mini1, where it is kept.</p></div>{cmd("pi-dispatch sandbox gh-9575")}</div>
 </div>"""
@@ -427,7 +439,7 @@ The live transcript streams below. Tool arguments and results fold; a failed res
 
 **How a person uses it.** The outcome banner says "Completed: finished in 22m on mini1" and reminds the reader that merges are never automatic. Its buttons open the issue and preview a re-run. *Run* lists the record's facts in plain words: trigger, turns against maxTurns, attempt, exit code and recovery. *Actions* explains each next step in a sentence:
 - **Preview a re-run** (paid). Its confirm bar is shown open with the reservation against today's cap and an undo line.
-- **Fork from a point** links to the fork view.
+- **Preview a fork** (paid) selects a saved entry boundary and optional provider, permitted model, thinking level and follow-up message. Its preview names the reservation and independent branch. Unavailable source state is named.
 - **Terminal chat** and **sandbox** commands copy with one click.
 
 The side column has tokens and dollars (job cap as a bar with the soft-hold line), resources (peak memory against the size given), session and plan, and the chain as one line.
