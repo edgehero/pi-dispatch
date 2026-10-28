@@ -2516,8 +2516,8 @@ adversarial passes did.
 - **Status**: **OPEN** (2026-10-27, issue #753). Recorded with the proposal, before anything is built, so neither half
   is decided by a build.
 - **Position today**: `REQ-PARKED-ANSWERER` proposes a draft only: a draft job classifies and drafts, and a person
-  sends through the console's answer action. Two further modes were drawn in the design system and are **not**
-  proposed:
+  sends through the console's answer action. Two further modes were drawn in the design's first version and are
+  **not** proposed (the `ParkedAnswerer` card in `design/` now shows sending without a person as one locked step, "Send without me"):
   - sending after a wait unless a person steps in;
   - sending when the model is sure, and telling the person after.
 
@@ -2681,3 +2681,4 @@ adversarial passes did.
 | 2026-10-22 (#730, review round 1) | **`OQ-047` AMENDED**: the readable OpenShell runner's key is kept by THREE properties, not two: the sandbox's seccomp, Yama at EXACTLY 1 (0/unreadable `-unprotected`, 2/3 `-too-strict`), and `ulimit -c 0` suppressing core dumps (a `kill -ABRT` route that does not go through Yama); and a tool may reopen a holder's fd 0, 1 and 2 to break or garble but never forge a signed line. **`OQ-049` UNCHANGED, checked**: the upstream ask is unchanged. |
 | 2026-10-22 (#730, review round 2) | **`OQ-047` CORRECTED**, wording only: `prlimit64` on another pid is already refused by OpenShell's seccomp, a file `core_pattern` writes nothing and a pipe one goes to a host-root handler outside the sandbox. **`OQ-049` CORRECTED**: its cost line says the venue is refused unless Yama is exactly 1. |
 | 2026-10-27 (#753, #754) | **NEW `OQ-050`** (OPEN, issue #754): whether a sandbox shell may open in the browser through a separate gateway process; the proposal (its own address and tab, attach only to a ticketed `pi-sandbox-*` container, a one-use 60 second ticket after a fresh sign-in, off by default), what it costs (the Docker socket is still root on that host, a second listener with operator reach, a stolen session is enough while a ticket lives), and what would close it; `DES-OPERATOR-CONSOLE`'s rejection stands while it is open. **NEW `OQ-051`** (OPEN, issue #753): whether a model may answer a parked question with no person's confirm, which `REQ-PARKED-ANSWERER` does not propose; it needs `CONST-TRIGGER-AUTHOR-GATE` amended (a third door, marked as a model's answer and never as `OWNER` or a person), and a measured misclassification rate, honest and steered by issue text, from rules run in `classify` and `draft` mode; until both, every answered run is a touch. |
+| 2026-10-28 (#737) | **`OQ-051` AMENDED**, words only: the two sending modes were drawn in the design's first version, and the `ParkedAnswerer` card, now in `design/`, shows sending without a person as one locked step. The question, its position and what would close it are UNCHANGED. |
