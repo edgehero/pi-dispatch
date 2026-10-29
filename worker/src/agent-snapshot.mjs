@@ -18,7 +18,7 @@ export function parseAgentDefinition(text) {
 		const doc = parseDocument(match[1], { uniqueKeys: true, maxAliasCount: 0 });
 		if (doc.errors.length) throw new Error("agent frontmatter is invalid");
 		const meta = doc.toJS({ maxAliasCount: 0 });
-		if (!meta || !MODEL_ROLE_RE.test(meta.name) || typeof meta.description !== "string" || meta.description.length > 4096 || (meta.model !== undefined && (typeof meta.model !== "string" || meta.model.length > 256))) throw new Error("agent frontmatter needs a bounded name, description and optional model");
+		if (!meta || typeof meta.name !== "string" || !MODEL_ROLE_RE.test(meta.name) || typeof meta.description !== "string" || meta.description.length > 4096 || (meta.model !== undefined && (typeof meta.model !== "string" || meta.model.length > 256))) throw new Error("agent frontmatter needs a bounded name, description and optional model");
 		const tools = typeof meta.tools === "string" ? meta.tools.split(",").map((v) => v.trim()).filter(Boolean) : meta.tools;
 		if (tools !== undefined && (!Array.isArray(tools) || tools.length > 128 || !tools.every((v) => typeof v === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(v)))) throw new Error("agent tools must be tool names");
 		return { name: meta.name, description: meta.description, content: match[2], ...(meta.model !== undefined ? { model: meta.model } : {}), ...(tools !== undefined ? { tools } : {}) };

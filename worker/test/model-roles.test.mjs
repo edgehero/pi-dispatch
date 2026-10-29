@@ -121,3 +121,10 @@ test("JSON escaping cannot push an admissible agent set past the runner input bo
 	assert.equal(existsSync(join(jobDir, "agents.json")), false);
 	assert.equal(existsSync(join(jobDir, "model-roles.json")), false);
 });
+
+
+test("agent names are YAML strings, never coerced missing or boolean values", () => {
+	for (const name of ["", "name: true\n", "name: false\n", "name: null\n"]) {
+		assert.throws(() => parseAgentDefinition(`---\n${name}description: Explore\n---\nPrompt`), { piDispatchConfig: true });
+	}
+});

@@ -82,7 +82,7 @@ test("child uses nested runner argv, keeps meter environment and removes prompt 
 	const result = await runRoleChild({ agent, task: "--a task", model: "test/small", cwd: "/workspace" }, { spawnChild: (command, args, options) => {
 		assert.equal(command, process.execPath);
 		assert.match(args[0], /run-job.mjs$/);
-		assert.deepEqual(args.slice(-2), ["--", "--a task"]);
+		assert.deepEqual(args.slice(-2), ["--", "Task: --a task"]);
 		assert.equal(args[args.indexOf("--model") + 1], "test/small");
 		assert.equal(options.env, undefined, "inherits the child preload and ledger");
 		prompt = args[args.indexOf("--append-system-prompt") + 1];
@@ -163,4 +163,20 @@ test("child failure and excessive stdout return errors and clean the temporary p
 		assert.equal(result.text.includes("private"), false);
 		assert.equal(killed, mode === "overflow");
 	}
+});
+
+
+test("the pinned CLI keeps leading @ task text literal instead of reading an attached file", async () => {
+	const { parseArgs } = await import(new URL("./cli/args.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
+	let captured;
+	await runRoleChild({ agent, task: "@/tmp/private-file", model: "test/small", cwd: "/workspace" }, { spawnChild: (_command, args) => {
+		captured = args.slice(1);
+		const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => {};
+		queueMicrotask(() => child.emit("close", 0));
+		return child;
+	} });
+	const parsed = parseArgs(captured);
+	assert.deepEqual(parsed.messages, ["Task: @/tmp/private-file"]);
+	assert.deepEqual(parsed.fileArgs, []);
+	assert.deepEqual(parsed.diagnostics, []);
 });

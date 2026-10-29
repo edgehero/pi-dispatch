@@ -21,7 +21,7 @@ export { EARLIER_MAX, recordedEarlier };
 
 /** Host-authored replay lineage only, never a path or the original task text. */
 export function recordedCanary(value) {
-	if (!value || typeof value !== "object" || typeof value.sourceJobId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(value.sourceJobId) || !MODEL_ROLE_RE.test(value.role ?? "") || value.role === "inherit" || modelListProblem([value.candidate]) !== null) return null;
+	if (!value || typeof value !== "object" || typeof value.sourceJobId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(value.sourceJobId) || typeof value.role !== "string" || !MODEL_ROLE_RE.test(value.role) || value.role === "inherit" || modelListProblem([value.candidate]) !== null) return null;
 	return { sourceJobId: value.sourceJobId, role: value.role, candidate: value.candidate };
 }
 
