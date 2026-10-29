@@ -20,6 +20,7 @@ import {
   splitEnvelope,
   splitPriorities,
   spendToday,
+  spendOver,
   spendTabs,
   spendCaps,
 } from "../src/console/panels/spend.mjs";
@@ -30,7 +31,7 @@ import {
   SPEND_PAINT_TOKENS,
   SPEND_EXTRA_PAINTS,
 } from "../src/console/spend-css.mjs";
-import { assembleInsightsView } from "../src/insights-assembly.mjs";
+import { assembleInsightsView, spendSummaryOf, spendChartsOf } from "../src/insights-assembly.mjs";
 import { PD_TOKENS, SVG_EXTRA } from "../src/console/compat-css.mjs";
 import { PAGE_CSS, pageCss } from "../src/console/page-css.mjs";
 import { SPEND_DRAW, spendFixture } from "./helpers/spend-goldens.mjs";
@@ -515,4 +516,129 @@ test("cron rearm stays a wire and is never described as a target skill or observ
   assert.doesNotMatch(list, /skill,\s*trigger/);
   const details = String(flowsSelected(v));
   assert.doesNotMatch(details, /cron-rearm/);
+});
+
+test("allocation history facts stay visible to viewers while only operators get Revert", () => {
+  const id = "a".repeat(64);
+  const p = { ...allocation, state: { ...allocation.state, planId: id }, log: [
+    { at: NOW, planId: id, outcome: "applied", writer: "operator-session", weights: { web: 10 } },
+    { at: NOW - 1000, planId: id, outcome: "duplicate", writer: "operator-session", weights: { web: 10 } },
+    { at: NOW - 2000, planId: "b".repeat(64), outcome: "refused", writer: "operator-session", weights: null },
+    { at: NOW - 3000, planId: "c".repeat(64), outcome: "applied", writer: "operator-session", weights: { web: 1 } },
+  ] };
+  for (const role of ["operator", "viewer"]) {
+    const out = String(splitHistory(view({ role, data: { insights: { allocation: p } } })));
+    assert.match(out, /In force/);
+    assert.match(out, /Same as row 1/);
+    assert.match(out, /No split to go back to/);
+    assert.equal((out.match(/In force/g) ?? []).length, 1);
+    if (role === "viewer") assert.doesNotMatch(out, /<th>Action|data-action|Revert row/);
+    else assert.match(out, /Revert row 4/);
+  }
+});
+
+const recordMoneyFixture = (records, budget = {}) => ({ spend: {
+  ...spendSummaryOf({ records, hosts: [], budget, nowMs: NOW }),
+  ...spendChartsOf({ records, sinceMs: NOW - 86_400_000, nowMs: NOW, jobCapMicros: 10_000_000, heldMicros: 0 }),
+} });
+const moneyRecord = (id, over = {}) => ({ jobId: id, endedAt: new Date(NOW - 1000).toISOString(), outcome: "completed", dollars: { basis: "unreserved", settledMicros: 0 }, ...over });
+const paidMoneyRecord = () => moneyRecord("paid", { tokens: { cost: 7, metered: true }, usage: { models: [{ provider: "paid", model: "model", cost: 7, input: 1, output: 1 }] } });
+const unknownMoneyRecord = () => moneyRecord("unknown");
+const moneyView = (p) => view({ page: "insights", query: { range: "7d" }, data: { insights: p } });
+const settledCell = (out) => /<dt>Settled in today(?:'|&#39;)s records<\/dt>\s*<dd>([\s\S]*?)<\/dd>/.exec(out)?.[1];
+const dateCell = (out) => /<dt>2026-10-29<\/dt>\s*<dd>([\s\S]*?)<\/dd>/.exec(out)?.[1];
+
+test("paid work without dollar windows shows its real record cost, not its unreserved zero charge", () => {
+  const p = recordMoneyFixture([paidMoneyRecord()]);
+  assert.equal(p.spend.today.usedMicros, 7_000_000);
+  assert.equal(p.spend.today.ledgerMicros, 0);
+  const today = String(spendToday(moneyView(p)));
+  assert.match(today, /No daily dollar cap is configured/);
+  assert.match(settledCell(today), /\$7\.00/);
+  assert.match(today, /Charged to dollar windows/);
+  assert.match(today, /not the cost of all readable work/);
+  const chart = String(spendOver(moneyView(p)));
+  assert.match(dateCell(chart), /\$7\.00/);
+  assert.match(chart, /2026-10-29: \$7\.00 settled/);
+});
+
+test("partly unknown record costs show a visible floor and unknown count in Today, daily values and escaped tips", () => {
+  const p = recordMoneyFixture([paidMoneyRecord(), unknownMoneyRecord()]);
+  assert.equal(p.spend.today.settledFloor, true);
+  assert.equal(p.spend.today.unpriced, 1);
+  const today = String(spendToday(moneyView(p)));
+  assert.match(settledCell(today), /≥\$7\.00/);
+  assert.match(settledCell(today), /1 run has unknown cost/);
+  const chart = String(spendOver(moneyView(p)));
+  assert.match(dateCell(chart), /≥\$7\.00; 1 run has unknown cost/);
+  assert.match(chart, /<li>2026-10-29: ~≥\$7\.00; 1 run has unknown cost settled/);
+});
+
+test("all-unknown record cost stays unknown instead of an exact zero or a zero-value settled bar", () => {
+  const p = recordMoneyFixture([unknownMoneyRecord()]);
+  assert.equal(p.spend.today.settledMicros, null);
+  const today = String(spendToday(moneyView(p)));
+  assert.match(settledCell(today), /unknown; 1 run has unknown cost/);
+  assert.doesNotMatch(settledCell(today), /\$0/);
+  const chart = String(spendOver(moneyView(p)));
+  assert.match(dateCell(chart), /unknown; 1 run has unknown cost/);
+  assert.doesNotMatch(dateCell(chart), /\$0\.00 settled/);
+  assert.match(chart, /<li>2026-10-29: unknown; 1 run has unknown cost settled/);
+  assert.match(chart, /text-anchor="middle" font-size="3"[^>]*>\?<\/text>/);
+});
+
+test("estimated floors and real window charges retain separate labels and actual counter reconciliation", () => {
+  const partial = moneyRecord("partial", { tokens: { cost: 7, metered: false }, usage: null });
+  const budget = { dollars: { windows: [{ ledger: "deployment", name: "Deployment", window: "day", counterMicros: 2_000_000, capMicros: 20_000_000 }] } };
+  const p = recordMoneyFixture([partial], budget);
+  const today = String(spendToday(moneyView(p)));
+  assert.match(settledCell(today), /~≥\$7\.00/);
+  assert.match(today, /Counter beyond recorded window charges and holds/);
+  assert.equal(p.spend.today.unattributedMicros, 2_000_000);
+  const chart = String(spendOver(moneyView(p)));
+  assert.match(dateCell(chart), /~≥\$7\.00/);
+  assert.match(chart, /sp-bar--estimated/);
+  assert.match(chart, /<li>2026-10-29: ~≥\$7\.00 settled/);
+});
+
+test("a newer duplicate references the applied row and never claims that its duplicate event put the plan in force", () => {
+  const id = "a".repeat(64);
+  const p = { ...allocation, log: [{ planId: id, outcome: "duplicate", weights: { web: 10 } }, { planId: id, outcome: "applied", weights: { web: 10 } }] };
+  const out = String(splitHistory(view({ role: "viewer", data: { insights: { allocation: p } } })));
+  const rows = out.match(/<tr>[\s\S]*?<\/tr>/g).slice(1);
+  assert.match(rows[0], /Same as row 2/);
+  assert.doesNotMatch(rows[0], /In force/);
+  assert.match(rows[1], /In force/);
+});
+
+test("a plan's API-equivalent settlement floor and live hold stay distinct in Today and the daily bar", () => {
+  const plan = moneyRecord("plan-floor", { provider: "plan", model: "paid", dollars: { basis: "floor", reservedMicros: 9_000_000, settledMicros: 9_000_000 }, tokens: { cost: 0, metered: true }, usage: { models: [{ provider: "plan", model: "paid", cost: 0, input: 10 }] } });
+  const budget = { dollars: { windows: [{ ledger: "deployment", name: "Deployment", window: "day", counterMicros: 11_000_000, capMicros: 20_000_000 }] } };
+  const hosts = [{ name: "host", jobsMore: "0", jobs: [{ id: "live", at: NOW - 1000, h: 2_000_000, ha: NOW - 1000 }] }];
+  const subscriptions = [{ id: "work", provider: "plan", models: ["paid"] }];
+  const summary = spendSummaryOf({ records: [plan], hosts, budget, subscriptions, nowMs: NOW });
+  const p = { spend: { ...summary, ...spendChartsOf({ records: [plan], subscriptions, sinceMs: NOW - 86_400_000, nowMs: NOW, jobCapMicros: 10_000_000, heldMicros: summary.today.heldMicros }) } };
+  assert.equal(summary.today.heldMicros, 2_000_000);
+  assert.equal(summary.today.settledMicros, 9_000_000);
+  const today = String(spendToday(moneyView(p)));
+  assert.match(settledCell(today), /≥\$9\.00/);
+  assert.match(today, /Held for 1 running jobs<\/dt><dd>\$2\.00/);
+  const chart = String(spendOver(moneyView(p)));
+  assert.match(dateCell(chart), /≥\$9\.00 settled; \$2\.00 held/);
+  assert.match(chart, /class="sp-held"/);
+});
+
+
+test("the current neutral split is in force for both roles and offers no redundant Revert", () => {
+  const at = "2026-10-29T12:00:00Z";
+  for (const writer of ["default", "expiry"]) {
+    const state = { planId: null, appliedAt: at, writer, weights: { web: 1 } };
+    const log = [{ planId: writer === "expiry" ? "old-plan" : null, at, writer, outcome: writer === "expiry" ? "expired" : "neutral", weights: { web: 1 } }];
+    for (const role of ["operator", "viewer"]) {
+      const text = String(splitHistory({ role, query: {}, data: { insights: { allocation: { state, log } } } }));
+      assert.match(text, /In force/);
+      assert.match(text, /Today&#39;s neutral split/);
+      assert.doesNotMatch(text, /data-action="allocation-revert"/);
+    }
+  }
 });

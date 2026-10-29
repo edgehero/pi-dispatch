@@ -14,7 +14,7 @@ The Flows map is `/insights/flows` on the [operator console](console.md), one of
 
 Drag to pan; use the wheel, zoom buttons and Fit. Tab and Enter select a chip; Escape clears it. The selected side card is also server-rendered from `select=<trigger index>`, so Breakdown links and scripts-disabled pages can select a trigger. A spent one-shot links to its run. The map retains its size on a phone and scrolls inside its card.
 
-Choose `view=list` for a server-rendered table over the same graph model, including trigger facts and unreachable flows, with no map node data or script dependency. Viewer paths remain basenames even with `paths=full`. The map names missing inputs, unverifiable skills, unattributed runs and bounded scans instead of inventing edges.
+Choose `view=list` for a server-rendered table over the same graph model, including trigger facts and unreachable flows, with no map node data or script dependency. Viewer paths remain basenames even with `paths=full`. The map names missing inputs, unverifiable skills, unattributed runs and bounded scans instead of inventing edges. Its trigger file is validated by the worker’s loader from the same bytes used for display: an invalid entry refuses the entire map with the loader’s explanation, rather than drawing a plausible partial set. Read failures are named separately from missing files.
 
 This document explains the semantics behind what that pane draws.
 

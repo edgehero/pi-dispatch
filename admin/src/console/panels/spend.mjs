@@ -66,6 +66,23 @@ const card = (title, body, end = null) =>
   ui.card({ title, body: html`<div class="card__body">${body}</div>`, end });
 const empty = (title, text) => card(title, note(text));
 const factsOne = (pairs) => ui.facts(pairs, { cols: 1 });
+const unknownCount = (row) => Number.isSafeInteger(row?.unpriced) && row.unpriced > 0 ? row.unpriced : 0;
+const moneyMarks = ({ floor = false, estimated = false } = {}) => `${estimated === true ? "~" : ""}${floor === true ? "≥" : ""}`;
+function markedMoney(amount, flags) {
+  return number(amount) === null ? usd(null) : html`${moneyMarks(flags)}${usd(amount)}`;
+}
+function markedMoneyText(amount, flags) {
+  return number(amount) === null ? "unknown" : `${moneyMarks(flags)}$${(amount / 1e6).toFixed(2)}`;
+}
+function settledMoney(row) {
+  const unknown = unknownCount(row);
+  return html`${markedMoney(row?.settledMicros, { floor: row?.settledFloor, estimated: row?.settledEstimated })}${unknown ? html`; ${unknown} ${unknown === 1 ? "run has" : "runs have"} unknown cost` : null}`;
+}
+function settledMoneyText(row) {
+  const unknown = unknownCount(row);
+  return `${markedMoneyText(row?.settledMicros, { floor: row?.settledFloor, estimated: row?.settledEstimated })}${unknown ? `; ${unknown} ${unknown === 1 ? "run has" : "runs have"} unknown cost` : ""}`;
+}
+
 
 /** Legacy chart geometry is in pixels. A viewBox preserves it when the Pulse card changes width. */
 export function responsiveInsightsSvg(markup) {
@@ -237,37 +254,35 @@ export function spendWeek(v) {
 }
 export function spendToday(v) {
   const s = payload(v).spend?.today;
+  const capped = s?.counterConfigured === true || number(s?.capMicros) > 0;
+  const uncapped = s?.counterConfigured === false || s?.usedSource === "records";
+  const chargedDiffers = s?.ledgerMicros !== undefined && (s.ledgerMicros !== s.settledMicros || s.settledFloor === true || s.settledEstimated === true || unknownCount(s) > 0);
   return card(
     "Today",
     html`${ui.kpi(
-      usd(s?.usedMicros),
-      `${pct(s?.usedMicros, s?.capMicros)} of the daily cap`,
+      markedMoney(s?.usedMicros, { floor: s?.usedFloor, estimated: s?.usedEstimated }),
+      capped ? `${pct(s?.usedMicros, s?.capMicros)} of the daily cap` : uncapped ? "No daily dollar cap is configured" : "The daily dollar cap could not be read",
     )}${factsOne([
-      ["Settled in today's records", usd(s?.settledMicros)],
+      ["Settled in today's records", settledMoney(s)],
       [`Held for ${s?.heldJobs ?? "unknown"} running jobs`, usd(s?.heldMicros)],
-      [
-        "Counter not explained by readable records and holds",
-        usd(s?.unattributedMicros),
-      ],
-    ])}${note(
-      "The remainder can include records this host cannot read, including another host's records on an unshared PI_LOGS_DIR. Held money is reported by running jobs, never inferred from the counter.",
-    )}${s?.reconciliationMismatch
-      ? note(
-          "Counter reconciliation mismatch: the readable records and running-job holds exceed the counter. Refresh or check shared history; no held money is inferred.",
-        )
+      ...(chargedDiffers ? [["Charged to dollar windows", usd(s.ledgerMicros)]] : []),
+      ...(capped ? [["Counter beyond recorded window charges and holds", usd(s?.unattributedMicros)]] : []),
+    ])}${chargedDiffers ? note("Readable record cost includes work outside dollar windows or cost that is not fully known. Charged to dollar windows is the recorded window charge, not the cost of all readable work.") : null}${note(
+      capped
+        ? "The counter remainder is not explained by readable window charges and published holds. It can include records this host cannot read, such as another host's on an unshared PI_LOGS_DIR. Held money is reported by running jobs, never inferred from the counter."
+        : uncapped ? "The amount above is readable record cost plus published running-job holds, not a dollar-window counter. Held money is reported by running jobs, never inferred from another total." : "The dollar-window configuration could not be read. Unknown amounts are not zero.",
+    )}${s?.usedSource === "unknown-counter" ? note("The configured dollar counter could not be read. Its amount stays unknown; readable records do not replace it.") : null}${unknownCount(s) || s?.settledFloor || s?.settledEstimated ? note("Unknown costs are not counted as zero. ≥ marks a known minimum; ~ marks an estimate.") : null}${s?.reconciliationMismatch
+      ? note("Counter reconciliation mismatch: readable window charges and running-job holds exceed the counter. Refresh or check shared history; no held money is inferred.")
       : null}${s?.unknownHosts?.length
-      ? note(
-          `Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`,
-        )
+      ? note(`Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`)
       : null}${v.query?.project
-      ? note(
-          typeof s?.basis === "string" && s.basis.startsWith("project:")
-            ? "This project's own dollar windows."
-            : "Deployment dollar windows: this project has no separate dollar window.",
-        )
+      ? note(typeof s?.basis === "string" && s.basis.startsWith("project:")
+          ? "This project's own dollar windows."
+          : "Deployment dollar windows: this project has no separate dollar window.")
       : null}`,
   );
 }
+
 export function spendTokens(v) {
   const s = payload(v).spend?.tokens;
   return kpi(
@@ -338,18 +353,14 @@ export function spendOver(v) {
             const top = (45 * (held ?? 0)) / max;
             return html`<g data-tip="${i}"
               ><title>
-                ${d.date}: ${usd(settled)}
-                settled${d.today ? html`; ${usd(held)} held` : ""}${d.unpriced
-                  ? "; some runs unpriced"
-                  : ""}</title
-              ><rect
-                class="sp-bar"
+                ${d.date}: ${settledMoneyText(d)} settled${d.today ? `; ${markedMoneyText(held)} held` : ""}</title
+              >${settled === null ? html`<text x="${i * width + width / 2}" y="49" text-anchor="middle" font-size="3" fill="var(--ink-muted)">?</text>` : html`<rect
+                class="${d.settledEstimated ? "sp-bar sp-bar--estimated" : "sp-bar"}"
                 x="${i * width + width * 0.15}"
                 y="${50 - bar}"
                 width="${width * 0.7}"
                 height="${Math.max(0.15, bar)}"
-              ></rect
-              >${top > 0
+              ></rect>`}${top > 0
                 ? html`<rect
                     class="sp-held"
                     x="${i * width + width * 0.15}"
@@ -365,20 +376,20 @@ export function spendOver(v) {
       ${tipsHtml(
         days.map(
           (d) =>
-            `${d.date}: ${d.settledMicros === null ? "unknown" : `$${(d.settledMicros / 1e6).toFixed(2)}`} settled${d.today ? `; ${d.heldMicros === null ? "unknown" : `$${(d.heldMicros / 1e6).toFixed(2)}`} held` : ""}`,
+            `${d.date}: ${settledMoneyText(d)} settled${d.today ? `; ${markedMoneyText(d.heldMicros)} held` : ""}`,
         ),
       )}
       <p class="keyrow">
         <span><i class="sp-k sp-k--bar"></i>Settled</span
         ><span><i class="sp-k sp-k--held"></i>Held today</span
-        ><span>Daily dollar cap</span>
+        >${cap !== null ? html`<span>Daily dollar cap</span>` : null}
       </p>
       ${note(
-        "Solid: settled run records. Dashed top today: held for running jobs, released when they settle. Past days show settled money only.",
+        "Solid: known settled record cost. Dashed top today: held for running jobs, released when they settle. Past days show record cost only. ≥ marks a known minimum; ~ marks an estimate; ? means the cost is unknown. Unknown costs are not zero.",
       )}${ui.facts(
         days.map((d) => [
           d.date,
-          html`${usd(d.settledMicros)}${d.today
+          html`${settledMoney(d)}${d.today
             ? html` settled; ${usd(d.heldMicros)} held`
             : ""}`,
         ]),
@@ -892,10 +903,15 @@ export function splitHistory(v) {
             </thead>
             <tbody>
               ${rows.slice(0, 20).map((r, i) => {
-                const duplicate = rows.findIndex(
+                const applied = rows.findIndex((other) => other.planId && other.planId === r.planId && other.outcome !== "duplicate" && other.outcome !== "refused");
+                const duplicate = applied >= 0 ? applied : rows.findIndex(
                   (other) => other.planId && other.planId === r.planId,
                 );
-                const current = r.planId && r.planId === p.state?.planId;
+                const neutralCurrent = p.state && p.state.planId == null && p.state.appliedAt != null && r.at === p.state.appliedAt && r.writer === p.state.writer && r.weights && !["duplicate", "refused"].includes(r.outcome);
+                const current = neutralCurrent || (r.planId && r.planId === p.state?.planId && duplicate === i);
+                const historyFact = duplicate >= 0 && duplicate !== i
+                  ? `Same as row ${duplicate + 1}`
+                  : current ? "In force" : !r.weights ? "No split to go back to" : null;
                 return html`<tr>
                   <td>${i + 1}</td>
                   <td>${when(r.at)}</td>
@@ -910,22 +926,14 @@ export function splitHistory(v) {
                       : null}
                   </td>
                   <td>
-                    ${r.planId ??
-                    (r.weights
-                      ? "Today's neutral split"
-                      : "No split to go back to")}
+                    ${neutralCurrent ? "Today's neutral split" : r.planId ?? (r.weights ? "Today's neutral split" : null)}
+                    ${historyFact ? note(historyFact) : null}
                   </td>
                   ${new Set(rows.map((x) => x.host).filter(Boolean)).size > 1
                     ? html`<td>${r.host ?? "unknown"}</td>`
                     : null}${canAct(v)
                     ? html`<td>
-                        ${current
-                          ? "In force"
-                          : duplicate >= 0 && duplicate < i
-                            ? `Same as row ${duplicate + 1}`
-                            : !r.weights
-                              ? "No split to go back to"
-                              : html`<form data-action="allocation-revert">
+                        ${historyFact ? null : html`<form data-action="allocation-revert">
                                   <input
                                     type="hidden"
                                     name="index"

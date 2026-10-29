@@ -45,7 +45,20 @@ export async function drawSpend(page = "insights", { role = "operator", query = 
   return String(out.html);
 }
 const allocationState = (over) => { const p = spendFixture(); return { ...p, allocation: { ...p.allocation, ...over } }; };
+function recordMoneyState(kind) {
+  const p = spendFixture();
+  const base = records()[0];
+  const paid = { ...base, endedAt: iso(NOW - 1000), dollars: { basis: "unreserved", settledMicros: 0 }, tokens: { ...base.tokens, cost: 7, metered: true }, usage: { models: [{ ...base.usage.models[0], cost: 7 }] } };
+  const unknown = { ...base, jobId: "gh-unknown-cost", endedAt: iso(NOW - 1000), dollars: { basis: "unreserved", settledMicros: 0 }, tokens: null, usage: null };
+  const rs = kind === "unknown" ? [unknown] : kind === "partial" ? [paid, unknown] : [paid];
+  const budget = kind === "partial" ? p.budget : {};
+  const currentFold = foldCosts({ records: rs, subscriptions: [], pricing, nowMs: NOW, piAiPin: "fixture", sinceMs: NOW - 7 * DAY });
+  return { ...p, budget, fold: currentFold, recent24h: currentFold, spend: { ...spendSummaryOf({ records: rs, hosts: [], budget, nowMs: NOW, jobCapMicros: 2000000 }), ...spendChartsOf({ records: rs, sinceMs: NOW - 7 * DAY, nowMs: NOW, jobCapMicros: 2000000, heldMicros: 0 }) } };
+}
 const states = {
+  "spend-no-dollar-window.viewer": () => drawSpend("insights", { role: "viewer", payload: recordMoneyState("paid") }),
+  "spend-partial-money.viewer": () => drawSpend("insights", { role: "viewer", payload: recordMoneyState("partial") }),
+  "spend-unknown-money.viewer": () => drawSpend("insights", { role: "viewer", payload: recordMoneyState("unknown") }),
   "spend-plan-model.viewer": () => { const p = spendFixture(); p.recent24h.byModel.push({ provider: "plan-provider", model: "plan-model", runs: 2, tokens: 300, cost: { usd: 0, class: "plan", planId: "work", floor: false } }); p.triggersByModel = { "plan-provider/plan-model": ["row 2"] }; return drawSpend("insights", { role: "viewer", payload: p }); },
   "spend-whatif-runs.viewer": () => drawSpend("insights", { role: "viewer", query: "range=7d&whatif=acme/model-2&runs=24h", whatIf: { runSet: { class: "estimated", usd: .3, originalUsd: .6, runs: 3, excluded: 1, coverage: .75, ratesVersion: "fixture", planId: "work" } } }),
   "spend-whatif-flow.viewer": () => drawSpend("insights-breakdown", { role: "viewer", query: "range=7d&whatif=acme/model-2&flow=fix", whatIf: { result: { class: "estimated", usd: .4, perRun: .2, windowRuns: 2, coverage: 1, excluded: 0, ratesVersion: "fixture" } } }),

@@ -83,7 +83,7 @@
 <nav class="sp-tabs spend-tabs" aria-label="Spend views">
       <div class="seg" role="group" aria-label="Spend views"><a href="/insights?range=7d" aria-current="page">Spend</a><a href="/insights/budget-split?range=7d">Budget split</a><a href="/insights/capacity?range=7d">Capacity</a><a href="/insights/breakdown?range=7d">Breakdown</a><a href="/insights/flows?range=7d">Flows map</a></div>
     </nav>
-    <p class="sp-note note">Spend window: last 7d. Series are bounded by log retention and the 92-day scan cap.</p><div class="cards-4"><section id="p-week" data-panel><div class="card"><div class="card__head"><h2>This week</h2></div><div class="card__body"><p class="kpi"><b>$2.60</b><span>Monday to today, 5% of the weekly cap</span></p><dl class="facts facts--1"><div class="fact"><dt>Weekly cap</dt><dd>$50.00</dd></div><div class="fact"><dt>Left</dt><dd>$47.40</dd></div></dl><p class="sp-note note">Spent and held, in this window&#39;s own counter.</p></div></div></section><section id="p-today" data-panel><div class="card"><div class="card__head"><h2>Today</h2></div><div class="card__body"><p class="kpi"><b>$2.60</b><span>26% of the daily cap</span></p><dl class="facts facts--1"><div class="fact"><dt>Settled in today&#39;s records</dt><dd>$0.60</dd></div><div class="fact"><dt>Held for 1 running jobs</dt><dd>$2.00</dd></div><div class="fact"><dt>Counter not explained by readable records and holds</dt><dd>$0.00</dd></div></dl><p class="sp-note note">The remainder can include records this host cannot read, including another host&#39;s records on an unshared PI_LOGS_DIR. Held money is reported by running jobs, never inferred from the counter.</p></div></div></section><section id="p-tokens" data-panel><div class="card"><div class="card__head"><h2>Tokens today</h2></div><div class="card__body"><p class="kpi"><b>360</b></p><p class="sp-note note">4% of 10000 daily tokens. Refused at the cap; no soft hold.</p></div></div></section><section id="p-avg" data-panel><div class="card"><div class="card__head"><h2>Average per metered run</h2></div><div class="card__body"><p class="kpi"><b>$0.20</b><span>Last 24 hours, 3 metered runs</span></p><dl class="facts facts--1"><div class="fact"><dt>Largest run</dt><dd>$0.30</dd></div><div class="fact"><dt>Per-job cap</dt><dd>$2.00</dd></div></dl></div></div></section></div><div class="cols"><div class="stack"><section id="p-over" data-panel><div class="card"><div class="card__head"><h2>Spend over time</h2></div><div class="card__body"><div id="wrap">
+    <p class="sp-note note">Spend window: last 7d. Series are bounded by log retention and the 92-day scan cap.</p><div class="cards-4"><section id="p-week" data-panel><div class="card"><div class="card__head"><h2>This week</h2></div><div class="card__body"><p class="kpi"><b>$2.60</b><span>Monday to today, 5% of the weekly cap</span></p><dl class="facts facts--1"><div class="fact"><dt>Weekly cap</dt><dd>$50.00</dd></div><div class="fact"><dt>Left</dt><dd>$47.40</dd></div></dl><p class="sp-note note">Spent and held, in this window&#39;s own counter.</p></div></div></section><section id="p-today" data-panel><div class="card"><div class="card__head"><h2>Today</h2></div><div class="card__body"><p class="kpi"><b>$2.60</b><span>26% of the daily cap</span></p><dl class="facts facts--1"><div class="fact"><dt>Settled in today&#39;s records</dt><dd>$0.60</dd></div><div class="fact"><dt>Held for 1 running jobs</dt><dd>$2.00</dd></div><div class="fact"><dt>Counter beyond recorded window charges and holds</dt><dd>$0.00</dd></div></dl><p class="sp-note note">The counter remainder is not explained by readable window charges and published holds. It can include records this host cannot read, such as another host&#39;s on an unshared PI_LOGS_DIR. Held money is reported by running jobs, never inferred from the counter.</p></div></div></section><section id="p-tokens" data-panel><div class="card"><div class="card__head"><h2>Tokens today</h2></div><div class="card__body"><p class="kpi"><b>360</b></p><p class="sp-note note">4% of 10000 daily tokens. Refused at the cap; no soft hold.</p></div></div></section><section id="p-avg" data-panel><div class="card"><div class="card__head"><h2>Average per metered run</h2></div><div class="card__body"><p class="kpi"><b>$0.20</b><span>Last 24 hours, 3 metered runs</span></p><dl class="facts facts--1"><div class="fact"><dt>Largest run</dt><dd>$0.30</dd></div><div class="fact"><dt>Per-job cap</dt><dd>$2.00</dd></div></dl></div></div></section></div><div class="cols"><div class="stack"><section id="p-over" data-panel><div class="card"><div class="card__head"><h2>Spend over time</h2></div><div class="card__body"><div id="wrap">
         <div id="tip"></div>
         <svg
           class="sp-chart spend-chart"
@@ -99,100 +99,84 @@
                 y2="5"
               ></line><g data-tip="0"
               ><title>
-                2026-10-01: $0.00
-                settled</title
+                2026-10-01: $0.00 settled</title
               ><rect
                 class="sp-bar"
                 x="1.875"
                 y="50"
                 width="8.75"
                 height="0.15"
-              ></rect
-              ></g
+              ></rect></g
             ><g data-tip="1"
               ><title>
-                2026-10-02: $0.00
-                settled</title
+                2026-10-02: $0.00 settled</title
               ><rect
                 class="sp-bar"
                 x="14.375"
                 y="50"
                 width="8.75"
                 height="0.15"
-              ></rect
-              ></g
+              ></rect></g
             ><g data-tip="2"
               ><title>
-                2026-10-03: $0.00
-                settled</title
+                2026-10-03: $0.00 settled</title
               ><rect
                 class="sp-bar"
                 x="26.875"
                 y="50"
                 width="8.75"
                 height="0.15"
-              ></rect
-              ></g
+              ></rect></g
             ><g data-tip="3"
               ><title>
-                2026-10-04: $0.00
-                settled</title
+                2026-10-04: $0.00 settled</title
               ><rect
                 class="sp-bar"
                 x="39.375"
                 y="50"
                 width="8.75"
                 height="0.15"
-              ></rect
-              ></g
+              ></rect></g
             ><g data-tip="4"
               ><title>
-                2026-10-05: $0.00
-                settled</title
+                2026-10-05: $0.00 settled</title
               ><rect
                 class="sp-bar"
                 x="51.875"
                 y="50"
                 width="8.75"
                 height="0.15"
-              ></rect
-              ></g
+              ></rect></g
             ><g data-tip="5"
               ><title>
-                2026-10-06: $0.00
-                settled</title
+                2026-10-06: $0.00 settled</title
               ><rect
                 class="sp-bar"
                 x="64.375"
                 y="50"
                 width="8.75"
                 height="0.15"
-              ></rect
-              ></g
+              ></rect></g
             ><g data-tip="6"
               ><title>
-                2026-10-07: $0.00
-                settled</title
+                2026-10-07: $0.00 settled</title
               ><rect
                 class="sp-bar"
                 x="76.875"
                 y="50"
                 width="8.75"
                 height="0.15"
-              ></rect
-              ></g
+              ></rect></g
             ><g data-tip="7"
               ><title>
-                2026-10-08: $0.60
-                settled; $2.00 held</title
+                2026-10-08: $0.60 settled; $2.00 held</title
               ><rect
                 class="sp-bar"
                 x="89.375"
                 y="47.3"
                 width="8.75"
                 height="2.7"
-              ></rect
-              ><rect
+              ></rect><rect
                     class="sp-held"
                     x="89.375"
                     y="38.3"
@@ -210,7 +194,7 @@
         ><span><i class="sp-k sp-k--held"></i>Held today</span
         ><span>Daily dollar cap</span>
       </p>
-      <p class="sp-note note">Solid: settled run records. Dashed top today: held for running jobs, released when they settle. Past days show settled money only.</p><dl class="facts facts--3"><div class="fact"><dt>2026-10-01</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-02</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-03</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-04</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-05</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-06</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-07</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-08</dt><dd>$0.60 settled; $2.00 held</dd></div></dl></div></div></section><section id="p-byflow" data-panel><div class="card"><div class="card__head"><h2>By flow</h2></div><div class="card__body"><div class="spend-cap">
+      <p class="sp-note note">Solid: known settled record cost. Dashed top today: held for running jobs, released when they settle. Past days show record cost only. ≥ marks a known minimum; ~ marks an estimate; ? means the cost is unknown. Unknown costs are not zero.</p><dl class="facts facts--3"><div class="fact"><dt>2026-10-01</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-02</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-03</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-04</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-05</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-06</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-07</dt><dd>$0.00</dd></div><div class="fact"><dt>2026-10-08</dt><dd>$0.60 settled; $2.00 held</dd></div></dl></div></div></section><section id="p-byflow" data-panel><div class="card"><div class="card__head"><h2>By flow</h2></div><div class="card__body"><div class="spend-cap">
           <div class="row">
             <span class="mono">fix</span
             ><b class="end">$0.30</b>

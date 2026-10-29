@@ -38,10 +38,12 @@ import {
   envelopeJobCap,
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
+import { readGraphTriggers } from "./graph-triggers.mjs";
 import { INSIGHTS_SPLIT_REFUSALS } from "./insights-html.mjs";
-import { costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, matchesGlob, meteredRunMicros, repoKeyOf, projectKeyOf } from "./costs.mjs";
+import { costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, matchesGlob, meteredRunMicros, repoKeyOf, projectKeyOf, refusedBeforeSpend } from "./costs.mjs";
 import { sizeBits, outsideEdit, splitTotalMicros } from "./render.mjs";
 import { escapeInterpreted } from "./panel.mjs";
+import { meteredMicros } from "@edgehero/pi-dispatch/dollar-budget";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SUGGEST_WINDOW_DAYS } from "@edgehero/pi-dispatch/size-suggest";
 import { coverageNotes, historyNotes, hostCaveats, hostFacts, noRunText, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
@@ -132,11 +134,12 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing, now
  * `collectGraphInputs`, and the pure fold. All I/O lives in the read-model; this function only
  * aggregates its outputs into buildGraphModel's input shape. `pricing` is the façade (`needPricing`).
  */
-export async function assembleGraph(paths, { pricing, project, nowMs = Date.now() } = {}) {
+export async function assembleGraph(paths, { pricing, project, fullPaths = false, nowMs = Date.now(), readSchedulersFn = readSchedulers } = {}) {
   needPricing(pricing);
-  const triggers = readTriggers({ triggersPath: paths.triggersPath });
+  const triggers = readGraphTriggers({ triggersPath: paths.triggersPath, fullPaths });
+  if (triggers.missing || triggers.invalid) return buildGraphModel({ triggers, nowMs });
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
-  const schedulers = await readSchedulers({ url: paths.valkeyUrl });
+  const schedulers = await readSchedulersFn({ url: paths.valkeyUrl });
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
   const recs = Array.isArray(records) ? records.filter((r) => !project || recordInProject(r, project)) : [];
   // Spend badges (issue #175): the dashboard seam's twin -- one subscriptions read, two pure folds.
@@ -493,6 +496,69 @@ export function heldMoneyOf(hosts, { nowMs, project = null } = {}) {
   return { heldMicros: safeAmount(heldMicros) ? heldMicros : null, heldJobs, unknownHosts };
 }
 
+/**
+ * Enforcement settlement is not a history price: without a dollar reservation the worker writes unreserved/0 even
+ * when a paid run reports money. Keep genuine settlements (including refunds and floors), otherwise use recorded
+ * prices. Plans retain their recorded API equivalent; old zero-price plan rows need a declared counterfactual.
+ */
+export function recordSpendOf(record, { subscriptions = [], pricing } = {}) {
+  const dollars = record?.dollars;
+  if (safeAmount(dollars?.settledMicros) && dollars.basis !== "unreserved") return { micros: dollars.settledMicros, ledgerMicros: dollars.settledMicros, floor: dollars.basis === "floor", estimated: false, unknown: false };
+  const ledgerMicros = dollars?.basis === "unreserved" ? 0 : null;
+  if (refusedBeforeSpend(record)) return { micros: 0, ledgerMicros: ledgerMicros ?? 0, floor: false, estimated: false, unknown: false };
+  const toMicros = meteredMicros;
+  const usage = record?.usage;
+  const rows = Array.isArray(usage?.models) && usage.models.length > 0 ? usage.models : null;
+  let estimated = record?.tokens?.metered !== true;
+  let missing = false;
+  let planUnknown = false;
+  let repricedPlan = false;
+  let knownRows = 0;
+  let rowMicros = 0;
+  for (const row of rows ?? []) {
+    let cost = toMicros(row?.cost);
+    const plan = subscriptions.find((sub) => !sub.hypothetical && sub.provider === row?.provider && sub.models?.some((glob) => matchesGlob(row?.model, glob)));
+    if (plan && cost === 0) {
+      const priced = plan.counterfactualModel && pricing?.reprice?.({ input: row.input ?? 0, output: row.output ?? 0, cacheRead: row.cacheRead ?? 0, cacheWrite: row.cacheWrite ?? 0, cacheWrite1h: row.cacheWrite1h ?? 0 }, plan.counterfactualModel);
+      cost = toMicros(priced?.usd);
+      if (cost !== null) { estimated = true; repricedPlan = true; }
+      else planUnknown = true;
+    }
+    if (cost === null) missing = true;
+    else { knownRows++; rowMicros += cost; }
+  }
+  const recordedMicros = toMicros(record?.tokens?.cost);
+  let micros = repricedPlan || planUnknown ? knownRows > 0 ? rowMicros : null : recordedMicros ?? (knownRows > 0 ? rowMicros : null);
+  // Before ledgers, a plan's flat zero is no API baseline either. Its cache split cannot be reconstructed to reprice it.
+  if (!rows && recordedMicros === 0 && subscriptions.some((sub) => !sub.hypothetical && sub.provider === record?.provider && sub.models?.some((glob) => matchesGlob(record?.model, glob)))) { micros = null; missing = true; }
+  if (micros === null || !safeAmount(micros)) return { micros: null, ledgerMicros, floor: true, estimated, unknown: true };
+  const facade = pricing ?? { getPricedModel: () => null, isZeroRated: () => false, piAiVersion: () => null };
+  const at = recordInstant(record);
+  const cost = foldCosts({ records: [record], subscriptions: [], pricing: facade, nowMs: Number.isFinite(at) ? at : 0 }).provenance.total;
+  return { micros, ledgerMicros, floor: cost.floor === true || missing || usage?.truncated > 0, estimated, unknown: missing };
+}
+
+function spendAccumulator(readable) {
+  return { settledMicros: readable ? 0 : null, ledgerMicros: readable ? 0 : null, settledFloor: !readable, settledEstimated: false, unpriced: 0, known: 0, records: 0 };
+}
+function addRecordSpend(sum, record, opts) {
+  const amount = recordSpendOf(record, opts);
+  sum.records++;
+  if (amount.micros === null) sum.unpriced++;
+  else { sum.settledMicros += amount.micros; sum.known++; if (amount.unknown) sum.unpriced++; }
+  sum.settledFloor ||= amount.floor;
+  sum.settledEstimated ||= amount.estimated;
+  if (amount.ledgerMicros === null) sum.ledgerMicros = null;
+  else if (sum.ledgerMicros !== null) sum.ledgerMicros += amount.ledgerMicros;
+}
+function finishSpend(sum) {
+  if (sum.records > 0 && sum.known === 0 || !safeAmount(sum.settledMicros)) sum.settledMicros = null;
+  if (!safeAmount(sum.ledgerMicros)) sum.ledgerMicros = null;
+  delete sum.known;
+  delete sum.records;
+  return sum;
+}
+
 /** The named windows stay independent of the chart filter: today's counter is always today's counter. */
 export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, jobCapMicros = null, subscriptions = [], pricing }) {
   const rows = budget?.dollars?.windows ?? [];
@@ -505,21 +571,20 @@ export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, 
   };
   const all = Array.isArray(records) ? records : [];
   const dayStart = Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS;
-  let settledMicros = 0;
-  let unpriced = 0;
-  for (const r of all) if (recordInstant(r) >= dayStart && recordInstant(r) <= nowMs) {
-    if (safeAmount(r.dollars?.settledMicros)) settledMicros += r.dollars.settledMicros;
-    else unpriced++;
-  }
+  const settled = spendAccumulator(Array.isArray(records));
+  for (const r of all) if (recordInstant(r) >= dayStart && recordInstant(r) <= nowMs) addRecordSpend(settled, r, { subscriptions, pricing });
+  finishSpend(settled);
   const held = heldMoneyOf(hosts, { nowMs, project: scoped.some((r) => r.window === "day") ? project : null });
   const today = window("day");
-  const remainder = today.usedMicros !== null && held.heldMicros !== null ? today.usedMicros - settledMicros - held.heldMicros : null;
+  const counterConfigured = rows.some((r) => r.window === "day" && (r.ledger === "deployment" || r.ledger === "scope" && r.name === `project:${project}`));
+  const remainder = today.usedMicros !== null && held.heldMicros !== null && settled.ledgerMicros !== null ? today.usedMicros - settled.ledgerMicros - held.heldMicros : null;
+  if (!counterConfigured) today.usedMicros = settled.settledMicros !== null && held.heldMicros !== null && safeAmount(settled.settledMicros + held.heldMicros) ? settled.settledMicros + held.heldMicros : null;
   const micros = all.filter((r) => recordInstant(r) >= nowMs - INSIGHTS_DAY_MS && recordInstant(r) <= nowMs).map((r) => meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) })).filter((n) => n !== null);
   return {
     basis: scoped.length > 0 ? `project:${project}` : "deployment",
     projectFallback: Boolean(project && scoped.length === 0),
     week: window("week"),
-    today: { ...today, settledMicros: Array.isArray(records) && safeAmount(settledMicros) ? settledMicros : null, unpriced, ...held, unattributedMicros: remainder, reconciliationMismatch: remainder !== null && remainder < 0 },
+    today: { ...today, ...settled, counterConfigured, counterAvailable: counterConfigured && today.usedMicros !== null, usedSource: counterConfigured ? today.usedMicros !== null ? "counter" : "unknown-counter" : "records", usedFloor: !counterConfigured && (settled.settledFloor || held.unknownHosts.length > 0), usedEstimated: !counterConfigured && settled.settledEstimated, ...held, unattributedMicros: remainder, reconciliationMismatch: remainder !== null && remainder < 0 },
     tokens: { used: budget?.tokens?.spent ?? null, cap: budget?.tokens?.cap ?? null },
     average: { costMicros: micros.length > 0 ? Number((micros.reduce((sum, n) => sum + BigInt(n), 0n) + BigInt(Math.floor(micros.length / 2))) / BigInt(micros.length)) : null, runs: micros.length, largestMicros: micros.length > 0 ? Math.max(...micros) : null },
     jobCapMicros,
@@ -534,7 +599,7 @@ export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, 
 export async function assembleInsightsView(paths, window, { view = "spend", project = null, role = "viewer", fullPaths = false, pricing, nowMs = Date.now(), envFn = processEnv, reads = {} } = {}) {
   needPricing(pricing);
   const io = { costs: assembleCosts, graph: assembleGraph, budget: assembleBudgetView, allocation: assembleAllocationView, capacity: assembleCapacityView, sizing: assembleSizingView, hosts: readHosts, projects: readProjects, scan: scanRunRecords, subscriptions: readSubscriptions, settings: readSettingsView, ...reads };
-  const opts = { pricing, project, nowMs, envFn };
+  const opts = { pricing, project, nowMs, envFn, fullPaths: role === "operator" && fullPaths };
   const out = { window, view, project, nowMs };
   if (view === "capacity") {
     out.capacity = await io.capacity(paths, window, nowMs, { envFn });
@@ -612,7 +677,9 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   }
   const recent = Array.isArray(scanned) ? inProject(scanned.filter((r) => recordInstant(r) >= nowMs - INSIGHTS_DAY_MS && recordInstant(r) <= nowMs), project) : [];
   out.recent24h = Array.isArray(scanned) ? foldCosts({ records: recent, subscriptions: subs?.subscriptions ?? [], pricing, nowMs, piAiPin: pricing.piAiVersion(), sinceMs: nowMs - INSIGHTS_DAY_MS }) : null;
-  Object.assign(out.spend, spendChartsOf({ records: costs?.records, sinceMs: costsSinceMs(window, nowMs), nowMs, jobCapMicros, subscriptions, pricing, heldMicros: out.spend.today.heldMicros }));
+  // The chart follows the project filter even when the headline falls back to deployment windows.
+  const chartHeld = hosts?.unreachable ? null : heldMoneyOf(out.hosts, { nowMs, project }).heldMicros;
+  Object.assign(out.spend, spendChartsOf({ records: costs?.records, sinceMs: costsSinceMs(window, nowMs), nowMs, jobCapMicros, subscriptions, pricing, heldMicros: chartHeld }));
   const choices = new Map();
   const choice = (provider, model) => {
     if (typeof provider !== "string" || typeof model !== "string") return;
@@ -652,22 +719,19 @@ export function spendChartsOf({ records, sinceMs, nowMs, jobCapMicros, subscript
   const today = new Date(nowMs).toISOString().slice(0, 10);
   for (let at = Math.floor(sinceMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS; at <= nowMs; at += INSIGHTS_DAY_MS) {
     const date = new Date(at).toISOString().slice(0, 10);
-    days.set(date, { date, settledMicros: Array.isArray(records) ? 0 : null, heldMicros: date === today ? heldMicros : 0, today: date === today, unpriced: 0 });
+    days.set(date, { date, ...spendAccumulator(Array.isArray(records)), heldMicros: date === today ? heldMicros : 0, today: date === today });
   }
   const costs = [];
   for (const r of Array.isArray(records) ? records : []) {
     const at = recordInstant(r);
     if (!(at >= sinceMs && at <= nowMs)) continue;
     const day = days.get(new Date(at).toISOString().slice(0, 10));
-    if (day) {
-      if (safeAmount(r.dollars?.settledMicros)) day.settledMicros += r.dollars.settledMicros;
-      else day.unpriced++;
-    }
+    if (day) addRecordSpend(day, r, { subscriptions, pricing });
     const cost = meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) });
     if (cost !== null) costs.push(cost);
   }
   const histogram = safeAmount(jobCapMicros) && jobCapMicros > 0 ? Array.from({ length: 10 }, (_, i) => ({ fromMicros: i * jobCapMicros / 10, toMicros: (i + 1) * jobCapMicros / 10, runs: 0 })) : [];
   for (const cost of costs) if (histogram.length) histogram[Math.min(histogram.length - 1, Math.floor(cost * histogram.length / jobCapMicros))].runs++;
-  for (const day of days.values()) if (!safeAmount(day.settledMicros)) day.settledMicros = null;
+  for (const day of days.values()) finishSpend(day);
   return { daily: [...days.values()], histogram, largestRangeMicros: costs.length ? Math.max(...costs) : null, meteredRangeRuns: costs.length, overJobCapRuns: safeAmount(jobCapMicros) ? costs.filter((n) => n > jobCapMicros).length : null };
 }

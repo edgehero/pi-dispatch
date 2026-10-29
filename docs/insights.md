@@ -16,7 +16,7 @@ History is bounded by log retention and the 92-day scan cap. A missing read, tru
 
 ## Settled, held and caps
 
-Today's settled amount comes from run records. Held money comes from the live workers' actual reservations and their reservation times, never from the difference between a counter and the records. Older workers or incomplete job lists leave the hold total incomplete and are named. Any remaining difference from the enforcement counter is named separately. Past daily bars show settled money only.
+Today's settled amount comes from run records. An enforcement record marked `unreserved` with zero dollars means no dollar window was charged; a paid run still shows its recorded metered cost. The view names counter-charged settlement separately when it differs. Missing prices remain unknown, and partial or estimated totals keep their marks. Held money comes from the live workers' actual reservations and their reservation times, never from the difference between a counter and the records. Older workers or incomplete job lists leave the hold total incomplete and are named. Any remaining difference from the enforcement counter is named separately. Past daily bars show settled money only.
 
 Dollar counters include settled charges and reservations. A dollar window can be full before the displayed counter reaches its cap because another job's per-job reservation would not fit. Only global job-count windows have a soft hold; scoped job-count windows have hard caps. At that hold the worker refuses new starts; it does not leave them waiting. Tokens are refused at their cap alone.
 
