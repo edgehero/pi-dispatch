@@ -280,7 +280,8 @@ test("the runs and parked pages PR 4 converted are not legacy: their panels are 
   // The runs table's Newer and Older links were the last old `.pager`: no old markup draws one, so neither the layer's
   // two rules for it nor its collision with bundle.css's `.pager` are left.
   assert.ok(!EMITTED.classes.has("pager") && !COLLISIONS.includes("pager") && !LEGACY_CLASSES.includes("pager"));
-  for (const c of ["filters", "note", "warn", "range"]) assert.ok(EMITTED.classes.has(c), `.${c} is still old markup`);
+  for (const c of ["note", "warn"]) assert.ok(EMITTED.classes.has(c), `.${c} is still old markup`);
+  for (const c of ["filters", "range", "answer", "hidden-tips"]) assert.ok(!EMITTED.classes.has(c) && !LEGACY_CLASSES.includes(c), `Spend no longer leaves .${c} in the legacy layer`);
 });
 
 test("an empty LEGACY_PAGES leaves no legacy layer: the last converted page deletes it", () => {

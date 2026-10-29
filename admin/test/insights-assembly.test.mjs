@@ -264,7 +264,14 @@ test("with an envelope set, the split is read through readAllocations, without h
   ia._setAllocationSeamsForTests({ redisFn: () => redis, prefix: "t507", now: () => new Date(Date.parse("2026-10-05T12:00:00Z")) });
   let slice;
   try {
-    slice = await ia.assembleAllocationView(paths, ia.splitCounts(records));
+    slice = await ia.assembleAllocationView(paths, ia.splitCounts(records), { nowMs: Date.parse("2026-10-05T12:00:00Z") });
+    const viewer = await ia.assembleAllocationView(paths, null, { consoleView: true, role: "viewer", nowMs: Date.parse("2026-10-05T12:00:00Z") });
+    const operator = await ia.assembleAllocationView(paths, null, { consoleView: true, role: "operator", nowMs: Date.parse("2026-10-05T12:00:00Z") });
+    assert.equal(viewer.log[0].host, "CANARY-HOST", "the console names the host without changing shareable exports");
+    assert.deepEqual(viewer.state.weights, { shop: 1, _other: 0 });
+    assert.equal("reasons" in viewer.state, false, "a viewer's data never contains the plan text");
+    assert.equal(operator.state.reasons.shop, "CANARY-REASON");
+    assert.equal(viewer.envelope.delegation.maxPlanDays, 14, "structured forms receive the parsed envelope bounds");
   } finally {
     ia._setAllocationSeamsForTests({});
   }
@@ -283,17 +290,17 @@ test("with an envelope set, the split is read through readAllocations, without h
   let dials = 0;
   ia._setAllocationSeamsForTests({ redisFn: () => { dials += 1; throw new Error("dialled"); }, prefix: "t507" });
   try {
-    assert.deepEqual(await ia.assembleAllocationView({ envelopeFile: null }, null), { unset: true });
+    assert.deepEqual(await ia.assembleAllocationView({ envelopeFile: null }, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { unset: true });
     writeFileSync(files.envelope, "{ not json");
     // A broken envelope names its file by basename only: a viewer reads the page too.
-    assert.deepEqual(await ia.assembleAllocationView(paths, null), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json" });
+    assert.deepEqual(await ia.assembleAllocationView(paths, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json" });
     // An operator's ?paths=full is the page's one opt-in for host paths, and it holds here too.
-    assert.deepEqual(await ia.assembleAllocationView(paths, null, { fullPaths: true }), { problem: `the envelope file does not load: envelope file is not valid JSON (at character 2): ${files.envelope}` });
+    assert.deepEqual(await ia.assembleAllocationView(paths, null, { fullPaths: true, nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: `the envelope file does not load: envelope file is not valid JSON (at character 2): ${files.envelope}` });
     // The cut is made on the parser's raw text: a folder whose name the escape rewrites still loses its path.
     const odd = join(dir, "zero\u200bwidth");
     mkdirSync(odd);
     writeFileSync(join(odd, "envelope.json"), "{ not json");
-    assert.deepEqual(await ia.assembleAllocationView({ ...paths, envelopeFile: join(odd, "envelope.json") }, null), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json" });
+    assert.deepEqual(await ia.assembleAllocationView({ ...paths, envelopeFile: join(odd, "envelope.json") }, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json" });
   } finally {
     ia._setAllocationSeamsForTests({});
   }
@@ -499,7 +506,7 @@ test("assembleCapacityView: the page's window and instant reach the read, mtd fr
   await ia.assembleCapacityView(paths, "30d", CNOW, { readCapacityFn, env: {} });
   assert.equal(seen[2].span.sinceMs(CNOW), CNOW - 30 * 24 * CH);
   assert.equal(seen[2].span.bucketMs, 6 * CH);
-  assert.deepEqual(ia.INSIGHTS_CAPACITY_BUCKET_MS, { "7d": CH, "30d": 6 * CH, mtd: 6 * CH });
+  assert.deepEqual(ia.INSIGHTS_CAPACITY_BUCKET_MS, { "24h": CH, "7d": CH, "30d": 6 * CH, mtd: 6 * CH });
   // a read that fails says so; it is never a host with nothing to show
   assert.deepEqual(await ia.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => ({ error: "PI_LOG_RETENTION_DAYS must be a non-negative integer" }), env: {} }), { unreachable: "PI_LOG_RETENTION_DAYS must be a non-negative integer" });
   assert.deepEqual(await ia.assembleCapacityView(paths, "7d", CNOW, { readCapacityFn: async () => { throw new Error("EACCES"); }, env: {} }), { unreachable: "the capacity report could not be read (EACCES)" });

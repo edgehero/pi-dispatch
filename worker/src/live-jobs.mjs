@@ -23,6 +23,8 @@
  *   - `p` is a project id (`isProjectId`) or null; `runs:rec:*` already carries project ids.
  *   - `m`, `c`, `at` and orphan stop `s` are integers (MiB, hundredths of a CPU, epoch millis), `o` is 1;
  *     `v` is the orphan runtime from this build's closed venue table.
+ *   - `h` and `ha` are the actual dollar reservation (micro-dollars) and its epoch instant. A zero is known zero;
+ *     absent fields mean an older host or an orphan whose reservation this process cannot know, never zero.
  *
  * ORDER AND SIZE. Oldest first (by `at`, then id), at most `LIVE_JOBS_MAX`: the jobs that have held a slot longest
  * carry the most busy time and are the ones an operator looks for. The rest are counted in `jobsMore`, never dropped
@@ -40,6 +42,7 @@ export const LIVE_JOB_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 /** The most a `jobs` value may be before a reader declines to parse it: 32 entries at their longest fit well inside. */
 export const LIVE_JOBS_MAX_BYTES = 16 * 1024;
 
+const nonnegativeInt = (v) => Number.isSafeInteger(v) && v >= 0;
 const positiveInt = (v) => Number.isSafeInteger(v) && v > 0;
 
 /** A job id as it may be published: itself when inside `LIVE_JOB_ID_RE`, else its digest; null for no id. */
@@ -67,7 +70,7 @@ export function liveJobsOf({ running = [], budgetEntries = [], defaultVenue = nu
 		if (seen.has(id)) return; // one job, two pickups (or running and orphaned): listed once
 		seen.add(id);
 		const venue = typeof e.orphan?.venue === "string" ? e.orphan.venue : (e.orphan?.venue && typeof e.orphan.venue === "object" ? (e.orphan.venue.backend ?? defaultVenue) : null);
-		out.push({ id, p: isProjectId(e.project) ? e.project : null, ...(positiveInt(e.memMiB) ? { m: e.memMiB } : {}), ...(positiveInt(e.cpuCenti) ? { c: e.cpuCenti } : {}), at: e.at, ...(orphan ? { o: 1, ...(BACKEND_NAMES.includes(venue) ? { v: venue } : {}), ...(positiveInt(e.orphan?.since) ? { s: e.orphan.since } : {}) } : {}) });
+		out.push({ id, p: isProjectId(e.project) ? e.project : null, ...(positiveInt(e.memMiB) ? { m: e.memMiB } : {}), ...(positiveInt(e.cpuCenti) ? { c: e.cpuCenti } : {}), at: e.at, ...(nonnegativeInt(e.holdMicros) && positiveInt(e.holdAt) ? { h: e.holdMicros, ha: e.holdAt } : {}), ...(orphan ? { o: 1, ...(BACKEND_NAMES.includes(venue) ? { v: venue } : {}), ...(positiveInt(e.orphan?.since) ? { s: e.orphan.since } : {}) } : {}) });
 	};
 	// Running first, so a job both running and in the ledger as an orphan (it cannot be: the gate defers it) reads as running.
 	for (const e of Array.isArray(running) ? running : []) push(e, false);
@@ -125,7 +128,7 @@ function parseList(list) {
 			dropped++;
 			continue;
 		}
-		jobs.push({ id: e.id, p: e.p ?? null, m, c, at: e.at, o: e.o === 1 || e.o === true, ...(e.v != null ? { v: e.v } : {}), ...(e.s != null ? { s: e.s } : {}) });
+		jobs.push({ id: e.id, p: e.p ?? null, m, c, at: e.at, o: e.o === 1 || e.o === true, ...(nonnegativeInt(e.h) && positiveInt(e.ha) ? { h: e.h, ha: e.ha } : {}), ...(e.v != null ? { v: e.v } : {}), ...(e.s != null ? { s: e.s } : {}) });
 	}
 	return { jobs, dropped };
 }

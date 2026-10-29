@@ -14,6 +14,7 @@ import { basename } from "node:path";
 import {
   readSchedulers,
   readBudget,
+  readDollarWindows,
   readSettingsView,
   readTriggers,
   readScopedLimits,
@@ -38,7 +39,7 @@ import {
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { INSIGHTS_SPLIT_REFUSALS } from "./insights-html.mjs";
-import { costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo } from "./costs.mjs";
+import { costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, matchesGlob, meteredRunMicros, repoKeyOf, projectKeyOf } from "./costs.mjs";
 import { sizeBits, outsideEdit, splitTotalMicros } from "./render.mjs";
 import { escapeInterpreted } from "./panel.mjs";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
@@ -46,6 +47,9 @@ import { SUGGEST_WINDOW_DAYS } from "@edgehero/pi-dispatch/size-suggest";
 import { coverageNotes, historyNotes, hostCaveats, hostFacts, noRunText, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
+import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "@edgehero/pi-dispatch/config";
+import { parseLiveJobs, parseJobsMore } from "@edgehero/pi-dispatch/live-jobs";
+import { deploymentDollarCaps } from "./dollar-windows.mjs";
 import { windowState } from "@edgehero/pi-dispatch/budget";
 
 /** The environment a caller that names none reads: this process's own. */
@@ -91,9 +95,8 @@ export function envelopeProblem(r) {
  * `{ fold }`, or scanRunRecords' `{ unreachable }` passed through for the caller to surface. `pricing` is the
  * façade (`needPricing`).
  */
-export function assembleCosts(paths, window, { flow, repo, project, pricing } = {}) {
+export function assembleCosts(paths, window, { flow, repo, project, pricing, nowMs = Date.now() } = {}) {
   needPricing(pricing);
-  const nowMs = Date.now();
   const sinceMs = costsSinceMs(window, nowMs);
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
   if (!Array.isArray(records)) return records; // { unreachable }
@@ -104,7 +107,8 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing } = 
   // "acme/web" selects that repo on every forge, a qualified "github:acme/web" (the byRepo rollup's key) one forge.
   const repoScoped = typeof repo === "string" && repo !== "" ? flowScoped.filter((r) => recordInRepo(r, repo)) : flowScoped;
   // Issue #499 part C: the project filter at the same records level, by the id each record carries (never re-derived).
-  const scoped = typeof project === "string" && project !== "" ? repoScoped.filter((r) => recordInProject(r, project)) : repoScoped;
+  const projectScoped = typeof project === "string" && project !== "" ? repoScoped.filter((r) => recordInProject(r, project)) : repoScoped;
+  const scoped = projectScoped.filter((r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "") <= nowMs);
   // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
   // the same file-read-plus-pure-fold path the dashboard seam takes.
   const triggersView = readTriggers({ triggersPath: paths.triggersPath });
@@ -128,14 +132,13 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing } = 
  * `collectGraphInputs`, and the pure fold. All I/O lives in the read-model; this function only
  * aggregates its outputs into buildGraphModel's input shape. `pricing` is the façade (`needPricing`).
  */
-export async function assembleGraph(paths, { pricing } = {}) {
+export async function assembleGraph(paths, { pricing, project, nowMs = Date.now() } = {}) {
   needPricing(pricing);
-  const nowMs = Date.now();
   const triggers = readTriggers({ triggersPath: paths.triggersPath });
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
   const schedulers = await readSchedulers({ url: paths.valkeyUrl });
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
-  const recs = Array.isArray(records) ? records : [];
+  const recs = Array.isArray(records) ? records.filter((r) => !project || recordInProject(r, project)) : [];
   // Spend badges (issue #175): the dashboard seam's twin -- one subscriptions read, two pure folds.
   const subsView = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
   const triggerJoin = attributeRunsToTriggers({ records: recs, triggers: triggerList });
@@ -161,20 +164,23 @@ function posIntOrNull(v) {
 /**
  * The budget slice of the insights payload (issue #181): reserved-vs-cap FACTS for the three job-slot
  * windows and the daily token counter, with the per-window state computed HERE by the worker's own
- * `windowState` (and the token rule the old dashboard token line used: `>=` cap, `>` the soft-hold
- * floor -- tokens are a running count, not a reservation, so equality is already over). States ride
+ * `windowState` (tokens have no soft hold: equality with their cap is already over). States ride
  * the payload as WORDS the page never derives: the artifact builder cannot load the worker
  * (its import allowlist is the two pure siblings), and duplicating threshold arithmetic behind a
  * parity test would put policy in two places. Caps come from the settings overlay ALONE -- a cap the
- * overlay does not set is null, "unknown", because the worker resolves it from env/defaults this
- * process cannot read authoritatively, and the page must render that as absence, never a guess.
+ * overlay does not set is null unless the console passes its deployment environment; then the worker
+ * precedence applies. The static export keeps its former overlay-only contract.
  * `readBudget` is GET-only (CONST-BUDGET-BEFORE-TOKENS: observing the budget spends nothing). Exported with a Valkey
  * client seam (`redisFn`) for its tests, as `assembleAllocationView` is.
  */
-export async function assembleBudgetView(paths, { redisFn } = {}) {
-  const raw = await readBudget({ url: paths.valkeyUrl, redisFn });
+export async function assembleBudgetView(paths, { redisFn, env, nowMs = Date.now() } = {}) {
+  const raw = await readBudget({ url: paths.valkeyUrl, redisFn, now: new Date(nowMs) });
   const view = readSettingsView({ settingsFile: paths.settingsFile });
-  const overlay = view && !view.invalid && view.overlay ? view.overlay : {};
+  const overlay = view && !view.invalid && view.overlay ? { ...view.overlay } : {};
+  if (env) {
+    const keys = { dailyCap: "PI_DAILY_CAP", weeklyCap: "PI_WEEKLY_CAP", monthlyCap: "PI_MONTHLY_CAP", dailyTokenCap: "PI_DAILY_TOKEN_CAP", maxTokens: "PI_MAX_TOKENS", softHoldPct: "PI_SOFT_HOLD_PCT" };
+    for (const [key, variable] of Object.entries(keys)) if (overlay[key] === undefined && /^\d+$/.test(env[variable] ?? "")) overlay[key] = Number(env[variable]);
+  }
   const pct = Number.isInteger(overlay.softHoldPct) ? overlay.softHoldPct : null;
   const unreachable = raw?.unreachable ? String(raw.unreachable) : null;
   const slotWindow = (key, capKey) => {
@@ -189,9 +195,7 @@ export async function assembleBudgetView(paths, { redisFn } = {}) {
     tokenCap !== null && tokensSpent !== null
       ? tokensSpent >= tokenCap
         ? "over"
-        : pct !== null && tokensSpent > Math.floor((tokenCap * pct) / 100)
-          ? "soft-hold"
-          : "ok"
+        : "ok"
       : "ok";
   // The scoped rows (issue #242): the configured limits joined to their live counters, states computed
   // ASSEMBLER-side with the worker's own windowState so they ride the payload as words (the insights
@@ -199,7 +203,7 @@ export async function assembleBudgetView(paths, { redisFn } = {}) {
   // in-flight is worker-process state no redis read can see, and the panel never invents a number.
   const limitsView = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
   const limits = Array.isArray(limitsView?.limits) ? limitsView.limits : [];
-  const scopedCounters = limits.length > 0 ? await readScopedBudget({ url: paths.valkeyUrl, limits, redisFn }) : { rows: [] };
+  const scopedCounters = limits.length > 0 ? await readScopedBudget({ url: paths.valkeyUrl, limits, redisFn, now: new Date(nowMs) }) : { rows: [] };
   const scoped = limits.map((l, i) => {
     const used = scopedCounters?.rows?.[i] ?? null;
     const win = (cap, key) => {
@@ -235,6 +239,7 @@ export async function assembleBudgetView(paths, { redisFn } = {}) {
   });
   return {
     unreachable,
+    ...(env ? { dollars: await readDollarWindows({ paths, env, now: new Date(nowMs), redisFn }), settingsInvalid: Boolean(view?.invalid), settings: overlay } : {}),
     softHoldPct: pct,
     day: slotWindow("day", "dailyCap"),
     week: slotWindow("week", "weeklyCap"),
@@ -283,7 +288,7 @@ export function splitCounts(records) {
  * `outsideEdit` is the panel's notice, by its rule, over the same 20 rows. Exported for its tests, as `splitCounts` is: the
  * rest of the insights assembly dials the real queue. `envFn` is the deployment's environment (`processEnv`).
  */
-export async function assembleAllocationView(paths, counts, { fullPaths = false, envFn = processEnv } = {}) {
+export async function assembleAllocationView(paths, counts, { fullPaths = false, envFn = processEnv, consoleView = false, role = "viewer", nowMs } = {}) {
   if (!paths.envelopeFile) return { unset: true };
   const read = readEnvelope({ envelopeFile: paths.envelopeFile, projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env: envFn() }) });
   if (!read.envelope) {
@@ -292,8 +297,8 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
     return { problem: envelopeProblem({ ...read, invalid }) };
   }
   const e = read.envelope;
-  const head = { window: e.window, totalMicros: e.totalMicros, floors: { ...e.floors }, delegation: e.delegation?.enabled === true };
-  const alloc = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: allocNow(), withReasons: false, ...allocRedis() });
+  const head = { window: e.window, totalMicros: e.totalMicros, floors: { ...e.floors }, delegation: e.delegation?.enabled === true, ...(consoleView ? { envelope: e, digest: read.digest, file: fullPaths && role === "operator" ? paths.envelopeFile : basename(paths.envelopeFile) } : {}) };
+  const alloc = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: nowMs === undefined ? allocNow() : new Date(nowMs), withReasons: consoleView && role === "operator", ...allocRedis() });
   if (alloc?.unreachable) return { ...head, unreachable: String(alloc.unreachable) };
   const st = alloc.state ?? null;
   return {
@@ -303,14 +308,14 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
     totalMicros: splitTotalMicros(st, e.totalMicros),
     fileTotalMicros: e.totalMicros,
     stateProblem: alloc.stateProblem ?? null,
-    state: st && { planId: st.planId ?? null, writer: st.writer ?? null, appliedAt: st.appliedAt ?? null, validUntil: st.validUntil ?? null, clamped: st.clamped === true, allocations: { ...(st.allocations ?? {}) }, unallocated: st.unallocated ?? null },
+    state: st && { ...(consoleView ? { weights: { ...(st.weights ?? {}) }, jobId: st.jobId ?? null, triggerId: st.triggerId ?? null, ...(role === "operator" ? { reasons: { ...(st.reasons ?? {}) } } : {}) } : {}), planId: st.planId ?? null, writer: st.writer ?? null, appliedAt: st.appliedAt ?? null, validUntil: st.validUntil ?? null, clamped: st.clamped === true, allocations: { ...(st.allocations ?? {}) }, unallocated: st.unallocated ?? null },
     mismatch: st !== null && st.envelopeDigest !== read.digest,
     outsideEdit: outsideEdit(alloc.log, st?.envelopeDigest),
     spend: {
       deployment: alloc.spend?.deployment?.micros ?? null,
       projects: Object.fromEntries(Object.entries(alloc.spend?.projects ?? {}).map(([id, v]) => [id, v?.micros ?? null])),
     },
-    log: (Array.isArray(alloc.log) ? alloc.log : []).slice(0, 20).map((h) => ({ at: h.at, writer: h.writer, outcome: h.outcome, reason: h.reason ?? null, planId: h.planId ?? null })),
+    log: (Array.isArray(alloc.log) ? alloc.log : []).slice(0, 20).map((h) => ({ at: h.at, writer: h.writer, outcome: h.outcome, reason: h.reason ?? null, planId: h.planId ?? null, ...(consoleView ? { host: h.host ?? null, weights: h.weights ?? null, jobId: h.jobId ?? null, triggerId: h.triggerId ?? null } : {}) })),
     counts,
   };
 }
@@ -335,7 +340,7 @@ export async function assembleSizingView(paths, nowMs, { readHostsFn = readHosts
  * six hours over 30 days or the month so far (at most 124). Finer than `CAPACITY_WINDOWS`' own (the CLI prints no
  * chart), coarse enough that a bar stays wider than a few pixels on the page. The headline numbers do not depend on it.
  */
-export const INSIGHTS_CAPACITY_BUCKET_MS = Object.freeze({ "7d": 60 * 60 * 1000, "30d": 6 * 60 * 60 * 1000, mtd: 6 * 60 * 60 * 1000 });
+export const INSIGHTS_CAPACITY_BUCKET_MS = Object.freeze({ "24h": 60 * 60 * 1000, "7d": 60 * 60 * 1000, "30d": 6 * 60 * 60 * 1000, mtd: 6 * 60 * 60 * 1000 });
 
 /**
  * One capacity report as the insights page draws it (issue #599, phase 4, REQ-CAPACITY-INSIGHTS): every sentence and
@@ -362,7 +367,7 @@ export function capacityViewOf(report) {
   // The coverage clauses one by one (the CLI joins them into one line), so a long list of hosts whose history is not here
   // can never push out what follows it: the records no host holds, the jobs running now, why a source was not read.
   const coverage = coverageNotes({ ...cov, historyNotShared: Array.isArray(cov.historyNotShared) ? cov.historyNotShared : [] }, { namesShown: INSIGHTS_CAPACITY_NAMES_SHOWN });
-  return { window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts, noRun: noRunText(cov, "in this window") };
+  return { ...(report.fleet ? { fleet: report.fleet } : {}), window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts, noRun: noRunText(cov, "in this window") };
 }
 
 /** How many names the page's coverage lists of the hosts whose history is not here, before "and N more". */
@@ -453,4 +458,216 @@ export function projectSizing(paths, { hostBudgets = null, projectIds = null, no
   const ids = projectIds ?? (Array.isArray(pv?.projects) ? pv.projects.map((p) => p.id) : []);
   const res = readSizeSuggestions({ logsDir: paths.logsDir, projectIds: ids, limits, env: envFn(), hostBudgets, nowMs, withSeries });
   return res.unreachable ? { unreachable: String(res.unreachable) } : { projects: res.projects, hostBudgetCount: Array.isArray(hostBudgets) ? hostBudgets.length : null, skipped: res.skipped };
+}
+
+const INSIGHTS_DAY_MS = 24 * 60 * 60 * 1000;
+const safeAmount = (n) => Number.isSafeInteger(n) && n >= 0;
+const recordInstant = (r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "");
+const inProject = (records, project) => records.filter((r) => !project || recordInProject(r, project));
+
+/** A live row can omit money because it predates the field, not because every job reserved zero. */
+export function heldMoneyOf(hosts, { nowMs, project = null } = {}) {
+  const day = Math.floor(nowMs / INSIGHTS_DAY_MS);
+  let heldMicros = 0;
+  let heldJobs = 0;
+  const unknownHosts = [];
+  for (const host of Array.isArray(hosts) ? hosts : []) {
+    const parsed = parseLiveJobs(host.jobs);
+    const more = parseJobsMore(host.jobsMore);
+    let unknown = parsed.jobs === null || parsed.dropped > 0 || more === null || more > 0;
+    const seen = new Set();
+    for (const job of parsed.jobs ?? []) {
+      if (project && job.p !== project) continue;
+      if (seen.has(job.id)) continue;
+      seen.add(job.id);
+      if (!safeAmount(job.h) || !safeAmount(job.ha)) {
+        unknown = true;
+        continue;
+      }
+      if (Math.floor(job.ha / INSIGHTS_DAY_MS) !== day) continue;
+      heldMicros += job.h;
+      if (job.h > 0) heldJobs++;
+    }
+    if (unknown) unknownHosts.push(host.name);
+  }
+  return { heldMicros: safeAmount(heldMicros) ? heldMicros : null, heldJobs, unknownHosts };
+}
+
+/** The named windows stay independent of the chart filter: today's counter is always today's counter. */
+export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, jobCapMicros = null, subscriptions = [], pricing }) {
+  const rows = budget?.dollars?.windows ?? [];
+  const scoped = project ? rows.filter((r) => r.ledger === "scope" && r.name === `project:${project}`) : [];
+  const deployment = rows.filter((r) => r.ledger === "deployment");
+  const window = (kind) => {
+    const own = scoped.find((r) => r.window === kind);
+    const row = own ?? deployment.find((r) => r.window === kind);
+    return { usedMicros: row?.counterMicros ?? null, capMicros: row?.capMicros ?? null, basis: own ? `project:${project}` : "deployment", projectFallback: Boolean(project && !own) };
+  };
+  const all = Array.isArray(records) ? records : [];
+  const dayStart = Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS;
+  let settledMicros = 0;
+  let unpriced = 0;
+  for (const r of all) if (recordInstant(r) >= dayStart && recordInstant(r) <= nowMs) {
+    if (safeAmount(r.dollars?.settledMicros)) settledMicros += r.dollars.settledMicros;
+    else unpriced++;
+  }
+  const held = heldMoneyOf(hosts, { nowMs, project: scoped.some((r) => r.window === "day") ? project : null });
+  const today = window("day");
+  const remainder = today.usedMicros !== null && held.heldMicros !== null ? today.usedMicros - settledMicros - held.heldMicros : null;
+  const micros = all.filter((r) => recordInstant(r) >= nowMs - INSIGHTS_DAY_MS && recordInstant(r) <= nowMs).map((r) => meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) })).filter((n) => n !== null);
+  return {
+    basis: scoped.length > 0 ? `project:${project}` : "deployment",
+    projectFallback: Boolean(project && scoped.length === 0),
+    week: window("week"),
+    today: { ...today, settledMicros: Array.isArray(records) && safeAmount(settledMicros) ? settledMicros : null, unpriced, ...held, unattributedMicros: remainder, reconciliationMismatch: remainder !== null && remainder < 0 },
+    tokens: { used: budget?.tokens?.spent ?? null, cap: budget?.tokens?.cap ?? null },
+    average: { costMicros: micros.length > 0 ? Number((micros.reduce((sum, n) => sum + BigInt(n), 0n) + BigInt(Math.floor(micros.length / 2))) / BigInt(micros.length)) : null, runs: micros.length, largestMicros: micros.length > 0 ? Math.max(...micros) : null },
+    jobCapMicros,
+  };
+}
+
+/**
+ * Console-only assemblies (#749). Each route reads its own slices, so an unavailable capacity report cannot spoil
+ * Breakdown and an operator's plan text is never even read for a viewer. The old static export stays unchanged.
+ * `reads` injects the I/O boundaries for tests; every fallback names its failed slice instead of inventing zero.
+ */
+export async function assembleInsightsView(paths, window, { view = "spend", project = null, role = "viewer", fullPaths = false, pricing, nowMs = Date.now(), envFn = processEnv, reads = {} } = {}) {
+  needPricing(pricing);
+  const io = { costs: assembleCosts, graph: assembleGraph, budget: assembleBudgetView, allocation: assembleAllocationView, capacity: assembleCapacityView, sizing: assembleSizingView, hosts: readHosts, projects: readProjects, scan: scanRunRecords, subscriptions: readSubscriptions, settings: readSettingsView, ...reads };
+  const opts = { pricing, project, nowMs, envFn };
+  const out = { window, view, project, nowMs };
+  if (view === "capacity") {
+    out.capacity = await io.capacity(paths, window, nowMs, { envFn });
+    out.sizing = await io.sizing(paths, nowMs, { envFn });
+    return out;
+  }
+  const pv = io.projects({ projectsPath: paths.projectsFile });
+  out.projects = Array.isArray(pv?.projects) ? pv.projects.map(({ id, name }) => ({ id, name })) : [];
+  const projectsError = pv?.invalid ?? pv?.unreachable;
+  if (projectsError) out.projectsUnreadable = true;
+  const loadCosts = () => {
+    const costs = io.costs(paths, window, opts);
+    out.fold = costs?.fold ?? null;
+    out.costsUnreachable = costs?.unreachable ? String(costs.unreachable) : null;
+    return costs;
+  };
+  if (view === "budget-split") {
+    out.allocation = await io.allocation(paths, null, { consoleView: true, role, fullPaths: role === "operator" && fullPaths, envFn, nowMs });
+    const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
+    out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
+    if (hosts?.unreachable) out.hostsUnreadable = true;
+    const sinceMs = costsSinceMs(out.allocation.window === "day" ? "24h" : out.allocation.window === "week" ? "week" : "mtd", nowMs);
+    const start = out.allocation.window === "day" ? Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS : sinceMs;
+    const records = io.scan({ logsDir: paths.logsDir, sinceMs: start, nowMs });
+    out.allocation.counts = splitCounts(records);
+    const writer = Array.isArray(records) && records.find((r) => r.jobId === out.allocation.state?.jobId);
+    if (writer && out.allocation.state) Object.assign(out.allocation.state, { provider: writer.provider ?? null, model: writer.model ?? null });
+    out.allocation.hosts = out.hosts.map((h) => ({ name: h.name, fpEnvelope: h.fpEnvelope ?? null }));
+    return out;
+  }
+  const costs = loadCosts();
+  if (view === "flows") {
+    out.graph = await io.graph(paths, opts);
+    const records = costs?.records;
+    if (Array.isArray(records)) {
+      const triggers = readTriggers({ triggersPath: paths.triggersPath });
+      const subs = io.subscriptions({ subscriptionsPath: paths.subscriptionsPath });
+      const join = attributeRunsToTriggers({ records, triggers: triggers?.triggers ?? [] });
+      out.costByTrigger = foldTriggerCosts({ records, subscriptions: subs?.subscriptions ?? [], pricing, triggerJoin: join });
+    } else out.costByTrigger = null;
+    return out;
+  }
+  if (view === "breakdown") {
+    const groups = new Map();
+    for (const record of costs?.records ?? []) {
+      const key = repoKeyOf(record) ?? "(no target)";
+      if (!groups.has(key)) groups.set(key, new Set());
+      groups.get(key).add(projectKeyOf(record));
+    }
+    out.repoProjects = Object.fromEntries([...groups].map(([key, ids]) => [key, [...ids].sort((a, b) => String(a).localeCompare(String(b)))]));
+    return out;
+  }
+  const env = envFn();
+  const subs = io.subscriptions({ subscriptionsPath: paths.subscriptionsPath });
+  const subscriptions = subs?.subscriptions ?? [];
+  out.budget = await io.budget(paths, { env, nowMs });
+  const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
+  out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
+  if (hosts?.unreachable) out.hostsUnreadable = true;
+  const settings = io.settings({ settingsFile: paths.settingsFile });
+  const overlay = settings?.overlay ?? {};
+  const { jobCapMicros } = deploymentDollarCaps(overlay, env);
+  out.settings = { ...overlay, provider: overlay.provider ?? env.PI_PROVIDER ?? DEFAULT_PROVIDER, model: overlay.model ?? env.PI_MODEL ?? DEFAULT_MODEL, maxCostMicros: jobCapMicros };
+  const scanned = io.scan({ logsDir: paths.logsDir, sinceMs: Math.min(costsSinceMs("week", nowMs), nowMs - INSIGHTS_DAY_MS), nowMs });
+  // A selected project's charts can coexist with deployment caps. For that fallback the KPI records must also be
+  // deployment-wide; otherwise settled and held would describe different populations beside the same counter.
+  const hasProjectWindow = project && (out.budget?.dollars?.windows ?? []).some((r) => r.ledger === "scope" && r.name === `project:${project}` && r.window === "day");
+  const all = Array.isArray(scanned) ? inProject(scanned, hasProjectWindow ? project : null) : null;
+  out.spend = spendSummaryOf({ records: all, hosts: out.hosts, budget: out.budget, project, nowMs, jobCapMicros, subscriptions, pricing });
+  if (hosts?.unreachable) {
+    out.spend.today.heldMicros = null;
+    out.spend.today.unattributedMicros = null;
+    out.spend.today.reconciliationMismatch = false;
+    out.spend.today.hostsUnreadable = true;
+  }
+  const recent = Array.isArray(scanned) ? inProject(scanned.filter((r) => recordInstant(r) >= nowMs - INSIGHTS_DAY_MS && recordInstant(r) <= nowMs), project) : [];
+  out.recent24h = Array.isArray(scanned) ? foldCosts({ records: recent, subscriptions: subs?.subscriptions ?? [], pricing, nowMs, piAiPin: pricing.piAiVersion(), sinceMs: nowMs - INSIGHTS_DAY_MS }) : null;
+  Object.assign(out.spend, spendChartsOf({ records: costs?.records, sinceMs: costsSinceMs(window, nowMs), nowMs, jobCapMicros, subscriptions, pricing, heldMicros: out.spend.today.heldMicros }));
+  const choices = new Map();
+  const choice = (provider, model) => {
+    if (typeof provider !== "string" || typeof model !== "string") return;
+    const id = `${provider}/${model}`;
+    const plan = subscriptions.find((sub) => !sub.hypothetical && sub.provider === provider && sub.models?.some((m) => matchesGlob(model, m)));
+    choices.set(id, { id, label: `${id}${provider === out.settings.provider && model === out.settings.model ? " (current)" : ""}${plan ? " (plan)" : ""}` });
+  };
+  choice(out.settings.provider, out.settings.model);
+  const triggerView = readTriggers({ triggersPath: paths.triggersPath });
+  for (const t of triggerView?.triggers ?? []) choice(t.provider ?? out.settings.provider, t.model ?? out.settings.model);
+  for (const r of Array.isArray(scanned) ? scanned : []) {
+    choice(r.provider, r.model);
+    for (const row of r.usage?.models ?? []) choice(row.provider, row.model);
+  }
+  for (const sub of subscriptions) {
+    for (const model of sub.models ?? []) if (!model.includes("*")) choice(sub.provider, model);
+    if (sub.hypothetical) continue;
+    const candidate = (pricing.listPricedModels?.() ?? []).find((m) => m.provider === sub.provider && sub.models?.some((glob) => matchesGlob(m.id, glob)));
+    if (candidate) choice(candidate.provider, candidate.id);
+  }
+  out.modelChoices = [...choices.values()].slice(0, 4000);
+  out.triggersByModel = {};
+  for (const r of recent) {
+    const key = `${r.provider}/${r.model}`;
+    const trigger = Number.isInteger(r.triggerIndex) ? `row ${r.triggerIndex + 1}` : r.triggerId ?? null;
+    if (trigger && !(out.triggersByModel[key] ?? []).includes(trigger)) (out.triggersByModel[key] ??= []).push(trigger);
+  }
+  out.allocation = await io.allocation(paths, null, { consoleView: true, role: "viewer", fullPaths: role === "operator" && fullPaths, envFn, nowMs });
+  const writer = Array.isArray(scanned) && scanned.find((r) => r.jobId === out.allocation.state?.jobId);
+  if (writer && out.allocation.state) Object.assign(out.allocation.state, { provider: writer.provider ?? null, model: writer.model ?? null });
+  return out;
+}
+
+/** Daily settled charges and equal cost bins retain their own source, rather than borrowing fold-time plan prices. */
+export function spendChartsOf({ records, sinceMs, nowMs, jobCapMicros, subscriptions = [], pricing, heldMicros = null }) {
+  const days = new Map();
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  for (let at = Math.floor(sinceMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS; at <= nowMs; at += INSIGHTS_DAY_MS) {
+    const date = new Date(at).toISOString().slice(0, 10);
+    days.set(date, { date, settledMicros: Array.isArray(records) ? 0 : null, heldMicros: date === today ? heldMicros : 0, today: date === today, unpriced: 0 });
+  }
+  const costs = [];
+  for (const r of Array.isArray(records) ? records : []) {
+    const at = recordInstant(r);
+    if (!(at >= sinceMs && at <= nowMs)) continue;
+    const day = days.get(new Date(at).toISOString().slice(0, 10));
+    if (day) {
+      if (safeAmount(r.dollars?.settledMicros)) day.settledMicros += r.dollars.settledMicros;
+      else day.unpriced++;
+    }
+    const cost = meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) });
+    if (cost !== null) costs.push(cost);
+  }
+  const histogram = safeAmount(jobCapMicros) && jobCapMicros > 0 ? Array.from({ length: 10 }, (_, i) => ({ fromMicros: i * jobCapMicros / 10, toMicros: (i + 1) * jobCapMicros / 10, runs: 0 })) : [];
+  for (const cost of costs) if (histogram.length) histogram[Math.min(histogram.length - 1, Math.floor(cost * histogram.length / jobCapMicros))].runs++;
+  for (const day of days.values()) if (!safeAmount(day.settledMicros)) day.settledMicros = null;
+  return { daily: [...days.values()], histogram, largestRangeMicros: costs.length ? Math.max(...costs) : null, meteredRangeRuns: costs.length, overJobCapRuns: safeAmount(jobCapMicros) ? costs.filter((n) => n > jobCapMicros).length : null };
 }

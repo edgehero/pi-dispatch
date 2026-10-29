@@ -536,7 +536,7 @@ test("the running-jobs entry exists exactly while an admitted job runs, and is g
 		const run = h.processor(ghJob("ran").job, "tok", signal());
 		await h.untilStarted(1);
 		const [entry] = runningJobs.list();
-		assert.deepEqual({ ...entry, at: typeof entry.at }, { id: "ran", project: "shop", memMiB: 8192, cpuCenti: 200, at: "number" });
+		assert.deepEqual({ ...entry, at: typeof entry.at, holdAt: typeof entry.holdAt }, { id: "ran", project: "shop", memMiB: 8192, cpuCenti: 200, at: "number", holdMicros: 0, holdAt: "number" });
 		h.releaseNext();
 		assert.equal((await run).outcome, "completed");
 		assert.equal(entry.at, Date.parse(h.seen.records.at(-1).startedAt), "admitted at the record's startedAt");

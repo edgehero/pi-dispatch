@@ -41,6 +41,12 @@ export const COSTS_WINDOWS = ["7d", "30d", "mtd"];
  * command and the view disagree by a whole month edge.
  */
 export function costsSinceMs(windowKey, nowMs) {
+  if (windowKey === "24h") return nowMs - DAY_MS;
+  if (windowKey === "week") {
+    const now = new Date(nowMs);
+    const day = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    return day - ((now.getUTCDay() + 6) % 7) * DAY_MS;
+  }
   if (windowKey === "7d") return nowMs - 7 * DAY_MS;
   if (windowKey === "30d") return nowMs - 30 * DAY_MS;
   const now = new Date(nowMs);
@@ -953,4 +959,46 @@ function medianQuad(quads) {
     quad[key] = sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
   return quad;
+}
+
+/**
+ * Re-price the SAME ledgered runs, never a median multiplied by an unrelated scan's run count (#749).
+ * A partial ledger cannot tell the whole run's cache split, so it is excluded and counted beside the answer.
+ */
+export function whatIfRuns({ records, target, pricing, subscriptions = [] }) {
+  let usd = 0;
+  let originalUsd = 0;
+  let runs = 0;
+  let excluded = 0;
+  let ratesVersion = null;
+  for (const record of Array.isArray(records) ? records : []) {
+    if (refusedBeforeSpend(record)) continue;
+    const usage = record?.usage;
+    const rows = usage?.models;
+    if (!Array.isArray(rows) || rows.length === 0 || usage.truncated > 0 || rows.some((r) => QUAD_KEYS.some((key) => !Number.isSafeInteger(r?.[key] ?? 0) || (r[key] ?? 0) < 0))) {
+      excluded++;
+      continue;
+    }
+    const repriced = pricing.reprice(sumQuads(rows), target);
+    const original = rows.reduce((sum, r) => sum + (Number.isFinite(r.cost) && r.cost >= 0 ? r.cost : NaN), 0);
+    if (!Number.isFinite(repriced?.usd) || repriced.usd < 0 || !Number.isFinite(original)) {
+      excluded++;
+      continue;
+    }
+    usd += repriced.usd;
+    originalUsd += original;
+    ratesVersion = repriced.ratesVersion ?? ratesVersion;
+    runs++;
+  }
+  const plan = coveringSubscription(target.provider, target.id, subscriptions);
+  return { class: "estimated", usd, originalUsd, runs, excluded, coverage: runs + excluded > 0 ? runs / (runs + excluded) : 0, ratesVersion, planId: plan?.id ?? null };
+}
+
+/** A metered-only run's cost, using the same row classification as every cost chart; mixed plan runs are excluded. */
+export function meteredRunMicros(record, { subscriptions = [], pricing = { getPricedModel: () => null, isZeroRated: () => false } } = {}) {
+  if (record?.tokens?.metered !== true) return null;
+  const contribution = runContribution(record, subscriptions, pricing);
+  if (contribution.refused || contribution.floor || contribution.rows.length === 0 || !contribution.rows.every((r) => r.class === "metered" || r.class === "zero-rated")) return null;
+  const micros = Math.round(contribution.usd * 1_000_000);
+  return Number.isSafeInteger(micros) && micros >= 0 ? micros : null;
 }

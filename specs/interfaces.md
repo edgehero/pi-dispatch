@@ -6622,6 +6622,8 @@ validator rather than a second copy of it.
 
 ## INT-CAPACITY-REPORT
 
+**AMENDED 2026-10-29 (#749)**: The full report adds `fleet: { busyPerMille, peak, peakAtMs, waits: { n, p50Ms, p95Ms }, promisedMemPerMille, busiestHourMs, incomplete }`. Ratios use integer per mille, unknown amounts null, instants integer ms. Busy weights slot time; peak is simultaneous, waits pool eligible original observations, and memory names the busiest integrated slot-hour. `incomplete` names insufficient coverage/capacity. Single-host projections omit the fleet field. The 24h console view uses one-hour buckets.
+
 - **Contract** (issue #599, `REQ-CAPACITY-INSIGHTS`, `DES-CAPACITY-FROM-RECORDS`): the capacity report, version 1,
   returned by `computeCapacity` (`worker/src/capacity.mjs`, exported as `@edgehero/pi-dispatch/capacity`) and printed
   whole by `pi-dispatch capacity --json`. Every surface that shows capacity shows this object, so they cannot disagree.
@@ -9178,6 +9180,8 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 ## INT-HOST-REGISTRY-CONTRACT
 
+**AMENDED 2026-10-29 (#749)**: Each running `jobs` entry may additionally publish `h`, nonnegative safe-integer micro-dollars actually reserved, and `ha`, positive safe-integer reservation epoch milliseconds. Missing fields mean unknown (older workers/orphans), not zero. Modern pickups publish explicit zero until reservation, update after success, and clear after settlement/release. The fields obey the same content, byte and list bounds; dropped/missing jobs keep sums incomplete. They are display telemetry, never an admission decision.
+
 **Producer**: every worker, about itself. **Consumers today**: the cron gate
 (`cron.mjs -> reconcileGated`), the receiver's router (`route.mjs`), `doctor`, the admin console's fleet
 read model (`admin/src/read-model.mjs`) and its host-queue discovery behind the pause switch
@@ -9228,7 +9232,8 @@ abstains.
     jobs            JSON of the jobs this host runs now and its budget's orphans, oldest first, at most 32:
                     [{"id":<job id>,"p":<project id>|null,"m":<MiB>,"c":<hundredths>,"at":<epoch ms>,"o":1}],
                     `m`/`c` left out when not known, `o` only on an orphan; orphan `v` is its venue and
-                    `s` its failed-stop epoch ms, both optional for older workers; "" before the worker exists
+                    `s` its failed-stop epoch ms, both optional for older workers; running `h` is the actual reserved
+                    micro-dollars and `ha` its reservation epoch ms (both absent when unknown); "" before the worker exists
     jobsMore        how many running jobs `jobs` does not list (past 32, or with no id or instant), an integer
     sandboxes       JSON [{"id":<safe job id or sha256 digest>,"v":<venue>,"until":<epoch ms|null>,"pin":<boolean>}],
                     newest first, at most 32; cached directory read at most once per 60 seconds
@@ -11871,3 +11876,4 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-28 (#747) | **`INT-CONSOLE-EVENT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM` and `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: run-page panels carry no SSE id; operator entry events carry the transcript cursor and tdone does not close page updates; terminal done/closure unchanged. Additive record maxTurns captures pickup settings; OpenShell bundle.placeholderNames carries validated names only; delivered inbox messages gain the steer kind with unknown-kind note fallback. **`INT-RUN-PROGRESS-KEY` UNCHANGED, checked**: its closed field contract is preserved. All actual stream connections keep counting against the same caps. |
 | 2026-10-28 (#716) | **NEW `INT-MODEL-COOLDOWN-KEY`; `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-DEFER-REASON-KEY` AMENDED**: fallback list, signed failure/replay evidence, selected-model facts and two free wait reasons. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: required `modelFailover` image capability and pre-spend unsupported-image refusal. **Exit codes UNCHANGED, checked**: provider failures still exit 1. **`INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked**: weights do not choose models. **`INT-DOCTOR-RESULTS-KEY` UNCHANGED, checked**: cooldowns use existing redacted warning checks. |
 | 2026-10-29 (#748) | **`INT-CONSOLE-EVENT-STREAM`, `INT-HOST-REGISTRY-CONTRACT`, `INT-DEFER-REASON-KEY` AMENDED**: the page live flag defines stream admission; host telemetry adds orphan venue/time, retained workspace inventory, budget provenance and CPU-reserve facts; host-budget defer records identify memory, CPU or count while legacy budget remains readable. **`INT-CONSOLE-STATE-API`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: telemetry grants no authority and no job payload text is read for running targets. |
+| 2026-10-29 (#749) | `INT-HOST-REGISTRY-CONTRACT` and `INT-CAPACITY-REPORT` AMENDED: optional h/ha actual dollar holds and additive fleet metrics, shared with CLI and console. `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-CONSOLE-AUDIT-LOG`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked: no new API field, live route, audit kind, run fact or plan writer. |

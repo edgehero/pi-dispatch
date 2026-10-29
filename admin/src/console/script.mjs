@@ -826,7 +826,7 @@ export const CONSOLE_SCRIPT = `"use strict";
     if (off.length > 0) later(function () { for (var j = 0; j < off.length; j++) off[j].disabled = false; }, 0);
   });
   // ---- the spend screen: chart tooltips and the interactive topology ----
-  if (page === "insights") {
+  if (page === "insights" || (typeof page === "string" && page.indexOf("insights-") === 0)) {
     try { fitInsightsLabels(); } catch (e) { /* the labels stay as drawn */ }
     insightsPage();
   }
@@ -860,7 +860,7 @@ ${FIT_JS}
         // becomes a node.
         if (nid === null || !/^n\\d{1,6}$/.test(nid)) continue;
         var words = function (v, re) { return (v || "").split(" ").filter(function (w) { return re.test(w); }); };
-        NODES[nid] = { tip: items[b].textContent, nb: words(items[b].getAttribute("data-nb"), /^n\\d{1,6}$/), w: words(items[b].getAttribute("data-w"), /^w\\d{1,6}$/) };
+        NODES[nid] = { trigger: items[b].getAttribute("data-trigger-index"), tip: items[b].textContent, nb: words(items[b].getAttribute("data-nb"), /^n\\d{1,6}$/), w: words(items[b].getAttribute("data-w"), /^w\\d{1,6}$/) };
       }
     }
     // The ONLY indexed read of NODES: an id from the hash or the DOM could be "constructor", which a bare lookup returns.
@@ -903,6 +903,8 @@ ${FIT_JS}
     // A breakdown row selects its trigger's chip: the click is replayed at the chip, so the topology's own handler stays
     // the one owner of the selection.
     document.addEventListener("click", function (e) {
+      var zoom = e.target && e.target.closest ? e.target.closest("[data-graph-zoom]") : null;
+      if (zoom && svg && root) { graphZoom(zoom.getAttribute("data-graph-zoom")); return; }
       var row = e.target && e.target.closest ? e.target.closest("[data-node]") : null;
       if (!row) return;
       var id = row.getAttribute("data-node");
@@ -916,6 +918,8 @@ ${FIT_JS}
     // How far the view zooms, as the drawn width over the view's: the wheel stops here, and a fragment is held to it.
     var ZOOM_MIN = 0.15;
     var ZOOM_MAX = 4;
+    var baseX = vb.x;
+    var baseY = vb.y;
     var baseW = vb.width;
     var baseH = vb.height;
     var selected = null;
@@ -1024,6 +1028,27 @@ ${FIT_JS}
       vb.height = vb.height / k;
       scheduleHash();
     }, { passive: false });
+    function updateSelected(id) {
+      if (!document.body || document.body.getAttribute("data-page") !== "insights-flows") return;
+      var entry = id ? ownNode(id) : null;
+      var panel = document.querySelector("[data-selected-details]");
+      var empty = document.querySelector("[data-selected-empty]");
+      var templates = document.querySelectorAll("template[data-trigger-details]");
+      if (panel) {
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+        for (var i = 0; entry && i < templates.length; i++) {
+          if (templates[i].getAttribute("data-trigger-details") === entry.trigger) panel.appendChild(templates[i].content.cloneNode(true));
+        }
+        panel.hidden = !panel.firstChild;
+        if (empty) empty.hidden = !!panel.firstChild;
+      }
+      var chips = svg.querySelectorAll(".gnode");
+      for (var i = 0; i < chips.length; i++) chips[i].setAttribute("aria-pressed", chips[i].id === id ? "true" : "false");
+      var url = new URL(location.href);
+      if (entry && entry.trigger !== null) url.searchParams.set("select", entry.trigger);
+      else url.searchParams.delete("select");
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    }
     function mark(id) {
       var el = document.getElementById(id);
       if (el) el.classList.add("hi");
@@ -1040,6 +1065,7 @@ ${FIT_JS}
       var g = ownNode(id);
       if (!g) return;
       selected = id;
+      updateSelected(id);
       root.classList.add("dim");
       mark(id);
       for (var i = 0; i < g.nb.length; i++) mark(g.nb[i]);
@@ -1050,12 +1076,29 @@ ${FIT_JS}
       var el = nodeAt(e) || pressed;
       pressed = null;
       if (suppressClick) { suppressClick = false; return; }
-      if (el) { if (selected === el.id) clearSel(); else select(el.id); }
-      else clearSel();
+      if (el) { if (selected === el.id) { clearSel(); updateSelected(null); } else select(el.id); }
+      else { clearSel(); updateSelected(null); }
     });
-    document.addEventListener("keydown", function (e) { if (e.key === "Escape") clearSel(); });
+    svg.addEventListener("keydown", function (e) {
+      var el = nodeAt(e);
+      if (el && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(el.id); }
+    });
+    function graphZoom(mode) {
+      if (mode === "fit") { vb.x = baseX; vb.y = baseY; vb.width = baseW; vb.height = baseH; }
+      else {
+        var factor = mode === "in" ? 1.25 : mode === "out" ? 0.8 : 1;
+        var width = clamp(vb.width / factor, baseW / ZOOM_MAX, baseW / ZOOM_MIN);
+        var ratio = width / vb.width;
+        vb.x += (vb.width - width) / 2; vb.y += vb.height * (1 - ratio) / 2;
+        vb.width = width; vb.height *= ratio;
+      }
+      scheduleHash();
+    }
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") { clearSel(); updateSelected(null); } });
     // Last, and guarded: the fragment is anyone's to write, and a throw from it must not escape insightsPage() and take
     // the rest of this script (the action forms, the live stream) down with it. The view stays as drawn.
+    var initial = typeof svg.querySelector === "function" ? svg.querySelector('.gnode[aria-pressed="true"]') : null;
+    if (initial) select(initial.id);
     try { readHash(); } catch (e) { /* the view stays as drawn */ }
   }
   // ---- the action forms (issue #642) and the confirm slot (issue #737) ----
@@ -1513,6 +1556,36 @@ ${FIT_JS}
       } else {
         out[el.name] = v;
       }
+    }
+    var structured = typeof form.getAttribute === "function" ? form.getAttribute("data-structured") : null;
+    if (structured === "priorities" || structured === "envelope") {
+      var weights = Object.create(null);
+      var floors = Object.create(null);
+      for (var key in out) {
+        if (!Object.prototype.hasOwnProperty.call(out, key)) continue;
+        if (key.indexOf("weight:") === 0 || key.indexOf("floor:") === 0) {
+          var id = key.slice(key.indexOf(":") + 1);
+          if (!/^(?:_other|[a-z0-9][a-z0-9-]{0,31})$/.test(id)) throw new Error("Invalid envelope project");
+          var value = Number(out[key]);
+          if (!isFinite(value) || value < 0 || (key.indexOf("weight:") === 0 && (Math.floor(value) !== value || value > 1000))) throw new Error("Weights must be whole numbers from 0 to 1000; floors must be nonnegative numbers");
+          (key.indexOf("weight:") === 0 ? weights : floors)[id] = value;
+          delete out[key];
+        }
+      }
+      if (structured === "priorities") {
+        var projects = [];
+        for (var id in weights) projects.push({ id: id, weight: weights[id] });
+        return { projects: projects, validDays: Number(out.validDays) };
+      }
+      out.floorsUsd = floors;
+      out.defaultWeights = weights;
+      out.enabled = out.enabled === true;
+      for (var key of ["totalUsd", "maxStepPct", "minIntervalHours", "maxPlanDays"]) {
+        out[key] = Number(out[key]);
+        if (!isFinite(out[key]) || out[key] < 0) throw new Error(key + " must be a nonnegative number");
+      }
+      if (!Array.isArray(out.writers)) out.writers = [];
+      return { envelope: out };
     }
     return out;
   }

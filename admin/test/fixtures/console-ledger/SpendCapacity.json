@@ -1,0 +1,392 @@
+{
+  "card": "SpendCapacity",
+  "pr": 749,
+  "panels": [
+    "p-cap-busy",
+    "p-cap-peak",
+    "p-cap-wait",
+    "p-cap-mem",
+    "p-cap-build3",
+    "p-cap-mini1",
+    "p-cap-mini2",
+    "p-cap-key",
+    "p-cap-coverage",
+    "p-cap-states"
+  ],
+  "elements": [
+    {
+      "el": "p-cap-busy",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityBusy",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Fleet busy"
+    },
+    {
+      "el": "p-cap-peak",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityPeak",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Fleet peak"
+    },
+    {
+      "el": "p-cap-wait",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityWait",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Wait for a slot"
+    },
+    {
+      "el": "p-cap-mem",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityMemory",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Promised memory"
+    },
+    {
+      "el": "p-cap-build3",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The host cards have individual article ids within the shared host panel, so they update as one report."
+    },
+    {
+      "el": "p-cap-mini1",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The host cards have individual article ids within the shared host panel, so they update as one report."
+    },
+    {
+      "el": "p-cap-mini2",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The host cards have individual article ids within the shared host panel, so they update as one report."
+    },
+    {
+      "el": "p-cap-key",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityKey",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "How to read the chart"
+    },
+    {
+      "el": "p-cap-coverage",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityCoverage",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Coverage"
+    },
+    {
+      "el": "p-cap-states",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityStates",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Other states"
+    },
+    {
+      "el": "**Window.** 24 hours, 7 days or 30 days. At 7 days each bar is one hour.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-busy",
+      "source": "admin/src/console/panels/spend.mjs#capacityBusy",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Fleet busy",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Four big numbers:** busy share of slot time across the fleet, the peak, the wait for a slot (p95 and median), and promised memory at the busiest hour.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-mem",
+      "source": "admin/src/console/panels/spend.mjs#capacityMemory",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Promised memory",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**One card per host:**",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "busy, idle and no data as words with numbers;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "a chart: the bar is jobs at once (average for the hour), the tick the most at once, the dashed line the slot count, hatching is no data and empty is idle;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "facts: average and peak of the slots, how often full, promised memory and CPU, CPU used, wait for a slot, and projects by run time.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-mem",
+      "source": "admin/src/console/panels/spend.mjs#capacityMemory",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Promised memory",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Always said:** \"Jobs only: a machine busy with other work reads as idle.\"",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-key",
+      "source": "admin/src/console/panels/spend.mjs#capacityKey",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "How to read the chart",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Truncated history** is drawn hatched and named, never drawn as idle.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Right column:** how to read the chart, *Coverage* (runs counted, refused before a slot, retried, without a size, live runs not counted), and *Other states* (no time in this window yet, capacity not read, hosts not drawn past 20).",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-coverage",
+      "source": "admin/src/console/panels/spend.mjs#capacityCoverage",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Coverage",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The tab row under the title (Spend, Budget split, Capacity, Breakdown, Flows map) is shared by all five Spend views; the current one is filled. They are server-rendered links (`/insights`, `/insights/budget-split`, `/insights/capacity`, `/insights/breakdown`, `/insights/flows`, proposed routes) and on a phone the row scrolls inside itself.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-busy",
+      "source": "admin/src/console/panels/spend.mjs#capacityBusy",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Fleet busy",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The numbers come from the run mirror and this host's run records, never from the machine: a machine busy with other work reads as idle. The *Jobs only* banner says so on the page because it is the one misreading that would change a decision.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-key",
+      "source": "admin/src/console/panels/spend.mjs#capacityKey",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "How to read the chart",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Missing history is never idle. Where the run mirror holds nothing older for a host, that time is hatched and counted as neither busy nor idle, and the card names the gap.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-hosts",
+      "source": "admin/src/console/panels/spend.mjs#capacityHosts",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The peak is the most jobs at once in one hour with every host added up.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-peak",
+      "source": "admin/src/console/panels/spend.mjs#capacityPeak",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Fleet peak",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The wait for a slot is measured from when a job could start to when it held a slot.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-wait",
+      "source": "admin/src/console/panels/spend.mjs#capacityWait",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Wait for a slot",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Promised memory is what the running jobs were promised, as a share of every host's budget.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cap-mem",
+      "source": "admin/src/console/panels/spend.mjs#capacityMemory",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": "Promised memory",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Shared Spend views, window and project links",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": [
+        "Spend views",
+        "Budget split",
+        "Capacity",
+        "Breakdown",
+        "Flows map"
+      ]
+    },
+    {
+      "el": "State: spend-capacity.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": [
+        "Fleet busy",
+        "build3",
+        "mini1",
+        "mini2",
+        "Jobs only: a machine busy with other work reads as idle"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-capacity-no-time.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-capacity-no-time.viewer"
+      ],
+      "shows": [
+        "No time in this window yet"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-capacity-unreadable.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-capacity-unreadable.viewer"
+      ],
+      "shows": [
+        "Capacity not read; the other Spend views still work"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-capacity-truncated.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-capacity-truncated.viewer"
+      ],
+      "shows": [
+        "incomplete history",
+        "missing time is never counted as idle"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "The capacity report per host: slots and budget, covered, missing, busy, idle and full time, peak, average, promised memory and CPU, CPU used, wait p50 and p95, projects by run time, buckets, and coverage. Every chart is inline SVG with percent positions; the hatch is an SVG pattern.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/insights-assembly.mjs#capacityViewOf",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": [
+        "build3",
+        "mini1",
+        "mini2",
+        "Fleet peak"
+      ]
+    }
+  ]
+}

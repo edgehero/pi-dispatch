@@ -1,0 +1,460 @@
+{
+  "card": "SpendBudgetSplit",
+  "pr": 749,
+  "panels": [
+    "p-env-kpi",
+    "p-alloc-kpi",
+    "p-spent-kpi",
+    "p-plan-kpi",
+    "p-split",
+    "p-split-history",
+    "p-priorities",
+    "p-envelope",
+    "p-plan-reasons",
+    "p-split-counts",
+    "p-split-states"
+  ],
+  "elements": [
+    {
+      "el": "p-env-kpi",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitEnvelopeKpi",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Envelope"
+    },
+    {
+      "el": "p-alloc-kpi",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitAllocatedKpi",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Allocated"
+    },
+    {
+      "el": "p-spent-kpi",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitSpentKpi",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Spent this envelope window"
+    },
+    {
+      "el": "p-plan-kpi",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitPlanKpi",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Plan in force"
+    },
+    {
+      "el": "p-split",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitRows",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Budget split"
+    },
+    {
+      "el": "p-split-history",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitHistory",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "History"
+    },
+    {
+      "el": "p-priorities",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitPriorities",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Set priorities"
+    },
+    {
+      "el": "p-envelope",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitEnvelope",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Envelope"
+    },
+    {
+      "el": "p-plan-reasons",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitReasons",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Why the plan says so"
+    },
+    {
+      "el": "p-split-counts",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitCounts",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Refusals and plans"
+    },
+    {
+      "el": "p-split-states",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#splitStates",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Other states"
+    },
+    {
+      "el": "**Four big numbers:** the envelope ($120.00 per week, delegation on), what is allocated (with what is left unallocated), what was spent this week, and how long the plan in force has left.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-env-kpi",
+      "source": "admin/src/console/panels/spend.mjs#splitEnvelopeKpi",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Envelope",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Budget split.** One row per project: the allocation as an outlined bar, the spend (held included) as a solid bar, and the floor as a tick, with the amounts written out and \"over\" with a glyph when spend passes the allocation. Above the rows: the plan id, its writer, when it was applied, until when, whether the 25% step clamped it, and whether every host has the same envelope.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#splitRows",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**History.** Every plan any host recorded, newest first, numbered from 1 like every other list in the console. Each row has its writer (`operator-session`, `portfolio-job`, `operator-revert`, `envelope-change`), outcome with a glyph and word, refusal reason, and plan. **Revert** opens a safe confirm bar with what the old split was and that the envelope's rules still bound it.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split-history",
+      "source": "admin/src/console/panels/spend.mjs#splitHistory",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "History",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Set priorities.** A weight per project (0 to 1000) and how many days the plan holds, previewed before anything is written.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-priorities",
+      "source": "admin/src/console/panels/spend.mjs#splitPriorities",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Set priorities",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Right column:** the *Envelope* (window, total, floors, default weights, delegation, step, interval, plan length, file by its last folder, digest per host), *Why the plan says so* (the portfolio job's reasons, agent text shown as written and escaped), *Refusals and plans* counted in this host's run records, and *Other states*.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split-states",
+      "source": "admin/src/console/panels/spend.mjs#splitStates",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Other states",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Other states.** What the view says instead when the envelope changed outside the console, a host has another envelope, there is no envelope, no split exists yet, a newer pi-dispatch wrote it, or the queue did not answer.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split-states",
+      "source": "admin/src/console/panels/spend.mjs#splitStates",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Other states",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The tab row under the title (Spend, Budget split, Capacity, Breakdown, Flows map) is shared by all five Spend views; the current one is filled. They are server-rendered links (`/insights`, `/insights/budget-split`, `/insights/capacity`, `/insights/breakdown`, `/insights/flows`, proposed routes) and on a phone the row scrolls inside itself.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#splitRows",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The envelope file and its digest per host.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-env-kpi",
+      "source": "admin/src/console/panels/spend.mjs#splitEnvelopeKpi",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Envelope",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The applied split (`alloc:plan`) and its history (`alloc:log`, every host).",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-split-history",
+      "source": "admin/src/console/panels/spend.mjs#splitHistory",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "History",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Spend and held per project in the envelope's window.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-env-kpi",
+      "source": "admin/src/console/panels/spend.mjs#splitEnvelopeKpi",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Envelope",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Refusal and plan counts from this host's run records.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-split-counts",
+      "source": "admin/src/console/panels/spend.mjs#splitCounts",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Refusals and plans",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Plan reasons from the allocations log, operator role only.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-plan-reasons",
+      "source": "admin/src/console/panels/spend.mjs#splitReasons",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Why the plan says so",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "A project may spend up to the smaller of its allocation and its own scoped limit. A job refused by the split says `allocation-cap`; one refused by the project's own limit says `dollar-cap`, so the two are never confused.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#splitRows",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Floors come first, the rest is split by weight, and a change moves each share by at most 25% per step. That is why the plan in force says it was clamped by the 25% step.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#splitRows",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "A new envelope re-bases the split with no step. A host whose envelope differs refuses its governed jobs until it has the new one, which is why the card says whether every host agrees.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#splitRows",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The plan's reasons are agent text. They are shown as written and escaped, never as markup, and to operators only.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-plan-reasons",
+      "source": "admin/src/console/panels/spend.mjs#splitReasons",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": "Why the plan says so",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Shared Spend views, window and project links",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": [
+        "Spend views",
+        "Budget split",
+        "Capacity",
+        "Breakdown",
+        "Flows map"
+      ]
+    },
+    {
+      "el": "State: spend-split.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split.operator"
+      ],
+      "shows": [
+        "Why the plan says so",
+        "Preview the plan",
+        "Revert row 2",
+        "Same as row 2",
+        "No split to go back to"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split.viewer"
+      ],
+      "shows": [
+        "Budget split",
+        "History",
+        "0123456789abcdef"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split-no-envelope.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split-no-envelope.viewer"
+      ],
+      "shows": [
+        "No envelope: set an envelope"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split-invalid.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split-invalid.operator"
+      ],
+      "shows": [
+        "The envelope does not load"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split-no-plan.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split-no-plan.viewer"
+      ],
+      "shows": [
+        "No split yet"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split-mismatch.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split-mismatch.operator"
+      ],
+      "shows": [
+        "Another envelope is in force"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split-unreachable.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split-unreachable.viewer"
+      ],
+      "shows": [
+        "The queue is not answering"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split-newer.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split-newer.viewer"
+      ],
+      "shows": [
+        "Split not usable: newer"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-split-outside-edit.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-split-outside-edit.operator"
+      ],
+      "shows": [
+        "The split was edited outside the plan writer"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    }
+  ]
+}

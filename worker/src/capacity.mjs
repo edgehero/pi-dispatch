@@ -424,6 +424,8 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		}
 	}
 
+	const fleetSegments = [];
+	const fleetWaits = [];
 	const hosts = [];
 	const totals = zeroCounts();
 	const notShared = [];
@@ -511,6 +513,8 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		const segment = (a, b, n) => {
 			if (b <= a) return;
 			const cap = capAt(a);
+			const memoryKnown = positiveInt(cap.memMiB) && [...active].every((i) => h.runs[i].size !== null);
+			fleetSegments.push({ start: a, end: b, jobs: n, slots: cap.slots, memory: memoryKnown ? [...active].reduce((sum, i) => sum + h.runs[i].size.memMiB, 0) : null, budget: positiveInt(cap.memMiB) ? cap.memMiB : null });
 			// CPU used in this segment: each running job's measured time spread over its wall, together never more than
 			// the host's CPUs. Past it, every share is cut in proportion and the runs are counted as clamped.
 			const parts = [];
@@ -596,6 +600,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 		const other = rest.length === 0 ? null : { count: rest.length, runMs: Number(rest.reduce((s, [, p]) => s + p.runMs, 0n)), cpuMs: Number(rest.reduce((s, [, p]) => s + p.cpuUsec, 0n) / 1000n) };
 
 		for (const [k, v] of Object.entries(h.counts)) totals[k] += v;
+		fleetWaits.push(...h.waits);
 		const waits = [...h.waits].sort((a, b) => a - b);
 		hosts.push({
 			name,
@@ -632,6 +637,7 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 	const liveRowMissing = isHostName(coverage.localHost) && names.has(coverage.localHost) && !liveByName.has(coverage.localHost) ? coverage.localHost : null;
 	return {
 		v: CAPACITY_REPORT_VERSION,
+		fleet: fleetCapacity(fleetSegments, fleetWaits, { windowStartMs, nowMs, incomplete: hosts.some((h) => !h.shared || h.missingMs > 0 || h.coverage.liveUnreadable > 0) || unreadable > 0 || withoutHost > 0 || coverage.reason != null }),
 		window: { fromMs: windowStartMs, toMs: nowMs, bucketMs },
 		coverage: {
 			source: typeof coverage.source === "string" ? coverage.source : "records",
@@ -650,5 +656,64 @@ export function computeCapacity({ records = [], live = [], windowStartMs, nowMs,
 			historyNotShared: notShared,
 		},
 		hosts,
+	};
+}
+
+/** Aggregate the same covered segments as the host report, never an average of host percentages or percentiles. */
+function fleetCapacity(segments, waits, { windowStartMs, nowMs, incomplete }) {
+	const hourMs = 60 * 60 * 1000;
+	const events = [];
+	let occupied = 0n;
+	let available = 0n;
+	for (const s of segments) {
+		if (s.slots === null) incomplete = true;
+		else {
+			occupied += BigInt(s.jobs) * BigInt(s.end - s.start);
+			available += BigInt(s.slots) * BigInt(s.end - s.start);
+		}
+		if (s.memory === null || s.budget === null) incomplete = true;
+		events.push({ at: s.start, delta: 1, segment: s }, { at: s.end, delta: -1, segment: s });
+	}
+	events.sort((a, b) => a.at - b.at || a.delta - b.delta);
+	const hours = new Map();
+	let jobs = 0;
+	let memory = 0;
+	let budget = 0;
+	let unknownMemory = 0;
+	let peak = 0;
+	let peakAtMs = null;
+	let at = windowStartMs;
+	const count = (end) => {
+		if (end <= at) return;
+		if (jobs > peak) { peak = jobs; peakAtMs = at; }
+		for (let t = at; t < end;) {
+			const key = Math.floor(t / hourMs) * hourMs;
+			const stop = Math.min(end, key + hourMs);
+			const len = BigInt(stop - t);
+			const h = hours.get(key) ?? { runMs: 0n, memory: 0n, budget: 0n, unknown: false };
+			h.runMs += BigInt(jobs) * len;
+			h.memory += BigInt(memory) * len;
+			h.budget += BigInt(budget) * len;
+			h.unknown ||= unknownMemory > 0;
+			hours.set(key, h);
+			t = stop;
+		}
+	};
+	for (const e of events) {
+		count(e.at);
+		at = e.at;
+		jobs += e.delta * e.segment.jobs;
+		memory += e.delta * (e.segment.memory ?? 0);
+		budget += e.delta * (e.segment.budget ?? 0);
+		if (e.segment.memory === null || e.segment.budget === null) unknownMemory += e.delta;
+	}
+	count(nowMs);
+	const busiest = [...hours].sort((a, b) => a[1].runMs === b[1].runMs ? a[0] - b[0] : a[1].runMs > b[1].runMs ? -1 : 1)[0];
+	waits.sort((a, b) => a - b);
+	return {
+		busyPerMille: perMille(occupied, available), peak, peakAtMs,
+		waits: { n: waits.length, p50Ms: waits.length ? rank(waits, 50) : null, p95Ms: waits.length ? rank(waits, 95) : null },
+		promisedMemPerMille: busiest && !busiest[1].unknown ? perMille(busiest[1].memory, busiest[1].budget) : null,
+		busiestHourMs: busiest?.[0] ?? null, incomplete,
 	};
 }

@@ -42,6 +42,7 @@ import { HEADLINE_ID, legacyWrap, NAV_PARKED_ID, navParkedHtml, shellHtml } from
 import { TIMELINE_ROWS, TIMELINE_ZOOMS } from "./timeline.mjs";
 import { auditAbout, auditChain, auditFilter } from "./panels/audit.mjs";
 import { AUDIT_PARAMS, auditQueryString, parseAuditQuery, readAuditView } from "./audit-view.mjs";
+import { SPEND_PANELS, SPEND_LAYOUTS, spendControls, spendTabs, spendDescription } from "./panels/spend.mjs";
 import { errorPage, forbiddenContent } from "./error-pages.mjs";
 import {
   auditLog,
@@ -124,6 +125,10 @@ export const PAGES = Object.freeze({
   run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null, icon: "runs" }),
   parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked", icon: "parked" }),
   insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE, icon: "spend" }),
+  "insights-budget-split": Object.freeze({ path: "/insights/budget-split", auth: "viewer", live: false, title: SPEND_TITLE, nav: null, icon: "spend" }),
+  "insights-capacity": Object.freeze({ path: "/insights/capacity", auth: "viewer", live: false, title: SPEND_TITLE, nav: null, icon: "spend" }),
+  "insights-breakdown": Object.freeze({ path: "/insights/breakdown", auth: "viewer", live: false, title: SPEND_TITLE, nav: null, icon: "spend" }),
+  "insights-flows": Object.freeze({ path: "/insights/flows", auth: "viewer", live: false, title: SPEND_TITLE, nav: null, icon: "spend" }),
   fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet", icon: "fleet" }),
   host: Object.freeze({ path: "/fleet/host", auth: "viewer", live: true, title: "Host", nav: null, icon: "fleet" }),
   venue: Object.freeze({ path: "/fleet/venue", auth: "viewer", live: false, title: VENUE_LABEL, nav: null, icon: "fleet" }),
@@ -144,7 +149,7 @@ export const PAGES = Object.freeze({
  * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
  * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
  */
-export const LEGACY_PAGES = Object.freeze(["insights", "config"]);
+export const LEGACY_PAGES = Object.freeze(["config"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
@@ -156,7 +161,7 @@ const PAGE_PANELS = Object.freeze({
   runs: [["p-filters", runsFilters], ["p-summary", runsSummary], ["p-runs", runsTable]],
   run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
   parked: [["p-questions", parkedQuestions]],
-  insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
+  ...SPEND_PANELS,
   fleet: [["p-fleetbar", fleetBar], ["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-failed", fleetFailed], ["p-delayed", fleetDelayed], ["p-schedules", fleetSchedulers], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues]],
   host: [["p-hoststate", hostState], ["p-hostjobs", hostJobs], ["p-hostsandboxes", hostSandboxes], ["p-hostbudget", hostBudget], ["p-hostcap", hostCapacity], ["p-hostrow", hostRow], ["p-hostdoctor", hostDoctor]],
   venue: [["p-venue", venueSummary], ["p-venue-serves", venueServes], ["p-venue-hosts", venueHosts], ["p-venue-props", venueProperties], ["p-venue-fix", venueFix], ["p-venue-compare", venueCompare]],
@@ -198,6 +203,7 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  ...SPEND_LAYOUTS,
   fleet: [{ cls: "stack", items: ["p-fleetbar", "p-active"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-queues", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor"] }] }, { cls: "stack", items: ["p-venues"] }],
   host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
   venue: [{ cls: "cols", items: [{ cls: "stack", items: ["p-venue-props"] }, { cls: "stack", items: ["p-venue", "p-venue-serves", "p-venue-hosts", "p-venue-fix"] }] }, { cls: "stack", items: ["p-venue-compare"] }],
@@ -237,7 +243,11 @@ const PAGE_PARAMS = Object.freeze({
   runs: [...RUN_FILTER_FIELDS, "before"],
   run: ["id"],
   parked: [],
-  insights: ["range", "whatif", "flow", "paths"],
+  insights: ["range", "project", "whatif", "flow", "runs", "paths"],
+  "insights-budget-split": ["range", "project", "paths"],
+  "insights-capacity": ["range", "paths"],
+  "insights-breakdown": ["range", "project", "whatif", "flow", "paths"],
+  "insights-flows": ["range", "project", "view", "paths", "select"],
   fleet: [],
   host: ["name"],
   venue: ["name"],
@@ -334,20 +344,35 @@ export function parsePageQuery(name, searchParams) {
       if (!RUN_ID_RE.test(id)) return { refusal: "id must be a run id (letters, digits and . _ : -, at most 200 characters)" };
       return { query: Object.freeze({ id }) };
     }
+    case "insights-budget-split":
+    case "insights-capacity":
+    case "insights-breakdown":
+    case "insights-flows":
     case "insights": {
       const range = one("range") ?? INSIGHTS_DEFAULT_RANGE;
-      if (!INSIGHTS_RANGES.includes(range)) return { refusal: `range must be one of ${INSIGHTS_RANGES.join(", ")}` };
+      const ranges = name === "insights-capacity" ? ["24h", ...INSIGHTS_RANGES] : INSIGHTS_RANGES;
+      if (!ranges.includes(range)) return { refusal: `range must be one of ${ranges.join(", ")}` };
       const whatif = one("whatif");
       const flow = one("flow");
-      // Together or not at all: the estimate scores one flow's median run, so a model without a flow has no question in
-      // it, and a flow without a model has no rates to ask at.
-      if ((whatif === null) !== (flow === null)) return { refusal: "whatif and flow go together: give both (whatif=<provider>/<model>&flow=<flow>) or neither" };
-      if (whatif !== null && !WHATIF_MODEL_RE.test(whatif)) return { refusal: "whatif must be <provider>/<model> (letters, digits and . _ - for the provider; letters, digits and . _ : / @ + - for the model, which may also start with @ or ~, at most 128 characters)" };
+      if (name === "insights-breakdown" && (whatif === null) !== (flow === null)) return { refusal: "whatif and flow go together: give both or neither" };
+      if (flow !== null && whatif === null) return { refusal: "flow must be given with whatif and a model" };
+      if (whatif !== null && !WHATIF_MODEL_RE.test(whatif)) return { refusal: "whatif must be a provider/model id" };
       if (flow !== null && !WHATIF_FLOW_RE.test(flow)) return { refusal: "flow must be a flow name (lowercase letters, digits, '_' and '-', at most 64 characters)" };
       const paths = one("paths");
       if (paths !== null && paths !== "full") return { refusal: "paths must be full (or left out for folder names)" };
-      return { query: Object.freeze({ range, whatif, flow, paths }) };
+      const project = one("project");
+      if (project !== null && !PROJECT_ID_RE.test(project)) return { refusal: "project must be a project id (lowercase letters, digits and '-', at most 32 characters)" };
+      const runs = one("runs");
+      if (runs !== null && !["24h", "week"].includes(runs)) return { refusal: "runs must be 24h or week" };
+      const mode = one("view");
+      if (mode !== null && !["map", "list"].includes(mode)) return { refusal: "view must be map or list" };
+      const select = one("select");
+      if (select !== null && !/^(?:0|[1-9]\d{0,5})$/.test(select)) return { refusal: "select must be a triggers-file index" };
+      const query = { range, paths };
+      for (const [key, value] of Object.entries({ project, whatif, flow, runs, view: mode, select })) if (allowed.includes(key)) query[key] = value;
+      return { query: Object.freeze(query) };
     }
+
     case "overview": {
       // Issue #737: the timeline's three, each a closed value. The refusal names the parameter and what it takes, never
       // what was sent.
@@ -382,8 +407,8 @@ export function pageQueryString(name, query) {
     if (q.before !== null && q.before !== undefined) p.set("before", String(q.before));
   } else if ((name === "host" || name === "venue") && q.name) p.set("name", q.name);
   else if (name === "run" && q.id) p.set("id", q.id);
-  else if (name === "insights") {
-    for (const k of ["range", "whatif", "flow", "paths"]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
+  else if (name.startsWith("insights")) {
+    for (const k of PAGE_PARAMS[name]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
   }
   else if (name === "audit") return auditQueryString(q);
   else if (name === "overview") {
@@ -450,6 +475,10 @@ const PAGE_READS = Object.freeze({
   run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
   parked: ["snapshot", "parkedChecks"],
   insights: ["insights", "parkedCount"],
+  "insights-budget-split": ["insights", "parkedCount"],
+  "insights-capacity": ["insights", "parkedCount"],
+  "insights-breakdown": ["insights", "parkedCount"],
+  "insights-flows": ["insights", "parkedCount"],
   fleet: ["snapshot", "waiting"],
   host: ["snapshot", "waiting", "hostCapacity"],
   venue: ["snapshot"],
@@ -746,7 +775,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (reads.includes("insights")) {
     const fullPaths = q.paths === "full" && who?.role === "operator";
     try {
-      data.insights = await deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths });
+      data.insights = await deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths, project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length) });
     } catch {
       data.insights = null;
       data.insightsError = "The spend history could not be assembled. The console's log has the reason.";
@@ -757,11 +786,11 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     } catch {
       data.pricedModels = [];
     }
-    if (typeof q.whatif === "string" && typeof q.flow === "string") {
+    if (typeof q.whatif === "string") {
       if (typeof deps.whatIf !== "function") data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if reader is not wired" };
       else {
         try {
-          data.whatIf = await deps.whatIf({ model: q.whatif, flow: q.flow });
+          data.whatIf = await deps.whatIf({ model: q.whatif, flow: q.flow ?? null, range: q.range, project: q.project ?? null, runs: q.runs ?? "24h" });
         } catch {
           data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if estimate failed" };
         }
@@ -888,7 +917,7 @@ export async function renderPage(name, ctx) {
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
   const titleOptions = name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {};
-  const body = shellHtml(name, ctx, html`${inner}`, { ...titleOptions, ...(headline === null ? {} : { headline }) });
+  const body = shellHtml(name, ctx, html`${name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${inner}`, { ...titleOptions, ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = places !== null && !runPlaces(places).shown ? 503 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${["host", "venue"].includes(name) ? ctx?.query?.name ?? meta.title : meta.title}`, name, body, live, query, theme }) };

@@ -106,7 +106,7 @@ export function graphNodesHtml(scene) {
   const ids = Object.keys(nodes).filter((id) => NODE_ID_RE.test(id)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
   const list = (xs, re) => (Array.isArray(xs) ? xs.filter((x) => typeof x === "string" && re.test(x)).join(" ") : "");
   // A tooltip is several lines (the box keeps them, `white-space:pre-line`).
-  return html`<ol id="graph-nodes" class="hidden-tips" hidden>${ids.map((id) => html`<li data-id="${id}" data-nb="${list(nodes[id].nb, NODE_ID_RE)}" data-w="${list(nodes[id].w, WIRE_ID_RE)}">${linesHtml(nodes[id].tip)}</li>`)}</ol>`;
+  return html`<ol id="graph-nodes" class="hidden-tips" hidden>${ids.map((id) => html`<li data-id="${id}"${Number.isSafeInteger(nodes[id].triggerIndex) && nodes[id].triggerIndex >= 0 ? html` data-trigger-index="${nodes[id].triggerIndex}"` : null} data-nb="${list(nodes[id].nb, NODE_ID_RE)}" data-w="${list(nodes[id].w, WIRE_ID_RE)}">${linesHtml(nodes[id].tip)}</li>`)}</ol>`;
 }
 
 /**

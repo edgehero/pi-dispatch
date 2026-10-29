@@ -43,7 +43,8 @@ TOK24_METERED = sum(r[6] for r in M24)                          # metered tokens
 AVG24 = COST24 / len(M24)
 TODAY_METERED = round(sum(r[7] for r in METERED if r[0] == "08"), 2)   # 5.23
 OCT7 = round(sum(r[7] for r in METERED if r[0] == "07"), 2)           # 5.25
-HELD = round(15.04 - TODAY_METERED, 2)                                # 9.81
+RUNNING_HOLDS = [2.00, 2.00, 2.00, 3.81]  # sample actual reservations, not a counter difference
+HELD = round(sum(RUNNING_HOLDS), 2)
 MONTUE = round(33.07 - 15.04 - OCT7, 2)
 
 def money(v): return f"${v:,.2f}"
@@ -91,7 +92,6 @@ def spend_chart():
     def y(v): return top + plot - v / cap * plot
     s = [f'<svg class="sp-chart" height="{H}" role="img" aria-label="Spend per day for 7 days against the $25.00 daily cap: today $15.04 spent and held">']
     s.append(f'<line class="sp-cap" x1="0" x2="100%" y1="{y(cap):.1f}" y2="{y(cap):.1f}"/><text class="sp-ll" x="100%" y="{y(cap)-6:.1f}" text-anchor="end">daily cap $25.00</text>')
-    s.append(f'<line class="sp-hold" x1="0" x2="100%" y1="{y(20):.1f}" y2="{y(20):.1f}"/><text class="sp-ll" x="100%" y="{y(20)-6:.1f}" text-anchor="end">soft hold $20.00</text>')
     s.append(f'<line class="sp-base" x1="0" x2="100%" y1="{top+plot}" y2="{top+plot}"/>')
     n = len(DAYS)
     for i, (d, v, held, sample) in enumerate(DAYS):
@@ -106,7 +106,7 @@ def spend_chart():
         s.append(f'<text class="sp-d{" sp-d--now" if held else ""}" x="{cx:.2f}%" y="{H-6}" text-anchor="middle">{d}</text>')
     s.append("</svg>")
     key = ('<p class="keyrow"><span><i class="sp-k sp-k--bar"></i>Metered</span><span><i class="sp-k sp-k--held"></i>Held for running jobs, released when they settle</span>'
-           '<span><i class="sp-k sp-k--hold"></i>Soft hold: new jobs wait</span></p>')
+           '</p>')
     return "".join(s) + key
 
 def hist():
@@ -155,7 +155,7 @@ def whatif():
       <div class="field"><label for="wi-r">Runs</label><select id="wi-r" class="select"><option>Last 24 hours, {len(M24)} runs</option><option>This week</option></select></div></div>
   <p class="sp-wi__s">The same {len(M24)} runs on <b>claude-haiku-5-5</b> would have cost about <b>{money(est)}</b> instead of <b>{money(cur)}</b>.</p>
   {bars}
-  <p class="sp-note sp-note--ic">{ic('doctor', 'ic ic--sm')}<span>An estimate from token counts and list prices. Try it with a canary in Models.</span></p>"""
+  <p class="sp-note sp-note--ic">{ic('doctor', 'ic ic--sm')}<span>An estimate from token counts and list prices. Outcomes may differ: a cheaper model can take more turns or fail more often.</span></p>"""
 
 def metered_plan():
     return f"""<ul class="sp-mp">
@@ -168,9 +168,9 @@ def caps_card():
             ("Tokens", "today", 3081250/8e6, "3.08M", "8.00M"), ("Deployment", "today, spent and held", 15.04/25, "$15.04", "$25.00"),
             ("Deployment", "this week", 33.07/120, "$33.07", "$120.00"), ("project:web", "this week", 11.78/45, "$11.78", "$45.00"),
             ("claude-sonnet-5-5", "this week", 32.46/80, "$32.46", "$80.00")]
-    body = "".join(meterrow(*r) for r in rows)
-    body += '<p class="keyrow"><span><i class="k tone-ok"></i>Open</span><span><i class="k tone-attention"></i>From 80%: new jobs wait</span><span><i class="k tone-failed"></i>At the cap: new jobs are refused</span></p>'
-    return card("Caps", f'<div class="sp-caps">{body}</div>', sub="the tick on every bar is the 80% soft hold", end=btn("Edit caps", "", "config"), id_="p-caps")
+    body = "".join(meterrow(*r) if r[0] == "Jobs" else meterrow(*r, tone="ok" if r[2] < 1 else "failed").replace('<line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/>', "") for r in rows)
+    body += '<p class="keyrow"><span><i class="k tone-ok"></i>Open</span><span><i class="k tone-attention"></i>From the job soft hold new starts are refused; nothing is spent.</span><span><i class="k tone-failed"></i>Full: another job at its cap would not fit</span></p>'
+    return card("Caps", f'<div class="sp-caps">{body}</div>', sub="the tick on job windows is the 80% soft hold", end=btn("Edit caps", "", "config"), id_="p-caps")
 
 def spend_body():
     kpis = f"""<div class="cards-4">
@@ -186,7 +186,7 @@ def spend_body():
   {card("By project", hbars([(tag(p), v, '') for p, v in BY_PROJECT] + [(tag('ops'), 0.0, 'tidy, on plan')], unit=lambda v: money(v) if v else 'plan'), id_="p-byproject")}
 </div>
 <p class="sp-note sp-note--wide">Cost by flow, model and project counts the {NRUNS} metered runs listed since Tue 6 Oct, 15:11 UTC: the first page of Runs.</p>"""
-    sizes = card("Job sizes", hist() + f'<p class="sp-note">Each run reserves the <b>$2.00</b> job cap; the largest of these {len(METERED)} runs used <b>$0.48</b>.</p>',
+    sizes = card("Job sizes", hist() + f'<p class="sp-note">While a dollar window is set, each non-zero-rated run reserves its job cap; the largest of these {len(METERED)} runs used <b>$0.48</b>.</p>',
                  sub="cost per run", id_="p-sizes", end=btn("Change job cap", "", "config"))
     left = f'<div class="stack">{over}{cost3}{sizes}{card("Budget split", split(), sub="this week", id_="p-split")}</div>'
     right = f'<div class="stack">{caps_card()}{card("What if", whatif(), sub="another model, the same runs", id_="p-whatif")}{card("Metered and plan", metered_plan(), sub="last 24 hours", id_="p-plan")}</div>'
@@ -422,11 +422,11 @@ READMES = {
 - **Views.** A tab row under the title switches between Spend (this view), Budget split, Capacity, Breakdown and the Flows map. They are links, and the current one is filled.
 - **Range and project.** The range (7 days, 30 days, month to date) and the project chips scope everything below.
 - **Four big numbers:** this week against its cap; today against its cap, split into metered and held; tokens today; and the average cost per run.
-- **Spend over time.** Daily bars against the $25.00 daily cap and its $20.00 soft hold. Today's bar shows the money held for running jobs as a dashed top: it is released when they settle.
+- **Spend over time.** Daily settled bars against the $25.00 daily cap. Today's bar shows the money held for running jobs as a dashed top: it is released when they settle.
 - **Where it went.** Cost by flow, by model and by project, in one hue with values written out.
 - **Job sizes.** A histogram of cost per run against the $2.00 job cap, with how much the largest run used.
 - **Right column:**
-  - *Caps*: every window, with the 80% tick;
+  - *Caps*: every window, with the 80% tick on job windows only;
   - *What if*: pick another model and see the same runs' estimated cost;
   - *Metered and plan*: claude-sonnet-5-5 per run, kimi-for-coding on plan:kimi;
   - *Budget split*: written weekly by pm-weekly, with who wrote it and when.
@@ -443,11 +443,11 @@ READMES = {
 **Why it works this way.**
 - Every run reserves the whole job cap before it starts, so a lower `maxCostUsd` holds less money while jobs run. The job sizes chart is there to show how far below the cap runs really land.
 - The budget split is weights only: it never changes a cap.
-- The what-if is an estimate from token counts and list prices. Outcomes may differ, because a cheaper model can take more turns or fail more often, which is why the screen points at a canary in Models.
-- Plan runs count against the job and token caps, never the dollar windows.
+- The what-if is an estimate from token counts and list prices. Outcomes may differ, because a cheaper model can take more turns or fail more often, so the screen names that uncertainty.
+- Plan runs count against every cap, the dollar windows at their API-equivalent price.
 
 **Fixture note.**
-- **From the fixture:** the caps, today's $15.04 and the week's $33.07. Today's {money(TODAY_METERED)} metered and Wednesday's {money(OCT7)} are sums of the Runs list; the held {money(HELD)} is the difference.
+- **From the fixture:** the caps, today's $15.04 and the week's $33.07. Today's {money(TODAY_METERED)} metered and Wednesday's {money(OCT7)} are sums of the Runs list; the held {money(HELD)} is the sum of four sample running-job reservations.
 - **Computed from the Runs list:** cost by flow, model and project, and the job sizes, over the {NRUNS} metered runs listed since Tue 6 Oct, 15:11 UTC.
 - **Sample:**
   - the daily bars for Fri 2 to Tue 6 (Mon and Tue add up to the week total);

@@ -170,7 +170,7 @@ test("a 400 page sets the refusal's leading parameter name in the code face, and
   const BAD = {
     runs: ["before=x", "before=1&before=2", "outcome=nope", `repo=${"r".repeat(300)}`, "zz=1", "q=a&q=b", Array.from({ length: 17 }, (_, i) => `repo=${i}`).join("&")],
     run: ["", "id=not%20an%20id", "id=a&id=b"],
-    insights: ["range=never", "whatif=a/b", "flow=f", "whatif=a&flow=f", "whatif=a/b&flow=BAD!", "paths=nope"],
+    insights: ["range=never", "runs=month", "flow=f", "whatif=a&flow=f", "whatif=a/b&flow=BAD!", "paths=nope"],
     audit: ["before=x", "who=no%20one", "action=nope", "outcome=nope", "seq=0", "seq=1&before=2026-10:3"],
     overview: ["x=1"],
   };

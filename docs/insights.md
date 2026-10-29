@@ -1,169 +1,55 @@
-# Insights
+# Spend and insights
 
-One page that answers the two questions the terminal answers separately: **what is this deployment
-wired to do** (the trigger/flow topology, [`graph.md`](graph.md)) and **what is it costing**
-(the cost analytics, [`costs.md`](costs.md)). The page puts the charts a human reads fastest next to
-the topology those numbers came from: spend per day, per flow, per trigger, per model, per repo, plan
-verdicts, and the graph with spend badged onto the triggers that earned it.
+Spend has five views on the [operator console](console.md), all readable by operators and viewers. Each is drawn once per load. The tabs preserve the range, project and path choices the destination supports.
 
-The page is `/insights` on the **operator console** ([`console.md`](console.md)), the one analytics surface.
-Start the console on the deployment's host with `pi-dispatch-console serve`, sign in, and open
-`http://127.0.0.1:4790/insights` (the address is the deployment's `PI_CONSOLE_LISTEN`, default
-`127.0.0.1:4790`). How the console is installed, its tokens and roles, and how to reach it from another machine
-over an SSH tunnel are all in [`console.md`](console.md). Both roles, `operator` and `viewer`, can read the page;
-the one difference is folder paths ([Folder paths](#folder-paths)).
+- `/insights`: weekly and daily money, tokens today, average metered cost over 24 hours, settled daily spend with today's actual running-job holds, cost by flow/model/project, job-cost histogram, caps, run-set what-if, metered and plan runs, and a budget split summary.
+- `/insights/budget-split`: the envelope, allocation, spent amount, current plan, project rows, history and host envelope digests. The amounts and refusal counts use the envelope's window; the range is carried for navigation. Operators can preview and confirm priorities, envelope changes and history reverts here.
+- `/insights/capacity`: fleet utilization, simultaneous peak, wait percentiles and promised memory, followed by each host's charts and coverage. Choose 24 hours, 7 days or 30 days; a carried `mtd` link is supported too. Project memory/CPU sizing remains here until the project page replaces it.
+- `/insights/breakdown`: settled window spend, ledger coverage, plan comparisons, daily charts, trigger/repository/model breakdowns and per-flow what-if estimates.
+- `/insights/flows`: the graph and its selected-node details, or a server-rendered list with `view=list`. The map's runs cover 30 days; its spend follows the selected spend range. Both windows are named.
 
-## Getting there from pi
+## Ranges and projects
 
-```
-/dispatch insights [7d|30d|mtd]
-```
+Spend and Breakdown offer 7 days, 30 days (the default) and month to date. Project chips filter the records and charts. Headline cards explicitly name their own week, today or 24-hour windows. Project money uses its own configured dollar windows where available, otherwise the deployment's, identified on the page. Budget split's project filter narrows rows; its headline totals and history remain for the whole envelope. Capacity always covers the fleet.
 
-prints the console URL for that window, for example `http://127.0.0.1:4790/insights?range=30d`, built from the
-deployment's `PI_CONSOLE_LISTEN`. When the console listens on a unix socket, it prints the `ssh -L` tunnel that
-reaches it instead. When it binds every address (`0.0.0.0` or `[::]`), the URL says `<this host>`: use the host's
-name or address. With port 0 the operating system picks the port, so no URL is printed; `pi-dispatch-console serve`
-prints the address it got. If the console is not running, start it with `pi-dispatch-console serve`. The command writes
-nothing and opens no browser. In the `/dispatch` panel, the `i` key shows the same URL as a notice.
+History is bounded by log retention and the 92-day scan cap. A missing read, truncated history or unknown amount is named rather than shown as zero. Reload to refresh.
 
-```
-/dispatch insights whatif <provider/model> --flow <flow>
-```
+## Settled, held and caps
 
-prints the URL of the console's answer to that what-if ([What-if](#what-if-re-price-a-flow-before-you-switch)).
-Any other argument answers the command's usage line. The old static export (a self-contained HTML file written
-under a graph directory and opened in a browser, with its `--no-open` and `--full-paths` flags) is gone, and so is
-the setting that placed it: a leftover graph directory line in an existing deployment's `.env` is read by nothing.
+Today's settled amount comes from run records. Held money comes from the live workers' actual reservations and their reservation times, never from the difference between a counter and the records. Older workers or incomplete job lists leave the hold total incomplete and are named. Any remaining difference from the enforcement counter is named separately. Past daily bars show settled money only.
 
-## The spend window
+Dollar counters include settled charges and reservations. A dollar window can be full before the displayed counter reaches its cap because another job's per-job reservation would not fit. Only global job-count windows have a soft hold; scoped job-count windows have hard caps. At that hold the worker refuses new starts; it does not leave them waiting. Tokens are refused at their cap alone.
 
-The picker at the top chooses the spend window: **last 7d**, **last 30d** (the default) or **month to date**. It is
-in the URL as `/insights?range=7d`, `range=30d` or `range=mtd`, so a link keeps its window. The page is drawn once
-per load: reload it to see new runs.
+A prepaid plan changes reporting, not enforcement: its runs count against every cap, including dollar windows at API-equivalent price. See [cost accounting](costs.md).
 
-## Reading the page
+## What-if estimates
 
-- **Header**: the spend window and the two-window line ([Two windows, stated](#two-windows-stated)).
-- **KPI tiles**: window spend, runs, how many runs were fully ledgered, plans declared, top flow.
-- **Plan verdict cards**: one per declared subscription: SAVING/LOSING against API rates (or
-  WOULD SAVE/WOULD LOSE for hypothetical plans), the amortized $/run, the API-equivalent, and the
-  observed peak per vendor window. A vendor that discloses no limit gets facts, never an invented
-  burn-down. No counterfactual declared reads exactly that.
-- **Daily spend**: a column per UTC day. Quiet days render as quiet baseline ticks, never compressed
-  away. A dashed, translucent column is an estimate; a `≥` marks a floor. Hovering a column (or any
-  chart mark) gives its tooltip.
-- **Budget**: the operator's one real lever on cost, beside the spend it limits: reserved vs cap
-  for the day/week/month job-slot windows and the daily token counter, states as words
-  (`soft-hold`, `over`), an overlay-unset cap shown as unknown or off with no bar and no invented
-  denominator, and the lever named (`/dispatch set …`, the panel's `s` key). Under them, one line per
-  `scoped-limits.json` row: its job counts against their caps, and its dollar windows as spent and held
-  against the cap ([scoped limits](scoped-limits.md)).
-- **Budget split**: with an allocation envelope ([allocation](allocation.md)), the envelope, one bar per
-  project (its share, its spend in the envelope's window and an amber tick at its floor), the headroom, the plan
-  in force (who wrote it, when, until when, and whether the step clamped it), and the newest 20 outcomes of the
-  split's history. Under it, two counts over the spend window from this host's run records: jobs refused for a
-  reason of the split (`allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`,
-  `portfolio-snapshot-oversize`), and what each portfolio run's plan came to. No host name and no plan reason
-  reaches the page. With no envelope the section says so; when Valkey cannot be read it says that and shows no
-  number.
-- **Job sizes** and **capacity**: each project's memory peaks against its size ([job sizes](#the-job-sizes-section)),
-  then how busy each host was over the window, hatched where there is no data ([capacity](#the-capacity-section)).
-- **Trend lines**: a cumulative window-spend line under the daily columns (dashed from the first
-  estimated day onward: once an estimate enters a running total it never leaves), and per-flow
-  daily spend as small panels on one shared scale, dashed wherever an estimated day touches.
-- **Breakdowns**: five, spend by flow, by trigger, by model, by repo and by project, drawn as bars. Clicking a row
-  of the by-trigger breakdown highlights that trigger's chip and its wires in the topology below. The by-project
-  bars carry the id each run recorded, and runs outside every project, or from before projects existed, are
-  `(no project)` ([projects](projects.md)).
-- **Topology**: the trigger/flow graph ([`graph.md`](graph.md) explains every edge and badge, and
-  [The interactive topology](#the-interactive-topology) how to move around it), with spend badged under every
-  trigger that spent in the window and each cron's next fire or overdue state in its tip. A `run.command` trigger
-  renders as its `/name` with no flow edge (by design, not as a defect) and earns its by-trigger spend row like
-  any other entry.
-- **Footer**: the provenance ledger (which pi-ai priced the numbers, what was unmetered,
-  unledgered, truncated, or drifted) plus the graph's own honesty counters in the legend.
+On Spend, choose a model and the last 24 hours or this week. Each eligible run's ledgered tokens are repriced and summed; excluded runs are counted. The estimate names plan coverage beside API-equivalent cost. Outcomes can differ because a cheaper model can take more turns or fail more often.
 
-## The money never lies about itself
+Breakdown estimates one flow's median ledgered run at another model's rates, then multiplies by that flow's run count in the selected window. It names coverage, exclusions and the pricing version. A flow without ledgered history has a seeded band, not a measured price.
 
-Every dollar keeps the class discipline of [`costs.md`](costs.md), visually: solid means metered,
-dashed and translucent means estimated (`~ … est.`), `≥` means a floor, a plan-covered bucket draws
-a `plan:<id>` chip and **no dollar bar** (prepaid is not free, and $0.00 would be a lie), an
-uncovered zero-rate bucket reads `$0 (unrated)`, and the word "free" appears nowhere. An undeclared plan
-whose provider pi prices at an API-equivalent rate (`kimi-coding`, `zai`, `zai-coding-cn`) draws that rate
-as metered spend, so declare it (see [`costs.md`](costs.md#declaring-subscriptions)). Color
-reinforces these markers; it never replaces them.
+`/dispatch insights [7d|30d|mtd]` prints Spend's URL. `/dispatch insights whatif <provider>/<model> --flow <flow>` prints Breakdown's answer URL. Existing `/insights?whatif=<provider>/<model>&flow=<flow>` links redirect to Breakdown.
 
-## Two windows, stated
+## Budget split actions
 
-The spend half answers the window you picked (`7d`, `30d`, or month to date). The topology half
-always describes the fixed 30-day record window its run counts and observed edges are folded over.
-The header states both on one line:
+Operators use structured fields rather than JSON. Every change uses the existing preview, five-minute single-use confirmation ticket, audit and worker validators. Viewers see neither controls nor plan reasons. Plan reasons are escaped, including visible escapes for invisible or direction-changing characters.
 
-```
-spend window: last 30d · topology: fixed 30d record window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap
-```
+History row numbers start at 1. Revert previews the target weights and writer `operator-revert`. It skips the interval and step limits, but remains bounded by the envelope and refuses while delegation is off or this host has a different envelope. A row without a plan restores today's neutral split. The portfolio job continues and may move the split again. Undo identifies the previous plan by id because history row numbers move.
 
-and every spend badge's tooltip names its window, so a screenshot cannot conflate them. Every series is bounded by
-how long this host keeps its run records (`PI_LOG_RETENTION_DAYS`) and by the 92-day ceiling on the records one
-page reads.
+Changing the envelope writes this host's file and re-bases the split without a step. Other hosts must receive the same file or their governed jobs refuse with `envelope-mismatch`.
 
-## The interactive topology
+## Flows map and paths
 
-- **Pan** by dragging, **zoom** with the mouse wheel.
-- Each chip has a **tooltip**. A label too long for its chip is shortened to fit, and the tooltip carries the full
-  text.
-- Clicking a row of the "spend by trigger" breakdown **selects** that trigger: its chip and its wires are
-  highlighted. **Escape** clears the selection.
-- The view (pan, zoom and selection) is kept in the URL fragment, so a reload or a copied link opens the same view.
+Drag to pan, use the wheel or zoom buttons, and choose Fit to reset the view. Tab reaches chips, Enter selects one and Escape clears selection. A Breakdown trigger opens `/insights/flows?select=<index>` with that chip selected by its stable trigger index. A spent one-shot links to its run. Selection and the list are usable without JavaScript.
 
-## Folder paths
+Charts fit the phone viewport. Tabs, project chips and the map scroll inside their own containers. Both themes retain readable labels and keyboard focus.
 
-The topology names local folders (a local trigger's `run.folder`, a skills directory) by their basename, and so does
-the budget split's problem text. An **operator** can add `?paths=full` to the URL to see the full local paths
-instead; the page has a link that toggles it. A **viewer** always sees basenames, whatever the URL says, because
-full paths are detail about the host.
-
-## What-if: re-price a flow before you switch
-
-The estimator answers "what would this flow have cost on another model" from the same ledger the page
-draws. History is never re-priced; the counterfactual is. It is a form on the insights page, open to every
-signed-in role, and it only reads: it is not an action and changes nothing.
-
-- **Model**: `<provider>/<model>`. The target splits on the **first** `/` (model ids carry dots and colons,
-  never the provider separator), and the field suggests the priced model ids.
-- **Flow**: required, because the estimate scores **one flow's median run**, not a portfolio. The field suggests
-  the flows seen in the window.
-
-The answer is a URL like any other view of the page, `/insights?whatif=<provider>/<model>&flow=<flow>`, and keeps
-`range`. `whatif` and `flow` go together: one without the other, or a malformed value, is refused with 400. From pi,
-`/dispatch insights whatif <provider/model> --flow <flow>` prints that URL.
-
-Worked question: nightly `build-report` runs cost real money on the deployment default; before pinning the
-trigger's `model` to something cheaper, open
-`/insights?whatif=anthropic/claude-haiku-4-5&flow=build-report`, which answers
-
-```
-What-if build-report @ anthropic/claude-haiku-4-5:
-  estimate ~$4.87 est. total · ~$0.16 est. per run
-  coverage 87% of observed runs ledgered · excluded 4 (no ledger)
-  rates pi-ai 1.0.3
-```
-
-How to read it, class markers on ([`costs.md`](costs.md)): the flow's **median ledgered run** is
-re-priced at the target's rates, then multiplied across **every observed run** (the un-ledgered ones
-presumably cost something too), and the coverage line states how much of that extrapolation is measured.
-The spend window does not narrow it: the estimate wants every ledgered run it can see, so it scans the last 92
-days of run records (the scan ceiling) whatever the window. A flow with no ledgered run at all answers with the
-seeded band `unmeasured (OQ-002)`, marked as such, never a confident number. An unknown model answers with up to
-three of the closest priced ids, as links that ask again with that id, instead of an estimate. An answer is cached
-for 30 seconds, so reloading it costs nothing. The output is an argument for an edit, not an edit: the lever stays
-the trigger's own `model`/`provider` fields or the `/dispatch set` knobs.
+Local folders are shown by their last folder. Only an operator asking for `paths=full` receives full local paths; a viewer always receives basenames. No inline script or style is used. Chart tooltips and map node data are escaped hidden lists, and list view carries no map node data.
 
 ## What each run records about resources
 
 Every run record carries `resources`: what the job's container used, read from its own cgroup just before the
-runner's last line (issue #596). It is in each `<logsDir>/<jobId>.json`, and the page's **job sizes** section draws
-the memory part of it (below).
+runner's last line (issue #596). It is in each `<logsDir>/<jobId>.json`, and Capacity's **Memory and CPU sizing** section draws the memory part of it.
 
 | Field | What it is |
 |---|---|
@@ -193,150 +79,3 @@ the memory part of it (below).
   `project`, `env` or `default`). Compare `memPeak` with it to choose a size ([job sizes](scoped-limits.md#job-sizes-version-3),
   and [sizing jobs](sizing.md) for the whole path).
 - Disk I/O, disk space and network are not measured or isolated.
-
-### The job sizes section
-
-- **Each host's budget in use**: every live host's memory and CPU budget, and what its running jobs hold now, as the
-  hosts publish them, in the panel's HOSTS view states and words: `promised memory 6g of 16g, CPU 3 of 8`, `no memory
-  budget` for a budget switched off, `memory budget not known yet` while a starting worker has not read it, `memory
-  budget unreadable` for a value no worker writes, and `no host budget published` for a worker from before the fields.
-- **Each project row's size** shows in the budget card's scoped limits too (`memory 8g · 4 CPUs`), as the panel and
-  `/dispatch budget` print it, so a row that sets only a size is never a bare name.
-- **Per project, a chart of peak memory over time against the size line.** One dot per run (red for a run that ended
-  `oom-killed`) at its peak, over the last 30 days. The line is each run's size from that run on, and it steps to the
-  project's current size at the right edge. A dot on the line is a run that reached its limit, which page cache alone
-  does (a red dot is a kill). A peak above its size is drawn at the size.
-- **The suggestion** above each chart, and the exact call that applies it. These are the same runs and the same rules
-  as `pi-dispatch doctor` and the panel's PROJECTS view use ([choosing a size from the
-  runs](scoped-limits.md#choosing-a-size-from-the-runs)). A raise is capped at what a live host offers the project
-  (its `hostShare` of a budget, where its row has one), each host judged on its own pair of memory and CPU budgets; a
-  suggestion larger than any host offers says so and shows no call. A memory-pressure or CPU-ceiling fact shows below
-  the call, as information. Nothing on this page changes a size.
-- Only this host's run records are read for the sizes. A run another host recorded is counted only on a shared
-  `PI_LOGS_DIR`.
-
-## What each run records about capacity
-
-Four more fields in every run record feed the capacity report (issue #599), which `pi-dispatch capacity`, doctor,
-`dispatch_capacity`, the panel's HOSTS view and the insights page show:
-
-| Field | What it is |
-|---|---|
-| `queuedAt` | when the job became eligible to run, as an ISO time. `startedAt` minus `queuedAt` is how long it waited for a slot |
-| `earlier` | on a retry, the slot time of the job's earlier attempts, whose record this one replaced: `host`, `startedAt`, `endedAt`, `memMiB`, `cpuCenti`, at most 4 (never their cost, so no cost total counts anything twice) |
-| `stalledRepick` | true when the job's first attempt stalled (the worker running it died or lost its lock) and this pickup re-ran it; that first pickup's time no record holds |
-| `capacity` | what the host offered when the job took its slot: `slots` (the live `PI_CONCURRENCY`), `memMiB` and `cpuCenti` (the host budget, a number, `"off"`, or null without one) and `cpus` (the CPUs the container runtime reports: on Docker Desktop the VM's, not the Mac's; the worker's own count when the runtime's was not read) |
-
-- `queuedAt` is the moment the job was added plus the delay it was added with. A cron job is created ahead of its
-  slot and delayed until it, so its `queuedAt` is the scheduled minute, not the moment before. A pause window, a
-  deferral (a busy folder, a full budget) count as waiting, because the job was ready and did not run. A retry, and a
-  pickup after a stall, records null: its wait would include the earlier pickup and its run. A job held on `run.waitFor` records null too: the wait
-  its trigger asked for is not a wait for capacity.
-- `capacity` is set when the worker admits the job, after every gate and before the clone, and is read then: a
-  `PI_CONCURRENCY` or budget change while it runs does not change it. **It is null on every job refused before it
-  held a slot** (a size that never fits, a wait gate refusal), so the record itself says whether the run used a slot.
-  A record from before this field has no `capacity` key at all; the report reads its reason first (a wait or size
-  refusal never used a slot), then counts it as having used one when it lasted at least a second or reported
-  `resources`, and says how many it inferred each way. A value no host can have (more than 16384 slots, 4096 CPUs or
-  64 TiB of memory) is written as null, and one in a record from an older worker is read as unknown; the run still
-  counts, and the report says how many records gave one.
-- All four are numbers, ISO times, worker names, true or false (`stalledRepick`) and fixed words, like the rest of
-  the record.
-
-### `pi-dispatch capacity`
-
-`pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]` (default `7d`) prints, per
-host: the share of the time it ran at least one job and the share it sat idle; the average and peak number of jobs at
-once and how long every slot was taken; the memory and CPU its jobs were promised against its budget (CPU against all
-its CPUs when the CPU budget is off); the CPU they used, as a share of the host's CPUs (never above 100% of them); the wait for a slot at p50 and p95; the projects by run
-time; and where that host's history starts. Each moment is judged by the capacity in force then, so a budget you
-lowered while jobs ran shows as an over-commit only for the time it was lower. A share of time that is there but
-rounds to nothing prints as `under 0.1%` (and one short of all of it as `over 99.9%`), idle is printed as the
-complement of the printed busy, so the two always sum to 100%, and a history start reads `2026-10-01 09:29 UTC`.
-The last lines say what the history covers, including `history truncated` when the run mirror holds nothing older for
-a host. With no host in the report it says `No host ran a job in the last 7d.` only when the whole window was read:
-both sources, nothing cut, no record skipped, unreadable or without a host. Otherwise it says `No run in the history
-read here in the last 7d.`, since a host whose runs were not read may have run many.
-`--json` prints the whole report. It
-never loads the full config: it reads only `VALKEY_URL` (or the one `--valkey-url` names), `PI_LOGS_DIR`,
-`PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME`, from the shell or the `.env` of the folder you run it in (the logs directory defaults to
-`~/.pi-dispatch/logs`, the worker name to this machine's hostname as the worker names itself: lowercased, with any other character a dash), and writes nothing. If a Valkey you named with `--valkey-url` refuses or does not answer, it exits 1; one taken from the
-environment gives a report from this host's files, and says why.
-
-The same report shows in four more places. `pi-dispatch doctor` prints one line per host for the last 7 days (busy
-share, average and slots, promised memory and CPU, CPU used, the wait and the busiest project, then what the line
-cannot see), never as a warning. The `dispatch_capacity` tool returns it to a model in pi (`window` `24h`, `7d` or
-`30d`, and an optional `host`), as text and as the report `--json` prints. The panel's HOSTS view (`u` in
-`/dispatch`) shows each host's last 7 days under its live slots, budget and running jobs, with the same caveats, and
-reads the report when it opens and again on `u` ([what the panel shows](multi-host.md#what-the-panel-and-doctor-show-you)). The insights page draws it too
-([the capacity section](#the-capacity-section)).
-
-- **Jobs only.** No machine load is measured, so a machine busy with other work reads as idle.
-- **Missing history is never idle.** It reads the run mirror where workers declare `PI_WORKER_NAME`, and this host's
-  own files, and each host's history starts where its own sources do: this host's files to `PI_LOG_RETENTION_DAYS`,
-  the mirror to what it still holds (a host both hold, such as a named host seen from itself, says "the run mirror and
-  this host's files"). Every worker trims the shared mirror by its own retention, so a host with a
-  shorter one cuts everyone's older runs; it records where it cut, and the report starts the mirrored hosts there.
-  The mirror also records when it started (`runs:since`), so on a new deployment, or after its Valkey lost the mirror's
-  keys, the mirrored hosts' history starts then.
-  Time before a host's history, and a live host whose runs it cannot see (one without `PI_WORKER_NAME` writes no
-  mirror), count as neither busy nor idle, and the report names them. What it cannot see inside a history it has is
-  another matter: a host that is new, or was down, inside a window whose history is here reads as idle for that time,
-  since the records cannot tell a machine that ran nothing from one that was not there.
-- **A job running now is counted as busy up to now.** Each worker's registry row lists the jobs it runs (with or
-  without a host budget), and the report counts each from the moment it was admitted. A row that has not beaten for
-  more than 30 seconds counts its jobs only up to its last beat. A running job the row does not list (it lists 32) is
-  said as not counted, and so is one on a host whose history is not shared. A row whose list of running jobs cannot
-  be read is named, and the number running now is then unknown. When the host you read from has runs here and no row
-  (the registry was not read, or its row is gone until its next beat), the coverage line says the jobs it runs now are
-  not known; the other hosts' count stands. A container whose stop did not take (an orphan) is named, but its time
-  after the failed stop is in no record and is not counted as busy.
-- A retry replaces its earlier attempt's record, but carries that attempt's
-  slot time in `earlier`, so it is counted, on the host that ran that attempt where that host's history is here and covers it. An attempt the record could not carry (its own record unreadable, or beyond the 4 kept) is not counted, nor is one outside its host's history, and the report says
-  how many runs were retries. A run whose first attempt stalled and was picked up again is counted too, and the report says the stalled
-  pickup's own time is not. A stall of a later attempt is not counted at all: the run after it reads as an ordinary
-  retry, and the stalled attempt's time is in no record. CPU used comes from `resources`, which the job's container
-  produces: advisory, like every number there, and read at most at what the job's `--cpus` allows.
-
-### The capacity section
-
-The insights page shows the same report after the job sizes, over the page's own window: the last 7 days, the last
-30 days, or the month so far from its first instant (`mtd`, the same start as the spend). It is read once per page
-load. Per host:
-
-- **The headline**, in the words `pi-dispatch capacity` prints for the same report: busy and idle (each a share of the
-  time the host's history covers, with the share of the window it does not cover beside them), the jobs at once on
-  average and at peak against the slot count, the time every slot was taken (full), the memory and CPU its jobs were
-  promised against its budget, the CPU they used of the host's CPUs, the wait for a slot at p50 and p95, and the
-  projects by run time.
-- **A chart** of the jobs running at once, on average, in each hour (7 days) or each six hours (30 days and the month).
-  The dashed line is the host's slot count, a tick on a bar is the most that ran at once in it, and hovering a bar
-  gives its busy share, average, peak and full share. The time axis is the whole window and ends at the moment the page
-  was loaded, so a quiet day is an empty stretch, never squeezed out.
-- **Hatched is no data.** Time before a host's history starts (the run mirror at its cap or since it started, the log
-  retention), a host whose history is not here (one without `PI_WORKER_NAME`, or a run mirror that was not read), a
-  bucket the page could not read, and time after the report was read, are hatched in grey and counted as neither busy
-  nor idle. Hovering the hatch says which of these it is. An empty stretch with no hatch is a host that ran nothing
-  then. The dates under the chart mark UTC midnights.
-- **The caveats** the CLI prints, one per line: jobs refused before a slot, retries, jobs running now, and where the
-  history comes from. A host whose history is not here says why, in the same sentence, and shows no busy share. A
-  history the run mirror cut says "history truncated" with the moment it starts.
-
-At most 20 hosts are drawn: the ones with numbers first, then those with no history here, then those whose history is
-not here, and the page says how many of each it left out. Under the hosts, the coverage the CLI ends its report with,
-one clause per line; a long list of hosts whose history is not here is cut to five names and a count. On the first
-moment of a month, `mtd` has no time in it yet, and the section says so. **Jobs only: a machine busy with other work reads as idle.** The
-page says so every time, because nothing here measures the machine itself. When the report cannot be read at all, the
-section says so and draws no number; the rest of the page is unaffected.
-
-## Honest limits
-
-- The page is drawn once per load: it does not follow new runs by itself. Reload it to refresh.
-- Everything the [`costs.md`](costs.md) honest-limits section says holds here too: totals are
-  floors, pre-ledger runs are counted rather than guessed at, and history is never re-priced.
-- The topology's tier visibility depends on the console's settings: the overlay and
-  staged-package skill tiers enumerate only when `PI_GLOBAL_PI_DIR` is set in the deployment's `.env` (or the
-  shell that started `pi-dispatch-console serve`), and a flow the visible tiers miss renders the amber `[not at HEAD]` state rather than a red claim (see
-  [`graph.md`](graph.md)).
-- The page makes no request to another origin: everything it loads comes from the console itself (its
-  Content-Security-Policy is `default-src 'none'; script-src 'self'; style-src 'self'; ...`).

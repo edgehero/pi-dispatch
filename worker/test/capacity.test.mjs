@@ -571,3 +571,41 @@ test("a report with no host says whether the run mirror's own history was cut, a
 	assert.equal(report([], { coverage: mirror(NOW - 2 * H, false) }).coverage.truncated, false);
 	assert.equal(report([], { coverage: { source: "local", local: { fromMs: NOW - DAY }, mirror: null } }).coverage.truncated, false);
 });
+
+
+test("fleet slot share weights slots and fleet peak respects simultaneous time", () => {
+	const size = { memMiB: 1024, cpuCenti: 100, source: "project" };
+	const fleet = report([
+		run("a", 24, 12, { size, capacity: { ...CAP, slots: 1 } }),
+		run("b", 12, 0, { host: "b", size, capacity: { ...CAP, slots: 3 } }),
+	]).fleet;
+	assert.equal(fleet.busyPerMille, 250, "24 occupied hours of 96 available slot hours");
+	assert.equal(fleet.peak, 1, "the two hosts' peaks never overlapped");
+	assert.equal(fleet.peakAtMs, NOW - DAY);
+	assert.equal(fleet.promisedMemPerMille, 31, "1g promised of both hosts' combined 32g");
+});
+
+test("fleet waits pool samples rather than averaging host percentile summaries", () => {
+	const records = [run("a", 4, 3, { queuedAt: iso(NOW - 4 * H - 1000) }),
+		...Array.from({ length: 20 }, (_, i) => run(`b${i}`, 2, 1, { host: "b", queuedAt: iso(NOW - 2 * H - 10000) }))];
+	const fleet = report(records).fleet;
+	assert.deepEqual(fleet.waits, { n: 21, p50Ms: 10000, p95Ms: 10000 });
+	assert.equal(fleet.peak, 20);
+});
+
+test("fleet unknown memory is not zero and truncated coverage remains explicit", () => {
+	const fleet = report([run("a", 1, 0, { capacity: { ...CAP, memMiB: null } })]).fleet;
+	assert.equal(fleet.promisedMemPerMille, null);
+	assert.equal(fleet.incomplete, true);
+});
+
+test("fleet availability follows capacity changes and excludes missing history from its denominator", () => {
+	const changing = report([
+		run("early", 24, 0, { capacity: { ...CAP, slots: 1 } }),
+		run("change", 12, 12, { capacity: { ...CAP, slots: 3 } }),
+	]).fleet;
+	assert.equal(changing.busyPerMille, 500, "24 occupied hours / (12h at one slot + 12h at three slots)");
+	const cut = report([run("cut", 10, 2)], { coverage: { fromMs: NOW - 6 * H, truncated: true, source: "mirror", mirrored: true } }).fleet;
+	assert.equal(cut.busyPerMille, 333, "4 occupied hours / 6 covered hours at two slots");
+	assert.equal(cut.incomplete, true);
+});

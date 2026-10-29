@@ -49,6 +49,10 @@ test("the human report: one block per host with busy and idle, slots, promised a
 	assert.equal(
 		text,
 		[
+			"Fleet busy share of slot time: 8.3% (coverage incomplete)",
+			"Fleet peak: 2 jobs at once at 2026-10-08T03:00:00.000Z",
+			"Fleet wait for a slot: p95 40s, median 40s",
+			"Fleet promised memory at the busiest hour: 50%",
 			"Host mini1, last 24h",
 			"  busy 12.5%, idle 87.5%",
 			"  slots: avg 0.2 of 2, peak 2 of 2, full 4.2% of the time",

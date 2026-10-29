@@ -642,6 +642,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		stageRecovered = null,
 		resetTrustPaths = resetTrustPathsDefault,
 		runningJobs = null,
+		onDollarHold = () => {},
 		hostName = null,
 		// `({ runId, pointer, attempt }) => { seq } | { skipped }` (start.mjs): a salvage checkpoint from a crashed attempt's
 		// job directory still on this host, asked for a recovery job before its manifest is read. Null takes none.
@@ -732,6 +733,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 	// taken or once it has been settled or given back, so no path can settle or refund it twice. `dollars` is what
 	// the record says about it (INT-RUN-HISTORY-FILE-CONTRACT), null until the reservation step ran.
 	let dollarHold = null;
+	// A reporting failure must never change admission, settlement or the result of a paid run.
+	const publishDollarHold = (hold) => { try { onDollarHold(hold); } catch {} };
 	let dollars = null;
 	// Issue #596: what the container used (`resources` off its exit line), null until a container ran and reported it.
 	let resources = null;
@@ -2186,6 +2189,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 					return { outcome: "policy", reason: refusalReason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: globalHeld(), dollars: stranded ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded", modelBasis }) }; // return => not retried
 				}
 				dollarHold = reservation.hold;
+				publishDollarHold({ amountMicros: dollarHold.amountMicros, at: new Date(now).getTime() });
 				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null });
 				// Issue #645: an armed run never runs a container without a DURABLE record of its hold (run-budget-ledger.mjs's
 				// contract), so a recovery after a crash can see it and settle it exactly once. A record that did not land
@@ -2435,6 +2439,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			if (!ledgerMoved && modelPrefixes.size > 0) modelBasis = "floor";
 			dollars = applied === 0 && of > 0 && (settledMicros !== reservedMicros || !ledgerMoved) ? dollarsRecord({ reservedMicros, settledMicros: reservedMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis });
 			dollarHold = null;
+			publishDollarHold(null);
 			log("dollar_settled", { reservedMicros: dollars.reservedMicros, settledMicros: dollars.settledMicros, basis: dollars.basis, ...(modelBasis !== null ? { modelBasis } : {}) });
 		} else if (dollars?.basis === "unreserved") {
 			// Nothing was held, so nothing is written. A metered cost above 0 here would mean the runner's cap of 0 let a
@@ -2686,6 +2691,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				const heldModel = (hold.ledgers ?? []).some((l) => modelPrefixesOf(modelDollars).has(l.keyPrefix));
 				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: hold.amountMicros, basis: "floor", modelBasis: heldModel ? "floor" : null });
 			}
+			// A failed give-back becomes a settled floor, not a running job's reservation.
+			publishDollarHold(null);
 		}
 		// The record reads `dollars` off the error on every throw path (buildRecord), so a retried or failed attempt says
 		// what its windows were charged.

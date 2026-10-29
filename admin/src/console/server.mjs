@@ -419,6 +419,10 @@ function pageHandler(name) {
   return async (ctx) => {
     const parsed = pageQueryOr400(ctx, name, ctx.searchParams);
     if (!parsed) return;
+    // Saved flow estimates must keep answering after Spend and Breakdown became separate pages.
+    if (name === "insights" && parsed.query.whatif && parsed.query.flow) {
+      return redirect(ctx.res, `/insights/breakdown?${ctx.searchParams.toString()}`);
+    }
     const { pages, pageDeps, config } = ctx.deps;
     const data = await pages.loadPageData(name, parsed.query, pageDeps, { role: ctx.session.role, readOnly: Boolean(config.readOnly) });
     ctx.flash = ctx.req.method === "GET" && data?.readFailed !== true ? ctx.deps.sessions.takeFlash?.(ctx.session.id) ?? null : null;

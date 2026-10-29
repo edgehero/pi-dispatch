@@ -495,7 +495,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["project-delete", { plan: { deleted: "web" } }, DEL, null, "Delete project web", "Deleted project web"],
     ["envelope-set", {}, [U.envelope, U.envelopeAfter], null, "Confirm", "Changed the allocation envelope"],
     ["priorities-set", {}, twice(U.allocation), null, "Confirm", "Applied a priorities plan"],
-    ["allocation-revert", { payload: { index: 1 } }, twice(U.allocation), null, "Confirm", "Reverted the allocation to history row at index 1"],
+    ["allocation-revert", { payload: { index: 1 } }, twice(U.allocation), null, "Confirm", "Reverted the allocation to row 2"],
   ];
   assert.deepEqual([...new Set(rows.map(([name]) => name))].sort(), ACTIONS.map((a) => a.name).sort(), "every action has a row");
   for (const [name, out, undo, inverse, label, done, result] of rows) {
@@ -559,7 +559,7 @@ function goldenForms() {
   for (const f of files) {
     const text = readFileSync(join(root, String(f)), "utf8");
     for (const m of text.matchAll(/<form\b[^>]*\sdata-action="([^"]+)"[^>]*>([^]*?)<\/form>/g)) {
-      forms.push({ file: String(f), action: m[1], names: [...m[2].matchAll(/<(?:input|select|textarea|button)\b[^>]*\sname="([^"]+)"/g)].map((n) => n[1]) });
+      forms.push({ structured: /data-structured="(priorities|envelope)"/.exec(m[0])?.[1] ?? null, file: String(f), action: m[1], names: [...m[2].matchAll(/<(?:input|select|textarea|button)\b[^>]*\sname="([^"]+)"/g)].map((n) => n[1]) });
     }
   }
   return forms;
@@ -568,10 +568,15 @@ function goldenForms() {
 test("every form a golden draws names a known action and sends only fields that action takes", () => {
   const forms = goldenForms();
   assert.ok(forms.length >= 20, `the goldens hold the console's forms (${forms.length})`);
-  for (const { file, action, names } of forms) {
+  for (const { file, action, names, structured } of forms) {
     const a = ACTIONS.find((x) => x.name === action);
     assert.ok(a, `${file}: form[data-action="${action}"] is an action`);
-    for (const n of names) assert.ok(a.fields.includes(n), `${file}: ${action} sends ${n}, which it does not take`);
+    const sent = structured === "priorities" ? ["projects", "validDays"] : structured === "envelope" ? ["envelope"] : names;
+    if (structured) {
+      assert.equal(action, structured === "priorities" ? "priorities-set" : "envelope-set");
+      for (const name of names) assert.ok(structured === "priorities" ? name === "validDays" || /^weight:(?:_other|[a-z0-9-]+)$/.test(name) : ["window", "totalUsd", "enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"].includes(name) || /^(?:floor|weight):(?:_other|[a-z0-9-]+)$/.test(name), `${file}: structured ${name} is packed by bodyOf`);
+    }
+    for (const n of sent) assert.ok(a.fields.includes(n), `${file}: ${action} sends ${n}, which it does not take`);
   }
 });
 
@@ -2096,10 +2101,10 @@ test("allocation-revert: a row with no split is refused at the preview; an envel
   const none = await c.act("allocation-revert", { index: 1 });
   assert.equal(none.status, 400);
   // Issue #737: the row by the index the form asks for ("History row # (newest is 0)"), until PR 7a.
-  assert.equal(none.json().error, "history row at index 1 carries no split to go back to");
-  assert.equal((await c.act("allocation-revert", { index: 5 })).json().error, "no allocation history row at index 5 (have 2)");
+  assert.equal(none.json().error, "row 2 carries no split to go back to");
+  assert.equal((await c.act("allocation-revert", { index: 5 })).json().error, "no allocation row 6 (have 2)");
   const p = (await c.act("allocation-revert", { index: 0 })).json();
-  assert.match(p.summary[0], /^Revert the allocation to history row at index 0 \(writer operator-revert\)$/);
+  assert.match(p.summary[0], /^Revert the allocation to row 1 \(writer operator-revert\)$/);
   assert.deepEqual([p.undo, p.confirmLabel], [UNDO_SENTENCES.allocation, "Confirm"]);
   state.digest = "d2";
   const stale = await c.confirm("allocation-revert", p.ticket);
@@ -2112,8 +2117,8 @@ test("allocation-revert: a row with no split is refused at the preview; an envel
   assert.equal(back.confirm.status, 200, back.confirm.text);
   assert.deepEqual(state.reverted.map((r) => r.target), [{ at: "2026-10-15T00:00:00Z", outcome: "applied", planId: "p1", weights: { web: 2 } }]);
   const { change } = back.confirm.json();
-  assert.equal(change.summary, "Reverted the allocation to history row at index 0");
-  assert.ok(String(doneBannerHtml(change)).includes('<p class="banner__t">Reverted the allocation to history row at index 0</p>'), "the banner names the row");
+  assert.equal(change.summary, "Reverted the allocation to row 1");
+  assert.ok(String(doneBannerHtml(change)).includes('<p class="banner__t">Reverted the allocation to row 1</p>'), "the banner names the row");
 });
 
 test("secret-profile-add and -remove: a settings file changed after the preview is refused 409 and keeps the other writer's bytes", async () => {
@@ -2748,4 +2753,46 @@ test("leak canary: no audit row or log line carries a token, the answer text or 
     const v = verifyConsoleAudit({ logsDir: dir });
     assert.ok(v.ok, `${dir}: ${JSON.stringify(v.broken ?? {})}`);
   }
+});
+
+test("Budget split revert previews one-based rows, exceptions and undo by the previous plan id", async () => {
+  const { paths } = deployment();
+  const target = { at: "2026-10-15T00:00:00Z", outcome: "applied", planId: "old-plan", weights: { web: 2 } };
+  const { rm } = allocationRm({ log: [target] });
+  rm.readAllocations = async () => ({ log: [target], state: { planId: "current-plan" } });
+  const c = await start({ paths, a: { rm } });
+  const p = (await c.act("allocation-revert", { index: 0 })).json();
+  assert.match(p.summary[0], /row 1/);
+  for (const text of ["minIntervalHours", "maxStepPct", "delegation is off", "neutral split", "portfolio job keeps running"]) assert.ok(p.summary.some((line) => line.includes(text)), text);
+  assert.match(p.undo, /current-plan/);
+  assert.doesNotMatch(p.undo, /row [0-9]/);
+  assert.equal((await c.confirm("allocation-revert", p.ticket)).status, 200);
+  assert.equal((await c.confirm("allocation-revert", p.ticket)).status, 409, "ticket is single-use");
+});
+
+test("Budget split envelope preview contains the exact file diff and multi-host consequence without writing", async () => {
+  const { dir, paths } = deployment();
+  paths.envelopeFile = join(dir, "envelope.json");
+  const before = `${JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { web: "10", _other: "0" }, defaultWeights: { web: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }, null, 2)}\n`;
+  writeFileSync(paths.envelopeFile, before);
+  const c = await start({ paths });
+  const p = (await c.act("envelope-set", { envelope: { totalUsd: "120" } })).json();
+  assert.equal(typeof p.ticket, "string");
+  assert.match(p.html, /100/);
+  assert.match(p.html, /120/);
+  assert.ok(p.summary.some((line) => line.includes("envelope-mismatch")));
+  assert.equal(read(paths.envelopeFile), before);
+});
+
+
+test("structured allocation fields pack the existing action schemas, including false delegation and zero weights", () => {
+  const bodyOf = scriptBodyOf();
+  const field = (name, value, type = null) => ({ name, value, disabled: false, getAttribute: () => type });
+  const form = (kind, elements) => ({ elements, getAttribute: () => kind });
+  assert.deepEqual(bodyOf(form("priorities", [field("weight:web", "0"), field("weight:_other", "1000"), field("validDays", "3", "int")])), { projects: [{ id: "web", weight: 0 }, { id: "_other", weight: 1000 }], validDays: 3 });
+  const got = bodyOf(form("envelope", [field("window", "week"), field("totalUsd", "100"), field("floor:web", "10"), field("weight:web", "3"), field("maxStepPct", "25"), field("minIntervalHours", "0"), field("maxPlanDays", "7")]));
+  assert.equal(got.envelope.enabled, false);
+  assert.deepEqual({ ...got.envelope.floorsUsd }, { web: 10 });
+  assert.deepEqual({ ...got.envelope.defaultWeights }, { web: 3 });
+  for (const bad of ["-1", "1001", "1.5", "Infinity"]) assert.throws(() => bodyOf(form("priorities", [field("weight:web", bad), field("validDays", "3")])), /Weights/);
 });

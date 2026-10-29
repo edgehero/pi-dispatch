@@ -786,7 +786,7 @@ test("the session's role reaches the page read: a viewer's /insights?paths=full 
     const { cookie } = await c.login(token);
     const res = await c.send({ path: "/insights?paths=full", headers: { cookie } });
     assert.equal(res.status, 200);
-    assert.deepEqual(asked.splice(0), [{ fullPaths: want }], token === VIEW_TOKEN ? "viewer" : "operator");
+    assert.deepEqual(asked.splice(0), [{ view: "spend", project: null, role: want ? "operator" : "viewer", fullPaths: want }], token === VIEW_TOKEN ? "viewer" : "operator");
   }
 });
 
@@ -2121,4 +2121,19 @@ test("watch evidence refuses viewers before any private storage read and authent
   assert.match(accepted.text, /operator evidence/);
   assertSecurityHeaders(accepted, "private watch evidence");
   assert.deepEqual(asked, [["finding", "f1", { private: true }], ["trace", "f1", { private: true }]]);
+});
+
+
+test("saved flow what-if links redirect to Breakdown before reading data, retaining the query", async () => {
+  const c = await start();
+  const { cookie } = await c.login();
+  const query = "range=7d&project=web&paths=full&whatif=acme%2Fmodel-1&flow=fix";
+  const before = c.loads.length;
+  for (const method of ["GET", "HEAD"]) {
+    const out = await c.send({ method, path: `/insights?${query}`, headers: { cookie } });
+    assert.equal(out.status, 303);
+    assert.equal(out.headers.location, `/insights/breakdown?${query}`);
+    assertSecurityHeaders(out, method);
+  }
+  assert.equal(c.loads.length, before, "redirect performs no assembly");
 });

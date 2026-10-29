@@ -133,3 +133,18 @@ test("orphan publication carries only a known runtime and integer stop instant, 
 	assert.equal(jobs[0].v, "podman", "an unnamed venue uses the deployment's actual default");
 	for (const extra of [{ v: "unknown" }, { s: -1 }, { s: "20" }]) assert.equal(parseLiveJobs([{ id: "a", at: 1, o: 1, ...extra }]).dropped, 1);
 });
+
+
+test("dollar holds preserve explicit zero, the reservation instant, and old-host unknowns", () => {
+	const { jobs } = liveJobsOf({ running: [
+		{ id: "held", at: 10, holdMicros: 2_000_000, holdAt: 15 },
+		{ id: "zero", at: 20, holdMicros: 0, holdAt: 20 },
+		{ id: "old", at: 30 },
+	] });
+	const parsed = parseLiveJobs(liveJobsFields({ jobs, skipped: 0 }).jobs).jobs;
+	assert.deepEqual(parsed.map((j) => [j.h, j.ha]), [[2_000_000, 15], [0, 20], [undefined, undefined]]);
+	for (const h of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "200", null]) {
+		const row = parseLiveJobs([{ id: "x", at: 10, h, ha: 15 }]);
+		assert.equal(row.jobs[0].h, undefined, "a malformed hold is unknown, never coerced to zero");
+	}
+});

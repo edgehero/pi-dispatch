@@ -38,7 +38,7 @@ STATUS = {
     **{n: (BUILT, "Built by #747; managed forks added by #648. Watch remains separate work.") for n in ["RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered",
                                                       "RunSandboxed", "RunChatStates", "RunViewer"]},
     **{n: (BUILT, "Built by #748, Fleet with host and venue detail.") for n in ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"]},
-    **{n: (PLANNED, "#749, Spend.") for n in ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown",
+    **{n: (BUILT, "Built by #749, Spend as five views.") for n in ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown",
                                               "TopologyScreen", "SpendPhone"]},
     "TriggersScreen": (PLANNED, "#750. Its Watch and Dispatchers tabs are planned and proposed elsewhere."),
     "TriggerDetail": (PLANNED, "#750."), "TriggerEditor": (PLANNED, "#750."), "ConfigScreen": (PLANNED, "#750."),

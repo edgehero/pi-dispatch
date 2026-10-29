@@ -443,6 +443,9 @@ function normalizeModel(model) {
       kind: typeof n.kind === "string" ? n.kind : "skill",
       name: typeof n.name === "string" ? n.name : null,
       label: typeof n.label === "string" ? n.label : null,
+      index: Number.isSafeInteger(n.index) && n.index >= 0 ? n.index : null,
+      cronId: typeof n.cronId === "string" ? clip(n.cronId, 176) : null,
+      cost: n.cost && typeof n.cost === "object" ? n.cost : null,
       onType: typeof n.onType === "string" ? n.onType : null,
       pattern: typeof n.pattern === "string" ? n.pattern : null,
       flow: typeof n.flow === "string" ? n.flow : null,
@@ -456,13 +459,11 @@ function normalizeModel(model) {
         ? [...new Set(n.tiersUnknown.filter((t) => typeof t === "string").map((t) => clip(t, 40)))].sort().slice(0, 4)
         : [],
       replicas: intOr(n.replicas, null),
-      // One-shot facts (#231): `once` is the armed state, and the disarm mark is narrowed to its
-      // instant alone. The mark's jobId stays server-side on purpose: the page answers "spent, and
-      // when", and provenance beyond that belongs to the operator's own console -- a shareable
-      // file:// page should carry no more of a deployment's run history than the question needs.
+      // Keep the bounded run id for the console's one-shot link. The standalone renderer still
+      // prints only the instant; the run id is never interpolated into a shareable export.
       once: n.once === true,
       disarmed: n.disarmed !== null && n.disarmed !== undefined && typeof n.disarmed === "object" && !Array.isArray(n.disarmed)
-        ? { at: typeof n.disarmed.at === "string" ? clip(n.disarmed.at, 40) : Number.isFinite(n.disarmed.at) ? n.disarmed.at : null }
+        ? { at: typeof n.disarmed.at === "string" ? clip(n.disarmed.at, 40) : Number.isFinite(n.disarmed.at) ? n.disarmed.at : null, jobId: typeof n.disarmed.jobId === "string" && /^[a-zA-Z0-9._:-]{1,200}$/.test(n.disarmed.jobId) ? n.disarmed.jobId : null }
         : null,
       // The portfolio flag (issue #507): a strict boolean, rendered as one tip line and nothing else on the scene.
       portfolio: n.portfolio === true,
@@ -1934,6 +1935,7 @@ export function buildGraphScene(model, { now, fullPaths, outcomeWords } = {}) {
     nodeParts.push(nodeSvg(p, flags, drawIn, drawOut));
     const a = adj.get(p.id);
     graphData.nodes[p.id] = {
+      triggerIndex: n.kind === "trigger" ? n.index : null,
       tip: buildTip(n, flags, group ? group.label : null, nowMs, words),
       nb: a ? [...a.nb].sort() : [],
       w: a ? [...a.w].sort() : [],

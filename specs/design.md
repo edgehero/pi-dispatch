@@ -672,6 +672,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-CAPACITY-FROM-RECORDS
 
+- **AMENDED 2026-10-29 (#749)**: Fleet metrics live in the report, not the page. A global sweep measures simultaneous peak and pooled waits; slot-time denominators weight utilization, and missing coverage flags partial answers. Capacity adds 24h one-hour buckets.
+
 - **Decision** (issue #599, phase 1): how busy each host is and was is computed from the RUN RECORDS alone, by ONE
   pure function (`worker/src/capacity.mjs`, `computeCapacity`) that every surface calls, over the records of the
   window read by one reader (`worker/src/capacity-records.mjs`). Jobs only: nothing samples a machine's load. The
@@ -3517,6 +3519,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-COST-FOLD-BY-SCAN
 
+- **AMENDED 2026-10-29 (#749)**: Today’s holds are published actual worker reservations with timestamps, summed from live hosts; neither maxCostUsd nor counter minus settled records can reconstruct them. Unread/missing older telemetry and reconciliation differences are explicit. Spend’s run-set estimate is a sum of re-priced ledgers; Breakdown’s median flow estimate uses the selected window’s count.
+
 - **Decision**: Cost aggregation is a **read-only, filename-keyed scan** of the run-history sidecars
   (`scanRunRecords` in the admin read-model — `listRuns`' sibling without the 50-record clamp), bounded by
   `PI_LOG_RETENTION_DAYS` and hard-capped at **92 days** even when retention is the keep-forever `0`, folded
@@ -5223,6 +5227,8 @@ free local model, or using a few successful live probes as proof of every routin
   `INT-MODEL-ENDPOINTS-FILE-CONTRACT`
 
 ## DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE
+
+- **AMENDED 2026-10-29 (#749)**: Console allocation projection may carry host names and weights, and operator-only reasons, without widening the shareable export projection. Structured fields feed the existing confirmed action body contracts. Revert keeps machine indices internal and names rows from one.
 
 - **Decision**: An agent may split the dollar budget between projects with no keypress, inside an envelope the
   operator writes (issue #504, `REQ-DELEGATED-ALLOCATION`). The agent writes **weights**, never dollars, and
@@ -11955,6 +11961,8 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **AMENDED 2026-10-29 (#749)**: Five non-live Spend routes read independently through `assembleInsightsView`. Cache identity includes view, window, project, role and effective paths permission. The six Spend cards leave the legacy layer; their CSS stays pasted and pinned. Operator reasons never enter viewer reads or cache entries.
+
 - **Fleet, host and venue detail (#748).** Fleet leaves the compatibility wrapper and draws the FleetScreen and
   FleetPartPaused cards in the shared kit. The kill switch has its own panel, keeping its existing planner and
   confirmation pipeline; disagreement between the console and deployment Valkeys is read on every page load.
@@ -16424,3 +16432,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-28 (#716) | **NEW `DES-MODEL-FAILOVER`; `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` and `DES-OPERATOR-CONSOLE` AMENDED**: reviewed next-attempt singleton selection, authenticated replay eligibility, bounded shared cooldowns and existing Doctor-panel visibility. **`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` UNCHANGED, checked**: no subscription routing. The console visual system is **UNCHANGED, checked**: no tokens or stylesheet changed. |
 | 2026-10-29 (#748) | **`DES-OPERATOR-CONSOLE`, `DES-HOST-REGISTRY`, `DES-WAITING-REASONS` AMENDED**: Pulse Fleet and host/venue detail reuse the existing read model, planners and kit; bounded waiting lists and allowlisted telemetry explain delays, budgets and retained workspaces. Capacity assembly stays off live ticks. **`DES-HOST-BUDGET`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: no new admission authority, spend path, runtime action or dependency pin. |
 | 2026-10-29 (#748, design fidelity) | **`DES-OPERATOR-CONSOLE` AMENDED**: the published cards also bind component hierarchy, full-width regions and page-local styling; explicit capacity KPI denominators and partial-history geometry prevent misleading charts. Ledgers require panel-scoped visible evidence instead of export presence alone. **`DES-HOST-REGISTRY`, `DES-HOST-BUDGET`, `DES-WAITING-REASONS`, all constitution constraints UNCHANGED, checked**: no admission or runtime action changes. |
+| 2026-10-29 (#749) | `DES-OPERATOR-CONSOLE`, `DES-COST-FOLD-BY-SCAN`, `DES-CAPACITY-FROM-RECORDS`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED: independent views and role-safe cache reads, reservation telemetry, shared fleet aggregates and structured allocation. Enforcement thresholds, read-only analytics and static export privacy UNCHANGED, checked. |

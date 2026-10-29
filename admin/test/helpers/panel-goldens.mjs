@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { SPEND_DRAW } from "./spend-goldens.mjs";
 import { FLEET_DRAW } from "./fleet-goldens.mjs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
@@ -796,6 +797,7 @@ const RUN_CARD_STATES = {
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
 const DRAW = {
+  ...SPEND_DRAW,
   ...FLEET_DRAW,
   ...RUN_CARD_STATES,
   // ConfirmStates: the slot in every state, after the card that asked.
