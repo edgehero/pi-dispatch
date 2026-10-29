@@ -115,7 +115,7 @@
       "shows": "Other states"
     },
     {
-      "el": "**Four big numbers:** window spend (≥ when a run could not be fully priced), runs and how many are fully ledgered, plans declared, and the top flow.",
+      "el": "**Four big numbers:** window spend (\u2265 when a run could not be fully priced), runs and how many are fully ledgered, plans declared, and the top flow.",
       "kind": "readme",
       "status": "new",
       "panel": "p-bk-spend",
@@ -127,7 +127,7 @@
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
-      "el": "**Daily spend.** Solid is metered, a dashed top is estimated (~), a bar line marks a floor (≥), and a day with no runs is a hairline. Every value is written with its marks. Below it is the cumulative line, dashed from the first estimated day.",
+      "el": "**Daily spend.** Solid is metered, a dashed top is estimated (~), a bar line marks a floor (\u2265), and a day with no runs is a hairline. Every value is written with its marks. Below it is the cumulative line, dashed from the first estimated day.",
       "kind": "readme",
       "status": "new",
       "panel": "p-money-legend",
@@ -202,12 +202,17 @@
       "el": "The tab row under the title (Spend, Budget split, Capacity, Breakdown, Flows map) is shared by all five Spend views; the current one is filled. They are server-rendered links (`/insights`, `/insights/budget-split`, `/insights/capacity`, `/insights/breakdown`, `/insights/flows`, proposed routes) and on a phone the row scrolls inside itself.",
       "kind": "readme",
       "status": "new",
-      "panel": "p-bk-spend",
-      "source": "admin/src/console/panels/spend.mjs#breakdownSpend",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
       "golden": [
         "panels/spend-breakdown.viewer"
       ],
-      "shows": "Window spend",
+      "shows": [
+        "aria-label=\"Spend views\"",
+        "/insights/budget-split",
+        "/insights/capacity",
+        "/insights/breakdown",
+        "/insights/flows"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -271,7 +276,7 @@
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
-      "el": "`—`: unknown, not measured and not guessed;",
+      "el": "`\u2014`: unknown, not measured and not guessed;",
       "kind": "readme",
       "status": "new",
       "panel": "p-money-legend",
@@ -283,7 +288,7 @@
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
-      "el": "`≥$4.12`: a floor, because the window holds spend the meter could not fully price;",
+      "el": "`\u2265$4.12`: a floor, because the window holds spend the meter could not fully price;",
       "kind": "readme",
       "status": "new",
       "panel": "p-money-legend",

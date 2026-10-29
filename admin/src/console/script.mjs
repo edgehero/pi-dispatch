@@ -1535,6 +1535,25 @@ ${FIT_JS}
   // Focus leaving a field ends that hold once focus has landed (a tick later: during focusout it has not yet moved). On
   // every page, the slot or none: a viewer's runs filters are held too.
   document.addEventListener("focusout", function () { later(release, 0); });
+  // Shares describe the draft in these fields, not the plan currently in force. Keep them together while editing.
+  document.addEventListener("input", function (event) {
+    var el = event.target;
+    var form = el && typeof el.closest === "function" ? el.closest('form[data-structured="priorities"]') : null;
+    if (!form || !el.name || el.name.indexOf("weight:") !== 0) return;
+    var weights = Object.create(null), sum = 0, valid = true;
+    for (var i = 0; i < form.elements.length; i++) {
+      var field = form.elements[i];
+      if (!field.name || field.name.indexOf("weight:") !== 0) continue;
+      var n = Number(field.value);
+      if (field.value === "" || !isFinite(n) || Math.floor(n) !== n || n < 0 || n > 1000) valid = false;
+      else { weights[field.name.slice(7)] = n; sum += n; }
+    }
+    var outputs = form.querySelectorAll("[data-weight-share]");
+    for (var i = 0; i < outputs.length; i++) {
+      var weight = weights[outputs[i].getAttribute("data-weight-share")];
+      outputs[i].textContent = valid && weight !== undefined ? "about " + (sum > 0 ? Math.round(weight / sum * 100) : 0) + "%" : "Share unknown";
+    }
+  });
   function bodyOf(form) {
     var out = {};
     var els = form.elements;

@@ -1710,7 +1710,16 @@ function fitLabels(doc, measure) {
   var graphemes = typeof Intl === "object" && typeof Intl.Segmenter === "function"
     ? new Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
   function num(el, name) {
-    var v = parseFloat(el.getAttribute(name));
+    var raw = el.getAttribute(name);
+    // Pulse charts position labels and bars in percentages. Their SVG lengths resolve to user units;
+    // parseFloat alone would mistake a 45% wide segment for a 45px box and cut a label that fits.
+    if (typeof raw === "string" && raw.indexOf("%") >= 0) {
+      var lengths = el[name] && el[name].baseVal;
+      var resolved = lengths && typeof lengths.value === "number" ? lengths.value
+        : lengths && lengths.numberOfItems > 0 && typeof lengths.getItem === "function" ? lengths.getItem(0).value : null;
+      if (typeof resolved === "number" && isFinite(resolved)) return resolved;
+    }
+    var v = parseFloat(raw);
     return v === v ? v : 0;
   }
   function kids(el) {
@@ -1806,7 +1815,7 @@ function fitLabels(doc, measure) {
     if (leftAnchored(t)) {
       var right = boxRight(t);
       if (right === null) return;
-      avail = right - num(t, "x") - PAD;
+      avail = right - num(t, "x") - num(t, "dx") - PAD;
     } else {
       var loop = loopWidth(t);
       if (loop === null) return;

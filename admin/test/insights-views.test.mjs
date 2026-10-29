@@ -25,7 +25,7 @@ function readsFixture() {
 }
 
 for (const [view, expected] of [
-  ["capacity", ["capacity", "sizing"]],
+  ["capacity", ["capacity", "hosts", "sizing"]],
   ["budget-split", ["projects", "allocation", "hosts", "scan"]],
   ["breakdown", ["projects", "costs"]],
 ]) test(`${view} reads only its own slices`, async () => {
@@ -283,4 +283,31 @@ test("a real loader-invalid trigger file draws only the Flows error and performs
   assert.match(text, /Nothing is drawn until it loads/);
   assert.doesNotMatch(text, /id="graph"/);
   assert.ok(!text.includes(dir));
+});
+
+test("Capacity joins current venue declarations by host name, preserving older and missing rows as unknown", async () => {
+  const { reads } = readsFixture();
+  reads.capacity = async (_paths, _window, _now, opts) => {
+    assert.equal(opts.consoleDetails, true);
+    return { hosts: [{ name: "new" }, { name: "old" }, { name: "gone" }] };
+  };
+  reads.hosts = async () => ({ hosts: [{ name: "new", concurrency: "4", backends: "blessed=podman,openshell;floor=;os=podman:up" }, { name: "old", concurrency: "2" }] });
+  const got = await assembleInsightsView({}, "7d", { view: "capacity", pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.deepEqual(got.capacity.hosts[0].venues, ["podman", "openshell"]);
+  assert.equal(got.capacity.hosts[0].defaultVenue, "podman");
+  assert.equal(got.capacity.hosts[1].venues, null);
+  assert.equal(got.capacity.hosts[2].venues, null);
+  assert.equal(got.capacity.totalSlots, null, "a historical host without a live row has unknown current slots");
+  assert.equal(got.capacity.venuesUnreadable, false);
+});
+
+test("an unread registry cannot publish venue or slot claims, while the capacity report stays readable", async () => {
+  const { reads } = readsFixture();
+  reads.capacity = async () => ({ hosts: [{ name: "worker" }], coverage: ["history was read"] });
+  reads.hosts = async () => ({ unreachable: "not answering", hosts: [{ name: "worker", concurrency: "4", backends: "blessed=docker" }] });
+  const got = await assembleInsightsView({}, "7d", { view: "capacity", pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.equal(got.capacity.hosts[0].venues, null);
+  assert.equal(got.capacity.totalSlots, null);
+  assert.equal(got.capacity.venuesUnreadable, true);
+  assert.deepEqual(got.capacity.coverage, ["history was read"]);
 });

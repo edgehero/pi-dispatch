@@ -544,3 +544,20 @@ test("capacityViewOf: a long list of hosts whose history is not here is summaris
   assert.ok(view.coverage.includes("3 without a host, not counted"));
   assert.equal(view.coverage.at(-1), "Valkey did not answer");
 });
+
+test("console Capacity coverage preserves actual zero counts and unknowns without widening static export", () => {
+  const report = capReport();
+  const consoleView = ia.capacityViewOf(report, { consoleDetails: true });
+  assert.equal(consoleView.hostCount, report.hosts.length);
+  for (const key of ["used", "refusedBeforeSlot", "retried", "withoutSize", "live", "liveNotCounted", "running"]) assert.equal(consoleView.coverageCounts[key], report.coverage[key], key);
+  assert.equal(consoleView.coverageCounts.source, report.coverage.source);
+  const unknown = ia.capacityViewOf({ ...report, coverage: { ...report.coverage, used: undefined, retried: 0, withoutSize: -1, running: null } }, { consoleDetails: true });
+  assert.equal(unknown.coverageCounts.used, null);
+  assert.equal(unknown.coverageCounts.retried, 0);
+  assert.equal(unknown.coverageCounts.withoutSize, null);
+  assert.equal(unknown.coverageCounts.running, null);
+  const shared = ia.capacityViewOf(report);
+  assert.equal("coverageCounts" in shared, false);
+  assert.equal("hostCount" in shared, false);
+  assert.equal(shared.hosts.some((host) => "venues" in host), false);
+});

@@ -151,24 +151,35 @@
       "el": "**Views.** A tab row under the title switches between Spend (this view), Budget split, Capacity, Breakdown and the Flows map. They are links, and the current one is filled.",
       "kind": "readme",
       "status": "new",
-      "panel": "p-split",
-      "source": "admin/src/console/panels/spend.mjs#spendSplit",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
       "golden": [
         "panels/spend-populated.operator"
       ],
-      "shows": "Budget split",
+      "shows": [
+        "aria-label=\"Spend views\"",
+        "/insights/budget-split",
+        "/insights/capacity",
+        "/insights/breakdown",
+        "/insights/flows"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
       "el": "**Range and project.** The range (7 days, 30 days, month to date) and the project chips scope everything below.",
       "kind": "readme",
       "status": "new",
-      "panel": "p-week",
-      "source": "admin/src/console/panels/spend.mjs#spendWeek",
+      "source": "admin/src/console/panels/spend.mjs#spendControls",
       "golden": [
         "panels/spend-populated.operator"
       ],
-      "shows": "This week",
+      "shows": [
+        "aria-label=\"Spend window\"",
+        "aria-label=\"Projects\"",
+        "All projects",
+        "7 days",
+        "30 days",
+        "Month to date"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -449,7 +460,7 @@
       ],
       "shows": [
         "plan:work",
-        "plan-provider/plan-model"
+        "<b>plan-model</b><small>plan-provider;"
       ],
       "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
     },

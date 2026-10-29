@@ -63,7 +63,10 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "id=\"p-cap-build3\"",
+        ">build3</h2>"
+      ],
       "reason": "The host cards have individual article ids within the shared host panel, so they update as one report."
     },
     {
@@ -75,7 +78,10 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "id=\"p-cap-mini1\"",
+        ">mini1</h2>"
+      ],
       "reason": "The host cards have individual article ids within the shared host panel, so they update as one report."
     },
     {
@@ -87,7 +93,10 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "id=\"p-cap-mini2\"",
+        ">mini2</h2>"
+      ],
       "reason": "The host cards have individual article ids within the shared host panel, so they update as one report."
     },
     {
@@ -124,12 +133,16 @@
       "el": "**Window.** 24 hours, 7 days or 30 days. At 7 days each bar is one hour.",
       "kind": "readme",
       "status": "new",
-      "panel": "p-cap-busy",
-      "source": "admin/src/console/panels/spend.mjs#capacityBusy",
+      "source": "admin/src/console/panels/spend.mjs#spendControls",
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "Fleet busy",
+      "shows": [
+        "aria-label=\"Spend window\"",
+        "24 hours",
+        "7 days",
+        "30 days"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -153,7 +166,13 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "class=\"cp-trio\"",
+        "class=\"cp-chart\"",
+        "class=\"cp-facts\"",
+        "Jobs at once",
+        "Projects by run time"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -165,7 +184,13 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "class=\"cp-trio\"",
+        "class=\"cp-chart\"",
+        "class=\"cp-facts\"",
+        "Jobs at once",
+        "Projects by run time"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -177,7 +202,13 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "class=\"cp-trio\"",
+        "class=\"cp-chart\"",
+        "class=\"cp-facts\"",
+        "Jobs at once",
+        "Projects by run time"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -213,7 +244,13 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "class=\"cp-trio\"",
+        "class=\"cp-chart\"",
+        "class=\"cp-facts\"",
+        "Jobs at once",
+        "Projects by run time"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -232,12 +269,17 @@
       "el": "The tab row under the title (Spend, Budget split, Capacity, Breakdown, Flows map) is shared by all five Spend views; the current one is filled. They are server-rendered links (`/insights`, `/insights/budget-split`, `/insights/capacity`, `/insights/breakdown`, `/insights/flows`, proposed routes) and on a phone the row scrolls inside itself.",
       "kind": "readme",
       "status": "new",
-      "panel": "p-cap-busy",
-      "source": "admin/src/console/panels/spend.mjs#capacityBusy",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "Fleet busy",
+      "shows": [
+        "aria-label=\"Spend views\"",
+        "/insights/budget-split",
+        "/insights/capacity",
+        "/insights/breakdown",
+        "/insights/flows"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -261,7 +303,13 @@
       "golden": [
         "panels/spend-capacity.viewer"
       ],
-      "shows": "<span class=\"pid\">build3</span> <span>busy 2.1%, idle 97.9% · avg 0 of 2, peak 1 of 2 · full 0% of the time</span>",
+      "shows": [
+        "class=\"cp-trio\"",
+        "class=\"cp-chart\"",
+        "class=\"cp-facts\"",
+        "Jobs at once",
+        "Projects by run time"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
@@ -355,7 +403,8 @@
         "panels/spend-capacity-unreadable.viewer"
       ],
       "shows": [
-        "Capacity not read; the other Spend views still work"
+        "Capacity not read",
+        "The other Spend views still work."
       ],
       "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
     },
@@ -368,8 +417,8 @@
         "panels/spend-capacity-truncated.viewer"
       ],
       "shows": [
-        "incomplete history",
-        "missing time is never counted as idle"
+        "Incomplete history",
+        "Missing time is drawn as no data and is never counted as idle."
       ],
       "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
     },
@@ -387,6 +436,21 @@
         "mini2",
         "Fleet peak"
       ]
+    },
+    {
+      "el": "p-cap-window",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#capacityWindow",
+      "golden": [
+        "panels/spend-capacity.viewer"
+      ],
+      "shows": [
+        "Jobs only",
+        "A machine busy with other work reads as idle.",
+        "Each bar is"
+      ],
+      "reason": "The shared window and jobs-only warning sit above the host cards in one full-width panel."
     }
   ]
 }
