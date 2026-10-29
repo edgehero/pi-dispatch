@@ -130,3 +130,10 @@ test("cheaper-route proposals require declared equivalence, mapped source and de
 	assert.deepEqual(cheaperRouteChecks(roles, routes, models, []), []);
 	assert.deepEqual(cheaperRouteChecks(roles, [], models, endpoints), []);
 });
+
+
+test("catalog proposals and declared routes preserve supported @ and ~ model references", () => {
+	const rows = [{ ...model("@cf/vendor/model"), provider: "cloudflare-workers-ai" }, { ...model("~vendor/model"), provider: "openrouter" }];
+	assert.deepEqual(catalogDiff([], rows, ["cloudflare-workers-ai", "openrouter"]).map((row) => row.ref), ["cloudflare-workers-ai/@cf/vendor/model", "openrouter/~vendor/model"]);
+	assert.equal(parseProposalConfig(JSON.stringify({ version: 1, routes: [{ model: "anthropic/main", alternative: "openrouter/~vendor/model" }] })).routes.length, 1);
+});

@@ -1,6 +1,6 @@
 /** Reviewed suggestions only (#717). Data enters here; no routing or settings writes leave it. */
 
-const REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+const REF = /^(?=.{1,256}$)[~@]?[A-Za-z0-9][A-Za-z0-9._:/@_-]*$/;
 export function catalogDiff(before, after, providers) {
 	const index = (rows) => {
 		const out = new Map();
