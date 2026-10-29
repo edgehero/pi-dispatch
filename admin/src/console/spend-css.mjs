@@ -1282,6 +1282,7 @@ const adapters = `
 .pid { font-weight: 650; }
 .note { color: var(--ink-muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 .mono { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.sp-bar--estimated { fill: var(--ok-tint); stroke: var(--ok); stroke-width: .3; stroke-dasharray: 1 .5; }
 .spend-chart { display: block; width: 100%; max-width: 100%; height: auto; }
 .spend-meter { display: block; width: 100%; height: 9px; }
 .spend-cap { display: grid; gap: 5px; min-width: 0; }

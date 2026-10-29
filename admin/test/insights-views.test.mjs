@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assembleInsightsView, heldMoneyOf, spendSummaryOf, spendChartsOf, assembleBudgetView } from "../src/insights-assembly.mjs";
+import { assembleInsightsView, heldMoneyOf, spendSummaryOf, spendChartsOf, recordSpendOf, assembleBudgetView, assembleGraph } from "../src/insights-assembly.mjs";
 import { costsSinceMs, whatIfRuns } from "../src/costs.mjs";
 import { makeWhatIfReader } from "../src/console/whatif.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -174,4 +174,113 @@ test("a run with paid and plan ledger children never becomes metered-only throug
   const summary = spendSummaryOf({ records: [mixed], hosts: [], budget: {}, nowMs: NOW, subscriptions: subs });
   assert.equal(charts.meteredRangeRuns, 0);
   assert.equal(summary.average.runs, 0);
+});
+
+test("a paid $7 run with unreserved/0 remains $7 in Today and the daily chart without dollar windows", () => {
+  const paid = run("unreserved-paid", { dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } });
+  const summary = spendSummaryOf({ records: [paid], hosts: [], budget: {}, nowMs: NOW, pricing });
+  const day = spendChartsOf({ records: [paid], sinceMs: NOW - DAY, nowMs: NOW, jobCapMicros: null, pricing }).daily.at(-1);
+  assert.equal(summary.today.settledMicros, 7_000_000);
+  assert.equal(summary.today.ledgerMicros, 0);
+  assert.equal(summary.today.usedMicros, 7_000_000);
+  assert.equal(summary.today.counterConfigured, false);
+  assert.equal(summary.today.usedSource, "records");
+  assert.equal(day.settledMicros, 7_000_000);
+  assert.equal(day.settledFloor, false);
+});
+
+test("an unpriced run without a dollar ledger is unknown, not an exact empty day", () => {
+  const unknown = run("unknown", { tokens: null, usage: null });
+  const summary = spendSummaryOf({ records: [unknown], hosts: [], budget: {}, nowMs: NOW });
+  const day = spendChartsOf({ records: [unknown], sinceMs: NOW - DAY, nowMs: NOW, jobCapMicros: null }).daily.at(-1);
+  for (const result of [summary.today, day]) {
+    assert.equal(result.settledMicros, null);
+    assert.equal(result.settledFloor, true);
+    assert.equal(result.unpriced, 1);
+    assert.equal(result.ledgerMicros, null);
+  }
+  assert.equal(summary.today.usedMicros, null);
+});
+
+test("legacy recorded prices are retained and mixed known/unknown spend stays a floor", () => {
+  const legacy = run("legacy", { usage: null, tokens: { cost: 7, metered: true } });
+  const unknown = run("unknown", { tokens: null, usage: null });
+  const known = recordSpendOf(legacy);
+  assert.equal(known.micros, 7_000_000);
+  assert.equal(known.floor, false);
+  const sum = spendSummaryOf({ records: [legacy, unknown], hosts: [], budget: {}, nowMs: NOW });
+  assert.equal(sum.today.settledMicros, 7_000_000);
+  assert.equal(sum.today.settledFloor, true);
+  assert.equal(sum.today.usedFloor, true);
+  assert.equal(sum.today.unpriced, 1);
+});
+
+test("reserved settlements, refunds and floors keep the ledger semantics while unreserved prices do not enter reconciliation", () => {
+  const ledger = run("settled", { dollars: { reservedMicros: 9_000_000, settledMicros: 3_000_000, basis: "metered" } });
+  const refunded = run("refunded", { dollars: { reservedMicros: 9_000_000, settledMicros: 0, basis: "refunded" } });
+  const floor = run("floor", { dollars: { reservedMicros: 9_000_000, settledMicros: 9_000_000, basis: "floor" } });
+  const unreserved = run("unreserved", { dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } });
+  const budget = { dollars: { windows: [{ ledger: "deployment", window: "day", counterMicros: 12_000_000, capMicros: 20_000_000 }] } };
+  const today = spendSummaryOf({ records: [ledger, refunded, floor, unreserved], hosts: [], budget, nowMs: NOW }).today;
+  assert.equal(today.usedMicros, 12_000_000);
+  assert.equal(today.settledMicros, 19_000_000);
+  assert.equal(today.ledgerMicros, 12_000_000);
+  assert.equal(today.unattributedMicros, 0);
+  assert.equal(today.settledFloor, true);
+  assert.equal(today.counterAvailable, true);
+  assert.equal(today.usedSource, "counter");
+});
+
+test("a configured but unread daily counter stays unknown despite readable priced records", () => {
+  const budget = { dollars: { windows: [{ ledger: "deployment", window: "day", counterMicros: null, capMicros: 20_000_000 }] } };
+  const today = spendSummaryOf({ records: [run("paid", { dollars: { settledMicros: 0, basis: "unreserved" } })], hosts: [], budget, nowMs: NOW }).today;
+  assert.equal(today.settledMicros, 7_000_000);
+  assert.equal(today.usedMicros, null);
+  assert.equal(today.counterConfigured, true);
+  assert.equal(today.counterAvailable, false);
+  assert.equal(today.usedSource, "unknown-counter");
+});
+
+test("recorded plan API-equivalent spend is retained, and old zero-price plans need an explicit baseline", () => {
+  const subs = [{ id: "work", provider: "plan", models: ["paid"], counterfactualModel: { provider: "test", id: "api" } }];
+  const paidPlan = run("plan-api", { provider: "plan", model: "paid", usage: { models: [{ provider: "plan", model: "paid", input: 1, cost: 7 }] }, dollars: { settledMicros: 0, basis: "unreserved" } });
+  assert.equal(recordSpendOf(paidPlan, { subscriptions: subs, pricing }).micros, 7_000_000);
+  const oldPlan = run("plan-old", { provider: "plan", model: "paid", tokens: { cost: 0, metered: true }, usage: { models: [{ provider: "plan", model: "paid", input: 1, cost: 0 }] }, dollars: { settledMicros: 0, basis: "unreserved" } });
+  const estimated = recordSpendOf(oldPlan, { subscriptions: subs, pricing });
+  assert.equal(estimated.micros, 1_000_000);
+  assert.equal(estimated.estimated, true);
+  assert.equal(recordSpendOf(oldPlan, { subscriptions: [{ ...subs[0], counterfactualModel: null }], pricing }).micros, null);
+});
+
+test("a price floor is sticky for uncapped fallback meter records and their chart totals", () => {
+  const partial = run("partial", { usage: null, tokens: { cost: 7, metered: false }, dollars: { settledMicros: 0, basis: "unreserved" } });
+  const day = spendChartsOf({ records: [partial], sinceMs: NOW - DAY, nowMs: NOW, jobCapMicros: null }).daily.at(-1);
+  assert.equal(day.settledMicros, 7_000_000);
+  assert.equal(day.settledFloor, true);
+  assert.equal(day.settledEstimated, true);
+});
+
+test("project charts use that project's holds even when Today's headline falls back to deployment windows", async () => {
+  const { reads } = readsFixture();
+  reads.hosts = async () => ({ hosts: [{ name: "worker", jobsMore: "0", jobs: JSON.stringify([{ id: "site-job", p: "site", at: NOW - 1000, ha: NOW - 1000, h: 2_000_000 }, { id: "other-job", p: "other", at: NOW - 1000, ha: NOW - 1000, h: 3_000_000 }]) }] });
+  reads.budget = async () => ({ dollars: { windows: [{ ledger: "deployment", window: "day", capMicros: 10_000_000, counterMicros: 5_000_000 }] } });
+  const data = await assembleInsightsView({}, "7d", { project: "site", pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.equal(data.spend.today.basis, "deployment");
+  assert.equal(data.spend.today.heldMicros, 5_000_000);
+  assert.equal(data.spend.daily.at(-1).heldMicros, 2_000_000);
+});
+
+
+test("a real loader-invalid trigger file draws only the Flows error and performs no scheduler read", async () => {
+  const dir = tempDir("insights-invalid-graph-");
+  const triggersPath = join(dir, "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "not-a-trigger" }, run: { flow: "fix" } }] }));
+  const graph = await assembleGraph({ triggersPath }, { pricing, nowMs: NOW, readSchedulersFn: () => { throw new Error("an invalid graph must not dial the scheduler"); } });
+  const { renderPage, parsePageQuery } = await import("../src/console/pages.mjs");
+  const out = await renderPage("insights-flows", { query: parsePageQuery("insights-flows", "").query, session: { role: "viewer", name: "watcher" }, data: { now: NOW, insights: { graph } } });
+  const text = String(out.html);
+  assert.match(text, /on.type must be one of/);
+  assert.match(text, /Nothing is drawn until it loads/);
+  assert.doesNotMatch(text, /id="graph"/);
+  assert.ok(!text.includes(dir));
 });

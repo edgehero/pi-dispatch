@@ -7,6 +7,9 @@ import { SPEND_PANELS } from "../src/console/panels/spend.mjs";
 
 const rendered = Promise.all(Object.entries(SPEND_DRAW).map(async ([key, draw]) => [key, await draw()])).then(Object.fromEntries);
 const expected = {
+  "spend-no-dollar-window.viewer": ["No daily dollar cap is configured", "$7.00"],
+  "spend-partial-money.viewer": ["unknown cost", "≥"],
+  "spend-unknown-money.viewer": ["unknown cost", "unknown"],
   "spend-plan-model.viewer": ["plan:work", "plan-provider/plan-model"],
   "spend-whatif-runs.viewer": ["The same 3 runs", "$0.30", "API-equivalent amount"],
   "spend-whatif-flow.viewer": ["Per run", "$0.20", "Runs in this window", "fixture"],

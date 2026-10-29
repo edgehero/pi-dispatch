@@ -536,6 +536,48 @@
         "The settings file or counters could not be read"
       ],
       "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-no-dollar-window.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-no-dollar-window.viewer"
+      ],
+      "shows": [
+        "No daily dollar cap is configured",
+        "$7.00"
+      ],
+      "reason": "Real run-record fixtures distinguish unreserved money, partial known cost and missing cost without treating an enforcement zero as a free run."
+    },
+    {
+      "el": "State: spend-partial-money.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-partial-money.viewer"
+      ],
+      "shows": [
+        "unknown cost",
+        "\u2265"
+      ],
+      "reason": "Real run-record fixtures distinguish unreserved money, partial known cost and missing cost without treating an enforcement zero as a free run."
+    },
+    {
+      "el": "State: spend-unknown-money.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-unknown-money.viewer"
+      ],
+      "shows": [
+        "unknown cost",
+        "unknown"
+      ],
+      "reason": "Real run-record fixtures distinguish unreserved money, partial known cost and missing cost without treating an enforcement zero as a free run."
     }
   ]
 }

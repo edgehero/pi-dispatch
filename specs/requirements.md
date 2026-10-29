@@ -1501,10 +1501,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`REQ-OPERATOR-CONSOLE-ACTIONS`), and the controls it adds to these pages are held there; the live transcript on
   the run page is #643's (`REQ-LIVE-TRANSCRIPT`, resolving `OQ-044`) and progress is #644's (`REQ-RUN-PROGRESS`). The security rules every page meets are `REQ-CONSOLE-SECURITY`'s,
   (e), (k) and (l) above all, and (m) for the insights page (since #737 for every page). Since 2026-10-18 (insights
-  move to the console) the `/insights` page is the ONE analytics surface: the static insights export is retired
+  move to the console) the five Spend views rooted at `/insights` are the ONE analytics family: the static insights export is retired
   (`REQ-INSIGHTS-HTML-EXPORT`), and every normative clause it carried that is not about a file (the content bans, the
   allowlisting, determinism, escaping, the labelling rules of `REQ-COST-ANALYTICS` and the visual clauses, and the
-  budget, budget split, job sizes and capacity sections) binds this page. The page's what-if, its `paths=full` view
+  budget, budget split, job sizes and capacity sections) binds this family. Its what-if, its `paths=full` view
   and its interactive topology are reads too.
 - **Why**: before #641 the operator's live surfaces were the panel and a static insights file whose reload re-read
   the same file. Until 2026-10-18 that file was kept beside the console as an offline copy, and its renderer drifted
@@ -2268,6 +2268,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     - Spend has weekly and daily spent-and-held, tokens today and average metered cost over 24 hours; project dollar
       windows where configured, explicitly named deployment fallback otherwise. Settled money is read from run records,
       today's held part from actual live-job reservations (`INT-HOST-REGISTRY-CONTRACT`), never counter minus records.
+      An unreserved zero is no counter charge, not zero paid work: recorded metered cost remains visible. Legacy or
+      missing prices keep estimate/floor/unknown marks; counter reconciliation uses separately named ledger charges.
       Older or incomplete hosts are named; counter differences are named separately, never folded into either part.
       Past daily bars show settled amounts only. Caps use the worker's thresholds: soft hold only on global job-count
       windows (scoped counts have hard caps); a dollar window is full when the next per-job reservation would not fit. Plan runs consume all caps,
@@ -4579,7 +4581,7 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-TOPOLOGY-GRAPH
 
-- **AMENDED 2026-10-29 (#749)**: Flows map lives at `/insights/flows`, with `view=map` or script-free `view=list`, source-index `select`, server-selected details, keyboard selection and zoom/fit controls. A spent one-shot retains its validated job id for its run link.
+- **AMENDED 2026-10-29 (#749)**: Flows map lives at `/insights/flows`, with `view=map` or script-free `view=list`, source-index `select`, server-selected details, keyboard selection and zoom/fit controls. A spent one-shot retains its validated job id for its run link. The whole trigger file is judged by the worker loader against the same byte snapshot the graph displays; one invalid entry draws no partial graph. Viewer allocation history retains current and duplicate facts, including the current neutral split.
 
 - **Statement**: The harness shall make the trigger/flow **topology** visible: the topology pane of the
   operator console's `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS` (e), the one analytics surface; the static
@@ -7911,3 +7913,4 @@ instead of drifting.
 | 2026-10-29 (#748) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: pages are defined by `PAGES`; Fleet uses Pulse panels, with live host and non-live venue detail, bounded waiting lists, truthful missing data, runtime-specific orphan guidance and retained workspaces. New behavior has role, route, read-model, worker and browser regression coverage. **`REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: existing guards and confirmed action funnels apply, commands start no remote runtime operation. |
 | 2026-10-29 (#748, design fidelity) | **`REQ-OPERATOR-CONSOLE-SCREENS` (f) AMENDED**: component hierarchy and visible chart/declaration structure of all four published cards are explicit acceptance criteria, with structural and panel-scoped evidence checks. **`REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `INT-HOST-REGISTRY-CONTRACT`, `INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: role guards, confirmed actions, telemetry authority and stream behavior stay intact. |
 | 2026-10-29 (#749) | `REQ-OPERATOR-CONSOLE-SCREENS` (e), `REQ-CONSOLE-SECURITY` (m), `REQ-TOPOLOGY-GRAPH`, `REQ-COST-ANALYTICS`, `REQ-CAPACITY-INSIGHTS`, `REQ-DELEGATED-ALLOCATION`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-SIZE-SUGGESTIONS` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: five Spend routes, held-money facts, fleet capacity, window-scoped estimates, structured allocation and accessible map/list. All unrelated requirements UNCHANGED, checked. |
+| 2026-10-29 (#749, review) | `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH` and `REQ-OPERATOR-CONSOLE-SCREENS` (e) clarified: unreserved ledger zero is not zero paid cost; missing prices retain unknown/floor/estimate marks and counter charges stay separate. Graph validation uses the worker loader on one byte snapshot; unread files differ from missing ones. Current, duplicate and neutral history facts remain visible to viewers. All other requirements UNCHANGED, checked. |
