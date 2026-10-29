@@ -1,7 +1,9 @@
 import { modelListProblem, splitModelEntry } from "./model-ref.mjs";
+import { isProjectId } from "./project-id.mjs";
 
 export const MODEL_ROLE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const scopeOf = (roles, id) => object(roles) && typeof id === "string" && Object.hasOwn(roles, id) ? roles[id] : {};
 const failure = (reason, message) => Object.assign(new Error(message), { piDispatchConfig: true, modelSelectionReason: reason });
 
 /** A misspelt policy block must refuse rather than silently removing the reviewed ceiling. */
@@ -22,7 +24,7 @@ export function validateModelRoles(value) {
 	if (!object(value) || Object.keys(value).length > 128) bad();
 	const out = {};
 	for (const [project, roles] of Object.entries(value)) {
-		if (!/^[A-Za-z0-9._-]{1,64}$/.test(project) || ["__proto__", "constructor", "prototype"].includes(project) || !object(roles) || Object.keys(roles).length > 16) bad();
+		if (!isProjectId(project) || !object(roles) || Object.keys(roles).length > 16) bad();
 		const row = {};
 		for (const [role, entry] of Object.entries(roles)) {
 			if (!MODEL_ROLE_RE.test(role) || ["inherit", "constructor", "prototype"].includes(role)) bad();
@@ -41,7 +43,7 @@ export function validateModelRoles(value) {
 }
 
 export function roleMapFor(roles, project = null) {
-	const entries = { ...(roles?.default ?? {}), ...(project && project !== "default" ? roles?.[project] ?? {} : {}) };
+	const entries = { ...scopeOf(roles, "default"), ...(project && project !== "default" ? scopeOf(roles, project) : {}) };
 	return Object.fromEntries(Object.entries(entries).map(([role, entry]) => [role, typeof entry === "string" ? entry : entry.model]));
 }
 
@@ -58,13 +60,13 @@ export function resolveModelRoles(job, roles, project = null, { authoredProvider
 	if (requested !== null) {
 		const ref = splitModelEntry(map[requested]);
 		if (authoredProvider !== undefined && authoredProvider !== null && authoredProvider !== ref.provider) throw failure("model-role-provider-conflict", "run.provider conflicts with its model role provider");
-		const entry = roles?.[project]?.[requested] ?? roles?.default?.[requested];
+		const entry = scopeOf(roles, project)[requested] ?? scopeOf(roles, "default")[requested];
 		resolved = { ...resolved, ...ref, modelRole: requested };
 		if (job.fallbackModels !== undefined && typeof entry !== "string" && entry.fallbackModels !== undefined) throw failure("model-roles-invalid", "declare fallbackModels on the role or the trigger, not both");
 		if (typeof entry !== "string" && entry.fallbackModels !== undefined) resolved.fallbackModels = [...entry.fallbackModels];
 	}
 	const refs = [...(job.models ?? [`${resolved.provider}/${resolved.model}`]), ...Object.values(map)];
-	for (const entry of Object.values({ ...(roles?.default ?? {}), ...(project && project !== "default" ? roles?.[project] ?? {} : {}) })) if (typeof entry !== "string") refs.push(...(entry.fallbackModels ?? []));
+	for (const entry of Object.values({ ...scopeOf(roles, "default"), ...(project && project !== "default" ? scopeOf(roles, project) : {}) })) if (typeof entry !== "string") refs.push(...(entry.fallbackModels ?? []));
 	const models = [...new Set(refs)];
 	if (modelListProblem(models) !== null) throw failure("model-roles-invalid", "the role-expanded allowed-model list is invalid or exceeds 16 models");
 	return { ...resolved, models, modelRoles: map };

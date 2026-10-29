@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { makeLogSink, modelRolesTelemetryOf, parseExitModelRoles } from "../src/run-history.mjs";
+import { makeLogSink, MODEL_ROLE_REFUSAL_REASONS, modelRolesTelemetryOf, parseExitModelRoles } from "../src/run-history.mjs";
 const telemetry = { refusals: [{ agentHash: "a".repeat(64), reason: "unknown-role" }] };
 const line = (value) => JSON.stringify({ event: "exit", code: 0, reason: "completed", modelRoles: value });
 
@@ -21,4 +22,11 @@ test("role telemetry reaches the log sink only on a verified signed line", async
 		const result = await sink.close();
 		assert.deepEqual(result.modelRoles, expected);
 	}
+});
+
+
+test("the worker refusal vocabulary is pinned to actual runner emissions in both directions", () => {
+	const source = readFileSync(new URL("../../image/runner/src/model-roles.mjs", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+	const emitted = [...new Set([...source.matchAll(/(?:reason:\s*|refuse\([^,\n]*,\s*)"([a-z-]+)"/g)].map((match) => match[1]))];
+	assert.deepEqual(emitted.sort(), [...MODEL_ROLE_REFUSAL_REASONS].sort());
 });

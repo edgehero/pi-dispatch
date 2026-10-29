@@ -118,3 +118,5 @@ Use [model proposals](model-proposals.md) and a capped canary to evaluate a cand
 the reviewed role map. Proposals never adopt a model or change endpoints automatically.
 
 The complete JSON-encoded agent snapshot is bounded at 16 MiB before reserves, including the expansion caused by escaped prompt characters.
+
+Project scope keys use the same lowercase, 1 to 32 character letter/digit/dash identifiers as projects.json. Scope lookup uses own keys, so a project named `constructor` remains an ordinary project identifier.
