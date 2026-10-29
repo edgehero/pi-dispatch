@@ -402,7 +402,9 @@ async function renderInChild() {
     // As serve builds it (`cli.mjs`); the overview's load asks it for the waiting jobs (issue #737, `PAGE_READS`).
     reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW, readLiveHostsFn: (redis, opts) => W.hostRegistry.readLiveHosts(atBeat(redis), opts) });
     const deps = {
-      fleet: reader,
+      // The transport endpoint comes from the test environment, not the fixture deployment. Keep its display
+      // deterministic across local/CI ports; read-model tests separately assert the real urlShown projection.
+      fleet: { ...reader, snapshot: async (...args) => ({ ...await reader.snapshot(...args), valkey: "redis://valkey:6379" }) },
       watch: {
         listSources: async () => [{ id: "prod-alerts", verify: "hmac-sha256", maxPerDay: 1000 }],
         listRules: async () => [{ id: "shop-5xx", source: "prod-alerts", flow: "triage-incident", mode: "investigate", maxPerDay: 4, cooldownMs: 6 * 3600000, summary: { lastDeliveryAt: String(NOW), suppressed: "24", capped: "2" } }],
