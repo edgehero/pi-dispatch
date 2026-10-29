@@ -132,7 +132,7 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
     rows.push([
       html`${j.project ? ui.ptag(j.project) : "No project recorded"} ${runLink(j.jobId)}`,
       sizeText(j.size ?? s.defaultSize),
-      j.at ? ageText(v.now - j.at) : "not recorded",
+      Number.isFinite(j.queuedAt) ? ageText(Math.max(0, v.now - j.queuedAt)) : "not recorded",
       j.why === "host-budget"
         ? `Host budget (${j.budgetWhy ?? "dimension not recorded"}); asks again about every 9 seconds and keeps its place.`
         : (j.why ?? "No reason was recorded"),
