@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { html } from "../src/console/html.mjs";
+import { cardDocument, cardText } from "./helpers/card-structure.mjs";
 import { ROLES as PAGE_ROLES, SHOTS, STATIC_SHOTS } from "./helpers/console-pages-harness.mjs";
 import { FLEET_PANEL_STATES } from "./helpers/fleet-goldens.mjs";
 import { PANEL_STATES } from "./helpers/panel-goldens.mjs";
@@ -32,6 +33,7 @@ import { PANEL_STATES } from "./helpers/panel-goldens.mjs";
 //   - `golden` the rendered goldens that show it: `<shot>.<role>` (`fixtures/console/`, the page and static goldens)
 //     or `panels/<state>.<role>` (`fixtures/console/panels/`, the panel goldens). Each must hold the panel's
 //     `id="<id>" data-panel` (for a real or new panel, `as` or `el`; for `panel`), the `sentence` and the `shows` text.
+//     `shows` is one string or an array of visible strings/markup fragments; phase 6 claims check these inside their panel.
 //   - `reason` why, required for illustrative, and said wherever the console's version departs from the card's.
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
@@ -249,7 +251,11 @@ test("each ledger's shape: its card, its pull request, the README's panels and c
     expect(typeof e.el === "string" && e.el.trim() !== "", `${w}: el`);
     expect(KINDS.includes(e.kind), `${w}: kind is one of ${KINDS.join(", ")}`);
     expect(STATUSES.includes(e.status), `${w}: status is one of ${STATUSES.join(", ")}`);
-    for (const k of ["as", "panel", "source", "holds", "sentence", "shows", "reason"]) if (k in e) expect(typeof e[k] === "string" && e[k] !== "", `${w}: ${k} is a non-empty string`);
+    for (const k of ["as", "panel", "source", "holds", "sentence", "reason"]) if (k in e) expect(typeof e[k] === "string" && e[k] !== "", `${w}: ${k} is a non-empty string`);
+    if ("shows" in e) {
+      const pieces = Array.isArray(e.shows) ? e.shows : [e.shows];
+      expect(pieces.length > 0 && pieces.every((piece) => typeof piece === "string" && piece.trim() !== ""), `${w}: shows contains visible strings`);
+    }
     if ("panel" in e) expect(PANEL_ID_RE.test(e.panel), `${w}: panel is a repo panel id`);
     if (e.kind === "panel" && "as" in e) expect(PANEL_ID_RE.test(e.as), `${w}: a panel's as is the repo's panel id`);
     if ("golden" in e) {
@@ -331,7 +337,7 @@ test("each element's sentence and shown text are in every golden it names", () =
       const doc = goldenOf(expect, card, e, key);
       if (doc === null) continue;
       if (typeof said === "string") expect(shows(doc, said), `${w}: ${key} says ${e.sentence} (${JSON.stringify(said)})`);
-      if ("shows" in e) expect(shows(doc, e.shows), `${w}: ${key} shows ${JSON.stringify(e.shows)}`);
+      if ("shows" in e) for (const piece of Array.isArray(e.shows) ? e.shows : [e.shows]) expect(shows(doc, piece) || cardText(doc).includes(piece), `${w}: ${key} shows ${JSON.stringify(piece)}`);
     }
   }
 }));
@@ -365,3 +371,31 @@ test("the reverse check: every panel the screens of the ledgered cards draw is n
     for (const id of drawn) expect(named.has(id), `${key}: the panel ${id} is named by some card's ledger (kind panel, as, or an element's panel)`);
   }
 }));
+
+
+// #748 was able to pass export-only ledgers while rendering generic tables. A claim now needs visible evidence
+// in its own panel, so an unrelated heading elsewhere on the page cannot make a missing element look complete.
+test("Fleet redesign ledger claims carry visible evidence in the panel they describe", () => collect((expect) => {
+  const documents = new Map();
+  for (const { card, e } of ELEMENTS.filter(({ card, e }) => ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"].includes(card) && ["new", "real"].includes(e.status))) {
+    const w = where(card, e);
+    expect(Array.isArray(e.golden) && e.golden.length > 0, `${w}: cite a rendered state, not only an export`);
+    expect("shows" in e, `${w}: name the actual visible output proving this claim`);
+    if (e.kind !== "panel" && e.source?.includes("/panels/")) expect("panel" in e, `${w}: scope renderer evidence to its panel`);
+    for (const key of e.golden ?? []) {
+      if (!documents.has(key)) { const raw = goldenText(key); documents.set(key, raw === null ? null : cardDocument(raw)); }
+      const doc = documents.get(key);
+      if (doc === null) { expect(false, `${w}: ${key} exists`); continue; }
+      const id = e.kind === "panel" ? (e.as ?? e.el) : e.panel;
+      const node = id ? doc.byId.get(id) : null;
+      if (id) expect(Boolean(node), `${w}: evidence panel ${id} exists in ${key}`);
+      const markup = node ? doc.within(node) : id ? "" : doc.source;
+      for (const piece of Array.isArray(e.shows) ? e.shows : typeof e.shows === "string" ? [e.shows] : []) expect(shows(markup, piece) || cardText(markup).includes(piece), `${w}: ${key}'s ${id ?? "page"} contains ${JSON.stringify(piece)}`);
+    }
+  }
+}));
+
+test("every Fleet redesign state is evidenced by its card ledger, beyond merely naming its panels", () => {
+  const represented = new Set(ELEMENTS.filter(({ card }) => ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"].includes(card)).flatMap(({ e }) => e.shows ? e.golden ?? [] : []));
+  assert.deepEqual(FLEET_PANEL_STATES.filter((key) => !represented.has(`panels/${key}`)), [], "each rendered state must prove a visible piece in a card ledger");
+});

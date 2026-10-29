@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { parseDocument } from "./helpers/script-dom.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { PAGES, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
@@ -83,13 +84,15 @@ const ctxOf = (role, data, query = {}) => ({ query, session: { name: role, role 
 
 test("the Schedules table names a scheduler by its key, the trigger's id, and reads its stalls under it (BullMQ's name is the job's)", async () => {
   const fleet = (await pagePanels("fleet", ctxOf("viewer", { snapshot: snapshot() }))).map((p) => p.html).join("");
-  assert.match(fleet, /<td data-l="Schedule">nightly<\/td>.*?<td data-l="Pattern">0 3 \* \* \*<\/td>/);
-  assert.match(fleet, /<td data-l="Stalls">1 of 2<\/td>/, "the stall count kept under the trigger's id");
+  assert.match(parseDocument(`<html><body>${fleet}</body></html>`).querySelector('[data-l="Schedule"]').textContent, /nightly/);
+  assert.match(parseDocument(`<html><body>${fleet}</body></html>`).querySelector('[data-l="Pattern"]').textContent, /0 3 \* \* \*/);
+  assert.equal(parseDocument(`<html><body>${fleet}</body></html>`).querySelector('[data-l="Stalls"]').textContent, "1 of 2", "the stall count is kept under the trigger id");
   assert.ok(!fleet.includes('<td class="mono">local</td>'));
   // A scheduler whose key the reader refused has no stall count under it: "-", never a whole "0 / 2".
   const refused = { ...snapshot(), schedulers: [{ key: null, name: "local", pattern: "0 4 * * *", next: NOW + 5000, overdueMs: null }], schedulerStalls: { nightly: 1, null: 3 } };
   const row = (await pagePanels("fleet", ctxOf("viewer", { snapshot: refused }))).map((p) => p.html).join("");
-  assert.match(row, /<td data-l="Schedule">not recorded<\/td>.*?<td data-l="Stalls">unknown<\/td>/);
+  assert.match(parseDocument(`<html><body>${row}</body></html>`).querySelector('[data-l="Schedule"]').textContent, /not recorded/);
+  assert.match(row, /data-l="Stalls">unknown/);
   assert.doesNotMatch(row, /\d \/ 2<\/td>/);
 });
 
@@ -1841,11 +1844,12 @@ test("readable numbers: money in one fixed form with the exact amount on hover, 
     { name: "h4", concurrency: "1", jobs: [], staleMs: 1000, budgetCpuCenti: "lots", usedCpuCenti: "1" },
   ];
   const fleet = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), hostBudgets: hosts } }))).map((p) => [p.id, p.html])).get("p-hosts");
-  assert.match(fleet, /<th scope="col">Budget<\/th>/);
+  assert.match(fleet, /class="fl-res"/);
+  assert.match(fleet, /class="hostrow/);
   assert.ok(!fleet.includes("centi"));
   assert.ok(fleet.replace(/\s+/g, " ").includes("2 of 8 GiB") && fleet.replace(/\s+/g, " ").includes("1.5 of 8 cores"), "human units, not raw MiB or hundredths");
   assert.ok(fleet.replace(/\s+/g, " ").includes("unknown of 1 cores"), "an unread use is not zero");
-  assert.ok(fleet.includes("CPU budget off."));
+  assert.ok([...parseDocument(`<html><body>${fleet}</body></html>`).querySelectorAll(".fl-res")].some((resource) => resource.querySelector(".fl-res__l")?.textContent === "CPU" && resource.textContent.includes("budget off")), "CPU off is a named state, never a zero budget");
   assert.ok(fleet.includes("CPU budget unreadable."));
   // The run page's Resources: the size in cores.
   const record = { jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "completed", size: { memMiB: 4096, cpuCenti: 250, source: "trigger" } };
@@ -1868,11 +1872,12 @@ test("failed jobs: each id links to its run, with its record's reason and short 
   for (const role of ["viewer", "operator"]) {
     const html = new Map((await pagePanels("fleet", ctxOf(role, { snapshot: { ...snapshot(), failed } }))).map((p) => [p.id, p.html])).get("p-failed");
     const sentence = REASONS["container-never-started"].sentence.replace(/'/g, "&#39;");
-    assert.ok(html.includes(`<td data-l="Job"><a class="code" href="/run?id=gh-f">gh-f</a></td>`), html);
-    assert.ok(html.replace(/\s+/g, " ").includes(`<td data-l="Why (its record)">Its run record says: ${sentence}`), html);
-    assert.ok(html.includes('<td data-l="Why (its record)"><span class="note">no record</span></td>'));
+    assert.match(html, /data-l="Job"><a class="code" href="\/run\?id=gh-f">gh-f<\/a>/);
+    assert.ok(html.replace(/\s+/g, " ").includes(`Its run record says: ${sentence}`), "record sentence stays inline in the job cell");
+    assert.ok(html.includes('<span class="note">no record</span>'));
     assert.ok(html.replace(/\s+/g, " ").includes('<span class="code">brand-new-reason</span>, this console has no explanation for this reason.'));
-    assert.ok(html.includes('<td data-l="Job"><span class="code">&lt;bad id&gt;</span></td>'), "an id outside the run-id charset is text, not a link");
+    const invalidCell = [...parseDocument(`<html><body>${html}</body></html>`).querySelectorAll('[data-l="Job"]')].find((cell) => cell.textContent.includes("<bad id>"));
+    assert.ok(invalidCell && invalidCell.querySelector("a") === null, "an id outside the run-id charset is text, not a link");
     assert.ok([...html.matchAll(/<tr(?:\s[^>]*)?>[^]*?<\/tr>/g)].every(([row]) => !row.includes("REASON-TEXT")), "BullMQ's free text is never in a row, including inside markup (REQ-CONSOLE-SECURITY (l))");
     assert.equal(html.includes("REASON-TEXT"), role === "operator", "the operator's details only");
   }

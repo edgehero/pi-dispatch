@@ -6,6 +6,7 @@ import { NAMED_CHECK_IDS } from "@edgehero/pi-dispatch/doctor-results";
 import { DOCTOR_FILE_CHECKS, FIRST_RUN_COMMANDS, FIRST_RUN_COMMAND_HINTS, FIRST_RUN_STATES, FIRST_RUN_STEPS, doctorQuote, doctorStale, firstRunCommandHint, firstRunState, stepSentenceText } from "../src/doctor-view.mjs";
 import { BEAT_FRESH_MS, configPauseWindows, configSettings, configTriggers, fleetDoctor } from "../src/console/panels.mjs";
 import { stripAnsi, visibleLen } from "../src/style.mjs";
+import { cardDocument, cardText } from "./helpers/card-structure.mjs";
 
 /**
  * The published doctor results on both surfaces (issue #712, `INT-DOCTOR-RESULTS-KEY`): the console's Doctor panel and
@@ -56,21 +57,30 @@ test("the console's Doctor panel: per host its age, counts and problems with fix
   const out = render(fleetDoctor, snapshot()).replace(/\s+/g, " ");
   assert.match(out, /<h2>Doctor<\/h2>/);
   assert.match(out, /href="\/fleet\/host\?name=mini1">mini1<\/a>/);
-  assert.match(out, /class="tone-failed"/);
+  const doc = cardDocument(out);
+  const hostText = (name, markup = out) => {
+    const parsed = markup === out ? doc : cardDocument(markup);
+    const host = parsed.nodes.find((node) => node.classes.includes("fl-doc") && parsed.descendants(node).some((child) => child.attrs.href === `/fleet/host?name=${name}`));
+    assert.ok(host, `${name}: its own doctor group is drawn`);
+    return cardText(parsed.within(host));
+  };
+  assert.ok(doc.nodes.some((node) => node.classes.includes("fl-chk") && doc.descendants(node).some((child) => child.classes.includes("tone-failed"))), "the failing check has a failure indication");
   assert.match(out, /Doctor ran 3h 0m ago/);
   assert.match(out, /Worker 4\.3\.1/);
-  assert.match(out, /run by the worker: 1 failing, 1 warning, 40 passing/);
+  assert.match(hostText("mini1"), /1 failing 1 warning 40 passing/, "the count strip belongs to mini1");
+  assert.match(hostText("mini1"), /run by the worker/);
   assert.match(out, /The openshell venue was judged/);
   assert.ok(out.indexOf("triggers.file") < out.indexOf("valkey.2"), "failing before warning");
-  assert.match(out, /Fix: fix &lt;path&gt; so it loads/);
+  assert.match(hostText("mini1"), /Fix: fix <path> so it loads/, "the failing check keeps its actionable fix despite emphasis markup");
   assert.doesNotMatch(out, /node\.1/, "an ok check is never listed");
   assert.match(out, /href="\/fleet\/host\?name=build3">build3<\/a>/);
   assert.match(out, /Doctor ran 3d 0h ago/);
   assert.match(out, /Worker 4\.3\.0/);
-  assert.match(out, /run by hand \(uid 0\): 0 failing, 0 warnings, 30 passing/);
+  assert.match(hostText("build3"), /0 failing 0 warnings? 30 passing/, "the passing host has its own count strip");
+  assert.match(hostText("build3"), /run by hand \(uid 0\)/);
   assert.match(out, /It replaced the worker's own run/);
   assert.match(out, /uid 1001/);
-  assert.match(out, /Stale: older than two of this host's doctor runs \(every 24h\)/);
+  assert.match(hostText("build3"), /Older than two of this host's doctor runs \(every 24h\)/);
   assert.match(out, /Every check passed\./);
   assert.match(out, /href="\/fleet\/host\?name=odd">odd<\/a>/);
   assert.match(out, /Its published result cannot be read/);
@@ -78,7 +88,9 @@ test("the console's Doctor panel: per host its age, counts and problems with fix
   assert.ok(!out.includes("data-copy"), "a viewer reads fixes as sentences");
   const operator = render(fleetDoctor, snapshot(), "operator");
   assert.ok(operator.includes("data-copy"), "an operator can copy the doctor command");
-  for (const fact of ["1 failing, 1 warning, 40 passing", "triggers.file", "Every check passed", "No doctor result published by: quiet"]) assert.ok(operator.includes(fact), `${fact}: published facts are shared by both roles`);
+  assert.match(hostText("mini1", operator), /1 failing 1 warning 40 passing/);
+  assert.match(hostText("build3", operator), /0 failing 0 warnings? 30 passing/);
+  for (const fact of ["triggers.file", "Every check passed", "No doctor result published by: quiet"]) assert.ok(operator.includes(fact), `${fact}: published facts are shared by both roles`);
 });
 
 test("the console's Doctor panel escapes a hostile label and scrubs its control bytes", () => {

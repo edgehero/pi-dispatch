@@ -28,6 +28,7 @@
  *     an ancestor with computed `overflow-x: auto|scroll` whose own box fits (`<body>` and `<html>` excuse nothing:
  *     their overflow scrolls the viewport, which is the failure);
  *   - the computed `--canvas` is the token's value for the theme the page should show (`colorOf`, pulse-tokens.mjs);
+ *   - Fleet Active progress, its phase bars and labels stay inside their cell and clear of the action, with no clipped progress container;
  *   - every `PAGES` name has a golden for each role;
  *   - the window is a phone's: the emulation is read back from the page (`EMULATION_PROBE`), since nothing that SETS
  *     it can say whether DevTools applied it.
@@ -957,6 +958,20 @@ function cspFailures(csp) {
 	return csp.map((v) => `CSP violation: ${v.directive} refused ${v.blocked || "an inline resource"}${v.source ? ` (${v.source}:${v.line})` : ""}${v.sample ? ` "${v.sample}"` : ""}`);
 }
 
+/** Progress and every drawn phase must fit its cell and leave the action clear, even when the viewport itself fits. */
+export function activeProgressProblems(rows = [], slack = EDGE_SLACK) {
+	const problems = [];
+	for (const row of rows) for (const part of row.parts ?? []) {
+		const r = part.rect;
+		const c = row.cell;
+		if (r.left < c.left - slack || r.right > c.right + slack || r.top < c.top - slack || r.bottom > c.bottom + slack) problems.push(`Fleet Active row ${row.row}: ${part.name} leaves its progress cell`);
+		if (part.clipped) problems.push(`Fleet Active row ${row.row}: ${part.name} clips its progress content`);
+		const a = row.action;
+		if (a && Math.min(r.right, a.right) - Math.max(r.left, a.left) > slack && Math.min(r.bottom, a.bottom) - Math.max(r.top, a.top) > slack) problems.push(`Fleet Active row ${row.row}: ${part.name} overlaps its action`);
+	}
+	return [...new Set(problems)];
+}
+
 /**
  * One golden run's verdict over what the page reported: `csp` (the probe's violations, null when it never ran),
  * `errors` (uncaught page errors: notes, since the script ran into the stubs), `canvas` (the computed `--canvas`) against
@@ -964,7 +979,7 @@ function cspFailures(csp) {
  * always a phone's) and `settled`. Returns `{ failures, notes, width }`.
  */
 export function runVerdict({ csp, errors = [], canvas, want, expect, measured, emulation, settled = true }) {
-	const failures = [...cspFailures(csp), ...emulationProblems(emulation, true)];
+	const failures = [...cspFailures(csp), ...emulationProblems(emulation, true), ...activeProgressProblems(measured.activeProgress)];
 	const notes = [];
 	if (!settled) notes.push("the page did not settle within 1.5 s (fonts or frames); measured anyway");
 	for (const e of errors) notes.push(`page error: ${e}`);
@@ -1457,7 +1472,21 @@ function measureSource(width, slack) {
 		elements.push(Object.assign(name(el), { rect: box(r), up, text, font: text ? getComputedStyle(el).fontFamily : "", inside: host ? host.id : "", scrollers }));
 	}
 	Object.defineProperty(window, "__pdWidthKeep", { value: keep, configurable: true });
-	return { scrollWidth: se.scrollWidth, clientWidth: document.documentElement.clientWidth, elements };
+	const activeProgress = [];
+	for (const [i, row] of [...document.querySelectorAll("#p-active tbody tr")].entries()) {
+		const progress = row.querySelector(".fl-prog");
+		const cell = progress?.closest("td");
+		if (!cell) continue;
+		const action = row.querySelector('td[data-l="Progress"] + td .btn');
+		const parts = [];
+		for (const [name, selector] of [["progress", ".fl-prog"], ["phase list", ".phases"], ["phase", ".phases li"], ["phase bar", ".phases .bar"], ["phase label", ".phases .name"]]) for (const el of cell.querySelectorAll(selector)) {
+			const rect = el.getBoundingClientRect();
+			if (!(rect.width > 0 && rect.height > 0)) continue;
+			parts.push({ name, rect: box(rect), clipped: (name === "progress" || name === "phase list") && el.scrollWidth > el.clientWidth + S });
+		}
+		activeProgress.push({ row: i + 1, cell: box(cell.getBoundingClientRect()), action: action ? box(action.getBoundingClientRect()) : null, parts });
+	}
+	return { scrollWidth: se.scrollWidth, clientWidth: document.documentElement.clientWidth, elements, activeProgress };
 })()`;
 }
 

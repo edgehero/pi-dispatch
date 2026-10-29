@@ -16,7 +16,11 @@
       "status": "new",
       "source": "admin/src/console/panels/host.mjs#hostState",
       "golden": [
-        "panels/host-fresh.operator"
+        "panels/host-stale.operator"
+      ],
+      "shows": [
+        "class=\"hd-state\"",
+        "Stale: no beat"
       ]
     },
     {
@@ -26,6 +30,11 @@
       "source": "admin/src/console/panels/host.mjs#hostJobs",
       "golden": [
         "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Project and job",
+        "Size",
+        "Running"
       ]
     },
     {
@@ -35,6 +44,10 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "class=\"hd-bud__bar\"",
+        "class=\"hd-key\""
       ]
     },
     {
@@ -44,6 +57,11 @@
       "source": "admin/src/console/panels/host.mjs#hostCapacity",
       "golden": [
         "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "class=\"hd-kpis\"",
+        "class=\"hd-chart\"",
+        "class=\"hd-axis\""
       ]
     },
     {
@@ -53,6 +71,11 @@
       "source": "admin/src/console/panels/host.mjs#hostRow",
       "golden": [
         "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Worker",
+        "Job image",
+        "Matches the fleet"
       ]
     },
     {
@@ -62,145 +85,391 @@
       "source": "admin/src/console/panels/host.mjs#hostDoctor",
       "golden": [
         "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "class=\"hd-secs\"",
+        "Failing first, then warnings"
       ]
     },
     {
       "el": "One host in full, opened from a host row on Fleet or Overview: is it alive, what it promised, what runs and waits on it, how busy it has been, and what doctor last said.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostRow",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Worker",
+        "Job image",
+        "Time zone",
+        "Profiles",
+        "Matches the fleet"
+      ],
+      "panel": "p-hostrow"
     },
     {
       "el": "**State first.** A stale host leads with a yellow card: no beat for 3 minutes, what that means for routing, and *Pause pi-jobs@build3* (danger). A healthy host shows no card here.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostState"
+      "source": "admin/src/console/panels/host.mjs#hostState",
+      "golden": [
+        "panels/host-stale.operator"
+      ],
+      "shows": [
+        "class=\"hd-state\"",
+        "Stale: no beat",
+        "15s",
+        "three missed beats",
+        "Pause pi-jobs@build3"
+      ],
+      "panel": "p-hoststate"
     },
     {
       "el": "**Jobs on build3.** Running, orphaned and waiting jobs with project and size.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostJobs"
+      "source": "admin/src/console/panels/host.mjs#hostJobs",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Project and job",
+        "Size",
+        "Running",
+        "Host budget (memory)",
+        "Free the slot"
+      ],
+      "panel": "p-hostjobs"
     },
     {
       "el": "An orphaned job is tinted and says what it still holds, with *Free the slot*.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostJobs"
+      "source": "admin/src/console/panels/host.mjs#hostJobs",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "its container's stop did not take",
+        "still holds",
+        "Free the slot",
+        "billing"
+      ],
+      "panel": "p-hostjobs"
     },
     {
       "el": "A job waiting for the host budget says which dimension, that it asks again about every 9 seconds, and that it keeps its place.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostJobs"
+      "source": "admin/src/console/panels/host.mjs#hostJobs",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Host budget (memory)",
+        "about every 9 seconds",
+        "keeps its place"
+      ],
+      "panel": "p-hostjobs"
     },
     {
       "el": "**Slots and budget.** Slot dots, then memory and CPU bars split into promised to running jobs (solid), held by an orphan (hatched) and free. Facts cover:",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostBudget"
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "class=\"hd-bud__bar\"",
+        "promised to running jobs",
+        "held by an orphaned container",
+        "free"
+      ],
+      "panel": "p-hostbudget"
     },
     {
       "el": "how the budget was set;",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostBudget"
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Budget origin",
+        "auto:",
+        "machine's",
+        "reserve"
+      ],
+      "panel": "p-hostbudget"
     },
     {
       "el": "who waits for it, and the room kept for the oldest waiter;",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostBudget"
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Waiting for it",
+        "gh-budget",
+        "Room for oldest waiter",
+        "GiB and",
+        "cores"
+      ],
+      "panel": "p-hostbudget"
     },
     {
       "el": "project rules (`hostShare`, `minJobs`);",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostBudget"
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "hostShare",
+        "minJobs"
+      ],
+      "panel": "p-hostbudget"
     },
     {
       "el": "the CPU reserve;",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostBudget"
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "CPU reserve",
+        "pidispatch.slice",
+        "Wanted",
+        "Observed quota"
+      ],
+      "panel": "p-hostbudget"
     },
     {
       "el": "whether old containers were listed.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostBudget"
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Old containers",
+        "Listed: the worker counted the job containers"
+      ],
+      "panel": "p-hostbudget"
     },
     {
       "el": "The words a budget can show instead are listed.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostBudget"
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-budget-unseeded.operator"
+      ],
+      "shows": [
+        "admits no job",
+        "podman"
+      ],
+      "panel": "p-hostbudget"
     },
     {
       "el": "**Last 7 days.** Busy, idle and no-history shares, average and peak slots, time full, and wait p50 and p95, then a 6-hour bar chart. Each bar has a tick at the most at once, a dashed slot line, and hatched no-history time, which counts as neither busy nor idle. It also shows promised and used shares, projects by run time, the \"Jobs only\" caveat and any truncation.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostJobs"
+      "source": "admin/src/console/panels/host.mjs#hostCapacity",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "class=\"hd-kpis\"",
+        "class=\"hd-chart\"",
+        "class=\"hd-axis\"",
+        "p95",
+        "p50",
+        "no history",
+        "Promised",
+        "CPU used",
+        "By run time"
+      ],
+      "panel": "p-hostcap"
     },
     {
       "el": "**Registry row.** Version, start, image and digest, pi, time zone, queues, venues and floor, the profiles that route jobs here, the fingerprints that match the fleet, and the last beat.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostRow"
+      "source": "admin/src/console/panels/host.mjs#hostRow",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Worker",
+        "Job image",
+        "Image digest",
+        "pi version",
+        "Time zone",
+        "Queues",
+        "Venues and floor",
+        "Profiles",
+        "Matches the fleet",
+        "Fingerprints",
+        "Last beat"
+      ],
+      "panel": "p-hostrow"
     },
     {
       "el": "**Doctor.** The head line in the console's words, red when a check fails, then:",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Doctor ran",
+        "failing",
+        "warning",
+        "passing",
+        "tone-failed"
+      ],
+      "panel": "p-hostdoctor"
     },
     {
       "el": "the stale warning;",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-stale.operator"
+      ],
+      "shows": [
+        "Stale: older than two of this host's doctor runs"
+      ],
+      "panel": "p-hostdoctor"
     },
     {
       "el": "33 section chips (passing, failing, or not run);",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "class=\"hd-secs\"",
+        "node",
+        "docker",
+        "live",
+        "not run on this host"
+      ],
+      "panel": "p-hostdoctor"
     },
     {
       "el": "failing then warning checks, each with its fix, and the command;",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Failing first, then warnings",
+        "Failing",
+        "Warning",
+        "Fix:",
+        "pi-dispatch",
+        "doctor",
+        "Copy"
+      ],
+      "panel": "p-hostdoctor"
     },
     {
       "el": "every other doctor state: replaced by a hand run, more than 8, all passing, unreadable, never published.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-manual.operator"
+      ],
+      "shows": [
+        "run by hand",
+        "It replaced the worker"
+      ],
+      "panel": "p-hostdoctor"
     },
     {
       "el": "The host registry row: name, version, start, pid, concurrency, image and digest, pi version, time zone, caps, fingerprints, and budget used, held and waiters. It also carries the jobs list with sizes and orphan flags, the seed, and the beat time.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostRow"
+      "source": "admin/src/console/panels/host.mjs#hostRow",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Worker",
+        "pid",
+        "Job image",
+        "Time zone",
+        "Queues",
+        "Profiles",
+        "Fingerprints",
+        "Last beat"
+      ],
+      "panel": "p-hostrow"
     },
     {
       "el": "The host's slice of the capacity report.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostCapacity"
+      "source": "admin/src/console/panels/host.mjs#hostCapacity",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Last 7 days",
+        "one-hour buckets",
+        "class=\"hd-chart\""
+      ],
+      "panel": "p-hostcap"
     },
     {
       "el": "The host's published doctor result, with checks redacted at the source.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "Doctor ran",
+        "docker.39",
+        "Fix:"
+      ],
+      "panel": "p-hostdoctor"
     },
     {
       "el": "**Viewers** see everything here except the Pause, Cancel and Free the slot buttons. Doctor results are visible to both roles.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-fresh.viewer"
+      ],
+      "shows": [
+        "Doctor ran",
+        "failing",
+        "warning",
+        "passing",
+        "Fix:"
+      ],
+      "panel": "p-hostdoctor"
     },
     {
       "el": "**Fixture note.** build3, podman, the floor, the 3-minute late beat, gh-e802, gh-4a7e (cancelled 10:59), the 16 of 24 GiB and 8 of 12 cores, and doctor checks docker.39 and docker.40 come from the fixture. These are sample data:",
@@ -230,7 +499,7 @@
       "el": "the 7-day figures and chart;",
       "kind": "sample",
       "status": "illustrative",
-      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+      "reason": "Only the literal example figures and bar heights are illustrative. The chart, KPIs, axis, peak ticks, slot line and no-history marks are required and verified by the Last 7 days element and host-venue-fidelity tests."
     },
     {
       "el": "the sections that did not run;",
@@ -252,7 +521,13 @@
       "golden": [
         "panels/host-fresh.operator"
       ],
-      "reason": "#748 adds retained workspaces and runtime-specific orphan cleanup in a separate panel beyond the original card."
+      "reason": "#748 adds retained workspaces and runtime-specific orphan cleanup in a separate panel beyond the original card.",
+      "shows": [
+        "Sandboxes left on the host",
+        "pi-dispatch",
+        "sandbox",
+        "--list"
+      ]
     },
     {
       "el": "host-stale.operator",
@@ -261,6 +536,11 @@
       "source": "admin/src/console/panels/host.mjs#hostState",
       "golden": [
         "panels/host-stale.operator"
+      ],
+      "panel": "p-hoststate",
+      "shows": [
+        "Stale: no beat",
+        "Heartbeat late"
       ]
     },
     {
@@ -270,6 +550,11 @@
       "source": "admin/src/console/panels/host.mjs#hostRow",
       "golden": [
         "panels/host-gone.operator"
+      ],
+      "panel": "p-hostrow",
+      "shows": [
+        "Last seen",
+        "retained run records"
       ]
     },
     {
@@ -279,6 +564,10 @@
       "source": "admin/src/console/panels/host.mjs#hostRow",
       "golden": [
         "panels/host-unknown.viewer"
+      ],
+      "panel": "p-hostrow",
+      "shows": [
+        "No retained run record names this host"
       ]
     },
     {
@@ -288,6 +577,10 @@
       "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-retention-off.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "Workspace retention is off"
       ]
     },
     {
@@ -297,6 +590,10 @@
       "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-sandboxes-unreadable.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "unreadable or was not published"
       ]
     },
     {
@@ -306,69 +603,118 @@
       "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-sandboxes-more.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "more retained workspaces"
       ]
     },
     {
       "el": "host-orphan-local.operator",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-orphan-local.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "Orphaned hold",
+        "docker",
+        "rm",
+        "-f"
       ]
     },
     {
       "el": "host-orphan-podman.operator",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-orphan-podman.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "Orphaned hold",
+        "podman",
+        "rm",
+        "-f"
       ]
     },
     {
       "el": "host-orphan-openshell.operator",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-orphan-openshell.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "Orphaned hold",
+        "openshell",
+        "sandbox",
+        "delete"
       ]
     },
     {
       "el": "host-orphan-openshell-bind.operator",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-orphan-openshell-bind.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "Orphaned hold",
+        "openshell",
+        "sandbox",
+        "delete"
       ]
     },
     {
       "el": "host-orphan-digest.operator",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-orphan-digest.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "published id is a digest",
+        "ps",
+        "--filter"
       ]
     },
     {
       "el": "host-orphan-legacy.operator",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-orphan-legacy.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "pi-job-old",
+        "rm",
+        "-f"
       ]
     },
     {
       "el": "host-orphan-no-venue.operator",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
       "golden": [
         "panels/host-orphan-no-venue.operator"
+      ],
+      "panel": "p-hostsandboxes",
+      "shows": [
+        "venue was not published",
+        "cannot name its container or runtime"
       ]
     },
     {
@@ -378,6 +724,11 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-reserve-held.operator"
+      ],
+      "panel": "p-hostbudget",
+      "shows": [
+        "Every job runs under pidispatch.slice",
+        "Wanted"
       ]
     },
     {
@@ -387,6 +738,11 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-reserve-no-parent.operator"
+      ],
+      "panel": "p-hostbudget",
+      "shows": [
+        "no parent cgroup",
+        "Wanted"
       ]
     },
     {
@@ -396,6 +752,11 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-reserve-unmanaged.operator"
+      ],
+      "panel": "p-hostbudget",
+      "shows": [
+        "does not manage a shared CPU reserve",
+        "Wanted"
       ]
     },
     {
@@ -405,6 +766,11 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-reserve-budget-unknown.operator"
+      ],
+      "panel": "p-hostbudget",
+      "shows": [
+        "CPU budget is not known yet",
+        "Wanted"
       ]
     },
     {
@@ -414,6 +780,11 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-reserve-unreadable.operator"
+      ],
+      "panel": "p-hostbudget",
+      "shows": [
+        "CPU reserve could not be read",
+        "Wanted"
       ]
     },
     {
@@ -423,6 +794,11 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-reserve-unset.operator"
+      ],
+      "panel": "p-hostbudget",
+      "shows": [
+        "No CPU quota is set",
+        "Wanted"
       ]
     },
     {
@@ -432,6 +808,11 @@
       "source": "admin/src/console/panels/host.mjs#hostBudget",
       "golden": [
         "panels/host-reserve-differs.operator"
+      ],
+      "panel": "p-hostbudget",
+      "shows": [
+        "CPU quota differs",
+        "Wanted"
       ]
     },
     {
@@ -441,6 +822,10 @@
       "source": "admin/src/console/panels/host.mjs#hostDoctor",
       "golden": [
         "panels/host-doctor-stale.operator"
+      ],
+      "panel": "p-hostdoctor",
+      "shows": [
+        "Stale: older than two"
       ]
     },
     {
@@ -450,6 +835,10 @@
       "source": "admin/src/console/panels/host.mjs#hostDoctor",
       "golden": [
         "panels/host-doctor-manual.operator"
+      ],
+      "panel": "p-hostdoctor",
+      "shows": [
+        "run by hand"
       ]
     },
     {
@@ -459,6 +848,10 @@
       "source": "admin/src/console/panels/host.mjs#hostDoctor",
       "golden": [
         "panels/host-doctor-more.operator"
+      ],
+      "panel": "p-hostdoctor",
+      "shows": [
+        "more not shown here"
       ]
     },
     {
@@ -468,6 +861,10 @@
       "source": "admin/src/console/panels/host.mjs#hostDoctor",
       "golden": [
         "panels/host-doctor-passing.operator"
+      ],
+      "panel": "p-hostdoctor",
+      "shows": [
+        "Every check passed"
       ]
     },
     {
@@ -477,6 +874,10 @@
       "source": "admin/src/console/panels/host.mjs#hostDoctor",
       "golden": [
         "panels/host-doctor-unreadable.operator"
+      ],
+      "panel": "p-hostdoctor",
+      "shows": [
+        "published result cannot be read"
       ]
     },
     {
@@ -486,6 +887,10 @@
       "source": "admin/src/console/panels/host.mjs#hostDoctor",
       "golden": [
         "panels/host-doctor-missing.operator"
+      ],
+      "panel": "p-hostdoctor",
+      "shows": [
+        "No doctor result published"
       ]
     },
     {
@@ -493,7 +898,70 @@
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/host.mjs#hostCapacity",
-      "reason": "#748 requires the same one-hour buckets as Spend’s seven-day report; the card’s illustrative six-hour chart is not a separate aggregation contract."
+      "reason": "#748 requires the same one-hour buckets as Spend’s seven-day report; the card’s illustrative six-hour chart is not a separate aggregation contract.",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "shows": [
+        "one-hour buckets",
+        "read on page load",
+        "class=\"hd-chart\""
+      ],
+      "panel": "p-hostcap"
+    },
+    {
+      "el": "host-capacity-missing.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostCapacity",
+      "golden": [
+        "panels/host-capacity-missing.operator"
+      ],
+      "shows": [
+        "The host's capacity history could not be read."
+      ],
+      "panel": "p-hostcap"
+    },
+    {
+      "el": "host-capacity-truncated.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostCapacity",
+      "golden": [
+        "panels/host-capacity-truncated.operator"
+      ],
+      "shows": [
+        "Capacity history was truncated; earlier time is no history."
+      ],
+      "panel": "p-hostcap"
+    },
+    {
+      "el": "host-budget-off.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-budget-off.operator"
+      ],
+      "shows": [
+        "Memory: off (no budget).",
+        "CPU: off (no budget)."
+      ],
+      "panel": "p-hostbudget"
+    },
+    {
+      "el": "host-budget-unknown.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-budget-unknown.operator"
+      ],
+      "shows": [
+        "Free slots are not known",
+        "budget not known yet or unreadable"
+      ],
+      "panel": "p-hostbudget"
     }
   ]
 }

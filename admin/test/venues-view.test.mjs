@@ -83,7 +83,8 @@ const fleetHtml = async (rows) => (await pagePanels("fleet", ctxOf({ snapshot: {
 
 test("Fleet keeps a short venue matrix and details carry questions, asserters, serves and floors", async () => {
   const fleet = await fleetHtml(ROWS);
-  assert.match(fleet, /Venue declaration matrix/);
+  assert.match(fleet, /aria-label="Venue properties and what each venue serves"/);
+  for (const title of ["Egress", "Local folders", "Steering", "Live transcript", "Recovery", "Credentials held by"]) assert.ok(fleet.includes(title), `${title}: the short Fleet comparison keeps its meaningful columns`);
   assert.match(fleet, /fleet\/venue\?name=openshell-bind/);
   assert.match(fleet, /mini1/);
   for (const name of BACKEND_NAMES) {

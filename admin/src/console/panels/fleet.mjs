@@ -42,20 +42,22 @@ const venueHref = (name) => `/fleet/venue?${new URLSearchParams({ name })}`;
 const linkHost = (name) =>
   name ? html`<a href="${hostHref(name)}">${name}</a>` : "host not published";
 const project = (p) => (p ? ui.ptag(p) : "No project recorded");
-const wrap = (title, fn) => (view) =>
-  ui.card({
-    title,
-    ring:
-      title === "Fleet" &&
-      view.data?.snapshot?.queueCounts?.some((q) => q.paused) &&
-      view.data.snapshot.queueCounts.some((q) => !q.paused)
-        ? "attention"
-        : null,
-    body: view.data?.snapshot
-      ? fn(view.data.snapshot, view)
-      : html`<p class="note"> The deployment's Valkey could not be read. The next refresh tries again. </p>`,
-  });
-const act = (view, action, label, hidden = []) =>
+/** The card frame is the design's: tables flush to the edge, inset cards keep their padding. */
+const wrap =
+  (title, fn, { flush = false, sub = null, end = null } = {}) =>
+  (view) => {
+    const snapshot = view.data?.snapshot;
+    return ui.card({
+      title,
+      flush,
+      sub: typeof sub === "function" ? sub(snapshot, view) : sub,
+      end: snapshot && typeof end === "function" ? end(snapshot, view) : end,
+      body: snapshot
+        ? fn(snapshot, view)
+        : html`<p class="note">The deployment's Valkey could not be read. The next refresh tries again.</p>`,
+    });
+  };
+const act = (view, action, label, hidden = [], { small = true } = {}) =>
   canAct(view)
     ? ui.actForm({
         action,
@@ -65,10 +67,27 @@ const act = (view, action, label, hidden = []) =>
           action.startsWith("retry") || action.endsWith("resume")
             ? "paid"
             : "danger",
-          "sm",
+          ...(small ? ["sm"] : []),
         ],
+        icon: action.endsWith("pause")
+          ? "pause"
+          : action.endsWith("resume")
+            ? "play"
+            : action.startsWith("retry")
+              ? "rerun"
+              : action.startsWith("cancel")
+                ? "cancel"
+                : null,
       })
     : null;
+const rowNumber = (n, status = null) =>
+  Number.isFinite(n)
+    ? n > 0
+      ? html`<b class="${status ? `tinted tone-${status}` : ""}">${n}</b>`
+      : html`<span class="faint">0</span>`
+    : "not read";
+const headerSub = (rows, singular, plural = `${singular}s`) =>
+  `${list(rows).length} ${list(rows).length === 1 ? singular : plural}`;
 const jobAct = (view, action, label, r) =>
   RUN_ID_RE.test(String(r.jobId))
     ? act(view, action, label, [
@@ -85,239 +104,214 @@ const orphanRows = (s) =>
       .map((job) => ({ ...job, host })),
   );
 
-export const fleetBar = wrap("Fleet", (s, v) => {
+export const fleetBar = (v) => {
+  const s = v.data?.snapshot;
+  if (!s)
+    return ui.card({
+      title: "Fleet",
+      body: html`<p>The deployment's Valkey could not be read. The next refresh tries again.</p>`,
+    });
   const queues = list(s.queueCounts);
   const paused = queues.filter((q) => q.paused);
   const running = queues.filter((q) => !q.paused);
-  const state =
-    queues.length === 0
-      ? "Queue state not read"
-      : paused.length === queues.length
-        ? "Paused"
-        : paused.length
-          ? "Part paused"
-          : "Running";
-  const mismatch = v.data?.killSwitch;
+  const partial = paused.length > 0 && running.length > 0;
+  const allPaused = queues.length > 0 && paused.length === queues.length;
   const online = workersOnline(s);
+  const mismatch = v.data?.killSwitch;
   const count = (key) =>
     Number.isFinite(s.queue?.counts?.[key])
       ? s.queue.counts[key]
-      : queues.length
-        ? queues.reduce((n, q) => n + Number(q.counts?.[key] ?? 0), 0)
+      : queues.length && queues.every((q) => Number.isFinite(q.counts?.[key]))
+        ? queues.reduce((n, q) => n + q.counts[key], 0)
         : "not read";
-  return html`${s.queue?.fleetDegraded ? html`<p class="note">${REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.</p>` : null}${ui.badge(paused.length ? "attention" : "ok", state)}${
-    !paused.length && online.none
-      ? html`<p class="tone-attention">${NO_WORKER_TEXT}</p>`
-      : online.staleBeats
-        ? html`<p class="note">${STALE_BEATS_TEXT}</p>`
+  const title = !queues.length
+    ? "Queue state not read"
+    : partial
+      ? `Part paused: ${paused.length} of ${queues.length} queues are paused`
+      : allPaused
+        ? "The fleet is paused"
+        : "The fleet is running";
+  const statistic = (value, label, tone = null) =>
+    html`<span${tone ? html` class="tinted tone-${tone}"` : null}><b>${value}</b> ${label}</span>`;
+  const held =
+    !s.held || s.held.unreachable
+      ? "unreadable"
+      : list(s.held.rows).length + Number(s.held.more ?? 0);
+  return ui.card({
+    ring: partial ? "attention" : null,
+    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.online ?? "unknown"} hosts beat, ${running.length} queues accept jobs. Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span></p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}. Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
+      partial
+        ? statistic(
+            paused.reduce(
+              (n, q) =>
+                n +
+                Number(q.counts?.waiting ?? 0) +
+                Number(q.counts?.paused ?? 0),
+              0,
+            ),
+            "in paused queues",
+            "attention",
+          )
         : null
-  } <p> ${online.online ?? "unknown"} hosts beating (${list(s.hostBudgets).length} registered); ${running.length} queues accept jobs. </p> ${
-    paused.length && running.length
-      ? html`<p class="tone-attention"> Starts nothing new: ${paused.map((q) => q.queue).join(", ")}. Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}. ${paused.reduce(
-          (n, q) =>
-            n + Number(q.counts?.waiting ?? 0) + Number(q.counts?.paused ?? 0),
-          0,
-        )} jobs wait in paused queues. </p>`
-      : null
-  }${ui.facts([
-    ["Waiting", count("waiting")],
-    ["Active", count("active")],
-    ["Delayed", count("delayed")],
-    [
-      "Held",
-      s.held?.unreachable
-        ? "unreadable"
-        : list(s.held?.rows).length + Number(s.held?.more ?? 0),
-    ],
-    ["Awaiting retry", count("failed")],
-  ])} <div> ${
-    running.length || !queues.length
-      ? act(v, "fleet-pause", "Pause the fleet")
-      : null
-  }${
-    paused.length ? act(v, "fleet-resume", "Resume the fleet") : null
-  } </div> <p class="note"> Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${s.valkey ?? s.valkeyUrl ?? "the deployment's Valkey"} and ${list(s.hostBudgets).length} hosts' registry rows. </p> ${
-    mismatch?.disagreement
-      ? ui.banner({
-          status: "attention",
-          title: "Two Valkeys",
-          body: html`<p>${mismatch.disagreement}</p> <p> A pause reaches both; a resume neither until they agree. Nothing was changed. One queue can still be resumed on the Valkey this console read it from. </p> ${
-            v.role === "operator" && Array.isArray(mismatch.resumeArgv)
-              ? ui.cmd(mismatch.resumeArgv)
-              : null
-          }`,
-        })
-      : null
-  }`;
-});
+    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${partial ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}${running.length || !queues.length ? act(v, "fleet-pause", "Pause the fleet", [], { small: false }) : null}${allPaused ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: "Registry not read", body: html`${REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
+          block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from <span class="code">${s.valkey ?? "the deployment's Valkey"}</span> and ${list(s.hostBudgets).length} hosts' registry rows. Live: this panel redraws when the fleet changes.</span></p></div>`,
+  });
+};
 
-export const fleetQueues = wrap("Queues", (s, v) =>
-  ui.tbl({
-    label: "Queues",
-    stack: true,
-    heads: [
-      "Queue",
-      "State",
-      "Waiting",
-      "Active",
-      "Delayed",
-      "Paused",
-      "Failed",
-      ...(canAct(v) ? ["Action"] : []),
-    ],
-    rows: list(s.queueCounts).map((q) => ({
-      mark: q.paused ? "attention" : null,
+export const fleetQueues = wrap(
+  "Queues",
+  (s, v) =>
+    ui.tbl({
+      label: "Queues",
+      stack: true,
+      heads: [
+        "Queue",
+        "State",
+        ...["Waiting", "Active", "Delayed", "Paused", "Failed"].map(
+          (label) => ({ label, num: true }),
+        ),
+        ...(canAct(v) ? [{ label: "Action", l: "" }] : []),
+      ],
+      rows: list(s.queueCounts).map((q) => ({
+        mark: q.paused ? "attention" : null,
+        cells: [
+          html`<span class="code"><b>${q.queue}</b></span><span class="reason">${q.queue === "pi-jobs" ? `shared by ${list(s.hostBudgets).length} hosts` : q.paused ? "Its host still takes shared jobs." : "its host's own queue"}</span>`,
+          ui.chip(q.paused ? "Paused" : "Running", {
+            status: q.paused ? "attention" : "ok",
+            icon: q.paused ? "pause" : "play",
+          }),
+          ...["waiting", "active", "delayed", "paused", "failed"].map((key) =>
+            rowNumber(q.counts?.[key], key === "failed" ? "failed" : null),
+          ),
+          ...(canAct(v)
+            ? [
+                act(
+                  v,
+                  q.paused ? "queue-resume" : "queue-pause",
+                  q.paused ? "Resume" : "Pause",
+                  [["queue", q.queue]],
+                ),
+              ]
+            : []),
+        ],
+      })),
+      empty: "No queue was read.",
+    }),
+  { flush: true, sub: "Pause stops new starts; running jobs finish" },
+);
+
+export const fleetActive = wrap(
+  "Active jobs",
+  (s, v) => {
+    const rows = list(s.active).map((j) => {
+      const p = j.progress;
+      const has = p && !p.ended && !p.absent;
+      const progress = has
+        ? html`<div class="fl-prog">${p.phase?.count ? ui.phases({ names: Array.from({ length: Math.min(64, p.phase.count) }, (_, i) => `Phase ${i + 1}`), index: p.phase.index }) : null}<span class="reason">${progressText(p, v.now)}</span></div>`
+        : html`<div class="fl-prog">${ui.noProgress("This worker reports no progress")}</div>`;
+      return [
+        runLink(j.jobId),
+        project(j.project),
+        html`<span class="faint">shown when the run ends</span>`,
+        linkHost(j.host),
+        j.startedAt ? timeHtml(j.startedAt) : "not published",
+        j.startedAt ? ageText(v.now - j.startedAt) : "unknown",
+        progress,
+        ...(canAct(v) ? [jobAct(v, "cancel-active", "Cancel", j)] : []),
+      ];
+    });
+    const orphan = orphanRows(s).map((j) => ({
+      mark: "attention",
       cells: [
-        html`<span class="code">${q.queue}</span>${
-          q.queue === "pi-jobs"
-            ? html`<p>${list(s.hostBudgets).length} hosts share it.</p>`
-            : q.paused
-              ? html`<p>Its host still takes shared jobs.</p>`
-              : null
-        }`,
-        ui.badge(
-          q.paused ? "attention" : "ok",
-          q.paused ? "Paused" : "Running",
-        ),
-        ...["waiting", "active", "delayed", "paused", "failed"].map(
-          (k) => q.counts?.[k] ?? "not read",
-        ),
+        runLink(j.id),
+        project(j.p),
+        html`<span class="faint">shown when the run ends</span>`,
+        linkHost(j.host.name),
+        j.s ? timeHtml(j.s) : "stop time not published",
+        "Still holds a slot",
+        html`<div class="fl-prog"><b class="tinted tone-attention">${ui.icon("attention", { size: "sm" })} Orphaned hold</b><span class="reason">Its stop did not take${j.s ? html` at ${timeHtml(j.s)}` : ""}, but it still holds a ${j.host.name} slot. ${j.host.name} runs ${list(j.host.jobs).filter((x) => !x.o).length} jobs where it could run ${j.host.concurrency}.</span></div>`,
         ...(canAct(v)
           ? [
-              act(
-                v,
-                q.paused ? "queue-resume" : "queue-pause",
-                q.paused ? "Resume" : "Pause",
-                [["queue", q.queue]],
-              ),
+              ui.btn({
+                kind: ["danger", "sm"],
+                label: "Free the slot",
+                href: `${hostHref(j.host.name)}#p-hostsandboxes`,
+              }),
             ]
           : []),
       ],
-    })),
-    empty: "No queue was read.",
-  }),
+    }));
+    return ui.tbl({
+      label: "Active jobs",
+      stack: true,
+      heads: [
+        "Job",
+        "Project",
+        "Target",
+        "Host",
+        "Started",
+        { label: "Running for", num: true },
+        "Progress",
+        ...(canAct(v) ? [{ label: "Action", l: "" }] : []),
+      ],
+      rows: [...rows, ...orphan],
+      empty: "Nothing is running.",
+    });
+  },
+  {
+    flush: true,
+    sub: (s) =>
+      s
+        ? `${list(s.active).length} running, ${orphanRows(s).length} slots held by orphans`
+        : null,
+  },
 );
 
-export const fleetActive = wrap("Active jobs", (s, v) => {
-  const rows = list(s.active).map((j) => {
-    const p = j.progress;
-    const has = p && !p.ended && !p.absent;
-    return [
-      html`${project(j.project)} ${runLink(j.jobId)}`,
-      "shown when the run ends",
-      linkHost(j.host),
-      j.startedAt ? timeHtml(j.startedAt) : "not published",
-      j.startedAt ? ageText(v.now - j.startedAt) : "unknown",
-      has
-        ? html`${
-            p.phase?.count
-              ? ui.phases({
-                  names: Array.from(
-                    { length: Math.min(64, p.phase.count) },
-                    (_, i) => `Phase ${i + 1}`,
-                  ),
-                  index: p.phase.index,
-                })
-              : null
-          } <p>${progressText(p, v.now)}</p>`
-        : ui.noProgress("This worker reports no progress"),
-      ...(canAct(v) ? [jobAct(v, "cancel-active", "Cancel", j)] : []),
-    ];
-  });
-  const orphan = orphanRows(s).map((j) => ({
-    mark: "attention",
-    cells: [
-      html`${project(j.p)} ${runLink(j.id)}`,
-      "Orphaned hold",
-      linkHost(j.host.name),
-      j.s ? timeHtml(j.s) : "stop time not published",
-      "Still holds a slot",
-      html`<p> Orphaned hold: its stop did not take${j.s ? html` at ${timeHtml(j.s)}` : ""}, but it still holds a ${j.host.name} slot. ${j.host.name} runs ${list(j.host.jobs).filter((x) => !x.o).length} jobs where it could run ${j.host.concurrency}. </p>`,
-      ...(canAct(v)
-        ? [
-            ui.btn({
-              kind: ["ghost", "sm"],
-              label: "Free the slot",
-              href: `${hostHref(j.host.name)}#p-hostsandboxes`,
-            }),
-          ]
-        : []),
-    ],
-  }));
-  return ui.tbl({
-    label: "Active jobs",
-    stack: true,
-    heads: [
-      "Project and job",
-      "Target",
-      "Host",
-      "Started",
-      "Run time",
-      "Progress",
-      ...(canAct(v) ? ["Action"] : []),
-    ],
-    rows: [...rows, ...orphan],
-    empty: "Nothing is running.",
-  });
-});
-
-export const fleetHeld = wrap("Held", (s, v) => {
-  if (!s.held || s.held.unreachable)
-    return html`<p>The held jobs could not be read.</p>`;
-  const rows = [...list(s.held.rows)].sort(
-    (a, b) => (b.waitedMs ?? 0) - (a.waitedMs ?? 0),
-  );
-  const conditions = (r) =>
-    html`<ul> ${
-      r.after
-        ? html`<li> ${timeHtml(r.after)}: ${r.after <= v.now ? "met" : `in ${ageText(r.after - v.now)}`} </li>`
-        : null
-    }${list(r.answers).map(
-      (a) =>
-        html`<li> ${a.profile}: ${
-          a.answer === "go"
-            ? "met"
-            : a.answer === "hold"
-              ? "not yet"
-              : a.answer === "refuse"
-                ? "refused"
-                : a.answer
-        }${a.at ? html` (${timeHtml(a.at)})` : null} </li>`,
-    )} </ul>`;
-  return html`${
-    rows.length ? act(v, "cancel-all-held", "Cancel every held job") : null
-  }${ui.tbl({
-    label: "Held jobs",
-    stack: true,
-    heads: [
-      "Project and job",
-      "Target",
-      "Condition",
-      "Held for",
-      "Checks",
-      ...(canAct(v) ? ["Action"] : []),
-    ],
-    rows: rows.map((r) => [
-      html`${project(r.project)} ${runLink(r.jobId)}`,
-      r.target ?? "no target recorded",
-      html`<p> ${r.label ?? "Conditions not published"} </p> ${conditions(r)}<p class="note">${r.after ? "After a time" : "Without a time condition"}${
-        list(r.answers).length
-          ? `, then ${list(r.answers).length} ${list(r.answers).length === 1 ? "check" : "checks"}${` named ${list(
-              r.answers,
-            )
-              .map((a) => a.profile)
-              .join(", ")}`}`
-          : ", with no profile answer published yet"
-      }.</p>${list(r.answers).some((a) => a.answer === "unclear") ? html`<p>${list(r.answers).filter((a) => a.answer === "unclear").length} checks could not tell (${s.waitMaxFaults ?? 5} in a row ends the wait).</p>` : null}`,
-      ageText(r.waitedMs),
-      `${r.checks ?? 0} of ${s.waitMaxChecks ?? 96}`,
-      ...(canAct(v) ? [jobAct(v, "cancel-held", "Cancel", r)] : []),
-    ]),
-    empty: "No job is held.",
-  })} <p class="note"> A job starts when every condition is met. Checks spend nothing. A check profile gives up after ${Number(s.waitMaxMs ?? 86400000) / 3600000} hours or ${s.waitMaxChecks ?? 96} checks (wait-expired). A cancelled held job spent nothing while it waited. A check that cannot tell ${s.waitMaxFaults ?? 5} times in a row ends the wait. </p> ${s.held.more ? html`<p>${s.held.more} more held.</p>` : null}${
-    s.held.truncated ? html`<p>Not every held job was read.</p>` : null
-  }`;
-});
+const answerView = (answer) =>
+  answer === "go"
+    ? { text: "Met", status: "ok", icon: "done" }
+    : answer === "hold"
+      ? { text: "Not yet", status: "idle", icon: "hourglass" }
+      : answer === "refuse"
+        ? { text: "Refused", status: "refused", icon: "refused" }
+        : answer === "fault"
+          ? { text: "Fault", status: "attention", icon: "attention" }
+          : { text: "Unclear", status: "attention", icon: "attention" };
+export const fleetHeld = wrap(
+  "Held",
+  (s, v) => {
+    if (!s.held || s.held.unreachable)
+      return html`<p>The held jobs could not be read.</p>`;
+    const rows = [...list(s.held.rows)].sort(
+      (a, b) => (b.waitedMs ?? 0) - (a.waitedMs ?? 0),
+    );
+    return html`${rows.map(
+      (r) =>
+        html`<div class="fl-held"><div class="fl-held__h">${runLink(r.jobId)}${project(r.project)}<span>${r.target ?? "no target recorded"}</span><span class="muted">held ${ageText(r.waitedMs)}</span><span class="muted">${r.checks ?? 0} of ${s.waitMaxChecks ?? 96} checks</span><span class="end">${jobAct(v, "cancel-held", "Cancel", r)}</span></div><p class="card__sub">${r.label ?? "Conditions not published"}</p><p class="card__sub">It starts when every condition is met. ${r.after ? "After a time" : "Without a time condition"}${
+          list(r.answers).length
+            ? `, then ${list(r.answers).length} ${list(r.answers).length === 1 ? "check" : "checks"} named ${list(
+                r.answers,
+              )
+                .map((a) => a.profile)
+                .join(", ")}`
+            : ", with no profile answer published yet"
+        }.</p><ul class="fl-cond">${r.after ? html`<li>${ui.icon("clock", { size: "sm" })}<span><b>After ${timeHtml(r.after)}</b><span class="muted">${r.after <= v.now ? "met" : `in ${ageText(r.after - v.now)}`}</span></span>${ui.chip(r.after <= v.now ? "Met" : "Pending", { status: r.after <= v.now ? "ok" : "idle", icon: r.after <= v.now ? "done" : "hourglass" })}</li>` : null}${list(
+          r.answers,
+        ).map((a) => {
+          const state = answerView(a.answer);
+          return html`<li>${ui.icon(state.icon, { size: "sm" })}<span><b>${a.profile}</b><span class="muted">${state.text.toLowerCase()}${a.at ? html`, last checked ${timeHtml(a.at)}` : ", no check time published"}</span></span>${ui.chip(state.text, { status: state.status, icon: state.icon })}</li>`;
+        })}</ul>${list(r.answers).some((a) => a.answer === "unclear") ? html`<p class="card__sub">${list(r.answers).filter((a) => a.answer === "unclear").length} checks could not tell (${s.waitMaxFaults ?? 5} in a row ends the wait).</p>` : null}</div>`,
+    )}${!rows.length ? html`<p>No job is held.</p>` : null}<p class="note">A job starts when every condition is met. Checks spend nothing. A check profile gives up after ${Number(s.waitMaxMs ?? 86400000) / 3600000} hours or ${s.waitMaxChecks ?? 96} checks (wait-expired). A cancelled held job spent nothing while it waited. A check that cannot tell ${s.waitMaxFaults ?? 5} times in a row ends the wait.</p>${s.held.more ? html`<p>${s.held.more} more held.</p>` : null}${s.held.truncated ? html`<p>Not every held job was read.</p>` : null}`;
+  },
+  {
+    sub: (s) =>
+      s?.held && !s.held.unreachable ? headerSub(s.held.rows, "job") : null,
+    end: (s, v) =>
+      list(s.held?.rows).length
+        ? act(v, "cancel-all-held", "Cancel every held job")
+        : null,
+  },
+);
 
 export const fleetDelayed = wrap("Delayed", (s, v) => {
   const w = s.waiting;
@@ -325,7 +319,7 @@ export const fleetDelayed = wrap("Delayed", (s, v) => {
     return html`<p>The waiting jobs could not be read.</p>`;
   const cancellable = (r) =>
     r.attemptsMade === 0 && r.stalled === 0 && !r.recovery && !r.schedulerNext;
-  return html`<p> ${list(s.schedulers).length} cron schedules; ${
+  return html`${ui.kpi(s.queue?.counts?.delayed ?? "not read", "delayed jobs")}<p> ${list(s.schedulers).length} cron schedules; ${
     s.held?.unreachable
       ? "unreadable"
       : list(s.held?.rows).length + Number(s.held?.more ?? 0)
@@ -369,244 +363,156 @@ export const fleetDelayed = wrap("Delayed", (s, v) => {
   )} </ul> <p> Pause windows move to their end and reserve nothing. Retry backoff starts at 60 seconds and grows; scope and host slots ask after 5 seconds, endpoints after 7 seconds, host budget about every 9 seconds (keeping its place), and never-fits after 60 seconds for another host. </p> </details>`;
 });
 
-export const fleetHosts = wrap("Hosts", (s, v) => {
-  const hosts = list(s.hostBudgets);
-  const busy = hosts.reduce((n, h) => n + list(h.jobs).length, 0);
-  const complete = !s.queue?.fleetDegraded && hosts.every((h) => Array.isArray(h.jobs) && h.jobsMore === 0 && !h.jobsUnreadable && Number.isSafeInteger(Number(h.concurrency)) && h.concurrency !== null && h.concurrency !== "");
-  return html`${s.queue?.fleetDegraded ? html`<p>${REGISTRY_UNREAD_TEXT}</p>` : null}<p> ${hosts.filter((h) => beatAgeOf(h) !== null && beatAgeOf(h) <= 60000).length} beating, ${complete ? `${busy} of ${hosts.reduce((n, h) => n + Number(h.concurrency), 0)} slots busy` : `${busy} listed jobs hold slots; total occupancy is not known`}. </p> ${ui.tbl(
-    {
-      label: "Hosts",
+const completeHostJobs = (h, snapshot) =>
+  !snapshot.queue?.fleetDegraded && Array.isArray(h.jobs) && h.jobsMore === 0 && !h.jobsUnreadable &&
+  h.concurrency !== null && h.concurrency !== undefined && h.concurrency !== "" &&
+  Number.isSafeInteger(Number(h.concurrency)) && Number(h.concurrency) >= 0 &&
+  beatAgeOf(h) !== null && beatAgeOf(h) <= 60000;
+const resourceLine = (h, budgetKey, usedKey, label, divisor, units) => {
+  const budget = Number(h[budgetKey]);
+  const raw = h[usedKey];
+  const used =
+    raw !== null &&
+    raw !== undefined &&
+    raw !== "" &&
+    Number.isFinite(Number(raw))
+      ? Number(raw)
+      : null;
+  if (!(budget > 0))
+    return h[budgetKey] === "off"
+      ? html`<span class="fl-res"><span class="fl-res__l">${label}</span><span class="faint">budget off</span></span>`
+      : null;
+  return html`<span class="fl-res"><span class="fl-res__l">${label}</span>${used !== null ? ui.meter({ value: used, max: budget, label: `${label}: ${used / divisor} of ${budget / divisor} ${units}`, status: "running", height: 8 }) : html`<span class="faint">use not read</span>`}<span class="fl-res__v">${used === null ? "unknown" : used / divisor} of ${budget / divisor} ${units}</span></span>`;
+};
+
+export const fleetHosts = wrap(
+  "Hosts",
+  (s, v) => {
+    const hosts = list(s.hostBudgets);
+    return html`${s.queue?.fleetDegraded ? html`<p class="note">${REGISTRY_UNREAD_TEXT}</p>` : null}<ul class="hosts">${hosts.map(
+      (h) => {
+        const jobs = list(h.jobs);
+        const orphans = jobs.filter((j) => j.o).length;
+        const known = completeHostJobs(h, s);
+        const age = beatAgeOf(h);
+        const queue = list(s.queueCounts).find(
+          (q) => q.queue === `pi-jobs@${h.name}`,
+        );
+        return html`<li class="hostrow">${ui.dot(age !== null && age <= 60000 ? "ok" : "attention", { label: age === null ? "Heartbeat not known" : age <= 60000 ? "Beating" : "Heartbeat late" })}<span class="hostrow__n"><b>${linkHost(h.name)}</b><span>${
+          list(h.backends?.blessed)
+            .map(
+              (name) =>
+                `${name}${h.backends?.default === name ? " (default)" : ""}`,
+            )
+            .join(", ") || "venues not published"
+        }</span></span>${known ? ui.slots({ run: jobs.length - orphans, hold: orphans, free: Math.max(0, Number(h.concurrency ?? 0) - jobs.length) }) : html`<span class="faint">Free slots not known</span>`}<span class="hostrow__beat${age === null || age > 60000 ? " tone-attention" : ""}">${ui.icon("beat", { size: "sm" })}${ageText(age)}</span><span class="hostrow__p">${queue ? act(v, queue.paused ? "queue-resume" : "queue-pause", queue.paused ? "Resume" : "Pause", [["queue", queue.queue]]) : null}</span><span class="hostrow__x">${resourceLine(h, "budgetMemMiB", "usedMemMiB", "Memory", 1024, "GiB")}${resourceLine(h, "budgetCpuCenti", "usedCpuCenti", "CPU", 100, "cores")}${!(Number(h.budgetMemMiB) > 0) && !(Number(h.budgetCpuCenti) > 0) ? html`<span class="faint">This host reports no memory or CPU figures</span>` : null}${h.budgetCpuCenti && h.budgetCpuCenti !== "off" && !Number.isFinite(Number(h.budgetCpuCenti)) ? html`<span class="faint">CPU budget unreadable.</span>` : null}<span>Running ${jobs.length ? jobs.map((j, i) => html`${i ? ", " : null}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? ` ${ageText(v.now - j.at)}` : ""}`) : h.jobsUnreadable || !Array.isArray(h.jobs) ? "job list unreadable" : "none listed"}${h.jobsMore ? `; ${h.jobsMore} more not listed` : ""}</span><span>Routes: ${h.routes === false || h.routes === "false" ? "Shared jobs only" : "Routed and shared jobs"}</span>${age !== null && age > 60000 ? html`<span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}Heartbeat late: ${ageText(age)} (expected within 1m)</span>` : null}</span></li>`;
+      },
+    )}</ul>${!hosts.length ? html`<p>No host is registered.</p>` : null}`;
+  },
+  {
+    sub: (s) => {
+      if (!s) return null;
+      const hosts = list(s.hostBudgets);
+      const busy = hosts.reduce((n, h) => n + list(h.jobs).length, 0);
+      const complete =
+        !s.queue?.fleetDegraded &&
+        hosts.every(
+          (h) =>
+            Array.isArray(h.jobs) &&
+            h.jobsMore === 0 &&
+            !h.jobsUnreadable &&
+            h.concurrency !== null &&
+            h.concurrency !== "" &&
+            Number.isSafeInteger(Number(h.concurrency)),
+        );
+      return `${hosts.filter((h) => beatAgeOf(h) !== null && beatAgeOf(h) <= 60000).length} beating, ${complete ? `${busy} of ${hosts.reduce((n, h) => n + Number(h.concurrency), 0)} slots busy` : `${busy} listed jobs hold slots; total occupancy is not known`}`;
+    },
+  },
+);
+
+const doctorCounts = (r) =>
+  html`<span class="fl-cnt"><span class="tinted tone-failed">${ui.icon("failed", { size: "sm" })}<b>${r.counts?.fail ?? 0}</b> failing</span><span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}<b>${r.counts?.warn ?? 0}</b> warning</span><span class="tinted tone-ok">${ui.icon("done", { size: "sm" })}<b>${r.counts?.ok ?? 0}</b> passing</span></span>`;
+export const fleetDoctor = wrap(
+  "Doctor",
+  (s, v) => {
+    if (!s.doctor || s.doctor.unreachable)
+      return html`<p>The published doctor results could not be read.</p>`;
+    const rows = doctorHostsOf(s);
+    const silent = list(s.hostBudgets).filter(
+      (h) => !rows.some((r) => r.name === h.name),
+    );
+    return html`${rows.map((r) => {
+      const problems = doctorProblems(r);
+      const hidden =
+        Math.max(0, problems.length - DOCTOR_CHECKS_SHOWN) +
+        Number(r.more ?? 0);
+      return html`<div class="fl-doc"><div class="fl-doc__h"><b>${linkHost(r.name)}</b>${r.unreadable ? html`<span class="faint">Result unreadable</span>` : doctorCounts(r)}</div>${r.unreadable ? html`<p class="muted fl-doc__p">Its published result cannot be read (a worker of another version may have written it).</p>` : html`<p class="muted fl-doc__p">Doctor ran ${ageText(r.ageMs)} ago, ${doctorByText(r)}: ${doctorCountsText(r)}. Worker ${r.version ?? "version not published"}. ${r.openshell ? "The openshell venue was judged." : null}</p>${doctorStale(r) ? ui.banner({ status: "attention", title: `Stale: this result is ${ageText(r.ageMs)} old`, body: html`Older than two of this host's doctor runs (every ${r.every}h), so it may no longer describe the host. Version ${r.version ?? "not published"}, ${doctorByText(r)}.`, sm: true, icon: "clock" }) : null}${r.workerRun && !r.by?.worker ? html`<p class="muted fl-doc__p">It replaced the worker's own run${r.workerRun.uid !== undefined ? ` (uid ${r.workerRun.uid})` : ""}, so it shows another account's view of the host.</p>` : null}${problems.length ? html`<ul class="fl-chks">${problems.slice(0, DOCTOR_CHECKS_SHOWN).map((c) => html`<li class="fl-chk">${ui.chip(c.level === "fail" ? "Failing" : "Warning", { status: c.level === "fail" ? "failed" : "attention", icon: c.level === "fail" ? "failed" : "attention" })}<span class="code">${c.id}</span><span class="fl-chk__said">${c.label}</span>${c.fix ? html`<span class="fl-chk__fix"><b>Fix:</b> ${c.fix}</span>` : null}</li>`)}</ul>` : html`<p class="muted fl-doc__p">Every check passed.</p>`}${hidden ? html`<p class="muted fl-doc__p">${hidden} more not shown here; doctor on that host prints them all.</p>` : null}`}${v.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: r.name }) : html`<p class="muted fl-doc__p">Run doctor on this host to inspect these checks.</p>`}</div>`;
+    })}${silent.map((h) => html`<div class="fl-doc"><div class="fl-doc__h"><b>${linkHost(h.name)}</b><span class="faint">No doctor result published</span></div><p class="muted fl-doc__p">Run doctor on ${h.name} so this page can describe it.</p>${v.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: h.name }) : null}</div>`)}${silent.length ? html`<p class="note">No doctor result published by: ${silent.map((h) => h.name).join(", ")}.</p>` : null}${!rows.length ? html`<p class="note">No host has published doctor results yet. Each worker runs doctor a minute after it starts and then every PI_DOCTOR_INTERVAL_HOURS (24 by default).</p>` : null}${s.doctor.more ? html`<p>${s.doctor.more} more hosts published results; not every one is read.</p>` : null}`;
+  },
+  { sub: "each host's latest health check" },
+);
+
+const declarationChip = (p) =>
+  html`<span class="vw vw--${p.word}">${ui.chip(p.word, { status: p.word === "enforced" ? "ok" : null, icon: p.word === "enforced" ? "shield" : p.word === "asserted" ? "done" : "minus" })}</span>`;
+const servesChip = (feature) =>
+  html`<span class="chip ${feature.word === "image" ? "fl-asserted" : feature.word === "no" ? "fl-absent" : "tone-ok"}">${ui.icon(feature.word === "yes" ? "done" : feature.word === "no" ? "minus" : "info")}${feature.word === "image" ? "with the image" : feature.word}</span>`;
+export const fleetVenues = wrap(
+  "Venues",
+  (s) => {
+    const m = venuesView(list(s.hostBudgets));
+    const property = (venue, key) =>
+      venue.properties.find((p) => p.property === key);
+    const feature = (venue, key) => venue.serves.find((s) => s.key === key);
+    return html`${ui.tbl({ label: "Venue properties and what each venue serves", heads: [VENUE_LABEL, "Blessed on", "Default on", "Egress", "Local folders", "Steering", "Live transcript", "Recovery", "Sandbox shell", "Credentials held by"], rows: m.venues.map((x) => [html`<b>${runVenueLink(x.name)}</b><span class="reason">${x.describe}</span>`, x.blessedOn.join(", ") || "no live host", x.defaultOn.join(", ") || "no live host", declarationChip(property(x, "egress")), declarationChip(property(x, "localFolders")), servesChip(feature(x, "steering")), servesChip(feature(x, "liveTranscript")), servesChip(feature(x, "recovery")), servesChip(feature(x, "sandboxShell")), x.custody === "layer" ? "the venue's egress layer" : "the container"]), empty: "No venue in this build." })}<div class="fl-vfoot"><span>${ui.icon("shield", { size: "sm" })}Enforced: the worker builds and verifies the boundary.</span><span>Asserted: relies on a named assertion.</span><span>Absent: promises nothing.</span>${m.floors.map(
+      (f) =>
+        html`<span class="fl-floor">Floor on ${f.host}: <span class="code">${Object.entries(
+          f.floor,
+        )
+          .map(([key, word]) => `${key}=${word}`)
+          .join(", ")}</span></span>`,
+    )}<a class="link" href="${venueHref("local")}#p-venue-compare">All 14 properties</a></div>${m.unpublished.length ? html`<p class="note">Not published by ${m.unpublished.join(", ")}.</p>` : null}<details class="pp-pad"><summary>OpenShell setup published by the hosts</summary>${m.venues.flatMap((x) => list(x.openshell).map((o) => html`<p class="note">${x.name} on ${o.host}: ${o.unpublished ? "not published" : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown)}.</p>`))}</details>`;
+  },
+  {
+    flush: true,
+    sub: "published by each host's worker when it started; nothing here is read live",
+  },
+);
+const runVenueLink = (name) =>
+  html`<a class="code" href="${venueHref(name)}">${name}</a>`;
+
+export const fleetSchedulers = wrap(
+  "Schedules",
+  (s, v) =>
+    ui.tbl({
+      label: "Schedules",
       stack: true,
       heads: [
-        "Host",
-        "Venues",
-        "Slots",
-        "Budget",
-        "Running jobs",
-        "Routes",
-        "Heartbeat",
+        "Schedule",
+        "Project",
+        "Pattern",
+        "Next",
+        "Overdue",
+        { label: "Stalls", num: true },
       ],
-      rows: hosts.map((h) => {
-        const jobs = list(h.jobs);
-        const held = jobs.filter((j) => j.o).length;
-        const memory = Number(h.budgetMemMiB);
-        const cpu = Number(h.budgetCpuCenti);
+      rows: list(s.schedulers).map((x) => {
+        const n =
+          typeof x.key === "string" ? (s.schedulerStalls?.[x.key] ?? 0) : null;
         return [
-          linkHost(h.name),
-          list(h.backends?.blessed)
-            .map((n) => `${n}${h.backends?.default === n ? " (default)" : ""}`)
-            .join(", ") || "not published",
-          s.queue?.fleetDegraded ||
-          h.jobsUnreadable ||
-          !Array.isArray(h.jobs) ||
-          h.jobsMore ||
-          beatAgeOf(h) === null ||
-          beatAgeOf(h) > 60000
-            ? "Free slots not known"
-            : ui.slots({
-                run: jobs.length - held,
-                hold: held,
-                free: Math.max(0, Number(h.concurrency ?? 0) - jobs.length),
-              }),
-          html`${
-            memory > 0
-              ? html`<p> ${
-                  h.usedMemMiB !== "" && h.usedMemMiB !== undefined
-                    ? Number(h.usedMemMiB) / 1024
-                    : "unknown"
-                } of ${memory / 1024} GiB </p> ${
-                  h.usedMemMiB !== "" && h.usedMemMiB !== undefined
-                    ? ui.meter({
-                        value: Number(h.usedMemMiB),
-                        max: memory,
-                        label: "Memory",
-                      })
-                    : null
-                }`
-              : null
-          }${
-            cpu > 0
-              ? html`<p> ${
-                  h.usedCpuCenti !== "" && h.usedCpuCenti !== undefined
-                    ? Number(h.usedCpuCenti) / 100
-                    : "unknown"
-                } of ${cpu / 100} cores </p> ${
-                  h.usedCpuCenti !== "" && h.usedCpuCenti !== undefined
-                    ? ui.meter({
-                        value: Number(h.usedCpuCenti),
-                        max: cpu,
-                        label: "CPU",
-                      })
-                    : null
-                }`
-              : null
-          }${
-            h.budgetCpuCenti === "off"
-              ? html`<p>CPU budget off.</p>`
-              : h.budgetCpuCenti && !Number.isFinite(cpu)
-                ? html`<p>CPU budget unreadable.</p>`
-                : null
-          }${
-            !(memory > 0) && !(cpu > 0)
-              ? "This host reports no memory or CPU figures"
-              : null
-          }`,
-          html`${jobs.map(
-            (j) =>
-              html`<p> ${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${
-                j.at ? ` ${ageText(v.now - j.at)}` : ""
-              } </p>`,
-          )}`,
-          h.routes === false || h.routes === "false"
-            ? "Shared jobs only"
-            : "Routed and shared jobs",
-          beatAgeOf(h) > 60000
-            ? `Heartbeat late: ${ageText(beatAgeOf(h))} (expected within 1m)`
-            : ageText(beatAgeOf(h)),
+          html`<span class="code"><b>${x.key ?? "not recorded"}</b></span>`,
+          project(x.project),
+          html`<span class="code">${x.pattern ?? (x.every ? `every ${x.every} ms` : "not recorded")}</span>`,
+          x.next
+            ? html`${timeHtml(x.next)}<span class="reason">${x.next > v.now ? "in " : "overdue by "}${ageText(Math.abs(x.next - v.now))}</span>`
+            : "not recorded",
+          x.overdueMs ? ageText(x.overdueMs) : "no",
+          n === null
+            ? "unknown"
+            : `${n} of ${s.schedulerStallMax ?? "unknown"}`,
         ];
       }),
-      empty: "No host is registered.",
-    },
-  )}`;
-});
-
-export const fleetDoctor = wrap("Doctor", (s, v) => {
-  if (!s.doctor || s.doctor.unreachable)
-    return html`<p>The published doctor results could not be read.</p>`;
-  const rows = doctorHostsOf(s);
-  const silent = list(s.hostBudgets).filter(
-    (h) => !rows.some((r) => r.name === h.name),
-  );
-  return html`${rows.map((r) => {
-    const problems = doctorProblems(r);
-    const hidden =
-      Math.max(0, problems.length - DOCTOR_CHECKS_SHOWN) + Number(r.more ?? 0);
-    return html`<h3>${linkHost(r.name)}</h3> ${
-      r.unreadable
-        ? html`<p> Its published result cannot be read (a worker of another version may have written it). </p>`
-        : html`<p class="${
-            r.counts?.fail
-              ? "tone-failed"
-              : r.counts?.warn
-                ? "tone-attention"
-                : "tone-ok"
-          }" > Doctor ran ${ageText(r.ageMs)} ago, ${doctorByText(r)}: ${doctorCountsText(r)}. Worker ${r.version ?? "version not published"}. ${r.openshell ? "The openshell venue was judged." : null}</p> ${
-            doctorStale(r)
-              ? html`<p> Stale: older than two of this host's doctor runs (every ${r.every}h). </p>`
-              : null
-          }${
-            r.workerRun && !r.by?.worker
-              ? html`<p> It replaced the worker's own run${
-                  r.workerRun.uid !== undefined
-                    ? ` (uid ${r.workerRun.uid})`
-                    : ""
-                }, so it shows another account's view of the host. </p>`
-              : null
-          }${problems.length ? problems.slice(0, DOCTOR_CHECKS_SHOWN).map((c) => html`<div class="card card--tint ${c.level === "fail" ? "tone-failed" : "tone-attention"}"><h4><span class="code">${c.id}</span>: ${c.level === "fail" ? "failing" : "warning"}</h4><p>${c.label}</p>${c.fix ? html`<p>Fix: ${c.fix}</p>` : null}</div>`) : html`<p>Every check passed.</p>`}${
-            hidden
-              ? html`<p> ${hidden} more not shown here; doctor on that host prints them all. </p>`
-              : null
-          }`
-    }${v.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: r.name }) : html`<p>Run doctor on this host to inspect these checks.</p>`}`;
-  })}${silent.map((h) => (v.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: h.name }) : html`<p>Run doctor on ${h.name} to publish its result.</p>`))}${
-    silent.length
-      ? html`<p> No doctor result published by: ${silent.map((h) => h.name).join(", ")}. </p>`
-      : null
-  }${
-    !rows.length
-      ? html`<p> No host has published doctor results yet. Each worker runs doctor a minute after it starts and then every PI_DOCTOR_INTERVAL_HOURS (24 by default). </p>`
-      : null
-  }${
-    s.doctor.more
-      ? html`<p> ${s.doctor.more} more hosts published results; not every one is read. </p>`
-      : null
-  }`;
-});
-
-export const fleetVenues = wrap("Venues", (s) => {
-  const m = venuesView(list(s.hostBudgets));
-  return html`${ui.tbl({
-    label: "Venue summary",
-    stack: true,
-    heads: [VENUE_LABEL, "Blessed on", "Default on", "Floor", "Gateway"],
-    rows: m.venues.map((x) => [
-      html`<a href="${venueHref(x.name)}">${ui.vtag(x.name)}</a>`,
-      x.blessedOn.join(", ") || "no live host",
-      x.defaultOn.join(", ") || "no live host",
-      m.floors
-        .filter((f) => x.blessedOn.includes(f.host))
-        .map((f) => f.host)
-        .join(", ") || "none",
-      list(x.openshell)
-        .map(
-          (o) =>
-            `${o.host}: ${o.unpublished ? "not published" : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown)}`,
-        )
-        .join("; ") || "no gateway",
-    ]),
-    empty: "No venue in this build.",
-  })}${ui.tbl({
-    label: "Venue declaration matrix",
-    heads: [
-      "Property",
-      ...m.venues.map(
-        (x) => html`<a href="${venueHref(x.name)}">${x.name}</a>`,
-      ),
-    ],
-    rows: [
-      ...(m.venues[0]?.properties ?? [])
-        .map((p, i) => ({ p, i }))
-        .filter(({ p }) => ["egress", "localFolders"].includes(p.property))
-        .map(({ p, i }) => [
-          p.label,
-          ...m.venues.map((x) =>
-            html`<span class="vw vw--${x.properties[i].word}">${ui.chip(x.properties[i].word, {
-              status: x.properties[i].word === "enforced" ? "ok" : null,
-              icon: x.properties[i].word === "enforced" ? "shield" : x.properties[i].word === "asserted" ? "done" : "minus",
-            })}</span>`,
-          ),
-        ]),
-      ...(m.venues[0]?.serves ?? []).map((sv, i) => [
-        sv.key,
-        ...m.venues.map((x) => x.serves[i].word),
-      ]),
-      ["Credentials", ...m.venues.map((x) => x.custodyText)],
-    ],
-  })} <p class="note"> Enforced is enforced by the boundary, asserted relies on a named assertion, absent promises nothing. Open a venue for all properties, asserters and floors. </p> ${
-    m.unpublished.length
-      ? html`<p>Not published by ${m.unpublished.join(", ")}.</p>`
-      : null
-  }`;
-});
-
-export const fleetSchedulers = wrap("Schedules", (s, v) =>
-  ui.tbl({
-    label: "Schedules",
-    stack: true,
-    heads: [
-      "Schedule",
-      "Project",
-      "Pattern",
-      "Next",
-      "How far off",
-      "Overdue",
-      "Stalls",
-    ],
-    rows: list(s.schedulers).map((x) => {
-      const n =
-        typeof x.key === "string" ? (s.schedulerStalls?.[x.key] ?? 0) : null;
-      return [
-        x.key ?? "not recorded",
-        project(x.project),
-        x.pattern ?? (x.every ? `every ${x.every} ms` : "not recorded"),
-        x.next ? timeHtml(x.next) : "not recorded",
-        x.next ? ageText(Math.abs(x.next - v.now)) : "unknown",
-        x.overdueMs ? ageText(x.overdueMs) : "no",
-        n === null ? "unknown" : `${n} of ${s.schedulerStallMax ?? "unknown"}`,
-      ];
+      empty: "No schedule is registered.",
     }),
-    empty: "No schedule is registered.",
-  }),
+  { flush: true, sub: (s) => (s ? headerSub(s.schedulers, "schedule") : null) },
 );
 
 export function failedWhy(r) {
@@ -620,58 +526,76 @@ export function failedWhy(r) {
     : html`Its run record says: <span class="code">${r.reason}</span>, this console has no explanation for this reason.`;
 }
 
-export const fleetFailed = wrap("Failed jobs", (s, v) => {
-  const f = s.failed;
-  if (!f || f.unreachable)
-    return html`<p>The failed jobs could not be read.</p>`;
-  const rows = list(f.rows);
-  const filters = (action) => html`${[
-    ["queue", "Only queue", null],
-    ["repo", "Only repository", "owner/name"],
-  ].map(([name, label, placeholder]) => {
-    const id = `failed-${action}-${name}`;
-    return ui.field({ label, id, control: ui.input({ id, name, placeholder }) });
-  })}`;
-  const bulk = canAct(v) && rows.length
-    ? html`<details><summary>Retry or remove failed jobs in bulk</summary><form class="act" data-action="retry-all-failed">${filters("retry")}${ui.btn({ type: "submit", kind: ["paid", "sm"], label: "Retry all" })}</form><form class="act" data-action="remove-all-failed">${filters("remove")}${ui.btn({ type: "submit", kind: ["danger", "sm"], label: "Remove all" })}</form></details>`
-    : null;
-  return html`${ui.tbl({
-    label: "Failed jobs",
-    stack: true,
-    heads: [
-      "Job",
-      "Queue",
-      "Target",
-      "Attempts",
-      "Failed",
-      "Why (its record)",
-      ...(canAct(v) ? ["Action"] : []),
-    ],
-    rows: rows.map((r) => [
-      runLink(r.jobId),
-      r.queue,
-      r.target ?? "no target recorded",
-      `${r.attemptsMade ?? "unknown"} of ${r.attempts ?? "unknown"}`,
-      r.endedAt ? timeHtml(r.endedAt) : "unknown",
-      failedWhy(r),
-      ...(canAct(v)
-        ? [
-            html`${jobAct(v, "retry-failed", "Retry", r)}${jobAct(
-              v,
-              "remove-failed",
-              "Remove",
-              r,
-            )}`,
-          ]
-        : []),
-    ]),
-    empty: "No failed job is kept by the queue.",
-  })}${bulk}${f.more ? html`<p>${f.more} more failed.</p>` : null}${
-    v.role === "operator"
-      ? html`<h3>Why each failed</h3> ${rows.map(
-          (r) =>
-            html`<details> <summary class="code">${r.jobId}</summary> <p class="code">${r.failedReason}</p> </details>`,
-        )}`
-      : html`<p class="note">Failure reasons are shown to operators only.</p>`
-  }`;
-});
+export const fleetFailed = wrap(
+  "Failed jobs",
+  (s, v) => {
+    const f = s.failed;
+    if (!f || f.unreachable)
+      return html`<p>The failed jobs could not be read.</p>`;
+    const rows = list(f.rows);
+    const filters = (action) =>
+      html`${[
+        ["queue", "Only queue", null],
+        ["repo", "Only repository", "owner/name"],
+      ].map(([name, label, placeholder]) => {
+        const id = `failed-${action}-${name}`;
+        return ui.field({
+          label,
+          id,
+          control: ui.input({ id, name, placeholder }),
+        });
+      })}`;
+    const bulk =
+      canAct(v) && rows.length
+        ? html`<details><summary>Retry or remove failed jobs in bulk</summary><form class="act" data-action="retry-all-failed">${filters("retry")}${ui.btn({ type: "submit", kind: ["paid", "sm"], label: "Retry all" })}</form><form class="act" data-action="remove-all-failed">${filters("remove")}${ui.btn({ type: "submit", kind: ["danger", "sm"], label: "Remove all" })}</form></details>`
+        : null;
+    return html`${ui.tbl({
+      label: "Failed jobs",
+      stack: true,
+      heads: [
+        "Job",
+        "Queue",
+        "Target",
+        { label: "Attempts", num: true },
+        "Failed",
+        ...(canAct(v) ? ["Action"] : []),
+      ],
+      rows: rows.map((r) => [
+        {
+          html: html`${runLink(r.jobId)}<span class="reason fl-why">${failedWhy(r)}</span>`,
+          wide: true,
+        },
+        r.queue,
+        r.target ?? "no target recorded",
+        `${r.attemptsMade ?? "unknown"} of ${r.attempts ?? "unknown"}`,
+        r.endedAt ? timeHtml(r.endedAt) : "unknown",
+        ...(canAct(v)
+          ? [
+              html`${jobAct(v, "retry-failed", "Retry", r)}${jobAct(
+                v,
+                "remove-failed",
+                "Remove",
+                r,
+              )}`,
+            ]
+          : []),
+      ]),
+      empty: "No failed job is kept by the queue.",
+    })}<div class="pp-pad">${bulk}${f.more ? html`<p>${f.more} more failed.</p>` : null}${
+      v.role === "operator"
+        ? html`<h3>Why each failed</h3> ${rows.map(
+            (r) =>
+              html`<details> <summary class="code">${r.jobId}</summary> <p class="code">${r.failedReason}</p> </details>`,
+          )}`
+        : html`<p class="note">Failure reasons are shown to operators only.</p>`
+    }</div>`;
+  },
+  {
+    flush: true,
+    sub: "kept by the queue until you retry or remove",
+    end: (s, v) =>
+      list(s.failed?.rows).length
+        ? html`${act(v, "retry-all-failed", `Retry all ${list(s.failed.rows).length}`)}${act(v, "remove-all-failed", `Remove all ${list(s.failed.rows).length}`)}`
+        : null,
+  },
+);
