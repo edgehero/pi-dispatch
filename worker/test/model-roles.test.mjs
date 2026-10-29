@@ -128,3 +128,11 @@ test("agent names are YAML strings, never coerced missing or boolean values", ()
 		assert.throws(() => parseAgentDefinition(`---\n${name}description: Explore\n---\nPrompt`), { piDispatchConfig: true });
 	}
 });
+
+
+test("role map scopes use the projects file's canonical identifier rule", () => {
+	for (const project of ["Shop", ".shop", "shop_name", "a".repeat(33), "__proto__"]) assert.throws(() => validateModelRoles({ [project]: { editor: "p/m" } }));
+	assert.equal(validateModelRoles({ shop: { editor: "p/m" }, constructor: { editor: "p/m" } }).constructor.editor, "p/m");
+	const doc = validateModelRoles({ default: { name: { model: "p/m", fallbackModels: ["p/n"] } } });
+	assert.deepEqual(resolveModelRoles({ provider: "p", model: "role:name" }, doc, "constructor").fallbackModels, ["p/n"], "an inherited Object constructor is not a project override");
+});
