@@ -145,7 +145,7 @@
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {
-      "el": "**Wires:** config (the trigger names this flow), observed (a thicker line with \"6× · 12h ago\", chained in run records), potential (dashed \"mention\"), and the cron re-arm loop with its schedule.",
+      "el": "**Wires:** config (the trigger names this flow), observed (a thicker line with \"6\u00d7 \u00b7 12h ago\", chained in run records), potential (dashed \"mention\"), and the cron re-arm loop with its schedule.",
       "kind": "readme",
       "status": "new",
       "panel": "p-flows-key",
@@ -208,12 +208,17 @@
       "el": "The tab row under the title (Spend, Budget split, Capacity, Breakdown, Flows map) is shared by all five Spend views; the current one is filled. They are server-rendered links (`/insights`, `/insights/budget-split`, `/insights/capacity`, `/insights/breakdown`, `/insights/flows`, proposed routes) and on a phone the row scrolls inside itself.",
       "kind": "readme",
       "status": "new",
-      "panel": "p-flows",
-      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
       "golden": [
         "panels/spend-flows-selected.viewer"
       ],
-      "shows": "Flows map",
+      "shows": [
+        "aria-label=\"Spend views\"",
+        "/insights/budget-split",
+        "/insights/capacity",
+        "/insights/breakdown",
+        "/insights/flows"
+      ],
       "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
     },
     {

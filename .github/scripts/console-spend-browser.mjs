@@ -22,13 +22,13 @@ const paused = `new Promise(resolve => setTimeout(resolve, 120))`;
 export async function checkSpendBrowser({ browser, docs, origin, openPage, clockMs, shots }) {
 	const results = [];
 	const docFor = (page, test = () => true, role = "operator") => docs.find((d) => d.page === page && d.role === role && !d.file.startsWith("panels/") && test(d));
-	const run = async (name, doc, check, noScript = false) => {
+	const run = async (name, doc, check, noScript = false, { width = 1440, theme = "light" } = {}) => {
 		const result = { run: { key: `spend-browser-${name}`, doc: doc ?? { id: name, path: name, page: "insights", role: "operator" }, label: "real browser behavior" }, failures: [], notes: [] };
 		results.push(result);
 		if (!doc) { result.failures.push(`${name}: required Spend fixture is absent`); return; }
 		let target;
 		try {
-			const page = await openPage({ browser, key: name, url: origin + doc.path, metrics: { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, emulated: "light", clockMs, noScript });
+			const page = await openPage({ browser, key: name, url: origin + doc.path, metrics: { width, height: 1000, deviceScaleFactor: 1, mobile: width < 760 }, emulated: theme, clockMs, noScript });
 			target = page.t;
 			await check(page);
 			const errors = await page.evaluate(`({csp:window.__pdCsp||[],errors:window.__pdErrors||[]})`);
@@ -37,6 +37,36 @@ export async function checkSpendBrowser({ browser, docs, origin, openPage, clock
 		} catch (e) { result.failures.push(`${name}: ${e.message}`); }
 		finally { if (target) await target.close().catch(() => {}); }
 	};
+	// A panel's text and class names can all exist while the intended paint and composition are absent.
+	// Read the real computed SVG/card styles in both themes, at the actual card and phone widths.
+	for (const pageName of ["insights", "insights-budget-split", "insights-capacity"]) for (const width of [390, 1440]) for (const theme of ["light", "dark"]) {
+		await run(`paint-${pageName}-${width}-${theme}`, docFor(pageName), async ({ evaluate }) => {
+			const failures = await evaluate(`(() => {
+				const errors=[], root=getComputedStyle(document.documentElement);
+				const rgb=(token)=>{const h=root.getPropertyValue(token).trim();const m=/^#([a-f0-9]{6})$/i.exec(h);return m?'rgb('+[0,2,4].map(i=>parseInt(m[1].slice(i,i+2),16)).join(', ')+')':h;};
+				const paint=(selector,property,token)=>{const e=document.querySelector(selector);if(!e){errors.push('missing '+selector);return;}const actual=getComputedStyle(e)[property];if(actual!==rgb(token))errors.push(selector+' '+property+': '+actual+' expected '+rgb(token));};
+				const card=document.querySelector('.card');if(!card||parseFloat(getComputedStyle(card).borderRadius)<10)errors.push('Pulse card stylesheet is absent');
+				if(!/system-ui|sans-serif/.test(getComputedStyle(document.body).fontFamily))errors.push('Pulse typography is absent');
+				paint('.sp-tabs a[aria-current="page"]','backgroundColor','--primary');
+				if(${JSON.stringify(pageName)}==='insights'){
+					paint('#p-week .pbar__fill','fill','--ok');paint('#p-tokens .pbar__fill','fill','--ok');paint('#p-over .sp-bar','fill','--ok');
+					if(!document.querySelector('#p-split .sp-split'))errors.push('combined share strip is absent');
+					for(const text of document.querySelectorAll('#p-split .sp-split text')){const rect=text.parentNode.querySelector('rect');if(rect&&rect.getBoundingClientRect().width>150&&!text.firstChild.nodeValue.includes('%'))errors.push('a share label was truncated despite its wide segment');}
+					if(${width}===1440){const ids=['p-byflow','p-bymodel','p-byproject'], boxes=ids.map(id=>document.getElementById(id).getBoundingClientRect());if(Math.max(...boxes.map(b=>b.top))-Math.min(...boxes.map(b=>b.top))>2)errors.push('three breakdown cards are not one desktop row');}
+				}else if(${JSON.stringify(pageName)}==='insights-budget-split'){
+					paint('#p-spent-kpi .pbar__fill','fill','--ok');paint('#p-split .al-bar__spent','fill','--ok');paint('#p-split .al-bar__floor','stroke','--attention');
+					for(const cls of ['alloc','spent','floor','over'])if(!document.querySelector('#p-split .al-k--'+cls))errors.push('allocation key missing '+cls);
+				}else{
+					paint('#p-cap-hosts .cp-bar','fill','--running');paint('#p-cap-hosts .cp-slots','stroke','--ink-muted');paint('#p-cap-window .banner','backgroundColor','--attention-tint');
+					if(!document.querySelector('#p-cap-hosts .cp-trio')||!document.querySelector('#p-cap-hosts .cp-facts'))errors.push('host summaries are absent');
+					if(document.querySelectorAll('#p-cap-key .cp-key svg').length!==5)errors.push('five visual chart keys are absent');
+				}
+				if(document.scrollingElement.scrollWidth>${width})errors.push('page scrolls horizontally');
+				return errors;
+			})()`);
+			ensure(failures.length === 0, failures.join("; "));
+		}, false, { width, theme });
+	}
 	const map = docFor("insights-flows", (d) => d.html.includes('id="graph"'));
 	await run("map-controls", map, async ({ t, evaluate }) => {
 		const read = () => evaluate(`(() => {const v=document.getElementById("graph").viewBox.baseVal;return {x:v.x,y:v.y,width:v.width,height:v.height};})()`);
@@ -84,6 +114,7 @@ export async function checkSpendBrowser({ browser, docs, origin, openPage, clock
 		ensure(await evaluate(`(() => {const a=document.querySelector('#p-breakdown a[href*="/insights/flows?"]');if(!a)return false;const u=new URL(a.href);return u.pathname==='/insights/flows' && /^\\d+$/.test(u.searchParams.get('select')||'') && u.searchParams.has('range');})()`), "Breakdown has no stable trigger-selection link to the map");
 	});
 	await run("allocation-forms", docFor("insights-budget-split"), async ({ t, evaluate }) => {
+		ensure(await evaluate(`(() => {const form=document.querySelector('form[data-structured="priorities"]');const fields=[...form.elements].filter(e=>e.name.startsWith('weight:'));if(fields.length<2)return false;fields.forEach((e,i)=>{e.value=i===0?'3':i===1?'1':'0';});fields[0].dispatchEvent(new Event('input',{bubbles:true}));const outputs=[...form.querySelectorAll('[data-weight-share]')];return outputs.find(e=>e.dataset.weightShare===fields[0].name.slice(7))?.textContent==='about 75%'&&outputs.find(e=>e.dataset.weightShare===fields[1].name.slice(7))?.textContent==='about 25%';})()`), "Editing priority weights leaves the displayed shares stale");
 		await evaluate(`(() => {const original=window.fetch;window.__pdActionPosts=[];window.fetch=(url,opts)=>{if(String(url).startsWith('/api/act/')){window.__pdActionPosts.push({url:String(url),body:JSON.parse(opts.body)});const preview=String(url).endsWith('/preview');return Promise.resolve({ok:preview,status:preview?200:409,json:async()=>preview?{ticket:'browser-test-ticket',html:'<div class="confirm"><p>Browser test preview</p><span data-expires="300000">5:00</span><button type="button" data-confirm>Confirm</button><button type="button" data-cancel>Cancel</button></div>'}:{html:'<div class="confirm"><p>Browser test refusal, nothing changed</p><button type="button" data-close>Close</button></div>'}});}return original(url,opts);};})()`);
 		for (const action of ["priorities-set", "envelope-set", "allocation-revert"]) {
 			const selector = `form[data-action="${action}"]`;

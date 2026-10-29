@@ -49,6 +49,7 @@ import { SUGGEST_WINDOW_DAYS } from "@edgehero/pi-dispatch/size-suggest";
 import { coverageNotes, historyNotes, hostCaveats, hostFacts, noRunText, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
+import { parseHostBackends } from "@edgehero/pi-dispatch/backends";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "@edgehero/pi-dispatch/config";
 import { parseLiveJobs, parseJobsMore } from "@edgehero/pi-dispatch/live-jobs";
 import { deploymentDollarCaps } from "./dollar-windows.mjs";
@@ -351,7 +352,7 @@ export const INSIGHTS_CAPACITY_BUCKET_MS = Object.freeze({ "24h": 60 * 60 * 1000
  * `coverageLines`), so the page cannot say a number or a caveat differently from `pi-dispatch capacity`; the buckets
  * as the report has them, for the chart. The page only lays this out. Exported for its tests.
  */
-export function capacityViewOf(report) {
+export function capacityViewOf(report, { consoleDetails = false } = {}) {
   const cov = report.coverage ?? {};
   const hosts = (Array.isArray(report.hosts) ? report.hosts : []).map((h) => {
     const base = {
@@ -370,7 +371,10 @@ export function capacityViewOf(report) {
   // The coverage clauses one by one (the CLI joins them into one line), so a long list of hosts whose history is not here
   // can never push out what follows it: the records no host holds, the jobs running now, why a source was not read.
   const coverage = coverageNotes({ ...cov, historyNotShared: Array.isArray(cov.historyNotShared) ? cov.historyNotShared : [] }, { namesShown: INSIGHTS_CAPACITY_NAMES_SHOWN });
-  return { ...(report.fleet ? { fleet: report.fleet } : {}), window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts, noRun: noRunText(cov, "in this window") };
+  // The static export keeps the historical words-only coverage shape. The console needs explicit zero counts too:
+  // coverageNotes intentionally omits most zero clauses, which cannot tell a card "0 retried" from "not read".
+  const coverageCounts = consoleDetails ? Object.fromEntries(["used", "refusedBeforeSlot", "retried", "withoutSize", "withoutResources", "live", "liveNotCounted", "liveUnreadable", "running", "unreadable", "withoutHost", "earlier", "earlierDropped", "orphans", "legacyOccupied", "legacyRefused", "stalledRepick", "capacityOutOfRange", "cpuClamped"].map((key) => [key, Number.isSafeInteger(cov[key]) && cov[key] >= 0 ? cov[key] : null])) : null;
+  return { ...(report.fleet ? { fleet: report.fleet } : {}), ...(consoleDetails ? { coverageCounts: { source: ["mirror", "mirror+local", "local", "records"].includes(cov.source) ? cov.source : null, ...coverageCounts }, hostCount: hosts.length } : {}), window: { ...report.window }, truncated: cov.truncated === true, coverage, hosts, noRun: noRunText(cov, "in this window") };
 }
 
 /** How many names the page's coverage lists of the hosts whose history is not here, before "and N more". */
@@ -382,7 +386,7 @@ export const INSIGHTS_CAPACITY_NAMES_SHOWN = 5;
  * is) and the page's instant, cut to `capacityViewOf`. `{ unreachable }` when it could not be read; nothing here is
  * ever drawn as idle for that. `env` is the deployment's environment, `envFn()` when not given (`processEnv`).
  */
-export async function assembleCapacityView(paths, window, nowMs, { readCapacityFn = readCapacity, envFn = processEnv, env = envFn() } = {}) {
+export async function assembleCapacityView(paths, window, nowMs, { readCapacityFn = readCapacity, envFn = processEnv, env = envFn(), consoleDetails = false } = {}) {
   const bucketMs = INSIGHTS_CAPACITY_BUCKET_MS[window] ?? INSIGHTS_CAPACITY_BUCKET_MS["30d"];
   // The month's very first millisecond: a window of no time, which has nothing to read and is not a failure to read.
   const sinceMs = costsSinceMs(window, nowMs);
@@ -392,7 +396,7 @@ export async function assembleCapacityView(paths, window, nowMs, { readCapacityF
     if (!res?.report) return { unreachable: String(res?.error ?? "no report") };
     // Inside the try: a report this cannot word (a host without its capacity, a coverage that is not an object) is this
     // section's own degraded state, never a failure of the whole page.
-    return capacityViewOf(res.report);
+    return capacityViewOf(res.report, { consoleDetails });
   } catch (err) {
     return { unreachable: `the capacity report could not be read (${err?.message ?? err})` };
   }
@@ -602,7 +606,21 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   const opts = { pricing, project, nowMs, envFn, fullPaths: role === "operator" && fullPaths };
   const out = { window, view, project, nowMs };
   if (view === "capacity") {
-    out.capacity = await io.capacity(paths, window, nowMs, { envFn });
+    out.capacity = await io.capacity(paths, window, nowMs, { envFn, consoleDetails: true });
+    const registry = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
+    const live = Array.isArray(registry?.hosts) ? registry.hosts : null;
+    const byName = new Map((live ?? []).map((row) => [row.name, row]));
+    const reportHosts = Array.isArray(out.capacity?.hosts) ? out.capacity.hosts : [];
+    for (const host of reportHosts) {
+      const row = byName.get(host.name);
+      const backends = registry?.unreachable ? null : parseHostBackends(row?.backends);
+      host.venues = backends ? [...backends.blessed] : null;
+      host.defaultVenue = backends?.default ?? null;
+    }
+    out.capacity.venuesUnreadable = Boolean(registry?.unreachable) || live === null;
+    // Slot context is a current registry fact, not a sum of separately timed recorded capacities.
+    const slots = reportHosts.map((host) => Number(byName.get(host.name)?.concurrency));
+    out.capacity.totalSlots = !out.capacity.venuesUnreadable && slots.length > 0 && slots.every((n) => Number.isSafeInteger(n) && n > 0) && Number.isSafeInteger(slots.reduce((sum, n) => sum + n, 0)) ? slots.reduce((sum, n) => sum + n, 0) : null;
     out.sizing = await io.sizing(paths, nowMs, { envFn });
     return out;
   }

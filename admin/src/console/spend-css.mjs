@@ -1266,7 +1266,70 @@ export const SPEND_DESIGN_CSS = String.raw`
 }
 `;
 const adapters = `
-#p-plan-kpi .kpi b { font-size: 24px; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
+/* The copied cards use buttons for sample controls; the console uses real navigation links. */
+.spend-tabs a[aria-current="page"], .spend-controls .seg a[aria-current="page"] { background: var(--primary); color: var(--on-primary); }
+.spend-tabs { display: flex; flex-wrap: nowrap; gap: 6px; }
+.spend-tabs > a { flex: none; }
+.sp-kpi { gap: 8px; }
+.sp-kpi .kpi { margin-bottom: 2px; }
+.sp-kpi .facts { gap: 0; }
+.sp-kpi .fact { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 3px 0; font-size: 11px; line-height: 16px; }
+.sp-kpi .sp-kf { margin-top: 0; }
+.spend-whatif input, .spend-whatif select { background: var(--surface-2); }
+.sp-provenance { font-size: 11px; line-height: 16px; color: var(--ink-muted); }
+.sp-provenance > summary { cursor: pointer; }
+#p-plan-kpi .kpi b { font-size: 40px; }
+#p-plan-kpi .note { overflow-wrap: anywhere; }
+#p-over .sp-chart { display: block; width: 100%; height: 230px; max-width: 100%; }
+#p-over .sp-plot { border: 0; border-radius: 0; }
+#p-sizes .sp-hist { display: block; width: 100%; height: 180px; max-width: 100%; }
+#p-split .sp-split { display: block; width: 100%; height: 34px; }
+.sp-costs { min-width: 0; }
+.sp-costs section { min-width: 0; }
+.sp-costs .card__body { gap: 10px; }
+.sp-hb__l b, .sp-mp__t b { overflow-wrap: anywhere; }
+.sp-hb__v { max-width: 92px; white-space: normal; overflow-wrap: anywhere; }
+.sp-mp__v { max-width: 110px; white-space: normal; overflow-wrap: anywhere; }
+.sp-mp__k { min-width: 0; }
+.sp-caps .meterrow { grid-template-columns: minmax(0, 130px) minmax(0, 1fr) auto; }
+.sp-caps .meterrow__v { font-size: 12px; }
+.sp-caps .meterrow__l { overflow-wrap: anywhere; font-size: 12px; }
+.sp-cap-key { flex-direction: column; align-items: flex-start; }
+.pr-row { font-size: 12px; }
+.pr-row .pr-in { max-width: 100%; }
+.rs-l q { overflow-wrap: anywhere; }
+.rs-l { margin: 0; padding: 0; list-style: none; }
+.cn-l { margin: 0; padding: 0; list-style: none; }
+.cn-l .code { min-width: 0; overflow-wrap: anywhere; }
+#p-cap-hosts .cp-chart { display: block; width: 100%; max-width: 100%; height: 144px; }
+.cp-trio { flex-wrap: wrap; }
+.cp-host-meta { font-size: 13px; color: var(--ink-muted); }
+.cp-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+.cp-facts .facts { min-width: 0; }
+.cp-facts .fact { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+.cp-caveat { color: var(--attention-ink); }
+.cp-hatch { stroke: var(--line-strong); stroke-width: 1; fill: none; }
+.cp-peak-line { stroke: var(--ink); stroke-width: 2; }
+.cp-key svg { width: 22px; height: 16px; flex: none; }
+@media (max-width: 1100px) and (min-width: 761px) {
+ .spend-costs { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+ .spend-grid { display: flex; flex-direction: column; gap: var(--space-3); }
+ .spend-main, .spend-side { display: contents; }
+ .spend-grid #p-over { order: 1; }
+ .spend-grid .spend-costs { order: 2; width: 100%; grid-template-columns: minmax(0, 1fr); }
+ .spend-grid #p-sizes { order: 3; }
+ .spend-grid #p-caps { order: 4; }
+ .spend-grid #p-whatif { order: 5; }
+ .spend-grid #p-plan { order: 6; }
+ .spend-grid #p-split { order: 7; }
+ .spend-grid > section, .spend-grid .spend-main > section, .spend-grid .spend-side > section { width: 100%; }
+ .sp-caps .meterrow { grid-template-columns: minmax(0, 100px) minmax(0, 1fr) auto; }
+}
+@media (max-width: 600px) { .cp-facts { grid-template-columns: minmax(0, 1fr); } }
+
+#p-plan-kpi .kpi b { font-size: 40px; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
 .spend-tabs { margin: var(--space-2) 0 var(--space-4); min-width: 0; max-width: 100%; overflow-x: auto; }
 .spend-tabs .seg { width: max-content; min-width: 0; flex-wrap: nowrap; }
 .spend-controls { display: grid; gap: 8px; max-width: 100%; min-width: 0; }
@@ -1282,7 +1345,7 @@ const adapters = `
 .pid { font-weight: 650; }
 .note { color: var(--ink-muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 .mono { font-family: var(--font-mono); overflow-wrap: anywhere; }
-.sp-bar--estimated { fill: var(--ok-tint); stroke: var(--ok); stroke-width: .3; stroke-dasharray: 1 .5; }
+.sp-bar--estimated { fill: var(--ok-tint); stroke: var(--ok); stroke-width: 1.5; stroke-dasharray: 4 3; }
 .spend-chart { display: block; width: 100%; max-width: 100%; height: auto; }
 .spend-meter { display: block; width: 100%; height: 9px; }
 .spend-cap { display: grid; gap: 5px; min-width: 0; }
@@ -1292,6 +1355,7 @@ const adapters = `
 .spend-whatif label, .spend-fields label { display: grid; gap: 6px; min-width: 0; font-size: 12px; color: var(--ink-muted); }
 .spend-whatif input, .spend-whatif select, .spend-fields input, .spend-fields select { min-width: 0; width: 100%; padding: 8px 10px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--surface); }
 .spend-fields input[type=checkbox] { width: auto; }
+.spend-whatif input, .spend-whatif select { background: var(--surface-2); }
 .spend-whatif button, .spend-fields button { grid-column: 1 / -1; justify-self: start; }
 .table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
 table.table { width: 100%; border-collapse: collapse; font-size: 12px; }

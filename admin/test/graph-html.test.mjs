@@ -864,6 +864,22 @@ function chip(label, w = 160) {
 }
 const label = (c) => c.children[2];
 
+test("percentage-positioned chart labels fit their resolved SVG box, including the text inset (#749)", () => {
+  const segment = (width) => {
+    const rect = el("rect", { x: "9%", y: 0, width: "45%", height: 34 });
+    rect.x = { baseVal: { value: 90 } };
+    rect.width = { baseVal: { value: width } };
+    const text = el("text", { x: "9%", dx: 10, y: 22 }, "billing 45%");
+    text.x = { baseVal: { numberOfItems: 1, getItem: () => ({ value: 90 }) } };
+    return { group: el("g", {}, rect, text), text };
+  };
+  const wide = segment(450), narrow = segment(45);
+  fitLabels(docOf(wide.group, narrow.group), measureBy());
+  assert.equal(wide.text.firstChild.nodeValue, "billing 45%", "45% of a wide chart is not a 45px label box");
+  assert.notEqual(narrow.text.firstChild.nodeValue, "billing 45%", "the same percentage still needs fitting on a narrow chart");
+  assert.ok(widthOf(narrow.text.firstChild.nodeValue) <= 45 - 10 - 2, "the 10px text inset is part of the available width");
+});
+
 test("the page fits a label to its box by measuring it, and leaves one that fits alone (#422)", () => {
   // The chip's text box is the chip (the port straddling its edge is not the label's box): 160 - 38 - 2 = 120px.
   const wide = chip("MMMMMMMMMMMMMM");

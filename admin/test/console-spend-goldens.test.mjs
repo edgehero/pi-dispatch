@@ -10,7 +10,7 @@ const expected = {
   "spend-no-dollar-window.viewer": ["No daily dollar cap is configured", "$7.00"],
   "spend-partial-money.viewer": ["unknown cost", "≥"],
   "spend-unknown-money.viewer": ["unknown cost", "unknown"],
-  "spend-plan-model.viewer": ["plan:work", "plan-provider/plan-model"],
+  "spend-plan-model.viewer": ["plan:work", "plan-provider", "plan-model"],
   "spend-whatif-runs.viewer": ["The same 3 runs", "$0.30", "API-equivalent amount"],
   "spend-whatif-flow.viewer": ["Per run", "$0.20", "Runs in this window", "fixture"],
   "spend-populated.operator": ["Today", "$2.00", "Held for 1 running jobs"],
@@ -29,8 +29,8 @@ const expected = {
   "spend-split-outside-edit.operator": ["The split was edited outside the plan writer"],
   "spend-capacity.viewer": ["Fleet busy", "build3", "mini1", "mini2", "Jobs only: a machine busy with other work reads as idle"],
   "spend-capacity-no-time.viewer": ["No time in this window yet"],
-  "spend-capacity-unreadable.viewer": ["Capacity not read; the other Spend views still work"],
-  "spend-capacity-truncated.viewer": ["incomplete history", "missing time is never counted as idle"],
+  "spend-capacity-unreadable.viewer": ["Capacity not read", "The other Spend views still work."],
+  "spend-capacity-truncated.viewer": ["Incomplete history", "Missing time is drawn as no data and is never counted as idle."],
   "spend-breakdown.viewer": ["Window spend", "Settled run records only", "Where these numbers come from"],
   "spend-breakdown-unreadable.viewer": ["Costs could not be read"],
   "spend-breakdown-empty.viewer": ["No runs in the spend window", "Try 30 days"],
@@ -132,7 +132,12 @@ test("all five Spend views enforce the local-path boundary even when a viewer as
 test("Budget split headlines expose floors, permitted writers and remaining plan validity", async () => {
   const page = (await rendered)["spend-split.operator"];
   const text = cardText(page);
-  for (const sentence of ["Floors total $5.00", "Writers: operator-session, portfolio-job", "24 hours left in this plan"]) assert.ok(text.includes(sentence), sentence);
+  for (const sentence of ["Floors total $5.00", "Writers: operator-session, portfolio-job"]) assert.ok(text.includes(sentence), sentence);
+  const doc = cardDocument(page);
+  const plan = doc.within(doc.byId.get("p-plan-kpi"));
+  assert.match(cardText(plan), /24 hours left/);
+  assert.match(cardText(plan), /Applied .* until/);
+  assert.match(plan, /datetime="2026-10-09/);
 });
 
 
@@ -142,4 +147,15 @@ test("zero allocation refusals are named as zero and scheduled next fires are ti
   const selected = cardDocument(pages["spend-flows-selected.viewer"]);
   const panel = selected.byId.get("p-flows-selected");
   assert.ok(selected.descendants(panel).some((node) => node.tag === "time"), "scheduled next fire is a real time element");
+});
+
+
+test("compact plan rows preserve provider, model and subscription together", async () => {
+  const doc = cardDocument((await rendered)["spend-plan-model.viewer"]);
+  const panel = doc.byId.get("p-plan");
+  assert.ok(panel);
+  const row = doc.descendants(panel).find((node) => node.tag === "li" && cardText(doc.within(node)).includes("plan-model"));
+  assert.ok(row, "the plan model has its own visible row");
+  const text = cardText(doc.within(row));
+  for (const identity of ["plan-model", "plan-provider", "plan:work"]) assert.ok(text.includes(identity), identity);
 });

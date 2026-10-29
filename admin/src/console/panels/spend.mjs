@@ -3,6 +3,7 @@ import { PLAN_REASON_TEXT } from "@edgehero/pi-dispatch/reason-catalog";
 import { html, trustedRenderer as raw } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { countStatus } from "./overview.mjs";
+import * as capacityPulse from "./capacity-pulse.mjs";
 import { fmtCost, escapeInterpreted } from "../../panel.mjs";
 import { buildGraphScene, bannersHtml } from "../../graph-html.mjs";
 import {
@@ -48,7 +49,8 @@ const descriptions = [
 ];
 export const spendDescription = (name) =>
   descriptions[SPEND_VIEWS.findIndex(([n]) => n === name)] ?? descriptions[0];
-const spendWindowLabel = (range) => range === "24h" ? "last 24 hours" : insightsWindowLabel(range);
+const spendWindowLabel = (range) =>
+  range === "24h" ? "last 24 hours" : insightsWindowLabel(range);
 const payload = (v) => v.data?.insights ?? {};
 const number = (v) => (Number.isFinite(v) && v >= 0 ? v : null);
 const usd = (v) =>
@@ -62,17 +64,51 @@ const pct = (used, cap) =>
 const when = (value) =>
   timeHtml(typeof value === "string" ? Date.parse(value) : value);
 const note = (text) => html`<p class="sp-note note">${text}</p>`;
-const card = (title, body, end = null) =>
-  ui.card({ title, body: html`<div class="card__body">${body}</div>`, end });
+const card = (title, body, end = null, sub = null, bodyClass = "") =>
+  ui.card({
+    title,
+    sub,
+    body: html`<div class="card__body ${bodyClass}">${body}</div>`,
+    end,
+  });
 const empty = (title, text) => card(title, note(text));
 const factsOne = (pairs) => ui.facts(pairs, { cols: 1 });
-const unknownCount = (row) => Number.isSafeInteger(row?.unpriced) && row.unpriced > 0 ? row.unpriced : 0;
-const moneyMarks = ({ floor = false, estimated = false } = {}) => `${estimated === true ? "~" : ""}${floor === true ? "≥" : ""}`;
+const progress = (used, cap, label, status = "ok") =>
+  number(used) !== null && number(cap) > 0
+    ? ui.meter({ value: used, max: cap, label, status, height: 10 })
+    : null;
+const compactNumber = (n) =>
+  number(n) === null
+    ? "unknown"
+    : n >= 1_000_000
+      ? `${(n / 1_000_000).toFixed(2)}M`
+      : n >= 10_000
+        ? `${(n / 1000).toFixed(1)}k`
+        : n.toLocaleString("en-US");
+function statusBadge(status, word) {
+  return ui.badge(status, word);
+}
+function allocationWeights(p) {
+  const weights = p?.state?.weights;
+  return weights && typeof weights === "object"
+    ? Object.entries(weights).filter(([, value]) => number(value) !== null)
+    : [];
+}
+
+const overAllocation = (row) => number(row.spent) !== null && number(row.allocation) !== null && row.spent > row.allocation;
+const unknownCount = (row) =>
+  Number.isSafeInteger(row?.unpriced) && row.unpriced > 0 ? row.unpriced : 0;
+const moneyMarks = ({ floor = false, estimated = false } = {}) =>
+  `${estimated === true ? "~" : ""}${floor === true ? "≥" : ""}`;
 function markedMoney(amount, flags) {
-  return number(amount) === null ? usd(null) : html`${moneyMarks(flags)}${usd(amount)}`;
+  return number(amount) === null
+    ? usd(null)
+    : html`${moneyMarks(flags)}${usd(amount)}`;
 }
 function markedMoneyText(amount, flags) {
-  return number(amount) === null ? "unknown" : `${moneyMarks(flags)}$${(amount / 1e6).toFixed(2)}`;
+  return number(amount) === null
+    ? "unknown"
+    : `${moneyMarks(flags)}$${(amount / 1e6).toFixed(2)}`;
 }
 function settledMoney(row) {
   const unknown = unknownCount(row);
@@ -83,14 +119,15 @@ function settledMoneyText(row) {
   return `${markedMoneyText(row?.settledMicros, { floor: row?.settledFloor, estimated: row?.settledEstimated })}${unknown ? `; ${unknown} ${unknown === 1 ? "run has" : "runs have"} unknown cost` : ""}`;
 }
 
-
 /** Legacy chart geometry is in pixels. A viewBox preserves it when the Pulse card changes width. */
 export function responsiveInsightsSvg(markup) {
   return String(markup).replace(/<svg\b([^>]*)>/g, (tag, attributes) => {
     if (/\bviewBox=/.test(attributes)) return tag;
     const width = /\bwidth="(\d+(?:\.\d+)?)"/.exec(attributes)?.[1];
     const height = /\bheight="(\d+(?:\.\d+)?)"/.exec(attributes)?.[1];
-    return width && height ? `<svg${attributes} viewBox="0 0 ${width} ${height}">` : tag;
+    return width && height
+      ? `<svg${attributes} viewBox="0 0 ${width} ${height}">`
+      : tag;
   });
 }
 const responsiveLegacy = (markup) => raw(responsiveInsightsSvg(markup));
@@ -117,24 +154,10 @@ function link(v, path, over = {}) {
   return `${path}?${p}`;
 }
 export function spendTabs(v) {
-  return html`<nav class="sp-tabs spend-tabs" aria-label="Spend views">
-      ${ui.seg(
-        SPEND_VIEWS.map(([name, path, label]) => ({
-          label,
-          href: link(v, path),
-          on: v.page === name,
-        })),
-        { label: "Spend views" },
-      )}
-    </nav>
-    ${note(
-      `Spend window: ${spendWindowLabel(v.query?.range ?? "30d")}. ${v.page === "insights-flows" ? "Map window: the last 30 days of run records. " : ""}Series are bounded by log retention and the 92-day scan cap.`,
-    )}${v.role !== "operator" && v.query?.paths === "full"
-      ? note(
-          "Full local paths are shown to operators only; folder labels show folder names.",
-        )
-      : null}`;
+  const icons = ["spend", "pie", "slot", "runs", "flows"];
+  return html`<nav class="tabs sp-tabs spend-tabs" aria-label="Spend views">${SPEND_VIEWS.map(([name, path, label], index) => html`<a href="${link(v, path)}"${v.page === name ? html` aria-current="page"` : null}>${ui.icon(icons[index], { size: "sm" })}${label}</a>`)}</nav>${note(`Spend window: ${spendWindowLabel(v.query?.range ?? "30d")}. ${v.page === "insights-flows" ? "Map window: the last 30 days of run records. " : ""}Series are bounded by log retention and the 92-day scan cap.`)}${v.role !== "operator" && v.query?.paths === "full" ? note("Full local paths are shown to operators only; folder labels show folder names.") : null}`;
 }
+
 export function spendControls(v) {
   const path = SPEND_VIEWS.find(([n]) => n === v.page)?.[1] ?? "/insights";
   const ranges =
@@ -156,18 +179,21 @@ export function spendControls(v) {
         name,
       }));
   return html`<div class="spend-controls sp-controls">
-    ${v.page === "insights-budget-split"
-      ? null
-      : ui.seg(
-          ranges.map(([range, label]) => ({
-            label,
-            href: link(v, path, { range }),
-            on: (v.query?.range ?? "30d") === range,
-          })),
-          { label: "Spend window" },
-        )}${v.page === "insights-capacity"
-      ? null
-      : html`<div class="spend-projects">
+    ${
+      v.page === "insights-budget-split"
+        ? null
+        : ui.seg(
+            ranges.map(([range, label]) => ({
+              label,
+              href: link(v, path, { range }),
+              on: (v.query?.range ?? "30d") === range,
+            })),
+            { label: "Spend window" },
+          )
+    }${
+      v.page === "insights-capacity"
+        ? null
+        : html`<div class="spend-projects">
           ${ui.seg(
             [
               {
@@ -187,123 +213,134 @@ export function spendControls(v) {
             ],
             { label: "Projects" },
           )}
-        </div>`}
+        </div>`
+    }
   </div>`;
 }
 function kpi(title, amount, text) {
   return card(title, html`${ui.kpi(amount)}${note(text)}`);
 }
 function capLine(label, used, cap, money = true, soft = null) {
-  const percent =
-    number(used) !== null && number(cap) > 0
-      ? Math.min(100, (100 * used) / cap)
-      : 0;
-  return html`<div class="spend-cap">
-    <div class="row">
-      <span>${label}</span
-      ><span class="end"
-        >${money ? usd(used) : (used ?? "unknown")} /
-        ${money ? usd(cap) : (cap ?? "not set")}</span
-      >
-    </div>
-    <svg
-      class="sp-hb__bar spend-meter"
-      viewBox="0 0 100 5"
-      role="img"
-      aria-label="${label}: ${pct(used, cap)}"
-    >
-      <rect width="100" height="5" rx="2" fill="var(--line)"></rect>
-      <rect width="${percent}" height="5" rx="2" fill="var(--ink-muted)"></rect>
-      ${number(soft) !== null
-        ? html`<line
-            x1="${soft}"
-            x2="${soft}"
-            y1="0"
-            y2="5"
-            stroke="var(--ink)"
-            stroke-width=".6"
-          ></line>`
-        : null}
-    </svg>
-  </div>`;
+  const state = /: (Full|Soft hold|Open|unknown)$/.exec(label)?.[1];
+  const status =
+    state === "Full"
+      ? "failed"
+      : state === "Soft hold"
+        ? "attention"
+        : number(used) === null
+          ? "idle"
+          : "ok";
+  return html`<div class="meterrow"><span class="meterrow__l">${label}</span>${number(used) !== null && number(cap) > 0 ? ui.meter({ value: used, max: cap, label, status, hold: soft, height: 10 }) : html`<svg class="pbar tone-idle" height="10" role="img" aria-label="${label}: usage unknown"><rect class="pbar__bed" width="100%" height="10" rx="5"></rect>${number(soft) !== null ? html`<line class="pbar__hold" x1="${soft}%" x2="${soft}%" y1="-3" y2="13"></line>` : null}</svg>`}<span class="meterrow__v">${money ? usd(used) : compactNumber(used)} <span>/ ${money ? usd(cap) : compactNumber(cap)}</span></span></div>`;
 }
+
 export function spendWeek(v) {
   const s = payload(v).spend?.week;
+  const left =
+    number(s?.usedMicros) !== null && number(s?.capMicros) !== null
+      ? Math.max(0, s.capMicros - s.usedMicros)
+      : null;
   return card(
-    "This week",
-    html`${ui.kpi(
-      usd(s?.usedMicros),
-      `Monday to today, ${pct(s?.usedMicros, s?.capMicros)} of the weekly cap`,
-    )}${factsOne([
-      ["Weekly cap", usd(s?.capMicros)],
-      [
-        "Left",
-        number(s?.usedMicros) !== null && number(s?.capMicros) !== null
-          ? usd(Math.max(0, s.capMicros - s.usedMicros))
-          : usd(null),
-      ],
-    ])}${note("Spent and held, in this window's own counter.")}${v.query
-      ?.project
-      ? note(
-          s?.projectFallback
-            ? "Deployment weekly cap: this project has no separate weekly dollar window."
-            : `Project ${v.query.project}'s weekly dollar window.`,
-        )
-      : null}`,
+    "Spent this week",
+    html`${ui.kpi(usd(s?.usedMicros), html`of ${usd(s?.capMicros)}`)}${progress(s?.usedMicros, s?.capMicros, `This week's spend and held against its weekly cap`)}<p class="sp-kf">Mon to today. ${pct(s?.usedMicros, s?.capMicros)} of the weekly cap. ${usd(left)} left.</p>${v.query?.project ? note(s?.projectFallback ? "Deployment weekly cap: this project has no separate weekly dollar window." : `Project ${v.query.project}'s weekly dollar window.`) : null}`,
+    null,
+    null,
+    "sp-kpi",
   );
 }
+
 export function spendToday(v) {
   const s = payload(v).spend?.today;
   const capped = s?.counterConfigured === true || number(s?.capMicros) > 0;
-  const uncapped = s?.counterConfigured === false || s?.usedSource === "records";
-  const chargedDiffers = s?.ledgerMicros !== undefined && (s.ledgerMicros !== s.settledMicros || s.settledFloor === true || s.settledEstimated === true || unknownCount(s) > 0);
+  const uncapped =
+    s?.counterConfigured === false || s?.usedSource === "records";
+  const chargedDiffers =
+    s?.ledgerMicros !== undefined &&
+    (s.ledgerMicros !== s.settledMicros ||
+      s.settledFloor === true ||
+      s.settledEstimated === true ||
+      unknownCount(s) > 0);
   return card(
     "Today",
     html`${ui.kpi(
-      markedMoney(s?.usedMicros, { floor: s?.usedFloor, estimated: s?.usedEstimated }),
-      capped ? `${pct(s?.usedMicros, s?.capMicros)} of the daily cap` : uncapped ? "No daily dollar cap is configured" : "The daily dollar cap could not be read",
-    )}${factsOne([
-      ["Settled in today's records", settledMoney(s)],
-      [`Held for ${s?.heldJobs ?? "unknown"} running jobs`, usd(s?.heldMicros)],
-      ...(chargedDiffers ? [["Charged to dollar windows", usd(s.ledgerMicros)]] : []),
-      ...(capped ? [["Counter beyond recorded window charges and holds", usd(s?.unattributedMicros)]] : []),
-    ])}${chargedDiffers ? note("Readable record cost includes work outside dollar windows or cost that is not fully known. Charged to dollar windows is the recorded window charge, not the cost of all readable work.") : null}${note(
+      markedMoney(s?.usedMicros, {
+        floor: s?.usedFloor,
+        estimated: s?.usedEstimated,
+      }),
+      capped
+        ? html`of ${usd(s?.capMicros)}`
+        : uncapped
+          ? "No daily dollar cap is configured"
+          : "The daily dollar cap could not be read",
+    )}${progress(s?.usedMicros, s?.capMicros, "Today's spend and held against its daily dollar cap")}${factsOne(
+      [
+        ["Settled in today's records", settledMoney(s)],
+        [
+          `Held for ${s?.heldJobs ?? "unknown"} running jobs`,
+          usd(s?.heldMicros),
+        ],
+        ...(chargedDiffers
+          ? [["Charged to dollar windows", usd(s.ledgerMicros)]]
+          : []),
+        ...(capped
+          ? [
+              [
+                "Counter beyond recorded window charges and holds",
+                usd(s?.unattributedMicros),
+              ],
+            ]
+          : []),
+      ],
+    )}${s?.unknownHosts?.length ? note(`Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`) : null}<details class="sp-provenance"><summary>Cost and counter details</summary>${chargedDiffers ? note("Readable record cost includes work outside dollar windows or cost that is not fully known. Charged to dollar windows is the recorded window charge, not the cost of all readable work.") : null}${note(
       capped
         ? "The counter remainder is not explained by readable window charges and published holds. It can include records this host cannot read, such as another host's on an unshared PI_LOGS_DIR. Held money is reported by running jobs, never inferred from the counter."
-        : uncapped ? "The amount above is readable record cost plus published running-job holds, not a dollar-window counter. Held money is reported by running jobs, never inferred from another total." : "The dollar-window configuration could not be read. Unknown amounts are not zero.",
-    )}${s?.usedSource === "unknown-counter" ? note("The configured dollar counter could not be read. Its amount stays unknown; readable records do not replace it.") : null}${unknownCount(s) || s?.settledFloor || s?.settledEstimated ? note("Unknown costs are not counted as zero. ≥ marks a known minimum; ~ marks an estimate.") : null}${s?.reconciliationMismatch
-      ? note("Counter reconciliation mismatch: readable window charges and running-job holds exceed the counter. Refresh or check shared history; no held money is inferred.")
-      : null}${s?.unknownHosts?.length
-      ? note(`Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`)
-      : null}${v.query?.project
-      ? note(typeof s?.basis === "string" && s.basis.startsWith("project:")
-          ? "This project's own dollar windows."
-          : "Deployment dollar windows: this project has no separate dollar window.")
-      : null}`,
+        : uncapped
+          ? "The amount above is readable record cost plus published running-job holds, not a dollar-window counter. Held money is reported by running jobs, never inferred from another total."
+          : "The dollar-window configuration could not be read. Unknown amounts are not zero.",
+    )}${s?.usedSource === "unknown-counter" ? note("The configured dollar counter could not be read. Its amount stays unknown; readable records do not replace it.") : null}${unknownCount(s) || s?.settledFloor || s?.settledEstimated ? note("Unknown costs are not counted as zero. ≥ marks a known minimum; ~ marks an estimate.") : null}${
+      s?.reconciliationMismatch
+        ? note(
+            "Counter reconciliation mismatch: readable window charges and running-job holds exceed the counter. Refresh or check shared history; no held money is inferred.",
+          )
+        : null
+    }${
+      v.query?.project
+        ? note(
+            typeof s?.basis === "string" && s.basis.startsWith("project:")
+              ? "This project's own dollar windows."
+              : "Deployment dollar windows: this project has no separate dollar window.",
+          )
+        : null
+    }</details>`,
+    capped && number(s?.usedMicros) !== null
+      ? statusBadge("ok", pct(s.usedMicros, s.capMicros))
+      : null,
+    null,
+    "sp-kpi",
   );
 }
 
 export function spendTokens(v) {
   const s = payload(v).spend?.tokens;
-  return kpi(
+  return card(
     "Tokens today",
-    number(s?.used) === null ? "unknown" : s.used.toLocaleString("en-US"),
-    `${pct(s?.used, s?.cap)} of ${s?.cap ?? "an unset"} daily tokens. Refused at the cap; no soft hold.`,
+    html`${ui.kpi(compactNumber(s?.used), html`of ${compactNumber(s?.cap)}`)}${progress(s?.used, s?.cap, "Tokens today against the daily token cap")}<p class="sp-kf">${number(s?.used) === null ? "unknown" : s.used.toLocaleString("en-US")} tokens, ${pct(s?.used, s?.cap)} of the daily token cap. No soft hold.</p>`,
+    null,
+    null,
+    "sp-kpi",
   );
 }
+
 export function spendAverage(v) {
   const s = payload(v).spend;
   return card(
     "Average per metered run",
-    html`${ui.kpi(
-      usd(s?.average?.costMicros),
-      `Last 24 hours, ${s?.average?.runs ?? 0} metered runs`,
-    )}${factsOne([
-      ["Largest run", usd(s?.average?.largestMicros)],
-      ["Per-job cap", usd(s?.jobCapMicros)],
-    ])}`,
+    html`${ui.kpi(usd(s?.average?.costMicros), "last 24 hours")}${progress(s?.average?.costMicros, s?.jobCapMicros, "Average cost per metered run against the job cap")}<p class="sp-kf">${s?.average?.runs ?? 0} metered runs. The job cap is <b>${usd(s?.jobCapMicros)}</b>; the largest run used <b>${usd(s?.average?.largestMicros)}</b>.</p>`,
+    null,
+    null,
+    "sp-kpi",
   );
 }
+
 function tipsHtml(tips) {
   return html`<ol id="insights-tips" class="hidden-tips" hidden>
     ${tips.map((t) => html`<li>${t}</li>`)}
@@ -320,82 +357,43 @@ export function spendOver(v) {
   const cap = number(p.spend?.today?.capMicros);
   const max = Math.max(
     1,
+    cap ?? 0,
     ...days.map(
       (d) =>
         (number(d.settledMicros) ?? 0) +
         (d.today ? (number(d.heldMicros) ?? 0) : 0),
     ),
-    cap ?? 0,
   );
-  const width = 100 / Math.max(1, days.length);
-  return card(
-    "Spend over time",
-    html`<div id="wrap">
-        <div id="tip"></div>
-        <svg
-          class="sp-chart spend-chart"
-          viewBox="0 0 100 60"
-          role="img"
-          aria-label="Daily settled spend with today's running-job holds"
-        >
-          ${cap !== null
-            ? html`<line
-                class="sp-cap"
-                x1="0"
-                x2="100"
-                y1="${50 - (45 * cap) / max}"
-                y2="${50 - (45 * cap) / max}"
-              ></line>`
-            : null}${days.map((d, i) => {
-            const settled = number(d.settledMicros);
-            const held = d.today ? number(d.heldMicros) : 0;
-            const bar = (45 * (settled ?? 0)) / max;
-            const top = (45 * (held ?? 0)) / max;
-            return html`<g data-tip="${i}"
-              ><title>
-                ${d.date}: ${settledMoneyText(d)} settled${d.today ? `; ${markedMoneyText(held)} held` : ""}</title
-              >${settled === null ? html`<text x="${i * width + width / 2}" y="49" text-anchor="middle" font-size="3" fill="var(--ink-muted)">?</text>` : html`<rect
-                class="${d.settledEstimated ? "sp-bar sp-bar--estimated" : "sp-bar"}"
-                x="${i * width + width * 0.15}"
-                y="${50 - bar}"
-                width="${width * 0.7}"
-                height="${Math.max(0.15, bar)}"
-              ></rect>`}${top > 0
-                ? html`<rect
-                    class="sp-held"
-                    x="${i * width + width * 0.15}"
-                    y="${50 - bar - top}"
-                    width="${width * 0.7}"
-                    height="${top}"
-                  ></rect>`
-                : null}</g
-            >`;
-          })}
-        </svg>
-      </div>
-      ${tipsHtml(
-        days.map(
-          (d) =>
-            `${d.date}: ${settledMoneyText(d)} settled${d.today ? `; ${markedMoneyText(d.heldMicros)} held` : ""}`,
-        ),
-      )}
-      <p class="keyrow">
-        <span><i class="sp-k sp-k--bar"></i>Settled</span
-        ><span><i class="sp-k sp-k--held"></i>Held today</span
-        >${cap !== null ? html`<span>Daily dollar cap</span>` : null}
-      </p>
-      ${note(
-        "Solid: known settled record cost. Dashed top today: held for running jobs, released when they settle. Past days show record cost only. ≥ marks a known minimum; ~ marks an estimate; ? means the cost is unknown. Unknown costs are not zero.",
-      )}${ui.facts(
-        days.map((d) => [
-          d.date,
-          html`${settledMoney(d)}${d.today
-            ? html` settled; ${usd(d.heldMicros)} held`
-            : ""}`,
-        ]),
-        { cols: 3 },
-      )}`,
-  );
+  const n = Math.max(1, days.length);
+  const plot = 170;
+  const base = 192;
+  const dense = n > 10;
+  const valueOf = (d) =>
+    number(d.settledMicros) === null ||
+    (d.today && number(d.heldMicros) === null)
+      ? null
+      : d.settledMicros + (d.today ? d.heldMicros : 0);
+  const chart = html`<div id="wrap" class="sp-plot"><div id="tip"></div><svg class="sp-chart" height="230" role="img" aria-label="Daily settled spend with today's running-job holds">${cap !== null ? html`<line class="sp-cap" x1="0" x2="100%" y1="${base - (cap / max) * plot}" y2="${base - (cap / max) * plot}"></line><text class="sp-ll sp-ll--cap" x="100%" y="${Math.max(12, base - (cap / max) * plot - 7)}" text-anchor="end">daily cap ${markedMoneyText(cap)}</text>` : null}<line class="sp-base" x1="0" x2="100%" y1="${base}" y2="${base}"></line>${days.map(
+    (d, i) => {
+      const settled = number(d.settledMicros);
+      const held = d.today ? number(d.heldMicros) : 0;
+      const x = ((i + 0.18) / n) * 100;
+      const width = (0.64 / n) * 100;
+      const center = ((i + 0.5) / n) * 100;
+      const bar = ((settled ?? 0) / max) * plot;
+      const top = ((held ?? 0) / max) * plot;
+      const anchor = i === 0 ? "start" : i === n - 1 ? "end" : "middle";
+      const labelX = i === 0 ? 0 : i === n - 1 ? 100 : center;
+      return html`<g data-tip="${i}"><title>${d.date}: ${settledMoneyText(d)} settled${d.today ? `; ${markedMoneyText(held)} held` : ""}</title>${settled === null ? html`<text class="sp-gap" x="${center}%" y="${base - 8}" text-anchor="middle">?</text>` : html`<rect class="${d.settledEstimated ? "sp-bar sp-bar--estimated" : "sp-bar"}" x="${x}%" y="${base - bar}" width="${width}%" height="${Math.max(0.3, bar)}" rx="7"></rect>`}${top > 0 ? html`<rect class="sp-held" x="${x}%" y="${base - bar - top}" width="${width}%" height="${top}" rx="7"></rect>` : null}${!dense ? html`<text class="sp-v" x="${labelX}%" y="${Math.max(13, base - bar - top - 8)}" text-anchor="${anchor}">${markedMoneyText(valueOf(d), { floor: d.settledFloor, estimated: d.settledEstimated })}</text>` : null}${!dense || i % Math.ceil(n / 7) === 0 || i === n - 1 ? html`<text class="${d.today ? "sp-d sp-d--now" : "sp-d"}" x="${labelX}%" y="224" text-anchor="${anchor}">${d.date.slice(5)}</text>` : null}</g>`;
+    },
+  )}</svg></div>${tipsHtml(days.map((d) => `${d.date}: ${settledMoneyText(d)} settled${d.today ? `; ${markedMoneyText(d.heldMicros)} held` : ""}`))}<p class="keyrow"><span><i class="sp-k sp-k--bar"></i>Settled</span><span><i class="sp-k sp-k--held"></i>Held for running jobs, released when they settle</span></p><details class="sp-provenance sp-daily-values"${days.some((d) => unknownCount(d) > 0 || d.settledFloor || d.settledEstimated || number(d.settledMicros) === null) ? html` open` : null}><summary>Daily values and coverage</summary>${ui.facts(
+    days.map((d) => [
+      d.date,
+      html`${settledMoney(d)}${d.today ? html` settled; ${usd(d.heldMicros)} held` : ""}`,
+    ]),
+    { cols: 3 },
+  )}</details>${note("Past days show record cost only. ≥ marks a known minimum; ~ marks an estimate; ? means the cost is unknown. Unknown costs are not zero.")}`;
+  return card("Spend over time", chart, null, "per day, against the daily cap");
 }
 
 function moneyCost(cost) {
@@ -403,105 +401,62 @@ function moneyCost(cost) {
     ? html`${ui.icon("minus")} unknown`
     : fmtCost(cost);
 }
-function costRows(title, rows, label) {
+function costRows(title, rows, label, meta = () => "") {
   if (!rows?.length) return empty(title, "No runs in this spend window.");
   const max = Math.max(0.001, ...rows.map((r) => number(r.cost?.usd) ?? 0));
   return card(
     title,
-    html`${rows.map(
-      (r) =>
-        html`<div class="spend-cap">
-          <div class="row">
-            <span class="mono">${label(r)}</span
-            ><b class="end">${moneyCost(r.cost)}</b>
-          </div>
-          <svg
-            class="sp-hb__bar spend-meter"
-            viewBox="0 0 100 5"
-            aria-hidden="true"
-          >
-            <rect
-              width="${Math.min(100, (100 * (number(r.cost?.usd) ?? 0)) / max)}"
-              height="5"
-              fill="var(--ink-muted)"
-              ${r.cost?.class === "plan"
-                ? html` stroke="var(--ink-muted)" stroke-dasharray="2 1"`
-                : null}
-            ></rect>
-          </svg>
-        </div>`,
-    )}${note("Counts the runs in the selected spend window.")}`,
+    html`<div class="sp-hbars">${rows.map((r) => html`<div class="sp-hb"><span class="sp-hb__l"><b>${label(r)}</b>${meta(r) ? html`<small>${meta(r)}</small>` : null}</span><svg class="sp-hb__bar" height="12" aria-hidden="true"><rect class="sp-hb__bed" width="100%" height="12" rx="6"></rect><rect class="sp-hb__fill" width="${Math.min(100, (100 * (number(r.cost?.usd) ?? 0)) / max)}%" height="12" rx="6"></rect></svg><b class="sp-hb__v">${moneyCost(r.cost)}</b></div>`)}</div>${note("Counts the runs in the selected spend window.")}`,
   );
 }
 export const spendByFlow = (v) =>
   costRows("By flow", fold(v)?.byFlow, (r) => r.flow);
 export const spendByModel = (v) =>
-  costRows("By model", fold(v)?.byModel, (r) => `${r.provider}/${r.model}`);
+  costRows(
+    "By model",
+    fold(v)?.byModel,
+    (r) => r.model,
+    (r) =>
+      `${r.provider}; ${r.runs} runs${r.cost?.class === "plan" ? ` on plan:${r.cost.planId ?? "unknown"}` : ""}`,
+  );
 export const spendByProject = (v) =>
   costRows("By project", fold(v)?.byProject, (r) => r.label ?? r.key);
+
 export function spendSizes(v) {
-  const p = payload(v);
-  const s = p.spend;
+  const s = payload(v).spend;
   const cap = number(s?.jobCapMicros);
   const bins = s?.histogram ?? [];
   const max = Math.max(1, ...bins.map((b) => b.runs));
-  const width = 100 / Math.max(1, bins.length);
+  const n = Math.max(1, bins.length);
   return card(
     "Job sizes",
-    html`${cap > 0
-        ? html`<svg
-              class="sp-hist spend-chart"
-              viewBox="0 0 100 55"
-              role="img"
-              aria-label="Cost per metered run, equal bins to the job cap"
-            >
-              ${bins.map(
-                (b, i) =>
-                  html`<g
-                    ><title>
-                      ${usd(b.fromMicros)} to ${usd(b.toMicros)}: ${b.runs}
-                      metered runs</title
-                    ><rect
-                      class="sp-hbin"
-                      x="${i * width + 0.5}"
-                      y="${45 - (35 * b.runs) / max}"
-                      width="${width - 1}"
-                      height="${(35 * b.runs) / max}"
-                    ></rect
-                    ><text
-                      x="${i * width + width / 2}"
-                      y="${42 - (35 * b.runs) / max}"
-                      text-anchor="middle"
-                      font-size="3"
-                      fill="var(--ink)"
-                      >${b.runs}</text
-                    ></g
-                  >`,
-              )}</svg
-            >${note(
-              `Axis: $0 to $${(cap / 1e6).toFixed(2)}, in equal bins; ${s?.meteredRangeRuns ?? 0} metered runs.`,
-            )}`
-        : note("The per-job dollar cap could not be read.")}${note(
-        "While a dollar window is set, every run reserves its per-job cap before it starts; a zero-rated one reserves nothing.",
-      )}
-      <p class="sp-note">
-        The largest run used ${usd(s?.largestRangeMicros)}; a lower
-        <code>maxCostUsd</code> would hold less money while jobs run.
-      </p>
-      ${s?.overJobCapRuns
-        ? note(
-            `${s.overJobCapRuns} historical runs exceeded today's job cap and are included in the final bin.`,
-          )
-        : null}${v.role === "operator"
-        ? html`<a class="btn" href="/config#p-settings">Change the job cap</a>`
-        : null}`,
+    html`${
+      cap > 0
+        ? html`<svg class="sp-hist" height="180" role="img" aria-label="Cost per metered run, equal bins to the job cap"><line class="sp-base" x1="0" x2="100%" y1="142" y2="142"></line>${bins.map(
+            (b, i) => {
+              const h = (b.runs / max) * 105;
+              return html`<g><title>${markedMoneyText(b.fromMicros)} to ${markedMoneyText(b.toMicros)}: ${b.runs} metered runs</title><rect class="sp-hbin" x="${((i + 0.12) / n) * 97}%" y="${142 - h}" width="${(0.76 / n) * 97}%" height="${h}" rx="4"></rect><text class="sp-v" x="${((i + 0.5) / n) * 97}%" y="${134 - h}" text-anchor="middle">${b.runs}</text></g>`;
+            },
+          )}<line class="sp-capline" x1="99%" x2="99%" y1="22" y2="142"></line><text class="sp-ll" x="98%" y="15" text-anchor="end">job cap</text>${[0, 1, 2, 3, 4].map((i) => html`<text class="sp-d" x="${i * 24.5}%" y="166" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${markedMoneyText((cap * i) / 4)}</text>`)}</svg>${note(`Axis: $0 to $${(cap / 1e6).toFixed(2)}, in equal bins; ${s?.meteredRangeRuns ?? 0} metered runs.`)}`
+        : note("The per-job dollar cap could not be read.")
+    }${note("While a dollar window is set, every run reserves its per-job cap before it starts; a zero-rated one reserves nothing.")}<p class="sp-note">The largest run used <b>${usd(s?.largestRangeMicros)}</b>; a lower <code>maxCostUsd</code> would hold less money while jobs run.</p>${s?.overJobCapRuns ? note(`${s.overJobCapRuns} historical runs exceeded today's job cap and are included in the final bin.`) : null}`,
+    v.role === "operator"
+      ? ui.btn({
+          label: "Change the job cap",
+          href: "/config#p-settings",
+          icon: "config",
+          kind: "sm",
+        })
+      : null,
+    "cost per run",
   );
 }
 
-// Observe the next start, as Overview does; the worker's post-reservation state judges a different count.
 function countWord(used, cap, hold = null) {
   if (number(used) === null || number(cap) === null) return "unknown";
-  return { failed: "Full", attention: "Soft hold", ok: "Open" }[countStatus(used, cap, hold)];
+  return { failed: "Full", attention: "Soft hold", ok: "Open" }[
+    countStatus(used, cap, hold)
+  ];
 }
 export function spendCaps(v) {
   const p = payload(v);
@@ -515,11 +470,19 @@ export function spendCaps(v) {
   const windows = Array.isArray(dollar.windows) ? dollar.windows : [];
   return card(
     "Caps",
-    html`${b.unreachable || b.settingsInvalid || dollar.settingsInvalid || dollar.countersUnreachable || dollar.invalid?.length || dollar.limits?.invalid || b.scopedInvalid
-      ? note(
-          "The settings file or counters could not be read; amounts marked unknown are not zero.",
-        )
-      : null}${["day", "week", "month"].map((key) =>
+    html`<div class="sp-caps">${
+      b.unreachable ||
+      b.settingsInvalid ||
+      dollar.settingsInvalid ||
+      dollar.countersUnreachable ||
+      dollar.invalid?.length ||
+      dollar.limits?.invalid ||
+      b.scopedInvalid
+        ? note(
+            "The settings file or counters could not be read; amounts marked unknown are not zero.",
+          )
+        : null
+    }${["day", "week", "month"].map((key) =>
       b[key]?.cap
         ? capLine(
             `Jobs this ${key}: ${countWord(b[key].reserved ?? b[key].spent ?? b[key].used, b[key].cap, b.softHoldPct)}`,
@@ -529,9 +492,16 @@ export function spendCaps(v) {
             b.softHoldPct,
           )
         : null,
-    )}${b.tokens?.cap
-      ? capLine(`Tokens today: ${number(b.tokens.spent) === null ? "unknown" : b.tokens.spent >= b.tokens.cap ? "Full" : "Open"}`, b.tokens.spent, b.tokens.cap, false)
-      : null}${windows.map((d) =>
+    )}${
+      b.tokens?.cap
+        ? capLine(
+            `Tokens today: ${number(b.tokens.spent) === null ? "unknown" : b.tokens.spent >= b.tokens.cap ? "Full" : "Open"}`,
+            b.tokens.spent,
+            b.tokens.cap,
+            false,
+          )
+        : null
+    }${windows.map((d) =>
       capLine(
         `${pathLabel(v, d.name ?? d.ledger ?? "Deployment dollars")} ${d.window} (spent and held): ${number(d.counterMicros) === null ? "unknown" : d.full ? "Full" : "Open"}`,
         d.counterMicros,
@@ -548,13 +518,19 @@ export function spendCaps(v) {
             )
           : null,
       ),
-    )}${note(
-      "Open. From the soft hold new starts are refused; nothing is spent. Full: another job at its per-job cap would not fit. The soft-hold tick applies to global job windows only. Scoped job windows, tokens and dollars have hard caps.",
-    )}${v.role === "operator"
-      ? html`<a class="btn" href="/config#p-settings">Edit caps</a>`
-      : null}`,
+    )}</div><p class="keyrow sp-cap-key"><span><i class="k tone-ok"></i>Open</span><span><i class="k tone-attention"></i>From the job soft hold new starts are refused; nothing is spent.</span><span><i class="k tone-failed"></i>Full: another job at its per-job cap would not fit.</span></p>${note("The soft-hold tick applies to global job windows only. Scoped job windows, tokens and dollars have hard caps.")}`,
+    v.role === "operator"
+      ? ui.btn({
+          label: "Edit caps",
+          href: "/config#p-settings",
+          icon: "config",
+          kind: "sm",
+        })
+      : null,
+    "job soft-hold ticks only",
   );
 }
+
 function whatif(v, perFlow) {
   const d = v.data ?? {};
   const q = v.query ?? {};
@@ -586,12 +562,10 @@ function whatif(v, perFlow) {
     );
   else if (result?.runSet) {
     const r = result.runSet;
-    answer = html`${ui.kpi(
-      usd(number(r.usd) === null ? null : r.usd * 1e6),
-      `The same ${r.runs ?? 0} runs on ${q.whatif}`,
-    )}${note(
-      `Instead of ${number(r.originalUsd) === null ? "unknown" : `$${r.originalUsd.toFixed(2)}`}. ${r.excluded ?? 0} runs had no ledger and were excluded. ${r.planId ? `Plan ${r.planId}; this is the API-equivalent amount the dollar windows would be charged.` : ""}`,
-    )}`;
+    const target = number(r.usd) === null ? null : r.usd * 1e6;
+    const actual = number(r.originalUsd) === null ? null : r.originalUsd * 1e6;
+    const scale = Math.max(1, target ?? 0, actual ?? 0);
+    answer = html`<p class="sp-wi__s">The same ${r.runs ?? 0} runs on <b>${q.whatif}</b> would have cost about <b>${usd(target)}</b> instead of <b>${usd(actual)}</b>.</p><div class="sp-wi"><span class="sp-wi__l">Recorded cost<small>the same ledgered runs</small></span>${progress(actual, scale, "What these ledgered runs cost", "idle")}<b>${usd(actual)}</b><span class="sp-wi__l">${q.whatif}<small>estimate</small></span>${progress(target, scale, "The same runs repriced on the selected model")}<b>about ${usd(target)}</b></div>${note(`${r.excluded ?? 0} runs had no ledger and were excluded. ${r.planId ? `Plan ${r.planId}; this is the API-equivalent amount the dollar windows would be charged.` : ""}`)}`;
   } else if (result?.result) {
     const r = result.result;
     answer = html`${ui.facts([
@@ -627,11 +601,15 @@ function whatif(v, perFlow) {
           type="hidden"
           name="range"
           value="${q.range ?? "30d"}"
-        />${q.project
-          ? html`<input type="hidden" name="project" value="${q.project}" />`
-          : null}${q.paths
-          ? html`<input type="hidden" name="paths" value="${q.paths}" />`
-          : null}<label
+        />${
+          q.project
+            ? html`<input type="hidden" name="project" value="${q.project}" />`
+            : null
+        }${
+          q.paths
+            ? html`<input type="hidden" name="paths" value="${q.paths}" />`
+            : null
+        }<label
           >Model<input
             name="whatif"
             list="spend-models"
@@ -639,8 +617,9 @@ function whatif(v, perFlow) {
             maxlength="193"
             value="${q.whatif ?? ""}"
             placeholder="provider/model" /></label
-        >${perFlow
-          ? html`<label
+        >${
+          perFlow
+            ? html`<label
                 >Flow<input
                   name="flow"
                   list="spend-flows"
@@ -652,7 +631,7 @@ function whatif(v, perFlow) {
                   .filter((r) => WHATIF_FLOW_RE.test(r.flow ?? ""))
                   .map((r) => html`<option value="${r.flow}"></option>`)}
               </datalist>`
-          : html`<label
+            : html`<label
               >Which runs<select name="runs">
                 <option
                   value="24h"
@@ -667,7 +646,8 @@ function whatif(v, perFlow) {
                   This week
                 </option>
               </select></label
-            >`}<datalist id="spend-models">
+            >`
+        }<datalist id="spend-models">
           ${models.map(
             (m) =>
               html`<option value="${typeof m === "string" ? m : m.id}">
@@ -687,28 +667,12 @@ export function spendPlans(v) {
   const f = normFold(payload(v).recent24h);
   return card(
     "Metered and plan",
-    html`${f
-      ? factsOne(
-          f.byModel.map((r) => [
-            `${r.provider}/${r.model}`,
-            html`${r.runs} runs, ${r.tokens} tokens,
-            ${r.cost?.class === "plan"
-              ? html`Billed by plan:${r.cost.planId ?? "unknown"}, not per run`
-              : moneyCost(r.cost)}${payload(v).triggersByModel?.[
-              `${r.provider}/${r.model}`
-            ]?.length
-              ? html`; triggers
-                ${payload(v).triggersByModel[`${r.provider}/${r.model}`].join(
-                  ", ",
-                )}`
-              : null}`,
-          ]),
-        )
-      : note("No runs could be read for the last 24 hours.")}${note(
-      "Plan runs are billed by plan:<id>, not per run. They count against every cap, with dollar windows charged at their API-equivalent price.",
-    )}`,
+    html`${f ? html`<ul class="sp-mp">${f.byModel.map((r) => html`<li><span class="sp-mp__k">${r.cost?.class === "plan" ? "plan" : "metered"}</span><span class="sp-mp__t"><b>${r.model}</b><small>${r.provider}; ${r.runs} runs in 24 hours, ${r.tokens.toLocaleString("en-US")} tokens${payload(v).triggersByModel?.[`${r.provider}/${r.model}`]?.length ? ` (${payload(v).triggersByModel[`${r.provider}/${r.model}`].join(", ")})` : ""}. ${r.cost?.class === "plan" ? `Billed by plan:${r.cost.planId ?? "unknown"}, not per run.` : ""}</small></span><b class="sp-mp__v">${moneyCost(r.cost)}</b></li>`)}</ul>` : note("No runs could be read for the last 24 hours.")}${note("Plan runs are billed by plan:<id>, not per run. They count against every cap, with dollar windows charged at their API-equivalent price.")}`,
+    null,
+    "last 24 hours",
   );
 }
+
 function envelopeForm(p) {
   const source = p?.envelope;
   if (!source) return null;
@@ -727,22 +691,44 @@ function allocation(v) {
   return normAllocation(payload(v).allocation);
 }
 export function spendSplit(v) {
+  const p = payload(v).allocation;
   const a = allocation(v);
+  const weights = allocationWeights(p);
+  const total = weights.reduce((n, [, weight]) => n + weight, 0);
+  let x = 0;
+  const shares = new Map(
+    weights.map(([id, weight]) => [
+      id,
+      total > 0 ? (weight / total) * 100 : null,
+    ]),
+  );
   return card(
     "Budget split",
-    html`${a?.kind === "live"
-        ? html`${note(
-            `Weights only: it never changes a cap. Writer ${a.state?.writer ?? "not known"}; plan ${a.state?.planId ?? "none"}. Trigger ${payload(v).allocation?.state?.triggerId ?? "not recorded"}; model ${payload(v).allocation?.state?.model ?? "not recorded"}.`,
-          )}${when(a.state?.appliedAt)}${a.rows
-            .filter((r) => !v.query?.project || v.query.project === r.id)
-            .map((r) => capLine(r.id, r.spent, r.allocation))}`
-        : note("No budget split is available.")}<a
-        class="btn"
-        href="${link(v, "/insights/budget-split")}"
-        >Open Budget split</a
-      >`,
+    html`${
+      a?.kind === "live"
+        ? html`${
+            total > 0
+              ? html`<svg class="sp-split" height="34" role="img" aria-label="Allocation weight shares">${weights.map(
+                  ([id, weight], i) => {
+                    const width = (weight / total) * 100;
+                    const at = x;
+                    x += width;
+                    return html`<g><title>${id}: ${Math.round(width)}% share</title><rect class="${i % 2 ? "sp-seg sp-seg--1" : "sp-seg sp-seg--0"}" x="${at}%" y="0" width="${width}%" height="34" rx="10"></rect>${width >= 15 ? html`<text class="sp-seg__t" x="${at}%" dx="10" y="22">${id} ${Math.round(width)}%</text>` : null}</g>`;
+                  },
+                )}</svg>`
+              : note(
+                  weights.length
+                    ? "All published weights are zero; there are no proportional shares."
+                    : "The split's weights were not published; shares are unknown.",
+                )
+          }${note(`Weights only: it never changes a cap. Written by ${p?.state?.triggerId ?? a.state?.writer ?? "not known"}, writer ${a.state?.writer ?? "unknown"}, on ${p?.state?.model ?? "a model not recorded"}.`)}${when(a.state?.appliedAt)}<div class="sp-rows">${a.rows.filter((r) => !v.query?.project || v.query.project === r.id).map((r) => capLine(`${r.id}, ${shares.get(r.id) === null || shares.get(r.id) === undefined ? weights.length && total === 0 ? "no proportional" : "unknown" : Math.round(shares.get(r.id)) + "%"} share`, r.spent, r.allocation))}</div>`
+        : note("No budget split is available.")
+    }<a class="btn btn--sm" href="${link(v, "/insights/budget-split")}">Open Budget split</a>`,
+    null,
+    a?.window ?? null,
   );
 }
+
 export function splitEnvelopeKpi(v) {
   const a = allocation(v);
   return kpi(
@@ -761,25 +747,36 @@ export function splitAllocatedKpi(v) {
 }
 export function splitSpentKpi(v) {
   const a = allocation(v);
-  return kpi(
+  return card(
     "Spent this envelope window",
-    usd(a?.deploymentSpent),
-    `${a?.rows?.filter((r) => r.spent > r.allocation).length ?? 0} projects over allocation. Includes held money.`,
+    html`${ui.kpi(usd(a?.deploymentSpent), html`of ${usd(a?.totalMicros)}`)}${progress(a?.deploymentSpent, a?.totalMicros, "Spent and held against the allocation envelope")}<p class="sx-k">${a?.rows?.filter(overAllocation).length ?? 0} projects over allocation. Includes held money.</p>`,
   );
 }
 export function splitPlanKpi(v) {
   const a = allocation(v);
   const until = Date.parse(payload(v).allocation?.state?.validUntil ?? "");
-  const remaining = Number.isFinite(until) ? Math.max(0, Math.ceil((until - v.now) / 3_600_000)) : null;
+  const hours =
+    Number.isFinite(until) && Number.isFinite(v.now)
+      ? Math.max(0, Math.ceil((until - v.now) / 3_600_000))
+      : null;
+  const duration =
+    hours === null
+      ? "unknown"
+      : hours >= 48
+        ? `${Math.ceil(hours / 24)} days`
+        : `${hours} hours`;
   return card(
     "Plan in force",
-    html`${ui.kpi(a?.state?.planId ?? "No split yet")}${note(
-      `Writer ${a?.state?.writer ?? "unknown"}`,
-    )}${when(a?.state?.appliedAt)}${note("Valid until")}${when(
-      a?.state?.validUntil,
-    )}${note(remaining === null ? "No plan expiry recorded." : `${remaining} hours left in this plan.`)}`,
+    html`${ui.kpi(a?.state ? duration : "No split yet", a?.state ? "left" : null)}<p class="sx-k">Applied ${when(a?.state?.appliedAt)} by <span class="code">${payload(v).allocation?.state?.triggerId ?? a?.state?.writer ?? "unknown"}</span>, until ${when(a?.state?.validUntil)}.</p>${hours === null ? note("No plan expiry recorded.") : null}`,
+    a?.state
+      ? statusBadge(
+          hours === 0 ? "attention" : "ok",
+          hours === 0 ? "Expired" : "Applied",
+        )
+      : null,
   );
 }
+
 export function splitRows(v) {
   const a = allocation(v);
   const p = payload(v).allocation;
@@ -791,20 +788,31 @@ export function splitRows(v) {
   const hosts = p.hosts ?? payload(v).hosts ?? [];
   return card(
     "Budget split",
-    html`${note(
-        `Plan ${a.state?.planId ?? "none"}, writer ${a.state?.writer ?? "unknown"}${a.state?.clamped ? ", step clamped" : ""}.`,
-      )}${when(a.state?.appliedAt)}${hosts.length
-        ? ui.facts(
-            hosts.map((h) => [
-              h.name,
-              h.fpEnvelope
-                ? h.fpEnvelope === p.digest
-                  ? "Same envelope"
-                  : "Different envelope"
-                : "Envelope digest not published",
-            ]),
-          )
-        : note("Host envelope agreement is unknown.")}
+    html`<p class="al-env">${ui.icon("pie")}<span><b>${usd(a.totalMicros)} per ${a.window ?? "unknown window"}</b>, delegation ${a.delegation ? "on" : "off"}</span><span class="al-env__h">Unallocated <b>${usd(a.state?.unallocated)}</b>; deployment spent <b>${usd(a.deploymentSpent)}</b></span></p>${ui.facts(
+      [
+        ["Plan", html`<span class="code">${a.state?.planId ?? "none"}</span>`],
+        [
+          "Written by",
+          html`<span class="code">${a.state?.writer ?? "unknown"}</span>${p.state?.triggerId ? html`, the ${p.state.triggerId} run` : null}`,
+        ],
+        ["Applied", when(a.state?.appliedAt)],
+        ["Valid until", when(a.state?.validUntil)],
+        [
+          "Step",
+          a.state?.clamped
+            ? "Clamped by the envelope's step"
+            : "No step clamp recorded",
+        ],
+        [
+          "Envelope",
+          hosts.length &&
+          p.digest &&
+          hosts.every((h) => h.fpEnvelope === p.digest)
+            ? statusBadge("ok", "All hosts agree")
+            : statusBadge("attention", "Not confirmed"),
+        ],
+      ],
+    )}${hosts.some((h) => h.fpEnvelope !== p.digest || !h.fpEnvelope) ? note(hosts.map((h) => `${h.name}: ${!h.fpEnvelope ? "Envelope digest not published" : h.fpEnvelope !== p.digest ? "Different envelope" : "Same envelope"}`).join("; ")) : null}
       <ul class="al-rows">
         ${a.rows
           .filter((r) => !v.query?.project || r.id === v.query.project)
@@ -825,11 +833,11 @@ export function splitRows(v) {
                 class="al-bar"
                 height="22"
                 role="img"
-                aria-label="${r.id}: spent ${r.spent === null
-                  ? "unknown"
-                  : r.spent / 1e6} USD; allocation ${r.allocation === null
-                  ? "unknown"
-                  : r.allocation / 1e6} USD; floor ${(r.floor ?? 0) / 1e6} USD"
+                aria-label="${r.id}: spent ${
+                  r.spent === null ? "unknown" : r.spent / 1e6
+                } USD; allocation ${
+                  r.allocation === null ? "unknown" : r.allocation / 1e6
+                } USD; floor ${(r.floor ?? 0) / 1e6} USD"
               >
                 <rect
                   class="al-bar__track"
@@ -848,9 +856,11 @@ export function splitRows(v) {
                   rx="8"
                 ></rect>
                 <rect
-                  class="${r.spent > r.allocation
-                    ? "al-bar__spent al-bar__spent--over"
-                    : "al-bar__spent"}"
+                  class="${
+                    overAllocation(r)
+                      ? "al-bar__spent al-bar__spent--over"
+                      : "al-bar__spent"
+                  }"
                   x="0"
                   y="3"
                   width="${scale(r.spent)}%"
@@ -868,17 +878,29 @@ export function splitRows(v) {
                 ><span>${usd(r.spent)} spent of ${usd(r.allocation)}</span
                 ><small
                   >Floor ${usd(r.floor)}
-                  ${r.spent > r.allocation
-                    ? html`${ui.icon("failed")} over`
-                    : null}</small
+                  ${
+                    overAllocation(r)
+                      ? html`${ui.icon("failed")} over`
+                      : null
+                  }</small
                 ></span
               >
             </li>`;
           })}
       </ul>
+      <p class="keyrow"><span><i class="al-k al-k--alloc"></i>Allocation</span><span><i class="al-k al-k--spent"></i>Spend, held included</span><span><i class="al-k al-k--floor"></i>Floor</span><span><i class="al-k al-k--over"></i>Over the allocation</span></p>
       ${note(
         "A project may spend up to the smaller of its allocation and its own scoped limit. allocation-cap means the split refused it; dollar-cap means the operator's own limit refused it.",
       )}`,
+    canAct(v)
+      ? ui.btn({
+          label: "Set priorities",
+          href: "#p-priorities",
+          icon: "edit",
+          kind: "primary",
+        })
+      : null,
+    "this envelope window, every host",
   );
 }
 export function splitHistory(v) {
@@ -887,52 +909,92 @@ export function splitHistory(v) {
   return card(
     "History",
     rows.length
-      ? html`<div class="table-scroll">
-          <table class="table">
+      ? html`<div class="tbl-wrap">
+          <table class="tbl">
             <thead>
               <tr>
                 <th>Row</th>
                 <th>When (UTC)</th>
                 <th>Writer</th>
-                <th>Outcome and reason</th>
+                <th>Outcome</th><th>Reason</th>
                 <th>Plan</th>
-                ${new Set(rows.map((r) => r.host).filter(Boolean)).size > 1
-                  ? html`<th>Host</th>`
-                  : null}${canAct(v) ? html`<th>Action</th>` : null}
+                ${
+                  new Set(rows.map((r) => r.host).filter(Boolean)).size > 1
+                    ? html`<th>Host</th>`
+                    : null
+                }${canAct(v) ? html`<th>Action</th>` : null}
               </tr>
             </thead>
             <tbody>
               ${rows.slice(0, 20).map((r, i) => {
-                const applied = rows.findIndex((other) => other.planId && other.planId === r.planId && ["applied", "reverted", "rebased"].includes(other.outcome));
-                const neutralCurrent = p.state && p.state.planId == null && p.state.appliedAt != null && r.at === p.state.appliedAt && r.writer === p.state.writer && r.weights && !["duplicate", "refused"].includes(r.outcome);
-                const currentPlanRow = p.state?.planId ? rows.findIndex((other) => other.planId === p.state.planId && ["applied", "reverted", "rebased"].includes(other.outcome) && (p.state.appliedAt == null || other.at === p.state.appliedAt && other.writer === p.state.writer)) : -1;
+                const applied = rows.findIndex(
+                  (other) =>
+                    other.planId &&
+                    other.planId === r.planId &&
+                    ["applied", "reverted", "rebased"].includes(other.outcome),
+                );
+                const neutralCurrent =
+                  p.state &&
+                  p.state.planId == null &&
+                  p.state.appliedAt != null &&
+                  r.at === p.state.appliedAt &&
+                  r.writer === p.state.writer &&
+                  r.weights &&
+                  !["duplicate", "refused"].includes(r.outcome);
+                const currentPlanRow = p.state?.planId
+                  ? rows.findIndex(
+                      (other) =>
+                        other.planId === p.state.planId &&
+                        ["applied", "reverted", "rebased"].includes(
+                          other.outcome,
+                        ) &&
+                        (p.state.appliedAt == null ||
+                          (other.at === p.state.appliedAt &&
+                            other.writer === p.state.writer)),
+                    )
+                  : -1;
                 const current = neutralCurrent || currentPlanRow === i;
                 // Expiry keeps the old plan id but writes neutral weights; equal ids alone cannot identify a duplicate.
-                const historyFact = current ? "In force" : r.outcome === "duplicate"
-                  ? applied >= 0 ? `Same as row ${applied + 1}` : "Duplicate plan; its applied row is outside the newest 20 rows"
-                  : !r.weights ? "No split to go back to" : null;
+                const historyFact = current
+                  ? "In force"
+                  : r.outcome === "duplicate"
+                    ? applied >= 0
+                      ? `Same as row ${applied + 1}`
+                      : "Duplicate plan; its applied row is outside the newest 20 rows"
+                    : !r.weights
+                      ? "No split to go back to"
+                      : null;
                 return html`<tr>
                   <td>${i + 1}</td>
                   <td>${when(r.at)}</td>
                   <td>${r.writer}</td>
                   <td>
-                    ${ui.icon(r.outcome === "applied" ? "done" : "attention")}
-                    ${r.outcome}
-                    ${r.reason ?? ""}${r.reason
+                    ${statusBadge(r.outcome === "applied" ? "ok" : r.outcome === "refused" ? "refused" : "idle", r.outcome ?? "unknown")}
+                  </td><td>${r.reason ?? "none"}${
+                    r.reason
                       ? html`:
-                        ${PLAN_REASON_TEXT[r.reason]?.sentence ??
-                        "A newer worker recorded this reason; check its version and plan rules."}`
-                      : null}
+                        ${
+                          PLAN_REASON_TEXT[r.reason]?.sentence ??
+                          "A newer worker recorded this reason; check its version and plan rules."
+                        }`
+                      : null
+                  }
                   </td>
                   <td>
-                    ${neutralCurrent ? "Today's neutral split" : r.planId ?? (r.weights ? "Today's neutral split" : null)}
-                    ${historyFact ? note(historyFact) : null}
+                    ${neutralCurrent ? "Today's neutral split" : (r.planId ?? (r.weights ? "Today's neutral split" : null))}
+                    ${historyFact === "In force" ? statusBadge("ok", historyFact) : historyFact ? note(historyFact) : null}
                   </td>
-                  ${new Set(rows.map((x) => x.host).filter(Boolean)).size > 1
-                    ? html`<td>${r.host ?? "unknown"}</td>`
-                    : null}${canAct(v)
-                    ? html`<td>
-                        ${historyFact ? null : html`<form data-action="allocation-revert">
+                  ${
+                    new Set(rows.map((x) => x.host).filter(Boolean)).size > 1
+                      ? html`<td>${r.host ?? "unknown"}</td>`
+                      : null
+                  }${
+                    canAct(v)
+                      ? html`<td>
+                        ${
+                          historyFact
+                            ? null
+                            : html`<form data-action="allocation-revert">
                                   <input
                                     type="hidden"
                                     name="index"
@@ -941,9 +1003,11 @@ export function splitHistory(v) {
                                   /><button class="btn btn--sm" type="submit">
                                     Revert row ${i + 1}
                                   </button>
-                                </form>`}
+                                </form>`
+                        }
                       </td>`
-                    : null}
+                      : null
+                  }
                 </tr>`;
               })}
             </tbody>
@@ -963,56 +1027,20 @@ export function splitPriorities(v) {
       "Set priorities",
       "Read a valid envelope before setting priorities.",
     );
-  const ids = Object.keys(env.floorsUsd ?? env.floors ?? {});
+  const ids = Object.keys(env.floorsUsd ?? {});
+  const weights = p.state?.weights ?? env.defaultWeights ?? {};
+  const total = Math.max(
+    1,
+    Object.values(weights).reduce((sum, value) => sum + value, 0),
+  );
   return card(
     "Set priorities",
-    html`<form
-        data-action="priorities-set"
-        data-structured="priorities"
-        class="spend-fields"
-      >
-        ${ids.map(
-          (id) =>
-            html`<label
-              >${id}, weight (about
-              ${Math.round(
-                (100 *
-                  (p.state?.weights?.[id] ?? env.defaultWeights?.[id] ?? 0)) /
-                  Math.max(
-                    1,
-                    Object.values(
-                      p.state?.weights ?? env.defaultWeights ?? {},
-                    ).reduce((sum, n) => sum + n, 0),
-                  ),
-              )}%)<input
-                type="number"
-                name="weight:${id}"
-                min="0"
-                max="1000"
-                step="1"
-                required
-                value="${p.state?.weights?.[id] ??
-                env.defaultWeights?.[id] ??
-                0}"
-            /></label>`,
-        )}<label
-          >Days this plan holds<input
-            type="number"
-            name="validDays"
-            data-type="int"
-            min="1"
-            max="${env.maxPlanDays ?? 7}"
-            value="${env.maxPlanDays ?? 7}"
-            required /></label
-        ><button class="btn btn--primary" type="submit">
-          Preview the plan
-        </button>
-      </form>
-      ${note(
-        "Writer operator-session. Floors come first, the rest is split by weight, and a change moves each share by at most the envelope's step.",
-      )}`,
+    html`<form data-action="priorities-set" data-structured="priorities"><div class="pr-grid">${ids.map((id) => html`<label class="pr-row"><span class="ptag">${id}</span><span class="sr">Weight for ${id}</span><input class="input pr-in" type="number" name="weight:${id}" min="0" max="1000" step="1" required value="${weights[id] ?? 0}"><output class="pr-share" data-weight-share="${id}">about ${Math.round(((weights[id] ?? 0) / total) * 100)}%</output></label>`)}</div><div class="formrow pr-foot"><label class="field">Days this plan holds<input class="input pr-in" type="number" name="validDays" data-type="int" min="1" max="${env.maxPlanDays ?? 7}" value="${env.maxPlanDays ?? 7}" required><small class="field__hint">At most ${env.maxPlanDays ?? 7}, the envelope's limit.</small></label><button class="btn btn--primary" type="submit">Preview the plan</button></div></form>${note("Writer operator-session. Weights are whole numbers from 0 to 1000. Floors come first, the rest is split by weight, and a change moves each share by at most the envelope's step.")}`,
+    null,
+    "a plan of weights, previewed first",
   );
 }
+
 export function splitEnvelope(v) {
   const p = payload(v).allocation;
   const e = envelopeForm(p);
@@ -1023,36 +1051,40 @@ export function splitEnvelope(v) {
     );
   return card(
     "Envelope",
-    html`${ui.facts([
-      ["Window", e.window],
-      ["Total", `$${e.totalUsd ?? "unknown"}`],
-      ["Delegation", e.enabled ? "On" : "Off"],
-      ["Writers", (e.writers ?? []).join(", ")],
-      ["Step", `${e.maxStepPct}%`],
-      ["Minimum interval", `${e.minIntervalHours} hours`],
-      ["Longest plan", `${e.maxPlanDays} days`],
+    html`${ui.facts(
       [
-        "Floors",
-        Object.entries(e.floorsUsd ?? {})
-          .map(([id, n]) => `${id}: $${n}`)
-          .join(", "),
+        ["Window", e.window],
+        ["Total", `$${e.totalUsd ?? "unknown"}`],
+        ["Delegation", e.enabled ? "On" : "Off"],
+        ["Writers", (e.writers ?? []).join(", ")],
+        ["Step", `${e.maxStepPct}%`],
+        ["Minimum interval", `${e.minIntervalHours} hours`],
+        ["Longest plan", `${e.maxPlanDays} days`],
+        [
+          "Floors",
+          Object.entries(e.floorsUsd ?? {})
+            .map(([id, n]) => `${id}: $${n}`)
+            .join(", "),
+        ],
+        [
+          "Default weights",
+          Object.entries(e.defaultWeights ?? {})
+            .map(([id, n]) => `${id}: ${n}`)
+            .join(", "),
+        ],
+        ["File", pathLabel(v, p.file ?? p.path ?? "PI_ENVELOPE_FILE")],
+        ...(p.hosts ?? payload(v).hosts ?? []).map((h) => [
+          `Envelope digest, ${h.name}`,
+          h.fpEnvelope ?? "not published",
+        ]),
       ],
-      [
-        "Default weights",
-        Object.entries(e.defaultWeights ?? {})
-          .map(([id, n]) => `${id}: ${n}`)
-          .join(", "),
-      ],
-      ["File", pathLabel(v, p.file ?? p.path ?? "PI_ENVELOPE_FILE")],
-      ...(p.hosts ?? payload(v).hosts ?? []).map((h) => [
-        `Envelope digest, ${h.name}`,
-        h.fpEnvelope ?? "not published",
-      ]),
-    ], { cols: 1 })}${canAct(v)
-      ? html`<details>
+      { cols: 1 },
+    )}${
+      canAct(v)
+        ? html`<details>
           <summary>Edit envelope</summary>
           <form
-            data-action="envelope-set"
+            id="envelope-form" data-action="envelope-set"
             data-structured="envelope"
             class="spend-fields"
           >
@@ -1127,7 +1159,16 @@ export function splitEnvelope(v) {
             </button>
           </form>
         </details>`
-      : null}`,
+        : null
+    }`,
+    canAct(v)
+      ? ui.btn({
+          label: "Edit envelope",
+          href: "#envelope-form",
+          icon: "config",
+          kind: "sm",
+        })
+      : null,
   );
 }
 export function splitReasons(v) {
@@ -1136,186 +1177,107 @@ export function splitReasons(v) {
   return card(
     "Why the plan says so",
     reasons && Object.keys(reasons).length
-      ? factsOne(
-          Object.entries(reasons).map(([id, text]) => [
-            id,
-            escapeInterpreted(String(text)),
-          ]),
-        )
+      ? html`${note("Written by the portfolio job.")}<ul class="rs-l">${Object.entries(reasons).map(([id, text]) => html`<li><span class="ptag">${id}</span><q>${escapeInterpreted(String(text))}</q></li>`)}</ul>`
       : note("No project reasons were recorded for this plan."),
+    null,
+    "operators only",
   );
 }
 export function splitCounts(v) {
   const a = allocation(v);
-  const refusals = ["allocation-cap", "envelope-mismatch", "portfolio-no-envelope", "portfolio-snapshot-oversize"];
+  const refusals = [
+    "allocation-cap",
+    "envelope-mismatch",
+    "portfolio-no-envelope",
+    "portfolio-snapshot-oversize",
+  ];
+  const rows = (items) =>
+    html`<ul class="cn-l">${items.map(([name, value]) => html`<li><span class="code">${name}</span><b>${value}</b></li>`)}</ul>`;
   return card(
     "Refusals and plans",
-    html`${note("Counted in this host's run records over the envelope's window.")}${a?.refusals === null || a?.refusals === undefined ? note("Refusals and plans were not counted: the run records could not be read.") : factsOne([
-      ...refusals.map((reason) => [reason, a.refusals[reason] ?? 0]),
-      ...Object.entries(a.plans ?? {}).map(([reason, count]) => [`Plans: ${reason}`, count]),
-    ])}${a?.plans && Object.keys(a.plans).length === 0 ? note("No plans collected in this envelope window.") : null}`,
+    html`${note("Counted in this host's run records over the envelope's window.")}${a?.refusals === null || a?.refusals === undefined ? note("Refusals and plans were not counted: the run records could not be read.") : html`<p class="cn-h">${ui.icon("refused", { size: "sm" })}Refusals in runs on this host</p>${rows(refusals.map((name) => [name, a.refusals[name] ?? 0]))}<p class="cn-h">${ui.icon("done", { size: "sm" })}Plans collected in runs on this host</p>${rows(["applied", "duplicate", "refused"].map((name) => [name, a.plans?.[name] ?? 0]))}${!a.plans || Object.keys(a.plans).length === 0 ? note("No plans collected in this envelope window.") : null}`}`,
+    null,
+    "from run records",
   );
 }
 export function splitStates(v) {
   const a = allocation(v);
+  const state =
+    a?.kind === "unset"
+      ? [
+          "idle",
+          "No envelope",
+          "No envelope: set an envelope before splitting a budget. PI_ENVELOPE_FILE is unset, so delegation is off.",
+        ]
+      : a?.kind === "problem"
+        ? [
+            "failed",
+            "The envelope does not load",
+            "The envelope does not load. Check its fields in Configuration.",
+          ]
+        : a?.kind === "unreachable"
+          ? [
+              "failed",
+              "The split could not be read",
+              "The queue is not answering. The last split cannot be read. Nothing was changed.",
+            ]
+          : a?.stateProblem
+            ? [
+                "attention",
+                "Written by a newer pi-dispatch",
+                `Split not usable: ${a.stateProblem}. Upgrade this console if the split is newer.`,
+              ]
+            : a?.mismatch
+              ? [
+                  "failed",
+                  "The split was made for another envelope",
+                  "Another envelope is in force: hosts need the same envelope. Governed jobs refuse as envelope-mismatch.",
+                ]
+              : a?.outsideEdit
+                ? [
+                    "attention",
+                    "The envelope changed outside the console",
+                    "The split was edited outside the plan writer. A host with another envelope refuses governed jobs as envelope-mismatch.",
+                  ]
+                : !a?.state
+                  ? [
+                      "idle",
+                      "No split applied yet",
+                      "No split yet: the next pickup can write the neutral split.",
+                    ]
+                  : null;
   return card(
     "Other states",
-    note(
-      a?.kind === "unset"
-        ? "No envelope: set an envelope before splitting a budget."
-        : a?.kind === "problem"
-          ? "The envelope does not load. Check its fields in Configuration."
-          : a?.kind === "unreachable"
-            ? "The queue is not answering. The last split cannot be read."
-            : a?.stateProblem
-              ? `Split not usable: ${a.stateProblem}.`
-              : a?.mismatch
-                ? "Another envelope is in force: hosts need the same envelope."
-                : a?.outsideEdit
-                  ? "The split was edited outside the plan writer."
-                  : !a?.state
-                    ? "No split yet: the next pickup can write the neutral split."
-                    : "The envelope and split were read. A newer pi-dispatch's split is refused rather than guessed.",
-    ),
+    state
+      ? ui.banner({
+          status: state[0],
+          title: state[1],
+          body: state[2],
+          sm: true,
+        })
+      : ui.collapsed({
+          icon: "done",
+          title: "Envelope and split read",
+          body: "No exceptional split state was reported.",
+        }),
+    null,
+    "what this view says instead",
   );
-}
-export function capacityBusy(v) {
-  const f = payload(v).capacity?.fleet;
-  return kpi(
-    "Fleet busy",
-    f?.busyPerMille === null || f?.busyPerMille === undefined
-      ? "unknown"
-      : `${(f.busyPerMille / 10).toFixed(1)}%`,
-    `Busy share of slot time, weighted by slots.${f?.incomplete ? " Partial history: this is not a complete fleet total." : ""}`,
-  );
-}
-export function capacityPeak(v) {
-  const f = payload(v).capacity?.fleet;
-  return card(
-    "Fleet peak",
-    html`${ui.kpi(
-      f?.peak ?? "unknown",
-      "Most jobs at once in one hour, all hosts added",
-    )}${when(f?.peakAtMs)}`,
-  );
-}
-export function capacityWait(v) {
-  const w = payload(v).capacity?.fleet?.waits;
-  return kpi(
-    "Wait for a slot",
-    w?.p95Ms === null || w?.p95Ms === undefined
-      ? "No run recorded one"
-      : `${(w.p95Ms / 1000).toFixed(1)}s p95`,
-    `Median ${w?.p50Ms === null || w?.p50Ms === undefined ? "unknown" : `${(w.p50Ms / 1000).toFixed(1)}s`}, from eligible to holding a slot.`,
-  );
-}
-export function capacityMemory(v) {
-  const f = payload(v).capacity?.fleet;
-  return card(
-    "Promised memory",
-    html`${ui.kpi(
-      f?.promisedMemPerMille === null || f?.promisedMemPerMille === undefined
-        ? "unknown"
-        : `${(f.promisedMemPerMille / 10).toFixed(1)}%`,
-      "Of every host's budget at the busiest hour",
-    )}${when(f?.busiestHourMs)}`,
-  );
-}
-export function capacityHosts(v) {
-  const p = payload(v);
-  const tips = [];
-  const c = normCapacity(p.capacity);
-  const sizing = normSizing(p.sizing);
-  const charts = c?.hosts?.length
-    ? c.hosts.map(
-        (host) =>
-          html`<article class="card" id="p-cap-${host.name}">
-            ${responsiveLegacy(capacitySectionHtml(
-                {
-                  ...c,
-                  hosts: [host],
-                  coverage: [],
-                  notDrawn: {
-                    numbers: 0,
-                    empty: 0,
-                    "not-shared": 0,
-                    unnamed: 0,
-                    repeated: 0,
-                  },
-                },
-                tips,
-                v.now,
-                spendWindowLabel(v.query?.range),
-              ).replace('id="capacity"', `id="capacity-${host.name}"`),
-            )}
-          </article>`,
-      )
-    : c
-      ? responsiveLegacy(capacitySectionHtml(
-            c,
-            tips,
-            v.now,
-            spendWindowLabel(v.query?.range),
-          ),
-        )
-      : note("Capacity not read; the other Spend views still work.");
-  return html`<div class="stack">
-    ${charts}${(p.capacity?.hosts ?? []).filter(
-      (h) =>
-        /^[A-Za-z0-9._-]{1,64}$/.test(h.name ?? "") &&
-        !c?.hosts?.some((x) => x.name === h.name),
-    ).length
-      ? note(
-          `Hosts not drawn past 20: ${(p.capacity.hosts ?? [])
-            .filter(
-              (h) =>
-                /^[A-Za-z0-9._-]{1,64}$/.test(h.name ?? "") &&
-                !c?.hosts?.some((x) => x.name === h.name),
-            )
-            .map((h) => h.name)
-            .join(", ")}.`,
-        )
-      : null}${sizing
-      ? card(
-          "Memory and CPU sizing",
-          responsiveLegacy(sizingSectionHtml(sizing, tips, v.now)),
-        )
-      : null}${tipsHtml(tips)}
-  </div>`;
 }
 
-export const capacityKey = () =>
-  card(
-    "How to read the chart",
-    note(
-      "Bar: average jobs at once. Tick: most at once. Dashed line: slots. Hatching: no data or truncated history. Empty: idle. Jobs only: a machine busy with other work reads as idle.",
-    ),
-  );
-export function capacityCoverage(v) {
-  const c = payload(v).capacity;
-  return card(
-    "Coverage",
-    html`${Array.isArray(c?.coverage)
-      ? c.coverage.map(note)
-      : factsOne(
-          Object.entries(c?.coverage ?? c?.source ?? {}).filter(
-            ([, x]) => typeof x === "number" || typeof x === "string",
-          ),
-        )}${note(INSIGHTS_CAPACITY_JOBS_ONLY)}`,
-  );
-}
-export function capacityStates(v) {
-  const c = payload(v).capacity;
-  return empty(
-    "Other states",
-    c?.noTime
-      ? "No time in this window yet."
-      : c?.unreachable || !c
-        ? "Capacity not read; the other Spend views still work."
-        : c?.fleet?.incomplete
-          ? "Fleet figures have incomplete history; missing time is never counted as idle."
-          : "History coverage is shown with each host. At most 20 hosts are drawn.",
-  );
+export const capacityBusy = capacityPulse.capacityBusy;
+export const capacityPeak = capacityPulse.capacityPeak;
+export const capacityWait = capacityPulse.capacityWait;
+export const capacityMemory = capacityPulse.capacityMemory;
+export const capacityWindow = capacityPulse.capacityWindow;
+export const capacityKey = capacityPulse.capacityKey;
+export const capacityCoverage = capacityPulse.capacityCoverage;
+export const capacityStates = capacityPulse.capacityStates;
+export function capacityHosts(v) {
+  const tips = [];
+  const charts = capacityPulse.capacityHosts(v, tips);
+  const sizing = normSizing(payload(v).sizing);
+  return html`<div class="stack">${charts}${sizing ? card("Memory and CPU sizing", responsiveLegacy(sizingSectionHtml(sizing, tips, v.now))) : null}${tipsHtml(tips)}</div>`;
 }
 export function breakdownSpend(v) {
   const f = fold(v);
@@ -1358,7 +1320,8 @@ export function breakdownDaily(v) {
     f
       ? html`<div id="wrap">
             <div id="tip"></div>
-            ${responsiveLegacy(dailyChartHtml(f.daily, tips))}${responsiveLegacy(cumulativeHtml(f.daily, tips),
+            ${responsiveLegacy(dailyChartHtml(f.daily, tips))}${responsiveLegacy(
+              cumulativeHtml(f.daily, tips),
             )}
           </div>
           ${tipsHtml(tips)}`
@@ -1450,14 +1413,16 @@ export function breakdownRows(v) {
               (r) =>
                 html`<tr>
                   <td>
-                    ${r.index !== null
-                      ? html`<a
+                    ${
+                      r.index !== null
+                        ? html`<a
                           href="${link(v, "/insights/flows", {
                             select: r.index,
                           })}"
                           >${r.index + 1}. ${r.type} ${r.label}</a
                         >`
-                      : r.label}
+                        : r.label
+                    }
                   </td>
                   <td>${r.runs}</td>
                   <td>${r.outcomes.failed}</td>
@@ -1472,24 +1437,28 @@ export function breakdownRows(v) {
         f.byRepo.map((r) => [
           pathLabel(v, r.label),
           html`${r.kind ?? "no forge"},
-          ${(payload(v).repoProjects?.[r.key ?? "(no target)"] ?? [])
-            .map((id) => id ?? "no project")
-            .join(", ") || "no project"},
+          ${
+            (payload(v).repoProjects?.[r.key ?? "(no target)"] ?? [])
+              .map((id) => id ?? "no project")
+              .join(", ") || "no project"
+          },
           ${moneyCost(r.cost)}`,
         ]),
       )}
       <h3>By model</h3>
       ${ui.facts(
         f.byModel.map((r) => [`${r.provider}/${r.model}`, moneyCost(r.cost)]),
-      )}${v.role === "operator"
-        ? html`<a
+      )}${
+        v.role === "operator"
+          ? html`<a
             class="btn"
             href="${link(v, "/insights/breakdown", {
               paths: v.query?.paths === "full" ? null : "full",
             })}"
             >${v.query?.paths === "full" ? "Last folder" : "Full paths"}</a
           >`
-        : null}`,
+          : null
+      }`,
   );
 }
 export function breakdownSubscriptions(v) {
@@ -1516,9 +1485,11 @@ export function breakdownProvenance(v) {
     "Where these numbers come from",
     html`${note(
       "Metered means pi-ai prices, not invoices. Money held for running jobs is not in run records yet; the Spend view shows it.",
-    )}${f
-      ? raw(footerHtml(f, spendWindowLabel(v.query?.range)))
-      : note("No record provenance could be read.")}`,
+    )}${
+      f
+        ? raw(footerHtml(f, spendWindowLabel(v.query?.range)))
+        : note("No record provenance could be read.")
+    }`,
   );
 }
 export function breakdownStates(v) {
@@ -1531,11 +1502,13 @@ export function breakdownStates(v) {
         : !f.provenance.runsTotal
           ? "No runs in the spend window."
           : "The records in the selected spend window are shown.",
-    )}${!f?.provenance.runsTotal
-      ? html`<a href="${link(v, "/insights/breakdown", { range: "30d" })}"
+    )}${
+      !f?.provenance.runsTotal
+        ? html`<a href="${link(v, "/insights/breakdown", { range: "30d" })}"
           >Try 30 days</a
         >`
-      : null}`,
+        : null
+    }`,
   );
 }
 function scene(v) {
@@ -1619,11 +1592,13 @@ export function flowsMap(v) {
                   <td>${n.runs} runs; ${n.lastOutcome ?? "no outcome"}</td>
                   <td>${moneyCost(n.cost)}</td>
                   <td>
-                    ${n.once
-                      ? "one-shot armed"
-                      : n.disarmed
-                        ? "one-shot spent"
-                        : ""}
+                    ${
+                      n.once
+                        ? "one-shot armed"
+                        : n.disarmed
+                          ? "one-shot spent"
+                          : ""
+                    }
                     ${sc.norm.flags
                       .filter((f) => f.nodeId === n.id)
                       .map((f) => f.flag)
@@ -1740,7 +1715,12 @@ function selectedDetails(v, sc, n) {
       ["HEAD", group?.head ?? "unknown"],
       ["Runs in map window", n.runs],
       ["Last outcome", html`${n.lastOutcome ?? "none"} ${when(n.lastEndedAt)}`],
-      ["Next fire", n.next === null || n.next === undefined ? "not scheduled" : when(n.next)],
+      [
+        "Next fire",
+        n.next === null || n.next === undefined
+          ? "not scheduled"
+          : when(n.next),
+      ],
       ["Spend", moneyCost(n.cost)],
       [
         "Chainable",
@@ -1767,13 +1747,15 @@ function selectedDetails(v, sc, n) {
           .map((l) => l.hint)
           .join(", ") || "none detected",
       ],
-    ])}${n.disarmed?.jobId && RUN_ID_RE.test(n.disarmed.jobId)
-      ? html`<a
+    ])}${
+      n.disarmed?.jobId && RUN_ID_RE.test(n.disarmed.jobId)
+        ? html`<a
           class="btn"
           href="/run?${new URLSearchParams({ id: n.disarmed.jobId })}"
           >Run that spent this one-shot</a
         >`
-      : null}
+        : null
+    }
     <div class="actions">
       <a class="btn" href="/config">Open trigger</a
       ><a
@@ -1818,15 +1800,21 @@ export function flowsHonesty(v) {
   const sc = scene(v);
   return card(
     "What the map cannot see",
-    html`${sc.norm.meta.triggersMissing || sc.norm.meta.triggersInvalid
-      ? null
-      : raw(bannersHtml(sc.norm))}${note(
+    html`${
+      sc.norm.meta.triggersMissing || sc.norm.meta.triggersInvalid
+        ? null
+        : raw(bannersHtml(sc.norm))
+    }${note(
       `Unverifiable skills, unattributed runs, refused chains and scan caps remain incomplete evidence. ${sc.hiddenLabels} wire labels moved into tooltips. Chain caps still apply.`,
     )}`,
   );
 }
 // Empty optional fragments must not leave indentation-only lines in the checked-in page fixtures.
-const panels = (entries) => entries.map(([id, fn]) => [`p-${id}`, (view) => raw(String(fn(view)).replace(/[ \t]+\n/g, "\n"))]);
+const panels = (entries) =>
+  entries.map(([id, fn]) => [
+    `p-${id}`,
+    (view) => raw(String(fn(view)).replace(/[ \t]+\n/g, "\n")),
+  ]);
 export const SPEND_PANELS = Object.freeze({
   insights: panels([
     ["week", spendWeek],
@@ -1861,6 +1849,7 @@ export const SPEND_PANELS = Object.freeze({
     ["cap-peak", capacityPeak],
     ["cap-wait", capacityWait],
     ["cap-mem", capacityMemory],
+    ["cap-window", capacityWindow],
     ["cap-hosts", capacityHosts],
     ["cap-key", capacityKey],
     ["cap-coverage", capacityCoverage],
@@ -1898,21 +1887,49 @@ const layout = (kpis, main, side) => [
   },
 ];
 export const SPEND_LAYOUTS = Object.freeze({
-  insights: layout(
-    ["week", "today", "tokens", "avg"],
-    ["over", "byflow", "bymodel", "byproject", "sizes"],
-    ["caps", "whatif", "plan", "split"],
-  ),
+  insights: [
+    { cls: "cards-4", items: ["p-week", "p-today", "p-tokens", "p-avg"] },
+    {
+      cls: "cols spend-grid",
+      items: [
+        {
+          cls: "stack spend-main",
+          items: [
+            "p-over",
+            {
+              cls: "cards-3 spend-costs",
+              items: ["p-byflow", "p-bymodel", "p-byproject"],
+            },
+            "p-sizes",
+            "p-split",
+          ],
+        },
+        { cls: "stack spend-side", items: ["p-caps", "p-whatif", "p-plan"] },
+      ],
+    },
+  ],
   "insights-budget-split": layout(
     ["env-kpi", "alloc-kpi", "spent-kpi", "plan-kpi"],
     ["split", "split-history", "priorities"],
     ["envelope", "plan-reasons", "split-counts", "split-states"],
   ),
-  "insights-capacity": layout(
-    ["cap-busy", "cap-peak", "cap-wait", "cap-mem"],
-    ["cap-hosts"],
-    ["cap-key", "cap-coverage", "cap-states"],
-  ),
+  "insights-capacity": [
+    {
+      cls: "cards-4",
+      items: ["p-cap-busy", "p-cap-peak", "p-cap-wait", "p-cap-mem"],
+    },
+    { cls: "stack", items: ["p-cap-window"] },
+    {
+      cls: "cols",
+      items: [
+        { cls: "stack", items: ["p-cap-hosts"] },
+        {
+          cls: "stack",
+          items: ["p-cap-key", "p-cap-coverage", "p-cap-states"],
+        },
+      ],
+    },
+  ],
   "insights-breakdown": layout(
     ["bk-spend", "bk-runs", "bk-plans", "bk-top"],
     ["daily", "daily-flow", "breakdown", "whatif-flow"],
