@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { liveJobsOf, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
@@ -356,5 +357,49 @@ test("mobile venue declarations pair the question with its word and give the ass
   assert.ok(
     !phone.includes(".vd-cmp"),
     "the horizontally scrolling comparison keeps its separate design",
+  );
+});
+
+test("a digested boot orphan keeps neutral observed wording and its runtime listing fallback", () => {
+  const observedAt = AT - HOUR;
+  const publication = liveJobsOf({
+    budgetEntries: [
+      {
+        id: `container:pi-job-${"x".repeat(130)}`,
+        at: observedAt,
+        memMiB: 4096,
+        cpuCenti: 200,
+        orphan: { venue: "local", since: observedAt },
+      },
+    ],
+  });
+  const jobs = parseLiveJobs(publication.jobs).jobs;
+  assert.match(
+    jobs[0].id,
+    /^sha256:/,
+    "the actual publisher loses the boot-origin prefix when it hashes a long container name",
+  );
+  const v = view();
+  v.data.snapshot.hostBudgets = [host({ jobs })];
+  for (const render of [hostJobs, hostSandboxes]) {
+    const out = draw(render, v);
+    assert.match(out, /Orphaned hold observed at <time/);
+    assert.match(out, /its origin is not known from the published digest/);
+    assert.doesNotMatch(
+      out,
+      /Cancelled|Its stop did not take|Found left from before the worker started/,
+    );
+    assert.match(out, /still holds/);
+  }
+  const sandboxes = draw(hostSandboxes, v);
+  assert.match(
+    sandboxes,
+    /<span>docker<\/span> <span>ps<\/span> <span>-a<\/span>/,
+  );
+  assert.match(sandboxes, /name=pi-job-/);
+  assert.doesNotMatch(
+    sandboxes,
+    /<span>rm<\/span>/,
+    "a digest is never used as a guessed container name",
   );
 });
