@@ -107,7 +107,7 @@ test("a job the budget cannot hold now is DEFERRED at the budget's own cadence, 
 	await assert.rejects(() => h.processor(c.job, "tok-c", signal()), (e) => e.name === "DelayedError");
 	assert.deepEqual(c.moves, [{ ts: NOW + BUDGET_RECHECK_MS, tok: "tok-c" }]);
 	const line = h.seen.logs.find((l) => l.event === "host_budget_deferred");
-	assert.deepEqual(line.fields, { jobId: "c", project: null, why: "budget", rank: 0, memMiB: 20480, cpuCenti: 400, delayMs: BUDGET_RECHECK_MS });
+	assert.deepEqual(line.fields, { jobId: "c", project: null, why: "memory", rank: 0, memMiB: 20480, cpuCenti: 400, delayMs: BUDGET_RECHECK_MS });
 	assert.equal(h.seen.started, 1, "nothing started for the deferred job");
 	assert.deepEqual(b.waiting().map((w) => [w.id, w.suspended]), [["c", false]], "it waits, and its waiter holds");
 
@@ -323,7 +323,7 @@ test("the job COUNT is judged in the budget gate, so a big shared-queue job's ho
 	await h.untilStarted(3);
 	const big = ghJob("big-1", "acme/big");
 	await assert.rejects(() => h.processor(big.job, "t", signal()), (e) => e.name === "DelayedError");
-	assert.deepEqual(h.seen.logs.filter((l) => l.fields?.jobId === "big-1").map((l) => [l.event, l.fields.why]), [["host_budget_deferred", "budget"]], "deferred by the budget (the count), never by a host slot");
+	assert.deepEqual(h.seen.logs.filter((l) => l.fields?.jobId === "big-1").map((l) => [l.event, l.fields.why]), [["host_budget_deferred", "count"]], "deferred by the budget (the count), never by a host slot");
 	assert.equal(slots.count?.("host") ?? 0, 0, "no host slot taken");
 	// One small ends; the flood asks FIRST for the freed slot, and is deferred: the slot is the big job's hold.
 	h.releaseNext();
@@ -618,8 +618,8 @@ test("the budget's two deferrals record their reasons: the budget's verdict, and
 	const c = ghJob("c", "acme/web");
 	await assert.rejects(() => h.processor(c.job, "tok-c", signal()), (e) => e.name === "DelayedError");
 	const r = deferRecordOf(redis, "c");
-	// The verdict's own word, never a dimension it does not report; the host is the worker's name, the project the pickup's.
-	assert.deepEqual([r.why, r.bucket, r.until, r.budgetWhy, r.host, r.project], ["host-budget", "slot", NOW + BUDGET_RECHECK_MS, "budget", "mini1", "shop"]);
+	// The actual limiting dimension is recorded; the host is the worker's name, the project the pickup's.
+	assert.deepEqual([r.why, r.bucket, r.until, r.budgetWhy, r.host, r.project], ["host-budget", "slot", NOW + BUDGET_RECHECK_MS, "memory", "mini1", "shop"]);
 	h.releaseNext();
 	await first;
 

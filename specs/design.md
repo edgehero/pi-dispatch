@@ -8310,6 +8310,11 @@ a tunnel.
 
 ## DES-HOST-REGISTRY
 
+- **Display telemetry (#748).** Orphan entries carry their venue and failed-stop instant. Separate allowlisted
+  fields publish retained workspace inventory, cached for at least one minute, budget provenance from the budget's
+  own detail and the CPU reserve's observed state, including unset and a quota that differs from the requested one.
+  These facts have no admission authority and never make registry publication a boot dependency.
+
 - **Decision** (issue #57): every worker publishes one TTL'd, heartbeated row about ITSELF into a `host:`
   keyspace (`INT-HOST-REGISTRY-CONTRACT`), and reads its peers' rows. One structure, because every gap in
   the multi-host issue wants the same missing fact -- which hosts exist, and what is each one -- and six
@@ -11950,6 +11955,20 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **Fleet, host and venue detail (#748).** Fleet leaves the compatibility wrapper and draws the FleetScreen and
+  FleetPartPaused cards in the shared kit. The kill switch has its own panel, keeping its existing planner and
+  confirmation pipeline; disagreement between the console and deployment Valkeys is read on every page load.
+  The full venue declarations move to the non-live venue page, with a compact matrix on Fleet. A live host page
+  projects registry facts and bounded waiting reads; its seven-day capacity assembly is an initial read only.
+  The registry reports retained workspaces without opening them or probing another host's runtime. Cleanup remains
+  venue-specific command guidance, with listing fallbacks for ids that cannot safely name a container. An absent or
+  unreadable inventory is not an empty inventory; stale facts retain their read provenance. Running targets come
+  only with records. Viewers receive fixed explanations instead of commands and mutation controls.
+  The shared snapshot adds safe Valkey/read timestamps, default job size and configured wait limits; active rows
+  carry registry-derived project/size, failed rows distinguish record presence and carry record target/outcome and
+  attempts, schedulers carry project and waiting rows carry resolved size. These are display projections; the state
+  API retains its explicit allowlist and no active target is read from a job payload.
+
 - **Model failover visibility (#716)**: the existing Doctor panel renders published warning checks for each configured candidate cooling down, including its provider/model, fixed failure kind and reset instant. The panel's existing observation age distinguishes this snapshot from live state. An unreadable cooldown store is a warning, never an empty healthy result. The trigger read surfaces display the reviewed fallback list. No visual token or stylesheet changes are required.
 
 **Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
@@ -15560,6 +15579,11 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-WAITING-REASONS
 
+- **Fleet's complete bounded list (#748).** Fleet asks for the same waiting read as Overview and lists every row
+  within its existing limits, with the same truncation notice. Overview's remainder links there. Host budget
+  refusals distinguish memory, CPU and count without changing hold ranking or retry cadence; legacy budget words
+  remain readable. Neither surface hydrates running job payloads to invent targets.
+
 - **Decision** (issue #737, PR 3a): the worker RECORDS why it defers a job, at the moment it defers it, and a reader
   lists the jobs that have not started from the queue's own sets, their scores and those records, never a job's
   data. Every deferral goes through one function (`deferTo`, `worker/src/defer-write.mjs`), which writes
@@ -16385,3 +16409,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-28 (#737) | Issue #737: the design system moves into the repository. **`DES-OPERATOR-CONSOLE` AMENDED**, "The visual system": the Pulse design system is `design/` in this repository (`design/system`, what the Design System artifact publishes: `tokens.json`, `components/bundle.css` and one folder per card; `design/tools`, the Python generators and `build.py`, which rebuilds and checks every card outside `npm test`). "Pasted, not restated" keeps its rule and drops its reason ("the design folder is not in this repository"): the console still never reads the folder and still pastes its two files under their hashes. NEW, the other side of the paste: `admin/test/design-folder.test.mjs` holds the design's `tokens.json` to `PULSE_TOKENS_SHA256`, and its `bundle.css` to `PULSE_CSS_SHA256` or to exactly one version recorded as waiting (`DESIGN_CSS_WAITING_SHA256`). Waiting now: tabular figures on numbers only (on `body` they widened hyphens, so gh-2f6a read "gh - 2f6a"), pasted with #752's pass, which re-measures the text the console sizes by hand on the assumption that digits are tabular (`SANS_CLASSES`, `DRAWN`, `segmentPct`). The design status ribbon is a note on the cards, added by `design/tools/fix_markers.py`, never part of `bundle.css`. Every other bullet of the entry, and every Rejected option, UNCHANGED, checked. **`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`, `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` and `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN` UNCHANGED, checked** against the cards now in `design/`: they draw what the entries decide (a terminal that waits for Enter, a sent draft counted as a touch, a person sending every answer). |
 | 2026-10-28 (#747) | **`DES-OPERATOR-CONSOLE` AMENDED**: Pulse run main/side layout, state panels and static transcript; one EventSource attaches after good metadata, only entry ids are cursors, reconnect sends all panels, tdone keeps updates open. Operator browser slots hold question/tail text, never panel HTML; worker-derived sandbox capabilities and allowlisted running facts. Phase/striped kit helpers and full card/golden/browser verification. Targeted timestamp contrast paste only; the design's tabular-number change remains waiting for #752 measurements. Existing terminal endpoint, security headers, paid/destructive confirm pipeline and session lifecycle UNCHANGED, checked. |
 | 2026-10-28 (#716) | **NEW `DES-MODEL-FAILOVER`; `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` and `DES-OPERATOR-CONSOLE` AMENDED**: reviewed next-attempt singleton selection, authenticated replay eligibility, bounded shared cooldowns and existing Doctor-panel visibility. **`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` UNCHANGED, checked**: no subscription routing. The console visual system is **UNCHANGED, checked**: no tokens or stylesheet changed. |
+| 2026-10-29 (#748) | **`DES-OPERATOR-CONSOLE`, `DES-HOST-REGISTRY`, `DES-WAITING-REASONS` AMENDED**: Pulse Fleet and host/venue detail reuse the existing read model, planners and kit; bounded waiting lists and allowlisted telemetry explain delays, budgets and retained workspaces. Capacity assembly stays off live ticks. **`DES-HOST-BUDGET`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: no new admission authority, spend path, runtime action or dependency pin. |

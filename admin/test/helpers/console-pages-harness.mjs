@@ -70,6 +70,8 @@ export const SHOTS = Object.freeze([
   // own ceiling, with the canned pricing below so a pi bump moves no byte of it.
   ["insights-whatif", "insights", "whatif=acme%2Fmodel-1&flow=fix"],
   ["fleet", "fleet", ""],
+  ["host", "host", "name=build3"],
+  ["venue", "venue", "name=podman"],
   ["config", "config", ""],
   ["watch", "watch", "rule=shop-5xx"],
   ["watch-board", "watch-board", "rule=shop-5xx&finding=finding-1"],

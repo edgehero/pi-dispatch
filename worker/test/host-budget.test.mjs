@@ -190,11 +190,11 @@ test("admit: what runs plus the ask plus every hold ranked above it, in BOTH mem
 	const ledger = [run("a", "light", 8192, 200), run("b", "light", 8192, 200)];
 	const holds = [w("h", "heavy", 16384, 200, 1)];
 	// 16g + 2g + 16g held > 32g: a newcomer waits behind the hold.
-	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "n", project: "light", memMiB: 2048, cpuCenti: 100 } }), { ok: false, why: "budget" });
+	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "n", project: "light", memMiB: 2048, cpuCenti: 100 } }), { ok: false, why: "memory" });
 	// The hold itself has nothing above it: 16g + 16g fits.
 	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "h", project: "heavy", memMiB: 16384, cpuCenti: 200 } }), { ok: true });
 	// CPU binds alone: memory fits, 4 + 2 + 2 held + 1 > 8.
-	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "n", project: "x", memMiB: 0, cpuCenti: 300 } }), { ok: false, why: "budget" });
+	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "n", project: "x", memMiB: 0, cpuCenti: 300 } }), { ok: false, why: "cpu" });
 	// hostShare 50: light already holds 16g of 32g, so another light is a share stop even with no hold anywhere.
 	assert.deepEqual(admit({ budget, ledger, holds: [], ask: { id: "n", project: "light", memMiB: 1024, cpuCenti: 25 }, shareOf: (p) => (p === "light" ? 50 : null) }), { ok: false, why: "share" });
 	// Off and unknown budgets never refuse.
@@ -206,7 +206,7 @@ test("admit: the job COUNT is the third dimension: every running job, the ask an
 	const ledger = [run("a", null, 1024, 25), run("b", null, 1024, 25)];
 	const holds = [w("big", "big", 20480, 200, 1)];
 	// Memory and CPU are plentiful; 2 running + the ask + the hold above it = 4 > 3.
-	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "n", project: null, memMiB: 1024, cpuCenti: 25 } }), { ok: false, why: "budget" });
+	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "n", project: null, memMiB: 1024, cpuCenti: 25 } }), { ok: false, why: "count" });
 	// The hold itself has nothing above it: 2 + 1 = 3.
 	assert.deepEqual(admit({ budget, ledger, holds, ask: { id: "big", project: "big", memMiB: 20480, cpuCenti: 200 } }), { ok: true });
 	// Exactly at the count is admitted; one over is not; no count is no bound.
@@ -250,7 +250,7 @@ test("the gate: a hold is taken synchronously, release is idempotent, and a job 
 	assert.deepEqual(b.current(), { memMiB: 36864, cpuCenti: 800 });
 	assert.deepEqual(b.gate({ id: "a", project: "p", size: { memMiB: 32768, cpuCenti: 400 } }), { admitted: true });
 	const no = b.gate({ id: "b", project: "p", size: { memMiB: 8192, cpuCenti: 100 } });
-	assert.deepEqual(no, { admitted: false, why: "budget", rank: 0 });
+	assert.deepEqual(no, { admitted: false, why: "memory", rank: 0 });
 	assert.equal(b.waiting().length, 1);
 	assert.equal(b.release("a"), true);
 	assert.equal(b.release("a"), false, "a second release gives back nothing");
@@ -379,7 +379,7 @@ test("the count dimension in the gate: the live limit is read per gate, and the 
 	assert.equal(b.gate({ id: "s1", project: null, size: small }).admitted, true);
 	assert.equal(b.gate({ id: "s2", project: null, size: small }).admitted, true);
 	clock.t = 1;
-	assert.deepEqual(b.gate({ id: "big", project: null, size: { memMiB: 20480, cpuCenti: 200 } }), { admitted: false, why: "budget", rank: 0 }, "the count binds, not the memory");
+	assert.deepEqual(b.gate({ id: "big", project: null, size: { memMiB: 20480, cpuCenti: 200 } }), { admitted: false, why: "count", rank: 0 }, "the count binds, not the memory");
 	b.release("s1");
 	clock.t = 2;
 	assert.equal(b.gate({ id: "s3", project: null, size: small }).admitted, false, "the freed slot is the head waiter's");
@@ -910,4 +910,13 @@ test("a guessed survivor seeded BEFORE the first refresh is capped by that refre
 	facts = { memTotalMiB: 262144, hostCpus: 128 };
 	await later.refresh();
 	assert.deepEqual(later.entries().map((e) => [e.memMiB, e.cpuCenti]), [[131072, 6400]]);
+});
+
+test("budget explanations select memory then CPU then count without changing share precedence (#748)", () => {
+	const ask = { id: "ask", project: "shop", memMiB: 2, cpuCenti: 2 };
+	const base = { ledger: [], holds: [], ask };
+	assert.deepEqual(admit({ ...base, budget: { memMiB: 1, cpuCenti: 1, count: 0 } }), { ok: false, why: "memory" });
+	assert.deepEqual(admit({ ...base, budget: { memMiB: 2, cpuCenti: 1, count: 0 } }), { ok: false, why: "cpu" });
+	assert.deepEqual(admit({ ...base, budget: { memMiB: 2, cpuCenti: 2, count: 0 } }), { ok: false, why: "count" });
+	assert.deepEqual(admit({ ...base, budget: { memMiB: 2, cpuCenti: 2, count: 0 }, shareOf: () => 50 }), { ok: false, why: "share" });
 });

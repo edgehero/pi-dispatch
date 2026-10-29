@@ -1186,7 +1186,7 @@ test("issue #596, phase 2: createWorker builds ONE host budget, ticks it off the
 		assert.deepEqual(worker.hostBudget.current(), { memMiB: 16384 - 1638, cpuCenti: 300 });
 		// the job count is the budget's third dimension, against the worker's live concurrency (1 here).
 		assert.equal(worker.hostBudget.gate({ id: "a", size: { memMiB: 512, cpuCenti: 25 } }).admitted, true);
-		assert.equal(worker.hostBudget.gate({ id: "b", size: { memMiB: 512, cpuCenti: 25 } }).why, "budget", "memory and CPU are free; the count is not");
+		assert.equal(worker.hostBudget.gate({ id: "b", size: { memMiB: 512, cpuCenti: 25 } }).why, "count", "memory and CPU are free; the count is not");
 		worker.hostBudget.release("a");
 		worker.hostBudget.forget("b");
 		await new Promise((r) => setTimeout(r, 60));

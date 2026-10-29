@@ -856,7 +856,7 @@ const BACKENDS_TABLE = {
 			isolation: "OpenShell's compute driver (the agent container it creates with every capability dropped, no new privileges, networking off and a pids limit, under Landlock and seccomp)",
 			ephemeral: "the OpenShell gateway, which removes a sandbox's containers when the worker deletes it",
 			mountSet: "OpenShell's compute driver, which mounts its own runtime and the supervisor's socket and nothing of the job's",
-			egress: "OpenShell's supervisor, which decides every connection by the sandbox's policy (deny-all until issue #684 generates its rules)",
+			egress: "OpenShell's supervisor, which decides every connection by the sandbox's policy",
 			jobToJobIsolation: "OpenShell's compute driver, which gives each sandbox's agent no network beside its own supervisor",
 			imagePinning: "the OpenShell gateway's image pull policy on its compute driver",
 			exitCodes: "OpenShell's exec relay, which returns the command's own code and 128 plus the signal",

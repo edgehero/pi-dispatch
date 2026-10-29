@@ -825,3 +825,14 @@ the TOML above in the fix), and upstream's warning, quoted. The CI lane runs a b
   write it (outside the narrow residuals `INT-SESSION-STORE-CONTRACT` names).
 - **A local or cron trigger cannot run remotely.** The operator's own folder has to be bind-mounted and
   edited in place. There is no volume to hide behind.
+
+## Inspecting a venue in the console
+
+Fleet shows a short matrix. Open `/fleet/venue?name=<venue>` for all fourteen declarations, their asserters,
+arming switches, host observations and every published floor asking for each property, including non-blessing
+hosts. A conditional enforced word counts as asserted where its host observation fails. The page names whether
+the venue meets each floor. Its four-venue comparison also shows capabilities and credential custody.
+
+These are the build's declarations and each worker's startup observations, never a live runtime probe. OpenShell
+engine, copy/bind modes and local/remote/unknown gateway facts remain attributable to each blessing host. Operators
+get copyable fix commands; viewers get the fix as a sentence. This page makes no changes.

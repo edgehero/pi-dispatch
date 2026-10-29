@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { FLEET_PANEL_STATES } from "./helpers/fleet-goldens.mjs";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIRM_SLOT_ID } from "../src/console/confirm-view.mjs";
@@ -44,7 +45,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const runs = ["runs-mirror-off.operator", "runs-mirror-degraded.operator", "runs-truncated.operator", "runs-unreadable.viewer", "runs-empty.viewer", "runs-unknown-reason.viewer"];
   const parked = ["parked-approval.operator", "parked-approval.viewer", "parked-answerable.operator", "parked-unanswerable.operator", "parked-being-answered.operator", "parked-unknown.operator", "parked-empty.viewer"];
   const more = ["run-not-found.operator", "run-not-found.viewer", "confirm-refused-timeout.operator", "confirm-preview-resume-incomplete.operator", "confirm-preview-many-queues.operator"];
-  assert.deepEqual([...PANEL_STATES], [...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
+  assert.deepEqual([...PANEL_STATES], [...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });
@@ -74,7 +75,7 @@ function slotOf(page) {
   if (!tag) return null;
   const before = page.slice(0, tag.index);
   const panel = [...before.matchAll(/<section id="(p-[a-z-]+)" data-panel>/g)].at(-1)?.[1] ?? null;
-  return { open: tag[1] === undefined, at: tag.index, panel, closesWrapper: before.endsWith("</section></div>"), body: page.slice(tag.index + tag[0].length) };
+  return { open: tag[1] === undefined, at: tag.index, panel, closesWrapper: before.endsWith("</section></div>"), closesPanel: before.endsWith("</section>"), body: page.slice(tag.index + tag[0].length) };
 }
 
 /** The live notes shown (not hidden) on a page, by state. */
@@ -83,17 +84,17 @@ const notesShown = (page) => [...page.matchAll(/<div data-live-note="([a-z]+)">/
 test("the confirm states: the slot open right after the wrapper of the card that asked, never inside a panel, holding that state's bar", async () => {
   const pages = await rendered;
   const want = {
-    "confirm-previewing": ["p-queues", '<span data-slot-title>Previewing: Pause the fleet</span>'],
+    "confirm-previewing": ["p-fleetbar", '<span data-slot-title>Previewing: Pause the fleet</span>'],
     "confirm-preview": ["p-settings", '<p class="confirm__undo">'],
     "confirm-preview-paid": ["p-failed", '<div class="confirm confirm--paid">'],
-    "confirm-preview-danger": ["p-queues", '<div class="confirm confirm--danger">'],
+    "confirm-preview-danger": ["p-fleetbar", '<div class="confirm confirm--danger">'],
     "confirm-unchanged": ["p-settings", '<div class="confirm confirm--none">'],
     "confirm-bulk-preview": ["p-failed", '<div class="confirm confirm--paid">'],
     "confirm-bulk-results": ["p-failed", '<ul class="confirm__results">'],
     "confirm-refused-preview": ["p-settings", "The change was refused"],
     "confirm-refused-confirm": ["p-failed", "This confirmation cannot be used"],
     "confirm-preview-long-line": ["p-pause-windows", '<ul class="confirm__list">'],
-    "confirm-refused-partial": ["p-queues", "The change did not finish"],
+    "confirm-refused-partial": ["p-fleetbar", "The change did not finish"],
     "confirm-refused-person": ["p-queues", "This browser is now signed in as someone else"],
     "confirm-preview-cancel-queued": ["p-queues", "build3 has no free job slot"],
     "confirm-refused-started": ["p-queues", "started since the preview; nothing was changed"],
@@ -103,7 +104,7 @@ test("the confirm states: the slot open right after the wrapper of the card that
     const slot = slotOf(page);
     assert.ok(slot?.open, `${state}: the slot is open`);
     assert.equal(slot.panel, panel, `${state}: after ${panel}`);
-    assert.ok(slot.closesWrapper, `${state}: right after the panel's .legacy wrapper, outside it`);
+    assert.ok(page.includes('class="legacy"') ? slot.closesWrapper : slot.closesPanel, `${state}: immediately after the asking panel or its legacy wrapper, outside it`);
     assert.equal(page.split(`id="${CONFIRM_SLOT_ID}"`).length, 2, `${state}: one slot`);
     assert.ok(slot.body.slice(0, slot.body.indexOf("<template")).includes(shows), `${state}: the slot holds ${shows}`);
   }
@@ -230,13 +231,13 @@ test("the overview's states: all clear, the first run for each role, each kind o
   // Each waitlist state holds its kind of wait alone, under the bucket's title, with the row's one action.
   // What each kind of wait's rows offer, by bucket; the buckets themselves are the leaf's (DEFER_BUCKETS), so one it gains
   // fails here by name until its actions are written down.
-  const actions = { slot: ["Open Fleet", "Cancel"], run: ["Chain"], check: ["Edit"], retry: [], pause: ["Cancel"], ready: ["Cancel"], paused: ["Cancel"], due: ["Cancel", "Edit"], unknown: ["Cancel"], none: ["Cancel"] };
+  const actions = { slot: ["Open build3", "Cancel"], run: ["Chain"], check: ["Edit"], retry: [], pause: ["Cancel"], ready: ["Cancel"], paused: ["Cancel"], due: ["Cancel", "Edit"], unknown: ["Cancel"], none: ["Cancel"] };
   for (const b of DEFER_BUCKETS) {
     assert.ok(Object.hasOwn(actions, b), `the waitlist state of bucket ${b} has its actions written down here`);
     const list = panelOf(pages[`waitlist-${b}.operator`], "p-waitlists");
     const titles = DEFER_BUCKETS.filter((x) => list.includes(`<b>${esc(DEFER_BUCKET_WORDS[x].title)}</b>`));
     assert.deepEqual(titles, [b], `waitlist-${b}: its bucket alone`);
-    const drawn = [...list.matchAll(/<(?:a class="btn[^"]*" href="[^"]*"|button class="btn[^"]*" type="submit")>([A-Za-z ]+)<\/(?:a|button)>/g)].map((m) => m[1]).filter((w) => w !== "Spend");
+    const drawn = [...list.matchAll(/<(?:a class="btn[^"]*" href="[^"]*"|button class="btn[^"]*" type="submit")>([A-Za-z0-9 -]+)<\/(?:a|button)>/g)].map((m) => m[1]).filter((w) => w !== "Spend");
     assert.deepEqual([...new Set(drawn)].sort(), [...actions[b]].sort(), `waitlist-${b}: its actions`);
   }
   assert.ok(panelOf(pages["waitlist-slot.operator"], "p-waitlists").includes(esc(FREE_SLOT_TEXT)), "the free slot's sentence");

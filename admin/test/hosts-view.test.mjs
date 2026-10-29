@@ -540,6 +540,10 @@ test("the tick's snapshot carries each row's live fields through the worker's al
   await d.dispose();
   assert.deepEqual(snap.hostBudgets[0], {
     name: "mini1",
+    version: null, startedAt: null, pid: null, image: null, imageDigest: null, piVersion: null, tz: null,
+    fpCron: null, fpUsd: "secret-ish", fpProjects: null, fpEnvelope: null, budgetSeed: null,
+    sandboxes: null, sandboxesMore: null, sandboxRetentionHours: null, budgetFrom: null, cpuReserve: null,
+    heldMemMiB: undefined, heldCpuCenti: undefined,
     budgetMemMiB: "8192",
     budgetCpuCenti: "700",
     usedMemMiB: "4096",

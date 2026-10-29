@@ -37,7 +37,8 @@ function fleetPage({ flash = null, maxStreams = 4 } = {}) {
   const failed = html`<section id="p-fleet-failed" data-panel><h2>Failed jobs</h2><div class="scroll"><table class="grid"><tbody><tr><td>gh-1</td><td class="acts">${actForm("retry-failed", { hidden: [["jobId", "gh-1"], ["queue", "jobs"]], label: "Retry" })}</td></tr></tbody></table></div>${editor("Retry failed jobs in bulk", actForm("retry-all-failed", { fields: field("repo", "Repository"), label: "Preview retry of all" }))}</section>`;
   const windows = html`<section id="p-fleet-windows" data-panel><h2>Pause windows</h2>${actForm("pause-windows", { fields: area("windows", "Pause windows, as JSON", { type: "json" }), label: "Preview the windows" })}</section>`;
   const ctx = { session: OPERATOR, readOnly: false, data: { parkedCount: 3, now: NOW }, query: {}, theme: null, flash, maxStreams };
-  const body = shellHtml("fleet", ctx, html`${legacyWrap("fleet", state)}${legacyWrap("fleet", failed)}${legacyWrap("fleet", windows)}`);
+  // Exercise the legacy slot branch through the remaining config wrapper after Fleet migrates.
+  const body = shellHtml("fleet", ctx, html`${legacyWrap("config", state)}${legacyWrap("config", failed)}${legacyWrap("config", windows)}`);
   return String(page({ title: "pi-dispatch console: Fleet", name: "fleet", body, live: "fleet", query: "" }));
 }
 

@@ -105,10 +105,11 @@ export const RUN_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
  * A link to one run's detail page. The id travels in the query string, encoded, and is escaped as text. An id outside
  * `RUN_ID_RE` (a hand-written or foreign mirror record) is shown as plain escaped text: `/run` would answer it 400.
  */
-function runLink(jobId) {
+function runLink(jobId, { pulse = false } = {}) {
+  const cls = pulse ? "code" : "mono";
   if (jobId === null || jobId === undefined || jobId === "") return "-";
-  if (!RUN_ID_RE.test(String(jobId))) return html`<span class="mono">${cell(jobId)}</span>`;
-  return html`<a class="mono" href="${`/run?${new URLSearchParams({ id: String(jobId) })}`}">${String(jobId)}</a>`;
+  if (!RUN_ID_RE.test(String(jobId))) return html`<span class="${cls}">${cell(jobId)}</span>`;
+  return html`<a class="${cls}" href="${`/run?${new URLSearchParams({ id: String(jobId) })}`}">${String(jobId)}</a>`;
 }
 
 /**

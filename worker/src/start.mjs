@@ -45,6 +45,7 @@ import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
 import { liveJobsFields, liveJobsOf } from "./live-jobs.mjs";
+import { makeSandboxTelemetry, parseBudgetFrom, parseCpuReserve } from "./host-telemetry.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
 import { makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
@@ -60,7 +61,7 @@ import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatc
 import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeDoctorSpawner } from "./doctor-spawner.mjs";
 import { fileURLToPath } from "node:url";
-import { makeSandboxReaper } from "./sandbox-store.mjs";
+import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
@@ -701,6 +702,7 @@ export async function startWorker(
 		readMirroredRecord: readMirroredRecordFn = readMirroredRecord,
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
+		listSandboxes: listSandboxesFn = listSandboxes,
 		makeSandboxNetworkSweeper: makeSandboxNetworkSweeperFn = makeSandboxNetworkSweeper,
 		// Issue #429: the one call that asks a runtime which sandboxes are open, seamed so a wiring test can drive the real
 		// sandbox reaper against a real retention root without spawning docker or podman.
@@ -2075,6 +2077,7 @@ export async function startWorker(
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
+	const retainedNow = makeSandboxTelemetry({ list: () => listSandboxesFn({ sandboxDir: config.sandboxDir, throwOnReadFailure: true }), deadline: sandboxDeadline, retentionHours: config.sandboxRetentionHours, now, log });
 	// Issue #596, phase 2: one integer of the host budget's snapshot for the beat, or "" before the worker exists.
 	const snapshotField = (key) => {
 		const snap = worker?.hostBudget?.snapshot?.();
@@ -2090,7 +2093,7 @@ export async function startWorker(
 				return [];
 			}
 		};
-		return liveJobsFields(liveJobsOf({ running: read(() => worker?.runningJobs?.list?.()), budgetEntries: read(() => worker?.hostBudget?.entries?.()) }));
+		return liveJobsFields(liveJobsOf({ defaultVenue: config.defaultBackend, running: read(() => worker?.runningJobs?.list?.()), budgetEntries: read(() => worker?.hostBudget?.entries?.()) }));
 	};
 	// NOT awaited, and that is load-bearing rather than an optimisation. `makeRedisClient` sets
 	// `maxRetriesPerRequest: null` -- required for BullMQ's blocking connections -- which means a command
@@ -2164,6 +2167,11 @@ export async function startWorker(
 		// Issue #596, phase 2: this host's budget and what its jobs hold against it, integers (MiB and hundredths of a CPU),
 		// `off` for a budget switched off and "" while unknown, so doctor and a forge job's never-fits check can read which
 		// host a size fits on. Thunks over the worker's one budget, so every beat says what is held now.
+		sandboxes: () => retainedNow().sandboxes,
+		sandboxesMore: () => retainedNow().sandboxesMore,
+		sandboxRetentionHours: () => retainedNow().sandboxRetentionHours,
+		budgetFrom: () => { const value = parseBudgetFrom(worker?.hostBudget?.detail?.()); return value ? JSON.stringify(value) : ""; },
+		cpuReserve: () => JSON.stringify(parseCpuReserve(cpuReserve.states?.()) ?? []),
 		budgetMemMiB: () => budgetField(worker?.hostBudget?.current().memMiB ?? null),
 		budgetCpuCenti: () => budgetField(worker?.hostBudget?.current().cpuCenti ?? null),
 		usedMemMiB: () => snapshotField("usedMemMiB"),

@@ -38,7 +38,7 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 // worker would load (issue #499 part B).
 import { PROJECT_ID_RE, parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
+import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, effectiveWord, meets, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
 import { CRON_ID_MAX, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
@@ -72,6 +72,7 @@ import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
 import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueuesReporting, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { RUNS_INDEX, RUNS_INDEX_MAX, UNREAD_RECORD, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
+import { parseSandboxes, parseBudgetFrom, parseCpuReserve } from "@edgehero/pi-dispatch/host-telemetry";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import { CAP_SECRET, parseCaps } from "@edgehero/pi-dispatch/capabilities";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
@@ -471,10 +472,13 @@ export function killSwitchPlan({ paused, env = process.env, resolveFn = killSwit
   const context = panelValkeyContext({ env, pointerDir: deploymentDir, owned, fs, uid });
   const picked = resolveFn({ env, context });
   if (picked.error) return { refused: picked.error };
+  const deploymentUrl = picked.urls.length > 1 ? picked.urls[1] : picked.urls[0];
+  const resumeArgv = ["pi-dispatch", "resume", "--valkey-url", urlShown(deploymentUrl)];
+  const resumeCommand = `pi-dispatch resume --valkey-url '${urlShown(deploymentUrl).replaceAll("'", "'\\''")}'`;
   if (picked.urls.length > 1 && !paused) {
-    return { refused: `${picked.disagreement}: resume would start jobs on one of them, so it resumes neither. Make them agree (the .env is what the service reads), or run: pi-dispatch resume --valkey-url <url>` };
+    return { disagreement: picked.disagreement, resumeCommand, resumeArgv, refused: `${picked.disagreement}: resume would start jobs on one of them, so it resumes neither. Make them agree (the .env is what the service reads), or run: ${resumeCommand}` };
   }
-  return { urls: picked.urls, disagreement: picked.urls.length > 1 ? picked.disagreement : null, context };
+  return { urls: picked.urls, disagreement: picked.urls.length > 1 ? picked.disagreement : null, context, resumeCommand, resumeArgv };
 }
 
 /**
@@ -3712,10 +3716,18 @@ function hostRowOf(h) {
   const more = parseJobsMore(h?.jobsMore);
   return {
     name: h?.name,
+    ...Object.fromEntries(["version", "startedAt", "pid", "image", "imageDigest", "piVersion", "tz", "fpCron", "fpUsd", "fpProjects", "fpEnvelope", "budgetSeed"].map((key) => [key, typeof h?.[key] === "string" || Number.isSafeInteger(h?.[key]) ? h[key] : null])),
+    sandboxes: parseSandboxes(h?.sandboxes),
+    sandboxesMore: parseJobsMore(h?.sandboxesMore),
+    sandboxRetentionHours: parseJobsMore(h?.sandboxRetentionHours),
+    budgetFrom: parseBudgetFrom(h?.budgetFrom),
+    cpuReserve: parseCpuReserve(h?.cpuReserve),
     budgetMemMiB: h?.budgetMemMiB,
     budgetCpuCenti: h?.budgetCpuCenti,
     usedMemMiB: h?.usedMemMiB,
     usedCpuCenti: h?.usedCpuCenti,
+    heldMemMiB: h?.heldMemMiB,
+    heldCpuCenti: h?.heldCpuCenti,
     concurrency: h?.concurrency,
     budgetRunning: h?.budgetRunning,
     waiters: h?.waiters,
@@ -4314,7 +4326,7 @@ export function createFleetReader(
       // (PII), so it never enters the snapshot (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT). The host is read off
       // the registry rows this tick already holds (a host publishes the ids it runs), never off the Job.
       const hostOfJob = new Map();
-      for (const h of lastHosts) for (const j of parseLiveJobs(h?.jobs).jobs ?? []) if (typeof h?.name === "string") hostOfJob.set(j.id, h.name);
+      for (const h of lastHosts) for (const j of parseLiveJobs(h?.jobs).jobs ?? []) if (typeof h?.name === "string") hostOfJob.set(j.id, { host: h.name, project: j.p ?? null, size: j.m !== null || j.c !== null ? { memMiB: j.m, cpuCenti: j.c } : null });
       // Issue #646: of a Job's `.data`, ONE boolean (`steer`) and the run id it names (`recoveryOf`, through `runIdOf`)
       // are read, and the run id never leaves this function: it only spells the inbox keys below and, since issue #662,
       // the progress keys (a #645 recovery writes its progress under its RUN's id, so a `.r1` row read by its own id
@@ -4327,7 +4339,9 @@ export function createFleetReader(
             jobId: typeof j?.id === "string" ? j.id : j?.id === undefined || j?.id === null ? null : String(j.id),
             queue: queues[qi]?.name ?? "-",
             startedAt: Number.isSafeInteger(j?.processedOn) && j.processedOn > 0 ? j.processedOn : null,
-            host: hostOfJob.get(String(j?.id)) ?? null,
+            host: hostOfJob.get(String(j?.id))?.host ?? null,
+            project: hostOfJob.get(String(j?.id))?.project ?? null,
+            size: hostOfJob.get(String(j?.id))?.size ?? null,
           };
           if (j?.data?.steer === true && row.jobId !== null) steerRows.push({ row, runId: runIdOf(j) });
           const runId = row.jobId === null ? null : runIdOf(j);
@@ -4388,6 +4402,7 @@ export function createFleetReader(
             (Array.isArray(list) ? list : []).map((j) => ({
               jobId: j?.id ?? "-",
               attemptsMade: Number(j?.attemptsMade ?? 0),
+              attempts: Number.isSafeInteger(j?.opts?.attempts) && j.opts.attempts > 0 ? j.opts.attempts : null,
               failedReason: scrubReason(j?.failedReason),
               queue: queues[qi]?.name ?? "-",
               endedAt: Number(j?.finishedOn ?? 0),
@@ -4421,6 +4436,7 @@ export function createFleetReader(
           failures24hFloor: w.runs.length >= WIDE_RUNS && runAt(w.runs[w.runs.length - 1]) >= nowMs - DAY_MS,
           parkedUnreachable: w.partial ? scrubReason(w.partial) : null,
           recordReasons: newestReasonsOf(w.runs),
+          recordDetails: new Map(w.runs.map((r) => [r.jobId, r]).reverse()),
           // Issue #737: the overview's day of runs, its spend per hour and its soft-hold refusals, off the same window.
           runsDay: runsDayOf(w, nowMs),
           spendByHour: spendByHourOf(w, nowMs),
@@ -4432,7 +4448,12 @@ export function createFleetReader(
       );
       // Issue #710: each failed job's record reason (its newest record in the wide window), the closed enum alone, so the
       // fleet page can say why in the row. BullMQ's own `failedReason` stays the operator's free text, never in a row.
-      if (Array.isArray(failed?.rows)) for (const row of failed.rows) row.reason = fold.recordReasons.get(row.jobId) ?? null;
+      if (Array.isArray(failed?.rows)) for (const row of failed.rows) {
+        row.reason = fold.recordReasons.get(row.jobId) ?? null;
+        row.hasRecord = fold.recordReasons.has(row.jobId);
+        row.target = fold.recordDetails?.get(row.jobId)?.target ?? null;
+        row.outcome = fold.recordDetails?.get(row.jobId)?.outcome ?? null;
+      }
 
       // Issue #647: whether each waiting park is being answered now (a job queued or running on its target, which has no
       // record yet: `readPendingOnTargets`, the rule the Chat panel and the planner use). Read only while something is
@@ -4468,7 +4489,16 @@ export function createFleetReader(
         row.inbox = Array.isArray(inboxGot[i]?.entries) ? inboxGot[i].entries.map(publicInboxEntry) : null;
       });
 
+      const waitingJobs = waitingRead === null ? null : await waitingRead;
+      if (Array.isArray(waitingJobs?.rows)) for (const row of waitingJobs.rows) row.size = resolveJobSize({ project: row.project, limits: limitRows, env: dollarEnvFn() ?? {} });
+      if (waitingJobs && Array.isArray(held?.rows)) for (const row of held.rows) row.project = waitingJobs.rows?.find((job) => job.jobId === row.jobId)?.project ?? null;
       return {
+        defaultSize: resolveJobSize({ env: dollarEnvFn() ?? {} }),
+        waitMaxChecks: parseNonNegInt((dollarEnvFn() ?? {}).PI_WAIT_MAX_CHECKS, 96) || 96,
+        waitMaxFaults: parseNonNegInt((dollarEnvFn() ?? {}).PI_WAIT_MAX_FAULTS, 5) || 5,
+        waitMaxMs: parseNonNegInt((dollarEnvFn() ?? {}).PI_WAIT_MAX_MS, 24 * 3600 * 1000) || 24 * 3600 * 1000,
+        valkey: urlShown(paths.valkeyUrl),
+        readAt: nowMs,
         held,
         failed,
         scopedLimits,
@@ -4489,7 +4519,11 @@ export function createFleetReader(
         // declared name is one the worker refuses.
         doctorSelf: doctorSelfName(dollarEnvFn() ?? {}),
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
-        schedulers: mapSchedulers(schedulerList, Date.now()),
+        schedulers: mapSchedulers(schedulerList, nowMs).map((scheduler) => {
+          const trigger = triggersView?.triggers?.find((t) => t.type === "cron" && t.id === scheduler.key);
+          const project = typeof trigger?.folder === "string" ? projectOf({ kind: "local", folder: trigger.folder }, projectsView?.projects ?? []) : null;
+          return { ...scheduler, project };
+        }),
         // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so neither reader
         // changes.
         schedulerStalls: Object.fromEntries(cronIds.map((id, i) => [id, Number(stallCounts?.[i] ?? 0) || 0])),
@@ -4545,7 +4579,7 @@ export function createFleetReader(
         // Issue #737: when the registry rows in `hostBudgets` were read (the reader's clock), null before any read.
         hostsReadAt: lastHostsAt,
         // Issue #737: the waiting jobs (`readWaiting`'s shape, or `{ unreachable: true }`), only on a call that asked.
-        ...(waitingRead !== null ? { waiting: await waitingRead } : {}),
+        ...(waitingJobs !== null ? { waiting: waitingJobs } : {}),
         // Issue #737: what a switch preview's `queueCounts` cover, only on a call that asked for the switch's queues.
         ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete } : {}),
       };
@@ -6847,10 +6881,15 @@ export function venuesView(hostRows) {
           question: d?.question ?? "",
           word,
           wordText: DECLARATION_TEXT[word],
+          assertedBy: d?.assertedBy ?? null,
           armedBy: d?.armedBy ?? null,
           observedBy: d?.observedBy ?? null,
           observedText: d?.observedBy ? (OBSERVATIONS[d.observedBy] ?? null) : null,
-          flooredOn: blessing.filter((h) => Object.hasOwn(h.backends.floor ?? {}, property)).map((h) => ({ host: nameOf(h), want: h.backends.floor[property] })),
+          flooredOn: published.filter((h) => Object.hasOwn(h.backends.floor ?? {}, property)).map((h) => {
+            const observations = { openshellGatewayLocal: h.backends.openshell?.gateway === "local" };
+            const have = d?.observedBy === "openshellGatewayLocal" ? effectiveWord(name, property, observations) : word;
+            return { host: nameOf(h), want: h.backends.floor[property], have, meets: meets(have, h.backends.floor[property]), blessed: h.backends.blessed.includes(name) };
+          }),
         };
       }),
       serves: SERVES.map((key) => ({ key, word: entry.serves[key], text: SERVES_TEXT[key]?.[entry.serves[key]] ?? null })),

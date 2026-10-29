@@ -680,9 +680,9 @@ test("createFleetReader: every active job (never .data), per-queue counts, unans
     const snap = await reader.snapshot();
     assert.deepEqual(asked.map((a) => a.slice(1)), [[0, 49], [0, 49]], "bounded per queue");
     assert.deepEqual(snap.active, [
-      { jobId: "gh-a1", queue: "pi-jobs", startedAt: AT - MIN, host: null, progress: null },
-      { jobId: "gh-a2", queue: "pi-jobs@hostb", startedAt: AT - 2 * MIN, host: "hostb", progress: null },
-      { jobId: "gh-a3", queue: "pi-jobs@hostb", startedAt: null, host: null, progress: null },
+      { jobId: "gh-a1", queue: "pi-jobs", startedAt: AT - MIN, host: null, project: null, size: null, progress: null },
+      { jobId: "gh-a2", queue: "pi-jobs@hostb", startedAt: AT - 2 * MIN, host: "hostb", project: null, size: null, progress: null },
+      { jobId: "gh-a3", queue: "pi-jobs@hostb", startedAt: null, host: null, project: null, size: null, progress: null },
     ]);
     assert.equal(snap.activeJobId, "gh-a1", "the TUI's field is still there");
     assert.ok(!JSON.stringify(snap).includes("SECRET"), "no Job .data anywhere in the snapshot");
@@ -990,6 +990,10 @@ test("createFleetReader: the day's refusals beside its failures, and each failed
   assert.deepEqual(snap.refusals24h, { count: 1, top: [{ reason: "scope-cap", count: 1 }] });
   assert.equal(snap.failures24h, 2);
   assert.deepEqual(snap.failed.rows.map((r) => [r.jobId, r.reason]), [["gh-dead", "container-lost"], ["gh-odd", null], ["gh-none", null]], "the record's token, null for one outside the charset or with no record");
+  assert.deepEqual(snap.failed.rows.map((r) => [r.jobId, r.hasRecord]), [["gh-dead", true], ["gh-odd", true], ["gh-none", false]], "a retained record whose reason is absent stays distinct from no record");
+  assert.equal(snap.failed.rows[0].target, "acme/web#1");
+  assert.equal(snap.failed.rows[0].outcome, "failed");
+  assert.equal(snap.failed.rows[2].target, null);
   assert.equal(snap.failed.rows[0].failedReason, "FREE TEXT", "BullMQ's text is still the operator's, beside it");
 });
 

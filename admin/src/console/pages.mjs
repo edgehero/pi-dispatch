@@ -28,6 +28,9 @@
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
 import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
+import { ageText, beatAgeOf } from "./panels/common.mjs";
+import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
+import { BACKEND_NAMES } from "@edgehero/pi-dispatch/backends";
 import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
 import { REPLICAS_MAX } from "@edgehero/pi-dispatch/triggers";
 import { FORGES } from "@edgehero/pi-dispatch/forges";
@@ -55,6 +58,9 @@ import {
   fleetHeld,
   fleetHosts,
   fleetDoctor,
+  fleetBar, fleetDelayed,
+  hostState, hostJobs, hostSandboxes, hostBudget, hostCapacity, hostRow, hostDoctor,
+  venueSummary, venueServes, venueHosts, venueProperties, venueFix, venueCompare,
   fleetQueues,
   fleetSchedulers,
   fleetVenues,
@@ -96,7 +102,7 @@ import {
 import { chatFactsOf, parkedAnswerCheckOf, rerunCheckOf, sandboxCheckOf } from "./run-api.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
-import { SPEND_TITLE, recordReason } from "../words.mjs";
+import { SPEND_TITLE, VENUE_LABEL, recordReason } from "../words.mjs";
 import { RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
 
 /**
@@ -118,6 +124,8 @@ export const PAGES = Object.freeze({
   parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked", icon: "parked" }),
   insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE, icon: "spend" }),
   fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet", icon: "fleet" }),
+  host: Object.freeze({ path: "/fleet/host", auth: "viewer", live: true, title: "Host", nav: null, icon: "fleet" }),
+  venue: Object.freeze({ path: "/fleet/venue", auth: "viewer", live: false, title: VENUE_LABEL, nav: null, icon: "fleet" }),
   config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration", icon: "config" }),
   watch: Object.freeze({ path: "/watch", auth: "viewer", live: false, title: "Watch", nav: null, icon: "bolt" }),
   "watch-board": Object.freeze({ path: "/watch/board", auth: "viewer", live: false, title: "Watch board", nav: null, icon: "bolt" }),
@@ -135,7 +143,7 @@ export const PAGES = Object.freeze({
  * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
  * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
  */
-export const LEGACY_PAGES = Object.freeze(["insights", "fleet", "config"]);
+export const LEGACY_PAGES = Object.freeze(["insights", "config"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
@@ -148,7 +156,9 @@ const PAGE_PANELS = Object.freeze({
   run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
   parked: [["p-questions", parkedQuestions]],
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
-  fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
+  fleet: [["p-fleetbar", fleetBar], ["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-failed", fleetFailed], ["p-delayed", fleetDelayed], ["p-schedules", fleetSchedulers], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues]],
+  host: [["p-hoststate", hostState], ["p-hostjobs", hostJobs], ["p-hostsandboxes", hostSandboxes], ["p-hostbudget", hostBudget], ["p-hostcap", hostCapacity], ["p-hostrow", hostRow], ["p-hostdoctor", hostDoctor]],
+  venue: [["p-venue", venueSummary], ["p-venue-serves", venueServes], ["p-venue-hosts", venueHosts], ["p-venue-props", venueProperties], ["p-venue-fix", venueFix], ["p-venue-compare", venueCompare]],
   config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles], ["p-secret-bundles", configSecretBundles]],
   watch: [["p-watch", watchPanel]],
   "watch-board": [["p-watch-board", watchBoardPanel]],
@@ -160,7 +170,20 @@ const PAGE_PANELS = Object.freeze({
  * (`shell.mjs` `HEADLINE_ID`), and the stream swaps it like any panel, since what it says changes while the page is
  * open ("All clear. 4 jobs running, nothing needs you."). A screen with none draws no line.
  */
-const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadline });
+function hostHeadline(view) {
+  const host = view.data?.host ?? view.data?.snapshot?.hostBudgets?.find((h) => h.name === view.query?.name);
+  if (!host) return html`No live registry row for ${view.query?.name ?? "this host"}.`;
+  const venues = host.backends?.blessed ?? [];
+  const jobs = host.jobs;
+  const readable = Array.isArray(jobs) && !host.jobsUnreadable;
+  const moreKnown = Number.isSafeInteger(host.jobsMore) && host.jobsMore >= 0;
+  const used = readable && moreKnown ? jobs.length + host.jobsMore : null;
+  const occupied = used !== null ? `${used} of ${host.concurrency ?? "unknown"} slots taken` : readable && jobs.length > 0 ? `at least ${jobs.length} occupied ${jobs.length === 1 ? "slot" : "slots"} listed; total not known` : "occupied slots not known";
+  const beat = beatAgeOf(host);
+  return html`${venues.length ? venues.map((name) => `${name}${host.backends.default === name ? " (default)" : ""}`).join(", ") : "Venues not published"} · worker ${host.version ?? "not published"} · ${occupied} · last beat ${beat === null ? "not known" : `${ageText(beat)} ago`}`;
+}
+
+const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadline, host: hostHeadline });
 
 /**
  * How a screen's panels are laid out (issue #737), for a screen whose cards stand in a grid rather than one under
@@ -174,6 +197,9 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  fleet: [{ cls: "stack", items: ["p-fleetbar"] }, { cls: "cols", items: [{ cls: "stack", items: ["p-queues", "p-active", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor", "p-venues"] }] }],
+  host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
+  venue: [{ cls: "cols", items: [{ cls: "stack", items: ["p-venue-serves", "p-venue-props", "p-venue-compare"] }, { cls: "stack", items: ["p-venue", "p-venue-hosts", "p-venue-fix"] }] }],
   run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-terminal", "p-inbox", "p-run", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
   overview: Object.freeze([
     Object.freeze({ cls: "cols", items: Object.freeze(["p-setup", Object.freeze({ cls: "stack", items: Object.freeze(["p-setup-pi", "p-setup-empty"]) })]) }),
@@ -212,6 +238,8 @@ const PAGE_PARAMS = Object.freeze({
   parked: [],
   insights: ["range", "whatif", "flow", "paths"],
   fleet: [],
+  host: ["name"],
+  venue: ["name"],
   config: [],
   watch: ["rule"],
   "watch-board": ["rule", "finding"],
@@ -278,6 +306,14 @@ export function parsePageQuery(name, searchParams) {
     return v === null || v === "" ? null : v;
   };
   switch (name) {
+    case "host":
+    case "venue": {
+      const value = one("name");
+      if (value === null) return { refusal: `the ${name} page needs ?name=` };
+      if (name === "host" && !WORKER_NAME_RE.test(value)) return { refusal: "name must be a worker name (letters, digits, '.', '_', '-', at most 64 characters)" };
+      if (name === "venue" && !BACKEND_NAMES.includes(value)) return { refusal: `name must be one of ${BACKEND_NAMES.join(", ")}` };
+      return { query: Object.freeze({ name: value }) };
+    }
     case "watch":
     case "watch-board": return parseWatchQuery(params, { board: name === "watch-board" });
     case "runs": {
@@ -343,7 +379,8 @@ export function pageQueryString(name, query) {
   } else if (name === "runs") {
     for (const k of RUN_FILTER_FIELDS) if (q.filter?.[k] !== undefined) p.set(k, q.filter[k]);
     if (q.before !== null && q.before !== undefined) p.set("before", String(q.before));
-  } else if (name === "run" && q.id) p.set("id", q.id);
+  } else if ((name === "host" || name === "venue") && q.name) p.set("name", q.name);
+  else if (name === "run" && q.id) p.set("id", q.id);
   else if (name === "insights") {
     for (const k of ["range", "whatif", "flow", "paths"]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
   }
@@ -412,7 +449,9 @@ const PAGE_READS = Object.freeze({
   run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
   parked: ["snapshot", "parkedChecks"],
   insights: ["insights", "parkedCount"],
-  fleet: ["snapshot"],
+  fleet: ["snapshot", "waiting"],
+  host: ["snapshot", "waiting", "hostCapacity"],
+  venue: ["snapshot"],
   config: ["snapshot"],
   watch: ["parkedCount"],
   "watch-board": ["parkedCount"],
@@ -552,6 +591,20 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
     }
+  }
+  if (name === "fleet") {
+    try {
+      const plan = typeof deps.killSwitchPlan === "function" ? deps.killSwitchPlan({ paused: false }) : null;
+      data.killSwitch = plan ? { disagreement: plan.disagreement ?? null, refused: plan.refused ?? null, resumeCommand: plan.resumeCommand ?? null, resumeArgv: Array.isArray(plan.resumeArgv) ? [...plan.resumeArgv] : null } : null;
+    } catch { data.killSwitch = { refused: "The deployment's kill switch could not be read." }; }
+  }
+  if (name === "host") {
+    data.host = data.snapshot?.hostBudgets?.find((host) => host.name === q.name) ?? null;
+    try { const history = await deps.fleet.runsPage({ filter: { host: q.name }, limit: RUNS_PER_PAGE }); data.hostHistory = { ...history, records: history?.runs ?? [] }; } catch { data.hostHistory = null; }
+    // Capacity is an expensive historical fold. A live replacement deliberately omits its panel, keeping the initial chart.
+    if (who?.live !== true) {
+      try { data.hostCapacity = typeof deps.hostCapacity === "function" ? await deps.hostCapacity(q.name) : null; } catch { data.hostCapacity = null; }
+    } else data.live = true;
   }
   if (reads.includes("subscriptions")) data.subscriptions = await subscriptionsOf(deps);
   if (reads.includes("runsPage")) {
@@ -753,7 +806,7 @@ export const RUN_VIEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-prog
 /** Each panel of screen `name` as `{ id, fragment }`, with the role split enforced before rendering. */
 function panelFragments(name, ctx) {
   const view = viewOf(name, ctx);
-  return PAGE_PANELS[name].map(([id, render]) => ({ id, fragment: name === "run" && view.role !== "operator" && !RUN_VIEWER_PANELS.includes(id) ? html`` : render(view) }));
+  return PAGE_PANELS[name].filter(([id]) => !(name === "host" && ctx?.data?.live === true && id === "p-hostcap")).map(([id, render]) => ({ id, fragment: name === "run" && view.role !== "operator" && !RUN_VIEWER_PANELS.includes(id) ? html`` : render(view) }));
 }
 
 /**
@@ -836,5 +889,5 @@ export async function renderPage(name, ctx) {
   const body = shellHtml(name, ctx, html`${inner}`, headline === null ? {} : { headline });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = places !== null && !runPlaces(places).shown ? 503 : 200;
-  return { status, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, live, query, theme }) };
+  return { status, html: page({ title: `pi-dispatch console: ${["host", "venue"].includes(name) ? ctx?.query?.name ?? meta.title : meta.title}`, name, body, live, query, theme }) };
 }

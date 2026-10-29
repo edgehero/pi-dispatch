@@ -163,8 +163,8 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   // The role rule: the failure reason is the operator's, in a details element, and in no viewer page.
   const failed = "clone failed: remote rejected the token (403)";
   for (const [key, page] of Object.entries(first)) if (key.endsWith(".viewer")) assert.ok(!page.html.includes(failed), `${key} carries no failure reason`);
-  assert.match(first["fleet.operator"].html, new RegExp(`<details><summary class="mono">gh-5d10</summary><p class="mono">${failed.replace(/[()]/g, "\\$&")}</p></details>`), "the operator's fleet page has the reason in a details element");
-  assert.ok(!/<tr>[^]*?clone failed[^]*?<\/tr>/.test(first["fleet.operator"].html), "and never in a table row");
+  assert.match(first["fleet.operator"].html.replace(/>\s+</g, "><"), new RegExp(`<details><summary class="code">gh-5d10</summary><p class="code">${failed.replace(/[()]/g, "\\$&")}</p></details>`), "the operator's fleet page has the reason in a details element");
+  assert.ok([...first["fleet.operator"].html.matchAll(/<tr(?:\s[^>]*)?>[^]*?<\/tr>/g)].every(([row]) => !row.includes(failed)), "and never in a table row (a row cannot cross a table boundary)");
   assert.doesNotMatch(first["audit.viewer"].html, /serve-started|login-failed/, "a viewer's audit page shows no row");
   // What the screens show, spot-checked against the fixture.
   const overview = first["overview.operator"].html;
@@ -183,7 +183,7 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
     assert.match(first[key].html, /<p class="kpi"><b>5<\/b><span>jobs waiting to start<\/span><\/p>/, `${key}: five in line`);
     for (const [word, n] of [["Free slot", 1], ["Another run", 1], ["Time or check", 1], ["Retry backoff", 2]]) assert.ok(first[key].html.includes(`<span>${word}</span><span class="end"><b>${n}</b></span>`), `${key}: ${word} ${n}`);
   }
-  assert.ok(overview.includes('<span class="code">gh-c9e1</span><span class="wl__t">build3 has no free job slot. <span class="code">gh-4a7e</span> still holds one of its slots</span><a class="btn btn--sm btn--ghost" href="/fleet">Open Fleet</a>'), "the slot gh-4a7e still holds");
+  assert.ok(overview.includes('<span class="code">gh-c9e1</span><span class="wl__t">build3 has no free job slot. <span class="code">gh-4a7e</span> still holds one of its slots</span><a class="btn btn--sm btn--ghost" href="/fleet/host?name=build3">Open build3</a>'), "the slot gh-4a7e still holds and its host detail link");
   assert.ok(overview.includes('<span class="code">gh-d4f0</span><span class="wl__t">Chained after gh-b3d7; starts when its folder is free</span><a class="btn btn--sm btn--ghost" href="/run?id=gh-b3d7">Chain</a>'), "the chained job");
   assert.ok(overview.includes('<span class="code">gh-71b2</span><span class="wl__t">Attempt 2 of 3 at <time datetime="2026-10-08T15:43:08.000Z">'), "the retry, its backoff from the worker's record");
   assert.ok(!first["overview.viewer"].html.includes('btn--ghost" href="/fleet">Open Fleet</a>') && !first["overview.viewer"].html.includes(">Edit</a>"), "a viewer is offered no action");
@@ -209,8 +209,8 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   // Fleet's alone, for both roles.
   for (const key of ["fleet.viewer", "fleet.operator"]) {
     assert.match(first[key].html, /<th scope="col">Progress<\/th>/, key);
-    assert.match(first[key].html, /<td>turn 7, 12 steps \(1 failed\), bash running 40s, phase 2\/4<\/td>/, `${key}: the phased run`);
-    assert.match(first[key].html, /<td>turn 31, 58 steps<\/td>/, `${key}: the remote host's job`);
+    assert.match(first[key].html, /turn 7, 12 steps \(1 failed\), bash running 40s, phase 2\/4/, `${key}: the phased run`);
+    assert.match(first[key].html, /turn 31, 58 steps/, `${key}: the remote host's job`);
   }
   const liveRun = first["run-live.operator"].html;
   assert.equal(first["run-live.operator"].status, 200, "a running job without a record is a page, not a 404");
@@ -275,7 +275,7 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
   assert.match(pages["fleet.viewer"].html, /gh-&lt;b onmouseover=alert\(5\)&gt;/, "a hostile active job id is text");
   // The operator sees the reason, escaped and scrubbed, in its details element only.
   const fleet = pages["fleet.operator"].html;
-  assert.match(fleet, /<details><summary class="mono">gh-&lt;script&gt;[^<]*<\/summary><p class="mono">SECRET-FAILURE-TEXT &lt;img src=x onerror=alert\(4\)&gt; ?\[0m<\/p><\/details>/);
+  assert.match(fleet.replace(/>\s+</g, "><"), /<details><summary class="code">gh-&lt;script&gt;[^<]*<\/summary><p class="code">SECRET-FAILURE-TEXT &lt;img src=x onerror=alert\(4\)&gt; ?\[0m<\/p><\/details>/);
   assert.ok(!/<td[^>]*>[^<]*SECRET-FAILURE-TEXT/.test(fleet), "never in a list cell");
   assert.ok(pages.hostileRunQuery.refusal, "the hostile run id is refused as a query before any read");
 });
@@ -287,7 +287,7 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
 test("parsePageQuery: each screen takes only its own parameters, bounded and charset-checked, and refuses without echoing", async () => {
   const { PAGES, QUERY_LIMITS, pageQueryString, parsePageQuery } = await import("../src/console/pages.mjs");
   const q = (name, qs) => parsePageQuery(name, new URLSearchParams(qs));
-  assert.deepEqual(Object.keys(PAGES), ["overview", "runs", "run", "parked", "insights", "fleet", "config", "watch", "watch-board", "audit"]);
+  assert.deepEqual(Object.keys(PAGES), ["overview", "runs", "run", "parked", "insights", "fleet", "host", "venue", "config", "watch", "watch-board", "audit"]);
   assert.ok(Object.isFrozen(PAGES) && Object.values(PAGES).every(Object.isFrozen));
   assert.equal(PAGES.audit.auth, "operator");
   assert.ok(Object.values(PAGES).filter((p) => p.auth !== "operator").every((p) => p.auth === "viewer"));
@@ -443,14 +443,14 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
       env: { GITLAB_URL: "https://gl.example", GITHUB_TOKEN: "ghp_secret", VALKEY_URL: "redis://x" },
       now: () => 1234,
     };
-    const query = parsePageQuery(name, name === "run" ? "id=gh-1" : "").query;
+    const query = parsePageQuery(name, name === "run" ? "id=gh-1" : name === "host" ? "name=build3" : name === "venue" ? "name=local" : "").query;
     const data = await loadPageData(name, query, deps);
     assert.equal(data.now, 1234, `${name}: the clock is read once, into the data`);
     assert.deepEqual(data.env, { GITLAB_URL: "https://gl.example" }, `${name}: only forge host variables are kept`);
     assert.ok(calls.snapshot <= 1, `${name}: snapshot at most once`);
     // Issue #737: a screen that reads no snapshot reads the navigation's Parked count, once; one that does takes it from
     // the snapshot, so no screen reads both.
-    const expected = { overview: ["snapshot", "waiting"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot"], config: ["snapshot"], watch: ["parkedCount"], "watch-board": ["parkedCount"], audit: ["audit", "parkedCount"] }[name];
+    const expected = { overview: ["snapshot", "waiting"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot", "waiting"], host: ["snapshot", "waiting", "runsPage"], venue: ["snapshot"], config: ["snapshot"], watch: ["parkedCount"], "watch-board": ["parkedCount"], audit: ["audit", "parkedCount"] }[name];
     assert.deepEqual(Object.keys(calls).filter((k) => calls[k] > 0).sort(), [...expected].sort(), `${name} reads ${expected.join(", ")}`);
     assert.ok(calls.parkedCount <= 1, `${name}: the count at most once`);
     assert.equal(data.parkedCount, expected.includes("parkedCount") ? 2 : undefined, `${name}: the count is in the data where it was read`);

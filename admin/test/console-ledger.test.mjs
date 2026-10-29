@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { html } from "../src/console/html.mjs";
 import { ROLES as PAGE_ROLES, SHOTS, STATIC_SHOTS } from "./helpers/console-pages-harness.mjs";
+import { FLEET_PANEL_STATES } from "./helpers/fleet-goldens.mjs";
 import { PANEL_STATES } from "./helpers/panel-goldens.mjs";
 
 // Issue #737: every design card in scope has an element ledger, `fixtures/console-ledger/<Card>.json`, and
@@ -39,6 +40,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  FleetScreen: 6, FleetPartPaused: 6, HostDetail: 6, VenueDetail: 6,
   RunLive: 5, RunEnded: 5, RunRefused: 5, RunParked: 5, RunRecovered: 5, RunSandboxed: 5, RunChatStates: 5, RunViewer: 5, Transcript: 5, FactsAndLevels: 5,
   Shell: 1,
   Status: 1,
@@ -79,6 +81,8 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  ...FLEET_PANEL_STATES.map((key) => `panels/${key}`),
+  "fleet.operator", "fleet.viewer", "host.operator", "host.viewer", "venue.operator", "venue.viewer",
   "run.operator", "run.viewer", "run-live.operator", "run-live.viewer",
   "overview.operator",
   "overview.viewer",

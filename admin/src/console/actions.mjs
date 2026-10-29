@@ -70,6 +70,7 @@ import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { html } from "./html.mjs";
+import { cmd } from "./kit.mjs";
 import { WATCH_ID_RE, WATCH_RULE_ID_RE } from "./watch.mjs";
 import { timeHtml, utcText } from "./panels/common.mjs";
 import { FLASH_MAX_BYTES } from "./sessions.mjs";
@@ -1436,7 +1437,7 @@ function fleetSwitch({ name, kind, paused }) {
     async preview(_body, ctx) {
       const decide = ctx.a.killSwitchPlanFn;
       const plan = typeof decide === "function" ? decide({ paused }) : { urls: [ctx.a.paths?.valkeyUrl].filter(Boolean), disagreement: null };
-      if (plan?.refused) return { refusal: String(plan.refused) };
+      if (plan?.refused) return { refusal: String(plan.refused), ...(Array.isArray(plan.resumeArgv) ? { refusalHtml: html`<p>${String(plan.refused)}</p>${cmd(plan.resumeArgv)}<p>One queue can still be resumed on the Valkey this console read it from.</p>` } : {}) };
       const shown = (plan?.urls ?? []).map((u) => (typeof ctx.a.urlShown === "function" ? ctx.a.urlShown(u) : "the deployment's Valkey"));
       let waiting = null;
       // A resume's Undo re-pauses what was paused before it (`resumeBack`): how many queues the switch flips and which of
@@ -1445,6 +1446,17 @@ function fleetSwitch({ name, kind, paused }) {
       let pausedBefore = null;
       let short = [];
       let shortLines = [];
+      let pauseLines = [];
+      if (paused) {
+        const s = await snapshotOf(ctx, SWITCH_READ);
+        if (s.snapshot) {
+          const all = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
+          short = switchShortOf(s.snapshot);
+          shortLines = switchShortLines(s.snapshot, short);
+          const sum = (key) => all.reduce((n, row) => n + (Number.isSafeInteger(row.counts?.[key]) ? row.counts[key] : 0), 0);
+          pauseLines = [...Array.from({ length: Math.ceil(all.length / 20) }, (_, i) => `Queues: ${all.slice(i * 20, (i + 1) * 20).map((row) => String(row.queue)).join(", ")}`), `${sum("active")} running jobs keep running`, `${sum("delayed")} delayed jobs and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held jobs wait until a resume`, "Audited as fleet-pause", "Undo: Resume the fleet"];
+        } else pauseLines = ["The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch discovers", "Audited as fleet-pause", "Undo: Resume the fleet"];
+      }
       if (!paused) {
         const s = await snapshotOf(ctx, SWITCH_READ);
         if (s.snapshot) {
@@ -1463,7 +1475,7 @@ function fleetSwitch({ name, kind, paused }) {
         payload: {},
         ...(paused ? {} : { pausedBefore }),
         ...(waiting ? { count: waiting.count } : {}),
-        summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : []), ...shortLines],
+        summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : []), ...pauseLines, ...shortLines],
       };
     },
     async apply(_entry, ctx) {
@@ -2013,7 +2025,7 @@ export async function previewAction(ctx, action) {
   }
   // A refusal names its bar's state only where its status cannot (the snapshot's timeout, a 503 that is not Valkey's),
   // and only one of the slot's own states: a planner's answer may carry a field of that name for something else.
-  if (out?.refusal) return refuse(ctx, "preview", out.status ?? 400, out.refusal, typeof out.state === "string" && Object.hasOwn(REFUSAL_STATES, out.state) ? out.state : null);
+  if (out?.refusal) return refuse(ctx, "preview", out.status ?? 400, out.refusal, typeof out.state === "string" && Object.hasOwn(REFUSAL_STATES, out.state) ? out.state : null, out.refusalHtml ?? null);
   if (out?.unchanged) {
     const summary = [String(out.unchanged)];
     return ctx.json(200, { unchanged: true, action: action.name, summary, ...(out.extra ?? {}), html: String(unchangedBarHtml({ summary, sentenceHtml: out.unchangedHtml ?? null })) });

@@ -77,7 +77,7 @@ BASE_CSS = """
 .fl-chk__fix b { color: var(--ink); }
 .vw .ic { width: 13px; height: 13px; }
 .vw--asserted { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); }
-.vw--absent { background: transparent; color: var(--ink-muted); box-shadow: inset 0 0 0 1px var(--line); }
+.vw--absent { background: transparent; color: var(--ink-muted); box-shadow: none; border: 1px dashed var(--line); }
 .lead-s { font-size: 13px; line-height: 20px; color: var(--ink-muted); max-width: 820px; }
 .mini-list { display: grid; gap: 6px; font-size: 13px; }
 .mini-list li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: start; }
@@ -433,7 +433,7 @@ VD_CSS = BASE_CSS + """
 .vd-key { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-muted); }
 .vd-key .ic { flex: none; }
 .vd-intro { font-size: 13px; line-height: 20px; color: var(--ink-muted); max-width: 900px; }
-.vd-seg { flex-wrap: nowrap; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.vd-seg { flex-wrap: wrap; height: auto; max-width: 100%; }
 .vd-serves { display: grid; gap: 6px; }
 .vd-serves li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 13px; }
 .vd-serves__n { font-weight: 650; }

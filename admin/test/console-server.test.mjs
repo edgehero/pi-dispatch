@@ -756,7 +756,7 @@ test("every page: signed out it redirects to /login; signed in it loads its data
     assert.equal(anon.status, 303, spec.path);
     assert.equal(anon.headers.location, "/login");
     // `run` needs an id; every other page renders bare.
-    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : spec.path;
+    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, 200, `${path}: ${res.text.slice(0, 200)}`);
     assert.equal(c.loads.at(-1).name, name);
@@ -772,7 +772,7 @@ test("a viewer is refused an operator page 403, and gets every viewer page", asy
   const c = await start();
   const { cookie } = await c.login(VIEW_TOKEN);
   for (const [name, spec] of Object.entries(realPages.PAGES)) {
-    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : spec.path;
+    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, spec.auth === "operator" ? 403 : 200, path);
   }

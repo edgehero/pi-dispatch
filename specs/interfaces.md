@@ -9227,12 +9227,30 @@ abstains.
     waiters         how many jobs wait for the host budget (an integer), "" without a budget (issue #599, phase 2)
     jobs            JSON of the jobs this host runs now and its budget's orphans, oldest first, at most 32:
                     [{"id":<job id>,"p":<project id>|null,"m":<MiB>,"c":<hundredths>,"at":<epoch ms>,"o":1}],
-                    `m`/`c` left out when not known, `o` only on an orphan; "" before the worker exists
+                    `m`/`c` left out when not known, `o` only on an orphan; orphan `v` is its venue and
+                    `s` its failed-stop epoch ms, both optional for older workers; "" before the worker exists
     jobsMore        how many running jobs `jobs` does not list (past 32, or with no id or instant), an integer
+    sandboxes       JSON [{"id":<safe job id or sha256 digest>,"v":<venue>,"until":<epoch ms|null>,"pin":<boolean>}],
+                    newest first, at most 32; cached directory read at most once per 60 seconds
+    sandboxesMore   number beyond that inventory's bound; "" when not known
+    sandboxRetentionHours the configured retention window, 0 means off
+    budgetFrom      JSON of budget.detail(): memMode/cpuMode (auto, value, off), memTotalMiB, memReserveMiB,
+                    memFloored, cpuTotalCenti, cpuReserveCenti, cpuFloored; absent figures are null
+    cpuReserve      JSON [{"venue":<venue>,"status":<word>,"wantCenti":<integer|null>,"quotaCenti":<integer|null>}];
+                    states include held, no-parent, unmanaged, budget-unknown, unreadable, unset and differs
     backends        the venues this host blesses, its floor and its OpenShell setup, names and fixed words only:
                     `blessed=<venue>[,...];floor=<property>:<word>[,...];os=<engine>:<local|remote|unknown>`
                     (issue #712; `floor` absent without PI_BACKEND_FLOOR, `os` absent without an OpenShell venue)
 ```
+
+**Host detail telemetry (#748).** The console host page also reads the existing identity/version/start/pid,
+image/digest/pi/time-zone, concurrency, profile capabilities, fingerprints, routes, budget use/holds/waiters/seed and
+expiry-derived facts above. The additional inventory contains only safe ids, known venues, deadlines and pins,
+never manifest content, directory paths, prompts or event payloads. Unsafe or overlong job ids use the existing
+`sha256:<16 hex>` publication rule. Missing or unreadable inventory is not a verified empty list. Budget provenance
+comes from the host budget's own detail and CPU reserve comes from its existing observations, never a new probe per
+beat. Optional fields remain absent for older workers. The safe parsers are shared with the admin projection.
+No admission decision reads these fields.
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
 carries no configuration and no authority: nothing here is an instruction to anybody.
@@ -10601,8 +10619,8 @@ script is its only intended client; it is documented so that what a stream may c
 - **Request**: a GET with the session cookie. `page` names a page in `PAGES` whose `live` is true; the rest of the
   query is that page's own (`parsePageQuery`, every value bounded and charset-checked, refused by field name). A
   page the session's role may not open is refused as the page itself would be. `Last-Event-ID` (the header the
-  browser sends on a reconnect) is optional. An unknown page, a page that is not live (insights, config, audit;
-  the run page too until issue #644 made it live for its Progress panel) or a refused query is answered 400 JSON; a page above the session's role is 403.
+  browser sends on a reconnect) is optional. An unknown page, a page whose `live` flag in `PAGES` is false
+  (the non-live set is derived from that flag, never maintained as a second page list), or a refused query is answered 400 JSON; a page above the session's role is 403.
   **Since #737 (PR 2)** the query may also carry `as=<name>.<role>` (`PERSON_PARAM`), the person the page was drawn
   for, which the console's page always sends: it is taken off before the page's own query is parsed (no page's query
   takes the name), and when it names another person than the cookie's session the stream is refused `401`
@@ -11183,7 +11201,8 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
     host        the deferring worker's name, as the registry names its row
     holder      a job id the wait is on: the chained parent, the run a recovery continues, or the holder of the target
     endpoint    the model endpoint's id (`endpoint`)
-    budgetWhy   the host budget's verdict word: `budget`, `share`, `running-here` or `unseeded` (`host-budget`)
+    budgetWhy   the host budget's verdict word: `memory`, `cpu`, `count`, `share`, `running-here` or `unseeded`;
+                legacy `budget` remains readable during rolling upgrades (`host-budget`)
     trigger     the job's matched trigger index, `job.data.trigger.matched.index`, 0-based
     attempt     the attempt a retry will be (`retry`)
     attempts    the job's total attempts, `opts.attempts` (`retry`), so a reader need not read `opts`
@@ -11851,3 +11870,4 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-27 (#753) | Spec only, nothing ships. **Every entry UNCHANGED, checked**: no contract is fixed for the proposals of `REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-ZERO-TOUCH-RATE` and `REQ-PARKED-ANSWERER` until a build makes them. Each build writes its contracts into these entries then. `INT-SANDBOX-CONTRACT` gets the prepared sandbox's `sb-` id, its manifest, the trigger it was prepared as and the `--new` and `--as` options. Beside `INT-CANCEL-CHANNEL-CONTRACT` go the prepare request key, the open-shell key and the *End* request key, plus the per-host key that publishes kept workspaces. `INT-RUN-HISTORY-FILE-CONTRACT` gets a resumed run's reply source and a re-run's source run, and the touch index key goes beside it. `INT-TRIGGERS-FILE-CONTRACT` gets the answer rule, a field no tool may set. The job-level `console` field, today one token name the worker prints on the forge, may gain the draft job's run id, in the run-id charset. `INT-CONSOLE-AUDIT-LOG` gets a configuration write's refused run and the prepare, *End* and group-naming actions. The opener's link is the operator's computer's, not a file or container contract. |
 | 2026-10-28 (#747) | **`INT-CONSOLE-EVENT-STREAM`, `INT-LIVE-TRANSCRIPT-STREAM` and `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: run-page panels carry no SSE id; operator entry events carry the transcript cursor and tdone does not close page updates; terminal done/closure unchanged. Additive record maxTurns captures pickup settings; OpenShell bundle.placeholderNames carries validated names only; delivered inbox messages gain the steer kind with unknown-kind note fallback. **`INT-RUN-PROGRESS-KEY` UNCHANGED, checked**: its closed field contract is preserved. All actual stream connections keep counting against the same caps. |
 | 2026-10-28 (#716) | **NEW `INT-MODEL-COOLDOWN-KEY`; `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-DEFER-REASON-KEY` AMENDED**: fallback list, signed failure/replay evidence, selected-model facts and two free wait reasons. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: required `modelFailover` image capability and pre-spend unsupported-image refusal. **Exit codes UNCHANGED, checked**: provider failures still exit 1. **`INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked**: weights do not choose models. **`INT-DOCTOR-RESULTS-KEY` UNCHANGED, checked**: cooldowns use existing redacted warning checks. |
+| 2026-10-29 (#748) | **`INT-CONSOLE-EVENT-STREAM`, `INT-HOST-REGISTRY-CONTRACT`, `INT-DEFER-REASON-KEY` AMENDED**: the page live flag defines stream admission; host telemetry adds orphan venue/time, retained workspace inventory, budget provenance and CPU-reserve facts; host-budget defer records identify memory, CPU or count while legacy budget remains readable. **`INT-CONSOLE-STATE-API`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: telemetry grants no authority and no job payload text is read for running targets. |
