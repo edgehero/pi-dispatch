@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { readWatchMode, assertWatchCompatible, watchToolOptions } from "../src/watch.mjs";
+
+test("optional watch inputs cannot mask the shared job mount readability refusal", () => {
+	const source = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const readable = source.indexOf("assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);");
+	assert.notEqual(readable, -1, "the shared mount readability gate must remain present");
+	for (const call of ["const watchReadOnly = readWatchMode();", "const watchDecisionInput = readWatchDecision();", "const roleInputs = readRoleInputs();"]) assert.ok(source.indexOf(call) > readable, `${call} must follow the common mount gate`);
+	assert.ok(source.indexOf("const watchReadOnly = readWatchMode();") < source.indexOf("const modelRuntime = await createJobModelRuntime("), "watch validation remains before runtime construction and spend");
+});
 test("watch marker absent differs from malformed, symlinked, oversized or unreadable marker", () => {
 	assert.equal(readWatchMode({ fs: { lstatSync() { throw Object.assign(new Error(), { code: "ENOENT" }); } } }), false);
 	const fs = (raw, { isFile = true, size = raw.length } = {}) => ({ lstatSync: () => ({ isFile: () => isFile, size }), readFileSync: () => raw });
