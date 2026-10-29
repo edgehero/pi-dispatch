@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -96,4 +96,28 @@ test("queued maps carry no authority and a reviewed map never implicitly admits 
 	assert.deepEqual(resolveModelRoles(queued, {}), { provider: "p", model: "m" });
 	const resolved = resolveModelRoles({ provider: "p", model: "off", models: ["p/only"] }, { default: { editor: "q/editor" } });
 	assert.deepEqual(resolved.models, ["p/only", "q/editor"]);
+});
+
+
+test("default and project rows may merge 32 aliases while the physical list stays within 16", async () => {
+	const { validateRoleInputs } = await import("../../image/runner/src/model-roles.mjs");
+	const row = (prefix) => Object.fromEntries(Array.from({ length: 16 }, (_, n) => [`${prefix}${n}`, "p/model"]));
+	const policy = validateModelRoles({ default: row("default"), shop: row("project") });
+	const resolved = resolveModelRoles({ provider: "p", model: "role:default0" }, policy, "shop");
+	assert.equal(Object.keys(resolved.modelRoles).length, 32);
+	assert.deepEqual(resolved.models, ["p/model"]);
+	assert.doesNotThrow(() => validateRoleInputs({ version: 1, roles: resolved.modelRoles, parent: "p/model", models: resolved.models }, { version: 1, agents: [] }));
+	assert.throws(() => validateRoleInputs({ version: 1, roles: { ...resolved.modelRoles, extra: "p/model" }, parent: "p/model", models: resolved.models }, { version: 1, agents: [] }));
+});
+
+
+test("JSON escaping cannot push an admissible agent set past the runner input bound after reserves", async () => {
+	const workspace = tempDir("model-roles-size-");
+	const jobDir = tempDir("model-roles-size-");
+	mkdirSync(join(workspace, ".git"));
+	const entries = Array.from({ length: 24 }, (_, n) => ({ name: `agent${n}`, hash: n.toString(16).padStart(40, "0") }));
+	const git = async (_workspace, args) => args[0] === "ls-tree" ? entries.map(({ name, hash }) => `100644 blob ${hash}\t.pi/agents/${name}.md\0`).join("") : `---\nname: agent${parseInt(args[2], 16)}\ndescription: Test\n---\n${"\u0001".repeat(120000)}`;
+	await assert.rejects(() => stageModelRoleInputs({ provider: "p", model: "m", modelRoles: { editor: "p/m" }, models: ["p/m"] }, { workspace, jobDir, sha: "a".repeat(40) }, { git }), { piDispatchConfig: true });
+	assert.equal(existsSync(join(jobDir, "agents.json")), false);
+	assert.equal(existsSync(join(jobDir, "model-roles.json")), false);
 });

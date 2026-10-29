@@ -41,11 +41,16 @@ For each mapped role, doctor warns about deprecation or a retirement date inside
 The worker's ordinary daily doctor run repeats the warning. `replacements` contains operator-verified
 provider recommendations; doctor never guesses a replacement. Anthropic's provider-declared model
 line and release dates can identify a newer active sibling. No sibling is inferred from an ID's spelling.
+Claude requests explicitly include active, deprecated and retired models, so a mapped model's warning
+continues after retirement. Newer-sibling and cheaper-route information rows appear in the doctor CLI.
+Published doctor results omit successful-check labels; retirement warnings remain visible there.
 
 The adapters follow the provider references:
 [Claude Models API](https://platform.claude.com/docs/en/api/models/list) (`lifecycle`, `line`,
 `created_at`, `retires_at`) and [OpenAI Models API](https://developers.openai.com/api/reference/resources/models/methods/list)
 (`shutdown_date`). A retirement date is a schedule, not proof that retirement has already occurred.
+The lifecycle query uses the provider SDK's
+[bracket-array encoding](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/internal/utils/query.ts).
 
 ## Declared cheaper routes
 

@@ -13,19 +13,16 @@
 import { build } from "esbuild";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NODE_BUNDLE_OPTIONS, NODE_REQUIRE_PRELUDE } from "./bundle-options.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 await build({
+	...NODE_BUNDLE_OPTIONS,
 	entryPoints: [join(here, "src/index.ts")],
 	outfile: join(here, "dist/index.mjs"),
-	bundle: true,
-	format: "esm",
-	platform: "node",
-	target: "node22",
 	// Host-provided peer + heavy runtime deps stay external (declared in package.json). typebox is bundled.
-	external: ["@earendil-works/pi-coding-agent", "bullmq", "ioredis"],
-	banner: { js: "// pi-dispatch operator extension (bundled). Source: https://github.com/edgehero/pi-dispatch" },
+	banner: { js: `// pi-dispatch operator extension (bundled). Source: https://github.com/edgehero/pi-dispatch\n${NODE_REQUIRE_PRELUDE}` },
 	logLevel: "info",
 });
 
@@ -37,14 +34,10 @@ console.log("[built admin/dist/index.mjs]");
 // never imports it, so a stray transitive import fails loudly at load rather than bundling pi. The banner is the
 // shebang npm's bin shim needs; esbuild keeps it as the file's first line.
 await build({
+	...NODE_BUNDLE_OPTIONS,
 	entryPoints: [join(here, "src/console/cli.mjs")],
 	outfile: join(here, "dist/console.mjs"),
-	bundle: true,
-	format: "esm",
-	platform: "node",
-	target: "node22",
-	external: ["@earendil-works/pi-coding-agent", "bullmq", "ioredis"],
-	banner: { js: "#!/usr/bin/env node\n// pi-dispatch operator console (bundled). Source: https://github.com/edgehero/pi-dispatch" },
+	banner: { js: `#!/usr/bin/env node\n// pi-dispatch operator console (bundled). Source: https://github.com/edgehero/pi-dispatch\n${NODE_REQUIRE_PRELUDE}` },
 	logLevel: "info",
 });
 

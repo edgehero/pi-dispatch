@@ -741,7 +741,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
 
-- **Roles (#717)**: model-callable writes cannot set `modelRoles` under any nesting or near-miss spelling. Unrelated trigger edits preserve it. Run detail and the run API show validated role identity beside the resolved physical model and bounded agent-refusal counts.
+- **Roles (#717)**: model-callable writes cannot set `modelRoles` under any nesting or near-miss spelling. Unrelated trigger edits preserve it. Run detail and the run API show validated role identity beside the resolved physical model and bounded agent-refusal counts. Both published ESM bundles must load in plain Node without a source loader supplying CommonJS require; bundled CommonJS dependencies receive Node builtin resolution through an explicit createRequire prelude.
 
 - **Failover configuration (#716)**: no model-callable tool may set, remove or disguise `run.fallbackModels`, with or without confirmation. Add/edit calls carrying that field or a near miss are refused before confirmation. An unrelated edit preserves an existing reviewed list. Operator reads display the list; the console's published Doctor warnings name configured models cooling down, their fixed cause and reset instant, with the observation's age.
 

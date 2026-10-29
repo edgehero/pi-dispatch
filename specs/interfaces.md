@@ -1283,7 +1283,7 @@ refactor apart.
 
 ## INT-CONTAINER-JOB-INPUTS
 
-- **Role inputs (#717)**: an image must declare `modelRoles`. The worker stages read-only `model-roles.json` as `{version:1,roles:{"<role>":"provider/model"},parent:"provider/model",models:["provider/model"]}` and `agents.json` as `{version:1,agents:[{name,description,content,model?,tools?:["tool"]}]}` inside the existing job directory. `PI_MODEL_ROLES_FILE` and `PI_AGENTS_FILE` name their closed layout paths (`/job/...` or `/sandbox/job/...`), never workspace paths. Names are reserved against forwarding and secrets. Map and base-commit agent inputs are staged before cap reads/reserves. Missing/malformed inputs refuse `model-roles-invalid`; a conflicting `subagent` registration refuses `model-roles-shadowed`.
+- **Role inputs (#717)**: an image must declare `modelRoles`. The worker stages read-only `model-roles.json` as `{version:1,roles:{"<role>":"provider/model"},parent:"provider/model",models:["provider/model"]}` and `agents.json` as `{version:1,agents:[{name,description,content,model?,tools?:["tool"]}]}` inside the existing job directory. `PI_MODEL_ROLES_FILE` and `PI_AGENTS_FILE` name their closed layout paths (`/job/...` or `/sandbox/job/...`), never workspace paths. The merged map holds at most 32 aliases and its executable list at most 16 physical references; the complete JSON-encoded agent snapshot is at most 16 MiB, checked before reserves. Names are reserved against forwarding and secrets. Map and base-commit agent inputs are staged before cap reads/reserves. Missing/malformed inputs refuse `model-roles-invalid`; a conflicting `subagent` registration refuses `model-roles-shadowed`.
 
 **Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
@@ -11162,7 +11162,7 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
 
 ## INT-DEFER-REASON-KEY
 
-- **Canary exclusion (#717)**: ordinary worker pickup checks `dispatch:canary:exclusive` before paid gates and defers with reason `canary`. The experiment takes its compare-owned renewable lease before proving shared/host queue active lists empty. Lost ownership aborts the experiment. This closes the standalone command concurrency bypass; queue pause still refuses canaries.
+- **Canary exclusion (#717)**: ordinary worker pickup checks `dispatch:canary:exclusive` before paid gates and defers with reason `canary`. The experiment takes its compare-owned renewable lease before proving shared/host queue active lists empty. Lost ownership aborts the experiment. All consuming workers must run this implementation before experiments begin, and legacy consumers must not be started during an experiment: older code does not honor the lease. This closes the standalone command concurrency bypass; queue pause still refuses canaries.
 
 **The worker → Valkey → the admin console's waiting reader.** Why the worker put a job that has not started back on
 the delayed set, in the worker's own words, written at the moment it defers (issue #737, PR 3a,
