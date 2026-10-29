@@ -142,7 +142,12 @@
     "./scheduler-stall-guard": "./src/scheduler-stall-guard.mjs",
     "./watch-closer": "./src/watch-closer.mjs",
     "./defer-reasons": "./src/defer-reasons.mjs",
-    "./record-reason": "./src/record-reason.mjs"
+    "./record-reason": "./src/record-reason.mjs",
+    "./watch-contract": "./src/watch-contract.mjs",
+    "./watch-store": "./src/watch-store.mjs",
+    "./watch-decision": "./src/watch-decision.mjs",
+    "./watch-board": "./src/watch-board.mjs",
+    "./watch-trace": "./src/watch-trace.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

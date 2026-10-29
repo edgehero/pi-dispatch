@@ -333,6 +333,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "envelope-set": "envelope-set",
     "priorities-set": "priorities-set",
     "allocation-revert": "allocation-revert",
+    "board-freeze": "board-freeze", "board-unfreeze": "board-unfreeze", "board-clear": "board-clear", "board-revert": "board-revert", "board-adopt": "board-adopt",
   });
   assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-fork", "steer"]);
   assert.deepEqual(ACTIONS.filter((a) => a.bulk).map((a) => a.name).sort(), ["cancel-all-held", "remove-all-failed", "retry-all-failed"]);
@@ -356,8 +357,9 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "limit-add": ["limit"], "limit-edit": ["index", "limit"], "limit-delete": ["index"],
     "project-add": ["id", "name", "members"], "project-edit": ["id", "name", "members"], "project-delete": ["id"],
     "envelope-set": ["envelope"], "priorities-set": ["projects", "validDays"], "allocation-revert": ["index"],
+    "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
-  assert.equal(ACTIONS.length, 39);
+  assert.equal(ACTIONS.length, 44);
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
     assert.ok(Object.isFrozen(a.fields) && a.fields.every((f) => typeof f === "string"), `${a.name}: fields is a frozen list of names`);
@@ -368,7 +370,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     // Issue #737: every one of the 38 says what it did, for the banner after the write.
     for (const fn of ["undo", "inverse", "confirmLabel", "done"]) assert.equal(typeof a[fn], "function", `${a.name}: ${fn}`);
   }
-  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "secret-bundle-remove", "secret-profile-remove", "trigger-delete"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["board-clear", "board-freeze", "board-revert", "cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "secret-bundle-remove", "secret-profile-remove", "trigger-delete"]);
   assert.ok(Object.isFrozen(UNDO_SENTENCES));
   for (const [k, v] of Object.entries(UNDO_SENTENCES)) assert.match(v, /^[A-Z][^]*\.$/, `${k}: a sentence`);
 });
@@ -413,6 +415,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   const windows = { scope: "*", from: "01:00", to: "02:00", tz: "UTC" };
   // [action, out, undo, inverse (or null), label, done, done's result for a bulk act]
   const rows = [
+    ...["freeze", "unfreeze", "clear", "revert", "adopt"].map((op) => [`board-${op}`, { target: "shop" }, twice("Restore a retained board version, or change its freeze state."), null, `${op[0].toUpperCase() + op.slice(1)} board`, "Changed board shop"]),
     ["run-fork", { target: "gh-f", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Fork for up to $2.00", "Queued a fork of gh-f"],
     ["cancel-active", { payload: { jobId: "gh-1" } }, twice(U.cancelled), null, "Cancel the run", "Cancelled running job gh-1"],
     ["cancel-held", { payload: { jobId: "gh-2" } }, twice(U.held), null, "Cancel the held job", "Cancelled held job gh-2"],
@@ -527,7 +530,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
 });
 
 /** A value for each body key the preview may read, so a preview reads on past it (an index a number, an id its charset). */
-const SAMPLE_BODY = { decision: "decline", index: 0, validDays: 1, jobId: "gh-1", id: "a".repeat(32), mode: "steer", text: "x", windows: [], trigger: {}, limit: {}, envelope: {}, projects: [{ id: "p", weight: 1 }], members: ["m"], days: ["mon"] };
+const SAMPLE_BODY = {
+  rule: "shop", expectedVersion: 2, version: 1, proposalId: "p1", decision: "decline", index: 0, validDays: 1, jobId: "gh-1", id: "a".repeat(32), mode: "steer", text: "x", windows: [], trigger: {}, limit: {}, envelope: {}, projects: [{ id: "p", weight: 1 }], members: ["m"], days: ["mon"] };
 /** A dependency that is anything: every property and every call is another one, so a preview runs until it needs a real value. */
 function anything() {
   return new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : anything()), apply: () => anything() });
@@ -2691,6 +2695,38 @@ test("envelope-set: the preview lists each field it changes, through the worker'
   assert.ok(p.summary.some((l) => l.startsWith("minIntervalHours: 24")), JSON.stringify(p.summary));
   assert.deepEqual([p.undo, p.confirmLabel, typeof p.ticket], [UNDO_SENTENCES.envelope, "Confirm", "string"]);
   assert.equal(read(paths.envelopeFile), envelope, "the preview wrote nothing");
+});
+
+test("board adoption is previewed, confirmed once, audited without proposal text, and refused when audit fails", async () => {
+  const PRIVATE = "private-board-proposal-canary";
+  const b = { version: 2, frozen: false, blocks: [], versions: [{ version: 1, blocks: [] }], proposals: [{ id: "p1", blocks: [{ type: "note", text: PRIVATE }] }] };
+  const calls = [];
+  const watch = { readBoard: async () => b, async mutateBoard(rule, change, expected) { calls.push([rule, change, expected]); return { ok: true }; } };
+  const c = await start({ paths: deployment().paths, a: { watch } });
+  const invalid = await c.act("board-clear", { rule: "bad:rule", expectedVersion: 2 });
+  assert.equal(invalid.status, 400, invalid.text);
+  assert.deepEqual(calls, []);
+  for (const name of ["board-freeze", "board-unfreeze", "board-clear", "board-revert"]) {
+    const preview = await c.act(name, { rule: "shop", expectedVersion: 2, ...(name === "board-revert" ? { version: 1 } : {}) });
+    assert.equal(preview.status, 200, preview.text);
+  }
+  const p = await c.act("board-adopt", { rule: "shop", expectedVersion: 2, proposalId: "p1" });
+  assert.equal(p.status, 200, p.text);
+  assert.ok(p.json().html.includes(PRIVATE), "the safe preview shows the proposed contents");
+  assert.deepEqual(calls, [], "preview writes nothing");
+  const done = await c.confirm("board-adopt", p.json().ticket);
+  assert.equal(done.status, 200, done.text);
+  assert.deepEqual(calls, [["shop", { action: "adopt", proposalId: "p1" }, 2]]);
+  assert.deepEqual([lastWrite(c).kind, lastWrite(c).outcome], ["board-adopt", "ok"]);
+  assert.ok(!JSON.stringify(c.audit.rows).includes(PRIVATE));
+  const replay = await c.confirm("board-adopt", p.json().ticket);
+  assert.equal(replay.status, 409);
+  const p2 = await c.act("board-clear", { rule: "shop", expectedVersion: 2 });
+  c.audit.failNext = 1;
+  const failed = await c.confirm("board-clear", p2.json().ticket);
+  assert.equal(failed.status, 500, failed.text);
+  assert.equal(failed.json().error, AUDIT_FAILED);
+  assert.equal(calls.length, 1, "an unwritable audit prevents the board mutation");
 });
 
 // Issue #737: the copy rules `heldToCopyRules` holds each preview to reached every action's preview at

@@ -143,6 +143,7 @@ export const NAMED_CHECK_IDS = Object.freeze([
 	"settings.overlay-dollars",
 	"egress.proxy",
 	"provider.key",
+	"watch.sources",
 ]);
 
 /**

@@ -1598,7 +1598,7 @@ test("integration: every real page renders through the server, and a real live s
   const viewer = await login(VIEW_TOKEN);
 
   for (const [name, spec] of Object.entries(realPages.PAGES)) {
-    const path = name === "run" ? `${spec.path}?id=job-1` : spec.path;
+    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : spec.path;
     const res = await send({ path, headers: { cookie: op } });
     assert.equal(res.status, 200, `${path}: ${res.text.slice(0, 300)}`);
     assert.match(res.text, /<link rel="stylesheet" href="\/static\/console.css">|href="\/static\/console.css"/, `${path} links the stylesheet`);

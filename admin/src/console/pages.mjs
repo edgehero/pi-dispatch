@@ -25,6 +25,7 @@
  * panels out in the kit's grids (`PAGE_LAYOUT`) and have a line under its title that the stream swaps
  * (`PAGE_HEADLINES`).
  */
+import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
 import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
@@ -118,6 +119,8 @@ export const PAGES = Object.freeze({
   insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE, icon: "spend" }),
   fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet", icon: "fleet" }),
   config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration", icon: "config" }),
+  watch: Object.freeze({ path: "/watch", auth: "viewer", live: false, title: "Watch", nav: null, icon: "bolt" }),
+  "watch-board": Object.freeze({ path: "/watch/board", auth: "viewer", live: false, title: "Watch board", nav: null, icon: "bolt" }),
   audit: Object.freeze({ path: "/audit", auth: "operator", live: false, title: "Audit log", nav: "Audit", icon: "audit" }),
 });
 
@@ -147,6 +150,8 @@ const PAGE_PANELS = Object.freeze({
   insights: [["p-range", insightsRange], ["p-whatif", insightsWhatIf], ["p-insights", insightsPanel]],
   fleet: [["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues], ["p-schedulers", fleetSchedulers], ["p-failed", fleetFailed]],
   config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles], ["p-secret-bundles", configSecretBundles]],
+  watch: [["p-watch", watchPanel]],
+  "watch-board": [["p-watch-board", watchBoardPanel]],
   audit: [["p-audit-chain", auditChain], ["p-audit-filter", auditFilter], ["p-audit", auditLog], ["p-audit-about", auditAbout]],
 });
 
@@ -208,6 +213,8 @@ const PAGE_PARAMS = Object.freeze({
   insights: ["range", "whatif", "flow", "paths"],
   fleet: [],
   config: [],
+  watch: ["rule"],
+  "watch-board": ["rule", "finding"],
   audit: [...AUDIT_PARAMS],
 });
 
@@ -271,6 +278,8 @@ export function parsePageQuery(name, searchParams) {
     return v === null || v === "" ? null : v;
   };
   switch (name) {
+    case "watch":
+    case "watch-board": return parseWatchQuery(params, { board: name === "watch-board" });
     case "runs": {
       const f = parseRunFilter(params);
       if (f.refusal) return { refusal: f.refusal };
@@ -329,7 +338,9 @@ export function parsePageQuery(name, searchParams) {
 export function pageQueryString(name, query) {
   const p = new URLSearchParams();
   const q = query ?? {};
-  if (name === "runs") {
+  if (name === "watch" || name === "watch-board") {
+    for (const k of ["rule", "finding"]) if (q[k]) p.set(k, q[k]);
+  } else if (name === "runs") {
     for (const k of RUN_FILTER_FIELDS) if (q.filter?.[k] !== undefined) p.set(k, q.filter[k]);
     if (q.before !== null && q.before !== undefined) p.set("before", String(q.before));
   } else if (name === "run" && q.id) p.set("id", q.id);
@@ -403,6 +414,8 @@ const PAGE_READS = Object.freeze({
   insights: ["insights", "parkedCount"],
   fleet: ["snapshot"],
   config: ["snapshot"],
+  watch: ["parkedCount"],
+  "watch-board": ["parkedCount"],
   audit: ["audit", "parkedCount"],
 });
 
@@ -526,6 +539,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // Issue #737: the deployment the console serves, by its folder's last part (`cli.mjs`'s `pageDeps.deployment`), for
   // the first run's checklist; null where the caller passes none.
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
+  if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
   const reads = PAGE_READS[name];
   // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
   const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};

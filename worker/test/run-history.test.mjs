@@ -2392,3 +2392,13 @@ test("the record's turn budget is pickup's validated positive integer, never a m
 	for (const maxTurns of [null, undefined, 0, -1, 1.5, "40", Infinity]) assert.equal(buildRecord({ job, result, maxTurns }).maxTurns, undefined);
 	assert.equal(Object.keys(buildRecord({ job, result, maxTurns: 40 })).at(-1), "maxTurns", "the additive field preserves existing field order");
 });
+
+test("ignored watch finding has a stable reporting target and public decision without private evidence", async () => {
+	const { RUN_KINDS } = await import("../src/forges.mjs");
+	const record = buildRecord({ job: { id: "watch-job", name: "watch", data: { kind: "watch", watch: { ruleId: "shop-5xx", findingId: "a".repeat(64), finding: { samples: ["private-sample"], fields: { account: "private-account" } } } } }, result: { outcome: "completed", reason: "watch-ignored", decision: { model: "openrouter/typesafe/jev-1.13", action: "ignore", shadow: false, questions: ["act"], probabilities: { investigate: 0.02, ignore: 0.95, file_issue: 0.03 }, confidence: 0.9, costUsd: 0.001, state: { account: "private-state" }, samples: ["private-sample"] } } });
+	assert.equal(record.kind, "watch"); assert.equal(record.target, "watch:shop-5xx"); assert.equal(record.reason, "watch-ignored");
+	assert.deepEqual(record.decision, { model: "openrouter/typesafe/jev-1.13", action: "ignore", shadow: false, questions: ["act"], probabilities: { investigate: 0.02, ignore: 0.95, file_issue: 0.03 }, confidence: 0.9, costUsd: 0.001 });
+	const serialized = JSON.stringify(record); assert.equal(serialized.includes("private-"), false); assert.equal(serialized.includes('"samples"'), false); assert.equal(serialized.includes('"fields"'), false); assert.equal(serialized.includes('"finding"'), false);
+	assert.equal(RUN_KINDS.includes("watch"), false, "reporting a watch is not permission to fork, rerun or forge-dispatch one");
+	for (const ruleId of ["../private", "a".repeat(65), "", null]) assert.equal(buildRecord({ job: { id: "watch-job", data: { kind: "watch", watch: { ruleId } } }, result: { outcome: "policy" } }).target, null);
+});

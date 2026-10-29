@@ -265,6 +265,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	// is about 360 of them. The verdict cannot change between them (same record, same attempt), so one line says it.
 	// Bounded, oldest out first, so a long-lived worker holds at most REJECTED_SEEN_MAX keys.
 	const rejectedSeen = new Set();
+	// Watch producer refusals finish before pickup and cannot carry a steering session.
+	const recordWatchOutcome = recordRun;
 	// THE ONE DEFERRAL (issue #737, `defer-write.mjs`): every gate below that puts the job back on the delayed set goes
 	// through `deferTo`, which records the gate's reason in `defer:job:<id>` (bounded, fail-open) and then makes the move
 	// and the `DelayedError` throw the gates always made; `noteRetry` records an infrastructure retry's backoff before its
@@ -1011,7 +1013,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const modelAttemptId = `${job.queueName ?? QUEUE}:${job.id}`;
 		if (!settingsThrew && !settings?.invalid) {
 			try {
-				let effective = resolveModelRoles(effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields })), await readModelRoles(), project, { authoredProvider: job.data.provider });
+				let effective = resolveModelRoles(effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields })), job.data.watch ? {} : await readModelRoles(), project, { authoredProvider: job.data.provider });
 				selectedEffective = effective;
 				if (effective.fallbackModels !== undefined || (effective.recover === true && effective.recoveryOf)) {
 					const endpoints = modelEndpoints?.() ?? [];
@@ -1848,6 +1850,16 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 	};
 	return async function processor(job, token, signal) {
+		if (job.data?.kind === "watch" || job.data?.watch) {
+			if (!deps.watchRuntime) return { outcome: "policy", reason: "watch-unavailable" };
+			const resolved = await deps.watchRuntime.resolve(job.data, job.id);
+			if (resolved.deferUntil) await deferTo(job, token, resolved.deferUntil, "pause-window");
+			if (resolved.result) {
+				await recordWatchOutcome({ job, result: resolved.result, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
+				return resolved.result;
+			}
+			job.data = resolved.data;
+		}
 		if (!hostBudget) return pickup(job, token, signal, { budgetDeferred: false });
 		// The pickup's TICKET: the ledger entry this pickup takes carries it, and only this pickup's release or
 		// orphan can act on that entry, so a second pickup of the same job id (a stalled scheduled job handed back while

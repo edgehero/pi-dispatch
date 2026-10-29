@@ -63,11 +63,12 @@ const IN_SCOPE_CARDS = Object.freeze({
 });
 
 /** The cards outside #737, with the issues that build them (decided 2026-10-23): no ledger here. */
-const PLANNED_CARDS = Object.freeze({
+const ISSUE_OWNED_CARDS = Object.freeze({
   ApprovalRequest: Object.freeze([649]),
   ForkRun: Object.freeze([648]),
   ModelsScreen: Object.freeze([716, 717]),
   WatchScreen: Object.freeze([735]),
+  WatchBoard: Object.freeze([743]),
 });
 
 /**
@@ -218,11 +219,11 @@ test("a ledger for every in-scope card, and none for a card outside the list", (
   }
 }));
 
-test("the planned cards are their issues' (by number) and carry no ledger", () => collect((expect) => {
-  for (const [name, issues] of Object.entries(PLANNED_CARDS)) {
+test("cards outside the console redesign are their issues' (by number) and carry no redesign ledger", () => collect((expect) => {
+  for (const [name, issues] of Object.entries(ISSUE_OWNED_CARDS)) {
     expect(Array.isArray(issues) && issues.length > 0 && issues.every((n) => Number.isSafeInteger(n) && n > 0), `${name}: built with its issue, named by number`);
-    expect(!Object.hasOwn(IN_SCOPE_CARDS, name), `${name} is planned, not in scope`);
-    expect(!LEDGERS.has(name), `${name}: no ledger until its issue builds it`);
+    expect(!Object.hasOwn(IN_SCOPE_CARDS, name), `${name} belongs to its own issue, not the console redesign`);
+    expect(!LEDGERS.has(name), `${name}: no redesign ledger for a screen owned by its own issue`);
   }
 }));
 

@@ -1327,3 +1327,161 @@ What to do: Remove the conflicting subagent extension or staged package and run 
 Refused: the job image does not declare modelRoles support. Rebuild it before running role-mapped jobs. Not run.
 
 What to do: Rebuild the job image from a release that declares the feature, or set the trigger's `run.image` to one that does.
+
+## Watch findings and investigations
+
+### watch-cooldown
+
+The finding arrived during its fingerprint cooldown. No additional investigation started.
+
+What to do: Wait for cooldown to end or inspect the existing finding.
+
+### watch-cap
+
+The source, rule or active-fingerprint cap refused the finding before paid work.
+
+What to do: Inspect the source and caps before changing the reviewed limits.
+
+### watch-unmatched
+
+The finding matched no reviewed watch rule. No investigation started.
+
+What to do: Check the source and structured match fields.
+
+### watch-ignored
+
+The reviewed decision selected ignore. Only the decision was charged.
+
+What to do: Inspect its probabilities and thresholds if the outcome was unexpected.
+
+### decide-refused
+
+The decision model or its bounded price was refused.
+
+What to do: Use a known input-only priced decision model and a sufficient reviewed cap.
+
+### decide-unanswered
+
+The decision did not produce a usable answer; its reviewed human fallback applies.
+
+What to do: Inspect the decision trace and the fallback issue.
+
+### watch-reference-invalid
+
+The queued watch reference does not identify the reviewed finding. No investigation started.
+
+What to do: Check the producer and worker versions and submit a new authenticated finding.
+
+### watch-config-changed
+
+The reviewed watch rule changed or disappeared before pickup. No investigation started.
+
+What to do: Review the current configuration and submit the finding again if still wanted.
+
+### watch-window-pending
+
+The digest window is still open. No investigation started.
+
+What to do: Wait until the finding is due and inspect delayed queue health.
+
+### watch-threshold
+
+The completed digest did not reach its minimum count. No investigation started.
+
+What to do: Inspect the digest counts and review the configured threshold.
+
+### watch-evidence-expired
+
+The private finding evidence expired or is unavailable. No investigation started.
+
+What to do: Check evidence retention and queue delay before submitting a new finding.
+
+### watch-issue-target-missing
+
+The selected action needs a reviewed issue target that is unavailable.
+
+What to do: Configure an explicit supported forge issue target.
+
+### watch-trace-unavailable
+
+The investigation trace could not be collected completely.
+
+What to do: Check the trace store and collector; treat the investigation record as incomplete.
+
+### watch-output-unavailable
+
+The completed investigation output could not be collected safely.
+
+What to do: Check the output files, schema and store before retrying.
+
+### watch-project-mismatch
+
+The watch source project differs from the resolved investigation folder project. Nothing was spent.
+
+What to do: Correct the reviewed source and folder project pairing.
+
+### watch-config-invalid
+
+The job image refused its watch isolation marker or incompatible integrations.
+
+What to do: Use a current watch-capable image and read-only reviewed configuration.
+
+### watch-issue-cap
+
+The source reached its durable watch issue identity limit before calling the forge.
+
+What to do: Inspect existing issue mappings and reduce fingerprint cardinality.
+
+### watch-issue-uncertain
+
+An earlier issue creation has an uncertain result; another issue was not created.
+
+What to do: Reconcile its stable marker on the forge before retrying or changing the mapping.
+
+### watch-issue-close-policy-changed
+
+The quiet-close policy changed before the issue could be closed.
+
+What to do: Inspect the current reviewed rule and issue status.
+
+### watch-issue-close-raced
+
+A new finding arrived during issue closure; the host reopened the issue.
+
+What to do: Inspect the ongoing incident and its latest count.
+
+### watch-issue-close-uncertain
+
+The forge outcome of quiet closure is uncertain.
+
+What to do: Inspect the issue on the forge and retry reconciliation.
+
+### job-image-watch-unsupported
+
+The job image does not declare read-only watch isolation. The investigation was refused.
+
+What to do: Rebuild the image from a watch-capable release or select a compatible reviewed image.
+
+### watch-board-invalid
+
+The proposed watch board failed its inert block schema or trace provenance checks. The previous board remains.
+
+What to do: Inspect the proposal and produce a schema-valid board with trace references.
+
+### watch-board-oversize
+
+The proposed watch board exceeded 16 KiB. The previous board remains.
+
+What to do: Reduce the proposal before producing another board.
+
+### watch-unavailable
+
+The worker could not resolve the watch reference safely. No investigation started.
+
+What to do: check watch runtime configuration and worker availability.
+
+### watch-query-credential-missing
+
+A reviewed log query requires a host credential that is unavailable. No investigation started.
+
+What to do: configure the named read-only query credential on the worker host.

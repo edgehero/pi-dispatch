@@ -12,6 +12,7 @@ import { unqualifiedScope } from "./pause-windows.mjs";
 import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
+import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
@@ -576,6 +577,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// NEVER throws, so a refused plan is a recorded outcome of a completed job and never a retry. The default collects
 		// nothing (null: no plan), so a wiring that omits it records `plan: null`.
 		collectPlan = async () => null,
+		collectWatch = async () => {},
 		// Issue #501: the deployment's dollar windows `{ day, week, month }` in micro-dollars (each null when unset), or
 		// null when no window is set. Null is the default and the off switch: nothing is reserved or settled and no
 		// `budget:usd:*` key is written, so a deployment with no dollar setting is byte-identical.
@@ -689,6 +691,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 	const wantsForgeToken = isForgeBacked || job.github === true;
 	let token = null;
 	let prepared = null;
+	let watchCompleted = false;
+	let watchUsage = null;
+	let watchPolicyRefused = false;
 	// The job-count reservations still standing, in reserve order (issue #499 part B): what `reserveLedgers` took and
 	// no refund has given back yet. EVERY refund below is `releaseLedgers` over this one list, last first, so no path
 	// can give back one ledger and forget another, and none can give one back twice: a released ledger leaves the list.
@@ -1091,6 +1096,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			}
 		}
 
+		if (job.watch?.project && job.watch.project !== pickupProject) return { outcome: "policy", reason: "watch-project-mismatch", budgetReserved: false };
+
 		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function
 		// of the job's provider, the worker env, and (only when the env has no key) one small readFileSync of
 		// pi's auth.json. So it goes here, with the other free gates, which is further than issue #310 asked
@@ -1160,25 +1167,29 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			}
 		}
 
-		const credential = await checkProviderCredential(job, { modelEndpoints });
-		if (credential.unavailable) {
-			// Issue #503: the overlay models.json could not be read at this pickup for a transient reason, so the gate has no
-			// verdict for a provider that may be keyless. Retried, never refused: a refusal is permanent and public, and the
-			// next attempt may read the file. The code is a fixed errno token, never file text.
-			log("provider_credential_unavailable", { provider: job.provider ?? null, reason: credential.unavailable });
-			throw new InfraRetry("the provider credential could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
-		}
-		if (!credential.ok) {
-			// The PROVIDER is named and the message is not. The provider is operator-authored config, already
-			// on the record and the mirror, and named freely by the sibling refusals (`backend-unblessed` names
-			// the backend, `job-image-missing` names the image), so withholding it would tell the operator less
-			// than is safe. The message is withheld from BOTH surfaces: `credentialFromPiAuth`'s refusals carry
-			// `auth.json`'s absolute path, which is an OS account name, and the scoped-budget refusal below
-			// keeps a host path out of its own log line citing no-pii-in-logs. `doctor` prints the variable and
-			// the path, on the operator's terminal, which is where that belongs.
-			await comment(job, `Refused: this deployment has no usable credential for the "${job.provider}" provider, so no container was started and nothing was spent. Ask the operator to run \`pi-dispatch doctor\`. Not run.`);
-			log("refused_provider_unconfigured", { provider: job.provider ?? null });
-			return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		const credentialJobs = [job];
+		if (job.watch && job.watchDecisionModel && job.watchDecisionModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.watchDecisionModel.provider, model: job.watchDecisionModel.id });
+		for (const credentialJob of credentialJobs) {
+			const credential = await checkProviderCredential(credentialJob, { modelEndpoints });
+			if (credential.unavailable) {
+				// Issue #503: the overlay models.json could not be read at this pickup for a transient reason, so the gate has no
+				// verdict for a provider that may be keyless. Retried, never refused: a refusal is permanent and public, and the
+				// next attempt may read the file. The code is a fixed errno token, never file text.
+				log("provider_credential_unavailable", { provider: credentialJob.provider ?? null, reason: credential.unavailable });
+				throw new InfraRetry("the provider credential could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			if (!credential.ok) {
+				// The PROVIDER is named and the message is not. The provider is operator-authored config, already
+				// on the record and the mirror, and named freely by the sibling refusals (`backend-unblessed` names
+				// the backend, `job-image-missing` names the image), so withholding it would tell the operator less
+				// than is safe. The message is withheld from BOTH surfaces: `credentialFromPiAuth`'s refusals carry
+				// `auth.json`'s absolute path, which is an OS account name, and the scoped-budget refusal below
+				// keeps a host path out of its own log line citing no-pii-in-logs. `doctor` prints the variable and
+				// the path, on the operator's terminal, which is where that belongs.
+				await comment(job, `Refused: this deployment has no usable credential for the "${credentialJob.provider}" provider, so no container was started and nothing was spent. Ask the operator to run \`pi-dispatch doctor\`. Not run.`);
+				log("refused_provider_unconfigured", { provider: credentialJob.provider ?? null });
+				return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
 		}
 
 
@@ -1554,8 +1565,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// carry `secrets` the current set would refuse, and buildContainerEnv would write every one of them.
 		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
 		// no wiring of it can skip the check.
-		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => RESERVED_ENV_NAMES.has(name)) : undefined;
-		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: true } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
+		const secondaryCredentialNames = new Set(job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
+		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => RESERVED_ENV_NAMES.has(name) || secondaryCredentialNames.has(name)) : undefined;
+		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: RESERVED_ENV_NAMES.has(loadReserved) } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
 		if (resolved.profileUnknown) {
 			await comment(job, REFUSAL_COMMENTS["secret-profile-unknown"]);
 			// The operator's own profile LABEL, and never a path, a reference, or a byte the resolver printed.
@@ -1755,6 +1767,13 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			if (refused !== null) return refused;
 		}
 
+
+		const secondaryCollision = Object.keys(secrets ?? {}).find(name => secondaryCredentialNames.has(name));
+		if (secondaryCollision !== undefined) {
+			log("refused_watch_provider_credential_override", { name: secondaryCollision });
+			return { outcome: "policy", reason: "secret-name-reserved", budgetReserved: false, provider: job.provider ?? null, model: job.model ?? null };
+		}
+
 		if (wantsForgeToken) {
 			token = await mintToken(job);
 
@@ -1832,7 +1851,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// The existing read-only event file carries accepted human text. Environment/exec metadata stays id-only,
 		// including on gateways that log their exec argv. Keep the queued command for the operator's forge trail.
 		const stagedJob = job.approvalDecision ? { ...job, trigger: { ...job.trigger, comment: { ...job.trigger?.comment, body: job.approvalDecision.text ?? "" } } } : job;
-		prepared = await prepareWorkspace(stagedJob, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}), ...(isRecovery ? { pin: { sha: manifest.workspace.baseSha, from: workspaceCheckpointer.baseSourceUrl(runId) } } : forkSource ? { pin: { sha: forkSource.manifest.baseSha, from: forkStore.baseSourceUrl(job.fork.fromJob) } } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
+		prepared = await prepareWorkspace(stagedJob, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null }, ...(typeof jobUser?.store === "string" ? { podmanStore: jobUser.store } : {}), ...(portfolio ? { portfolio: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(mcpChecked.document ? { mcp: mcpChecked.document } : {}), ...(job.watch ? { watchSecrets: secrets } : {}), ...(isRecovery ? { pin: { sha: manifest.workspace.baseSha, from: workspaceCheckpointer.baseSourceUrl(runId) } } : forkSource ? { pin: { sha: forkSource.manifest.baseSha, from: forkStore.baseSourceUrl(job.fork.fromJob) } } : {}) }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
@@ -2242,8 +2261,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
 			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
 		}
+		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
 		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		containerRan = true;
+		watchPolicyRefused = code === EXIT_POLICY;
+		watchUsage = Number.isFinite(tokens?.cost) && tokens.cost >= 0 ? { costUsd: tokens.cost } : null;
 		if (sourcePrimed && !lingering && !detached && !aborted && code === EXIT_COMPLETED) {
 			const rootKey = sessionKeyFor(job).split(".")[0];
 			const transcriptPath = join(prepared.session?.hostDir ?? prepared.live?.hostDir ?? join(prepared.jobDir, "session"), "current.jsonl");
@@ -2478,6 +2500,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 
 		switch (code) {
 			case EXIT_COMPLETED: {
+				watchCompleted = true;
 				// The SOLE chain-collection point. Read the completed parent's /outbox and enqueue children
 				// BEFORE the `finally` deletes jobDir -- the await resolves inside this case, so the read
 				// finishes before control leaves to cleanup. NOT reached on any other branch (policy, abort,
@@ -2728,6 +2751,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		if (e instanceof InfraRetry) e.budgetReserved = globalHeld();
 		throw e;
 	} finally {
+		if (prepared && job.watch) await collectWatch({ job, prepared, completed: watchCompleted, policyRefused: watchPolicyRefused, usage: watchUsage }).catch(() => {});
 		if (prepared) await cleanup(prepared).catch(() => {});
 	}
 }

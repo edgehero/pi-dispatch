@@ -376,13 +376,13 @@ test("run-job decides nested or not FIRST, and a nested runner never reaches the
 	assert.equal((src.match(/process\.on\("SIGTERM"/g) ?? []).length, 1, "one handler");
 });
 
-test("both exit-line paths of run-job.mjs name the cost guard's rule on a cost-cap stop -- worker parseExitWhy depends on it (#507)", () => {
+test("all three exit-line paths of run-job.mjs name the cost guard's rule on a cost-cap stop -- worker parseExitWhy depends on it (#507)", () => {
 	// Same tactic as the guards above: main() self-runs on import. Every writeExit that writes a decided outcome (the
 	// prompt's end and the outer catch; the SIGTERM line is always `terminated`) spreads costRefusalField, and the
 	// accessor is set from the policy guard once it exists.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const writes = src.match(/exitWriter\.writeExit\([^\n]*/g) ?? [];
-	assert.equal(writes.length, 2, "two decided exit lines");
+	assert.equal(writes.length, 3, "chat, deterministic watch classifier and throw exit lines");
 	for (const line of writes) assert.match(line, /\.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\)/, line);
 	assert.match(src, /costRefusalWhy = \(\) => policyGuard\?\.refusedWhy\(\) \?\? null;/);
 });

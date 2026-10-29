@@ -881,3 +881,16 @@ test("runDocument and safeRunOf keep only closed failover facts (#716)", async (
     assert.equal(JSON.stringify(out).includes(CANARY), false);
   }
 });
+
+
+test("watch kind is reporting-only and needs its bounded watch target", () => {
+  const safe = safeRunOf("watch-1", { kind: "watch", target: "watch:shop-5xx", triggerType: "watch" });
+  assert.equal(safe.kind, "watch");
+  assert.equal(safe.target, "watch:shop-5xx");
+  assert.equal(safe.repo, null, "a watch rule is not a forge repository");
+  for (const target of ["acme/shop#1", "watch:bad rule", "watch:" + "a".repeat(65), "watch:_bad"]) {
+    const bad = safeRunOf("watch-1", { kind: "watch", target });
+    assert.equal(bad.kind, null, target);
+    assert.equal(bad.target, null, target);
+  }
+});

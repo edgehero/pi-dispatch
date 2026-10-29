@@ -1868,3 +1868,20 @@ A run with declared gates can end as `awaiting-approval`. It leaves no container
 `budget-raise` is worker-enforced and uses the cap declared by the trigger, within deployment and scoped limits. Other declared external actions are advisory. Push-to-default-branch and PR-open gates are refused until they can be enforced. Summary and reason text stay in the transcript and forge comment, never the run record.
 
 Model-role runs show the reviewed role beside the physical provider/model in run detail and the run API. Agent refusal counts contain bounded hashes and fixed reasons; the requested name stays in tool output. The model-callable tools cannot edit the reviewed `modelRoles` block. See [model-roles.md](model-roles.md).
+
+
+## Watch and rule boards
+
+When watch rules are configured, Configuration, Triggers links to `/watch`. Select a rule for its findings and
+`/watch/board?rule=<id>` for its board. A finding selection shows public stages and choice probabilities; an expired
+or failed store read says unavailable. The panel's Watch view reads the same store. Rules and sources are written
+by hand; these pages do not edit trigger authority.
+
+Operators can inspect private evidence at `/api/watch-trace?finding=<id>`. This includes samples, query text and
+decision state, and the route refuses viewers. Viewer pages and snapshots contain only approved public summaries
+and numeric board data. Agent-authored strings are escaped, and no agent HTML is served.
+
+Board proposals wait for operator adoption. `board-adopt`, `board-freeze`, `board-unfreeze`, `board-revert` and
+`board-clear` use the existing preview, Confirm and audit-before-write pipeline. Freeze, clear and revert are
+destructive actions. A frozen board refuses adoption; stale expected versions refuse any conflicting mutation.
+See [Watch findings](watch.md) and [Watch decisions and boards](watch-decisions.md).

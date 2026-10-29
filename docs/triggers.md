@@ -16,7 +16,12 @@ one entry in `triggers.json`. It says what starts a job and what that job runs.
 ] }
 ```
 
-## The five trigger types: what fires each one, and what it runs
+Watch is the additional collector trigger, configured by hand with `watchSources` and `on.type: "watch"`.
+Its signed finding schema, limits, read-only investigation and issue modes are described in [Watch findings](watch.md);
+optional shadow/active decisions and board proposals are in [Watch decisions](watch-decisions.md).
+The forge and cron reference below keeps their existing behavior.
+
+## Trigger types: what fires each one, and what it runs
 
 pi-dispatch is the trigger layer. Every entry is one `{ on, run }` pair: **`on` is what fires it**, and
 **`run` is what it runs**, either a flow or a registered command (`flow` names a `.pi/skills/<flow>` in

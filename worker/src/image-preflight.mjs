@@ -318,6 +318,7 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare model-failover support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner cannot report the authenticated failure and replay evidence this job requires. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 	Object.freeze({ token: "modelRoles", needed: (job) => job?.modelRoles !== undefined, result: "modelRolesUnsupported", reason: "job-image-model-roles-unsupported", event: "refused_image_model_roles_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare modelRoles support (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot resolve reviewed roles before child calls. Rebuild the image from a version that has this feature. Not run.` }),
+	Object.freeze({ token: "watch", needed: (job) => Boolean(job?.watch), result: "watchUnsupported", reason: "job-image-watch-unsupported", event: "refused_image_watch_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare watch isolation (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot enforce read-only investigations. Rebuild the image from a version that has this feature. Not run.` }),
 ]);
 
 /**

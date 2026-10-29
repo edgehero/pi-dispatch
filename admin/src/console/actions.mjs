@@ -70,6 +70,7 @@ import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { html } from "./html.mjs";
+import { WATCH_ID_RE, WATCH_RULE_ID_RE } from "./watch.mjs";
 import { timeHtml, utcText } from "./panels/common.mjs";
 import { FLASH_MAX_BYTES } from "./sessions.mjs";
 
@@ -1766,6 +1767,7 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
  */
 const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
 const WRITE_RULES = {
+  ...Object.fromEntries(["freeze", "unfreeze", "clear", "revert", "adopt"].map((op) => [`board-${op}`, { fields: ["rule", "expectedVersion", ...(op === "revert" ? ["version"] : []), ...(op === "adopt" ? ["proposalId"] : [])], danger: op !== "unfreeze" && op !== "adopt", undo: () => "Restore a retained board version, or change its freeze state.", inverse: () => null, confirmLabel: () => `${op[0].toUpperCase() + op.slice(1)} board`, done: (out) => `Changed board ${out.target}` }])),
   "cancel-active": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.cancelled), inverse: none, confirmLabel: () => "Cancel the run", done: (out) => `Cancelled running job ${out.payload.jobId}` },
   "cancel-held": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: () => "Cancel the held job", done: (out) => `Cancelled held job ${out.payload.jobId}` },
   "cancel-all-held": { fields: [], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: (out) => `Cancel ${plural(out.targets?.length ?? 0, "held job")}`, done: bulkDone("Cancelled", "held job") },
@@ -1869,8 +1871,34 @@ function withRules(a) {
   return Object.freeze({ ...a, fields: Object.freeze([...r.fields]), danger: r.danger, atConfirm: r.atConfirm ?? false, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done });
 }
 
+/** Board writes use the same ticket and audit-before-write path as every other console change. */
+const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((operation) => ({
+  name: `board-${operation}`, kind: `board-${operation}`, paid: false, bulk: false, needs: ["watch"],
+  async preview(body, ctx) {
+    const ruleId = str(body, "rule", { required: true, max: 64 });
+    if (!WATCH_RULE_ID_RE.test(ruleId)) throw new BadRequest("rule must be a watch identifier (letters, digits, _ or -)");
+    const revertVersion = operation === "revert" ? index(body, "version") : null;
+    const proposalId = operation === "adopt" ? str(body, "proposalId", { required: true, max: 128 }) : null;
+    if (proposalId !== null && !WATCH_ID_RE.test(proposalId)) throw new BadRequest("proposalId must be a watch identifier (letters, digits, _ or -)");
+    const expectedVersion = index(body, "expectedVersion");
+    const board = await ctx.a.watch.readBoard(ruleId);
+    if (board.version !== expectedVersion) return { refusal: "the board changed; preview it again", status: 409 };
+    const change = operation === "freeze" || operation === "unfreeze" ? { action: "freeze", frozen: operation === "freeze" } : operation === "revert" ? { action: "revert", version: revertVersion } : operation === "adopt" ? { action: "adopt", proposalId } : { action: "clear" };
+    const proposal = operation === "adopt" ? (board.proposals ?? []).find((p) => p.id === proposalId) : null;
+    if (operation === "adopt" && !proposal) return { refusal: "the board proposal is not retained", status: 404 };
+    if (operation === "adopt" && board.frozen) return { refusal: "the board is frozen", status: 409 };
+    if (operation === "revert" && !(board.versions ?? []).some((v) => v.version === change.version)) return { refusal: "the board version is not retained", status: 404 };
+    return { target: ruleId, payload: { ruleId, change, expectedVersion }, beforeDigest: sha256(JSON.stringify(board)), afterDigest: sha256(JSON.stringify({ change, blocks: proposal?.blocks ?? null })), summary: [`${operation[0].toUpperCase() + operation.slice(1)} the board for ${ruleId}`, `Current version ${expectedVersion}; the change is refused if another writer replaces it first`, ...(proposal ? [`Proposed blocks: ${JSON.stringify(proposal.blocks)}`] : [])] };
+  },
+  async apply(entry, ctx) {
+    const p = entry.payload;
+    const result = await ctx.a.watch.mutateBoard(p.ruleId, p.change, p.expectedVersion);
+    return result?.ok ? { ok: true } : { invalid: result?.reason ?? "the board change was refused" };
+  },
+}));
+
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {

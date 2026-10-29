@@ -1514,3 +1514,15 @@ test("codemode workers follow the resolved job size and cannot be replaced throu
 		assert.equal(env.PI_CODEMODE_MAX_WORKERS, String(Math.floor(memMiB / 512)));
 	}
 });
+
+test("secondary reviewed watch provider resolves only its own credential and refuses an absent key", { skip }, () => {
+	const options = { provider: "anthropic", secondaryProvider: "openrouter", model: "m", maxTurns: 1, hostEnv: { ANTHROPIC_API_KEY: "primary", OPENROUTER_API_KEY: "classifier", GEMINI_API_KEY: "unrelated" } };
+	const env = buildContainerEnv(options);
+	assert.equal(env.ANTHROPIC_API_KEY, "primary"); assert.equal(env.OPENROUTER_API_KEY, "classifier"); assert.equal(env.GEMINI_API_KEY, undefined);
+	assert.throws(() => buildContainerEnv({ ...options, hostEnv: { ANTHROPIC_API_KEY: "primary" } }), (error) => error.piDispatchConfig === true);
+	assert.equal(buildContainerEnv({ ...options, secondaryProvider: null }).OPENROUTER_API_KEY, undefined, "ordinary jobs retain their existing credential surface");
+});
+
+test("secondary classifier credential cannot be overwritten through the final secrets assignment", { skip }, () => {
+	assert.throws(() => buildContainerEnv({ provider: "anthropic", secondaryProvider: "openrouter", model: "m", maxTurns: 1, hostEnv: { ANTHROPIC_API_KEY: "primary", OPENROUTER_API_KEY: "classifier" }, secrets: { OPENROUTER_API_KEY: "override" } }), (error) => error.piDispatchConfig === true && !error.message.includes("override"));
+});

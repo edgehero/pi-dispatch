@@ -32,7 +32,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { configError, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
-import { FORGE_KINDS, PR_CLOSE_ACTIONS, parseTriggers } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, PR_CLOSE_ACTIONS, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 
 // Cwd-relative, matching what `pi-dispatch init` scaffolds (and the admin's default): the receiver's
 // default must be the file init just told the operator it created, not a demo buried in the repo.
@@ -311,7 +311,10 @@ function loadTriggers(env, readFile, fileExists) {
 		throw configError(`triggers file not found: ${path} -- run \`pi-dispatch init\` in this folder to scaffold one, or set PI_TRIGGERS_FILE to yours`);
 	}
 
-	const parsed = parseTriggers(readFile(path, "utf8"), path); // fail-loud
+	const document = parseTriggersDocument(readFile(path, "utf8"), path);
+	const parsed = document.triggers;
+	const watchSources = document.watchSources ?? {};
+	for (const source of Object.values(watchSources)) if (typeof env[source.secretEnv] !== "string" || !env[source.secretEnv].trim()) throw configError("watch: a configured source secret is missing");
 	void 0;
 
 	// Every forge gets a group whether or not the file names it, so the filter can read
@@ -326,7 +329,7 @@ function loadTriggers(env, readFile, fileExists) {
 	const knownFlows = new Set();
 
 	for (const [index, { on, run }] of parsed.entries()) {
-		if (on.type === "cron") continue; // the worker owns cron; the receiver never fires it -- but it keeps its index
+		if (on.type === "cron" || on.type === "watch") continue;
 		// Guarded because a command trigger (issue #189) has NO run.flow, and `Set.add(undefined)` would put
 		// undefined into the comment `<phrase> <flow>` override allowlist. That set exists to bound which
 		// names a collaborator's comment may summon; polluting it with a non-name is how a later loose
@@ -361,7 +364,7 @@ function loadTriggers(env, readFile, fileExists) {
 		}
 	}
 
-	return { ...groups, knownFlows };
+	return { ...groups, knownFlows, ...(Object.keys(watchSources).length ? { watchSources, watch: parsed.filter(t => t.on.type === "watch") } : {}) };
 }
 
 function emptyGroup() {

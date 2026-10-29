@@ -375,7 +375,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null }) {
+export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -383,6 +383,8 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, model, ma
 	// `modelEndpoints` is the pickup's snapshot (issue #503): the keyless branch answers `PI_DISPATCH_KEYLESS` in this
 	// map, so the variable is set exactly when the gate passed keyless and is absent on every other job.
 	const credEnv = resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
+	// A reviewed watch classifier may use another provider. Resolve only that provider, never a blanket key copy.
+	const secondaryCredEnv = secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
 
 	const env = {
 		PI_PROVIDER: provider,
@@ -487,6 +489,7 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, model, ma
 
 	// The provider credential(s), under pi's expected variable name(s), so pi's own auth resolution finds them.
 	Object.assign(env, credEnv);
+	Object.assign(env, secondaryCredEnv);
 
 	// Operator-declared extra vars (PI_FORWARD_ENV), forwarded by EXACT name -- the allowlist
 	// no-broad-env-into-container prescribes, not a host pass-through. This is how a CUSTOM provider's
@@ -528,6 +531,7 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, model, ma
 	// PI_SESSION_FILE and PI_FLOW already keep. The resolver guarantees non-empty; this is the defense in
 	// depth at the DI seam that the empty-token guard keeps for the mint.
 	for (const [name, value] of Object.entries(secrets ?? {})) {
+		if (secondaryProvider && providerKeyCandidates(secondaryProvider).includes(name)) throw configError(`watch classifier credential variable ${name} is reserved`);
 		if (typeof value === "string" && value !== "") env[name] = value;
 	}
 

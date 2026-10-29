@@ -19,6 +19,7 @@ import { isEntryModule } from "@edgehero/pi-dispatch/entry";
 const USAGE = `pi-dispatch-receiver — the always-on trigger edge: turns GitHub activity into queued jobs
 
   pi-dispatch-receiver serve   start the webhook receiver (the default when no command is given)
+  pi-dispatch-receiver watch   poll reviewed file, journald and Loki watch sources
   pi-dispatch-receiver poll    start the polling producer — no public URL, no DNS, no tunnel: it
                                reads api.github.com with the operator's own credential instead
 
@@ -38,7 +39,7 @@ serve listens, and POLL_REPOS / POLL_INTERVAL_SECONDS shape what poll watches an
 	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
 	// runs each file in a child process that serialises its own results over that same stdout, so a test
 	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
-export async function main(argv = process.argv.slice(2), env = process.env, { start, startPoll, write = (chunk) => process.stdout.write(chunk) } = {}) {
+export async function main(argv = process.argv.slice(2), env = process.env, { start, startPoll, startWatch, write = (chunk) => process.stdout.write(chunk) } = {}) {
 	const cmd = argv[0];
 
 	if (cmd === undefined || cmd === "serve") {
@@ -55,6 +56,13 @@ export async function main(argv = process.argv.slice(2), env = process.env, { st
 		const startPoller = startPoll ?? (await import("./poller.mjs")).startPoller;
 		const poller = await startPoller(env);
 		await poller?.done;
+		return 0;
+	}
+
+	if (cmd === "watch") {
+		const startWatchPuller = startWatch ?? (await import("./watch-puller.mjs")).startWatchPuller;
+		const puller = await startWatchPuller(env);
+		await puller?.done;
 		return 0;
 	}
 

@@ -3,6 +3,8 @@ import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
+import { executeWatchDecision } from "../src/watch-decision.mjs";
+import { createWatchTools } from "../src/watch-tools.mjs";
 import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { createPolicyGuard, createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -44,7 +46,7 @@ async function stubServer() {
 			if (req.url.endsWith("/systemone")) {
 				seen.classify++;
 				const { questions } = JSON.parse(body);
-				const answers = Object.fromEntries(Object.keys(questions).map((id) => [id, { type: "noul", noul: 0.9 }]));
+				const answers = Object.fromEntries(Object.entries(questions).map(([id, question]) => [id, question.type === "choice" ? { type: "choice", choice: "ignore", probabilities: { investigate: 0.02, ignore: 0.95, file_issue: 0.03 }, confidence: 0.9 } : { type: "noul", noul: 0.9 }]));
 				return reply({ answers, usage: { input_tokens: 1200, output_tokens: 0 } });
 			}
 			if (req.url.endsWith("/chat/completions")) {
@@ -85,6 +87,7 @@ async function job({ base, maxCostMicros = null, allowedModels = null }) {
 	const text = (result) => result.content.map((block) => block.text ?? "").join("\n");
 	return {
 		run,
+		runtime: modelRuntime,
 		text,
 		meter,
 		guard,
@@ -200,4 +203,51 @@ test("a script's own model object cannot redirect a call: the model is resolved 
 		await stub.close();
 		await elsewhere.close();
 	}
+});
+
+
+test("watch trusted decide tool uses the real pinned classifier through the process cost guard", { skip }, async () => {
+	const stub = await stubServer();
+	const j = await job({ base: stub.base, maxCostMicros: 1 });
+	const traces = [];
+	try {
+		const watch = createWatchTools({ config: { version: 1, decisionModel: CLASSIFIER }, runtime: j.runtime, fs: { appendFileSync(_path, line) { traces.push(JSON.parse(line)); }, writeFileSync() {} } });
+		const result = await watch.tools.find((tool) => tool.name === "decide").execute("watch-1", { state: { count: 37 }, questions: { ok: { type: "bool", instructions: "Investigate?", criteria: { true: "yes", false: "no" } } } });
+		assert.equal(result.isError, true);
+		assert.equal(stub.seen.classify, 0, "watch classifier is refused by the same guard before provider dispatch");
+		assert.equal(j.guard.snapshot().costRefused, 1);
+		assert.equal(traces.at(-1).status, "failed");
+	} finally { j.close(); await stub.close(); }
+});
+
+
+test("deterministic watch gate calls only the real guarded classifier, never chat, and cap refusal stays unsent", { skip }, async () => {
+	const stub = await stubServer();
+	try {
+		for (const cap of [1_000_000, 1]) {
+			const j = await job({ base: stub.base, maxCostMicros: cap });
+			const before = stub.seen.classify;
+			const output = [];
+			try {
+				const result = await executeWatchDecision({ input: { version: 1, model: CLASSIFIER, state: { count: 37 }, questions: { ok: { type: "bool", criteria: { true: "yes", false: "no" } } } }, runtime: j.runtime, fs: { writeFileSync(_path, raw) { output.push(JSON.parse(raw)); } } });
+				assert.equal(result.ok, true);
+				assert.equal(stub.seen.classify - before, cap === 1 ? 0 : 1);
+				assert.equal(stub.seen.images, 0);
+				assert.equal(output[0].stopReason, cap === 1 ? "aborted" : "stop");
+				assert.equal(j.meter.usageSnapshot()?.models.filter((m) => m.calls > 0).every((m) => m.model === CLASSIFIER.id) ?? true, true);
+			} finally { j.close(); }
+		}
+	} finally { await stub.close(); }
+});
+
+
+test("pinned watch classifier preserves choice probabilities and confidence in its public result", { skip }, async () => {
+	const stub = await stubServer();
+	const j = await job({ base: stub.base, maxCostMicros: 1_000_000 });
+	try {
+		let written;
+		await executeWatchDecision({ input: { version: 1, model: CLASSIFIER, state: { count: 37 }, questions: { act: { type: "choice", criteria: { investigate: "new", ignore: "noise", file_issue: "person" } } } }, runtime: j.runtime, fs: { writeFileSync(_path, value) { written = JSON.parse(value); } } });
+		assert.deepEqual(written.answers.act, { type: "choice", choice: "ignore", probabilities: { investigate: 0.02, ignore: 0.95, file_issue: 0.03 }, confidence: 0.9 });
+		assert.equal(stub.seen.classify, 1);
+	} finally { j.close(); await stub.close(); }
 });

@@ -756,7 +756,7 @@ test("every page: signed out it redirects to /login; signed in it loads its data
     assert.equal(anon.status, 303, spec.path);
     assert.equal(anon.headers.location, "/login");
     // `run` needs an id; every other page renders bare.
-    const path = name === "run" ? `${spec.path}?id=job-1` : spec.path;
+    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, 200, `${path}: ${res.text.slice(0, 200)}`);
     assert.equal(c.loads.at(-1).name, name);
@@ -772,7 +772,7 @@ test("a viewer is refused an operator page 403, and gets every viewer page", asy
   const c = await start();
   const { cookie } = await c.login(VIEW_TOKEN);
   for (const [name, spec] of Object.entries(realPages.PAGES)) {
-    const path = name === "run" ? `${spec.path}?id=job-1` : spec.path;
+    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, spec.auth === "operator" ? 403 : 200, path);
   }
@@ -2103,4 +2103,22 @@ test("a page request tells loadPageData who asks and the console's readOnly, so 
     assert.equal((await c.send({ path: "/parked", headers: { cookie } })).status, 200);
     assert.deepEqual(loads.at(-1), { name: "parked", who: { role: "operator", readOnly } });
   }
+});
+
+test("watch evidence refuses viewers before any private storage read and authenticates every request", async () => {
+  const asked = [];
+  const c = await start({ pageDeps: { watch: {
+    readFinding: async (id, opts) => (asked.push(["finding", id, opts]), { id, samples: ["operator evidence"] }),
+    readTrace: async (id, opts) => (asked.push(["trace", id, opts]), [{ kind: "query", text: "private query" }]),
+  } } });
+  const viewer = await c.login(VIEW_TOKEN);
+  const denied = await c.send({ path: "/api/watch-trace?finding=f1", headers: { cookie: viewer.cookie } });
+  assert.equal(denied.status, 403);
+  assert.deepEqual(asked, []);
+  const operator = await c.login();
+  const accepted = await c.send({ path: "/api/watch-trace?finding=f1", headers: { cookie: operator.cookie } });
+  assert.equal(accepted.status, 200);
+  assert.match(accepted.text, /operator evidence/);
+  assertSecurityHeaders(accepted, "private watch evidence");
+  assert.deepEqual(asked, [["finding", "f1", { private: true }], ["trace", "f1", { private: true }]]);
 });

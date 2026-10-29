@@ -1,7 +1,13 @@
 import { readBusy as canaryBusy } from "./canary-lock.mjs";
 import { makeReadModelRoles } from "./model-roles-file.mjs";
+import { makeWatchStore } from "./watch-store.mjs";
+import { makeWatchRuntime } from "./watch-runtime.mjs";
+import { makeWatchDrainer } from "./watch-drainer.mjs";
+import { makeWatchIssuePublisher } from "./watch-issue.mjs";
+import { makeWatchIssueAdapter } from "./watch-issue-adapter.mjs";
 import { checkFailoverCandidate, failoverEgressRequired } from "./model-failover.mjs";
-import { parseTriggers } from "./triggers.mjs";
+import { parseTriggers, parseTriggersDocument } from "./triggers.mjs";
+import { watchDurationMs } from "./watch-contract.mjs";
 import { makeApprovalSessionCheck } from "./approval-session.mjs";
 import { makeApprovalStore } from "./approval-state.mjs";
 import { makeApprovalRuntime, approvalExpiryJobId } from "./approval-runtime.mjs";
@@ -70,7 +76,7 @@ import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
-import { hostQueueName, makeQueue, QUEUE } from "./queue.mjs";
+import { hostQueueName, makeQueue, enqueueWatchJob, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
@@ -1834,6 +1840,23 @@ export async function startWorker(
 	// (`OQ-009`), so the working tree it needs is the one this machine just used: routing it anywhere
 	// else would enqueue a job only this host can run onto a queue every host drains.
 	const collectChain = makeCollectChain({ queue: cronQueue, config, log });
+	const watchStore = makeWatchStore(redis, { now });
+	const watchIssueAdapter = makeWatchIssueAdapter({ getContext: async target => {
+		const auth = forges[target.kind]?.auth ?? await ensureAuth(target.kind);
+		if (!auth) throw configError("watch: configure the target forge credentials");
+		const token = await auth.mintToken({ kind: target.kind, repo: target.repo, permissions: { issues: "write", metadata: "read" } });
+		return { apiUrl: target.kind === "github" ? "https://api.github.com" : config[target.kind]?.apiUrl, token };
+	} });
+	const watchPublisher = makeWatchIssuePublisher({ redis, adapter: watchIssueAdapter, now,
+		canClose: async mapping => {
+			const doc = parseTriggersDocument(readFileSync(onceTriggersFile, "utf8"), onceTriggersFile);
+			const rule = doc.triggers.find(t => t.on.type === "watch" && t.on.id === mapping.ruleId && t.on.source === mapping.source);
+			const target = rule?.run.issue;
+			return Boolean(doc.watchSources?.[mapping.source] && target?.closeAfter && target.kind === mapping.target.kind && target.repo === mapping.target.repo && watchDurationMs(target.closeAfter) === mapping.closeAfterMs);
+		},
+		reportClose: async (outcome, mapping) => { if (mapping?.ruleId) await watchStore.recordIssueOutcome(mapping.ruleId, outcome); },
+	});
+	const watchRuntime = makeWatchRuntime({ store: watchStore, triggersPath: onceTriggersFile, now, log, getSettings, pauseUntil: (job, at) => pauseUntilMs(pauseWindows.current, job, at), enqueue: (fields, opts) => enqueueWatchJob(cronQueue, fields, { now, ...opts }), publishIssue: watchPublisher });
 
 	// Issue #505. One live-file check, shared by the pickup gate, the snapshot and the plan collector, so the three ask one
 	// file by one rule: the same file and rule as the one-shot checks below (`onceTriggersFile`). `pi-dispatch run
@@ -2413,6 +2436,9 @@ export async function startWorker(
 	// INFO rejected unhandled ("Connection is closed"), failing whichever test was running.
 	for (const q of new Set([runtimeQueue, cronQueue])) settleCloseOf(q);
 	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
+	// A first source can arrive through live configuration after boot. Recovery and quiet-close
+	// draining must already exist then, even when the initial source registry was empty.
+	extraClosers.push(makeWatchDrainer({ runtime: watchRuntime, log }));
 
 	// HOISTED out of the deps literal (issue #288): the terminal failed listener below needs the same
 	// adapter the processor gets, and two bodies would drift exactly where drift costs a public comment.
@@ -2712,6 +2738,8 @@ export async function startWorker(
 		deps: {
 			collectChain,
 			collectPlan,
+			watchRuntime,
+			collectWatch: watchRuntime.collect,
 			// Issue #646: the late-message branches at the processor's settle (index.mjs `settleSteer`).
 			onLateForge: lateForge,
 			// Issue #638: held replies at the processor's settle (index.mjs `settleSteer` calls it first). Wired, it also arms
@@ -2738,7 +2766,7 @@ export async function startWorker(
 			// Issue #503: `modelEndpoints` is the pickup's snapshot, the same one runContainer hands buildContainerEnv.
 			checkProviderCredential: (job, { modelEndpoints = null } = {}) => {
 				try {
-					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: config.forwardEnv, modelEndpoints });
+					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.watch ? [] : config.forwardEnv, modelEndpoints });
 					return { ok: true };
 				} catch (error) {
 					// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)

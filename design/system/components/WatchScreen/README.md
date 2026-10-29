@@ -1,30 +1,13 @@
-Watch shows the findings that logs and alerts send in, what they started, and what was suppressed or refused, with a person in charge of any code change.
+Watch shows configured sources and rules before the first finding, retained finding outcomes, cooldown left, and suppressed or capped counts. Built by #735.
 
-**How a person uses it.**
-- **Four counts:** findings delivered, jobs started, suppressed by cooldown, and capped or unmatched (both refused before spend).
-- **Finding.** The newest finding, as a card:
-  - service, error type and top frame, with the count (37×);
-  - first and last seen, severity, project and cooldown left;
-  - 8 redacted samples shown as escaped plain text;
-  - what it started: the read-only triage job, the follow-up that waits for a person, and the forge issue filed in issue mode.
-- **Active fingerprints.** Each fingerprint's count, last seen, cooldown left and jobs.
-- **Right column:** *Sources*, each with its signature check, secret name and last delivery (doctor flags a missing secret), and *Triggers*, each with its match, fingerprint fields, threshold, cooldown, daily cap, mode, flow and job cap.
+**How a person uses it.** Open Watch from Configuration's Triggers section when a watch rule is configured. The compact static screen lists source signatures, latest delivery, refusal counters and explicitly unknown credential health. Doctor checks source credentials on their owning host. Rules show source, reviewed flow, mode and daily cap. Select a rule's board for retained findings and operator-only evidence. The terminal panel's z key opens Watch findings and outcome counters.
 
-**Panels.** `p-delivered`, `p-started`, `p-suppressed`, `p-refused`, `p-finding`, `p-fingerprints`, `p-sources`, `p-wtriggers`.
+**Panels.** The delivered console has `p-watch`, containing Sources, Watch rules and Findings.
 
-**The server provides.**
-- Counters per window.
-- Fingerprints with counts and cooldown expiry.
-- Redacted samples, never stored in run history.
-- The jobs and issues each finding started.
-- Sources with signature and secret status.
-- The watch triggers from triggers.json.
+**Who sees what.** Both roles see counts and outcomes. Samples are operator only on the board's evidence section and never enter run history or application logs. Watch configuration is hand-written; the generic trigger editor does not author it.
 
-**Why it works this way.**
-- Rules decide what starts a job, never a model: a finding never picks the flow, model, tools or secrets.
-- Watch jobs are read-only, with edit and write excluded. A fix starts only after someone with write access labels the issue `pi:fix`. The ordinary label trigger then opens a pull request, which a person merges.
-- A source's signature is checked before any field of a delivery is read.
-- The same fingerprint stays quiet for its cooldown (6 hours here) after it starts a job, so a noisy error starts one job, not hundreds.
-- Samples are redacted on the host before they reach the queue, shown as plain text, and never kept in run history. Fingerprints use structured fields only, never message text.
+**Why it works this way.** Signature verification precedes parsing. Deterministic rules, cooldown and source and rule caps precede spend. Each investigation is a fresh read-only container, and a person with write access authorizes a code-change follow-up. A finding cannot choose the flow, model, folder, permissions, secrets or image.
 
-**Fixture note.** This is a planned screen (#735), and all of it is sample, built from the example in the issue: prod-alerts, shop-5xx, checkout/TimeoutError/db.pool.acquire, 37 events and 8 redacted samples.
+**Future design, not delivered.** The earlier multi-panel live Watch dashboard is a future presentation option. This card describes the compact retained-data screen, not live widgets or receiver credential-health telemetry.
+
+**Fixture note.** Counts and timestamps are illustrative and match the board's shared finding and local-7f21 job.

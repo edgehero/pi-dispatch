@@ -2689,3 +2689,26 @@ test("a folder job on a venue that declares localFolders absent is refused befor
 	const { deps: ok } = deps({ redis: fakeRedis(), blessedBackends: ["local"], observationPreflight: async () => ({ venueRefused: { reason: "stop-here", comment: "x" } }), comment: async () => {}, log: () => {} });
 	assert.equal((await runJob({ kind: "local", folder: "/home/rob/proj", task: "t", provider: "anthropic", model: "m", maxTurns: 5 }, ok)).reason, "stop-here", "past the folder check, stopped at the next gate");
 });
+
+test("watch classifier credential is probed before mint, prepare, token reads or budget reservation", async () => {
+	const redis = fakeRedis(); const probes = []; const logs = []; let tokenReads = 0;
+	const { deps: d, calls } = deps({ redis: { ...redis, get() { tokenReads++; return null; } }, checkProviderCredential: (job) => { probes.push(job.provider); return job.provider === "openrouter" ? { ok: false, message: "private credential-path detail" } : { ok: true }; }, log: (event, fields) => logs.push({ event, fields }) });
+	const job = { kind: "local", folder: "/srv/shop", provider: "anthropic", model: "m", maxTurns: 5, watch: { findingId: "a".repeat(64) }, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" } };
+	const result = await runJob(job, d);
+	assert.equal(result.reason, "provider-unconfigured"); assert.equal(result.budgetReserved, false);
+	assert.deepEqual(probes, ["anthropic", "openrouter"]); assert.equal(redis.incrCalls, 0); assert.equal(tokenReads, 0);
+	assert.equal(calls.includes("prepare"), false); assert.equal(calls.includes("run-container"), false); assert.equal(calls.some((call) => call.startsWith("mint:")), false);
+	assert.equal(JSON.stringify(logs).includes("private credential-path"), false); assert.equal(logs.find((row) => row.event === "refused_provider_unconfigured").fields.provider, "openrouter");
+});
+test("an indeterminate classifier credential read retries infrastructure without reserving or running", async () => {
+	const redis = fakeRedis(); const { deps: d, calls } = deps({ redis, checkProviderCredential: (job) => job.provider === "openrouter" ? { ok: false, unavailable: "EIO" } : { ok: true } });
+	await assert.rejects(() => runJob({ kind: "local", folder: "/srv/shop", provider: "anthropic", model: "m", maxTurns: 5, watch: {}, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" } }, d), (error) => error.name === "InfraRetry" && error.reason === "container-never-started");
+	assert.equal(redis.incrCalls, 0); assert.equal(calls.includes("run-container"), false);
+});
+
+test("watch classifier credential bindings refuse before invoking a secret resolver", async () => {
+	const { deps: d, calls } = deps({ resolveSecrets() { assert.fail("a known classifier key collision is refused before reading any secret"); }, checkProviderCredential: () => ({ ok: true }) });
+	const result = await runJob({ kind: "local", folder: "/srv/shop", provider: "anthropic", model: "m", maxTurns: 5, watch: {}, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" }, secrets: { OPENROUTER_API_KEY: "opaque-secret-reference" } }, d);
+	assert.equal(result.reason, "secret-name-reserved"); assert.equal(result.budgetReserved, false);
+	assert.equal(d.redis.incrCalls, 0); assert.equal(calls.includes("prepare"), false); assert.equal(calls.includes("run-container"), false);
+});

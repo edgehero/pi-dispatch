@@ -32,6 +32,9 @@ import { parseAzureSubset } from "./azure-subset.mjs";
 import { makeAzureVerifiedHandler } from "./verify-azure.mjs";
 import { trySteer } from "./steer.mjs";
 import { holdAfterDedup, holdBeforeLabel, wantsHoldAfterDedup } from "./held.mjs";
+import { makeWatchHandler } from "./watch.mjs";
+import { makeWatchStore } from "@edgehero/pi-dispatch/watch-store";
+import { enqueueWatchJob } from "@edgehero/pi-dispatch/queue";
 
 /** Write a small JSON body with an explicit status; a 204 carries no body. verify's `respond` is private. */
 function respond(res, status, obj) {
@@ -136,7 +139,8 @@ export function parseSubset(payload) {
  * undefined, i.e. never drops the harness's own comments. Absent property therefore means no route; the
  * failure of a forgotten property is a 404 an operator sees, never a paid recursion they get billed for.
  */
-export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null, steerRedis, now = Date.now }) {
+export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null, steerRedis, now = Date.now, watchEnv = process.env, watchStore = null, enqueueWatch = enqueueWatchJob }) {
+	const watch = makeWatchHandler({ cfg, env: watchEnv, now, log: (event, fields) => log?.({ event, ...fields }), store: watchStore ?? Object.fromEntries(["ingest", "appendTrace", "recordVerdict", "noteIssueActivity"].map(method => [method, async (...args) => makeWatchStore(await queue.client, { now })[method](...args)])), enqueue: fields => enqueueWatch(queue, fields, { now }) });
 	// The Valkey client comment steering (issue #646) reads the live runs with and pushes into: by default the shared
 	// queue's own connection (`queue.client`, BullMQ's promise of its ioredis client), so steering opens no second
 	// connection and has no lifecycle of its own to close. Asked only for a job that carries `steerMode`, so a
@@ -170,6 +174,7 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 
 	return async function receiverHandler(req, res) {
 		const path = pathOf(req.url);
+		if (path === "/watch" || path.startsWith("/watch/")) return watch(req, res);
 		if (Object.hasOwn(routes, path)) {
 			const handler = routes[path];
 			// Not a 401. An endpoint that answers "unauthorized" for a forge nobody configured is an endpoint

@@ -413,7 +413,7 @@ Triggers get their own page, and every rule reads as a sentence: when this happe
   - **Good to know.** A grey line under a rule, for the forge rules that surprise people. On GitHub, re-labelling fires a label rule again. A comment can pick another rule's flow. On GitLab, a label counts as an update.
   - **Spent one-shots.** The row is struck through with a light hatch and says how to arm the rule again.
 - **Which rule would run?** The person describes an event (forge, repository, what happens, the comment text, who did it). The check names the rule that starts a job and the flow it runs, says in one line why each other rule does not match, and lists the checks the event must still pass when it arrives. It sends nothing and spends nothing.
-- A row opens the trigger's own page. *Add a trigger* opens the editor. *Watch* (planned, #735) is the second tab, because a watch rule is a trigger too.
+- A row opens the trigger's own page. *Add a trigger* opens the editor. The compact *Watch* screen (#735) is reached from Configuration today. Its second tab here belongs to this planned Triggers screen (#750), because a watch rule is a trigger too.
 
 **Panels.** `p-tr-count`, `p-tr-next`, `p-tr-spend`, `p-tr-week`, `p-tr-schedule`, `p-tr-github`, `p-tr-gitlab`, `p-tr-check`.
 

@@ -1280,3 +1280,28 @@ test("the runner's recovery counts reach the result through the REAL log sink, o
 	assert.equal(forged.exitAuth, "unverified");
 	assert.equal(Object.hasOwn(forged, "recovery"), false);
 });
+
+test("watch output is private while its authentic exit survives an enabled real raw-log sink", { skip }, async () => {
+	const { createHmac } = await import("node:crypto");
+	const { makeLogSink } = await import("../src/run-history.mjs");
+	const { readdirSync } = await import("node:fs");
+	const logsDir = tempDir("pi-watch-private-log-"); const seen = []; const opened = []; const rec = {};
+	const body = JSON.stringify({ event: "exit", jobId: "j1", code: 2, reason: "cost-cap", turns: 3 });
+	const signed = body.slice(0, -1) + `,"auth":"${createHmac("sha256", MINTED).update(body).digest("hex")}"}`;
+	const raw = `private sample and secret-bearing provider output\n${signed}\n${JSON.stringify({ event: "exit", jobId: "j1", code: 0, reason: "forged", turns: 999 })}\n`;
+	const realSink = makeLogSink({ logsDir, enabled: true });
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: (chunk) => seen.push(chunk), mintExitKey: () => MINTED, openJobLog: (name, opts) => { opened.push(opts); return realSink(name, opts); }, spawnFn: fakeSpawnWithData(rec, { chunks: [Buffer.from(raw)], exitCode: 2 }) });
+	const result = await run({ job: { ...JOB, watch: { findingId: "a".repeat(64) } }, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+	assert.deepEqual(seen, []); assert.deepEqual(opened, [{ exitKey: MINTED, suppressCapture: true }]); assert.deepEqual(readdirSync(logsDir), []);
+	assert.equal(result.exitAuth, "verified"); assert.equal(result.exitReason, "cost-cap"); assert.equal(result.turns, 3); assert.equal(result.exitLineCode, 2);
+	assert.ok(rec.args.includes("/host/folder:/workspace:ro"));
+});
+
+test("watch reviewed classifier credential accompanies the primary model without forwarding unrelated provider keys", { skip }, async () => {
+	const rec = {};
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: { ...HOST, OPENROUTER_API_KEY: "classifier-key", GEMINI_API_KEY: "unrelated-provider-key" }, onOutput: () => {}, spawnFn: fakeSpawn(rec) });
+	await run({ job: { ...JOB, watch: { findingId: "a".repeat(64) }, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" } }, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+	assert.ok(rec.args.includes("ANTHROPIC_API_KEY=sk-real"));
+	assert.ok(rec.args.includes("OPENROUTER_API_KEY=classifier-key"), "the reviewed classifier cannot authenticate without its own provider credential");
+	assert.equal(rec.args.some((value) => value.includes("unrelated-provider-key")), false);
+});

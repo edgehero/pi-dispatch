@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
-import { DefaultResourceLoader, getAgentDir, loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, SettingsManager, getAgentDir, loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import { LAYOUT } from "./layout.mjs";
 import { extensionEntryName, isUnderAnyRoot, owningRoot, partitionAdminExtensions } from "./packages.mjs";
 
@@ -546,8 +546,26 @@ export function buildResourceLoader({
 	// named inline factories: present only for a job whose trigger names MCP servers, and never `builtin: true`, so a
 	// `builtin:<name>` path still reaches pi as an unknown built-in and project settings cannot toggle them.
 	extensionFactories = [],
+	watchReadOnly = false,
+	watchExtensionFactories = [],
 } = {}) {
 	const guardrails = readFileSync(guardrailsPath, "utf8");
+	// Watch evidence has no author gate. Reject executable resources before their modules run;
+	// filtering a loaded extension afterward cannot undo module-level side effects.
+	if (watchReadOnly) return new DefaultResourceLoader({
+		cwd,
+		agentDir: getAgentDir(),
+		settingsManager: SettingsManager.inMemory({ ...settingsManager?.getSettings?.(), packages: [], extensions: [] }),
+		noContextFiles: false,
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		additionalExtensionPaths: [],
+		extensionFactories: watchExtensionFactories,
+		additionalSkillPaths: [`${jobPiDir}/skills`, ...(existsSync(triggerSkillsDir) ? [triggerSkillsDir] : [])],
+		appendSystemPromptOverride: () => [guardrails, readIfExists(`${jobPiDir}/APPEND_SYSTEM.md`)].filter(Boolean),
+	});
 	const projectPersona = readIfExists(`${jobPiDir}/APPEND_SYSTEM.md`);
 	// The operator's global overlay (REQ-GLOBAL-PI-OVERLAY), present only when the /opt/pi-global mount
 	// exists. Persona layers BETWEEN the immutable floor and the repo persona; skills layer UNDER the
@@ -771,7 +789,7 @@ export async function buildLoadedResourceLoader(options = {}) {
 	// The protected prompt set must exist before the loader does: promptsOverride is a synchronous
 	// seam, and a loader cannot reload() a second loader from inside its own reload. Null on the
 	// package-less path, so the common job builds exactly one loader as before.
-	const protectedPrompts = options.protectedPrompts ?? (await loadProtectedPrompts(options));
+	const protectedPrompts = options.watchReadOnly ? null : options.protectedPrompts ?? (await loadProtectedPrompts(options));
 	const loader = buildResourceLoader({ ...options, protectedPrompts });
 	await loader.reload();
 	return loader;
