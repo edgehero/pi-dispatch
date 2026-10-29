@@ -526,6 +526,7 @@ test("host jobs show actual sizes, project rules and queue action schemas", () =
   s.waiting.rows = [
     {
       jobId: "gh-wait",
+      queuedAt: NOW - 3 * 60000,
       host: "build3",
       queue: "pi-jobs@build3",
       project: "web",
@@ -542,6 +543,7 @@ test("host jobs show actual sizes, project rules and queue action schemas", () =
   const out = draw(host.hostJobs, view(s));
   assert.match(out, /8 GiB and 4 cores/);
   assert.match(out, /4 GiB and 2 cores/);
+  assert.match(out, /data-l="How long">3m<\/td>/, "waiting age comes from the queuedAt field published by readWaiting");
   assert.match(out, /Host budget \(memory\)/);
   assert.match(out, /keeps its place/);
   assert.match(draw(host.hostBudget, view(s)), /hostShare 50%, minJobs 2/);
