@@ -1,5 +1,5 @@
+import { SANDBOX_NAME, sandboxNameOf } from "./container-names.mjs";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -105,19 +105,7 @@ export { judgeGatewayStatus, OPENSHELL_TESTED_VERSION };
 
 const SANDBOX = LAYOUTS.sandbox;
 
-/**
- * A sandbox's name for a job's container name. OpenShell refuses a sandbox name longer than 19 characters (measured:
- * "name exceeds maximum length (34 > 19)"), and a job's container name is `pi-job-<the queue's job id>`, routinely
- * longer, so the sandbox is named by a hash of it: `pi-job-s` and 11 hex digits, 19 exactly, still inside the job
- * namespace every sweep matches. A name already of that shape is its own sandbox name, so what `list` returned (a
- * leftover the host budget seeded by its sandbox name) maps to itself, and every step, the stop and the gone-check
- * included, goes through this one function.
- */
-export const SANDBOX_NAME = /^pi-job-s[0-9a-f]{11}$/;
-export function sandboxNameOf(containerName) {
-	if (SANDBOX_NAME.test(containerName)) return containerName;
-	return `${JOB_NAME_PREFIX}s${createHash("sha256").update(String(containerName)).digest("hex").slice(0, 11)}`;
-}
+export { SANDBOX_NAME, sandboxNameOf } from "./container-names.mjs";
 
 /**
  * The paths the runner's process tree may WRITE (pi-landlock's `--rw`): the job's workspace and session, the scratch

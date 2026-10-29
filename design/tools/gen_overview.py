@@ -1,6 +1,8 @@
 """Overview screens built on the Pulse kit: the problem state (fixture) and the all-clear state."""
 from pulse import *
 
+OVERVIEW_LOCAL_CSS = ".wl__l li > .btn { max-width: 100%; height: auto; min-height: 32px; white-space: normal; overflow-wrap: anywhere; }"
+
 PROJECTS = [("All", "31"), ("web", "13"), ("api", "4"), ("billing", "12"), ("ops", "2")]
 def projseg(counts=PROJECTS):
     return ('<div class="projseg" role="group" aria-label="Project"><span class="projseg__l">Project</span>'
@@ -205,7 +207,7 @@ def overview(clear=False):
 
 if __name__ == "__main__":
     write("OverviewScreen", card_marker("Screens", 1520, 1440, "Overview with problems: what needs you, what is in line and on what it waits, runs by project"),
-          "Overview", overview(False))
-    write("OverviewAllClear", card_marker("Screens", 1400, 1440, "Overview when nothing needs you"), "Overview, all clear", overview(True))
-    write("OverviewPhone", card_marker("Screens, phone", 2900, 390, "Overview at 390px: the same cards, one column"), "Overview on a phone", overview(False))
+          "Overview", overview(False), OVERVIEW_LOCAL_CSS)
+    write("OverviewAllClear", card_marker("Screens", 1400, 1440, "Overview when nothing needs you"), "Overview, all clear", overview(True), OVERVIEW_LOCAL_CSS)
+    write("OverviewPhone", card_marker("Screens, phone", 2900, 390, "Overview at 390px: the same cards, one column"), "Overview on a phone", overview(False), OVERVIEW_LOCAL_CSS)
     print("overview written")

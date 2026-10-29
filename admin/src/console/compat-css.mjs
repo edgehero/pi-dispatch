@@ -168,8 +168,6 @@ form.act{display:inline-flex;flex-wrap:wrap;gap:6px 10px;align-items:end;margin:
 form.act label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--pd-dim)}
 form.act textarea{font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--pd-fg);background:var(--pd-canvas);border:1px solid var(--pd-border);border-radius:6px;padding:4px 8px;min-width:280px}
 .forms form.act{display:flex;margin:8px 0;padding:8px 0;border-top:1px solid var(--pd-border)}
-td.acts form.act{margin:0 4px 0 0}
-.bar{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
 details.editor{margin:10px 0}
 details.editor>summary{font-size:13px;color:var(--pd-accent)}
 .preview-area{flex-basis:100%;margin-top:6px;padding:8px;border:1px solid var(--pd-border);border-radius:6px;background:var(--pd-canvas);font-size:12px}

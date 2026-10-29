@@ -1,0 +1,260 @@
+{
+  "card": "FleetScreen",
+  "pr": 6,
+  "panels": [
+    "p-fleetbar",
+    "p-queues",
+    "p-active",
+    "p-held",
+    "p-failed",
+    "p-schedules",
+    "p-hosts",
+    "p-doctor",
+    "p-venues"
+  ],
+  "elements": [
+    {
+      "el": "p-fleetbar",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-queues",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-active",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetActive",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-held",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-failed",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-schedules",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetSchedulers",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-hosts",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-doctor",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDoctor",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "p-venues",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "Fleet is where an operator keeps the fleet healthy and unsticks the queue: the kill switch, queues, active, held and failed jobs, hosts, doctor results, venues and schedules.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetSchedulers"
+    },
+    {
+      "el": "**The fleet bar.** It says in one line whether the fleet runs and how many jobs wait, run, are delayed, held or await retry. *Pause the fleet* is the kill switch. It is outlined in red, and its preview opens under it, naming every queue, what keeps running, the Valkey address and the undo (\"Resume the fleet\"), with a ticket that expires in 5 minutes. Only the confirm button is filled red.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "**Queues.** Each queue's state with waiting, active, delayed, paused and failed counts, and a Pause per queue.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues"
+    },
+    {
+      "el": "**Active jobs.** Every running job with its project, target, host, start, run time and progress (phases or turns where reported, stripes where the worker reports none). An orphaned hold such as gh-4a7e is flagged in yellow with what it costs (\"build3 runs 1 job where it could run 2\") and *Free the slot*.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetActive"
+    },
+    {
+      "el": "**Held.** Each held job with its conditions as a checklist (time, CI green) and whether each is met.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+    },
+    {
+      "el": "**Failed jobs.** The reason sentence and next step inline; Retry is a paid act (amber outline), Remove is destructive (red outline); both also come in bulk.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed"
+    },
+    {
+      "el": "**Hosts.** Slots as dots, memory in GiB and CPU in cores as bars, heartbeat (late beyond 1 minute), venues and routes.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+    },
+    {
+      "el": "**Doctor.** Failing, warning and passing counts per host, each check with its fix; a stale result is flagged; a host with no result says how to get one.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDoctor"
+    },
+    {
+      "el": "**Venues.** One row per venue: where it is blessed and the default, two of its properties (egress, local folders) as enforced, asserted or absent, what it serves (steering, live transcript, recovery) as yes, no or with the image, and who holds the credentials. Each value is a word with a glyph, never colour alone. The footer names build3's floor and links to all 14 properties on the venue's own page.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues"
+    },
+    {
+      "el": "Queue counts per queue.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues"
+    },
+    {
+      "el": "Active jobs with project, target (once known), host, start and progress.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetActive"
+    },
+    {
+      "el": "Held jobs with each condition and its state.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+    },
+    {
+      "el": "Failed jobs with attempts and the reason token, which the reason catalog turns into a sentence and next step.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed"
+    },
+    {
+      "el": "Per host: slots, memory and CPU (or none), last beat, venues and routes.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+    },
+    {
+      "el": "Doctor results with version, age and checks.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDoctor"
+    },
+    {
+      "el": "The venue table from the build, plus each host's published floor.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+    },
+    {
+      "el": "Schedules with next run, overdue and stalls.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetSchedulers"
+    },
+    {
+      "el": "The venue words are a closed set, and the table carries no legend: *enforced* means the worker makes it so and reads it back; *asserted* means someone else provides it and the worker cannot check; *absent* means it is not offered.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues"
+    },
+    {
+      "el": "*With the image* means a venue serves the feature only when the job image supports it.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues"
+    },
+    {
+      "el": "The venue table is what each host's worker published when it started; nothing in it is read live.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+    },
+    {
+      "el": "**Fixture note.** Queues, active, held and failed jobs, hosts, doctor checks and schedules come from the fixture. These are sample data:",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The card names illustrative hosts, ids, times, counts and chart samples. Production reads the bounded registry, queue and run-record projections; literal fixture values are not runtime contracts."
+    },
+    {
+      "el": "the projects of gh-e802, gh-c41f and local-9e20;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "maxTurns 40 for gh-e802's turn bar;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "gh-5d10's reason sentence;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the venue property values;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "mini2 blessing openshell-bind beside openshell, where RunSandboxed's run is;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the `pi-dispatch doctor` command.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    }
+  ]
+}

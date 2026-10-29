@@ -83,13 +83,13 @@ const ctxOf = (role, data, query = {}) => ({ query, session: { name: role, role 
 
 test("the Schedules table names a scheduler by its key, the trigger's id, and reads its stalls under it (BullMQ's name is the job's)", async () => {
   const fleet = (await pagePanels("fleet", ctxOf("viewer", { snapshot: snapshot() }))).map((p) => p.html).join("");
-  assert.match(fleet, /<tr><td class="mono">nightly<\/td><td class="mono">0 3 \* \* \*<\/td>/);
-  assert.match(fleet, /<td class="num warn">1 \/ 2<\/td>/, "the stall count kept under the trigger's id");
+  assert.match(fleet, /<td data-l="Schedule">nightly<\/td>.*?<td data-l="Pattern">0 3 \* \* \*<\/td>/);
+  assert.match(fleet, /<td data-l="Stalls">1 of 2<\/td>/, "the stall count kept under the trigger's id");
   assert.ok(!fleet.includes('<td class="mono">local</td>'));
   // A scheduler whose key the reader refused has no stall count under it: "-", never a whole "0 / 2".
   const refused = { ...snapshot(), schedulers: [{ key: null, name: "local", pattern: "0 4 * * *", next: NOW + 5000, overdueMs: null }], schedulerStalls: { nightly: 1, null: 3 } };
   const row = (await pagePanels("fleet", ctxOf("viewer", { snapshot: refused }))).map((p) => p.html).join("");
-  assert.match(row, /<tr><td class="mono">-<\/td><td class="mono">0 4 \* \* \*<\/td><td>.*?<\/td><td>no<\/td><td class="num">-<\/td><\/tr>/);
+  assert.match(row, /<td data-l="Schedule">not recorded<\/td>.*?<td data-l="Stalls">unknown<\/td>/);
   assert.doesNotMatch(row, /\d \/ 2<\/td>/);
 });
 
@@ -99,8 +99,8 @@ test("the role rule: a failure reason is the operator's, in a details element, a
   const operator = (await pagePanels("fleet", ctxOf("operator", data))).map((p) => p.html).join("");
   assert.ok(!viewer.includes("REASON-TEXT"), "a viewer sees no reason");
   assert.match(viewer, /shown to operators only/);
-  assert.match(operator, /<details><summary class="mono">gh-f<\/summary><p class="mono">REASON-TEXT &lt;b&gt;<\/p><\/details>/);
-  assert.ok(!/<td[^>]*>REASON-TEXT/.test(operator), "and the operator never in a cell");
+  assert.match(operator, /<details>\s*<summary class="code">gh-f<\/summary>\s*<p class="code">REASON-TEXT &lt;b&gt;<\/p>\s*<\/details>/);
+  assert.ok([...operator.matchAll(/<tr(?:\s[^>]*)?>[^]*?<\/tr>/g)].every(([row]) => !row.includes("REASON-TEXT")), "the escaped failure text remains outside every table row");
   // The audit log: a viewer is refused it with none of its panels drawn (the refusal is a card of its own).
   const row = { seq: 1, at: "2026-10-08T00:00:00Z", actor: { name: "ops", role: "operator" }, action: "login", outcome: "ok" };
   const audit = await renderPage("audit", ctxOf("viewer", { audit: { rows: [{ entry: row, pos: "2026-10:1", state: "ok" }], next: null, examined: 1, stopped: false, found: null, who: ["ops"], chain: { state: "ok", from: 1, through: 1, startsAt: null, broken: null, last: null }, unreadable: null } }));
@@ -1760,8 +1760,8 @@ test("no worker online: the hosts panel warns first, by the hosts' beats, and th
   assert.ok(stale.includes(NO_WORKER_TEXT) && stale.indexOf(NO_WORKER_TEXT) < stale.indexOf("hostrow"), stale);
   assert.ok(!stale.includes(STALE_BEATS_TEXT));
   assert.match(stale, /<span class="card__sub">2 registered, 0 beating<\/span>/);
-  const fleetQueuesHtml = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), queue: { ...queue, workers: "unknown" }, hostBudgets: [host("h1", BEAT_FRESH_MS + 1)] } }))).map((p) => [p.id, p.html])).get("p-queues");
-  assert.match(fleetQueuesHtml, /<dt>Fleet<\/dt><dd><span class="warn">not paused, but no worker is online<\/span>/, "the fleet page says the same");
+  const fleetQueuesHtml = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), queue: { ...queue, workers: "unknown" }, queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 4 } }], hostBudgets: [host("h1", BEAT_FRESH_MS + 1)] } }))).map((p) => [p.id, p.html])).get("p-fleetbar");
+  assert.ok(fleetQueuesHtml.includes(NO_WORKER_TEXT), "the fleet bar says the same");
   // No registry row and no BullMQ worker either.
   const empty = await hostsOf({ queue: { ...queue, workers: "unknown" }, hostBudgets: [] });
   assert.ok(empty.includes(NO_WORKER_TEXT));
@@ -1796,8 +1796,8 @@ test("clock skew: a host whose beats look stale while BullMQ sees its worker is 
   const page = await hostsOf({ queue: { ...queue, workers: 1 }, hostBudgets: [host("h1", 61_000)] });
   assert.ok(!page.includes(NO_WORKER_TEXT), page);
   assert.ok(page.includes(STALE_BEATS_TEXT), "the softer note, not the warning");
-  const fleet = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), queue: { ...queue, workers: 1 }, hostBudgets: [host("h1", 61_000)] } }))).map((p) => [p.id, p.html])).get("p-queues");
-  assert.match(fleet, /<dt>Fleet<\/dt><dd><span class="good">running<\/span>/, "the fleet page agrees");
+  const fleet = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), queue: { ...queue, workers: 1 }, hostBudgets: [host("h1", 61_000)] } }))).map((p) => [p.id, p.html])).get("p-fleetbar");
+  assert.ok(fleet.includes(STALE_BEATS_TEXT) && !fleet.includes(NO_WORKER_TEXT), "the fleet bar agrees");
   // A fresh registry with BullMQ blind (no CLIENT SETNAME): online, no note, no warning.
   const blind = await hostsOf({ queue: { ...queue, workers: "unknown" }, hostBudgets: [host("h1", 1000)] });
   assert.ok(!blind.includes(NO_WORKER_TEXT) && !blind.includes(STALE_BEATS_TEXT));
@@ -1841,12 +1841,12 @@ test("readable numbers: money in one fixed form with the exact amount on hover, 
     { name: "h4", concurrency: "1", jobs: [], staleMs: 1000, budgetCpuCenti: "lots", usedCpuCenti: "1" },
   ];
   const fleet = new Map((await pagePanels("fleet", ctxOf("viewer", { snapshot: { ...snapshot(), hostBudgets: hosts } }))).map((p) => [p.id, p.html])).get("p-hosts");
-  assert.match(fleet, /<th scope="col">CPU<\/th>/);
+  assert.match(fleet, /<th scope="col">Budget<\/th>/);
   assert.ok(!fleet.includes("centi"));
-  assert.match(fleet, /<td>h1<\/td><td class="num">2<\/td><td>2048 \/ 8192 MiB<\/td><td>1\.5 \/ 8 cores<\/td>/);
-  assert.match(fleet, /<td>h2<\/td><td class="num">1<\/td><td>-<\/td><td>- \/ 1 core<\/td>/);
-  assert.match(fleet, /<td>h3<\/td><td class="num">1<\/td><td>-<\/td><td>off<\/td>/);
-  assert.match(fleet, /<td>h4<\/td><td class="num">1<\/td><td>-<\/td><td>1 \/ lots<\/td>/);
+  assert.ok(fleet.replace(/\s+/g, " ").includes("2 of 8 GiB") && fleet.replace(/\s+/g, " ").includes("1.5 of 8 cores"), "human units, not raw MiB or hundredths");
+  assert.ok(fleet.replace(/\s+/g, " ").includes("unknown of 1 cores"), "an unread use is not zero");
+  assert.ok(fleet.includes("CPU budget off."));
+  assert.ok(fleet.includes("CPU budget unreadable."));
   // The run page's Resources: the size in cores.
   const record = { jobId: "gh-1", kind: "github", target: "acme/web#1", outcome: "completed", size: { memMiB: 4096, cpuCenti: 250, source: "trigger" } };
   const run = (await pagePanels("run", ctxOf("operator", { run: { record, source: "local" } }, parsePageQuery("run", "id=gh-1").query))).map((p) => p.html).join("");
@@ -1867,13 +1867,13 @@ test("failed jobs: each id links to its run, with its record's reason and short 
   };
   for (const role of ["viewer", "operator"]) {
     const html = new Map((await pagePanels("fleet", ctxOf(role, { snapshot: { ...snapshot(), failed } }))).map((p) => [p.id, p.html])).get("p-failed");
-    const sentence = shortSentence(REASONS["container-never-started"].sentence).replace(/'/g, "&#39;");
-    assert.ok(html.includes(`<td class="keep"><a class="mono" href="/run?id=gh-f">gh-f</a></td>`), html);
-    assert.ok(html.includes(`<td><span class="mono">container-never-started</span> · ${sentence}</td>`), html);
-    assert.ok(html.includes('<td><span class="note">no record</span></td>'));
-    assert.ok(html.includes('<td><span class="mono">brand-new-reason</span>, no explanation yet</td>'));
-    assert.ok(html.includes('<td class="keep"><span class="mono">&lt;bad id&gt;</span></td>'), "an id outside the run-id charset is text, not a link");
-    assert.ok(!/<td[^>]*>[^<]*REASON-TEXT/.test(html), "BullMQ's free text is never in a row (REQ-CONSOLE-SECURITY (l))");
+    const sentence = REASONS["container-never-started"].sentence.replace(/'/g, "&#39;");
+    assert.ok(html.includes(`<td data-l="Job"><a class="code" href="/run?id=gh-f">gh-f</a></td>`), html);
+    assert.ok(html.replace(/\s+/g, " ").includes(`<td data-l="Why (its record)">Its run record says: ${sentence}`), html);
+    assert.ok(html.includes('<td data-l="Why (its record)"><span class="note">no record</span></td>'));
+    assert.ok(html.replace(/\s+/g, " ").includes('<span class="code">brand-new-reason</span>, this console has no explanation for this reason.'));
+    assert.ok(html.includes('<td data-l="Job"><span class="code">&lt;bad id&gt;</span></td>'), "an id outside the run-id charset is text, not a link");
+    assert.ok([...html.matchAll(/<tr(?:\s[^>]*)?>[^]*?<\/tr>/g)].every(([row]) => !row.includes("REASON-TEXT")), "BullMQ's free text is never in a row, including inside markup (REQ-CONSOLE-SECURITY (l))");
     assert.equal(html.includes("REASON-TEXT"), role === "operator", "the operator's details only");
   }
 });

@@ -336,3 +336,17 @@ at another daemon is invisible to it, and only the rules above protect it.
   each pass"), with the command to remove that one directory as the files' owner. The one kind it never offers to
   remove is a directory holding a PINNED run whose name was taken when it was put back: the sweep puts it back once
   the name is free, so do not remove it.
+
+## Retained workspaces on the host page
+
+The console's `/fleet/host?name=<worker-name>` lists that worker's retained workspaces, newest first (up to 32,
+with the remainder counted), their venue, deadline and pin. The worker refreshes this inventory at most once a
+minute. It is not a live listing of open sandbox shells; `pi-dispatch sandbox --list` on the host answers that.
+
+Local and Podman workspaces show the opening command to operators, with `--pin` after their retention window.
+OpenShell and OpenShell bind runs explain that their venue has no sandbox shell. Retention off is named; an unpublished or unreadable inventory is never shown as a verified empty list. Each retained workspace contains the run's clone, `prompt.md`
+and `event.json`, including issue text; the registry publishes none of that content or its directory path.
+
+An orphan container is separate from a retained workspace. The host page gives its venue's cleanup command to run
+on that host, with listing guidance where a published digest cannot safely identify it. The console starts no
+sandbox and performs no cleanup on another host.

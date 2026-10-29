@@ -1,0 +1,269 @@
+{
+  "card": "FleetPartPaused",
+  "pr": 6,
+  "panels": [
+    "p-fleetbar",
+    "p-queues",
+    "p-failed",
+    "p-held",
+    "p-delayed"
+  ],
+  "elements": [
+    {
+      "el": "p-fleetbar",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-part-paused.operator"
+      ]
+    },
+    {
+      "el": "p-queues",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues",
+      "golden": [
+        "panels/fleet-part-paused.operator"
+      ]
+    },
+    {
+      "el": "p-failed",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed",
+      "golden": [
+        "panels/fleet-part-paused.operator"
+      ]
+    },
+    {
+      "el": "p-held",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld",
+      "golden": [
+        "panels/fleet-part-paused.operator"
+      ]
+    },
+    {
+      "el": "p-delayed",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDelayed",
+      "golden": [
+        "panels/fleet-part-paused.operator"
+      ]
+    },
+    {
+      "el": "Fleet when it is part paused: two of four queues are paused, the console and the service read different Valkeys, and an operator works out what is stuck and what to start again.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "**The fleet bar.** It is ringed yellow and says *Part paused* with which queues start nothing new and which keep going. Its counts add *in paused queues*. Both switches are offered: *Resume the fleet* (paid, amber outline, because queued jobs start spending) and *Pause the fleet* (danger).",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "**Two Valkeys.** When `VALKEY_URL` differs between the console's environment and the deployment's `.env`, a yellow line says so in the repo's words. A pause reaches both; a resume is refused, and the refusal opens where the preview would, with the command that resumes one Valkey on purpose. Nothing was changed.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "**Queues.** Paused rows are tinted and say *Paused* with the pause glyph. Their sub-line says the host still takes shared jobs. *Resume* on a row is paid; its preview names how many jobs wait in it and why no single reserve figure applies.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues"
+    },
+    {
+      "el": "**Failed jobs.** Each row quotes its run record's sentence. The bulk editor filters by queue or repository; *Retry all* opens a preview that lists each job with its reserve, then the bulk reserve, including the case where one job's reserve is unknown. *Why each failed* shows the queue's own text in a collapsed row per job.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed"
+    },
+    {
+      "el": "**Held.** Each held job's condition label as the worker writes it (`after … + ci-green`), how long it has waited and how many of its 96 checks it has used.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+    },
+    {
+      "el": "**Delayed.** The delayed count is one number. The card splits out what can be counted (cron next occurrences, held jobs) and calls the rest *undifferentiated*. A folded list explains every deferral and how often it asks again. Jobs waiting for a host budget link to the host.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+    },
+    {
+      "el": "**Other states.** Running, paused (kill switch on), a pause that did not reach every queue, an unreadable host registry, a held set too large to read, and the per-job results after a bulk retry with *Reload*.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "The paused state: running, part paused or paused.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "The kill switch's plan: Valkey URLs as shown (never with credentials), the disagreement sentence, or the refusal.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "Per queue: counts and paused flag.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues"
+    },
+    {
+      "el": "Failed jobs with queue, attempts, failed time, target, run record reason, and the scrubbed queue text (operators only).",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed"
+    },
+    {
+      "el": "Held rows (job, target, label, waited, checks).",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+    },
+    {
+      "el": "The delayed total with the counted cron and held parts.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+    },
+    {
+      "el": "Host waiters.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDelayed"
+    },
+    {
+      "el": "Every preview's summary lines and reserve text come from the server, not the page.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+    },
+    {
+      "el": "**Viewers** see the bar, counts, queues, held and failed rows and the delayed split. They do not see any button or preview. In place of *Why each failed* they see \"Failure reasons are shown to operators only.\"",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues"
+    },
+    {
+      "el": "**Fixture note.** Queue names, hosts, `redis://127.0.0.1:6399/0`, gh-77c1, gh-5d10 and the schedules come from the fixture. These are sample data:",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The card names illustrative hosts, ids, times, counts and chart samples. Production reads the bounded registry, queue and run-record projections; literal fixture values are not runtime contracts."
+    },
+    {
+      "el": "the paused queues and every count;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the second Valkey `redis://127.0.0.1:6379/0`;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "gh-91a0, gh-6e21 and their texts;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the reserves.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "fleet-running.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-running.operator"
+      ]
+    },
+    {
+      "el": "fleet-part-paused.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-part-paused.operator"
+      ]
+    },
+    {
+      "el": "fleet-paused.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-paused.operator"
+      ]
+    },
+    {
+      "el": "fleet-two-valkeys.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-two-valkeys.operator"
+      ]
+    },
+    {
+      "el": "fleet-registry-unreadable.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts",
+      "golden": [
+        "panels/fleet-registry-unreadable.operator"
+      ]
+    },
+    {
+      "el": "fleet-truncated.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDelayed",
+      "golden": [
+        "panels/fleet-truncated.operator"
+      ]
+    },
+    {
+      "el": "fleet-no-progress.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetActive",
+      "golden": [
+        "panels/fleet-no-progress.operator"
+      ]
+    },
+    {
+      "el": "fleet-all-reasons.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDelayed",
+      "golden": [
+        "panels/fleet-all-reasons.operator"
+      ]
+    },
+    {
+      "el": "Delayed jobs described by their worker-recorded reason instead of undifferentiated",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/fleet.mjs#fleetDelayed",
+      "reason": "#748 explicitly replaces the card’s undifferentiated remainder with the recorded reasons and lists every read row within the reader bounds."
+    }
+  ]
+}

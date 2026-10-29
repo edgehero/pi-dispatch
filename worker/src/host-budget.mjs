@@ -306,7 +306,7 @@ export function rankHolds(waiters, ledger, minJobsOf = () => 0) {
 
 /**
  * THE ADMISSION RULE (PURE): may `ask` (`{ id, project, memMiB, cpuCenti }`) start now? `{ ok: true }`, or `{ ok: false,
- * why }` with `why` `share` (its project would hold more than its `hostShare` of the budget) or `budget` (what runs, plus
+ * why }` with `why` `share` (its project would hold more than its `hostShare` of the budget) or `memory`, `cpu`, `count` (what runs, plus
  * `ask`, plus every hold ranked above it, does not fit in memory, in CPU or in the job COUNT). `holds` is `rankHolds`'
  * order; a job that holds no hold has every hold above it. The share is judged first, so a job its own project's share
  * stops is not reported as waiting for the budget (and so does not hold room it could not use).
@@ -328,7 +328,10 @@ export function admit({ budget, ledger, holds, ask, shareOf = () => null }) {
 	const counted = [...ledger, ask, ...(rank === -1 ? holds : holds.slice(0, rank))];
 	const need = sumOf(counted);
 	const count = Number.isSafeInteger(budget.count) ? budget.count : null;
-	if (!fits(need.memMiB, budget.memMiB) || !fits(need.cpuCenti, budget.cpuCenti) || !fits(counted.length, count)) return { ok: false, why: "budget" };
+	// A stable order explains the first blocked dimension without changing admission or ranked holds.
+	if (!fits(need.memMiB, budget.memMiB)) return { ok: false, why: "memory" };
+	if (!fits(need.cpuCenti, budget.cpuCenti)) return { ok: false, why: "cpu" };
+	if (!fits(counted.length, count)) return { ok: false, why: "count" };
 	return { ok: true };
 }
 
@@ -643,7 +646,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		/**
 		 * THE GATE, synchronous: `{ admitted: true }` with the hold taken under `ticket`, or `{ admitted: false, why }`:
 		 * `unseeded` (the boot listing of the job's `venue` is not read yet) and `running-here` (the ledger already holds
-		 * this id, or an orphan carries the container `name` this pickup will use) make no waiter; `budget` and `share`
+		 * this id, or an orphan carries the container `name` this pickup will use) make no waiter; dimension refusals and `share`
 		 * keep (or make) the job a waiter. `getState` is the job's own, kept for `verify`.
 		 */
 		gate({ id, ticket = null, project = null, size, venue = null, name = null, getState = null, limits = scopedLimits() }) {

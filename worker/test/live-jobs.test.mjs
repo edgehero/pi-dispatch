@@ -117,3 +117,19 @@ test("jobsMore reads back as a non-negative integer or null", () => {
 	assert.equal(parseJobsMore(4), 4);
 	for (const bad of ["", "-1", "1.5", "1e3", "9999999999", undefined, null, -2, "x"]) assert.equal(parseJobsMore(bad), null, String(bad));
 });
+
+test("orphan publication carries only a known runtime and integer stop instant, including seeded and digested ids (#748)", () => {
+	for (const venue of ["local", "podman", "openshell", "openshell-bind"]) {
+		const { jobs } = liveJobsOf({ budgetEntries: [{ id: "unsafe/path", at: 10, orphan: { venue: { backend: venue, task: "private" }, since: 20 } }] });
+		assert.equal(jobs[0].v, venue);
+		assert.equal(jobs[0].s, 20);
+		assert.match(jobs[0].id, /^sha256:[0-9a-f]{16}$/);
+		const parsed = parseLiveJobs(liveJobsFields({ jobs, skipped: 0 }).jobs).jobs;
+		assert.deepEqual(parseLiveJobs(parsed).jobs, parsed);
+		assert.equal(parsed[0].v, venue);
+		assert.equal(parsed[0].s, 20);
+	}
+	const { jobs } = liveJobsOf({ defaultVenue: "podman", budgetEntries: [{ id: "container:pi-job-old", at: 1, orphan: { venue: {}, since: 2 } }] });
+	assert.equal(jobs[0].v, "podman", "an unnamed venue uses the deployment's actual default");
+	for (const extra of [{ v: "unknown" }, { s: -1 }, { s: "20" }]) assert.equal(parseLiveJobs([{ id: "a", at: 1, o: 1, ...extra }]).dropped, 1);
+});

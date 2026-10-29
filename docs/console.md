@@ -594,9 +594,35 @@ readers ([Live updates](#live-updates)).
 | `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status and numbers with a banner explaining what is hidden. |
 | `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/insights?range=30d` | Spend: the insights, the deployment's one analytics page ([`insights.md`](insights.md)), for `7d`, `30d` (the default) or `mtd` (month to date): the charts, the budget and its split, job sizes, capacity, plans, the breakdowns and the interactive trigger/flow topology, plus a what-if form (`&whatif=<provider>/<model>&flow=<flow>`) that every role may use, since it only reads. `/dispatch insights` in pi prints this page's URL. |
-| `/fleet` | Job counts per queue and state, the jobs held on a wait (Held), each host with its slots, budget (CPUs in cores), running jobs and the venues it blesses (its default first), each host's last doctor run ([Doctor results](#doctor-results)), every running job, the venues, the schedules (each by its trigger's id) with their next and last run and whether one has stalled, and the failed jobs, each linked to its run page with its record's reason and what it means (the queue's own error text is in the operator's details below the list). |
+| `/fleet` | Pulse fleet state and queue switches, active and orphaned jobs, held conditions, failed jobs and bulk actions, all waiting jobs within the bounded read, schedules, hosts, doctor and a short venue comparison. Part paused names which queues still start jobs. Differing console and deployment Valkeys are disclosed on page load. |
+| `/fleet/host?name=build3` | One host's heartbeat, running and waiting jobs, orphan cleanup guidance, retained workspaces, slots and budgets, seven-day capacity, registry and doctor. The host facts update live; capacity is read when the page opens. |
+| `/fleet/venue?name=podman` | One venue's capabilities, all fourteen isolation declarations and asserters, every published applicable floor, host observations, credential custody and four-venue comparison. Read once, with no runtime probes. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
 | `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. How far its hash chain is verified, which rows it does not vouch for, filters and a search ([The audit log](#the-audit-log)). A line that is not a valid row is shown as damaged in its place, never skipped. |
+
+### Fleet, host and venue detail
+
+Fleet lists all waiting jobs within the reader's bounds (200 per queue list and 64 queues), grouped by the worker's
+recorded reason. A truncated read says that rows may be missing. Overview's remainder links to this list. The
+Delayed panel separates scheduled runs and held jobs from other waits; a missing reason is named rather than guessed.
+Held rows show the after time, check answers and limits. Failed jobs show their record's target, reason and next step;
+a record without a reason is distinct from no record. Queue error text remains scrubbed and operator-only.
+
+Open a host from Fleet or Overview. A stale beat, missing registry row, retained doctor result and missing history are
+separate states. Its orphan rows show the venue and failed-stop time when published. **Free the slot** opens guidance
+on that host page: run the displayed command on that host using its runtime. Podman uses the worker's account. A
+published digest or missing venue gets identification guidance, never a guessed container name. The host budget
+returns the room within five seconds after its runtime reports the container gone.
+
+Retained workspaces are the worker's cached inventory, read at most once a minute, newest 32 with any remainder
+counted. Their deadline and pin are published facts. The inventory does not say whether an interactive shell is
+open; run `pi-dispatch sandbox --list` on that host for that. Retention off is named; an inventory that was not published or could not be read is never shown as an empty list. Local and Podman runs offer a shell command; OpenShell venues explain why they have none.
+
+Open a venue for the full declaration table. A declaration is the build's table; host observations were read when
+that worker started. A conditional enforced word becomes asserted where its observation does not hold, which can
+fail a floor even on a host that does not bless the venue. Capability words describe what the venue can serve and
+are not guarantees compared by floors. Commands and queue error details are operators' alone; viewers see sentence
+fixes, and read-only consoles offer no mutations.
 
 ### Look and theme
 

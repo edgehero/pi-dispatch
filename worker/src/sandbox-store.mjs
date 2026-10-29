@@ -268,12 +268,13 @@ export function readManifest({ sandboxDir, jobId, fs = defaultFs }) {
  * An entry with no readable manifest is skipped rather than surfaced: it cannot be resurrected, and the
  * reaper removes it on the next sweep.
  */
-export function listSandboxes({ sandboxDir, fs = defaultFs }) {
+export function listSandboxes({ sandboxDir, fs = defaultFs, throwOnReadFailure = false }) {
 	if (!sandboxDir) return [];
 	let names;
 	try {
 		names = fs.readdirSync(sandboxDir);
-	} catch {
+	} catch (error) {
+		if (throwOnReadFailure) throw error;
 		return [];
 	}
 	const out = [];

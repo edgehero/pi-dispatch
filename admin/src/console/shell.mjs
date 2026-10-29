@@ -306,15 +306,15 @@ export function shellHtml(name, ctx, inner, { headline = null } = {}) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const meta = PAGES[name];
   const role = roleOf(ctx?.session);
-  const here = name === "run" ? "runs" : name === "watch" || name === "watch-board" ? "config" : name;
+  const here = name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : name === "watch" || name === "watch-board" ? "config" : name;
   // Drawn on a live page always, so the stream has a panel to fill; elsewhere only when there is a count to show.
   const count = navParkedHtml(ctx?.data);
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;
   const start = LIVE_STATES.start;
   const glyphs = Object.entries(LIVE_GLYPHS).map(([state, glyph]) => liveGlyph(state, glyph));
   const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
-  const back = name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : null;
-  const heading = name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : meta.title;
+  const back = name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : ["host", "venue"].includes(name) ? html`<a class="back" href="${PAGES.fleet.path}">${ui.icon("chev-l", { size: "sm" })}Fleet</a>` : null;
+  const heading = name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : ["host", "venue"].includes(name) && typeof ctx?.query?.name === "string" ? html`${ctx.query.name}` : meta.title;
   const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;
   const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload) : null;
   const readOnly = Boolean(ctx?.readOnly);

@@ -186,7 +186,7 @@ test("the fleet snapshot's active rows carry integers and a tool name only, a re
     const name = opts?.name ?? "pi-jobs";
     return { name, isPaused: async () => false, getJobCounts: async () => ({ waiting: 0, active: 1, paused: 0, delayed: 0, failed: 0 }), getWorkers: async () => [], getJobSchedulers: async () => [], getActive: async () => lists[name] ?? [], getFailed: async () => [], close: async () => {} };
   };
-  const hosts = [{ name: "hostb", routes: true, jobs: JSON.stringify([{ id: "gh-remote", p: null, at: AT - 120_000 }]) }];
+  const hosts = [{ name: "hostb", routes: true, version: "4.3.1", tz: "UTC", fpUsd: "a".repeat(16), heldMemMiB: "2048", jobs: JSON.stringify([{ id: "gh-remote", p: "web", m: 4096, c: 200, at: AT - 120_000 }]), sandboxes: JSON.stringify([{ id: "gh-kept", v: "podman", until: AT + 3600000, pin: false }]), sandboxRetentionHours: "24", sandboxesMore: "2", cpuReserve: JSON.stringify([{ venue: "podman", status: "held", wantCenti: 200, quotaCenti: 200 }]) }];
   const reader = createFleetReader(
     { valkeyUrl: URL11, logsDir, triggersPath: join(logsDir, "none.json") },
     { makeQueueFn: mk, parseConnectionFn: () => ({}), redisFn: () => redis.duplicate(), readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => ["pi-jobs@hostb"], nowFn: () => AT, activeLimit: 10 },
@@ -195,6 +195,14 @@ test("the fleet snapshot's active rows carry integers and a tool name only, a re
     const snap = await reader.snapshot();
     const byId = Object.fromEntries(snap.active.map((a) => [a.jobId, a]));
     assert.equal(byId["gh-remote"].host, "hostb");
+    assert.equal(byId["gh-remote"].project, "web");
+    assert.deepEqual(byId["gh-remote"].size, { memMiB: 4096, cpuCenti: 200 });
+    assert.equal(snap.hostBudgets[0].version, "4.3.1");
+    assert.equal(snap.hostBudgets[0].heldMemMiB, "2048");
+    assert.equal(snap.hostBudgets[0].sandboxRetentionHours, 24);
+    assert.equal(snap.hostBudgets[0].sandboxesMore, 2);
+    assert.deepEqual(snap.hostBudgets[0].sandboxes, [{ id: "gh-kept", v: "podman", until: AT + 3600000, pin: false }]);
+    assert.deepEqual(snap.hostBudgets[0].cpuReserve, [{ venue: "podman", status: "held", wantCenti: 200, quotaCenti: 200 }]);
     assert.deepEqual(byId["gh-remote"].progress, { turn: 2, steps: 1, failed: 0, running: { tool: "bash", since: AT + 3 }, phase: { index: 0, count: 1, done: 2, total: 9 }, ended: false, updatedAt: hostile.updatedAt });
     assert.equal(byId["gh-local"].progress, null, "no key");
     assert.equal(byId["gh-bad"].progress, null, "an invalid key draws nothing");

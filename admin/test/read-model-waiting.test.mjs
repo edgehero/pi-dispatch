@@ -933,7 +933,7 @@ test("/api/state is unchanged by the waiting jobs: the state document names none
   }
 });
 
-test("only the overview's load reads the waiting jobs: a fleet, parked or config load reads none, and a second overview load inside the window reads none either", async () => {
+test("overview, Fleet and host share a cached waiting read; parked and config read no waiting jobs", async () => {
   const { loadPageData } = await import("../src/console/pages.mjs");
   const logsDir = tempDir("pd-737-waiting-pages-");
   const v = fakeValkey();
@@ -943,7 +943,7 @@ test("only the overview's load reads the waiting jobs: a fleet, parked or config
   const deps = { fleet: readerOf(logsDir, snapshotValkey(v), { now: () => t }), now: () => t, env: {} };
   const reads = () => v.redis.log.filter(([cmd]) => cmd === "zrange" || cmd === "lrange").length;
   const others = async () => {
-    for (const name of ["fleet", "parked", "config"]) {
+    for (const name of ["parked", "config"]) {
       const data = await loadPageData(name, {}, deps);
       assert.equal(Object.hasOwn(data.snapshot, "waiting"), false, `${name}: no waiting jobs in its data`);
     }
@@ -954,6 +954,11 @@ test("only the overview's load reads the waiting jobs: a fleet, parked or config
   assert.deepEqual(first.snapshot.waiting.rows.map((r) => r.jobId), ["gh-1"], "the overview's load reads them");
   const once = reads();
   assert.ok(once > 0);
+  for (const name of ["fleet", "host"]) {
+    const data = await loadPageData(name, name === "host" ? { name: "build3" } : {}, deps);
+    assert.equal(data.snapshot.waiting, first.snapshot.waiting, `${name}: reuses the overview's waiting read`);
+  }
+  assert.equal(reads(), once, "Fleet and host do not repeat the bounded queue read inside its window");
   await others();
   t += WAITING_TTL_MS - 1;
   const second = await loadPageData("overview", {}, deps);

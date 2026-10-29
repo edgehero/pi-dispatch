@@ -1,0 +1,308 @@
+{
+  "card": "VenueDetail",
+  "pr": 6,
+  "panels": [
+    "p-venue",
+    "p-venue-serves",
+    "p-venue-hosts",
+    "p-venue-props",
+    "p-venue-compare"
+  ],
+  "elements": [
+    {
+      "el": "p-venue",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary",
+      "golden": [
+        "panels/venue-openshell.operator"
+      ]
+    },
+    {
+      "el": "p-venue-serves",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueServes",
+      "golden": [
+        "panels/venue-openshell.operator"
+      ]
+    },
+    {
+      "el": "p-venue-hosts",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueHosts",
+      "golden": [
+        "panels/venue-openshell.operator"
+      ]
+    },
+    {
+      "el": "p-venue-props",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-openshell.operator"
+      ]
+    },
+    {
+      "el": "p-venue-compare",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueCompare",
+      "golden": [
+        "panels/venue-openshell.operator"
+      ]
+    },
+    {
+      "el": "One venue in full, opened from Fleet's Venues panel: what the venue declares, what it serves, where it runs, and how it compares with the other three. It answers \"can I trust this venue with this job, and why\".",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "**Venue switch.** A segmented control at the top moves between local, podman, openshell and openshell-bind.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "**What it declares.** All 14 properties. Each shows its short name, the question it answers, its key, and its word: *enforced* (shield), *asserted* (check, outlined) or *absent* (dash, dashed outline), so the word is never colour alone.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties"
+    },
+    {
+      "el": "For an asserted word, the next column says who asserts it, in the build table's own words.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties"
+    },
+    {
+      "el": "It says when a switch arms the property (`PI_EGRESS`) and which host observation the word depends on.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties"
+    },
+    {
+      "el": "The last column names any host floor that asks for the property, and whether this venue meets it.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties"
+    },
+    {
+      "el": "**Where it runs.** The hosts that bless the venue, where it is the default, who holds credentials (the egress layer, or the container), floors, and which hosts published nothing.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "**What it serves.** Live transcript, steering, recovery and sandbox shell, each *yes*, *no* or *with the image*, with one line for this venue.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueServes"
+    },
+    {
+      "el": "**OpenShell on each host.** Engine, modes and the gateway word per blessing host.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueHosts"
+    },
+    {
+      "el": "**Compare venues.** All four venues' 14 words, what each serves and who holds credentials, with this venue's column highlighted. This replaces the Fleet matrix wherever a full comparison is wanted.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueCompare"
+    },
+    {
+      "el": "The build's venue table: describe, declares, asserts, armedBy, observedBy, serves and credential custody.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties"
+    },
+    {
+      "el": "Each live host's published blessing, default, floor and OpenShell engine, modes and gateway word.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueHosts"
+    },
+    {
+      "el": "The hosts that published nothing.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "Nothing on this page is read live from a host. Viewers and operators see the same page; there are no actions.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "**The three words.** *Enforced*: this worker builds the property in its own code, and a test reads it back off what was produced. *Asserted*: something outside the worker provides it (an image, a vendor's documentation), which the worker cannot verify. *Absent*: not provided, so a floor that asks for it refuses this venue. *With the image* means only from a job image that declares the feature.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties"
+    },
+    {
+      "el": "**Where the words come from.** What a venue declares is this build's table. Which hosts bless it, their floors and their OpenShell setup are what each host's worker published when it started.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "**Serving is not a guarantee.** What a venue serves is what it can do for an operator, so no floor compares those rows. A feature it serves can still be refused before spend by what the job image lacks.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueServes"
+    },
+    {
+      "el": "**Credentials on openshell.** Values with an endpoint are placeholders in the agent; `run.secrets` go to the job's provider.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "**A worker older than this console** publishes nothing, and the summary names it.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary"
+    },
+    {
+      "el": "**Other gateway words a host can publish.** Not local (every job there is refused as `openshell-gateway-not-local`), unread (the gateway did not answer when the worker started), and not published.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueHosts"
+    },
+    {
+      "el": "**When an observation does not hold.** *Credentials stay on owned networks* is enforced only where the gateway is local. On a host where the observation fails, the word drops to asserted, and a floor asking for enforced refuses there. The fix is to run the gateway on that host and register it on loopback (`openshell gateway add https://127.0.0.1:17670 --local`); a remote gateway is refused, not lowered.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueFix"
+    },
+    {
+      "el": "**Fixture note.** The hosts and build3's floor `egress=enforced` come from the fixture. The words, questions, asserts, serves and gateway sentences are the repo's (`worker/src/backends.mjs`, `admin/src/read-model.mjs`). mini2's engine and mode are sample values.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The card names illustrative hosts, ids, times, counts and chart samples. Production reads the bounded registry, queue and run-record projections; literal fixture values are not runtime contracts."
+    },
+    {
+      "el": "p-venue-fix",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueFix",
+      "golden": [
+        "panels/venue-openshell.operator"
+      ],
+      "reason": "#748 makes observation failures and operator-only fix commands a distinct panel beyond the card’s panel list."
+    },
+    {
+      "el": "venue-local.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-local.operator"
+      ]
+    },
+    {
+      "el": "venue-local.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-local.viewer"
+      ]
+    },
+    {
+      "el": "venue-podman.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-podman.operator"
+      ]
+    },
+    {
+      "el": "venue-podman.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-podman.viewer"
+      ]
+    },
+    {
+      "el": "venue-openshell.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-openshell.operator"
+      ]
+    },
+    {
+      "el": "venue-openshell.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-openshell.viewer"
+      ]
+    },
+    {
+      "el": "venue-openshell-bind.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-openshell-bind.operator"
+      ]
+    },
+    {
+      "el": "venue-openshell-bind.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueProperties",
+      "golden": [
+        "panels/venue-openshell-bind.viewer"
+      ]
+    },
+    {
+      "el": "venue-gateway-local.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueHosts",
+      "golden": [
+        "panels/venue-gateway-local.operator"
+      ]
+    },
+    {
+      "el": "venue-gateway-remote.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueHosts",
+      "golden": [
+        "panels/venue-gateway-remote.operator"
+      ]
+    },
+    {
+      "el": "venue-gateway-unknown.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueHosts",
+      "golden": [
+        "panels/venue-gateway-unknown.operator"
+      ]
+    },
+    {
+      "el": "venue-unpublished.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary",
+      "golden": [
+        "panels/venue-unpublished.operator"
+      ]
+    }
+  ]
+}

@@ -1470,8 +1470,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
-- **Statement**: The operator console shall show the whole deployment on eight read pages (overview, runs, run
-  detail, parked inbox, insights, fleet, configuration and audit) and as one JSON snapshot (`GET /api/state`); shall
+- **Statement**: The operator console shall show the whole deployment on the pages of `PAGES` and as one JSON snapshot (`GET /api/state`); shall
   read all of it through the read model's one fleet reader (`createFleetReader`), the same reader the `/dispatch`
   panel uses; shall keep every open live page current within about two seconds of a change in Valkey by sending only
   the panels that changed; and shall bound every query a page accepts. The `/dispatch` panel shall show the parked
@@ -2291,46 +2290,32 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `admin/test/console-panels.test.mjs` (the script under a DOM stub, the what-if reader, paths, the window line, 30d,
     zero external requests), `admin/test/console-pages.test.mjs` (the fixtures, with a what-if page),
     `admin/test/console-headers.test.mjs`.
-  - (f) **Fleet** (`/fleet`). The page shows BullMQ counts per state for each queue and summed, the held waits, each
-    host with its slots, budget, running jobs and last beat, every active job (not only the first), the job
-    schedulers with their next and last run and stall state, and the failed jobs as a list of job id, attempts, queue
-    and end time, with no reason text in the list. Tests: `admin/test/console-pages.test.mjs`,
-    `admin/test/console-panels.test.mjs`. AMENDED 2026-10-21 (#712): and a Doctor panel (`p-doctor`, after Hosts): each
-    host's last published doctor run (`INT-DOCTOR-RESULTS-KEY`) with its age, counts and failing and warning checks
-    with their fix, failing first, flagged stale past two of the host's doctor intervals; a live host that published
-    nothing is named, and an unreadable read is said, never drawn as no problems. The configuration page's "does not
-    load" sentences (g) quote the newest published check about that file, naming its host and age, and fall back to
-    "run pi-dispatch doctor for the reason". The `/dispatch` panel's HOSTS view gives each host the same lines. Tests:
-    `admin/test/doctor-view.test.mjs`, `admin/test/console-pages.test.mjs`.
-    AMENDED 2026-10-21 (#712, part B): each host also with the venues it blesses (its default first, or "not
-    published" for a worker from before the registry's `backends` field), and a Venues panel: for every venue the
-    backend table holds, the live hosts that bless it and default to it, each host's floor, every declared property as
-    its question and its word with the word's sentence, what the venue serves and who holds its credentials, and per
-    host the OpenShell engine, modes and whether its gateway was on that host when its worker started; from the hosts'
-    published facts and the static table only, nothing resolved live. The panel's VENUES view (`v` from HOSTS) shows
-    the same. Tests:
-    `admin/test/venues-view.test.mjs` (a property or word without its sentence fails).
-    AMENDED 2026-10-23 (#710): each host's CPU budget is in cores (`1.5 / 8 cores`, the worker's `formatCpus` and
-    `coresText`), where the page printed the registry's hundredths, and the run page's Resources gives the size in cores
-    the same way; the queues panel's Fleet state follows (a)'s no-worker rule; each failed job's id links to its run
-    page, with a "Why (its record)" cell: the job's newest run record's closed `reason` token and its catalog sentence
-    cut by `shortSentence` (the snapshot's `failed[].reason`, from the fleet reader's wide window), "no record" for a job
-    that wrote none, a token the catalog does not know with "no explanation yet". BullMQ's free-text `failedReason`
-    stays in the operator's per-job details below the list and never in a row (`REQ-CONSOLE-SECURITY` (l)). Tests:
-    `admin/test/console-panels.test.mjs` ("failed jobs: each id links to its run", "readable numbers"),
-    `admin/test/read-model-pages.test.mjs`.
-    AMENDED 2026-10-25 (#737 PR 3b): the Schedules table names each scheduler by its `key` alone, the cron trigger's
-    id, which its stall count is kept under; BullMQ's `name` is the job name the scheduler mints its runs with
-    (`local` for every cron trigger) and never stands in for it, so a scheduler whose key the reader refused reads "-"
-    in its id cell and in its stall cell, since no stall count is kept under no key, beside its pattern and next run.
-    The reader carries a scheduler's `key` (BullMQ's `key` alone, no other field standing in) and `name` only in the
-    cron id charset and at most `SCHEDULER_NAME_MAX` characters, the triggers loader's longest cron id (`CRON_ID_MAX`,
-    176, `INT-TRIGGERS-FILE-CONTRACT`), so every id the loader takes is one the reader keeps (`mapSchedulers`), else
-    null, never cut, and keeps the entry (`REQ-CONSOLE-SECURITY`). Tests:
-    `admin/test/console-panels.test.mjs` ("the Schedules table names a scheduler by its key, the trigger's id, and
-    reads its stalls under it (BullMQ's name is the job's)"), `admin/test/read-model.test.mjs` ("a scheduler's id and
-    job name are read in the cron id charset and at most SCHEDULER_NAME_MAX characters, else null, and the entry
-    stays").
+  - (f) **Fleet** (`/fleet`, #748). The Pulse fleet bar names running, paused or part paused queues,
+    the safe Valkey display, counts and read provenance. Its kill switch uses the existing preview/confirm funnel;
+    a pause names the queues and running jobs that continue, and differing Valkeys are disclosed on every page load.
+    Queues, active jobs (including orphaned holds), held conditions, failed jobs, delayed reasons, schedules, hosts,
+    doctor and the short venue matrix each have their own panel. Every not-started job read within the waiting
+    reader's bounds can be listed and cancelled, with truncation stated, and the overview links to that list.
+    Active projects come from the registry; targets wait for a run record. Held rows show the worker's conditions,
+    answers and check limits, longest wait first. Failed rows distinguish a record without a reason from no record,
+    show the record's target and next step, and keep scrubbed queue text in operator-only disclosures. Retry and
+    remove work singly and in bulk through existing previews. Each host and venue opens its detail page.
+    - **Host** (`/fleet/host?name=`): viewer-readable and live, with a name in `WORKER_NAME_RE`; a fresh, stale,
+      gone or unknown host is distinguished without treating missing reads as healthy. Panels show running, orphaned
+      and waiting jobs, retained workspaces, slots and budgets (running, orphan and free), budget provenance, CPU
+      reserve, the registry and published doctor. An orphan's cleanup is a command for its own venue to run on that
+      host, never a remote console action; unsafe/digested ids get listing guidance. Retention off, expired and pinned
+      workspaces and venues without a sandbox shell are named. The seven-day capacity view uses one-hour buckets,
+      shows no-history separately and is read only on initial load, never on live ticks. Doctor section chips come
+      from `DOCTOR_SECTIONS`, with unknown ids still counted and all stale, manual, truncated and unreadable states.
+    - **Venue** (`/fleet/venue?name=`): viewer-readable, not live, with a name in `BACKEND_NAMES`. It shows what
+      the venue serves, all fourteen declarations with asserters and conditional observations, every published floor
+      requesting each property (including hosts not blessing it), effective meet/fail results, credential custody,
+      blessing/default hosts and OpenShell gateway facts. The full four-venue comparison lives here. Published host
+      observations are labelled as startup facts, never live probes.
+    Both themes fit 375 px. Viewers see facts and sentence fixes, with no mutation controls, previews, copy commands
+    or queue error text. Operators on read-only consoles keep command guidance but no mutations. The four design
+    cards have checked-in ledgers; page and exceptional-state goldens are checked under the real browser CSP.
   - (g) **Configuration** (`/config`). The page shows the triggers, the settings overlay, the pause windows, the
     scoped limits, the projects, the envelope and allocation, the MCP servers and the staged packages, and the secret
     profiles by NAME only: no page and no `/api/state` body carries a resolver path, a secret's value or a secret's
@@ -7904,3 +7889,4 @@ instead of drifting.
 | 2026-10-15 | Issue #642, writes and actions from the operator console. **NEW `REQ-OPERATOR-CONSOLE-ACTIONS`**: the console does everything the `/dispatch` TUI and the tools do, plus retry and remove a failed job, re-run a finished run, answer a parked run, and three bulk actions (retry every failed job, remove every failed job, cancel every held job); each action a preview and a confirm through the panel's own funnel and planner, re-checked at the confirm, a paid action showing the reserve the worker will hold, every action audited; acceptance per action, naming the funnel tests and the console's HTTP suite `admin/test/console-actions.test.mjs`, over the routes `POST /api/act/<name>/preview` and `/confirm`. **`REQ-CONSOLE-SECURITY` AMENDED**: (g) generalised from the pause-windows write to every entry of the action table (the ticket holds payload, `expect`, targets and reserve; audit before the funnel, a `failed` row after a refusal; the tests loop over the table); Scope names the new requirement. **`REQ-OPERATOR-JOB-CANCEL` AMENDED**: the console is a third surface (per job and in bulk), on the CLI's channel; a held job is looked for on every fleet queue, which fixed the panel's funnel refusing a held job on a host queue as gone. **`REQ-AWAIT-INPUT` AMENDED**: the console as an answer source, under an operator session and a single-use ticket, the reply job the receiver would have built with the answer as data, the `not-parked` gate and the reserve unchanged, and the worker's one trail comment; a pull request's park is still answered on the forge. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the console's confirm is the ticket and reaches the same planners; every extension write appends a `panel` audit row before it writes and is refused when it cannot; the wizard is the one exception. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, wording: the parked inbox's answer box and the pages' controls are held by the new requirement. UNCHANGED, checked: `REQ-RESURRECTABLE-SANDBOX` (the console shows the command and starts no container, so the surfaces it lists are unchanged), `REQ-DELEGATED-ALLOCATION` (the priorities and revert actions use its funnels unchanged), `REQ-TRIGGER-AUTHOR-GATE` (the receiver's gate is untouched; the operator door is `CONST-TRIGGER-AUTHOR-GATE`'s new clause). |
 | 2026-10-28 (#747) | **`REQ-CONSOLE-SECURITY` (l), `REQ-OPERATOR-CONSOLE-SCREENS` (c), `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-LIVE-TRANSCRIPT` AMENDED**: the Pulse run page uses fixed state panels, one operator page/transcript connection, late attachment and nonclosing tdone; transcript-filled question/tail slots are empty on the server and absent for viewers; running facts use a validated allowlist; Cancel uses the existing preview/confirm funnel. Tests cover state transitions, role separation, hostile text, lookup correctness, action-first audit sentences, sandbox declarations, retention, card ledgers and browser width/CSP. **`REQ-RUN-PROGRESS` UNCHANGED, checked**: the turn budget is read beside the progress key, never added to it. |
 | 2026-10-28 (#716) | **`REQ-MODEL-POLICY` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: reviewed fallback list, per-attempt singleton execution, pre-spend candidate checks, authenticated replay eligibility and no tool-written fallback policy. **`REQ-COST-ANALYTICS` UNCHANGED, checked**: insights do not switch models. **`CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked**: provider exit 1, free gates before spend and pi 1.4.0 retained. |
+| 2026-10-29 (#748) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: pages are defined by `PAGES`; Fleet uses Pulse panels, with live host and non-live venue detail, bounded waiting lists, truthful missing data, runtime-specific orphan guidance and retained workspaces. New behavior has role, route, read-model, worker and browser regression coverage. **`REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: existing guards and confirmed action funnels apply, commands start no remote runtime operation. |

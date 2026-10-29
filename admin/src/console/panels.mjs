@@ -57,10 +57,13 @@ export {
   insightsPanel, WHATIF_FLOW_RE, insightsWhatIf
 } from "./panels/insights.mjs";
 export {
-  fleetQueues, fleetActive, fleetHeld, fleetHosts, fleetDoctor, fleetVenues, fleetSchedulers, fleetFailed
+  fleetBar, fleetDelayed, fleetQueues, fleetActive, fleetHeld, fleetHosts, fleetDoctor, fleetVenues, fleetSchedulers, fleetFailed
 } from "./panels/fleet.mjs";
 export {
   configTriggers, configSettings, configPauseWindows, configScopedLimits, configProjects, configMcp, configPackages,
   configSecretProfiles, configSecretBundles
 } from "./panels/config.mjs";
 export { auditLog } from "./panels/audit.mjs";
+
+export { hostState, hostJobs, hostSandboxes, hostBudget, hostCapacity, hostRow, hostDoctor } from "./panels/host.mjs";
+export { venueSummary, venueServes, venueHosts, venueProperties, venueFix, venueCompare } from "./panels/venue.mjs";

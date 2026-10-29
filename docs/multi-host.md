@@ -499,3 +499,15 @@ publish itself, so the others cannot see it, and it will not route its own work.
 
 See also [`scoped-limits.md`](scoped-limits.md), [`wait-for.md`](wait-for.md) and
 [`secrets.md`](secrets.md), each of which has a per-host consequence noted in it.
+
+## Inspecting a host in the console
+
+Fleet and Overview link each host to `/fleet/host?name=<worker-name>`. Its live page shows the last published
+heartbeat, slots, jobs, budgets, doctor and retained workspaces. Seven-day capacity is read when the page opens,
+not on each live update. A host whose registry row expired can still have queued jobs, retained run records and a
+doctor result; the page says which evidence remains. Unknown and unreadable data never imply an idle healthy host.
+
+The additional registry facts are display telemetry: orphan venue/time, a one-minute cached workspace inventory,
+budget provenance and CPU-reserve state. They contain identifiers and fixed words, never workspace paths or issue
+text. Removing them changes reporting, never admission. Cleanup commands must be run on the affected host; the
+console cannot operate another host's runtime. A host-queue pause still leaves shared jobs available to that host.

@@ -212,7 +212,7 @@ FLEET_CSS = """
 .fl-chk__fix { grid-column: 1 / -1; color: var(--ink-muted); font-size: 12px; }
 .fl-chk__fix b { color: var(--ink); }
 .fl-asserted { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); }
-.fl-absent { background: transparent; color: var(--ink-faint); box-shadow: inset 0 0 0 1px var(--line); }
+.fl-absent { background: transparent; color: var(--ink-faint); box-shadow: none; border: 1px dashed var(--line); }
 .fl-vfoot { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: var(--space-3) var(--space-5) var(--space-4); border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-muted); }
 .fl-vfoot > span { display: inline-flex; align-items: center; gap: 6px; }
 .fl-floor { margin-left: 0; }

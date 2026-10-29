@@ -53,17 +53,32 @@ test("stale is two of the host's own intervals; an interval of 0 or unknown is n
 });
 
 test("the console's Doctor panel: per host its age, counts and problems with fixes, failing first, stale and silent hosts said", () => {
-  const out = render(fleetDoctor, snapshot());
+  const out = render(fleetDoctor, snapshot()).replace(/\s+/g, " ");
   assert.match(out, /<h2>Doctor<\/h2>/);
-  assert.match(out, /<h3>mini1<\/h3><p class="bad">Doctor ran 3h 0m ago \(version 4\.3\.1\), run by the worker: 1 failing, 1 warning, 40 passing\. The openshell venue was judged\.<\/p>/);
+  assert.match(out, /href="\/fleet\/host\?name=mini1">mini1<\/a>/);
+  assert.match(out, /class="tone-failed"/);
+  assert.match(out, /Doctor ran 3h 0m ago/);
+  assert.match(out, /Worker 4\.3\.1/);
+  assert.match(out, /run by the worker: 1 failing, 1 warning, 40 passing/);
+  assert.match(out, /The openshell venue was judged/);
   assert.ok(out.indexOf("triggers.file") < out.indexOf("valkey.2"), "failing before warning");
-  assert.match(out, /<td>fix &lt;path&gt; so it loads<\/td>/);
+  assert.match(out, /Fix: fix &lt;path&gt; so it loads/);
   assert.doesNotMatch(out, /node\.1/, "an ok check is never listed");
-  assert.match(out, /<h3>build3<\/h3><p>Doctor ran 3d 0h ago \(version 4\.3\.0\), run by hand \(uid 0\): 0 failing, 0 warnings, 30 passing\.<\/p><p class="warn">It replaced the worker's own run of 4d 0h ago \(uid 1001\), so it shows another account's view of the host\.<\/p><p class="warn">Stale: older than two of this host's doctor runs \(every 24h\)/);
+  assert.match(out, /href="\/fleet\/host\?name=build3">build3<\/a>/);
+  assert.match(out, /Doctor ran 3d 0h ago/);
+  assert.match(out, /Worker 4\.3\.0/);
+  assert.match(out, /run by hand \(uid 0\): 0 failing, 0 warnings, 30 passing/);
+  assert.match(out, /It replaced the worker's own run/);
+  assert.match(out, /uid 1001/);
+  assert.match(out, /Stale: older than two of this host's doctor runs \(every 24h\)/);
   assert.match(out, /Every check passed\./);
-  assert.match(out, /<h3>odd<\/h3><p class="warn">Its published result cannot be read/);
+  assert.match(out, /href="\/fleet\/host\?name=odd">odd<\/a>/);
+  assert.match(out, /Its published result cannot be read/);
   assert.match(out, /No doctor result published by: quiet\./, "a live host that never published is named, never read as healthy");
-  assert.equal(render(fleetDoctor, snapshot(), "operator"), out, "the same panel for both roles: the labels are doctor's redacted sentences, not run text");
+  assert.ok(!out.includes("data-copy"), "a viewer reads fixes as sentences");
+  const operator = render(fleetDoctor, snapshot(), "operator");
+  assert.ok(operator.includes("data-copy"), "an operator can copy the doctor command");
+  for (const fact of ["1 failing, 1 warning, 40 passing", "triggers.file", "Every check passed", "No doctor result published by: quiet"]) assert.ok(operator.includes(fact), `${fact}: published facts are shared by both roles`);
 });
 
 test("the console's Doctor panel escapes a hostile label and scrubs its control bytes", () => {

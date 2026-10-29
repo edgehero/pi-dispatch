@@ -489,7 +489,7 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   for (const name of ["overview", "fleet", "parked", "config"]) {
     const from = modules.fleet.asked.length;
     await realPages.loadPageData(name, {}, deps);
-    assert.deepEqual(modules.fleet.asked.slice(from), [name === "overview" ? { waiting: true } : null], name);
+    assert.deepEqual(modules.fleet.asked.slice(from), [["overview", "fleet"].includes(name) ? { waiting: true } : null], name);
   }
   await deps.insights("7d");
   await deps.insights("7d");

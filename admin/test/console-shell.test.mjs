@@ -78,7 +78,7 @@ test("every page, both roles: the pills in order, aria-current on the screen sho
       assert.equal(nav.includes('<details class="more">'), role === "operator", `${name}.${role}: More is the operator's`);
       if (role === "viewer") assert.ok(!html.includes('href="/audit"'), `${name}: a viewer is never offered the audit log`);
       const current = [...nav.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]);
-      const here = name === "run" ? "runs" : name === "watch" || name === "watch-board" ? "config" : name;
+      const here = name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : name === "watch" || name === "watch-board" ? "config" : name;
       if (PAGES[here].auth === "operator" && role !== "operator") assert.deepEqual(current, [], `${name}.${role}: the refused page has no pill to mark`);
       else assert.deepEqual(current, [PAGES[here].path], `${name}.${role}: the one current pill`);
     }
@@ -149,7 +149,7 @@ test("the title bar: the page's title, and the run detail's back link to Runs wi
   for (const absent of ['class="legacy"', 'id="p-audit', 'class="titlebar__end"', "Drawn at"]) assert.ok(!refused.includes(absent), absent);
   const run = (await draw("run")).html;
   assert.match(run, /<div class="titlebar__lead"><a class="back" href="\/runs"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"><\/use><\/svg>Runs<\/a><h1>gh-1<\/h1><div class="titlebar__sub">/);
-  for (const name of Object.keys(PAGES).filter((n) => n !== "run")) assert.ok(!(await draw(name)).html.includes('class="back"'), `${name} has no back link`);
+  for (const name of Object.keys(PAGES).filter((n) => !["run", "host", "venue"].includes(n))) assert.ok(!(await draw(name)).html.includes('class="back"'), `${name} has no back link`);
 });
 
 test("the headline: a panel span in the title bar's sub line, drawn for a page that has one, its id and data-panel alone", () => {
@@ -290,7 +290,7 @@ test("LEGACY_PAGES is a written-out frozen list: a page added to PAGES later is 
   // The list as written: a copy derived from PAGES would make every new page start in the old markup. PR 2
   // converted the audit log, the two sign-in pages and the operators-only refusal; PR 3 the overview; PR 4 the runs and
   // parked pages.
-  assert.deepEqual(LEGACY_PAGES, ["insights", "fleet", "config"]);
+  assert.deepEqual(LEGACY_PAGES, ["insights", "config"]);
   assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "an array, frozen: a frozen Set still takes .add()");
   assert.throws(() => LEGACY_PAGES.push("models"), TypeError);
   assert.equal(new Set(LEGACY_PAGES).size, LEGACY_PAGES.length);
@@ -299,7 +299,8 @@ test("LEGACY_PAGES is a written-out frozen list: a page added to PAGES later is 
   for (const name of ["overview", "audit", "login", "login-code", "forbidden", "error", "models", "watch", "secrets", "connections", "project", "host", "Overview", "", "__proto__", "constructor"]) assert.equal(LEGACY_PAGES.includes(name), false, name);
   assert.equal(String(legacyWrap("audit", html`<p>x</p>`)), "<p>x</p>", "a converted page's content is as it is");
   assert.equal(String(legacyWrap("overview", html`<p>x</p>`)), "<p>x</p>");
-  assert.equal(String(legacyWrap("fleet", html`<p>x</p>`)), '<div class="legacy"><p>x</p></div>');
+  assert.equal(String(legacyWrap("fleet", html`<p>x</p>`)), "<p>x</p>");
+  assert.equal(String(legacyWrap("config", html`<p>x</p>`)), '<div class="legacy"><p>x</p></div>');
 });
 
 test("the legacy wrapper: each section of a legacy page in a .legacy of its own, the frame and the slot outside every one", async () => {

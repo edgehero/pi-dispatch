@@ -62,13 +62,14 @@ test("venuesView: every venue in table order, the hosts that bless it and defaul
       assert.equal(p.word, BACKENDS[x.name].declares[p.property], `${x.name}.${p.property}: the declared word`);
       assert.equal(p.question, PROPERTIES[p.property].question);
       assert.equal(p.wordText, DECLARATION_TEXT[p.word]);
+      if (p.word === "asserted") assert.ok(p.assertedBy, `${x.name}.${p.property}: asserted words name their asserter`);
     }
     assert.deepEqual(x.serves.map((s) => [s.key, s.text]), SERVES.map((k) => [k, SERVES_TEXT[k][BACKENDS[x.name].serves[k]]]), x.name);
     assert.equal(x.custodyText, CUSTODY_TEXT[BACKENDS[x.name].credentialCustody ?? "container"]);
   }
   const egress = by.local.properties.find((p) => p.property === "egress");
-  assert.deepEqual([egress.armedBy, egress.flooredOn], ["PI_EGRESS", [{ host: "mini1", want: "enforced" }]]);
-  assert.deepEqual(by.podman.properties.find((p) => p.property === "egress").flooredOn, [], "mini2 has no floor");
+  assert.deepEqual([egress.armedBy, egress.flooredOn], ["PI_EGRESS", [{ host: "mini1", want: "enforced", have: "enforced", meets: true, blessed: true }]]);
+  assert.deepEqual(by.podman.properties.find((p) => p.property === "egress").flooredOn, [{ host: "mini1", want: "enforced", have: "enforced", meets: true, blessed: false }], "every published floor appears, including hosts not blessing this venue");
   assert.equal(by.local.properties.find((p) => p.property === "credentialTransit").observedBy, "dockerEndpointLocal");
   // A venue a newer worker blesses that this build does not know is named with its hosts, not hidden.
   assert.deepEqual(venuesView([row("new1", "blessed=far-venue,local")]).others, [{ name: "far-venue", blessedOn: ["new1"] }]);
@@ -80,26 +81,20 @@ test("venuesView: every venue in table order, the hosts that bless it and defaul
 const ctxOf = (data) => ({ query: {}, session: { name: "ops", role: "viewer" }, data: { now: AT, env: {}, ...data }, readOnly: false });
 const fleetHtml = async (rows) => (await pagePanels("fleet", ctxOf({ snapshot: { queue: { counts: {} }, hostBudgets: rows } }))).map((p) => p.html).join("");
 
-test("the Fleet page's Venues panel: every venue, every property's question and word, serves and custody, the OpenShell setup", async () => {
-  const html = await fleetHtml(ROWS);
-  const venues = html.slice(html.indexOf("<h2>Venues</h2>"), html.indexOf("<h2>Schedules</h2>"));
-  assert.ok(venues.length > 0, "between Hosts and Schedules");
-  assert.match(venues, /<summary>local: blessed on mini1, the default on mini1<\/summary>/);
-  assert.match(venues, /<summary>openshell-bind: blessed on mini2<\/summary>/);
-  for (const p of PROPERTY_NAMES) assert.ok(venues.includes(PROPERTIES[p].question.replace(/'/g, "&#39;")), p);
-  for (const t of Object.values(DECLARATION_TEXT)) assert.ok(venues.includes(t.replace(/'/g, "&#39;")), t);
-  assert.match(venues, /Only while PI_EGRESS is on\./);
-  assert.match(venues, /enforced on mini1/, "the floor that asks for egress");
-  assert.match(venues, /<td>mini2<\/td><td>docker<\/td><td>bind<\/td><td>the gateway was not on this host when the worker started/);
-  assert.match(venues, /held by the venue('|&#39;)s egress layer/);
-  assert.match(venues, /It takes steering messages \(run\.steer\)\./);
-  assert.match(venues, /Not published by old3/);
-  assert.match(venues, /egress=enforced/);
-  // The hosts table's venue column: the blessed list, the default first and marked; a row without the field says so.
-  const hosts = html.slice(html.indexOf("<h2>Hosts</h2>"), html.indexOf("<h2>Venues</h2>"));
-  assert.match(hosts, /<th scope="col">Venues<\/th>/);
-  assert.match(hosts, /<td>local \(default\), openshell<\/td>/);
-  assert.match(hosts, /<td><span class="note">not published<\/span><\/td>/);
+test("Fleet keeps a short venue matrix and details carry questions, asserters, serves and floors", async () => {
+  const fleet = await fleetHtml(ROWS);
+  assert.match(fleet, /Venue declaration matrix/);
+  assert.match(fleet, /fleet\/venue\?name=openshell-bind/);
+  assert.match(fleet, /mini1/);
+  for (const name of BACKEND_NAMES) {
+    const panels = await pagePanels("venue", { query: { name }, session: { role: "viewer" }, data: { snapshot: { hostBudgets: ROWS }, now: AT } });
+    const detail = panels.map((p) => p.html).join("");
+    for (const property of PROPERTY_NAMES) assert.ok(detail.includes(PROPERTIES[property].question.replace(/'/g, "&#39;")), `${name}.${property}`);
+    assert.match(detail, /What it serves/);
+    assert.match(detail, /Compare venues/);
+    assert.match(detail, /mini1/);
+    for (const p of venuesView(ROWS).venues.find((v) => v.name === name).properties) if (p.assertedBy) assert.ok(detail.includes(p.assertedBy.replace(/'/g, "&#39;")), `${name}.${p.property} asserter`);
+  }
 });
 
 test("the Venues panel escapes a host's name and never reads one as markup", async () => {
@@ -193,7 +188,7 @@ test("a row that blesses an OpenShell venue and carries no os part is not publis
   const rows = [row("hand1", "blessed=openshell")];
   assert.deepEqual(venuesView(rows).venues.find((x) => x.name === "openshell").openshell, [{ host: "hand1", engine: null, gateway: null, modes: [], unpublished: true }]);
   const html = await fleetHtml(rows);
-  assert.match(html, new RegExp(`<td>hand1</td><td colspan="3">${OPENSHELL_UNPUBLISHED_TEXT.replace(/'/g, "(?:'|&#39;)")}</td>`));
+  assert.match(html, /hand1: not published/);
   assert.ok(!html.includes(GATEWAY_TEXT.unknown.replace(/'/g, "&#39;")) && !html.includes(GATEWAY_TEXT.unknown), "not the unknown word's sentence");
   const comp = await openVenues(rows);
   comp.handleInput("\x1b[B");
@@ -228,4 +223,15 @@ test("v pressed while the 7-day read runs: the answer lands in VENUES and HOSTS 
   assert.match(out, /history not wired/);
   assert.equal(reads, 1);
   await comp.dispose();
+});
+
+
+test("venue floors use the published OpenShell gateway observation and distinguish a non-blessing floor", () => {
+  for (const gateway of ["local", "remote", "unknown"]) {
+    const hosts = [row("build3", hostBackendsField({ backends: ["local", "openshell"], backendFloor: { credentialTransit: "enforced" }, openshellEngine: "docker", gatewayWord: gateway }))];
+    const property = venuesView(hosts).venues.find((v) => v.name === "openshell").properties.find((p) => p.property === "credentialTransit");
+    assert.equal(property.flooredOn[0].blessed, true);
+    assert.equal(property.flooredOn[0].have, gateway === "local" ? "enforced" : "asserted");
+    assert.equal(property.flooredOn[0].meets, gateway === "local");
+  }
 });

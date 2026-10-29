@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { FLEET_DRAW } from "./fleet-goldens.mjs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -795,9 +796,10 @@ const RUN_CARD_STATES = {
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
 const DRAW = {
+  ...FLEET_DRAW,
   ...RUN_CARD_STATES,
   // ConfirmStates: the slot in every state, after the card that asked.
-  "confirm-previewing.operator": async () => openSlotAfter(await fleetLive(), "p-queues", { label: "Pause the fleet" }),
+  "confirm-previewing.operator": async () => openSlotAfter(await fleetLive(), "p-fleetbar", { label: "Pause the fleet" }),
   "confirm-preview.operator": async () => {
     const answer = await actionWorld().preview("setting-set", { key: "maxTurns", value: "40" });
     return openSlotAfter(await screen("config"), "p-settings", { inner: answerHtml(answer, 200, "setting-set") });
@@ -808,7 +810,7 @@ const DRAW = {
   },
   "confirm-preview-danger.operator": async () => {
     const answer = await actionWorld().preview("fleet-pause");
-    return openSlotAfter(await fleetLive(), "p-queues", { inner: answerHtml(answer, 200, "fleet-pause") });
+    return openSlotAfter(await fleetLive(), "p-fleetbar", { inner: answerHtml(answer, 200, "fleet-pause") });
   },
   "confirm-unchanged.operator": async () => {
     const answer = await actionWorld().preview("setting-set", { key: "maxTurns", value: "30" });
@@ -860,7 +862,7 @@ const DRAW = {
   "confirm-refused-partial.operator": async () => {
     const world = actionWorld({ fleet: { pause: async () => ({ results: [{ shown: "redis://valkey:6379", res: { ok: true, queues: ["pi-jobs"] } }, { shown: "redis://valkey-b:6379", res: null }] }) } });
     const answer = await world.both("fleet-pause");
-    return openSlotAfter(await fleetLive(), "p-queues", { inner: answerHtml(answer, 409, "fleet-pause, partial") });
+    return openSlotAfter(await fleetLive(), "p-fleetbar", { inner: answerHtml(answer, 409, "fleet-pause, partial") });
   },
   // A page drawn for one person after another signed this browser in: the bar the server answers such a preview with
   // (`server.mjs`, the person check, which answers before any action runs).

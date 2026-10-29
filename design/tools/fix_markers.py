@@ -37,7 +37,7 @@ STATUS = {
     "ParkedPhone": (BUILT, "In main since #746, except the question text: the shipped page sends you to the run page to read it."),
     **{n: (BUILT, "Built by #747; managed forks added by #648. Watch remains separate work.") for n in ["RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered",
                                                       "RunSandboxed", "RunChatStates", "RunViewer"]},
-    **{n: (PLANNED, "#748, Fleet.") for n in ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"]},
+    **{n: (BUILT, "Built by #748, Fleet with host and venue detail.") for n in ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"]},
     **{n: (PLANNED, "#749, Spend.") for n in ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown",
                                               "TopologyScreen", "SpendPhone"]},
     "TriggersScreen": (PLANNED, "#750. Its Watch and Dispatchers tabs are planned and proposed elsewhere."),
@@ -54,7 +54,7 @@ STATUS = {
     "ParkedDraftViewer": (PROPOSED, "#753. As a viewer sees it."), "ParkedDraftPhone": (PROPOSED, "#753. On a phone."),
     "RunLivePhone": (BUILT, "Built by #747, the run page on a phone."),
     "TriggersPhone": (PLANNED, "#750, on a phone."), "TriggersViewer": (PLANNED, "#750. As a viewer sees it."),
-    "FleetPhone": (PLANNED, "#748, on a phone."), "FleetViewer": (PLANNED, "#748. As a viewer sees it."),
+    "FleetPhone": (BUILT, "Built by #748, on a phone."), "FleetViewer": (BUILT, "Built by #748. As a viewer sees it."),
     "ParkedAnswerer": (PROPOSED, "#753. Sending with no person's confirm is not proposed: OQ-051."),
 }
 RIBBON_RE = re.compile(r'<div class="ds-status[^"]*" role="note"[^>]*>.*?</div>\n', re.S)

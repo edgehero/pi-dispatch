@@ -1,0 +1,499 @@
+{
+  "card": "HostDetail",
+  "pr": 6,
+  "panels": [
+    "p-hoststate",
+    "p-hostjobs",
+    "p-hostbudget",
+    "p-hostcap",
+    "p-hostrow",
+    "p-hostdoctor"
+  ],
+  "elements": [
+    {
+      "el": "p-hoststate",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostState",
+      "golden": [
+        "panels/host-fresh.operator"
+      ]
+    },
+    {
+      "el": "p-hostjobs",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostJobs",
+      "golden": [
+        "panels/host-fresh.operator"
+      ]
+    },
+    {
+      "el": "p-hostbudget",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-fresh.operator"
+      ]
+    },
+    {
+      "el": "p-hostcap",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostCapacity",
+      "golden": [
+        "panels/host-fresh.operator"
+      ]
+    },
+    {
+      "el": "p-hostrow",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostRow",
+      "golden": [
+        "panels/host-fresh.operator"
+      ]
+    },
+    {
+      "el": "p-hostdoctor",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-fresh.operator"
+      ]
+    },
+    {
+      "el": "One host in full, opened from a host row on Fleet or Overview: is it alive, what it promised, what runs and waits on it, how busy it has been, and what doctor last said.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "**State first.** A stale host leads with a yellow card: no beat for 3 minutes, what that means for routing, and *Pause pi-jobs@build3* (danger). A healthy host shows no card here.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostState"
+    },
+    {
+      "el": "**Jobs on build3.** Running, orphaned and waiting jobs with project and size.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostJobs"
+    },
+    {
+      "el": "An orphaned job is tinted and says what it still holds, with *Free the slot*.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostJobs"
+    },
+    {
+      "el": "A job waiting for the host budget says which dimension, that it asks again about every 9 seconds, and that it keeps its place.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostJobs"
+    },
+    {
+      "el": "**Slots and budget.** Slot dots, then memory and CPU bars split into promised to running jobs (solid), held by an orphan (hatched) and free. Facts cover:",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget"
+    },
+    {
+      "el": "how the budget was set;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget"
+    },
+    {
+      "el": "who waits for it, and the room kept for the oldest waiter;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget"
+    },
+    {
+      "el": "project rules (`hostShare`, `minJobs`);",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget"
+    },
+    {
+      "el": "the CPU reserve;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget"
+    },
+    {
+      "el": "whether old containers were listed.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget"
+    },
+    {
+      "el": "The words a budget can show instead are listed.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget"
+    },
+    {
+      "el": "**Last 7 days.** Busy, idle and no-history shares, average and peak slots, time full, and wait p50 and p95, then a 6-hour bar chart. Each bar has a tick at the most at once, a dashed slot line, and hatched no-history time, which counts as neither busy nor idle. It also shows promised and used shares, projects by run time, the \"Jobs only\" caveat and any truncation.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostJobs"
+    },
+    {
+      "el": "**Registry row.** Version, start, image and digest, pi, time zone, queues, venues and floor, the profiles that route jobs here, the fingerprints that match the fleet, and the last beat.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostRow"
+    },
+    {
+      "el": "**Doctor.** The head line in the console's words, red when a check fails, then:",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "the stale warning;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "33 section chips (passing, failing, or not run);",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "failing then warning checks, each with its fix, and the command;",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "every other doctor state: replaced by a hand run, more than 8, all passing, unreadable, never published.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "The host registry row: name, version, start, pid, concurrency, image and digest, pi version, time zone, caps, fingerprints, and budget used, held and waiters. It also carries the jobs list with sizes and orphan flags, the seed, and the beat time.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostRow"
+    },
+    {
+      "el": "The host's slice of the capacity report.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostCapacity"
+    },
+    {
+      "el": "The host's published doctor result, with checks redacted at the source.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "**Viewers** see everything here except the Pause, Cancel and Free the slot buttons. Doctor results are visible to both roles.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor"
+    },
+    {
+      "el": "**Fixture note.** build3, podman, the floor, the 3-minute late beat, gh-e802, gh-4a7e (cancelled 10:59), the 16 of 24 GiB and 8 of 12 cores, and doctor checks docker.39 and docker.40 come from the fixture. These are sample data:",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The card names illustrative hosts, ids, times, counts and chart samples. Production reads the bounded registry, queue and run-record projections; literal fixture values are not runtime contracts."
+    },
+    {
+      "el": "gh-91d2;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the job sizes;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "pid, digest, pi version and profiles;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the 7-day figures and chart;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the sections that did not run;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "the hand-run uid.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."
+    },
+    {
+      "el": "p-hostsandboxes",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
+      "golden": [
+        "panels/host-fresh.operator"
+      ],
+      "reason": "#748 adds retained workspaces and runtime-specific orphan cleanup in a separate panel beyond the original card."
+    },
+    {
+      "el": "host-stale.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostState",
+      "golden": [
+        "panels/host-stale.operator"
+      ]
+    },
+    {
+      "el": "host-gone.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostRow",
+      "golden": [
+        "panels/host-gone.operator"
+      ]
+    },
+    {
+      "el": "host-unknown.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostRow",
+      "golden": [
+        "panels/host-unknown.viewer"
+      ]
+    },
+    {
+      "el": "host-retention-off.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
+      "golden": [
+        "panels/host-retention-off.operator"
+      ]
+    },
+    {
+      "el": "host-sandboxes-unreadable.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
+      "golden": [
+        "panels/host-sandboxes-unreadable.operator"
+      ]
+    },
+    {
+      "el": "host-sandboxes-more.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostSandboxes",
+      "golden": [
+        "panels/host-sandboxes-more.operator"
+      ]
+    },
+    {
+      "el": "host-orphan-local.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "golden": [
+        "panels/host-orphan-local.operator"
+      ]
+    },
+    {
+      "el": "host-orphan-podman.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "golden": [
+        "panels/host-orphan-podman.operator"
+      ]
+    },
+    {
+      "el": "host-orphan-openshell.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "golden": [
+        "panels/host-orphan-openshell.operator"
+      ]
+    },
+    {
+      "el": "host-orphan-openshell-bind.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "golden": [
+        "panels/host-orphan-openshell-bind.operator"
+      ]
+    },
+    {
+      "el": "host-orphan-digest.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "golden": [
+        "panels/host-orphan-digest.operator"
+      ]
+    },
+    {
+      "el": "host-orphan-legacy.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "golden": [
+        "panels/host-orphan-legacy.operator"
+      ]
+    },
+    {
+      "el": "host-orphan-no-venue.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#orphanCommand",
+      "golden": [
+        "panels/host-orphan-no-venue.operator"
+      ]
+    },
+    {
+      "el": "host-reserve-held.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-reserve-held.operator"
+      ]
+    },
+    {
+      "el": "host-reserve-no-parent.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-reserve-no-parent.operator"
+      ]
+    },
+    {
+      "el": "host-reserve-unmanaged.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-reserve-unmanaged.operator"
+      ]
+    },
+    {
+      "el": "host-reserve-budget-unknown.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-reserve-budget-unknown.operator"
+      ]
+    },
+    {
+      "el": "host-reserve-unreadable.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-reserve-unreadable.operator"
+      ]
+    },
+    {
+      "el": "host-reserve-unset.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-reserve-unset.operator"
+      ]
+    },
+    {
+      "el": "host-reserve-differs.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostBudget",
+      "golden": [
+        "panels/host-reserve-differs.operator"
+      ]
+    },
+    {
+      "el": "host-doctor-stale.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-stale.operator"
+      ]
+    },
+    {
+      "el": "host-doctor-manual.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-manual.operator"
+      ]
+    },
+    {
+      "el": "host-doctor-more.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-more.operator"
+      ]
+    },
+    {
+      "el": "host-doctor-passing.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-passing.operator"
+      ]
+    },
+    {
+      "el": "host-doctor-unreadable.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-unreadable.operator"
+      ]
+    },
+    {
+      "el": "host-doctor-missing.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostDoctor",
+      "golden": [
+        "panels/host-doctor-missing.operator"
+      ]
+    },
+    {
+      "el": "One-hour buckets across the seven-day report",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/host.mjs#hostCapacity",
+      "reason": "#748 requires the same one-hour buckets as Spend’s seven-day report; the card’s illustrative six-hour chart is not a separate aggregation contract."
+    }
+  ]
+}

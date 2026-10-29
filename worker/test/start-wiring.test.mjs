@@ -269,6 +269,7 @@ async function runStart({ env = {}, whileRunning, makeDoctorSpawner, makeAuth, m
 			makeRecordWriter: recordWriter,
 			makeLogReaper: logReaper,
 			makeSandboxReaper: sandboxReaper,
+			listSandboxes: () => [],
 			makeSandboxNetworkSweeper: sandboxSweeper,
 			makeRunContainer: runContainerFactory,
 			makeSecretsResolver: (args) => (secretsResolverCalls.push(args), async () => ({ ok: true, secrets: {} })),
@@ -5089,8 +5090,9 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	const listed = [];
 	let listAnswer = () => [{ name: "pi-job-left", memMiB: 1024, cpuCenti: 50 }];
 	const snap = { seeded: false, unseeded: ["local"] };
+	const detail = { memMode: "auto", cpuMode: "value", memTotalMiB: 16384, memReserveMiB: 1638, memFloored: false, cpuTotalCenti: null, cpuReserveCenti: null, cpuFloored: false };
 	const { captured } = await runStart({
-		workerHostBudget: { snapshot: () => ({ ...snap }), current: () => ({ memMiB: null, cpuCenti: null }) },
+		workerHostBudget: { snapshot: () => ({ ...snap }), current: () => ({ memMiB: null, cpuCenti: null }), detail: () => detail },
 		env: { PI_HOST_MEMORY_BUDGET: "auto", PI_HOST_CPU_BUDGET: "6", PI_JOB_MEMORY: "2g" },
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 		makeHost: () => fakeHost(),
@@ -5129,9 +5131,14 @@ test("issue #596, phase 2: createWorker is handed the host budget's inputs and t
 	};
 	await assert.rejects(() => opts.survivors.local(), /Cannot connect/);
 	assert.equal(captured.deps.hostBudget, undefined, "beside the other worker-wide inputs, never in deps");
-	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans", "budgetSeed"]) {
+	for (const key of ["budgetMemMiB", "budgetCpuCenti", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "budgetRunning", "budgetHolds", "budgetOrphans", "budgetSeed", "sandboxes", "sandboxesMore", "sandboxRetentionHours", "budgetFrom", "cpuReserve"]) {
 		assert.equal(typeof published[key], "function", `${key} is a thunk, re-read every beat`);
 	}
+	assert.deepEqual(JSON.parse(published.budgetFrom()), detail, "provenance comes from the budget itself");
+	assert.ok(Array.isArray(JSON.parse(published.cpuReserve())));
+	assert.equal(published.sandboxRetentionHours(), "24");
+	assert.ok(Array.isArray(JSON.parse(published.sandboxes())));
+	assert.equal(published.sandboxesMore(), "0");
 	// the boot listing's state, read at every beat.
 	assert.equal(published.budgetSeed(), "unlisted:local", "the unread venues, named");
 	snap.seeded = true;

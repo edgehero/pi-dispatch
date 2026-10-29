@@ -454,6 +454,11 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const pricing = pricingOf(m.pricing);
     const pageDeps = {
       fleet,
+      killSwitchPlan: killSwitchPlanFn,
+      hostCapacity: async (host) => {
+        const capacity = await m.insights.assembleCapacityView(side.paths, "7d", now(), { envFn: () => side.env });
+        return { ...capacity, hosts: (capacity?.hosts ?? []).filter((row) => row.name === host) };
+      },
       watch: fleet.watch,
       insights: cachedPerWindow((window, opts) => m.insights.assembleInsights(side.paths, window, { pricing, nowMs: now(), envFn: () => side.env, ...(opts?.fullPaths ? { fullPaths: true } : {}) }), { now }),
       // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers

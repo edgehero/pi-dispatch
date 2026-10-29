@@ -275,3 +275,14 @@ test("INT-DEFER-REASON-KEY restates the leaf: its reason table is DEFER_WHYS wit
 	const written = new Set(Object.values(DEFER_WHYS).map((entry) => entry.bucket));
 	assert.deepEqual(listWords(unreached[1], "or"), DEFER_BUCKETS.filter((bucket) => !written.has(bucket)), "the buckets no reason is in, as the spec names them");
 });
+
+test("budget deferrals preserve each limiting dimension and the legacy verdict during a rolling upgrade (#748)", () => {
+	for (const budgetWhy of ["memory", "cpu", "count", "share", "running-here", "unseeded", "budget"]) {
+		const args = deferHsetArgs({ ...GOOD, why: "host-budget", budgetWhy });
+		const fields = {};
+		for (let i = 0; i < args.length; i += 2) fields[args[i]] = args[i + 1];
+		const parsed = parseDefer(reply(fields));
+		assert.equal(parsed.budgetWhy, budgetWhy);
+		assert.equal(parsed.bucket, "slot");
+	}
+});

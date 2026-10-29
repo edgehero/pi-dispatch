@@ -21,7 +21,8 @@
  *     carried and cannot satisfy it. No quote, backslash, slash or control character can reach the JSON, so the
  *     writer's path-shape check never refuses the field.
  *   - `p` is a project id (`isProjectId`) or null; `runs:rec:*` already carries project ids.
- *   - `m`, `c` and `at` are integers (MiB, hundredths of a CPU, epoch millis), `o` is 1.
+ *   - `m`, `c`, `at` and orphan stop `s` are integers (MiB, hundredths of a CPU, epoch millis), `o` is 1;
+ *     `v` is the orphan runtime from this build's closed venue table.
  *
  * ORDER AND SIZE. Oldest first (by `at`, then id), at most `LIVE_JOBS_MAX`: the jobs that have held a slot longest
  * carry the most busy time and are the ones an operator looks for. The rest are counted in `jobsMore`, never dropped
@@ -29,6 +30,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { BACKEND_NAMES } from "./backends.mjs";
 import { isProjectId } from "./project-id.mjs";
 
 /** The most jobs one row lists; the rest are counted (`jobsMore`). */
@@ -48,11 +50,11 @@ export function publishedJobId(id) {
 }
 
 /**
- * The list a row publishes, before the cap: `[{ id, p, m, c, at, o? }]`, oldest first. `running` is the in-flight
+ * The list a row publishes, before the cap: `[{ id, p, m, c, at, o?, v?, s? }]`, oldest first. `running` is the in-flight
  * map's entries (`{ id, project, memMiB, cpuCenti, at }`), `budgetEntries` the host budget's ledger (`entries()`), of
  * which only orphans are taken. An entry with no id or no instant is left out and counted in `skipped`.
  */
-export function liveJobsOf({ running = [], budgetEntries = [] } = {}) {
+export function liveJobsOf({ running = [], budgetEntries = [], defaultVenue = null } = {}) {
 	const out = [];
 	const seen = new Set();
 	let skipped = 0;
@@ -64,7 +66,8 @@ export function liveJobsOf({ running = [], budgetEntries = [] } = {}) {
 		}
 		if (seen.has(id)) return; // one job, two pickups (or running and orphaned): listed once
 		seen.add(id);
-		out.push({ id, p: isProjectId(e.project) ? e.project : null, ...(positiveInt(e.memMiB) ? { m: e.memMiB } : {}), ...(positiveInt(e.cpuCenti) ? { c: e.cpuCenti } : {}), at: e.at, ...(orphan ? { o: 1 } : {}) });
+		const venue = typeof e.orphan?.venue === "string" ? e.orphan.venue : (e.orphan?.venue && typeof e.orphan.venue === "object" ? (e.orphan.venue.backend ?? defaultVenue) : null);
+		out.push({ id, p: isProjectId(e.project) ? e.project : null, ...(positiveInt(e.memMiB) ? { m: e.memMiB } : {}), ...(positiveInt(e.cpuCenti) ? { c: e.cpuCenti } : {}), at: e.at, ...(orphan ? { o: 1, ...(BACKEND_NAMES.includes(venue) ? { v: venue } : {}), ...(positiveInt(e.orphan?.since) ? { s: e.orphan.since } : {}) } : {}) });
 	};
 	// Running first, so a job both running and in the ledger as an orphan (it cannot be: the gate defers it) reads as running.
 	for (const e of Array.isArray(running) ? running : []) push(e, false);
@@ -116,11 +119,13 @@ function parseList(list) {
 		const ok = e !== null && typeof e === "object" && !Array.isArray(e);
 		const m = ok ? optionalSize(e.m) : undefined;
 		const c = ok ? optionalSize(e.c) : undefined;
-		if (!ok || typeof e.id !== "string" || !LIVE_JOB_ID_RE.test(e.id) || !(e.p === undefined || e.p === null || isProjectId(e.p)) || m === undefined || c === undefined || !positiveInt(e.at) || !(e.o === undefined || e.o === 1 || typeof e.o === "boolean")) {
+		const venue = ok && (e.v === undefined || e.v === null || BACKEND_NAMES.includes(e.v));
+		const since = ok && (e.s === undefined || e.s === null || positiveInt(e.s));
+		if (!ok || !venue || !since || typeof e.id !== "string" || !LIVE_JOB_ID_RE.test(e.id) || !(e.p === undefined || e.p === null || isProjectId(e.p)) || m === undefined || c === undefined || !positiveInt(e.at) || !(e.o === undefined || e.o === 1 || typeof e.o === "boolean")) {
 			dropped++;
 			continue;
 		}
-		jobs.push({ id: e.id, p: e.p ?? null, m, c, at: e.at, o: e.o === 1 || e.o === true });
+		jobs.push({ id: e.id, p: e.p ?? null, m, c, at: e.at, o: e.o === 1 || e.o === true, ...(e.v != null ? { v: e.v } : {}), ...(e.s != null ? { s: e.s } : {}) });
 	}
 	return { jobs, dropped };
 }
