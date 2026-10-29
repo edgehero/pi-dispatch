@@ -163,12 +163,6 @@ async function main() {
 	// Issue #686: whether the key came as frame 1 of the stdin frame channel, the one fact that admits PI_STEER on the
 	// sandbox layout (PI_EXIT_AUTH itself has already left the environment).
 	const cfg = parseRunnerEnv(process.env, { steerFrames: exitKey.frames === true });
-	const watchReadOnly = readWatchMode();
-	const watchDecisionInput = readWatchDecision();
-	if (watchDecisionInput && (!watchReadOnly || cfg.maxCostMicros === null)) throw configError("watch decisions require a read-only marker and a cost cap", "watch-config-invalid");
-	const watchToolsConfig = watchReadOnly && !watchDecisionInput ? readWatchTools() : null;
-	const roleInputs = readRoleInputs();
-	if (watchReadOnly) assertWatchCompatible(cfg, { roles: roleInputs });
 
 	// FIRST, before the prompt is read and before any auth or model lookup: a staged package root
 	// that did not mount is a pre-spend config failure (exit 2, not retried) and this is the only
@@ -195,6 +189,13 @@ async function main() {
 	// UNWRITABLE stays advisory (mountAdvisories below): "a read-only review of a folder the job user cannot write
 	// is a legitimate job", so only a workspace the job cannot even read is refused here.
 	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);
+	// Diagnose the shared mount boundary before inspecting optional watch or role files.
+	const watchReadOnly = readWatchMode();
+	const watchDecisionInput = readWatchDecision();
+	if (watchDecisionInput && (!watchReadOnly || cfg.maxCostMicros === null)) throw configError("watch decisions require a read-only marker and a cost cap", "watch-config-invalid");
+	const watchToolsConfig = watchReadOnly && !watchDecisionInput ? readWatchTools() : null;
+	const roleInputs = readRoleInputs();
+	if (watchReadOnly) assertWatchCompatible(cfg, { roles: roleInputs });
 	// Issue #704 part 3: a project secret bundle's plain variables on a gateway venue, from the job's own directory into
 	// this process's environment (pi's), before any runtime or request exists. Same moment, same exit code: a flag
 	// without a usable file refuses before spend rather than running the job without a variable it was given.
