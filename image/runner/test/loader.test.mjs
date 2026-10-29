@@ -1440,13 +1440,14 @@ test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in
 		assert.ok(!loaderSrc.includes(name), `loader.mjs names ${name}`);
 	}
 	assert.ok(!/builtInExtensions|\bbuiltin:\s*true\s*[,}]/.test(runJob + loaderSrc + mcpSrc), "a factory is marked built-in");
-	// Four sources only: the job's MCP document, the tool a job armed with run.awaitInput may end on (issue #625), the
-	// tool a job armed with run.progress reports with (issue #644), and the inbox of a job armed with run.steer (issue #646).
-	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\), \.\.\.\(requestApproval\?\.factories \?\? \[\]\), \.\.\.\(reportProgress\?\.factories \?\? \[\]\), \.\.\.\(inbox \? \[inbox\.factory\] : \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document, run.awaitInput, run.gates, run.progress and run.steer");
+	// Only the reviewed inline factories: MCP, await-input, approval, progress, role subagents and steer.
+	// Role inputs are read from the immutable worker snapshot; ordinary jobs receive no new factory.
+	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\), \.\.\.\(requestApproval\?\.factories \?\? \[\]\), \.\.\.\(reportProgress\?\.factories \?\? \[\]\), \.\.\.\(roleSubagents\?\.factories \?\? \[\]\), \.\.\.\(inbox \? \[inbox\.factory\] : \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document, run.awaitInput, run.gates, run.progress, immutable role inputs and run.steer");
 	assert.equal(runJob.split("extensionFactories").length - 1, 3, "extensionFactories is built once and passed once");
 	assert.match(runJob, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\) : null;/);
 	assert.match(runJob, /const reportProgress = cfg\.reportProgress \? createReportProgress\(\) : null;/);
+	assert.match(runJob, /const roleSubagents = roleInputs \? createRoleSubagents\(roleInputs\) : null;/);
 	assert.match(runJob, /const inbox = cfg\.steer \? createInbox\(\{ [^\n]*\}\) : null;/);
 	assert.match(runJob, /const jobMcp = mcpDocument \? createJobMcp\(/);
 	assert.match(loaderSrc, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);

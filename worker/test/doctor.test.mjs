@@ -9437,6 +9437,17 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 	const rootfulEndpoint = { local: true, endpoint: "unix:///run/podman/podman.sock" };
 	const rootfulDaemon = { answered: true, facts: { shape: "podman", podman: true, rootless: false, remoteSocketPath: "unix:///run/podman/podman.sock" } };
 	const probes = {
+		// #717: exercise every branch of proposal config so the computed provider-key reads and the
+		// overlay/endpoint path reads are covered even when the feature is normally dormant.
+		doctorModelProposalChecks: async (e) => {
+			const { doctorModelProposalChecks } = await import("../src/doctor-model-proposals.mjs");
+			const paths = new Proxy(e, { get: (target, key) => { const value = target[key]; return key === "PI_GLOBAL_PI_DIR" ? "/overlay" : value; } });
+			await doctorModelProposalChecks(paths, {
+				cwd: "/deployment", now: () => 0,
+				read: (path) => path.endsWith("model-proposals.json") ? JSON.stringify({ version: 1, lifecycleProviders: ["anthropic", "openai"], proxyUrl: "http://proxy:3128", routes: [{ model: "anthropic/old", alternative: "local/new" }] }) : path.endsWith("triggers.json") ? JSON.stringify({ triggers: [], modelRoles: { default: { editor: "anthropic/old" } } }) : path.endsWith("models.json") ? '{"providers":{}}' : "api.anthropic.com\napi.openai.com",
+				fetch: async () => [],
+			});
+		},
 		agentDirFrom: (e) => agentDirFrom(e),
 		logsDirPath: (e) => (cfg.logsDirPath(e, "/h"), cfg.logsDirPath(e, null)),
 		settingsFilePath: (e) => (cfg.settingsFilePath(e, "/h"), cfg.settingsFilePath(e, null)),
@@ -9493,6 +9504,7 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 	// And doctor hands them the RESOLVED environment (`env`, never this shell's), so they judge the service's chain.
 	assert.match(code, /const observed = observeHost\(\{ endpoint, daemon, fs, unit, env \}\);/);
 	assert.match(code, /const rootful = await observeRootfulConf\(\{ endpoint, daemon, fs: observationFs, readService: readPodmanService, env, unit \}\);/);
+	assert.match(code, /doctorModelProposalChecks\(env, \{ cwd, credentials: service\.extra\(\["ANTHROPIC_API_KEY", "OPENAI_API_KEY"\]\)\.env,/, "proposal credentials use the same by-name service resolution as provider checks");
 	// underOsTempDir reaches doctor as the `underTemp` seam rather than by name, and reads TMPDIR and TEMP.
 	const read = new Set();
 	cfg.underOsTempDir("/x", new Proxy({}, { get: (_, k) => (typeof k === "string" && read.add(k), undefined) }), { platform: "win32" });
@@ -12806,4 +12818,20 @@ test("doctor collection names Radius's protocol refusal under a cap without comp
 	assert.doesNotMatch(radius[0].fix, /maxTokensField/);
 	const uncapped = await collectChecks({ ...env, PI_MAX_COST_USD: "" }, secretsSeams());
 	assert.equal(uncapped.some((check) => /^Radius \(pi-messages\) has no verified local cost bound/.test(check.label)), false);
+});
+
+test("doctor collection resolves project roles before catalog and real deployment-cap checks (#717)", { skip: skipNoPi }, async () => {
+	const dir = tempDir("pi-doctor-roles-");
+	const triggers = join(dir, "triggers.json");
+	const projects = join(dir, "projects.json");
+	writeFileSync(triggers, JSON.stringify({ modelRoles: { default: { editor: "anthropic/old" }, shop: { editor: "openai/new" } }, triggers: [{ on: { type: "cron", id: "roles", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop", model: "role:editor", flow: "work", task: "work" } }] }));
+	writeFileSync(projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["/srv/shop"] }] }));
+	const seen = [];
+	const checks = await collectChecks({ PI_PROVIDER: "anthropic", PI_MODEL: "default", ANTHROPIC_API_KEY: "literal-test-key", PI_MAX_COST_USD: "0.01", PI_TRIGGERS_FILE: triggers, PI_PROJECTS_FILE: projects }, {
+		...secretsSeams(), modelCatalog: async () => ({ checkModelsKnown: (refs) => { seen.push(...refs); return { ok: true }; }, builtinChatModels: () => [], builtinModel: (_provider, id) => ({ id, api: "anthropic-messages", maxTokens: 1000, cost: { input: 0, output: 100, cacheRead: 0, cacheWrite: 0 } }) }),
+	});
+	assert.ok(seen.some((ref) => ref.provider === "openai" && ref.id === "new"), JSON.stringify({ seen, checks: checks.filter((check) => /role|triggers file|projects/.test(check.label)) }));
+	assert.equal(seen.some((ref) => ref.id.startsWith("role:")), false);
+	assert.ok(checks.some((check) => check.label.includes("openai/new") && /cap/.test(check.label)));
+	assert.equal(checks.some((check) => /reviewed model roles refuse/.test(check.label)), false);
 });

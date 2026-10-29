@@ -33,7 +33,11 @@ import { EXIT_OOM_KILLED } from "./run-history.mjs";
 // status comment lives (the prompt contract instructs it, including for "I cannot fix this"), and exit 2
 // by construction means the agent was cut off before that step.
 // EXPORTED only so a test can hold every RUNNER_POLICY_REASONS member to a row here (issue #437 review).
+export const MODEL_AGENTS_INVALID_COMMENT = "Refused: the base commit's agent definitions are invalid. Fix their frontmatter and retry. Not run.";
+
 export const TERMINAL_COMMENTS = {
+	"model-roles-invalid": "Stopped: the job image could not read its reviewed model roles and agent definitions. Rebuild the image and check its job inputs. Not retried.",
+	"model-roles-shadowed": "Stopped: another extension registered the reserved subagent tool, so reviewed model role resolution cannot be guaranteed. Remove the conflicting extension. Not retried.",
 	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
 	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",

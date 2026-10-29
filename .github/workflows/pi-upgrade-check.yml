@@ -697,6 +697,13 @@ jobs:
 
       - run: npm ci --no-audit --no-fund
 
+      - name: "RUNNER: model canaries cannot reach a forge (issue #717, zero spend)"
+        run: |
+          docker pull "$(node --input-type=module -e 'import {CANARY_PROXY_IMAGE} from "./worker/src/canary-runtime.mjs"; console.log(CANARY_PROXY_IMAGE)')"
+          node .github/scripts/canary-network-smoke.mjs "$IMAGE_REF"
+          docker pull valkey/valkey:8
+          node .github/scripts/canary-runtime-smoke.mjs "$IMAGE_REF"
+
       - name: "RUNNER: every job mount works for a worker that is not uid 1001 (issue #341)"
         run: |
           sudo useradd -m --uid 1234 --user-group pdjob

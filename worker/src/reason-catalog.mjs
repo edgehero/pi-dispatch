@@ -33,7 +33,7 @@
  */
 
 import {
-	APPROVAL_COMMENTS,	BUNDLE_COMMENTS,
+	MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS,	BUNDLE_COMMENTS,
 	MODEL_NOT_ALLOWED_COMMENTS,
 	FAILED_COMMENT_BY_REASON,
 	OPENSHELL_REFUSALS,
@@ -57,6 +57,12 @@ const REBUILD = "Rebuild the job image from a release that declares the feature,
  * table read is derived; a string literal is written here for one of the three reasons in the header.
  */
 const ROWS = [
+	["model-role-unknown", "Refused: the requested model role is not declared in the reviewed role map. Nothing was spent.", "Add or correct the role in triggers.json modelRoles, then run the trigger again."],
+	["model-role-provider-conflict", "Refused: the trigger's provider conflicts with its mapped role provider. Nothing was spent.", "Remove run.provider or make it agree with modelRoles."],
+	["model-agents-invalid", MODEL_AGENTS_INVALID_COMMENT, "Correct the base commit's .pi/agents frontmatter and run again."],
+	["model-roles-invalid", TERMINAL_COMMENTS["model-roles-invalid"], "Check the reviewed role map, its effective 16-model ceiling, and the job image inputs."],
+	["model-roles-shadowed", TERMINAL_COMMENTS["model-roles-shadowed"], "Remove the conflicting subagent extension or staged package and run again."],
+	["job-image-model-roles-unsupported", "Refused: the job image does not declare modelRoles support. Rebuild it before running role-mapped jobs. Not run.", REBUILD],
 	...Object.entries(APPROVAL_COMMENTS).map(([token, sentence]) => [token, sentence, "Check the current approval, its saved session, and the trigger declaration; reload before replying again."]),
 	// ── Stopped while running ───────────────────────────────────────────────────────────────────────────────────────
 	["worker-abort", TERMINAL_COMMENTS["worker-abort"], "Check the worker log for the 30-minute limit or a shutdown, then run the job again if its work is still wanted."],

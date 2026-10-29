@@ -129,6 +129,15 @@ test("a local job's workspace is the operator's own folder and is recorded verba
 	assert.equal(manifest.workspace, "/home/rob/project", "a path outside jobDir was never ours to move");
 });
 
+test("retention records only a validated host base commit for canary replay (#717)", () => {
+	for (const sha of ["a".repeat(40), "b".repeat(64), "bad", undefined]) {
+		const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+		const manifest = retainJobDir(prepared({ sha }), { sandboxDir: "/sbx", fs, now: () => 1_000 });
+		assert.equal(manifest.baseSha, typeof sha === "string" && [40, 64].includes(sha.length) ? sha : undefined);
+		assert.equal(JSON.parse(fs.files["/sbx/gh-1/manifest.json"]).baseSha, manifest.baseSha);
+	}
+});
+
 test("the per-job transcript copy is deleted BEFORE the rename, never carried along", () => {
 	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>", "/jobs/job-xyz/session/current.jsonl": "{}" } });
 	retainJobDir(prepared(), { sandboxDir: "/sbx", fs });

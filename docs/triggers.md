@@ -721,3 +721,7 @@ Read where a workflow's own state lives before you build on it. It differs betwe
 a cron job and a forge job. See [`docs/workflows.md`](workflows.md).
 
 Resumable forge flows may declare typed approval gates with `run.gates`, an optional `run.gateTimeout`, and a bounded `run.gateBudgetRaiseUsd` for budget raises. See [approval gates](approval-gates.md) for configuration, decision surfaces and enforcement limits.
+
+## Reviewed model roles
+
+Use `run.model: "role:editor"` with an operator-reviewed `modelRoles` block to move all jobs of a role with one edit. See [model-roles.md](model-roles.md) for deployment/project precedence, agent inheritance and policy checks, [model-proposals.md](model-proposals.md) for catalog and retirement notices, and [canary.md](canary.md) for capped replay comparisons before adopting a candidate.

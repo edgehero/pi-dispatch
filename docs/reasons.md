@@ -1291,3 +1291,39 @@ Check the current approval, its saved session, and the trigger declaration; relo
 Refused: approval gates need an image with authenticated runner exits (exitAuth). Rebuild the job image. Not run.
 
 Check the current approval, its saved session, and the trigger declaration; reload before replying again.
+
+### model-role-unknown
+
+Refused: the requested model role is not declared in the reviewed role map. Nothing was spent.
+
+What to do: Add or correct the role in triggers.json modelRoles, then run the trigger again.
+
+### model-role-provider-conflict
+
+Refused: the trigger's provider conflicts with its mapped role provider. Nothing was spent.
+
+What to do: Remove run.provider or make it agree with modelRoles.
+
+### model-agents-invalid
+
+Refused: the base commit's agent definitions are invalid. Fix their frontmatter and retry. Not run.
+
+What to do: Correct the base commit's .pi/agents frontmatter and run again.
+
+### model-roles-invalid
+
+Stopped: the job image could not read its reviewed model roles and agent definitions. Rebuild the image and check its job inputs. Not retried.
+
+What to do: Check the reviewed role map, its effective 16-model ceiling, and the job image inputs.
+
+### model-roles-shadowed
+
+Stopped: another extension registered the reserved subagent tool, so reviewed model role resolution cannot be guaranteed. Remove the conflicting extension. Not retried.
+
+What to do: Remove the conflicting subagent extension or staged package and run again.
+
+### job-image-model-roles-unsupported
+
+Refused: the job image does not declare modelRoles support. Rebuild it before running role-mapped jobs. Not run.
+
+What to do: Rebuild the job image from a release that declares the feature, or set the trigger's `run.image` to one that does.

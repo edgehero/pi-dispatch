@@ -1,3 +1,4 @@
+import { modelRolesTelemetryOf } from "@edgehero/pi-dispatch/run-history";
 /**
  * The run page's panels (the outcome banner, progress, inbox, chat and the record's panels), split out of
  * `../panels.mjs` (issue #737), which re-exports what this module exports. The rules every panel keeps (one pure,
@@ -675,6 +676,8 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Project", cell(r.project)],
 
     ["Provider and model", [r.provider, r.model].filter(Boolean).join(" / ") || "-"],
+    ["Model role", typeof r.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(r.modelRole) ? r.modelRole : null],
+    ["Agent refusals", modelRolesTelemetryOf(r.modelRoles)?.refusals.length || null],
     ["Model choice", MODEL_WHY.includes(r.modelWhy) ? r.modelWhy : null],
     ["Provider failure", providerFailureOf(r.providerFailure)?.kind],
     ["Provider reset", providerFailureOf(r.providerFailure)?.resetAt !== undefined ? timeHtml(r.providerFailure.resetAt) : null],

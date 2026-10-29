@@ -1,0 +1,5 @@
+{
+  "providers": ["anthropic", "openai"],
+  "capsUsd": [1, 5],
+  "outputTokens": 4096
+}

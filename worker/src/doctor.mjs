@@ -62,11 +62,12 @@ import { randomBytes } from "node:crypto";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
-import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectsFingerprint } from "./projects.mjs";
+import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
+import { resolveModelRoles } from "./model-roles.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
 import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, endpointsAt, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
@@ -115,6 +116,7 @@ import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
 import { parseTriggersDocument } from "./triggers.mjs";
 import { secretBundleChecks } from "./doctor-bundles.mjs";
+import { doctorModelProposalChecks } from "./doctor-model-proposals.mjs";
 
 /**
  * How long `doctor --secrets` waits for one bundle resolver (issue #704): doctor's own 30 s capture bound, not the
@@ -235,6 +237,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// can drive the not-installed arm and a disagreement without editing pi. Undefined means the defaults.
 		modelCatalog,
 		piModelLoader,
+		modelProposals,
 		dollarKeysExist,
 		// Issue #504 part B: the applied split's envelope digest (`alloc:plan`), read once. Undefined means the default.
 		readAppliedSplit,
@@ -428,7 +431,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -1778,7 +1781,8 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const { modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const modelRoleProjects = readProjectFacts(env, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(env, fileExists);
 	section("triggers");
@@ -3318,7 +3322,7 @@ export async function collectChecks(shellVars, seams) {
 				// A model a capped job may use is named by the cost-cap line below (`costCapFitChecks`), which runs on the
 				// same catalog seam, so this line names only the rest: one line per model.
 				const capEndpoints = (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: keylessIo })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform, valkeyUrl: keylessValkey });
-				const capped = usageCatalog ? cappedModelNames(env, { runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists) }) : new Set();
+				const capped = usageCatalog ? cappedModelNames(env, { runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), modelRoles: triggerModelRoles, projects: modelRoleProjects }) : new Set();
 				const uncapped = ignoredOutputCapModels({ models: overlayModels, endpoints: capEndpoints, builtinModel: usageCatalog?.builtinModel, builtinChatModels: usageCatalog?.builtinChatModels }).filter((m) => !capped.has(`${m.provider}/${m.modelId}`));
 				if (uncapped.length > 0) {
 					const SHOWN = 5;
@@ -3646,6 +3650,10 @@ export async function collectChecks(shellVars, seams) {
 	// pi-ai does not load: the provider key line below already fails on that. A triggers file that did not load
 	// contributes no trigger (its own line says so), and the deployment's default is still judged for its cap.
 	{
+		let roleEnvList = null;
+		try { roleEnvList = allowedModelsFrom(env); } catch {}
+		// Role refusals are determinate without pi; a missing catalog must not hide invalid reviewed policy.
+		checks.push(...resolveDoctorModelRuns({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList: roleEnvList, modelRoles: triggerModelRoles, projects: modelRoleProjects }).checks);
 		const catalog = await (seams.modelCatalog ?? defaultModelCatalog)();
 		if (catalog) {
 			const overlayDir = typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "" ? resolve(cwd, env.PI_GLOBAL_PI_DIR) : null;
@@ -3662,7 +3670,8 @@ export async function collectChecks(shellVars, seams) {
 			} catch {
 				// A malformed PI_ALLOWED_MODELS is its own line above (the worker refuses to boot on it).
 			}
-			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList });
+			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList, modelRoles: triggerModelRoles, projects: modelRoleProjects });
+
 			// The deployment default's catalog row prints PI_PROVIDER/PI_MODEL: not for a malformed one, whose shape row is
 			// the one line (issue #673, review round 1).
 			const envShapeBad = envShapeProblem.PI_MODEL !== null || envShapeProblem.PI_PROVIDER !== null;
@@ -3682,13 +3691,16 @@ export async function collectChecks(shellVars, seams) {
 	// Read only configured model identities. A keyspace scan would expose retired configuration and make a
 	// doctor run's cost depend on everything else sharing this Valkey.
 	{
-		const refs = cooldownModelRefs(parseError ? [] : modelRuns, deploymentSettingsOf(env, settingsFilePath(env, home), fileExists));
+		let envList = null;
+		try { envList = allowedModelsFrom(env); } catch {}
+		const refs = cooldownModelRefs(parseError ? [] : modelRuns, deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), { modelRoles: triggerModelRoles, projects: modelRoleProjects, envList });
 		if (refs.length > 0) {
 			const state = valkeyUsable ? await (seams.readModelCooldowns ?? defaultReadModelCooldowns)(valkeyTalkUrl, refs, { now: seams.wallClock ?? Date.now }) : null;
 			checks.push(...modelCooldownChecks(state));
 		}
 	}
 
+	checks.push(...await doctorModelProposalChecks(env, { cwd, credentials: service.extra(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]).env, now: seams.wallClock ?? Date.now, ...(seams.modelProposals ?? {}) }));
 	section("secrets");
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
@@ -5551,9 +5563,9 @@ export async function defaultReadAppliedSplit(url) {
 }
 
 /** The configured failover models, never arbitrary keyspace members. Non-failover jobs add no read. */
-export function cooldownModelRefs(runs, deployment) {
+export function cooldownModelRefs(runs, deployment, { modelRoles = {}, projects = [], envList = null } = {}) {
 	const refs = new Set();
-	for (const run of runs) {
+	for (const run of resolveDoctorModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
 		if (!Array.isArray(run.fallbackModels) || run.fallbackModels.length === 0) continue;
 		for (const ref of [`${run.provider ?? deployment.provider}/${run.model ?? deployment.model}`, ...run.fallbackModels]) {
 			if (splitModelEntry(ref)) refs.add(ref);
@@ -5896,6 +5908,34 @@ export function boundModelOf({ provider, id }, { builtinModel, overlay = null })
 	return builtin;
 }
 
+/** The same role resolver as pickup, expanded over every project a broad forge trigger can reach. */
+export function resolveDoctorModelRuns({ runs = [], deployment, envList = null, modelRoles = {}, projects = [], resolveFolder = realpathSync }) {
+	const resolved = [];
+	const checks = [];
+	for (const run of runs) {
+		if (Object.keys(modelRoles).length === 0 && !run.model?.startsWith("role:")) { resolved.push(run); continue; }
+		const list = run.models ?? envList;
+		const job = { ...run, provider: run.provider ?? deployment.provider, model: run.model ?? deployment.model, ...(list ? { models: list } : {}) };
+		// Forge events without a fully qualified repository can reach any matching project. Azure
+		// run.repository alone is only a repository name, not enough to infer a project-qualified scope.
+		if (job.kind === "local" && typeof job.folder === "string") {
+			try { job.folder = resolveFolder(job.folder); } catch { /* The folder diagnostic names an unreadable workspace. */ }
+		}
+		const fixed = run.kind === "local" || typeof run.repo === "string";
+		const possible = fixed ? [projectOf(job, projects)] : [null, ...projects.filter((project) => project.members?.some((member) => typeof member === "string" && member.startsWith(`${run.kind}:`))).map((project) => project.id)];
+		for (const project of new Set(possible)) {
+			const label = project === null ? run.label : `${run.label} (project ${project})`;
+			try {
+				const selected = resolveModelRoles(job, modelRoles, project, { authoredProvider: run.provider });
+				resolved.push({ ...selected, label });
+			} catch (error) {
+				checks.push({ ok: false, warn: true, label: `${label}: reviewed model roles refuse this job (${error.modelSelectionReason ?? "model-roles-invalid"})`, fix: "review triggers.json modelRoles and this trigger's provider/model/allowed list; project roles override defaults" });
+			}
+		}
+	}
+	return { runs: resolved, checks };
+}
+
 /**
  * Who runs on which models under which cap (issues #501 and #502), as the worker resolves a job: the deployment's own
  * default, then every trigger. `deployment` is `{ provider, model, maxCostUsd }` (overlay over env,
@@ -5905,7 +5945,7 @@ export function boundModelOf({ provider, id }, { builtinModel, overlay = null })
  * trigger's and the deployment's, `effectiveCostCapMicros`) or null, and `named` says the trigger names a provider, a
  * model or a list of its own.
  */
-export function modelSubjects({ runs = [], deployment, envList = null }) {
+export function modelSubjects({ runs = [], deployment, envList = null, modelRoles = {}, projects = [] }) {
 	const listOf = (list) => (Array.isArray(list) ? list.map(splitModelEntry).filter((ref) => ref !== null).map((ref) => ({ provider: ref.provider, id: ref.model })) : []);
 	const capOf = (triggerValue) => {
 		try {
@@ -5915,7 +5955,7 @@ export function modelSubjects({ runs = [], deployment, envList = null }) {
 		}
 	};
 	const subjects = [{ label: "the deployment default", main: { provider: deployment.provider, id: deployment.model }, list: listOf(envList), cap: capOf(undefined), secretNames: [], named: false, deployment: true }];
-	for (const run of runs) {
+	for (const run of resolveDoctorModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
 		subjects.push({
 			label: run.label,
 			main: { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model },
@@ -5933,7 +5973,7 @@ export function modelSubjects({ runs = [], deployment, envList = null }) {
  * `modelSubjects` resolves them), for the overlay's output-cap line to leave to `costCapFitChecks` (issue #507). Empty
  * when the settings cannot be read.
  */
-export function cappedModelNames(env, { runs, deployment }) {
+export function cappedModelNames(env, { runs, deployment, modelRoles = {}, projects = [] }) {
 	let envList = null;
 	try {
 		envList = allowedModelsFrom(env);
@@ -5941,7 +5981,7 @@ export function cappedModelNames(env, { runs, deployment }) {
 		// A malformed PI_ALLOWED_MODELS is its own line.
 	}
 	const names = new Set();
-	for (const s of modelSubjects({ runs, deployment, envList })) {
+	for (const s of modelSubjects({ runs, deployment, envList, modelRoles, projects })) {
 		if (s.cap === null || s.cap === undefined) continue;
 		for (const ref of [s.main, ...s.list]) names.add(`${ref.provider}/${ref.id}`);
 	}
@@ -6246,7 +6286,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
+	const none = { modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -6258,7 +6298,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		if (!statSync(path).isFile()) return { ...none, parseError: `triggers file is not a regular file: ${path}`, path };
 		const text = readFileSync(path, "utf8");
 		// The document parser, so the file's `secretBundles` (issue #704) is judged by the loaders' one rule too.
-		const { triggers, secretBundles } = parseTriggersDocument(text, path);
+		const { triggers, secretBundles, modelRoles } = parseTriggersDocument(text, path);
 		// The one-shot facts are counted from the RAW entries, not the parsed records, because the
 		// validator collapses a disarmed entry to a sentinel that carries neither `once` nor
 		// `disarmed` -- exactly so nothing can match it -- which also erases it from every parsed
@@ -6280,6 +6320,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
 		return {
 			secretBundles,
+			modelRoles,
 			onceArmed: rawEntries.filter((t) => t?.on?.once === true && t.on.disarmed === undefined).length,
 			onceSpent: rawEntries.filter((t) => t?.on?.disarmed !== undefined).length,
 			requiring: triggers.filter((t) => t.run.packages === true).length,
@@ -6379,6 +6420,9 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 			// a model the worker does not know is refused wherever the job runs.
 			modelRuns: triggers.map((t, index) => ({
 				label: triggerLabel(t, index),
+				kind: t.run.kind,
+				folder: t.run.folder,
+				repository: t.run.repository,
 				provider: typeof t.run.provider === "string" ? t.run.provider : undefined,
 				model: typeof t.run.model === "string" ? t.run.model : undefined,
 				models: Array.isArray(t.run.models) ? t.run.models : undefined,

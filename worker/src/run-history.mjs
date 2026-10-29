@@ -7,6 +7,8 @@ import { basename, join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
 import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
+import { modelListProblem } from "./model-ref.mjs";
+import { MODEL_ROLE_RE } from "./model-roles.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { HOST_CPUS_MAX, HOST_MEMORY_MAX_MIB, HOST_SLOTS_MAX, recordedJobSize } from "./job-size.mjs";
 import { waitArmed } from "./wait-for.mjs";
@@ -16,6 +18,12 @@ import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
 import { recordReasonOf } from "./record-reason.mjs";
 
 export { EARLIER_MAX, recordedEarlier };
+
+/** Host-authored replay lineage only, never a path or the original task text. */
+export function recordedCanary(value) {
+	if (!value || typeof value !== "object" || typeof value.sourceJobId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(value.sourceJobId) || !MODEL_ROLE_RE.test(value.role ?? "") || value.role === "inherit" || modelListProblem([value.candidate]) !== null) return null;
+	return { sourceJobId: value.sourceJobId, role: value.role, candidate: value.candidate };
+}
 
 /**
  * Durable per-run history.
@@ -195,7 +203,7 @@ export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"
  * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
  */
 export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -259,6 +267,21 @@ export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap
  * only beside a `cost-cap` reason, where it becomes the record's `why`: the worst a forged line can do is name the
  * wrong rule of the three.
  */
+/** Bounded refusal diagnostics: hashes and closed reasons only, never agent-authored names. */
+export const MODEL_ROLE_REFUSAL_REASONS = Object.freeze(["unknown-role", "model-not-allowed", "unknown-agent", "invalid-arguments", "aborted"]);
+export function modelRolesTelemetryOf(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.refusals) || value.refusals.length > 8) return null;
+	const refusals = [];
+	for (const row of value.refusals) {
+		if (row === null || typeof row !== "object" || typeof row.agentHash !== "string" || !/^[a-f0-9]{64}$/.test(row.agentHash) || !MODEL_ROLE_REFUSAL_REASONS.includes(row.reason)) return null;
+		refusals.push({ agentHash: row.agentHash, reason: row.reason });
+	}
+	return { refusals };
+}
+export function parseExitModelRoles(text) {
+	return modelRolesTelemetryOf(decisiveExitLine(text)?.modelRoles);
+}
+
 export function parseExitProviderFailure(text) {
 	const parsed = decisiveExitLine(text);
 	return parsed?.code === 1 ? providerFailureOf(parsed.providerFailure) : null;
@@ -980,8 +1003,11 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		usage: source.usage ?? null,
 		provider: source.provider ?? null,
 		model: source.model ?? null,
+		...(typeof source.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(source.modelRole) ? { modelRole: source.modelRole } : {}),
+		...(recordedCanary(data.canary) ? { canary: recordedCanary(data.canary) } : {}),
 		...(MODEL_WHY.includes(source.modelWhy) ? { modelWhy: source.modelWhy } : {}),
 		...(providerFailureOf(source.providerFailure) ? { providerFailure: providerFailureOf(source.providerFailure) } : {}),
+		...(modelRolesTelemetryOf(source.modelRoles) ? { modelRoles: modelRolesTelemetryOf(source.modelRoles) } : {}),
 		budgetReserved: source.budgetReserved ?? null,
 		// The ATTEMPT NUMBER, 1-based: the first run of a job is 1, its retry 2 (ledger item, issue #464 round). Every
 		// record is written while the job is still processing, where BullMQ's `attemptsMade` counts the attempts FINISHED
@@ -1474,6 +1500,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const approval = parseExitApproval(exitText);
 			const exitLineCode = parseExitCode(exitText);
 			const exitWhy = parseExitWhy(exitText);
+			const modelRoles = keyed && exitAuth === "verified" ? parseExitModelRoles(exitText) : null;
 			const providerFailure = keyed && exitAuth === "verified" ? parseExitProviderFailure(exitText) : null;
 			const toolsStarted = keyed && exitAuth === "verified" ? parseExitToolsStarted(exitText) : null;
 			const replaySafe = keyed && exitAuth === "verified" ? parseExitReplaySafe(exitText) : null;
@@ -1515,7 +1542,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

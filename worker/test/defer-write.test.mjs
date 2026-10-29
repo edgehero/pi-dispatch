@@ -304,7 +304,7 @@ test("BY SHAPE: no module in worker/src moves a job to the delayed set except th
 test("BY SHAPE: every reason in the table is written by a site, and every site writes a reason from the table", () => {
 	const index = strip(readFileSync(join(SRC, "index.mjs"), "utf8"));
 	const sites = [...index.matchAll(/\bawait deferTo\(job, token, [^\n]*?, ("[^"]*"|why|selectionWait\.wait), /g)].map((m) => m[1]);
-	assert.equal(sites.length, 19, "19 deferTo calls, including scope and model-selection forwarding; a new deferral must be counted here");
+	assert.equal(sites.length, 20, "20 deferTo calls, including canary exclusion, scope and model-selection forwarding; a new deferral must be counted here");
 	assert.deepEqual(sites.filter((s) => !s.startsWith("\"")).sort(), ["selectionWait.wait", "why"], "only scope and model selection pass through a closed upstream reason");
 	const literal = new Set(sites.filter((s) => s.startsWith("\"")).map((s) => JSON.parse(s)));
 	// The selector returns only these three transient wait reasons. Include their actual assignments, not a

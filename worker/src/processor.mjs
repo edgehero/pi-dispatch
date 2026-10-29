@@ -1,3 +1,4 @@
+import { stageModelRoleInputs } from "./agent-snapshot.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { validateFork, forkBranch, forkArchiveFact, FORK_THINKING_LEVELS } from "./fork-job.mjs";
 import { sessionKeyFor } from "./session-key.mjs";
@@ -34,7 +35,7 @@ import { answerTrailComment, consoleAnswerBy } from "./console-answer.mjs";
 import { forgeDeliveryJobId } from "./job-id.mjs";
 // The forge-comment tables (issue #710): every fixed sentence this file posts, in one leaf the reason catalog can import
 // without the job path. Re-exported below under the names they always had here.
-import { APPROVAL_COMMENTS, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
+import { MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -1958,6 +1959,12 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			if (!staged?.key) throw new InfraRetry("the fork transcript could not be staged", { reason: "container-never-started", budgetReserved: false });
 			prepared = { ...prepared, session: staged };
 			await comment(job, `Fork of run \`${job.fork.fromJob}\`, ${job.fork.position} entry \`${job.fork.fromEntry}\`, using \`${job.provider}/${job.model}\` on \`${forkBranch(job)}\`. The original attempt is preserved.`);
+		}
+		try { await (deps.stageModelRoleInputs ?? stageModelRoleInputs)(job, prepared); } catch (error) {
+			if (!error?.piDispatchConfig) throw new InfraRetry("the trusted agent snapshot could not be staged", { reason: "container-never-started", provider: job.provider, model: job.model, budgetReserved: false });
+			log("refused_model_agents_invalid", {});
+			await comment(job, MODEL_AGENTS_INVALID_COMMENT);
+			return { outcome: "policy", reason: "model-agents-invalid", exitCode: null, turns: null, tokens: null, provider: job.provider, model: job.model, budgetReserved: false };
 		}
 		// Daily TOKEN cap (issue #25): the deliberate check-AFTER control. Token cost is only known
 		// post-run, so this cannot check-and-increment before the spend the way the job-count cap does
