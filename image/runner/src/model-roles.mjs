@@ -26,7 +26,7 @@ const bounded = (value, max) => typeof value === "string" && value.length <= max
 
 export function validateRoleInputs(document, agents) {
 	if (!object(document) || document.version !== 1 || !object(document.roles) || !pair(document.parent) || !Array.isArray(document.models) || document.models.length < 1 || document.models.length > 16 || !document.models.every(pair)) throw configError("the model role input is invalid", "model-roles-invalid");
-	if (Object.keys(document.roles).length > 16 || !Object.entries(document.roles).every(([name, model]) => role(name) && !["inherit", "constructor", "prototype"].includes(name) && pair(model))) throw configError("the model role map is invalid", "model-roles-invalid");
+	if (Object.keys(document.roles).length > 32 || !Object.entries(document.roles).every(([name, model]) => role(name) && !["inherit", "constructor", "prototype"].includes(name) && pair(model))) throw configError("the model role map is invalid", "model-roles-invalid");
 	if (!object(agents) || agents.version !== 1 || !Array.isArray(agents.agents) || agents.agents.length > 128) throw configError("the agent snapshot is invalid", "model-roles-invalid");
 	const names = new Set();
 	for (const agent of agents.agents) {

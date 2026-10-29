@@ -59,3 +59,5 @@ the remaining ones from starting. It never pauses or resumes the operator's queu
 The flow must be present in the retained base repository's `.pi/skills/`. An injected or overlay-only
 flow is refused before the first paid replay. Other roles retain their original snapshot mapping; the
 candidate replaces only the role whose main-session runs were selected.
+
+Upgrade every queue consumer before running a canary, and keep legacy worker builds stopped throughout the experiment. The exclusive admission lease is honored by this implementation; older workers do not check it. The command takes the lease before checking all discovered active lists, and ordinary upgraded workers defer before paid work. It stops candidate runs on lost lease ownership. The usual lease residual remains: a control process frozen beyond its lease lifetime cannot stop its container until it resumes.

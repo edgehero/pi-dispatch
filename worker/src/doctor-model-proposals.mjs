@@ -8,7 +8,9 @@ import { endpointsForModel, loadModelEndpoints } from "./model-endpoints.mjs";
 import { lifecycleModels, roleProposalChecks } from "./model-proposals.mjs";
 import { getPricedModel } from "./pricing.mjs";
 
-const APIS = Object.freeze({ anthropic: "https://api.anthropic.com/v1/models?limit=1000", openai: "https://api.openai.com/v1/models" });
+// The default catalog omits retired models, which would make a role's warning vanish on retirement.
+// Match the provider SDK's bracket-array query encoding (internal/utils/query.ts).
+const APIS = Object.freeze({ anthropic: "https://api.anthropic.com/v1/models?limit=1000&lifecycle%5B%5D=active&lifecycle%5B%5D=deprecated&lifecycle%5B%5D=retired", openai: "https://api.openai.com/v1/models" });
 const KEYS = Object.freeze({ anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" });
 const safeRead = (path) => {
 	const stat = lstatSync(path);

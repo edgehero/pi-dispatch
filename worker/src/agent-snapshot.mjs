@@ -40,6 +40,10 @@ export async function snapshotAgents({ workspace, sha }, { git = gitRead } = {})
 export async function stageModelRoleInputs(job, prepared, options = {}) {
 	if (!job.modelRoles) return;
 	const agents = await snapshotAgents(prepared, options);
-	writeFileSync(join(prepared.jobDir, "agents.json"), JSON.stringify(agents), { mode: 0o444, flag: "wx" });
+	// JSON escaping can multiply a valid Markdown body's size. Refuse here, before reserves,
+	// rather than let the runner reject its otherwise valid immutable input after container startup.
+	const encodedAgents = JSON.stringify(agents);
+	if (Buffer.byteLength(encodedAgents, "utf8") > 16 * 1024 * 1024) throw Object.assign(new Error("the agent snapshot exceeds 16 MiB"), { piDispatchConfig: true });
+	writeFileSync(join(prepared.jobDir, "agents.json"), encodedAgents, { mode: 0o444, flag: "wx" });
 	writeFileSync(join(prepared.jobDir, "model-roles.json"), JSON.stringify({ version: 1, roles: job.modelRoles, parent: `${job.provider}/${job.model}`, models: job.models }), { mode: 0o444, flag: "wx" });
 }

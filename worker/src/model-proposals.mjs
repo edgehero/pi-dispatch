@@ -50,7 +50,7 @@ export function lifecycleModels(provider, response) {
 		const date = provider === "anthropic" ? row.retires_at : row.shutdown_date;
 		if (date != null && (typeof date !== "string" || !Number.isFinite(Date.parse(date)))) throw new Error("invalid retirement date");
 		if (provider === "anthropic" && !["active", "deprecated", "retired"].includes(row.lifecycle)) throw new Error("invalid lifecycle stage");
-		return { id: row.id, retiresAt: date ?? null, deprecated: provider === "anthropic" ? row.lifecycle !== "active" : date != null, line: typeof row.line === "string" ? row.line : null, createdAt: row.created_at ?? null };
+		return { id: row.id, retiresAt: date ?? null, deprecated: provider === "anthropic" ? row.lifecycle !== "active" : date != null, retired: provider === "anthropic" && row.lifecycle === "retired", line: typeof row.line === "string" ? row.line : null, createdAt: row.created_at ?? null };
 	});
 }
 
@@ -64,7 +64,7 @@ export function roleProposalChecks({ roles, catalogs = {}, replacements = {}, no
 		const model = rows.find((m) => m.id === id);
 		if (!model) continue;
 		const retirement = model.retiresAt === null ? null : Date.parse(model.retiresAt);
-		if (model.deprecated || retirement !== null && retirement - now <= noticeDays * 86400000) checks.push({ ok: false, warn: true, label: `Model role ${scope}/${role}: ${ref} is deprecated${model.retiresAt ? `; retirement ${model.retiresAt}` : ""}`, fix: replacements[ref] ? `review provider replacement ${replacements[ref]} with a capped canary, then edit modelRoles` : "review the provider's deprecation notice and run a capped canary before editing modelRoles" });
+		if (model.deprecated || retirement !== null && retirement - now <= noticeDays * 86400000) checks.push({ ok: false, warn: true, label: `Model role ${scope}/${role}: ${ref} is ${model.retired ? "retired" : "deprecated"}${model.retiresAt ? `; retirement ${model.retiresAt}` : ""}`, fix: replacements[ref] ? `review provider replacement ${replacements[ref]} with a capped canary, then edit modelRoles` : "review the provider's deprecation notice and run a capped canary before editing modelRoles" });
 		const siblings = model.line ? rows.filter((m) => m.line === model.line && !m.deprecated && Number.isFinite(Date.parse(m.createdAt)) && Date.parse(m.createdAt) > Date.parse(model.createdAt)) : [];
 		if (siblings.length) checks.push({ ok: true, label: `Model role ${scope}/${role}: newer provider-declared sibling ${siblings.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0].id}; review with a capped canary` });
 	}

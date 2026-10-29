@@ -30,7 +30,7 @@ deployment's existing forwarding or secret configuration; a role map does not gr
 
 Role names start with a lowercase letter and contain at most 32 lowercase letters, digits, underscores
 or dashes. `inherit`, `constructor` and `prototype` are reserved. There are at most 128 map rows,
-16 roles per row and 16 models in a job's expanded allowed list. A reference is `provider/model`, with
+16 roles per row, at most 32 merged aliases and 16 models in a job's expanded allowed list. A reference is `provider/model`, with
 each half following the normal model/provider identifier limits. Unknown role-object fields and
 ambiguous case duplicates refuse. No model-callable tool can write this policy. Unrelated console
 trigger edits preserve it.
@@ -116,3 +116,5 @@ agent-name SHA-256 hash and fixed reason. Run details show the role and refusal 
 
 Use [model proposals](model-proposals.md) and a capped canary to evaluate a candidate before editing
 the reviewed role map. Proposals never adopt a model or change endpoints automatically.
+
+The complete JSON-encoded agent snapshot is bounded at 16 MiB before reserves, including the expansion caused by escaped prompt characters.

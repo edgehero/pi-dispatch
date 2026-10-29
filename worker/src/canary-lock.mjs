@@ -22,8 +22,10 @@ export async function acquireCanaryLease(redis, { token = randomUUID() } = {}) {
 /** Discover host queues as well as the shared queue, then ask BullMQ's public active-count API. */
 export async function canaryQueueNames(redis) {
 	const names = new Set(["pi-jobs"]);
-	let cursor = "0", scanned = 0;
+	let cursor = "0", scanned = 0, pages = 0;
 	do {
+		// MATCH limits returned keys, not the work SCAN does across a shared database.
+		if (++pages > 512) throw new Error("canary queue discovery exceeded its bound");
 		const next = await redis.scan(cursor, "MATCH", "bull:pi-jobs*:meta", "COUNT", 100);
 		cursor = next[0];
 		for (const key of next[1]) {

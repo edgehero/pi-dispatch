@@ -149,3 +149,10 @@ test("local runtime restores only base objects, passes only provider credentials
 	} finally { await runtime.close(); }
 	assert.deepEqual(readdirSync(jobs), []);
 });
+
+
+test("queue discovery bounds empty SCAN pages as well as matching metadata", async () => {
+	let pages = 0;
+	await assert.rejects(canaryQueueNames({ scan: async () => { pages++; return ["1", []]; } }), /exceeded its bound/);
+	assert.equal(pages, 512);
+});

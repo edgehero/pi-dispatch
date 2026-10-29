@@ -78,6 +78,21 @@ test("lifecycle fetch uses fixed API, no redirects, bounded body and refuses inc
 	await assert.rejects(fetchLifecycle("openai", { key: "fake", fetch: async () => new Response("x".repeat(1024 * 1024 + 1)) }), /too large/);
 });
 
+test("Claude requests every lifecycle stage and a retired mapped model retains its warning", async () => {
+	const rows = await fetchLifecycle("anthropic", { key: "fake", proxyUrl: "http://proxy:3128", fetch: async (url) => {
+		const request = new URL(url);
+		assert.equal(request.origin, "https://api.anthropic.com");
+		assert.deepEqual(request.searchParams.getAll("lifecycle[]"), ["active", "deprecated", "retired"]);
+		assert.equal(request.searchParams.get("limit"), "1000");
+		return new Response(JSON.stringify({ data: [{ id: "retired", lifecycle: "retired", retires_at: "2025-12-01T00:00:00Z" }], has_more: false }));
+	} });
+	const checks = roleProposalChecks({ roles: { default: { editor: "anthropic/retired" } }, catalogs: { anthropic: rows }, now: now() });
+	assert.equal(checks.length, 1);
+	assert.equal(checks[0].warn, true);
+	assert.match(checks[0].label, /anthropic\/retired/);
+	assert.match(checks[0].label, /is retired/);
+});
+
 test("doctor defaults to no network and fails open explicitly on unavailable opt-in lifecycle", async () => {
 	let fetched = 0;
 	const fetch = async () => { fetched++; throw new Error("secret must not print"); };
