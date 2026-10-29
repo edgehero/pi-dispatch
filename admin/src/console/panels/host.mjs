@@ -61,6 +61,8 @@ const card = (title, fn) => (v) =>
       }[title] ?? null,
     body: fn(hostOf(v), v),
   });
+const digestOrphanObservation = (job) =>
+  html`Orphaned hold observed${job.s ? html` at ${timeHtml(job.s)}` : " at an unpublished time"}; its origin is not known from the published digest`;
 const gone = html`<p class="note"> This host has no live registry row. Its last run records, queued jobs and retained doctor result can still be shown. </p>`;
 
 /** A published id can be a digest; that never becomes a guessed container name. */
@@ -155,7 +157,7 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
         html`${j.p ? ui.ptag(j.p) : "No project recorded"} ${runLink(j.id)}`,
         sizeText({ memMiB: j.m, cpuCenti: j.c }),
         j.at ? ageText(Math.max(0, v.now - j.at)) : "not recorded",
-        html`${ui.badge("attention", "Orphaned")}<span class="reason">${String(j.id).startsWith("container:") ? html`Found left from before the worker started${j.s ? html` at ${timeHtml(j.s)}` : "; observation time was not published"}; it still holds ${sizeText({ memMiB: j.m, cpuCenti: j.c })}.` : html`Cancelled${j.s ? html` at ${timeHtml(j.s)}` : ""}; its container's stop did not take, so it still holds ${sizeText({ memMiB: j.m, cpuCenti: j.c })}.`}</span>`,
+        html`${ui.badge("attention", "Orphaned")}<span class="reason">${String(j.id).startsWith("sha256:") ? html`${digestOrphanObservation(j)}; it still holds ${sizeText({ memMiB: j.m, cpuCenti: j.c })}.` : String(j.id).startsWith("container:") ? html`Found left from before the worker started${j.s ? html` at ${timeHtml(j.s)}` : "; observation time was not published"}; it still holds ${sizeText({ memMiB: j.m, cpuCenti: j.c })}.` : html`Cancelled${j.s ? html` at ${timeHtml(j.s)}` : ""}; its container's stop did not take, so it still holds ${sizeText({ memMiB: j.m, cpuCenti: j.c })}.`}</span>`,
         v.role === "operator"
           ? ui.btn({
               label: "Free the slot",
@@ -221,7 +223,7 @@ export const hostSandboxes = card("Sandboxes left on the host", (h, v) => {
   const sandboxesKnown = Array.isArray(h.sandboxes);
   return html`${orphans.map((j) => {
     const argv = orphanCommand(j);
-    return html`<div class="card card--tint tone-attention"> <h3>Orphaned hold ${j.id}</h3> <p> ${String(j.id).startsWith("container:") ? html`Found left from before the worker started${j.s ? html` at ${timeHtml(j.s)}` : "; observation time was not published"}` : html`Its stop did not take ${j.s ? html`at ${timeHtml(j.s)}` : "at an unpublished time"}`}; it still holds ${j.m ?? "unknown"} MiB and ${j.c === undefined || j.c === null ? "unknown" : Number(j.c) / 100} cores. </p> ${
+    return html`<div class="card card--tint tone-attention"> <h3>Orphaned hold ${j.id}</h3> <p> ${String(j.id).startsWith("sha256:") ? digestOrphanObservation(j) : String(j.id).startsWith("container:") ? html`Found left from before the worker started${j.s ? html` at ${timeHtml(j.s)}` : "; observation time was not published"}` : html`Its stop did not take ${j.s ? html`at ${timeHtml(j.s)}` : "at an unpublished time"}`}; it still holds ${j.m ?? "unknown"} MiB and ${j.c === undefined || j.c === null ? "unknown" : Number(j.c) / 100} cores. </p> ${
       argv
         ? command(v, argv)
         : html`<p> The venue was not published, so the console cannot name its container or runtime. Inspect the host's runtime and identify the orphan there. </p>`
