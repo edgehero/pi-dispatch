@@ -44,6 +44,9 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
                            no credentials  [--publish <port>[:<containerPort>]] [--pin]
   pi-dispatch sandbox --list
                            what is still re-openable, for how long, and what is running now
+  pi-dispatch canary --role <role> --model <provider/model> --flow <flow> --cap-usd <amount>
+                           replay up to three retained recent jobs in disposable workspaces with forge
+                           access blocked, under one experiment cap [--count 1..10] [--json]
 
   pi-dispatch worker       drain the queue (run this in another terminal, or as a service)
   pi-dispatch-receiver     webhook receiver for forge triggers, its own bin (see docs/github.md)
@@ -153,6 +156,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 	if (cmd === "sandbox") {
 		const { runSandbox } = await import("./sandbox-cli.mjs");
 		return runSandbox(argv.slice(1), { env });
+	}
+	if (cmd === "canary") {
+		const { runCanary } = await import("./canary-cli.mjs");
+		return runCanary(argv.slice(1), { env, write, deploymentEnv: cliDeploymentEnv });
 	}
 
 	if (cmd === "worker") {

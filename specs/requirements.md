@@ -741,6 +741,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
 
+- **Roles (#717)**: model-callable writes cannot set `modelRoles` under any nesting or near-miss spelling. Unrelated trigger edits preserve it. Run detail and the run API show validated role identity beside the resolved physical model and bounded agent-refusal counts.
+
 - **Failover configuration (#716)**: no model-callable tool may set, remove or disguise `run.fallbackModels`, with or without confirmation. Add/edit calls carrying that field or a near miss are refused before confirmation. An unrelated edit preserves an existing reviewed list. Operator reads display the list; the console's published Doctor warnings name configured models cooling down, their fixed cause and reset instant, with the observation's age.
 
 - **Statement**: The admin surface shall ship as a pi extension in `admin/`, loaded into the operator's
@@ -4479,6 +4481,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-COST-ANALYTICS
 
+- **Measured canaries (#717)**: a capped candidate replay is a new paid run with source lineage, not a counterfactual repricing. Its comparison links `/insights?whatif=<provider>/<model>&flow=<flow>` and distinguishes recorded candidate cost/outcome from estimates and unknown costs. Insights and role maps still change nothing.
+
 - **Statement**: The harness shall make recorded spend **analyzable**: the operator console's `/insights` page
   (`REQ-OPERATOR-CONSOLE-SCREENS` (e), the operator's one analytics view; it was the static insights export until
   2026-10-18), the `dispatch_costs` read tool (the machine-readable path), and the what-if form on that page (the
@@ -4871,6 +4875,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   file's contents.
 
 ## REQ-MODEL-POLICY
+
+- **Model roles (#717)**: reviewed deployment/project mappings follow `DES-MODEL-ROLES`. Mapped models and role fallbacks join a job's allowed ceiling before every existing gate; overflow and unknown roles refuse pre-spend. A shipped subagent resolves roles, `inherit` and listed literals before child spawn. Refusals identify the requested agent in tool output and by bounded hash/fixed reason in authenticated history. Changing a map affects the next delivery without editing its trigger; recovery never switches its checkpoint model. No tool sets the map, including nested or near-miss field spellings.
 
 - **Reviewed failover (#716)**: `run.fallbackModels` is an ordered, operator-file-only list of 1 to 16 unique `provider/model` entries. Each must be on the trigger's `run.models`, or the deployment's `PI_ALLOWED_MODELS` when the trigger has none. At pickup a failover job runs only one selected model: its executable list is a singleton beneath that reviewed ceiling, including child calls. This narrowing is opt-in; a job without fallbacks keeps the existing multi-model policy. Candidates pass existence, bounded API/prices, credentials, egress, endpoint slots, cooldown and model-window checks before paid work. A terminal authenticated provider failure may cool its model and permit the next queue attempt to choose another reviewed candidate only when no tool started and the runner proves replay eligibility. Missing evidence never authorizes switching. Context overflow requires a known larger context window; recovery keeps its checkpoint model. No mid-run switch occurs. See `DES-MODEL-FAILOVER` and `INT-MODEL-COOLDOWN-KEY`.
 
@@ -7588,10 +7594,18 @@ instead of drifting.
   `DES-APPROVAL-DECISION-IS-HOST-AUTHORITY`, `INT-APPROVAL-STATE-CONTRACT`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`, `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-TRIGGER-AUTHOR-GATE`.
 
+## REQ-MODEL-PROPOSALS-AND-CANARY
+
+- **Statement (#717)**: new models, retirement notices and cheaper declared equivalent routes are proposals only. A person reviews a role-map edit. The pi-bump draft reports added, removed and repriced chat models from integrity-verified exact npm artifacts, without importing candidate code. Public `.github/model-proposals.json` inputs label reference providers, caps and an empty-text/output envelope explicitly; they are not claims about an unknown operator deployment or the cost of an arbitrary first request. Missing evidence is named.
+- **Doctor**: opt-in deployment `model-proposals.json` enables bounded fixed-provider lifecycle reads through declared egress, never direct fallback. Dates use an injected clock. Missing, paginated/incomplete, stale or malformed evidence produces no unsupported current-model claim. New siblings use provider-declared lineage, never lexicographic ID guesses. Replacement hints and cross-provider equivalence are operator-reviewed declarations. A cheaper route must already resolve through declared endpoints and recorded comparable prices; it changes no host or credential. The ordinary recurring doctor run repeats retirement warnings.
+- **Canary**: `pi-dispatch canary --role <role> --model <provider/model> --flow <flow> --cap-usd <amount> [--count <1..10>]` selects recent completed role/flow runs whose replay inputs and base are retained. It refuses unavailable evidence before paid work. Fixed per-run cap shares sum to at most the experiment cap, with ordinary count, token and dollar admission/settlement. Every supported replay has a fresh disposable base workspace, provider-only credentials and enforced provider-only egress. No worker forge publication, push credential, mutating forge MCP, outbox child, shell/extension/child forge access or role-map write is available. Unsupported forges/venues, endpoints or policy configurations refuse explicitly rather than silently dropping their constraints. Outcome means recorded execution result, not an inferred quality score.
+- **Acceptance**: deterministic fixtures prove catalog additions/removals/repricing and bound labels; default doctor makes zero network requests; retirement and declared-route proposals never mutate configuration. Tests prove role resolution/map edits, inherited and refused subagents, actual budget reservations and side-effect denials. The comparison names original and candidate run ids, model, measured/unknown cost, execution outcome and what-if link. No actual paid provider calls occur in unit tests.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-29 (#717) | NEW `REQ-MODEL-PROPOSALS-AND-CANARY`; AMENDED `REQ-MODEL-POLICY`, `REQ-ADMIN-VIA-PI-EXTENSION` and `REQ-COST-ANALYTICS` for reviewed roles, immutable inputs, pre-spawn refusals, proposal-only reports and capped replay comparisons. Existing literal selection, #716 singleton enforcement and counterfactual estimates UNCHANGED, checked. |
 | 2026-10-28 | Issue #693: clarify `REQ-TOKEN-ACCOUNTING-AND-CAPS` summary output bounds and named Radius doctor diagnosis. `REQ-RESUMABLE-SESSION` persistence/authorization UNCHANGED, checked; the resumed tool-loadout decision is recorded in `DES-PER-TRIGGER-TOOL-EXCLUSIONS`. Pinned 1.4.0 artifact and offline real-SDK tests verify behavior. |
 | 2026-10-28 (#649) | Issue #649: added `REQ-APPROVAL-GATES`, typed durable park/decide/resume with bounded budget elevation, advisory external gates, expiry and all operator surfaces. `REQ-AWAIT-INPUT` and console actions extended by reference; ordinary parked-input behavior UNCHANGED, checked. |
 | 2026-10-28 (#648) | NEW `REQ-MANAGED-RUN-FORK`: managed issue-run forks use immutable source identity, exact retained transcript/workspace boundaries, independently derived branches and session lineage, current policy and normal admission. Console and terminal share paid preview/confirm/audit. Pinned pi tree semantics, model/thinking recording, named unavailable points/venues, bounded private retention and new zero-spend/worker/UI tests are specified. Existing host-local chat fork and recovery newest-two retention remain unchanged. Relevant constitutional constraints UNCHANGED, checked as recorded in `INT-MANAGED-FORK-CONTRACT`. Final cross-feature checks: `run.awaitInput` managed forks refuse before spend as `fork-await-input-unsupported`; recovery of an existing managed fork restores its checkpoint without re-forking, while recovery-attempt records are not new sources. `REQ-AWAIT-INPUT` and ordinary canonical reply behavior UNCHANGED, checked. |

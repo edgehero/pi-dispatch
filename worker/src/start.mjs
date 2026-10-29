@@ -1,3 +1,5 @@
+import { readBusy as canaryBusy } from "./canary-lock.mjs";
+import { makeReadModelRoles } from "./model-roles-file.mjs";
 import { checkFailoverCandidate, failoverEgressRequired } from "./model-failover.mjs";
 import { parseTriggers } from "./triggers.mjs";
 import { makeApprovalSessionCheck } from "./approval-session.mjs";
@@ -2645,6 +2647,7 @@ export async function startWorker(
 		name: config.workerName,
 		concurrency: bootConcurrency,
 		getSettings,
+		readModelRoles: makeReadModelRoles({ triggersPath: onceTriggersFile, log }),
 		redis,
 		recordRun,
 		settledRecord,
@@ -2848,6 +2851,7 @@ export async function startWorker(
 			// seam's sibling, with the same roots, timeout, forwarded names and host env.
 			// `bundlesDeclared`: whether this host declares any bundle profile, env or panel. On such a host a MISSING
 			// triggers file is a failure (last good read, else retry), never "no bundles" (triggers-file.mjs says why).
+			canaryBusy: () => canaryBusy(redis),
 			findSecretBundle: makeFindSecretBundle({
 				triggersPath: onceTriggersFile,
 				log,

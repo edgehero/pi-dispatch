@@ -1,3 +1,4 @@
+import { resolveModelRoles } from "./model-roles.mjs";
 import { zeroRatedFor } from "./reserve-estimate.mjs";
 import { isTransientOverlayRead } from "./model-catalog.mjs";
 import { checkFailoverCandidate, markModelCooldown, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
@@ -257,7 +258,7 @@ export function makeRunningJobs() {
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs() }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs() }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -323,13 +324,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let openshellRan = null;
 		let selectedEffective = null;
 		let providerFailureRan = null;
+		let modelRolesRan = null;
 		const carryLiveSkip = (target) => {
 			if (target === null || typeof target !== "object") return;
 			try {
 				if (liveRan !== null && target.liveSkipped === undefined) target.liveSkipped = liveRan;
 				if (openshellRan !== null && target.openshell === undefined) target.openshell = openshellRan;
+				if (selectedEffective?.modelRole) target.modelRole = selectedEffective.modelRole;
+				if (selectedEffective?.modelRole) { target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
 				if (selectedEffective?.modelWhy) { target.modelWhy = selectedEffective.modelWhy; target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
 				if (providerFailureRan) target.providerFailure = providerFailureRan;
+				if (modelRolesRan) target.modelRoles = modelRolesRan;
 			} catch {}
 		};
 		const settleSteer = async ({ result = null, error = null } = {}) => {
@@ -411,6 +416,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// ref (start.mjs). An id or null, never a name.
 		const pickupProjects = projects();
 		const project = projectOf(job.data, pickupProjects);
+		// BullMQ marks this pickup active before entering here. The canary takes its exclusive
+		// lease before proving all active lists empty, so either side of that race sees the other.
+		if (await deps?.canaryBusy?.()) await deferTo(job, token, nowMs + SCOPE_BUSY_RECHECK_MS, "canary", { project });
 		const until = pauseUntil(job.data, nowMs);
 		if (until && until > nowMs + 1000) await deferTo(job, token, until, "pause-window", { project });
 
@@ -1001,63 +1009,66 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let failoverSnapshot = null;
 		let chosenModel = null;
 		const modelAttemptId = `${job.queueName ?? QUEUE}:${job.id}`;
-		if ((job.data?.fallbackModels !== undefined || (job.data?.recover === true && job.data?.recoveryOf)) && !settingsThrew && !settings?.invalid) {
+		if (!settingsThrew && !settings?.invalid) {
 			try {
-				let effective = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null);
-				const endpoints = modelEndpoints?.() ?? [];
-				let models;
-				try { models = overlayModels(); }
-				catch (error) {
-					if (error?.piDispatchConfig || error?.overlayLink || error?.overlayNotAFile || (typeof error?.code === "string" && !isTransientOverlayRead(error.code))) {
-						error.modelSelectionRefused = true;
-					}
-					throw error;
-				}
-				failoverSnapshot = { endpoints, models, set: [] };
-				let recoveryModel = null;
-				if (effective.recover === true && effective.recoveryOf) {
-					if (!deps?.workspaceCheckpointer) { const error = new Error("the recovery store is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
-					const read = await deps.workspaceCheckpointer.readManifest(effective.recoveryOf);
-					if (read?.ok && read.manifest?.provider && read.manifest?.model) recoveryModel = `${read.manifest.provider}/${read.manifest.model}`;
-					// A missing checkpoint is refused by runJob's existing free gate, never replaced by a fresh model.
-					else { const error = new Error("the recovery model is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
-					const ref = splitModelEntry(recoveryModel);
-					if (!ref) { const error = new Error("the recovery model is invalid"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
-					effective = { ...effective, provider: ref.provider, model: ref.model };
-				}
-				const selection = effective.fallbackModels === undefined ? { job: effective } : await selectFailoverJob(effective, {
-					redis, id: modelAttemptId, retry: Number(job.attemptsMade) > 0 || Number(job.stalledCounter) > 0,
-					recoveryModel, retryNeverStarted: priorAttemptRecord?.reason === "container-never-started" && priorAttemptRecord?.budgetReserved === false && priorAttemptRecord?.exitCode === null, models, limits, now, log: deps?.log,
-					reservationFor: (candidate) => zeroRatedFor(candidate, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }).zeroRated ? 0 : candidate.maxCostMicros,
-					checkCandidate: (candidate) => deps?.checkFailoverCandidate ? deps.checkFailoverCandidate(candidate, { models, endpoints }) : checkFailoverCandidate(candidate, { models, endpoints, credential: deps?.checkProviderCredential, lookup: deps?.builtinModel }),
-					acquireEndpoints: async (candidate) => {
-						const set = [...new Map(endpointSetFor({ models, job: candidate, endpoints }).map((endpoint) => [endpoint.id, endpoint])).values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-						const held = [];
-						for (const endpoint of set) {
-							if (!endpointSlots.tryAcquire(endpoint.id, endpoint.slots)) {
-								await releaseAllHolds({ candidateEndpoints: held });
-								return false;
-							}
-							let fleet = null;
-							try { if (endpointLease && !isPerMachineHost(endpoint.host)) fleet = await endpointLease.acquire(job.id, { slots: endpoint.slots, keyArgs: [hash16(endpoint.id)] }); }
-							catch (error) { held.push({ id: endpoint.id, fleet: null }); await releaseAllHolds({ candidateEndpoints: held }); throw error; }
-							held.push({ id: endpoint.id, fleet });
-							if (endpointLease && !isPerMachineHost(endpoint.host) && !fleet) {
-								await releaseAllHolds({ candidateEndpoints: held });
-								return false;
-							}
-							if (fleet?.degraded) deps?.log?.("endpoint_lease_degraded", { jobId: job.id, endpoint: endpoint.id });
+				let effective = resolveModelRoles(effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields })), await readModelRoles(), project, { authoredProvider: job.data.provider });
+				selectedEffective = effective;
+				if (effective.fallbackModels !== undefined || (effective.recover === true && effective.recoveryOf)) {
+					const endpoints = modelEndpoints?.() ?? [];
+					let models;
+					try { models = overlayModels(); }
+					catch (error) {
+						if (error?.piDispatchConfig || error?.overlayLink || error?.overlayNotAFile || (typeof error?.code === "string" && !isTransientOverlayRead(error.code))) {
+							error.modelSelectionRefused = true;
 						}
-						endpointHolds.push(...held);
-						failoverSnapshot.set = set;
-						return true;
-					},
-				});
-				selectedEffective = selection.job ?? null;
-				chosenModel = selection.ref ?? null;
-				if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy });
-				selectionRefused = selection.refused ?? null;
-				selectionWait = selection.wait ? selection : null;
+						throw error;
+					}
+					failoverSnapshot = { endpoints, models, set: [] };
+					let recoveryModel = null;
+					if (effective.recover === true && effective.recoveryOf) {
+						if (!deps?.workspaceCheckpointer) { const error = new Error("the recovery store is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
+						const read = await deps.workspaceCheckpointer.readManifest(effective.recoveryOf);
+						if (read?.ok && read.manifest?.provider && read.manifest?.model) recoveryModel = `${read.manifest.provider}/${read.manifest.model}`;
+						// A missing checkpoint is refused by runJob's existing free gate, never replaced by a fresh model.
+						else { const error = new Error("the recovery model is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
+						const ref = splitModelEntry(recoveryModel);
+						if (!ref) { const error = new Error("the recovery model is invalid"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
+						effective = { ...effective, provider: ref.provider, model: ref.model };
+					}
+					const selection = effective.fallbackModels === undefined ? { job: effective } : await selectFailoverJob(effective, {
+						redis, id: modelAttemptId, retry: Number(job.attemptsMade) > 0 || Number(job.stalledCounter) > 0,
+						recoveryModel, retryNeverStarted: priorAttemptRecord?.reason === "container-never-started" && priorAttemptRecord?.budgetReserved === false && priorAttemptRecord?.exitCode === null, models, limits, now, log: deps?.log,
+						reservationFor: (candidate) => zeroRatedFor(candidate, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }).zeroRated ? 0 : candidate.maxCostMicros,
+						checkCandidate: (candidate) => deps?.checkFailoverCandidate ? deps.checkFailoverCandidate(candidate, { models, endpoints }) : checkFailoverCandidate(candidate, { models, endpoints, credential: deps?.checkProviderCredential, lookup: deps?.builtinModel }),
+						acquireEndpoints: async (candidate) => {
+							const set = [...new Map(endpointSetFor({ models, job: candidate, endpoints }).map((endpoint) => [endpoint.id, endpoint])).values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+							const held = [];
+							for (const endpoint of set) {
+								if (!endpointSlots.tryAcquire(endpoint.id, endpoint.slots)) {
+									await releaseAllHolds({ candidateEndpoints: held });
+									return false;
+								}
+								let fleet = null;
+								try { if (endpointLease && !isPerMachineHost(endpoint.host)) fleet = await endpointLease.acquire(job.id, { slots: endpoint.slots, keyArgs: [hash16(endpoint.id)] }); }
+								catch (error) { held.push({ id: endpoint.id, fleet: null }); await releaseAllHolds({ candidateEndpoints: held }); throw error; }
+								held.push({ id: endpoint.id, fleet });
+								if (endpointLease && !isPerMachineHost(endpoint.host) && !fleet) {
+									await releaseAllHolds({ candidateEndpoints: held });
+									return false;
+								}
+								if (fleet?.degraded) deps?.log?.("endpoint_lease_degraded", { jobId: job.id, endpoint: endpoint.id });
+							}
+							endpointHolds.push(...held);
+							failoverSnapshot.set = set;
+							return true;
+						},
+					});
+					selectedEffective = selection.job ?? null;
+					chosenModel = selection.ref ?? null;
+					if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy });
+					selectionRefused = selection.refused ?? null;
+					selectionWait = selection.wait ? selection : null;
+				}
 			} catch (error) {
 				if (error?.modelSelectionReason) selectionRefused = error.modelSelectionReason;
 				else if (error?.modelSelectionRefused) selectionRefused = "model-failover-no-candidate";
@@ -1097,7 +1108,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// `modelEndpoints` so a later gate reads the same declaration this one leased against. With no endpoints
 		// declared the overlay is not even read, and the job touches nothing new: no command, no key, no field.
 		let endpointSnapshot = failoverSnapshot;
-		if (job.data?.fallbackModels === undefined && !selectionError && !selectionRefused && modelEndpoints && !settingsThrew && !settings?.invalid) {
+		if (failoverSnapshot === null && !selectionError && !selectionRefused && modelEndpoints && !settingsThrew && !settings?.invalid) {
 			let endpoints = [];
 			let models = null;
 			let set = [];
@@ -1545,6 +1556,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					}).then(async (r) => {
 						// Only signed, matching terminal metadata can permit a later cross-model replay. The pessimistic
 						// marker written before spawn survives crashes and tools that terminate the runner.
+						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.aborted !== true) modelRolesRan = r.modelRoles ?? null;
 						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.code === 1 && r?.aborted !== true) {
 							providerFailureRan = r.providerFailure ?? null;
 							try {
@@ -1892,7 +1904,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1950,6 +1962,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			containerName,
 			redis,
 			getSettings,
+			readModelRoles,
 			// Issue #596, phase 2: the ONE host budget. `multiHost` is whether this worker declared a fleet (a host queue):
 			// without one it declares no fleet and no other host is there to wait for, so a size that never fits here is refused rather than
 			// deferred for a host that does not exist (gate round 2 of phase 2).

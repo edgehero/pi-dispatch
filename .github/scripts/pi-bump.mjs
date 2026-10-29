@@ -50,6 +50,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { modelProposalReport } from "./model-proposal-report.mjs";
 import { piPinProblems, repositoryPins } from "./pi-pin-check.mjs";
 
 export const SCOPE = "@earendil-works/";
@@ -388,7 +389,7 @@ export function decide({ pinned, target, repo, base, pulls, tip, ahead, behind }
 }
 
 /** The pull request's title and body, and the commit message, from validated versions only: no text from outside. */
-export function renderPullRequest({ from, to, versions }) {
+export function renderPullRequest({ from, to, versions, modelReport = "Model catalog report unavailable: run the report against both pinned npm artifacts before reviewing model changes." }) {
 	for (const v of [from, to]) if (!EXACT_VERSION_RE.test(v)) throw new Error(`${JSON.stringify(v)} is not an exact version`);
 	const links = versionsBetween(versions, from, to);
 	if (!links.includes(to)) links.push(to);
@@ -402,6 +403,8 @@ export function renderPullRequest({ from, to, versions }) {
 		"Read each one before merging. They are linked, not copied here.",
 		"",
 		...links.map((v) => `- [v${v}](${PI_RELEASES}${v})`),
+		"",
+		modelReport,
 		"",
 		"## How to review",
 		"",
@@ -523,7 +526,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	} else if (args[0] === "render") {
 		const [, summaryFile, versionsFile, dir] = args;
 		const { from, to } = json(summaryFile);
-		const pr = renderPullRequest({ from, to, versions: json(versionsFile) });
+		let modelReport;
+		try {
+			modelReport = await modelProposalReport(from, to, json(new URL(".github/model-proposals.json", repo)));
+		} catch {
+			// A registry outage must not hide the reviewed bump. The body names the missing evidence.
+			modelReport = "## Model catalog proposals\n\nReport unavailable: catalog download, integrity, schema or public report configuration could not be verified. No candidate code was loaded. Review both pinned npm catalogs before approving this bump.";
+		}
+		const pr = renderPullRequest({ from, to, versions: json(versionsFile), modelReport });
 		writeFileSync(join(dir, "title.txt"), `${pr.title}\n`);
 		writeFileSync(join(dir, "body.md"), pr.body);
 		writeFileSync(join(dir, "commit.txt"), pr.commit);

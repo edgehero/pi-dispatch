@@ -26,7 +26,7 @@ import * as nodeFs from "node:fs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { ISSUE_ACTIONS, isMcpNearMiss, recoverVenueProblem, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, isModelRolesField, isMcpNearMiss, recoverVenueProblem, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
@@ -391,6 +391,13 @@ function mcpFieldNearMiss(key) {
 
 /** The refusal for a call that carries a tool-proof field or a near miss of one (see `TOOL_PROOF_FIELDS`), or null. */
 export function wideningFieldRefusal(params, tool) {
+  const seen = new Set();
+  const hasRoles = (value) => {
+    if (!value || typeof value !== "object" || seen.has(value)) return false;
+    seen.add(value);
+    return Object.entries(value).some(([key, entry]) => isModelRolesField(key) || hasRoles(entry));
+  };
+  if (hasRoles(params)) return `${tool} cannot set modelRoles: the role map is a reviewed operator file edit, never a tool write`;
   const bundle = secretBundleFieldRefusal(params, tool);
   if (bundle !== null) return bundle;
   const objects = [["", params], ["run.", params?.run], ["on.", params?.on]];

@@ -52,6 +52,7 @@ import { assertExcludeToolsKnown, excludableToolNames } from "./src/tools.mjs";
 import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/mcp.mjs";
 import { applyApprovalDecision, approvalDecisionFromEvent, approvalShadow, approvalTerminal, createRequestApproval } from "./src/request-approval.mjs";
 import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
+import { createRoleSubagents, readRoleInputs, roleSubagentShadow } from "./src/model-roles.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
 import { assertSteerReady, createInbox } from "./src/inbox.mjs";
 import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/steer-frames.mjs";
@@ -112,7 +113,7 @@ function pickTotals({ input, output, total, cost }) {
  * (issue #543): a call an extension made while it loaded may have spent before a later check refused the job
  * (command-unregistered, say), and an exit line without tokens would hide that spend from the settlement.
  */
-let meteredExitFields = () => ({});
+let meteredExitFields = () => ({ ...roleExitFields() });
 /**
  * The meter's stop, if it stopped, as the outcome decideExit ranks it, else null. Set with meteredExitFields. A throw
  * after a stop (a load-time call refused, then command-unregistered) exits with the STOP's reason, the same ranking
@@ -129,6 +130,7 @@ let costRefusalWhy = () => null;
  * until the turn budget is attached; then set, so a line written on a stop carries what the decided line would have.
  */
 let liveExitFields = () => ({});
+let roleExitFields = () => ({});
 /**
  * The meter's teardown (issue #500 part E's review): the children hook's final fold, its STOP and its teardown rule, and
  * the teardown line. Empty until the meter installs; idempotent. The prompt's finally runs it, and so do the SIGTERM
@@ -158,6 +160,7 @@ async function main() {
 	// Issue #686: whether the key came as frame 1 of the stdin frame channel, the one fact that admits PI_STEER on the
 	// sandbox layout (PI_EXIT_AUTH itself has already left the environment).
 	const cfg = parseRunnerEnv(process.env, { steerFrames: exitKey.frames === true });
+	const roleInputs = readRoleInputs();
 
 	// FIRST, before the prompt is read and before any auth or model lookup: a staged package root
 	// that did not mount is a pre-spend config failure (exit 2, not retried) and this is the only
@@ -339,7 +342,8 @@ async function main() {
 		meteredExitFields = () => {
 			const usage = meter.usageSnapshot();
 			// The guard's counters with the children's added (childWatch.guardFields): a child's partial count floors the job.
-			return { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}) }, ...(usage ? { usage } : {}) };
+			const fields = { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}) }, ...(usage ? { usage } : {}) };
+			return { ...fields, ...roleExitFields() };
 		};
 		finishMeter = () => usageMeter.uninstall();
 		meterStopAtExit = () => (meter.state.stopReason === null ? null : decideExit({ budgetAborted: false, meterStop: meter.state.stopReason }));
@@ -370,6 +374,8 @@ async function main() {
 	const requestApproval = cfg.approvalGates.length ? createRequestApproval(cfg.approvalGates) : null;
 	// The tool a job armed with run.progress reports its phases with (issue #644), on the same terms.
 	const reportProgress = cfg.reportProgress ? createReportProgress() : null;
+	const roleSubagents = roleInputs ? createRoleSubagents(roleInputs) : null;
+	if (roleSubagents) roleExitFields = () => ({ modelRoles: roleSubagents.snapshot() });
 	// The run's inbox (issue #646, src/inbox.mjs), on the same terms. The acks are signed with the exit key and name the
 	// run by PI_JOB_ID, the exact string the worker verifies them against (its container name for this job: the worker's
 	// steer-ack.mjs is handed that same value). Nothing needs it stable across attempts: the exit key is minted per
@@ -384,7 +390,7 @@ async function main() {
 	// agent_start at the latest; the seed below drops whatever the transcript already delivered. A no-op on the mount
 	// transport.
 	inbox?.listen();
-	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
+	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(roleSubagents?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
 	const resourceLoader = await buildLoadedResourceLoader({
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
@@ -528,6 +534,7 @@ async function main() {
 		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job may`, "await-input-shadowed");
 	}
 	// Likewise the progress tool (issue #644): another extension's report_progress would answer the calls the worker reads.
+	if (roleSubagents && roleSubagentShadow(session.getAllTools())) throw configError("another extension registers the job subagent tool", "model-roles-shadowed");
 	if (reportProgress) {
 		const shadow = reportProgressShadow(session.getAllTools());
 		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job may`, "report-progress-shadowed");
@@ -754,7 +761,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...recoveryField(), ...steerField() });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, ...roleExitFields(), tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...recoveryField(), ...steerField() });
 	return outcome.code;
 }
 

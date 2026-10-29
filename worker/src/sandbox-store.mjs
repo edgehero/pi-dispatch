@@ -169,6 +169,7 @@ export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs =
 
 		const manifest = {
 			jobId: meta.jobId,
+			...(typeof prepared.sha === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(prepared.sha) ? { baseSha: prepared.sha } : {}),
 			kind: meta.kind ?? null,
 			image: meta.image ?? null,
 			// The venue the job resolved to (#277), which `resolveSandbox` refuses by when it is not this

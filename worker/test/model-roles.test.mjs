@@ -1,0 +1,99 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { validateModelRoles, roleMapFor, resolveModelRoles } from "../src/model-roles.mjs";
+import { makeReadModelRoles } from "../src/model-roles-file.mjs";
+import { parseTriggersDocument } from "../src/triggers.mjs";
+import { snapshotAgents, stageModelRoleInputs, parseAgentDefinition } from "../src/agent-snapshot.mjs";
+import { CAPABILITY_GATES } from "../src/image-preflight.mjs";
+
+const roles = { default: { planner: "anthropic/opus", editor: "anthropic/sonnet", explorer: "anthropic/haiku" }, shop: { editor: "openai/gpt" } };
+const job = { provider: "anthropic", model: "role:editor", kind: "local" };
+
+test("reviewed deployment roles merge by project, resolve physical provider, and join the allowed ceiling", () => {
+	const doc = validateModelRoles(roles);
+	assert.equal(roleMapFor(doc, "shop").planner, "anthropic/opus");
+	const resolved = resolveModelRoles(job, doc, "shop");
+	assert.equal(resolved.provider, "openai");
+	assert.equal(resolved.model, "gpt");
+	assert.equal(resolved.modelRole, "editor");
+	assert.deepEqual(resolved.models, ["openai/gpt", "anthropic/opus", "anthropic/haiku"]);
+	assert.throws(() => resolveModelRoles(job, doc, "shop", { authoredProvider: "anthropic" }), { modelSelectionReason: "model-role-provider-conflict" });
+	assert.equal(job.model, "role:editor");
+});
+
+test("role maps reject invalid policy and unknown references, including union overflow and case collisions", () => {
+	for (const value of [null, [], { default: { inherit: "p/m" } }, { default: { editor: "role:planner" } }, { default: { editor: { model: "p/m", unexpected: true } } }]) assert.throws(() => validateModelRoles(value));
+	assert.throws(() => resolveModelRoles({ ...job, model: "role:missing" }, roles), { modelSelectionReason: "model-role-unknown" });
+	assert.throws(() => resolveModelRoles({ ...job, models: Array.from({ length: 16 }, (_, n) => `p/m${n}`) }, roles), { modelSelectionReason: "model-roles-invalid" });
+	assert.throws(() => resolveModelRoles({ ...job, models: ["anthropic/SONNET"] }, roles), { modelSelectionReason: "model-roles-invalid" });
+	assert.equal(resolveModelRoles({ provider: "p", model: "m" }, {}).modelRoles, undefined);
+});
+
+test("role fallback candidates enter the ceiling before existing failover narrows it", () => {
+	const doc = validateModelRoles({ default: { editor: { model: "p/main", fallbackModels: ["q/next"] } } });
+	const resolved = resolveModelRoles(job, doc);
+	assert.deepEqual(resolved.fallbackModels, ["q/next"]);
+	assert.deepEqual(resolved.models, ["p/main", "q/next"]);
+	assert.throws(() => resolveModelRoles({ ...job, fallbackModels: ["q/other"] }, doc));
+});
+
+test("the shared trigger schema preserves reviewed roles and rejects near misses and duplicate keys", () => {
+	assert.deepEqual(parseTriggersDocument(JSON.stringify({ triggers: [], modelRoles: roles }), "test").modelRoles, roles);
+	assert.throws(() => parseTriggersDocument('{"triggers":[],"model_roles":{}}', "test"));
+	assert.throws(() => parseTriggersDocument('{"triggers":[],"ｍodelRoles":{}}', "test"));
+	assert.throws(() => parseTriggersDocument('{"triggers":[],"modelRoles":{},"modelRoles":{}}', "test"));
+});
+
+test("pickup reads edits without trigger changes; a broken save keeps and names last-good policy", () => {
+	const dir = tempDir("model-roles-");
+	const path = join(dir, "triggers.json");
+	const logs = [];
+	writeFileSync(path, JSON.stringify({ triggers: [], modelRoles: roles }));
+	const read = makeReadModelRoles({ triggersPath: path, log: (...args) => logs.push(args) });
+	assert.equal(resolveModelRoles(job, read()).model, "sonnet");
+	writeFileSync(path, JSON.stringify({ triggers: [], modelRoles: { default: { editor: "p/new" } } }));
+	assert.equal(resolveModelRoles(job, read()).model, "new");
+	writeFileSync(path, "broken");
+	assert.equal(resolveModelRoles(job, read()).model, "new");
+	assert.equal(logs.at(-1)[0], "model_roles_last_good");
+	assert.throws(() => makeReadModelRoles({ triggersPath: path })(), { modelSelectionReason: "model-roles-invalid" });
+});
+
+test("agent snapshots read the base blobs, excluding modified worktree definitions and symlinks", async () => {
+	const workspace = tempDir("model-roles-");
+	const git = (...args) => execFileSync("git", ["-C", workspace, ...args], { encoding: "utf8" }).trim();
+	git("init", "--quiet");
+	mkdirSync(join(workspace, ".pi/agents"), { recursive: true });
+	const path = join(workspace, ".pi/agents/explorer.md");
+	writeFileSync(path, "---\nname: explorer\ndescription: Explore\nmodel: explorer\ntools: [read, bash]\n---\nTrusted prompt\n");
+	git("add", ".");
+	git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture");
+	const sha = git("rev-parse", "HEAD");
+	writeFileSync(path, "agent-written content");
+	const snapshot = await snapshotAgents({ workspace, sha });
+	assert.equal(snapshot.agents[0].content, "Trusted prompt\n");
+	const jobDir = tempDir("model-roles-");
+	const resolved = resolveModelRoles(job, roles);
+	await stageModelRoleInputs(resolved, { workspace, sha, jobDir });
+	assert.equal(JSON.parse(readFileSync(join(jobDir, "model-roles.json"))).parent, "anthropic/sonnet");
+	assert.equal(JSON.parse(readFileSync(join(jobDir, "agents.json"))).agents[0].model, "explorer");
+	assert.throws(() => parseAgentDefinition("---\nname: a\nname: b\ndescription: Bad\n---\nx"));
+});
+
+test("older job images cannot silently ignore a role map", () => {
+	const gate = CAPABILITY_GATES.find((gate) => gate.token === "modelRoles");
+	assert.equal(gate.needed(resolveModelRoles(job, roles)), true);
+	assert.equal(gate.needed({ model: "literal" }), false);
+});
+
+
+test("queued maps carry no authority and a reviewed map never implicitly admits an unmapped main", () => {
+	const queued = { provider: "p", model: "m", modelRoles: { editor: "evil/model" }, modelRole: "forged" };
+	assert.deepEqual(resolveModelRoles(queued, {}), { provider: "p", model: "m" });
+	const resolved = resolveModelRoles({ provider: "p", model: "off", models: ["p/only"] }, { default: { editor: "q/editor" } });
+	assert.deepEqual(resolved.models, ["p/only", "q/editor"]);
+});

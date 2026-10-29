@@ -34,6 +34,7 @@ import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS, RU
 import { findDuplicateKey } from "./json-duplicates.mjs";
 // The server-name rule, from the one module that parses the overlay's list (its body is import-inert).
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
+import { isModelRolesField, validateModelRoles } from "./model-roles.mjs";
 import { validateModelRef } from "./model-ref.mjs";
 import { parseUsdMicros } from "./money.mjs";
 import { validateApprovalConfig } from "./approval-policy.mjs";
@@ -49,7 +50,7 @@ import { WAIT_CONDITION_KEYS, WAIT_CONDITION_MAX, afterInstantMs } from "./wait-
 
 // Re-exported so the console checks a provider or model it is about to write with the loader's own
 // grammar, through the subpath it already imports, rather than a copy that could drift.
-export { validateModelRef };
+export { validateModelRef, isModelRolesField };
 
 // EXPORTED for the same reason as PR_ACTIONS: the admin re-states this vocabulary to a MODEL.
 export const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue"]);
@@ -339,7 +340,9 @@ export function parseTriggersDocument(text, path) {
 		}
 	}
 	const secretBundles = validateSecretBundles(parsed.secretBundles, path);
-	return { triggers, secretBundles };
+	const modelRoles = validateModelRoles(parsed.modelRoles);
+	for (const key of Object.keys(parsed)) if (key !== "modelRoles" && isModelRolesField(key)) throw configError("triggers file: use modelRoles");
+	return { triggers, secretBundles, modelRoles };
 }
 
 function normalizeTrigger(entry, index, path, state) {

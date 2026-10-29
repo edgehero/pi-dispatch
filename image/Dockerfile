@@ -444,7 +444,7 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # that starts the supervisor and the runner from it on PI_RUNNER_OBSERVABLE=1, which an OpenShell venue needs before any
 # connection of the job can be made. A gate on those venues only: an image without it is refused there before spend.
 # verify-image.sh holds the copy to runner-node's bytes, its mode, its label entry, and both key holders to it.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork"
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

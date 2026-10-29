@@ -408,6 +408,9 @@ export function makeRunContainer({
 		// Issue #345: BESIDE the job directory, never inside the `/job:ro` mount. Removed first because the docker CLI refuses
 		// to start with an existing cidfile; every attempt's job dir is a fresh mkdtemp, so a leftover is not expected, and
 		// this keeps one from turning into a start failure if a caller ever reuses a directory.
+		// env-internal PI_MODEL_ROLES_FILE: closed read-only job input, set by the worker.
+		// env-internal PI_AGENTS_FILE: base-commit agent snapshot beside the role map.
+		if (job.modelRoles) { env.PI_MODEL_ROLES_FILE = `${paths.job}/model-roles.json`; env.PI_AGENTS_FILE = `${paths.job}/agents.json`; }
 		const cidFile = `${prepared.jobDir}.cid`;
 		try {
 			fs.rmSync(cidFile, { force: true });
@@ -827,6 +830,7 @@ export function makeRunContainer({
 				// Issue #507: the cost guard's rule on a `cost-cap` line, already filtered by parseExitWhy to COST_CAP_WHYS.
 				let exitWhy = null;
 				let providerFailure = null;
+				let modelRoles = null;
 				let toolsStarted = null;
 				let replaySafe = null;
 				// Issue #545: null (no key issued), "verified" or "unverified" (a key, and no exit line carried it).
@@ -845,7 +849,7 @@ export function makeRunContainer({
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -857,6 +861,7 @@ export function makeRunContainer({
 					exitLineCode = null;
 					exitWhy = null;
 					providerFailure = null;
+					modelRoles = null;
 					toolsStarted = null;
 					replaySafe = null;
 					resources = null;
@@ -879,6 +884,7 @@ export function makeRunContainer({
 					exitLineCode = null;
 					exitWhy = null;
 					providerFailure = null;
+					modelRoles = null;
 					toolsStarted = null;
 					replaySafe = null;
 					resources = null;
@@ -889,7 +895,7 @@ export function makeRunContainer({
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
 				// `exitWhy` only when the line named one, so every other run resolves the object it always did.
-				const why = { ...(exitWhy !== null ? { exitWhy } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
+				const why = { ...(exitKey !== null && exitAuthResult === "verified" && modelRoles ? { modelRoles } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
 				// `memoryLimit` only beside the OOM report, the one place it is read, for the same reason.
 				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };

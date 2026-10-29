@@ -51,6 +51,7 @@ const PROVIDER_ID_SHAPE = "a provider id of 1 to 64 characters: letters, digits,
  * uppercase ids. The sentence never carries the value.
  */
 export function modelIdProblem(value) {
+	if (typeof value === "string" && value.startsWith("role:") && !/^role:[a-z][a-z0-9_-]{0,31}$/.test(value)) return "must name role:<lowercase-role>, with a role of 1 to 32 letters, digits, underscores or dashes";
 	if (typeof value !== "string" || !/^[\x21-\x7E]+$/.test(value) || !MODEL_REF_PATTERN.test(value.toLowerCase())) return `must be ${MODEL_ID_SHAPE}`;
 	return null;
 }
@@ -112,7 +113,7 @@ export function validateModelRef(run, at, path) {
 		// The main model must be on its own list, refused HERE when the trigger names all three, because the
 		// file alone answers it. When the provider or the model comes from the deployment default instead,
 		// the worker answers it at job start (`model-not-allowed`, pre-spend).
-		if (out.provider !== undefined && out.model !== undefined && !modelOnList(run.models, out.provider, out.model)) {
+		if (out.provider !== undefined && out.model !== undefined && !out.model.startsWith("role:") && !modelOnList(run.models, out.provider, out.model)) {
 			throw configError(`${at}: run.models does not list this trigger's own run.provider/run.model, so every job it starts would be refused: ${path}`);
 		}
 		out.models = [...run.models];

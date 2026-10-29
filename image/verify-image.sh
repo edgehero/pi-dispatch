@@ -260,6 +260,23 @@ else
 				[ "$model_code" = 2 ] && echo "$model_exit" | grep -Eq '"reason":"model-not-allowed"[,}]' && echo "$model_exit" | grep -Eq '"modelRefused":1[,}]' \
 					|| fail "the image declares 'modelPolicy' but a job whose PI_ALLOWED_MODELS lacks its model was not stopped before its first call (exit $model_code: $model_exit)"
 				;;
+			modelRoles)
+				# Issue #717: execute the shipped role tool offline, including inherit and pre-spawn refusals.
+				roles_job=$(mktemp -d)
+				cat >"$roles_job/model-roles.json" <<'ROLES'
+{"version":1,"roles":{"explorer":"test/small"},"parent":"test/parent","models":["test/parent","test/small"]}
+ROLES
+				cat >"$roles_job/agents.json" <<'AGENTS'
+{"version":1,"agents":[{"name":"scout","description":"scout","model":"explorer","content":"find"},{"name":"inherited","description":"inherit","model":"inherit","content":"find"},{"name":"unknown-role","description":"unknown","model":"missing","content":"find"},{"name":"off-list","description":"off-list","model":"test/other","content":"find"}]}
+AGENTS
+				chmod -R a+rX "$roles_job"
+				roles_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$roles_job:/job:ro" \
+					-e PI_MODEL_ROLES_FILE=/job/model-roles.json -e PI_AGENTS_FILE=/job/agents.json \
+					--entrypoint node "$IMAGE_REF" /app/image/runner/test/fixtures/model-roles-smoke.mjs 2>&1) && roles_code=0 || roles_code=$?
+				rm -rf "$roles_job"
+				[ "$roles_code" = 0 ] && echo "$roles_out" | grep -q '^model role capability holds$' \
+					|| fail "the image declares 'modelRoles' but its offline role tool proof failed (exit $roles_code: $roles_out)"
+				;;
 			modelFailover)
 				# Issue #716. Run the actual SDK runner through its normal entrypoint, replacing only fetch with an
 				# offline 429 fixture. A grep for a classifier cannot prove the signed fields reach the worker.

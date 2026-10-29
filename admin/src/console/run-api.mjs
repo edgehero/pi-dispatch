@@ -29,7 +29,7 @@ import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { SESSION_NOT_SAVED } from "@edgehero/pi-dispatch/record-reason";
-import { approvalRecordOf, recordedProgress } from "@edgehero/pi-dispatch/run-history";
+import { modelRolesTelemetryOf, approvalRecordOf, recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
 import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
@@ -128,6 +128,8 @@ export function safeRunOf(id, record) {
     finishedAt: iso(r.endedAt),
     provider: str(r.provider, RUN_PROVIDER_RE),
     model: str(r.model, RUN_MODEL_RE),
+    ...(typeof r.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(r.modelRole) ? { modelRole: r.modelRole } : {}),
+    ...(modelRolesTelemetryOf(r.modelRoles) ? { modelRoles: modelRolesTelemetryOf(r.modelRoles) } : {}),
     ...(MODEL_WHY.includes(r.modelWhy) ? { modelWhy: r.modelWhy } : {}),
     ...(providerFailureOf(r.providerFailure) ? { providerFailure: providerFailureOf(r.providerFailure) } : {}),
     host: str(r.host, WORKER_NAME_RE),
