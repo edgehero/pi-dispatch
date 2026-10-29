@@ -19,6 +19,8 @@
  * a container query) must leave the page readable where it is not understood: a browser drops the whole rule, so the
  * rule may only add to a layout that already works without it.
  */
+import { FLEET_DESIGN_CSS } from "./fleet-css.mjs";
+import { HOST_DETAIL_CSS, VENUE_DETAIL_CSS } from "./host-venue-css.mjs";
 import { BTN_KINDS } from "./kit.mjs";
 import { PARKED_CSS } from "./parked-css.mjs";
 import { PULSE_CSS } from "./pulse-css.mjs";
@@ -757,18 +759,21 @@ main>.cards-4>section>.card{height:100%}
 `;
 
 /** Venue declaration treatments and local switch wrapping, from gen_fleet2.py's card rules. */
-const FLEET_CSS = `
+const FLEET_CSS = `${FLEET_DESIGN_CSS}
+
 .vw .ic{width:13px;height:13px}
 .vw--asserted>.chip{background:var(--surface-2);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line-strong)}
 .vw--absent>.chip{background:transparent;color:var(--ink-muted);box-shadow:none;border:1px dashed var(--line)}
 `;
-const VENUE_CSS = `${FLEET_CSS}
+const VENUE_CSS = `${VENUE_DETAIL_CSS}
+${FLEET_CSS}
 #p-venue .seg{flex-wrap:wrap;height:auto;max-width:100%}
 .venue-compare--local th:nth-child(2),.venue-compare--local td:nth-child(2),.venue-compare--podman th:nth-child(3),.venue-compare--podman td:nth-child(3),.venue-compare--openshell th:nth-child(4),.venue-compare--openshell td:nth-child(4),.venue-compare--openshell-bind th:nth-child(5),.venue-compare--openshell-bind td:nth-child(5){background:var(--surface-2)}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: FLEET_CSS, venue: VENUE_CSS });
+export const PAGE_CSS = Object.freeze({ login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
+${FLEET_CSS}`, venue: VENUE_CSS });
 
 /**
  * Every page's rules, each confined to `body[data-page="<page>"]`, in the table's order. `table` is `PAGE_CSS`; a test

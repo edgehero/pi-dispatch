@@ -20,6 +20,10 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetBar",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"fl-bar__stats\"",
+        "awaiting retry"
       ]
     },
     {
@@ -29,6 +33,13 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetQueues",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Waiting",
+        "Active",
+        "Delayed",
+        "Paused",
+        "Failed"
       ]
     },
     {
@@ -38,6 +49,13 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetActive",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Job",
+        "Project",
+        "Target",
+        "Host",
+        "Progress"
       ]
     },
     {
@@ -47,6 +65,10 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetHeld",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"fl-held\"",
+        "class=\"fl-cond\""
       ]
     },
     {
@@ -56,6 +78,10 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetFailed",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Its run record says:",
+        "Next:"
       ]
     },
     {
@@ -65,6 +91,12 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetSchedulers",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Schedule",
+        "Pattern",
+        "Next",
+        "Stalls"
       ]
     },
     {
@@ -74,6 +106,11 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetHosts",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"hostrow\"",
+        "Memory",
+        "CPU"
       ]
     },
     {
@@ -83,6 +120,10 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetDoctor",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"fl-doc\"",
+        "Fix:"
       ]
     },
     {
@@ -92,127 +133,353 @@
       "source": "admin/src/console/panels/fleet.mjs#fleetVenues",
       "golden": [
         "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Egress",
+        "Local folders",
+        "Live transcript",
+        "Credentials held by"
       ]
     },
     {
       "el": "Fleet is where an operator keeps the fleet healthy and unsticks the queue: the kill switch, queues, active, held and failed jobs, hosts, doctor results, venues and schedules.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetSchedulers"
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "waiting",
+        "active",
+        "delayed",
+        "held",
+        "awaiting retry"
+      ],
+      "panel": "p-fleetbar"
     },
     {
       "el": "**The fleet bar.** It says in one line whether the fleet runs and how many jobs wait, run, are delayed, held or await retry. *Pause the fleet* is the kill switch. It is outlined in red, and its preview opens under it, naming every queue, what keeps running, the Valkey address and the undo (\"Resume the fleet\"), with a ticket that expires in 5 minutes. Only the confirm button is filled red.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetBar"
+      "source": "admin/src/console/panels/fleet.mjs#fleetBar",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "The fleet is running",
+        "Pause the fleet",
+        "class=\"fl-bar__stats\"",
+        "Read",
+        "registry rows"
+      ],
+      "panel": "p-fleetbar"
     },
     {
       "el": "**Queues.** Each queue's state with waiting, active, delayed, paused and failed counts, and a Pause per queue.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetQueues"
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Waiting",
+        "Active",
+        "Delayed",
+        "Paused",
+        "Failed",
+        "Pause",
+        "shared by"
+      ],
+      "panel": "p-queues"
     },
     {
       "el": "**Active jobs.** Every running job with its project, target, host, start, run time and progress (phases or turns where reported, stripes where the worker reports none). An orphaned hold such as gh-4a7e is flagged in yellow with what it costs (\"build3 runs 1 job where it could run 2\") and *Free the slot*.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetActive"
+      "source": "admin/src/console/panels/fleet.mjs#fleetActive",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Project",
+        "Target",
+        "Host",
+        "Started",
+        "Running for",
+        "Progress",
+        "shown when the run ends",
+        "Orphaned hold",
+        "Free the slot"
+      ],
+      "panel": "p-active"
     },
     {
       "el": "**Held.** Each held job with its conditions as a checklist (time, CI green) and whether each is met.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"fl-cond\"",
+        "It starts when every condition is met",
+        "Pending",
+        "not yet"
+      ],
+      "panel": "p-held"
     },
     {
       "el": "**Failed jobs.** The reason sentence and next step inline; Retry is a paid act (amber outline), Remove is destructive (red outline); both also come in bulk.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetFailed"
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Its run record says:",
+        "Next:",
+        "Retry",
+        "Remove",
+        "Retry all",
+        "Remove all"
+      ],
+      "panel": "p-failed"
     },
     {
       "el": "**Hosts.** Slots as dots, memory in GiB and CPU in cores as bars, heartbeat (late beyond 1 minute), venues and routes.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"hostrow\"",
+        "Memory",
+        "GiB",
+        "CPU",
+        "cores",
+        "Routes:",
+        "default"
+      ],
+      "panel": "p-hosts"
     },
     {
       "el": "**Doctor.** Failing, warning and passing counts per host, each check with its fix; a stale result is flagged; a host with no result says how to get one.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetDoctor"
+      "source": "admin/src/console/panels/fleet.mjs#fleetDoctor",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "failing",
+        "warning",
+        "passing",
+        "Fix:",
+        "pi-dispatch",
+        "doctor"
+      ],
+      "panel": "p-doctor"
     },
     {
       "el": "**Venues.** One row per venue: where it is blessed and the default, two of its properties (egress, local folders) as enforced, asserted or absent, what it serves (steering, live transcript, recovery) as yes, no or with the image, and who holds the credentials. Each value is a word with a glyph, never colour alone. The footer names build3's floor and links to all 14 properties on the venue's own page.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetVenues"
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Blessed on",
+        "Default on",
+        "Egress",
+        "Local folders",
+        "Steering",
+        "Live transcript",
+        "Recovery",
+        "Credentials held by",
+        "enforced",
+        "asserted",
+        "absent"
+      ],
+      "panel": "p-venues"
     },
     {
       "el": "Queue counts per queue.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetQueues"
+      "source": "admin/src/console/panels/fleet.mjs#fleetQueues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Waiting",
+        "Active",
+        "Delayed",
+        "Paused",
+        "Failed"
+      ],
+      "panel": "p-queues"
     },
     {
       "el": "Active jobs with project, target (once known), host, start and progress.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetActive"
+      "source": "admin/src/console/panels/fleet.mjs#fleetActive",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Project",
+        "Target",
+        "Host",
+        "Started",
+        "Progress",
+        "shown when the run ends"
+      ],
+      "panel": "p-active"
     },
     {
       "el": "Held jobs with each condition and its state.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetHeld"
+      "source": "admin/src/console/panels/fleet.mjs#fleetHeld",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"fl-cond\"",
+        "Pending",
+        "not yet"
+      ],
+      "panel": "p-held"
     },
     {
       "el": "Failed jobs with attempts and the reason token, which the reason catalog turns into a sentence and next step.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetFailed"
+      "source": "admin/src/console/panels/fleet.mjs#fleetFailed",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Attempts",
+        "Its run record says:",
+        "Next:"
+      ],
+      "panel": "p-failed"
     },
     {
       "el": "Per host: slots, memory and CPU (or none), last beat, venues and routes.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+      "source": "admin/src/console/panels/fleet.mjs#fleetHosts",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "class=\"sls\"",
+        "GiB",
+        "cores",
+        "Routes:",
+        "default"
+      ],
+      "panel": "p-hosts"
     },
     {
       "el": "Doctor results with version, age and checks.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetDoctor"
+      "source": "admin/src/console/panels/fleet.mjs#fleetDoctor",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Doctor ran",
+        "Worker",
+        "docker.39",
+        "Fix:"
+      ],
+      "panel": "p-doctor"
     },
     {
       "el": "The venue table from the build, plus each host's published floor.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Floor on",
+        "All 14 properties"
+      ],
+      "panel": "p-venues"
     },
     {
       "el": "Schedules with next run, overdue and stalls.",
       "kind": "provides",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetSchedulers"
+      "source": "admin/src/console/panels/fleet.mjs#fleetSchedulers",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Schedule",
+        "Project",
+        "Pattern",
+        "Next",
+        "Overdue",
+        "Stalls",
+        "nightly-tidy"
+      ],
+      "panel": "p-schedules"
     },
     {
       "el": "The venue words are a closed set, and the table carries no legend: *enforced* means the worker makes it so and reads it back; *asserted* means someone else provides it and the worker cannot check; *absent* means it is not offered.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetVenues"
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "Enforced:",
+        "Asserted:",
+        "Absent:"
+      ],
+      "panel": "p-venues"
     },
     {
       "el": "*With the image* means a venue serves the feature only when the job image supports it.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetVenues"
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "with the image"
+      ],
+      "panel": "p-venues"
     },
     {
       "el": "The venue table is what each host's worker published when it started; nothing in it is read live.",
       "kind": "readme",
       "status": "new",
-      "source": "admin/src/console/panels/fleet.mjs#fleetHosts"
+      "source": "admin/src/console/panels/fleet.mjs#fleetVenues",
+      "golden": [
+        "panels/fleet-running.operator"
+      ],
+      "shows": [
+        "published by each host's worker when it started; nothing here is read live"
+      ],
+      "panel": "p-venues"
     },
     {
       "el": "**Fixture note.** Queues, active, held and failed jobs, hosts, doctor checks and schedules come from the fixture. These are sample data:",

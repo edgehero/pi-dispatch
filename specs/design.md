@@ -11969,6 +11969,19 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   attempts, schedulers carry project and waiting rows carry resolved size. These are display projections; the state
   API retains its explicit allowlist and no active target is read from a job payload.
 
+- **The Fleet cards' component hierarchy (#748, fidelity correction).** Active jobs and Venues each span the page;
+  the wide two-column middle keeps Queues, Held, Failed, Delayed and Schedules beside host resource rows and Doctor.
+  The fleet bar uses its state tile, headline, inline count capsules and grouped switches. Held conditions are inset
+  checklists, not another generic table. The local rules of FleetScreen, FleetPartPaused, HostDetail and VenueDetail
+  are pasted into scoped page styles along with the shared kit. Host slots and split resource meters, six capacity
+  KPIs, dated chart axes and the busy/peak/slots/no-history legend retain the cards' hierarchy. Capacity shares use
+  the same full-window denominator, derived from numeric bucket coverage and busy time, and a first partial bucket
+  leaves no-history hatching before the covered interval. Venue properties lead the main column; serving features
+  live beside them and comparison spans the page below, with sticky property labels and a highlighted selection.
+  The title bar holds the venue switch. Card ledgers must cite visible evidence within the named panel; the existence
+  of a renderer export is insufficient evidence of a card element. Structural tests pin the full-width regions and
+  component arrangement, and stylesheet tests pin the local rules against the published reference previews.
+
 - **Model failover visibility (#716)**: the existing Doctor panel renders published warning checks for each configured candidate cooling down, including its provider/model, fixed failure kind and reset instant. The panel's existing observation age distinguishes this snapshot from live state. An unreadable cooldown store is a warning, never an empty healthy result. The trigger read surfaces display the reviewed fallback list. No visual token or stylesheet changes are required.
 
 **Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
@@ -16410,3 +16423,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-28 (#747) | **`DES-OPERATOR-CONSOLE` AMENDED**: Pulse run main/side layout, state panels and static transcript; one EventSource attaches after good metadata, only entry ids are cursors, reconnect sends all panels, tdone keeps updates open. Operator browser slots hold question/tail text, never panel HTML; worker-derived sandbox capabilities and allowlisted running facts. Phase/striped kit helpers and full card/golden/browser verification. Targeted timestamp contrast paste only; the design's tabular-number change remains waiting for #752 measurements. Existing terminal endpoint, security headers, paid/destructive confirm pipeline and session lifecycle UNCHANGED, checked. |
 | 2026-10-28 (#716) | **NEW `DES-MODEL-FAILOVER`; `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` and `DES-OPERATOR-CONSOLE` AMENDED**: reviewed next-attempt singleton selection, authenticated replay eligibility, bounded shared cooldowns and existing Doctor-panel visibility. **`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` UNCHANGED, checked**: no subscription routing. The console visual system is **UNCHANGED, checked**: no tokens or stylesheet changed. |
 | 2026-10-29 (#748) | **`DES-OPERATOR-CONSOLE`, `DES-HOST-REGISTRY`, `DES-WAITING-REASONS` AMENDED**: Pulse Fleet and host/venue detail reuse the existing read model, planners and kit; bounded waiting lists and allowlisted telemetry explain delays, budgets and retained workspaces. Capacity assembly stays off live ticks. **`DES-HOST-BUDGET`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked**: no new admission authority, spend path, runtime action or dependency pin. |
+| 2026-10-29 (#748, design fidelity) | **`DES-OPERATOR-CONSOLE` AMENDED**: the published cards also bind component hierarchy, full-width regions and page-local styling; explicit capacity KPI denominators and partial-history geometry prevent misleading charts. Ledgers require panel-scoped visible evidence instead of export presence alone. **`DES-HOST-REGISTRY`, `DES-HOST-BUDGET`, `DES-WAITING-REASONS`, all constitution constraints UNCHANGED, checked**: no admission or runtime action changes. |

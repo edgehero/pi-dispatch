@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import { parseDocument } from "./helpers/script-dom.mjs";
 import * as fleet from "../src/console/panels/fleet.mjs";
 import * as host from "../src/console/panels/host.mjs";
 import * as venue from "../src/console/panels/venue.mjs";
@@ -34,6 +35,7 @@ const view = (snapshot = base(), role = "operator", extra = {}) => ({
 });
 const draw = (fn, v) =>
   String(fn(v)).replace(/\s+/g, " ").replace(/> </g, "><");
+const text = (markup) => parseDocument(`<html><body>${markup}</body></html>`).body.textContent.replace(/\s+/g, " ").trim();
 const row = () => ({
   name: "build3",
   concurrency: "3",
@@ -88,8 +90,8 @@ test("Two-Valkey notice is visible without a preview, and its command remains op
     };
     const out = draw(fleet.fleetBar, v);
     assert.match(out, /Two Valkeys/);
-    assert.match(out, /Nothing was changed/);
-    assert.match(out, /One queue can still be resumed/);
+    assert.match(out, /The deployment and console read different Valkeys/);
+    assert.match(out, /A pause reaches both; a resume neither until they agree/);
     assert.equal(out.includes("--valkey-url"), role === "operator");
   }
 });
@@ -166,7 +168,8 @@ test("held jobs sort longest first and report every condition with a bounded che
   assert.match(out, /14 of 96/);
   assert.match(out, /in 10s/);
   assert.match(out, /fault/);
-  assert.match(out, /: met/);
+  assert.match(out, /class="fl-cond"/);
+  assert.match(out, /<span class="chip tone-ok">.*?Met<\/span>/);
   const viewer = draw(fleet.fleetHeld, view(s, "viewer"));
   assert.match(viewer, /ci-green/);
   assert.doesNotMatch(viewer, /data-action=/);
@@ -331,6 +334,7 @@ test("host budget splits running/orphan/free promises and words the published or
     {
       ...row(),
       jobs: [{ id: "gh-orphan", o: true, m: 4096, c: 200 }],
+      jobsMore: 0,
       budgetFrom: {
         memMode: "auto",
         cpuMode: "value",
@@ -342,7 +346,7 @@ test("host budget splits running/orphan/free promises and words the published or
   ];
   const out = draw(host.hostBudget, view(s));
   assert.match(out, /fill="url\(#hatch\)"/);
-  assert.match(out, /4 held by orphans, 16 free/);
+  assert.match(text(out), /4 held by orphans; 16 free/);
   assert.match(out, /machine&#39;s 28 less a 4 reserve/);
   assert.match(out, /cores explicitly set/);
   assert.match(out, /pidispatch.slice/);
@@ -369,7 +373,7 @@ test("host fingerprints compare actual registry fields and queue names use the w
   ];
   const out = draw(host.hostRow, view(s));
   assert.match(out, /pi-jobs@build3/);
-  assert.match(out, /triggers: abc \(differs across live hosts\)/);
+  assert.match(text(out), /triggers: abc \(differs across live hosts\)/);
 });
 
 test("host capacity draws seven-day hourly bars with peak ticks and explicit missing-history semantics", () => {
@@ -380,6 +384,7 @@ test("host capacity draws seven-day hourly bars with peak ticks and explicit mis
     hosts: [
       {
         name: "build3",
+        fromMs: NOW - 1800000,
         slots: 3,
         facts: {
           busy: "50%",
@@ -394,6 +399,8 @@ test("host capacity draws seven-day hourly bars with peak ticks and explicit mis
           {
             fromMs: NOW - 3600000,
             coveredMs: 1800000,
+            busyMs: 1800000,
+            fullMs: 0,
             avgMilli: 1500,
             peak: 2,
           },
@@ -402,9 +409,11 @@ test("host capacity draws seven-day hourly bars with peak ticks and explicit mis
     ],
   };
   const out = draw(host.hostCapacity, v);
-  assert.match(out, /50%, 50%, 10%/);
-  assert.match(out, /stroke-dasharray="4 3"/);
-  assert.match(out, /hatched no-history/);
+  assert.match(out, /<b>50%<\/b><span>busy in the full window/);
+  assert.match(out, /<b>0%<\/b><span>idle in the full window/);
+  assert.match(out, /<b>50%<\/b><span>no history/);
+  assert.match(out, /class="hd-slotline"/);
+  assert.match(text(out), /no.history/i);
   assert.match(out, /web 2h/);
   assert.match(
     out,
@@ -585,8 +594,8 @@ test("an absent progress projection draws stripes and held answer words follow t
 
 test("Fleet's comparison stays short while the venue page carries the complete declaration table", () => {
   const out = draw(fleet.fleetVenues, view());
-  assert.match(out, /egress allowlist/);
-  assert.match(out, /local folders in place/);
+  assert.match(out, /<th scope="col">Egress<\/th>/);
+  assert.match(out, /<th scope="col">Local folders<\/th>/);
   assert.match(out, /Credentials/);
   assert.doesNotMatch(out, /agent not root|stoppable on timeout/);
   const detail = draw(

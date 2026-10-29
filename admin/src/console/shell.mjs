@@ -199,10 +199,10 @@ export function liveNoteHtml({ maxStreams = null, reload = null } = {}) {
  * load and say when"): when it was drawn, as a `<time>` the script shows in the reader's own time, "not live", and
  * Reload. `now` is the page data's clock; a page with none says only that it is not live.
  */
-function drawnHtml(now, reload) {
+function drawnHtml(now, reload, before = null) {
   const at = Number.isFinite(now) && Math.abs(now) <= 8.64e15 ? new Date(now) : null;
   const when = at === null ? html`Drawn once` : html`Drawn at <time datetime="${at.toISOString()}">${at.toISOString().slice(11, 16)} UTC</time>`;
-  return html`<div class="titlebar__end"><span class="drawn">${ui.icon("clock", { size: "sm" })}<span>${when} \u00b7 not live</span></span>${ui.btn({ kind: ["sm", "ghost"], icon: "rerun", label: "Reload", href: reload })}</div>`;
+  return html`<div class="titlebar__end">${before}<span class="drawn">${ui.icon("clock", { size: "sm" })}<span>${when} \u00b7 not live</span></span>${ui.btn({ kind: ["sm", "ghost"], icon: "rerun", label: "Reload", href: reload })}</div>`;
 }
 
 /**
@@ -302,7 +302,7 @@ const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(
  * `headline` is the page's headline panel's first content (text or a fragment, an empty one included, which the stream
  * fills later), drawn under the title as `#p-headline` (see the header); null, the default, draws no line.
  */
-export function shellHtml(name, ctx, inner, { headline = null } = {}) {
+export function shellHtml(name, ctx, inner, { headline = null, description = null, end = null } = {}) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const meta = PAGES[name];
   const role = roleOf(ctx?.session);
@@ -316,14 +316,14 @@ export function shellHtml(name, ctx, inner, { headline = null } = {}) {
   const back = name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : ["host", "venue"].includes(name) ? html`<a class="back" href="${PAGES.fleet.path}">${ui.icon("chev-l", { size: "sm" })}Fleet</a>` : null;
   const heading = name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : ["host", "venue"].includes(name) && typeof ctx?.query?.name === "string" ? html`${ctx.query.name}` : meta.title;
   const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;
-  const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload) : null;
+  const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload, end) : end;
   const readOnly = Boolean(ctx?.readOnly);
   const ro = readOnly ? ui.banner({ status: "attention", icon: "shield", sm: true, title: READ_ONLY_TITLE, body: READ_ONLY_BODY }) : null;
   const flash = ctx?.flash !== null && typeof ctx?.flash === "object" ? doneBannerHtml(ctx.flash) : null;
   const notes = meta.live ? liveNoteHtml({ maxStreams: ctx?.maxStreams, reload }) : null;
   const writes = role === "operator" && !readOnly && ctx?.slot !== false ? confirmSlotHtml() : null;
   const held = meta.live ? html`<template id="held-note">${heldNoteHtml()}</template>` : null;
-  const sub = headline === null ? null : name === "run" ? html`<div class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></div>` : html`<p class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></p>`;
+  const sub = headline === null ? (description === null ? null : html`<p class="titlebar__sub">${description}</p>`) : name === "run" ? html`<div class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></div>` : html`<p class="titlebar__sub"><span id="${HEADLINE_ID}" data-panel>${headline}</span></p>`;
   return html`<a class="skip" href="#main">Skip to content</a>
 ${SPRITE}
 <div class="page">
