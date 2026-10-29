@@ -118,6 +118,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkSpendBrowser } from "./console-spend-browser.mjs";
 import { frozenDateSource, openChrome } from "../../launch/chrome-pipe.mjs";
 import { findOnPath } from "../../launch/server-binary.mjs";
 
@@ -233,7 +234,8 @@ export const NAV_MS = 20_000;
 /** The longest any other DevTools call may take. */
 const STEP_MS = 20_000;
 /** The longest the whole run may take; the workflow step's own `timeout-minutes` is the backstop above this. */
-export const RUN_MS = 6 * 60_000;
+// Five Spend routes and their exceptional states expand both the CSP sweep and the shell matrix.
+export const RUN_MS = 12 * 60_000;
 
 const USAGE = `usage: node .github/scripts/console-width-check.mjs [--require] [--shots <dir>]
        node .github/scripts/console-width-check.mjs --verify-zip <file> [--platform ${CFT_PLATFORMS.join("|")}]
@@ -1784,6 +1786,11 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		if (run) {
 			current = run.key;
 			shell.push(await checkNoScript({ browser, run, url: origin + run.doc.path, clockMs, shots }));
+			after();
+		}
+		if (docs.some((d) => d.page === "insights-flows")) {
+			current = "spend-browser";
+			results.push(...await checkSpendBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
 		}
 		for (const s of strays) {

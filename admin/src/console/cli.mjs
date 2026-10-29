@@ -88,20 +88,21 @@ export const AUDIT_VERIFY_CACHE_MS = 30_000;
 
 /**
  * `fn(window, opts)` memoised per key for `ttlMs` on `now`; a rejection is not kept, so the next call tries again. The
- * key is the window and, for the spend screen, whether full paths were asked (`opts.fullPaths`): an operator's
- * full-path assembly must never be handed to a viewer's request, so the two are different entries. At most six keys
- * exist (three windows, two path choices), so the map needs no bound.
+ * key includes view, window, project, role and path permission. An operator's reasons and full paths must never
+ * reach a viewer's request. Project ids are user-selected, so the cache drops its oldest entry past 128 keys.
  */
 export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_CACHE_MS } = {}) {
   const held = new Map();
   return (window, opts) => {
     const fullPaths = opts?.fullPaths === true;
-    const key = `${String(window)}\n${fullPaths ? "full" : "names"}`;
+    const key = JSON.stringify([String(window), opts?.view ?? "spend", opts?.project ?? null, opts?.role === "operator" ? "operator" : "viewer", fullPaths]);
     const t = now();
     const hit = held.get(key);
     if (hit && t >= hit.at && t - hit.at < ttlMs) return hit.promise;
-    const promise = Promise.resolve().then(() => (fullPaths ? fn(window, { fullPaths }) : fn(window)));
+    const promise = Promise.resolve().then(() => (opts ? fn(window, { ...opts, fullPaths }) : fn(window)));
+    held.delete(key);
     held.set(key, { at: t, promise });
+    while (held.size > 128) held.delete(held.keys().next().value);
     promise.catch(() => {
       if (held.get(key)?.promise === promise) held.delete(key);
     });
@@ -460,10 +461,10 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
         return { ...capacity, hosts: (capacity?.hosts ?? []).filter((row) => row.name === host) };
       },
       watch: fleet.watch,
-      insights: cachedPerWindow((window, opts) => m.insights.assembleInsights(side.paths, window, { pricing, nowMs: now(), envFn: () => side.env, ...(opts?.fullPaths ? { fullPaths: true } : {}) }), { now }),
+      insights: cachedPerWindow((window, opts) => (m.insights.assembleInsightsView ?? m.insights.assembleInsights)(side.paths, window, { ...opts, pricing, nowMs: now(), envFn: () => side.env }), { now }),
       // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers
       // bounded and cached per (model, flow, scan window) (`whatif.mjs`).
-      ...(m.whatif ? { whatIf: m.whatif.makeWhatIfReader({ pricing, scan: () => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, nowMs: now(), fs }), now }), pricedModels: memoOnce(() => m.whatif.pricedModelIds(pricing)) } : {}),
+      ...(m.whatif ? { whatIf: m.whatif.makeWhatIfReader({ pricing, scan: () => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, nowMs: now(), fs }), subscriptions: () => m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs })?.subscriptions ?? [], now }), pricedModels: memoOnce(() => m.whatif.pricedModelIds(pricing)) } : {}),
       // The audit page (issue #737) asks for each row's position (`positions`), so a row's chain state can be told by
       // where it sits against the verification's last good row and its first damaged one.
       audit: ({ limit, before, positions } = {}) => m.audit.readConsoleAudit({ logsDir: config.logsDir, limit, before, fs, positions: positions === true }),

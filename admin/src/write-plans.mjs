@@ -1286,6 +1286,8 @@ export function planEnvelope({ params, paths, env, fs = nodeFs }) {
     plan: {
       change,
       files,
+      beforeText: planned.inputs.find((input) => input.path === paths.envelopeFile)?.text ?? null,
+      afterText: planned.text,
       lines: planned.lines,
       digest: planned.digest,
       beforeDigest: planned.beforeDigest,

@@ -100,7 +100,7 @@ export function onlyHost(report, host) {
 	if (!known.includes(host)) return { unknown: known };
 	const shown = report.hosts.find((h) => h.name === host);
 	const { fromMs, source: _source, truncated, ...counts } = shown.coverage;
-	return { report: { ...report, hosts: [shown], coverage: { ...report.coverage, fromMs, truncated, ...counts, historyNotShared: report.coverage.historyNotShared.filter((n) => n === host) } } };
+	return { report: { ...report, fleet: undefined, hosts: [shown], coverage: { ...report.coverage, fromMs, truncated, ...counts, historyNotShared: report.coverage.historyNotShared.filter((n) => n === host) } } };
 }
 
 /**
@@ -164,6 +164,7 @@ const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
 /** The human report: one block per host, then what the fleet's history covers. Control characters stripped. */
 export function capacityText(report, { since }) {
 	const lines = [];
+	if (report.fleet) lines.push(...fleetFacts(report.fleet));
 	for (const h of report.hosts) lines.push(...hostLines(h, since, report.coverage));
 	if (report.hosts.length === 0) lines.push(`${capitalized(noRunText(report.coverage, `in the last ${since}`))}.`);
 	lines.push(...coverageLines(report.coverage));
@@ -373,3 +374,15 @@ export function coverageLines(cov) {
 
 /** The fleet's history cut by the run mirror (`coverage.truncated`), as the CLI's coverage line says it. */
 export const TRUNCATED_NOTE = "history truncated: the run mirror holds nothing older for at least one host, so its earlier time is counted as neither busy nor idle";
+
+/** Shared fleet headline wording for the CLI and the Spend capacity view. */
+export function fleetFacts(fleet) {
+	const pct = (value) => value === null ? "unknown" : percentText(value);
+	const wait = (value) => value === null ? "no run recorded one" : durationText(value);
+	return [
+		`Fleet busy share of slot time: ${pct(fleet.busyPerMille)}${fleet.incomplete ? " (coverage incomplete)" : ""}`,
+		`Fleet peak: ${fleet.peak} jobs at once${fleet.peakAtMs === null ? "" : ` at ${new Date(fleet.peakAtMs).toISOString()}`}`,
+		`Fleet wait for a slot: p95 ${wait(fleet.waits.p95Ms)}, median ${wait(fleet.waits.p50Ms)}`,
+		`Fleet promised memory at the busiest hour: ${pct(fleet.promisedMemPerMille)}`,
+	];
+}

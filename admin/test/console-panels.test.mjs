@@ -1235,23 +1235,23 @@ const FOLD = () => ({
 });
 const PAYLOAD = () => ({ graph: buildGraphModel(GRAPH_INPUTS()), fold: FOLD(), window: "30d", costsUnreachable: null, costByTrigger: { "trigger:0": { cost: usd(1.5), runs: 2 } } });
 
-test("the spend screen opens on 30d, states both windows, and draws the topology's chip data for its script", async () => {
+test("Spend opens on 30d and the separate Flows page states both windows and uses stable cross-page selection", async () => {
   const q = parsePageQuery("insights", "").query;
-  assert.equal(q.range, "30d", "a bare /insights is the last 30 days");
-  const range = String(insightsRange({ query: q, role: "viewer" }));
-  assert.match(range, /<a href="\/insights\?range=30d" aria-current="page">last 30d<\/a>/);
+  assert.equal(q.range, "30d");
   const page = String((await renderPage("insights", ctxOf("viewer", { insights: PAYLOAD(), pricedModels: [] }, q))).html);
-  assert.match(page, /<h2>Spend, last 30d<\/h2>/);
-  assert.ok(page.includes('<p id="windows" class="note">spend window: last 30d · topology: fixed 30d record window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap</p>'), "the two-window line, with the retention and scan-cap note");
-  assert.match(page, /<ol id="graph-nodes" class="hidden-tips" hidden><li data-id="n0" data-nb="[nw\d ]*" data-w="[nw\d ]*">/, "the chips' data, as a hidden list");
-  assert.match(page, /data-node="n\d+"/, "a breakdown row names its chip by minted id");
-  assert.ok(!page.includes('"trigger:0"'), "no original trigger id reaches the page");
-  const mtd = String((await renderPage("insights", ctxOf("viewer", { insights: { ...PAYLOAD(), window: "mtd" } }, parsePageQuery("insights", "range=mtd").query))).html);
-  assert.ok(mtd.includes("spend window: month to date · topology: fixed 30d record window"));
-  // The topology's window is the scene's own, not a constant that happens to equal the default.
-  const fortnight = { ...PAYLOAD(), graph: buildGraphModel({ ...GRAPH_INPUTS(), caps: { ...GRAPH_INPUTS().caps, windowDays: 14 } }) };
-  const fourteen = String((await renderPage("insights", ctxOf("viewer", { insights: fortnight }, q))).html);
-  assert.ok(fourteen.includes("topology: fixed 14d record window"), "a 14-day scene says 14d");
+  assert.match(page, /Spend window: last 30d/);
+  assert.match(page, /92-day scan cap/);
+  assert.doesNotMatch(page, /id="graph-nodes"|data-node=/, "Spend does not load or draw a topology");
+  const flows = String((await renderPage("insights-flows", ctxOf("viewer", { insights: PAYLOAD() }, parsePageQuery("insights-flows", "range=7d&select=0").query))).html);
+  assert.match(flows, /Map window: the last 30 days of run records/);
+  assert.match(flows, /Spend window: last 7d/);
+  assert.match(flows, /<ol id="graph-nodes" class="hidden-tips" hidden>/);
+  assert.match(flows, /data-trigger-index="0"/);
+  assert.match(flows, /aria-pressed="true"/);
+  assert.match(flows, /Trigger 1/);
+  const breakdown = String((await renderPage("insights-breakdown", ctxOf("viewer", { insights: PAYLOAD() }, q))).html);
+  assert.match(breakdown, /href="\/insights\/flows\?range=30d&amp;select=0"/, "a trigger row links by its stable triggers-file index");
+  assert.doesNotMatch(breakdown, /data-node=/);
 });
 
 test("the chips' hidden list carries minted ids only, by the same two rules the script reads it with", () => {
@@ -1287,11 +1287,11 @@ test("full local paths are an operator's opt-in (?paths=full); a viewer always g
   for (const [role, want] of [["operator", true], ["viewer", false], [undefined, false]]) {
     const asked = [];
     await loadPageData("insights", full, { insights: async (w, o) => (asked.push([w, o]), {}), now: NOW }, { role });
-    assert.deepEqual(asked, [["30d", { fullPaths: want }]], String(role));
+    assert.deepEqual(asked, [["30d", { fullPaths: want, project: null, role: role ?? "viewer", view: "spend" }]], String(role));
   }
   const asked = [];
   await loadPageData("insights", plain, { insights: async (w, o) => (asked.push(o), {}), now: NOW }, { role: "operator" });
-  assert.deepEqual(asked, [{ fullPaths: false }], "an operator who did not ask gets names too");
+  assert.deepEqual(asked, [{ fullPaths: false, project: null, role: "operator", view: "spend" }], "an operator who did not ask gets names too");
 });
 
 test("the what-if panel: a GET form for every role with the priced ids and the window's flows, and each kind of answer", async () => {
@@ -1330,7 +1330,7 @@ test("loadPageData asks the what-if reader only for a whatif query, and a reader
   const none = await loadPageData("insights", parsePageQuery("insights", "").query, deps);
   assert.deepEqual([asked, none.whatIf, none.pricedModels], [[], undefined, ["a/b"]]);
   const one = await loadPageData("insights", parsePageQuery("insights", "whatif=a%2Fb&flow=tidy").query, deps);
-  assert.deepEqual(asked, [{ model: "a/b", flow: "tidy" }]);
+  assert.deepEqual(asked, [{ model: "a/b", flow: "tidy", range: "30d", project: null, runs: "24h" }]);
   assert.equal(one.whatIf.result.class, "seeded");
   const broken = await loadPageData("insights", parsePageQuery("insights", "whatif=a%2Fb&flow=tidy").query, { ...deps, whatIf: async () => { throw new Error("x"); }, pricedModels: () => { throw new Error("y"); } });
   assert.deepEqual(broken.whatIf, { model: "a/b", flow: "tidy", unreachable: "the what-if estimate failed" });
@@ -1349,7 +1349,7 @@ test("the what-if reader: an unknown model never scans, one bounded scan serves 
     reprice: (quad) => (reprices++, { usd: (quad.input + quad.output) / 1_000_000, ratesVersion: "9.9.9" }),
   };
   let reprices = 0;
-  const run = (flow, input) => ({ flow, outcome: "completed", usage: { models: [{ provider: "x", model: "y", input, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }] } });
+  const run = (flow, input) => ({ flow, endedAt: new Date(NOW).toISOString(), outcome: "completed", usage: { models: [{ provider: "x", model: "y", input, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }] } });
   let t = NOW;
   let scans = 0;
   let records = [run("tidy", 1_000_000), run("tidy", 3_000_000), run("tidy", 2_000_000), run("fix", 9)];
@@ -1358,7 +1358,7 @@ test("the what-if reader: an unknown model never scans, one bounded scan serves 
   assert.deepEqual(unknown, { model: "acme/m-1x", flow: "tidy", unknown: true, near: ["acme/m-1"] }, "the closest priced ids, from the catalog alone");
   assert.equal(scans, 0, "an unknown model never walks the logs");
   const a = await read({ model: "acme/m-1", flow: "tidy" });
-  assert.deepEqual(a.result, { class: "estimated", usd: 6, perRun: 2, coverage: 1, excluded: 0, ratesVersion: "9.9.9" }, "the median run re-priced, times the runs");
+  assert.deepEqual(a.result, { class: "estimated", usd: 6, perRun: 2, coverage: 1, excluded: 0, ratesVersion: "9.9.9", windowRuns: 3 }, "the median run re-priced, times the runs");
   await read({ model: "acme/m-2", flow: "tidy" });
   await read({ model: "acme/m-3", flow: "fix" });
   assert.equal(scans, 1, "one scan within the TTL, whatever the key");

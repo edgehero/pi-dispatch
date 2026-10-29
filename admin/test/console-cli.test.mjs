@@ -811,3 +811,20 @@ test("serve hands each live load's who to loadPageData: a load no operator's str
   assert.ok(operators.length >= 1, JSON.stringify(operators));
   for (const [, who] of operators) assert.deepEqual(who, { readOnly: false, live: true });
 });
+
+test("Spend cache keeps views, projects, roles and path permissions apart and bounds user-chosen keys", async () => {
+  let calls = 0;
+  let t = T0;
+  const cached = cachedPerWindow(async (window, opts) => ({ sequence: ++calls, window, opts }), { now: () => t });
+  const args = { view: "budget-split", project: "site", role: "operator", fullPaths: true };
+  const first = await cached("7d", args);
+  assert.equal((await cached("7d", args)).sequence, first.sequence);
+  for (const opts of [{ ...args, role: "viewer", fullPaths: false }, { ...args, fullPaths: false }, { ...args, project: "other" }, { ...args, view: "breakdown" }]) assert.notEqual((await cached("7d", opts)).sequence, first.sequence);
+  assert.notEqual((await cached("30d", args)).sequence, first.sequence);
+  for (let i = 0; i < 130; i++) await cached("7d", { view: "breakdown", project: `p${i}` });
+  assert.notEqual((await cached("7d", args)).sequence, first.sequence, "the oldest entry is evicted after the bounded cache fills");
+  const before = calls;
+  t += INSIGHTS_CACHE_MS;
+  await cached("7d", args);
+  assert.equal(calls, before + 1, "an expired answer is recomputed on the injected clock");
+});

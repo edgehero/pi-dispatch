@@ -569,7 +569,7 @@ test("insights whatif prints the console's what-if address; a unix socket gets t
     return notes;
   };
   const [what] = notesOf(["insights", "whatif", "anthropic/claude-sonnet-4-5", "--flow", "tidy"], { PI_CONSOLE_LISTEN: "127.0.0.1:4790" });
-  assert.equal(what[0].split("\n")[1], "http://127.0.0.1:4790/insights?range=30d&whatif=anthropic%2Fclaude-sonnet-4-5&flow=tidy");
+  assert.equal(what[0].split("\n")[1], "http://127.0.0.1:4790/insights/breakdown?range=30d&whatif=anthropic%2Fclaude-sonnet-4-5&flow=tidy");
   // A model id may hold a slash after the provider's (an OpenRouter id): the target splits on the first one.
   assert.match(notesOf(["insights", "whatif", "openrouter/anthropic/claude-x", "--flow", "fix"], {})[0][0], /whatif=openrouter%2Fanthropic%2Fclaude-x&flow=fix/);
   const [unix] = notesOf(["insights"], { PI_CONSOLE_LISTEN: "unix:/run/pd/console.sock" });

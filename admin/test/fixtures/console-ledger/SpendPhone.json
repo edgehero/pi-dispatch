@@ -1,0 +1,181 @@
+{
+  "card": "SpendPhone",
+  "pr": 749,
+  "panels": [
+    "p-week",
+    "p-today",
+    "p-tokens",
+    "p-avg",
+    "p-over",
+    "p-byflow",
+    "p-bymodel",
+    "p-byproject",
+    "p-sizes",
+    "p-caps",
+    "p-whatif",
+    "p-plan",
+    "p-split"
+  ],
+  "elements": [
+    {
+      "el": "p-week",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendWeek",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "This week"
+    },
+    {
+      "el": "p-today",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendToday",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Today"
+    },
+    {
+      "el": "p-tokens",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendTokens",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Tokens today"
+    },
+    {
+      "el": "p-avg",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendAverage",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Average per metered run"
+    },
+    {
+      "el": "p-over",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendOver",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Spend over time"
+    },
+    {
+      "el": "p-byflow",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendByFlow",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "By flow"
+    },
+    {
+      "el": "p-bymodel",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendByModel",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "By model"
+    },
+    {
+      "el": "p-byproject",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendByProject",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "By project"
+    },
+    {
+      "el": "p-sizes",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendSizes",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Job sizes"
+    },
+    {
+      "el": "p-caps",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendCaps",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Caps"
+    },
+    {
+      "el": "p-whatif",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendWhatif",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "What if"
+    },
+    {
+      "el": "p-plan",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendPlans",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Metered and plan"
+    },
+    {
+      "el": "p-split",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendSplit",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": "Budget split"
+    },
+    {
+      "el": "Shared Spend views, window and project links",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": [
+        "Spend views",
+        "Budget split",
+        "Capacity",
+        "Breakdown",
+        "Flows map"
+      ]
+    },
+    {
+      "el": "Phone controls and charts use the Spend page; widths are checked at 375 and 390 px",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendControls",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": [
+        "Spend window",
+        "Projects"
+      ],
+      "reason": "The browser width suite verifies the same server-rendered markup at phone widths."
+    }
+  ]
+}

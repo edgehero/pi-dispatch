@@ -15,7 +15,7 @@
  * (model, flow, scan window) for the same time, at most `WHATIF_LIMITS.answers` of them, the oldest dropped first, so a
  * client walking the catalog cannot grow the console's memory.
  */
-import { whatIfFlow } from "../costs.mjs";
+import { whatIfFlow, whatIfRuns, costsSinceMs, recordInProject } from "../costs.mjs";
 import { RUN_MODEL_RE } from "../run-filter.mjs";
 
 export const WHATIF_LIMITS = Object.freeze({ ttlMs: 30_000, answers: 64, near: 3, models: 4000 });
@@ -86,13 +86,25 @@ export function closestPricedIds(pricing, id) {
  * unreachable }` for a scan that failed, else `{ model, flow, result }` (`whatIfFlow`'s estimate or seeded band).
  * `records` may be a function, called only for a priced model, so an unknown one never scans.
  */
-export function whatIfAnswer({ model, flow, pricing, records }) {
+export function whatIfAnswer({ model, flow, pricing, records, range = "30d", project = null, runs = "24h", nowMs, subscriptions = [] }) {
   const target = splitTarget(model);
   if (target === null) return { model, flow, invalid: true };
   if (pricing.getPricedModel(target.provider, target.id) === null) return { model, flow, unknown: true, near: closestPricedIds(pricing, target.id) };
   const got = typeof records === "function" ? records() : records;
   if (!Array.isArray(got)) return { model, flow, unreachable: typeof got?.unreachable === "string" ? got.unreachable : "the run records could not be read" };
-  return { model, flow, result: whatIfFlow({ records: got, flow, target, pricing }) };
+  const scoped = project ? got.filter((r) => recordInProject(r, project)) : got;
+  const within = (window) => nowMs === undefined ? scoped : scoped.filter((r) => {
+    const at = Date.parse(r?.endedAt ?? r?.startedAt ?? "");
+    return at >= costsSinceMs(window, nowMs) && at <= nowMs;
+  });
+  if (!flow) return { model, runs, runSet: whatIfRuns({ records: within(runs), target, pricing, subscriptions }) };
+  const result = whatIfFlow({ records: scoped, flow, target, pricing });
+  if (result.class === "estimated") {
+    const n = within(range).filter((r) => r?.flow === flow && !(r?.tokens == null && r?.exitCode == null && r?.budgetReserved === false)).length;
+    result.usd = result.perRun * n;
+    result.windowRuns = n;
+  } else Object.assign(result, whatIfFlow({ records: within(range), flow, target, pricing }));
+  return { model, flow, result };
 }
 
 /**
@@ -100,7 +112,7 @@ export function whatIfAnswer({ model, flow, pricing, records }) {
  * `ttlMs` on `now`, at most `max` answers, over ONE record scan per `ttlMs` shared by every key. `scan()` returns
  * `scanRunRecords`' result. A scan that fails is not kept, so the next question tries again.
  */
-export function makeWhatIfReader({ pricing, scan, now = () => Date.now(), ttlMs = WHATIF_LIMITS.ttlMs, max = WHATIF_LIMITS.answers }) {
+export function makeWhatIfReader({ pricing, scan, subscriptions = () => [], now = () => Date.now(), ttlMs = WHATIF_LIMITS.ttlMs, max = WHATIF_LIMITS.answers }) {
   let held = null;
   const records = () => {
     const t = now();
@@ -110,13 +122,13 @@ export function makeWhatIfReader({ pricing, scan, now = () => Date.now(), ttlMs 
     return value;
   };
   const answers = new Map();
-  return async ({ model, flow }) => {
-    const key = `${model}\n${flow}\n${WHATIF_SCAN_WINDOW}`;
+  return async ({ model, flow, range = "30d", project = null, runs = "24h" }) => {
+    const key = JSON.stringify([model, flow, range, project, runs, WHATIF_SCAN_WINDOW]);
     const t = now();
     const hit = answers.get(key);
     if (hit && t >= hit.at && t - hit.at < ttlMs) return hit.value;
     answers.delete(key);
-    const value = whatIfAnswer({ model, flow, pricing, records });
+    const value = whatIfAnswer({ model, flow, pricing, records, range, project, runs, nowMs: t, subscriptions: subscriptions() });
     if (value.unreachable === undefined) {
       answers.set(key, { at: t, value });
       // A Map iterates in insertion order, and a re-asked key was deleted above, so the first key is the oldest.

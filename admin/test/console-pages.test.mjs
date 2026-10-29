@@ -228,15 +228,18 @@ test("console pages: every screen, both roles, byte-identical to the fixtures an
   assert.match(first["runs.viewer"].html, /<a class="btn btn--sm" href="\/runs\?before=\d+">Older<\/a>/, "the runs page pages by a cursor");
   assert.match(first["runs-filtered.viewer"].html, /value="web"/, "the filter form shows the query's values");
   assert.match(first["runs-filtered.viewer"].html, /<a class="btn btn--sm" href="\/runs\?project=web&amp;outcome=completed&amp;before=\d+">Older<\/a>/, "and paging keeps the filter");
-  assert.match(first["insights.viewer"].html, /<ol id="insights-tips" class="hidden-tips" hidden><li>/, "the chart tooltips are listed");
-  // The insights move to the console: the two-window line, the chips' data list, the what-if form, and its answer.
-  assert.match(first["insights.viewer"].html, /<p id="windows" class="note">spend window: last 7d · topology: fixed 30d record window · series bounded by retention \(PI_LOG_RETENTION_DAYS\) and the 92-day scan cap<\/p>/);
-  assert.match(first["insights.viewer"].html, /<ol id="graph-nodes" class="hidden-tips" hidden><li data-id="n0"/);
-  assert.match(first["insights.viewer"].html, /<section id="p-whatif" data-panel><h2>What if<\/h2>/);
-  assert.match(first["insights-whatif.viewer"].html, /<pre class="answer">What-if fix @ acme\/model-1:\n  estimate ~\$[\d.]+ est\. total · ~\$[\d.]+ est\. per run\n  coverage \d+% of observed runs ledgered/, "the estimate over the fixture's ledgered runs");
-  assert.match(first["insights-whatif.operator"].html, /<h2>Spend, last 30d<\/h2>/, "a what-if keeps the page's default window");
-  assert.doesNotMatch(first["insights.viewer"].html, /Show full local paths/, "a viewer is offered no paths toggle");
-  assert.match(first["insights.operator"].html, /Show full local paths/, "an operator is");
+  assert.match(first["insights.viewer"].html, /<ol id="insights-tips"[^>]*hidden>/, "the chart tooltips are listed");
+  // Each view is assembled independently; the graph and flow estimate moved off Spend.
+  assert.doesNotMatch(first["insights.viewer"].html, /id="graph-nodes"/);
+  assert.match(first["insights-flows.viewer"].html, /id="graph-nodes"/);
+  assert.doesNotMatch(first["insights-flows-list.viewer"].html, /id="graph-nodes"/);
+  assert.match(first["insights-flows-selected.viewer"].html, /id="p-flows-selected"/);
+  assert.match(first["insights.viewer"].html, /id="p-whatif"/);
+  assert.match(first["insights-whatif.viewer"].html, /id="p-whatif-flow"/);
+  assert.match(first["insights-whatif.viewer"].html, /acme\/model-1/);
+  assert.doesNotMatch(first["insights-breakdown.viewer"].html, /Show full local paths/, "viewer has no paths toggle");
+  assert.match(first["insights-breakdown.operator"].html, /Full paths/, "operator has paths opt-in");
+  assert.doesNotMatch(first["config.operator"].html, /data-action="(?:priorities-set|envelope-set|allocation-revert)"/);
   assert.match(first["config.viewer"].html, /\.\.\.\/site/, "a local folder is shown by its basename");
   assert.match(first["config.viewer"].html, /<li class="mono">kimi-coding|linear/, "the configuration lists what the overlay holds");
   assert.match(first["audit.operator"].html, /Not an audit row: line 5 of 2026-10\.jsonl/, "a damaged audit line is a warning row");
@@ -287,7 +290,7 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
 test("parsePageQuery: each screen takes only its own parameters, bounded and charset-checked, and refuses without echoing", async () => {
   const { PAGES, QUERY_LIMITS, pageQueryString, parsePageQuery } = await import("../src/console/pages.mjs");
   const q = (name, qs) => parsePageQuery(name, new URLSearchParams(qs));
-  assert.deepEqual(Object.keys(PAGES), ["overview", "runs", "run", "parked", "insights", "fleet", "host", "venue", "config", "watch", "watch-board", "audit"]);
+  assert.deepEqual(Object.keys(PAGES), ["overview", "runs", "run", "parked", "insights", "insights-budget-split", "insights-capacity", "insights-breakdown", "insights-flows", "fleet", "host", "venue", "config", "watch", "watch-board", "audit"]);
   assert.ok(Object.isFrozen(PAGES) && Object.values(PAGES).every(Object.isFrozen));
   assert.equal(PAGES.audit.auth, "operator");
   assert.ok(Object.values(PAGES).filter((p) => p.auth !== "operator").every((p) => p.auth === "viewer"));
@@ -369,27 +372,27 @@ test("parsePageQuery: each screen takes only its own parameters, bounded and cha
   assert.match(q("run", "id=gh-1&x=2").refusal, /takes only id/);
   // insights: a closed range vocabulary, 30d by default (the static export's default, kept when the insights moved to
   // the console); the what-if pair, together or not at all; and paths=full.
-  const none = { whatif: null, flow: null, paths: null };
+  const none = { whatif: null, flow: null, paths: null, project: null, runs: null };
   assert.deepEqual(q("insights", "").query, { range: "30d", ...none });
   for (const r of ["7d", "30d", "mtd"]) assert.deepEqual(q("insights", `range=${r}`).query, { range: r, ...none });
   for (const r of ["90d", "7D", "mtd ", "<x>"]) assert.match(q("insights", `range=${encodeURIComponent(r)}`).refusal, /range must be one of 7d, 30d, mtd/);
   const asked = q("insights", "range=7d&whatif=openrouter%2Fanthropic%2Fclaude-x&flow=fix-it&paths=full");
-  assert.deepEqual(asked.query, { range: "7d", whatif: "openrouter/anthropic/claude-x", flow: "fix-it", paths: "full" });
+  assert.deepEqual(asked.query, { range: "7d", whatif: "openrouter/anthropic/claude-x", flow: "fix-it", paths: "full", project: null, runs: null });
   assert.equal(pageQueryString("insights", asked.query), "range=7d&whatif=openrouter%2Fanthropic%2Fclaude-x&flow=fix-it&paths=full");
   assert.deepEqual(q("insights", pageQueryString("insights", asked.query)).query, asked.query, "the string round-trips");
   for (const [qs, re] of [
-    ["whatif=anthropic%2Fx", /whatif and flow go together/],
-    ["flow=tidy", /whatif and flow go together/],
-    ["whatif=noslash&flow=tidy", /whatif must be <provider>\/<model>/],
-    ["whatif=%2Fx&flow=tidy", /whatif must be <provider>\/<model>/],
-    ["whatif=a%2F&flow=tidy", /whatif must be <provider>\/<model>/],
-    [`whatif=a%2F${encodeURIComponent(hostile)}&flow=tidy`, /whatif must be <provider>\/<model>/],
-    [`whatif=a%2F${"m".repeat(129)}&flow=tidy`, /whatif must be <provider>\/<model>/],
+
+    ["flow=tidy", /flow must be given with whatif/],
+    ["whatif=noslash&flow=tidy", /whatif must be a provider\/model id/],
+    ["whatif=%2Fx&flow=tidy", /whatif must be a provider\/model id/],
+    ["whatif=a%2F&flow=tidy", /whatif must be a provider\/model id/],
+    [`whatif=a%2F${encodeURIComponent(hostile)}&flow=tidy`, /whatif must be a provider\/model id/],
+    [`whatif=a%2F${"m".repeat(129)}&flow=tidy`, /whatif must be a provider\/model id/],
     ["whatif=a%2Fb&flow=Tidy", /flow must be a flow name/],
     [`whatif=a%2Fb&flow=${encodeURIComponent(hostile)}`, /flow must be a flow name/],
     ["paths=absolute", /paths must be full/],
     ["paths=full&paths=full", /paths is given more than once/],
-    ["fullPaths=1", /takes only range, whatif, flow, paths/],
+    ["fullPaths=1", /takes only range, project, whatif, flow, runs, paths/],
   ]) {
     const r = q("insights", qs);
     assert.match(r.refusal ?? "", re, qs);
@@ -450,7 +453,7 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
     assert.ok(calls.snapshot <= 1, `${name}: snapshot at most once`);
     // Issue #737: a screen that reads no snapshot reads the navigation's Parked count, once; one that does takes it from
     // the snapshot, so no screen reads both.
-    const expected = { overview: ["snapshot", "waiting"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot", "waiting"], host: ["snapshot", "waiting", "runsPage"], venue: ["snapshot"], config: ["snapshot"], watch: ["parkedCount"], "watch-board": ["parkedCount"], audit: ["audit", "parkedCount"] }[name];
+    const expected = name.startsWith("insights") ? ["insights", "parkedCount"] : { overview: ["snapshot", "waiting"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot", "waiting"], host: ["snapshot", "waiting", "runsPage"], venue: ["snapshot"], config: ["snapshot"], watch: ["parkedCount"], "watch-board": ["parkedCount"], audit: ["audit", "parkedCount"] }[name];
     assert.deepEqual(Object.keys(calls).filter((k) => calls[k] > 0).sort(), [...expected].sort(), `${name} reads ${expected.join(", ")}`);
     assert.ok(calls.parkedCount <= 1, `${name}: the count at most once`);
     assert.equal(data.parkedCount, expected.includes("parkedCount") ? 2 : undefined, `${name}: the count is in the data where it was read`);

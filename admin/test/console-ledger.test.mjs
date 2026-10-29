@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { html } from "../src/console/html.mjs";
 import { cardDocument, cardText } from "./helpers/card-structure.mjs";
 import { ROLES as PAGE_ROLES, SHOTS, STATIC_SHOTS } from "./helpers/console-pages-harness.mjs";
+import { SPEND_PANEL_STATES } from "./helpers/spend-goldens.mjs";
 import { FLEET_PANEL_STATES } from "./helpers/fleet-goldens.mjs";
 import { PANEL_STATES } from "./helpers/panel-goldens.mjs";
 
@@ -42,6 +43,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  SpendScreen: 749, SpendBudgetSplit: 749, SpendCapacity: 749, SpendBreakdown: 749, TopologyScreen: 749, SpendPhone: 749,
   FleetScreen: 6, FleetPartPaused: 6, HostDetail: 6, VenueDetail: 6,
   RunLive: 5, RunEnded: 5, RunRefused: 5, RunParked: 5, RunRecovered: 5, RunSandboxed: 5, RunChatStates: 5, RunViewer: 5, Transcript: 5, FactsAndLevels: 5,
   Shell: 1,
@@ -83,6 +85,7 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  ...SPEND_PANEL_STATES.map((key) => `panels/${key}`),
   ...FLEET_PANEL_STATES.map((key) => `panels/${key}`),
   "fleet.operator", "fleet.viewer", "host.operator", "host.viewer", "venue.operator", "venue.viewer",
   "run.operator", "run.viewer", "run-live.operator", "run-live.viewer",
@@ -377,11 +380,13 @@ test("the reverse check: every panel the screens of the ledgered cards draw is n
 // in its own panel, so an unrelated heading elsewhere on the page cannot make a missing element look complete.
 test("Fleet redesign ledger claims carry visible evidence in the panel they describe", () => collect((expect) => {
   const documents = new Map();
-  for (const { card, e } of ELEMENTS.filter(({ card, e }) => ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"].includes(card) && ["new", "real"].includes(e.status))) {
+  for (const { card, e } of ELEMENTS.filter(({ card, e }) => ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail", "SpendScreen", "SpendPhone", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen"].includes(card) && ["new", "real"].includes(e.status))) {
     const w = where(card, e);
     expect(Array.isArray(e.golden) && e.golden.length > 0, `${w}: cite a rendered state, not only an export`);
     expect("shows" in e, `${w}: name the actual visible output proving this claim`);
-    if (e.kind !== "panel" && e.source?.includes("/panels/")) expect("panel" in e, `${w}: scope renderer evidence to its panel`);
+    // Spend tabs and controls live in the title bar, outside every data-panel section.
+    const titleBar = ["admin/src/console/panels/spend.mjs#spendTabs", "admin/src/console/panels/spend.mjs#spendControls"].includes(e.source);
+    if (e.kind !== "panel" && e.source?.includes("/panels/") && !titleBar) expect("panel" in e, `${w}: scope renderer evidence to its panel`);
     for (const key of e.golden ?? []) {
       if (!documents.has(key)) { const raw = goldenText(key); documents.set(key, raw === null ? null : cardDocument(raw)); }
       const doc = documents.get(key);
@@ -398,4 +403,10 @@ test("Fleet redesign ledger claims carry visible evidence in the panel they desc
 test("every Fleet redesign state is evidenced by its card ledger, beyond merely naming its panels", () => {
   const represented = new Set(ELEMENTS.filter(({ card }) => ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"].includes(card)).flatMap(({ e }) => e.shows ? e.golden ?? [] : []));
   assert.deepEqual(FLEET_PANEL_STATES.filter((key) => !represented.has(`panels/${key}`)), [], "each rendered state must prove a visible piece in a card ledger");
+});
+
+test("every Spend state is evidenced by its card ledger with visible state-specific facts", () => {
+  const cards = ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen", "SpendPhone"];
+  const represented = new Set(ELEMENTS.filter(({ card, e }) => cards.includes(card) && e.kind === "state" && e.shows).flatMap(({ e }) => e.golden ?? []));
+  assert.deepEqual(SPEND_PANEL_STATES.filter((key) => !represented.has(`panels/${key}`)), []);
 });

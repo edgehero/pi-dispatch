@@ -626,3 +626,76 @@ test("a verified line still meets the #542 rule: a stopped container's signed li
 	assert.equal(r.dollars.basis, "floor");
 	assert.equal(r.tokens.total, 15, "the token record keeps the runner's real count, which the SIGTERM handler now writes");
 });
+
+
+test("live hold reports the actual reserve once, then clears after settlement", async () => {
+	const observed = [];
+	const { deps: d } = deps({ onDollarHold: (hold) => observed.push(hold), runContainer: async () => {
+		assert.deepEqual(observed, [{ amountMicros: 2 * USD, at: NOW.getTime() }]);
+		return { code: 0, aborted: false, exitLineCode: 0, tokens: COMPLETE_TOKENS, usage: LEDGER };
+	} });
+	assert.equal((await runJob(job, d)).outcome, "completed");
+	assert.deepEqual(observed, [{ amountMicros: 2 * USD, at: NOW.getTime() }, null]);
+});
+
+test("live hold is never published on a refused reserve and reporting cannot fail a paid run", async () => {
+	const observed = [];
+	const { deps: refused } = deps({ redis: keyedRedis({ [DAY]: 10 * USD }), onDollarHold: (hold) => observed.push(hold) });
+	assert.equal((await runJob(job, refused)).reason, "dollar-cap");
+	assert.deepEqual(observed, []);
+	const { deps: d } = deps({ onDollarHold: () => { throw new Error("observer unavailable"); } });
+	assert.equal((await runJob(job, d)).outcome, "completed");
+});
+
+test("live hold clears on a never-started container refund", async () => {
+	const observed = [];
+	const { deps: d } = deps({ onDollarHold: (hold) => observed.push(hold), runContainer: async () => ({ code: 125, aborted: false }) });
+	await assert.rejects(runJob(job, d), InfraRetry);
+	assert.deepEqual(observed, [{ amountMicros: 2 * USD, at: NOW.getTime() }, null]);
+});
+
+
+test("live hold remains published while a never-started refund is in flight, including a failed give-back", async () => {
+	for (const fails of [false, true]) {
+		const observed = [];
+		const redis = keyedRedis();
+		const original = redis.eval;
+		redis.eval = async (...args) => {
+			assert.equal(observed.at(-1)?.amountMicros, 2 * USD, "still a hold until the release answers");
+			if (fails) throw new Error("unreachable");
+			return original(...args);
+		};
+		const { deps: d } = deps({ redis, onDollarHold: (hold) => observed.push(hold), runContainer: async () => ({ code: 125, aborted: false }) });
+		const error = await runJob(job, d).catch((e) => e);
+		assert.ok(error instanceof InfraRetry);
+		assert.equal(error.dollars.basis, fails ? "floor" : "refunded");
+		assert.equal(observed.at(-1), null, "a retained floor is now charged, not held by a running job");
+	}
+});
+
+test("a midnight-crossing container keeps its reservation's UTC day and reservation timestamp", async () => {
+	const reservedAt = new Date("2026-10-07T23:59:59.999Z");
+	const observed = [];
+	const { deps: d, redis } = deps({ now: reservedAt, onDollarHold: (hold) => observed.push(hold), runContainer: async () => {
+		assert.equal(observed[0].at, reservedAt.getTime());
+		return { code: 0, aborted: false, exitLineCode: 0, tokens: COMPLETE_TOKENS, usage: LEDGER };
+	} });
+	await runJob(job, d);
+	assert.ok(redis.ops.some((op) => op[0] === "settle" && op[1] === DAY));
+	assert.ok(!redis.ops.some((op) => String(op[1]).includes("2026-10-08")));
+});
+
+test("the running ledger updates a pickup without mutating snapshots or another retry", { skip }, () => {
+	const running = mod.makeRunningJobs();
+	const first = running.add({ id: "same", holdMicros: 0 });
+	const second = running.add({ id: "same", holdMicros: 0 });
+	const before = running.list();
+	running.update(first, { holdMicros: 2 * USD, holdAt: NOW.getTime() });
+	assert.deepEqual(before, [{ id: "same", holdMicros: 0 }, { id: "same", holdMicros: 0 }]);
+	assert.deepEqual(running.list().map((e) => e.holdMicros), [2 * USD, 0]);
+	running.remove(first);
+	running.update(first, { holdMicros: 3 * USD });
+	assert.equal(running.size(), 1, "a late report cannot recreate an ended pickup");
+	assert.equal(running.list()[0].holdMicros, 0);
+	running.remove(second);
+});

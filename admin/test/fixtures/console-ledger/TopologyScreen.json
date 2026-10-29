@@ -1,0 +1,384 @@
+{
+  "card": "TopologyScreen",
+  "pr": 749,
+  "panels": [
+    "p-flows",
+    "p-flows-key",
+    "p-flows-selected",
+    "p-flows-honesty"
+  ],
+  "elements": [
+    {
+      "el": "p-flows",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Flows map"
+    },
+    {
+      "el": "p-flows-key",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key"
+    },
+    {
+      "el": "p-flows-selected",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#flowsSelected",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Selected trigger"
+    },
+    {
+      "el": "p-flows-honesty",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#flowsHonesty",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "What the map cannot see"
+    },
+    {
+      "el": "**Groups.** One box per local folder (its last folder name and HEAD) and one per forge (\"unverifiable from this host\", with the repositories its runs ran against).",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows",
+      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Flows map",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Triggers** are pills with a glyph for their kind (cron, label, comment, pull request, issue), their run count in the 30-day map window and their spend in the spend window (or `plan:<id>`). A spent one-shot is faded and dashed and names the run that spent it.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Flows** are rounded boxes:",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows",
+      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Flows map",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "solid when the skill was found at HEAD;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "dashed grey when it is unverified (a forge repository is not readable from this host);",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "dashed amber when it is not at HEAD;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "dashed red when it is missing;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "faded when it is an orphan.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Wires:** config (the trigger names this flow), observed (a thicker line with \"6× · 12h ago\", chained in run records), potential (dashed \"mention\"), and the cron re-arm loop with its schedule.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Badges:** a dot for unread, injected ai-trigger or PR spend-loop risk, and a ring for chainable. Each also says so in its tooltip and in the key.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Selecting a chip** fills it, outlines its flow and dims the rest. The side card shows the chip's details: schedule, flow, folder, runs and the last outcome, next fire, spend, whether it can chain, what it chains to, and loops in the skill.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-selected",
+      "source": "admin/src/console/panels/spend.mjs#flowsSelected",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Selected trigger",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Moving around.** Map or List view, zoom buttons, drag to pan. Tab reaches every chip and Enter selects it; Escape clears.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows",
+      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Flows map",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Not on the map** counts what is missing from it: unattributed runs, refused chain requests and labels moved into tooltips. When the triggers file is missing or invalid, a red banner says so and nothing is drawn.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-honesty",
+      "source": "admin/src/console/panels/spend.mjs#flowsHonesty",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "What the map cannot see",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The tab row under the title (Spend, Budget split, Capacity, Breakdown, Flows map) is shared by all five Spend views; the current one is filled. They are server-rendered links (`/insights`, `/insights/budget-split`, `/insights/capacity`, `/insights/breakdown`, `/insights/flows`, proposed routes) and on a phone the row scrolls inside itself.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows",
+      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Flows map",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Skills of forge repositories cannot be read from this host, so their flows are drawn dashed as unverified, never as missing.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-key",
+      "source": "admin/src/console/panels/spend.mjs#flowsKey",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Key",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Chains are bounded: depth at most 1, at most 2 requests per job, same folder only. A chain wire counts the last 30 days of run records.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows-honesty",
+      "source": "admin/src/console/panels/spend.mjs#flowsHonesty",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "What the map cannot see",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Run counts on the chips use the 30-day map window, and spend uses the 7-day spend window, as the line under the tabs says.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows",
+      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Flows map",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The map works without a mouse: drag to pan, scroll or the buttons to zoom, Tab to a chip, Enter to select it and Escape to clear. The List view holds the same content as text.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-flows",
+      "source": "admin/src/console/panels/spend.mjs#flowsMap",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": "Flows map",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Shared Spend views, window and project links",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": [
+        "Spend views",
+        "Budget split",
+        "Capacity",
+        "Breakdown",
+        "Flows map"
+      ]
+    },
+    {
+      "el": "State: spend-flows-map.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-flows-map.viewer"
+      ],
+      "shows": [
+        "Flows map",
+        "Fit",
+        "What the map cannot see"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-flows-list.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-flows-list.viewer"
+      ],
+      "shows": [
+        "Flows list",
+        "Flows nothing reaches",
+        "one-shot spent"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-flows-selected.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": [
+        "Selected trigger",
+        "Runs in map window",
+        "nightly"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-flows-spent.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-flows-spent.viewer"
+      ],
+      "shows": [
+        "Run that spent this one-shot",
+        "review"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-flows-invalid.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-flows-invalid.viewer"
+      ],
+      "shows": [
+        "triggers file is invalid",
+        "Nothing is drawn until it loads"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-flows-missing.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-flows-missing.viewer"
+      ],
+      "shows": [
+        "Nothing is drawn until it loads"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "The graph model: groups, nodes with their kind and flags, edges with kind and counts, run counts per trigger, the spend map, next fire and overdue per cron trigger, and the honesty counters. The map is inline SVG in a viewBox; at 390px it keeps its size and scrolls sideways inside its card.",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/insights-assembly.mjs#assembleGraph",
+      "golden": [
+        "panels/spend-flows-selected.viewer"
+      ],
+      "shows": [
+        "nightly",
+        "fix",
+        "Selected trigger"
+      ]
+    }
+  ]
+}

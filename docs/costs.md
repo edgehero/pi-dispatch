@@ -117,13 +117,9 @@ labeled `unmeasured (OQ-002)`.
 
 ## The surfaces
 
-- The console's `/insights?range=7d|30d|mtd` page: the fold drawn as charts beside the trigger/flow
-  topology ([`insights.md`](insights.md)). In pi, `/dispatch insights [7d|30d|mtd]` prints its URL.
-- The what-if, a form on that page (`/insights?whatif=<provider>/<model>&flow=<flow>`): re-prices a flow's
-  recorded token profiles under another model. An unknown model gets up to three closest priced ids, and
-  the model field suggests the priced catalog. The flow is **required**: the estimate scores one
-  flow's median run, not a portfolio, so the page refuses a what-if without it.
-  `/dispatch insights whatif <provider>/<model> --flow <flow>` prints the URL of the answer.
+- Spend (`/insights`) shows caps, actual running-job holds, settled charts and an estimate of the same ledgered runs on another model, for 24 hours or this week.
+- Breakdown (`/insights/breakdown?range=7d|30d|mtd`) shows the classified cost fold and plan comparisons. Its per-flow what-if uses the median ledger profile, multiplied by the flow's runs in the selected window. Unknown models offer nearby priced ids; a flow without ledgered history has a seeded band.
+- `/dispatch insights [7d|30d|mtd]` prints Spend's URL. `/dispatch insights whatif <provider>/<model> --flow <flow>` prints Breakdown's answer URL. Saved flow what-if links at `/insights` redirect there.
 - The `dispatch_costs` tool returns the fold as JSON in which **every monetary value carries its
   `class`** — a model reading it can no more launder an estimate into a fact than the page can.
   Beside the fold, `dollars` holds the dollar caps' enforcement amounts (below): integer micro-dollars from the

@@ -1286,7 +1286,7 @@ test("RESERVED_ID_FAMILIES is every ordinal family the spend topology mints, eac
   assert.deepEqual(minted, ["g", "n", "sg", "w"], "the families graph-html.mjs mints");
   assert.deepEqual([...ui.RESERVED_ID_FAMILIES].sort(), minted);
   // Every topology id the spend golden draws (its chips and wires), by graph-html's own families, is refused.
-  const golden = readFileSync(new URL("./fixtures/console/insights.operator.html", import.meta.url), "utf8");
+  const golden = readFileSync(new URL("./fixtures/console/insights-flows.operator.html", import.meta.url), "utf8");
   const family = new RegExp(`^(?:${minted.join("|")})\\d+$`);
   const drawn = Array.from(golden.matchAll(/\sid="([^"]+)"/g), (m) => m[1]).filter((id) => family.test(id));
   assert.ok(drawn.includes("n0") && drawn.includes("w0") && drawn.length >= 10, drawn.join(" "));

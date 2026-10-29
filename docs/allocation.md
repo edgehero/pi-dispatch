@@ -268,10 +268,7 @@ runs the edited file, and it cannot see a hand edit put back. Check the host's l
 
 ### The other surfaces
 
-- **The insights page** has a budget split section: the envelope, one bar per entry (its share, its spend and
-  its floor), the headroom, the plan in force, the newest 20 outcomes from `alloc:log`, and, over the spend
-  window, the split's refusals and the plans collected, counted from this host's run records. It names no host
-  and holds no reason text, because a viewer reads the page as well as an operator ([insights](insights.md)).
+- **Budget split** (`/insights/budget-split`) shows the envelope's totals, per-project weights, allocations, spend including holds, floors, the current plan and newest 20 history rows. Refusal counts use the envelope window. Rows start at 1; a host column appears when history names several hosts. Live host digests show which envelopes differ or are unknown. Operators see escaped plan reasons and structured priorities/envelope forms, plus Revert with a preview and five-minute confirmation ticket; viewers see the numbers and history. The allocation forms live here rather than Configuration's Projects panel. Spend retains a linked split summary. [Spend views](insights.md) explains the confirmation and undo semantics.
 - **A run's detail** shows a `plan` line for a run that left one (the outcome, its reason, `clamped`, the plan
   id) and a `dollars` line (what the run settled, and on what basis).
 - **A portfolio trigger** carries `[portfolio]` in the panel's trigger list and in `/dispatch triggers`. Its

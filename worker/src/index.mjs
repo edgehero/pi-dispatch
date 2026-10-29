@@ -248,6 +248,11 @@ export function makeRunningJobs() {
 			entries.set(next, { ...entry });
 			return next;
 		},
+		/** Update only this pickup: a retry with the same job id has a different key. */
+		update(key, patch) {
+			const entry = entries.get(key);
+			if (entry) entries.set(key, { ...entry, ...patch });
+		},
 		/** Removes one pickup's entry; true only the first time. */
 		remove(key) {
 			return entries.delete(key);
@@ -1267,7 +1272,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			capacity = capacityNow();
 			// This host runs the job from here on (issue #599, phase 2): its entry, at the same instant as `startedAt`, given
 			// back by `releaseAllHolds` on every exit. `add` is total, so this block still cannot throw.
-			runningKey = runningJobs.add({ id: job.id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: Date.parse(startedAt) });
+			runningKey = runningJobs.add({ id: job.id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: Date.parse(startedAt), holdMicros: 0, holdAt: Date.parse(startedAt) });
 			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
 			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
 			// From the VENUE that will build the container, not from the local adapter reached for directly:
@@ -1640,6 +1645,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// The jobs running on this host (`{ list() }`, ids and admission instants), so a recovery whose base job still runs
 				// HERE is delayed rather than started beside it. The processor's own ledger, unless a wiring hands one in.
 				runningJobs: deps.runningJobs ?? runningJobs,
+				// Observability follows the actual reservation, never the configured cap before admission.
+				onDollarHold: (hold) => runningJobs.update?.(runningKey, { holdMicros: hold?.amountMicros ?? 0, holdAt: hold?.at ?? Date.parse(startedAt) }),
 			});
 			// Gate round 4 of PR #479: stopped again as runJob returns, before anything is recorded (a result with no
 			// container never passed the exit stop above). A cancel that lands after is never acknowledged, and its

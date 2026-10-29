@@ -84,7 +84,7 @@ test("the shell's rules and the legacy layer's declarations hold no colour liter
 
 test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR 3: the overview; PR 4: runs, parked), each served only under its own body", () => {
   assert.ok(Object.isFrozen(PAGE_CSS));
-  assert.deepEqual(Object.keys(PAGE_CSS), ["login", "login-code", "error", "audit", "overview", "run", "runs", "parked", "fleet", "host", "venue"]);
+  assert.deepEqual(Object.keys(PAGE_CSS), ["insights", "insights-budget-split", "insights-capacity", "insights-breakdown", "insights-flows", "login", "login-code", "error", "audit", "overview", "run", "runs", "parked", "fleet", "host", "venue"]);
   assert.equal(PAGE_CSS.runs, RUNS_CSS);
   assert.equal(PAGE_CSS.parked, PARKED_CSS);
   assert.equal(PAGE_CSS.login, PAGE_CSS["login-code"], "the two sign-in pages are one card's rules");
@@ -92,7 +92,7 @@ test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR
   assert.ok(PAGE_CSS.audit.endsWith(PAGE_CSS.error), "the audit page carries the error card's rules too");
   const served = pageCss();
   assert.ok(CONSOLE_CSS.includes(served));
-  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:login|login-code|error|audit|overview|run|runs|parked|fleet|host|venue)"\](?:$|[ >])/, sel);
+  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:insights(?:-budget-split|-capacity|-breakdown|-flows)?|login|login-code|error|audit|overview|run|runs|parked|fleet|host|venue)"\](?:$|[ >])/, sel);
   for (const name of Object.keys(PAGE_CSS)) assert.ok(served.includes(`body[data-page="${name}"] `), name);
   assert.equal(scopeCss('body[data-page="runs"]', ".x .y{color:var(--ink)}\nbody{gap:0}"), 'body[data-page="runs"] .x .y{color:var(--ink)}\nbody[data-page="runs"]{gap:0}');
 });
@@ -527,7 +527,7 @@ test("the parts a page draws hidden take no space until they show; a page shown 
   assert.match(PULSE_CSS, /\n\.btn \{[^}]*background: var\(--surface-3\);/, "the plain button's fill");
   // The legacy controls drawn with that fill wear it too; the legacy layer's other surface-3 rules are no control.
   const legacyFill = cssBlocks(LEGACY_CSS).filter((b) => !b.prelude.startsWith("@") && /(?:^|;)background:var\(--surface-3\)/.test(b.body));
-  assert.deepEqual(legacyFill.filter((b) => /box-shadow:var\(--stale-ring,none\)/.test(b.body)).map((b) => b.prelude), [".legacy button", ".legacy details.editor>summary", ".legacy .range a"]);
+  assert.deepEqual(legacyFill.filter((b) => /box-shadow:var\(--stale-ring,none\)/.test(b.body)).map((b) => b.prelude), [".legacy button", ".legacy details.editor>summary"]);
   assert.deepEqual(legacyFill.filter((b) => !/--stale-ring/.test(b.body)).map((b) => b.prelude), [".legacy .badge"], "a badge is a mark, not a control");
   assert.ok(!/--stale-ring:/.test(LEGACY_CSS) && !/--stale-ring:/.test(pageCss()), "the ring is declared on the flat panels alone");
   assert.ok(contrast(colorOf("ink-faint", "light"), colorOf("canvas", "light")) < 4.5, "the faint ink alone would miss AA on the light canvas");

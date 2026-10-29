@@ -2008,7 +2008,7 @@ export function insightsLink(tokens: string[], notify: Notify, env: any = deploy
     }
     query = new URLSearchParams({ range: window });
   }
-  notify?.(["insights are on the operator console's spend screen:", ...consolePageLines(env, `insights?${query}`)].join("\n"), "info");
+  notify?.(["insights are on the operator console's spend screen:", ...consolePageLines(env, `${rest[0] === "whatif" ? "insights/breakdown" : "insights"}?${query}`)].join("\n"), "info");
 }
 
 /**

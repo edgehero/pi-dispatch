@@ -749,7 +749,7 @@ function dollarName(row) {
  * A count window's status by the budget's own band (budget.mjs `windowState`): failed once the next start would pass the
  * cap, attention once it would pass the soft hold, else ok.
  */
-function countStatus(used, cap, hold) {
+export function countStatus(used, cap, hold) {
   if (used >= cap) return "failed";
   return Number.isInteger(hold) && used >= Math.floor((cap * hold) / 100) ? "attention" : "ok";
 }

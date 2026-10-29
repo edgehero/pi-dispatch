@@ -53,7 +53,8 @@ test("readCapacity: the same report the CLI prints, the running job counted, and
   const res = await readCapacity({ url: "redis://127.0.0.1:6399", env, window: "24h", now: () => NOW, redisFn: () => valkey });
   assert.equal(res.error, undefined);
   assert.deepEqual(res.report.hosts.map((h) => [h.name, h.busyMs, h.coverage.live]), [["mini1", 2 * H, 1], ["mini2", H, 0]]);
-  assert.match(res.text, /^Host mini1, last 24h\n/);
+  assert.match(res.text, /^Fleet busy share of slot time: /);
+  assert.match(res.text, /\nHost mini1, last 24h\n/);
   assert.match(res.text, /1 job running now, counted as busy up to now/);
   assert.deepEqual(valkey.calls.filter((c) => c.startsWith("WRITE")), [], "read-only: no prune, no write");
   assert.equal(valkey.calls.at(-1), "disconnect");

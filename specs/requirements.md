@@ -741,6 +741,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
 
+- **AMENDED 2026-10-29 (#749)**: `/dispatch insights whatif <provider>/<model> --flow <flow>` prints `/insights/breakdown` with the model, flow and range; the ordinary insights command still prints Spend.
+
 - **Roles (#717)**: model-callable writes cannot set `modelRoles` under any nesting or near-miss spelling. Unrelated trigger edits preserve it. Run detail and the run API show validated role identity beside the resolved physical model and bounded agent-refusal counts. Both published ESM bundles must load in plain Node without a source loader supplying CommonJS require; bundled CommonJS dependencies receive Node builtin resolution through an explicit createRequire prelude.
 
 - **Failover configuration (#716)**: no model-callable tool may set, remove or disguise `run.fallbackModels`, with or without confirmation. Add/edit calls carrying that field or a near miss are refused before confirmation. An unrelated edit preserves an existing reviewed list. Operator reads display the list; the console's published Doctor warnings name configured models cooling down, their fixed cause and reset instant, with the observation's age.
@@ -1385,8 +1387,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `admin/test/console-pages.test.mjs` ("the run page's children carry a reason only when it is a token"),
     `admin/test/job-actions.test.mjs` ("a parked answer's refusal for a run that is not parked names how it ended only
     in tokens: a reason or an outcome that is no token reaches no refusal").
-  - (m) **The insights page's reads** (2026-10-18, insights move to the console). Given a viewer's session, then
-    `/insights?whatif=<provider>/<model>&flow=<flow>` is answered as a read (a GET, no ticket, no audit row, no write)
+  - (m) **The five Spend views’ reads** (2026-10-18, insights move to the console). Given a viewer's session, then
+    the five routes in `REQ-OPERATOR-CONSOLE-SCREENS` (e), their map/list and what-if queries are answered as a read (a GET, no ticket, no audit row, no write)
     and its record scan is bounded by the 92-day scan ceiling and cached 30 s, at most 64 answers; given `paths=full`
     from a viewer, then the page still draws basenames and says full paths are for operators; given the same from an
     operator, then the topology's group labels and the budget split's problem text carry full local paths; given either
@@ -1406,6 +1408,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     so any other `url(` stays banned. Tests: `admin/test/console-pages.test.mjs` (`assertOwnReferences` in
     `admin/test/helpers/console-pages-harness.mjs`, on every golden, the hostile variant and every screen's read-only
     render), `admin/test/console-panels.test.mjs` (the insights page), `admin/test/console-stylesheet.test.mjs`.
+    Plan reasons are read only for an operator’s Budget split load and never enter a viewer cache. List view holds no
+    hidden graph node data. Every route enforces the effective role before full-path reads.
   - (n) **An error page for a person, JSON for a program** (issue #737 PR 2, #711's first visit). Given a request
     the console refuses or fails that is a GET or a HEAD, for a path outside `/api/` and `/static/`, whose `Accept`
     names `text/html` in any case (`wantsHtml`, what a browser's own navigation sends), it is answered with an error
@@ -2255,41 +2259,38 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     along"),
     `admin/test/console-run-outcome.test.mjs` ("the checks are reused for 15 s per run id while the record is the same,
     an unreadable one as long as a good one").
-  - (e) **Insights** (`/insights?range=`). Given `range` `7d`, `30d` or `mtd`, the page shows the insights sections
-    for that window, built by the one assembly (`assembleInsights`, pi-free in `admin/src/insights-assembly.mjs`),
-    with no inline style and no inline script; given any other range, it is refused; given no range, the last 30 days
-    (since 2026-10-18; it was 7 days); a second request within 30 seconds for the same window and the same `paths`
-    reuses the assembly; given an unknown query key, it is refused 400. Since 2026-10-18 (insights move to the
-    console), each of these holds too:
-    - (e1) **The two windows.** The page's header line reads "spend window: <label> · topology: fixed <N>d record
-      window · series bounded by retention (PI_LOG_RETENTION_DAYS) and the 92-day scan cap", so a screenshot cannot
-      conflate the two windows.
-    - (e2) **The what-if panel.** Given `whatif=<provider>/<model>&flow=<flow>`, the what-if panel shows the estimate
-      of `REQ-COST-ANALYTICS`: the flow's median per-run quad re-priced at the target over its ledgered runs, marked
-      estimated, naming its rates version and coverage, else the seeded band `unmeasured (OQ-002)`; the record scan is
-      the 92-day scan ceiling, bounded, and cached 30 s per (model, flow, scan window), at most 64 cached answers;
-      given a model the pricing catalog does not hold, the panel offers at most three priced ids that contain the
-      text and scans nothing; given `whatif` without `flow`, or `flow` without `whatif`, it is refused 400; given a
-      model outside the runs filter's model charset (a leading `@` or `~` allowed, as priced catalog ids carry) or
-      with no provider before the first `/`, or a flow outside the
-      skill name rule, it is refused 400 by field name and the value is not echoed. The form is a GET with a
-      `<datalist>` of the priced model ids and the window's flows, open to the viewer role, and it is not an action.
-    - (e3) **Full paths, operator only.** Given `paths=full` and an operator's session, the topology's group labels
-      and the budget split's problem text carry full local folder paths; given the same from a viewer, they carry
-      basenames and the page says full paths are for operators; given no `paths`, basenames for both roles.
-    - (e4) **The interactive topology.** Pan, zoom, chip tooltips, label fitting, and a breakdown row's click
-      highlighting its topology chip (through `data-node`) run in the console's one served script,
-      `/static/console.js`, under `script-src 'self'`; the per-node tooltip and neighbour data reach it as a hidden
-      escaped list in the page, never a script element; a mouse click on a chip selects it (and a second clears it)
-      although pointer capture retargets the click, and a view in the fragment is clamped to the zoom bounds rather
-      than thrown on; with the script off the page is the static page, every
-      label still sized by the builder's estimate.
-    - (e5) **Nothing leaves the host.** The page's bytes hold no external `src`, `href`, `url()` or `@import`, no
-      `fetch` of another origin and no `.log` content, under both roles and with hostile fixture values.
-    Tests: `admin/test/insights-assembly.test.mjs`, `admin/test/insights-html.test.mjs`, `admin/test/graph-html.test.mjs`,
-    `admin/test/console-panels.test.mjs` (the script under a DOM stub, the what-if reader, paths, the window line, 30d,
-    zero external requests), `admin/test/console-pages.test.mjs` (the fixtures, with a what-if page),
-    `admin/test/console-headers.test.mjs`.
+  - (e) **Spend, five views** (#749). `/insights`, `/insights/budget-split`, `/insights/capacity`,
+    `/insights/breakdown` and `/insights/flows` are viewer-readable, non-live Pulse pages, all titled Spend.
+    Their server-rendered tab links keep supported range, project and paths choices; tabs and chips scroll inside
+    themselves at 375 px. Range is 7d, 30d (default), mtd, with 24h additionally on Capacity. Unknown keys and invalid
+    values refuse by field name. Each view reads only its own slices, cached for 30 seconds by view, window, project,
+    effective path permission and role wherever operator-only text is read, with bounded cache size.
+    - Spend has weekly and daily spent-and-held, tokens today and average metered cost over 24 hours; project dollar
+      windows where configured, explicitly named deployment fallback otherwise. Settled money is read from run records,
+      today's held part from actual live-job reservations (`INT-HOST-REGISTRY-CONTRACT`), never counter minus records.
+      Older or incomplete hosts are named; counter differences are named separately, never folded into either part.
+      Past daily bars show settled amounts only. Caps use the worker's thresholds: soft hold only on global job-count
+      windows (scoped counts have hard caps); a dollar window is full when the next per-job reservation would not fit. Plan runs consume all caps,
+      the dollar windows at API-equivalent prices. Cost by flow/model/project, the job-cost histogram, metered/plan
+      rows, run-set what-if and a linked split summary complete the Spend view.
+    - Budget split's KPIs/history cover the envelope window; project selection narrows rows only. It shows allocation,
+      floor, weights, spend including holds, current plan and newest 20 history outcomes across hosts. Operator-only
+      priorities, envelope and revert forms use existing preview/confirm/audit doors; plan reasons are read only for
+      operators and escaped including invisible/directional characters. Every visible history number starts at 1.
+    - Capacity offers 24 hours, 7 days and 30 days, supports carried mtd, and draws the shared capacity report's fleet
+      KPIs, per-host charts and missing/truncated coverage. It always says jobs only; project size suggestions remain
+      below host cards until the project page takes them.
+    - Breakdown draws the classified cost fold, daily/cumulative and per-flow series, trigger/repository/model
+      breakdowns, plan comparisons, provenance and per-flow what-if with window-scoped totals. Trigger links open the
+      Flows map selected by the stable trigger index. Saved `/insights?whatif=...&flow=...` links redirect here.
+    - Flows map has a server-rendered selected-node side card, map/list toggle, zoom/fit controls and keyboard
+      selection (Tab/Enter, Escape clears). The list uses the same graph model without node data or a script
+      dependency; spent one-shots link to runs. Map records cover 30 days and spend uses the selected range, both
+      windows named. Missing/invalid triggers produce the loader's error and no graph; bounded scans and
+      unverifiable inputs are named. Full local paths remain operator opt-in on every route.
+    - Every view draws explicit empty, unreadable and invalid-input states, labels unknown money with the unknown
+      word and icon, and uses escaped hidden chart tooltip/node lists without inline script/style. The six card
+      ledgers, page/panel goldens, real browser CSP/width checks and interaction tests hold the design and behavior.
   - (f) **Fleet** (`/fleet`, #748). The Pulse fleet bar names running, paused or part paused queues,
     the safe Valkey display, counts and read provenance. Its kill switch uses the existing preview/confirm funnel;
     a pause names the queues and running jobs that continue, and differing Valkeys are disclosed on every page load.
@@ -2812,6 +2813,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `.github/scripts/console-width-check.mjs --require`.
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
+
+- **AMENDED 2026-10-29 (#749)**: The three allocation forms move from Configuration to Budget split. Existing body schemas, action names, audit kinds and five-minute ticket guards remain. Envelope preview includes the file diff and multi-host consequence; revert preview names its exceptions and undo identifies the previous plan id rather than a moving row number.
 
 **Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
@@ -4007,6 +4010,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-SIZE-SUGGESTIONS
 
+- **AMENDED 2026-10-29 (#749)**: Project memory/CPU suggestions remain below Capacity’s host cards until #751 moves them to the project page; Spend’s job sizes are instead a histogram of per-run metered cost.
+
 - **Statement**: The operator shall be told, per project, what job size its recent runs suggest (issue #596, phase 3):
   its memory and CPUs now, the p95 of what its runs used, and either "fits", "not enough runs", or a suggested size
   with its reason and the exact `dispatch_limit_edit` call (`dispatch_limit_add` when the project has no row) that
@@ -4058,6 +4063,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `INT-RUN-HISTORY-FILE-CONTRACT`
 
 ## REQ-CAPACITY-INSIGHTS
+
+- **AMENDED 2026-10-29 (#749)**: Capacity has a 24h view with one-hour buckets, alongside 7d and 30d and carried mtd. Fleet utilization is weighted by slot time; the peak is simultaneous across hosts; waits pool samples, never host percentiles. Missing coverage remains explicit.
 
 - **Statement**: The operator shall be told, per host, how busy it is and was with this deployment's jobs (issue #599):
   over a window of a day, a week or thirty days, the share of the time it ran at least one job and the share it sat
@@ -4134,6 +4141,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `REQ-HOST-BUDGET`, `REQ-MULTI-HOST-COORDINATION`, `REQ-DURABLE-RUN-HISTORY`, `OQ-039`
 
 ## REQ-DELEGATED-ALLOCATION
+
+- **AMENDED 2026-10-29 (#749)**: Budget split carries weights and host digests/history, operator-only escaped plan reasons, structured priority/envelope forms and one-based history labels. Revert skips minIntervalHours/maxStepPct, remains envelope-bound, does not stop the portfolio job, and a no-plan row restores today’s neutral split.
 
 - **Statement**: The worker shall apply a **priorities plan** (`INT-PRIORITIES-PLAN-CONTRACT`) with no human keypress,
   inside an operator **envelope** (`INT-ENVELOPE-FILE-CONTRACT`), under fixed rules, and shall record every attempt. The
@@ -4472,6 +4481,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-COST-ANALYTICS
 
+- **AMENDED 2026-10-29 (#749)**: Spend re-prices each eligible run ledger across flows for 24h or this week and sums those prices; exclusions and pricing caveats are explicit. Breakdown retains the median per-flow profile but multiplies by the selected window’s run count, not the whole scan’s.
+
 - **Measured canaries (#717)**: a capped candidate replay is a new paid run with source lineage, not a counterfactual repricing. Its comparison links `/insights?whatif=<provider>/<model>&flow=<flow>` and distinguishes recorded candidate cost/outcome from estimates and unknown costs. Insights and role maps still change nothing.
 
 - **Statement**: The harness shall make recorded spend **analyzable**: the operator console's `/insights` page
@@ -4567,6 +4578,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   its coverage (2026-10-18, `REQ-OPERATOR-CONSOLE-SCREENS` (e2)).
 
 ## REQ-TOPOLOGY-GRAPH
+
+- **AMENDED 2026-10-29 (#749)**: Flows map lives at `/insights/flows`, with `view=map` or script-free `view=list`, source-index `select`, server-selected details, keyboard selection and zoom/fit controls. A spent one-shot retains its validated job id for its run link.
 
 - **Statement**: The harness shall make the trigger/flow **topology** visible: the topology pane of the
   operator console's `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS` (e), the one analytics surface; the static
@@ -7897,3 +7910,4 @@ instead of drifting.
 | 2026-10-28 (#716) | **`REQ-MODEL-POLICY` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: reviewed fallback list, per-attempt singleton execution, pre-spend candidate checks, authenticated replay eligibility and no tool-written fallback policy. **`REQ-COST-ANALYTICS` UNCHANGED, checked**: insights do not switch models. **`CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked**: provider exit 1, free gates before spend and pi 1.4.0 retained. |
 | 2026-10-29 (#748) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: pages are defined by `PAGES`; Fleet uses Pulse panels, with live host and non-live venue detail, bounded waiting lists, truthful missing data, runtime-specific orphan guidance and retained workspaces. New behavior has role, route, read-model, worker and browser regression coverage. **`REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: existing guards and confirmed action funnels apply, commands start no remote runtime operation. |
 | 2026-10-29 (#748, design fidelity) | **`REQ-OPERATOR-CONSOLE-SCREENS` (f) AMENDED**: component hierarchy and visible chart/declaration structure of all four published cards are explicit acceptance criteria, with structural and panel-scoped evidence checks. **`REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `INT-HOST-REGISTRY-CONTRACT`, `INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: role guards, confirmed actions, telemetry authority and stream behavior stay intact. |
+| 2026-10-29 (#749) | `REQ-OPERATOR-CONSOLE-SCREENS` (e), `REQ-CONSOLE-SECURITY` (m), `REQ-TOPOLOGY-GRAPH`, `REQ-COST-ANALYTICS`, `REQ-CAPACITY-INSIGHTS`, `REQ-DELEGATED-ALLOCATION`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-SIZE-SUGGESTIONS` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: five Spend routes, held-money facts, fleet capacity, window-scoped estimates, structured allocation and accessible map/list. All unrelated requirements UNCHANGED, checked. |

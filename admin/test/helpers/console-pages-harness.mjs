@@ -68,7 +68,13 @@ export const SHOTS = Object.freeze([
   ["insights", "insights", "range=7d"],
   // The what-if (the insights move to the console): a priced model over the fixture's ledgered fix runs, at the scan's
   // own ceiling, with the canned pricing below so a pi bump moves no byte of it.
-  ["insights-whatif", "insights", "whatif=acme%2Fmodel-1&flow=fix"],
+  ["insights-whatif", "insights-breakdown", "whatif=acme%2Fmodel-1&flow=fix"],
+  ["insights-budget-split", "insights-budget-split", "range=7d"],
+  ["insights-capacity", "insights-capacity", "range=24h"],
+  ["insights-breakdown", "insights-breakdown", "range=7d"],
+  ["insights-flows", "insights-flows", "range=7d"],
+  ["insights-flows-list", "insights-flows", "range=7d&view=list"],
+  ["insights-flows-selected", "insights-flows", "range=7d&select=0"],
   ["fleet", "fleet", ""],
   ["host", "host", "name=build3"],
   ["venue", "venue", "name=podman"],
@@ -293,7 +299,7 @@ async function renderInChild() {
   };
   const RM = await import("../../src/read-model.mjs");
   const DW = await import("../../src/dollar-windows.mjs");
-  const { assembleInsights } = await import("../../src/insights-assembly.mjs");
+  const { assembleInsightsView } = await import("../../src/insights-assembly.mjs");
   const { makeWhatIfReader } = await import("../../src/console/whatif.mjs");
   const pricing = await import("../../../worker/src/pricing.mjs");
   const { makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } = await import("../../../worker/src/console-audit.mjs");
@@ -413,7 +419,7 @@ async function renderInChild() {
         readTrace: async (id, opts) => [{ kind: "stream", signature: "verified", source: "prod-alerts", count: 37, at: NOW }, { kind: "rule", status: "held", checks: { match: "passed", threshold: "at-window-end", cooldown: "passed", cap: "passed" }, at: NOW }, { kind: "decide", status: "answered", action: "investigate", model: "openrouter/typesafe/jev-1.13", modelReviewed: true, costUsd: 0.00002, at: NOW, confidence: 0.82, probabilities: { investigate: 0.82, file_issue: 0.15, ignore: 0.03 }, ...(opts.private ? { state: { severity: "error", count: 37 }, questions: { act: { type: "choice" } }, usage: { cost: 0.00002 } } : {}) }, { kind: "query", status: "completed", rows: 37, at: NOW, ...(opts.private ? { query: "sum(rate(checkout_errors[5m]))" } : {}) }],
         readBoard: async () => ({ version: 2, frozen: false, blocks: [{ id: "count", type: "number", title: "Checkout errors", value: 37, traceId: "q1" }, { id: "note", type: "note", title: "Investigation", text: "Pool saturation needs a person to review the follow-up issue.", traceId: "q2" }], versions: [{ version: 1, blocks: [] }], proposals: [{ id: "proposal-1", blocks: [{ id: "trend", type: "line", title: "Errors per minute", traceId: "q3", points: [{ x: "12:00", y: 2 }, { x: "12:01", y: 8 }, { x: "12:02", y: 3 }] }] }] }),
       },
-      insights: (window) => assembleInsights(fleetPaths, window, { pricing: { ...pricing, piAiVersion: () => "0.99.1" }, nowMs: NOW, envFn: () => env }),
+      insights: (window, opts) => assembleInsightsView(fleetPaths, window, { ...opts, pricing: { ...pricing, piAiVersion: () => "0.99.1" }, nowMs: NOW, envFn: () => env }),
       // A canned catalog of two ids and a rate of $1 in and $5 out per million tokens: the what-if's own arithmetic over
       // the fixture's real records, with nothing a pi bump can move.
       whatIf: makeWhatIfReader({

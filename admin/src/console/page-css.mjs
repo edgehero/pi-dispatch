@@ -19,6 +19,7 @@
  * a container query) must leave the page readable where it is not understood: a browser drops the whole rule, so the
  * rule may only add to a layout that already works without it.
  */
+import { SPEND_CSS } from "./spend-css.mjs";
 import { FLEET_DESIGN_CSS } from "./fleet-css.mjs";
 import { HOST_DETAIL_CSS, VENUE_DETAIL_CSS } from "./host-venue-css.mjs";
 import { BTN_KINDS } from "./kit.mjs";
@@ -772,7 +773,7 @@ ${FLEET_CSS}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
+export const PAGE_CSS = Object.freeze({ insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
 ${FLEET_CSS}`, venue: VENUE_CSS });
 
 /**

@@ -807,8 +807,9 @@ const configActions = [
       return {
         target: p.target,
         expect: p.expect,
+        diff: diffHtmlOf(p.beforeText, p.afterText, { file: p.target }),
         payload: { files: p.files, change: p.change },
-        summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : [])],
+        summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : []), "This host’s envelope file is written. Every host re-bases the split with no step; a host with another copy refuses governed jobs as envelope-mismatch until it has this envelope."],
         // The envelope's own digests (the parsed envelope's, the worker's comparison), as the tool's audit row has them.
         beforeDigest: p.beforeDigest ?? null,
         afterDigest: p.digest ?? null,
@@ -864,15 +865,13 @@ const configActions = [
       if (alloc?.unreachable) return { refusal: "the allocation history could not be read (is Valkey reachable?); nothing was changed", status: 503 };
       const log = Array.isArray(alloc?.log) ? alloc.log : [];
       const row = log[at];
-      // Issue #737: the row by the index the form asks for ("History row # (newest is 0)"), until the
-      // Configuration page converts (PR 7a).
-      if (!row) return { refusal: `no allocation ${atIndex("history row", at)} (have ${log.length})` };
-      if (row.weights === null || typeof row.weights !== "object") return { refusal: `${atIndex("history row", at)} carries no split to go back to` };
+      if (!row) return { refusal: `no allocation ${`row ${at + 1}`} (have ${log.length})` };
+      if (row.weights === null || typeof row.weights !== "object") return { refusal: `${`row ${at + 1}`} carries no split to go back to` };
       return {
         target: "allocation",
         expect: { envelopeDigest: env.read.digest },
-        payload: { row, index: at },
-        summary: [`Revert the allocation to ${atIndex("history row", at)} (writer operator-revert)`, `${String(row.at ?? "-")}: ${String(row.outcome ?? "-")}${row.planId ? `, plan ${String(row.planId)}` : ", the neutral split"}`, ...Object.entries(row.weights).map(([k, w]) => `${k}: weight ${String(w)}`)],
+        payload: { row, index: at, previousPlanId: alloc?.state?.planId ?? null },
+        summary: [`Revert the allocation to ${`row ${at + 1}`} (writer operator-revert)`, `${String(row.at ?? "-")}: ${String(row.outcome ?? "-")}${row.planId ? `, plan ${String(row.planId)}` : ", the neutral split"}`, ...Object.entries(row.weights).map(([k, w]) => `${k}: weight ${String(w)}`), "Every host uses this split from its next pickup. The envelope still bounds it; a refusal changes nothing.", "Revert ignores minIntervalHours and maxStepPct. It is refused while delegation is off or this host’s envelope is not the applied one.", "A row without a plan restores today’s neutral split, not that row’s weights. The portfolio job keeps running and its next due plan may change this split."],
       };
     },
     async apply(entry, ctx) {
@@ -1862,7 +1861,7 @@ const WRITE_RULES = {
   "project-delete": { fields: ["id"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Delete project ${out.plan?.deleted}`, done: (out) => `Deleted project ${out.plan.deleted}` },
   "envelope-set": { fields: ["envelope"], danger: false, undo: say(twice(UNDO_SENTENCES.envelope, UNDO_SENTENCES.envelopeAfter)), inverse: none, confirmLabel: confirmWord, done: say("Changed the allocation envelope") },
   "priorities-set": { fields: ["projects", "validDays"], danger: false, undo: say(UNDO_SENTENCES.allocation), inverse: none, confirmLabel: confirmWord, done: say("Applied a priorities plan") },
-  "allocation-revert": { fields: ["index"], danger: false, undo: say(UNDO_SENTENCES.allocation), inverse: none, confirmLabel: confirmWord, done: (out) => `Reverted the allocation to ${atIndex("history row", out.payload.index)}` },
+  "allocation-revert": { fields: ["index"], danger: false, undo: (out) => out.payload.previousPlanId ? `Restore plan ${out.payload.previousPlanId} from Budget split history; find it by plan id because row numbers change.` : UNDO_SENTENCES.allocation, inverse: none, confirmLabel: confirmWord, done: (out) => `Reverted the allocation to ${`row ${out.payload.index + 1}`}` },
 };
 
 /** How an edit's way back reads its entry: the file's list, the row's word, and the body the edit takes the entry in. */

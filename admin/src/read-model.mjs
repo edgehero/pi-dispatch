@@ -1809,14 +1809,13 @@ export async function revertAllocation({ url, envelope, digest = envelopeDigest(
  * honest 0 (a scope that never ran). One client, one timeout, `{ unreachable }` on a dead queue --
  * `readBudget`'s posture exactly.
  */
-export async function readScopedBudget({ url, limits, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+export async function readScopedBudget({ url, limits, redisFn = makeRedisClient, timeoutMs = 2500, now = new Date() } = {}) {
   if (!Array.isArray(limits) || limits.length === 0) return { rows: [] };
   let redis;
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
     redis.on?.("error", () => {}); // a down Valkey is `{ unreachable }`, never ioredis stack traces (PR #550's review)
-    const now = new Date();
     const settled = Promise.all(
       limits.map(async (l) => {
         const cell = async (key) => Number((await redis.get(key)) ?? 0);
@@ -2370,12 +2369,12 @@ export function mapSchedulers(list, nowMs) {
  * timeout on an unparseable URL is how a canned "not-a-url" test fixture turns into 2.5 wasted seconds
  * per invocation. The client is force-disconnected in `finally`.
  */
-export async function readBudget({ url, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+export async function readBudget({ url, redisFn = makeRedisClient, timeoutMs = 2500, now = new Date() } = {}) {
   let redis;
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
-    const settled = Promise.all([redis.get(dayKey()), redis.get(weekKey()), redis.get(monthKey()), redis.get(tokenDayKey())]).then(
+    const settled = Promise.all([redis.get(dayKey(now)), redis.get(weekKey(now)), redis.get(monthKey(now)), redis.get(tokenDayKey(now))]).then(
       ([day, week, month, tokens]) => ({ day: Number(day ?? 0), week: Number(week ?? 0), month: Number(month ?? 0), tokensToday: Number(tokens ?? 0) }),
       (err) => ({ unreachable: err?.message ?? String(err) }),
     );

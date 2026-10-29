@@ -1,0 +1,541 @@
+{
+  "card": "SpendScreen",
+  "pr": 749,
+  "panels": [
+    "p-week",
+    "p-today",
+    "p-tokens",
+    "p-avg",
+    "p-over",
+    "p-byflow",
+    "p-bymodel",
+    "p-byproject",
+    "p-sizes",
+    "p-caps",
+    "p-whatif",
+    "p-plan",
+    "p-split"
+  ],
+  "elements": [
+    {
+      "el": "p-week",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendWeek",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "This week"
+    },
+    {
+      "el": "p-today",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendToday",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Today"
+    },
+    {
+      "el": "p-tokens",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendTokens",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Tokens today"
+    },
+    {
+      "el": "p-avg",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendAverage",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Average per metered run"
+    },
+    {
+      "el": "p-over",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendOver",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Spend over time"
+    },
+    {
+      "el": "p-byflow",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendByFlow",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "By flow"
+    },
+    {
+      "el": "p-bymodel",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendByModel",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "By model"
+    },
+    {
+      "el": "p-byproject",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendByProject",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "By project"
+    },
+    {
+      "el": "p-sizes",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendSizes",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Job sizes"
+    },
+    {
+      "el": "p-caps",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendCaps",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Caps"
+    },
+    {
+      "el": "p-whatif",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendWhatif",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "What if"
+    },
+    {
+      "el": "p-plan",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendPlans",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Metered and plan"
+    },
+    {
+      "el": "p-split",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendSplit",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Budget split"
+    },
+    {
+      "el": "**Views.** A tab row under the title switches between Spend (this view), Budget split, Capacity, Breakdown and the Flows map. They are links, and the current one is filled.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#spendSplit",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Range and project.** The range (7 days, 30 days, month to date) and the project chips scope everything below.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-week",
+      "source": "admin/src/console/panels/spend.mjs#spendWeek",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "This week",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Four big numbers:** this week against its cap; today against its cap, split into metered and held; tokens today; and the average cost per run.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-avg",
+      "source": "admin/src/console/panels/spend.mjs#spendAverage",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Average per metered run",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Spend over time.** Daily settled bars against the $25.00 daily cap. Today's bar shows the money held for running jobs as a dashed top: it is released when they settle.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-over",
+      "source": "admin/src/console/panels/spend.mjs#spendOver",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Spend over time",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Where it went.** Cost by flow, by model and by project, in one hue with values written out.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-byflow",
+      "source": "admin/src/console/panels/spend.mjs#spendByFlow",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "By flow",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Job sizes.** A histogram of cost per run against the $2.00 job cap, with how much the largest run used.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-sizes",
+      "source": "admin/src/console/panels/spend.mjs#spendSizes",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Job sizes",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**Right column:**",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-week",
+      "source": "admin/src/console/panels/spend.mjs#spendWeek",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "This week",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "*Caps*: every window, with the 80% tick on job windows only;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-caps",
+      "source": "admin/src/console/panels/spend.mjs#spendCaps",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Caps",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "*What if*: pick another model and see the same runs' estimated cost;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-whatif",
+      "source": "admin/src/console/panels/spend.mjs#spendWhatif",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "What if",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "*Metered and plan*: claude-sonnet-5-5 per run, kimi-for-coding on plan:kimi;",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-plan",
+      "source": "admin/src/console/panels/spend.mjs#spendPlans",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Metered and plan",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "*Budget split*: written weekly by pm-weekly, with who wrote it and when.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#spendSplit",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Per-day metered and held totals.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-today",
+      "source": "admin/src/console/panels/spend.mjs#spendToday",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Today",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The cap windows with spent and held amounts.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-caps",
+      "source": "admin/src/console/panels/spend.mjs#spendCaps",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Caps",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Cost and tokens per run, with flow, model and project.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-week",
+      "source": "admin/src/console/panels/spend.mjs#spendWeek",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "This week",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The budget split file.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#spendSplit",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "For the what-if: the runs' token counts and the chosen model's list price. Charts are inline SVG with percent widths, so they stretch from 390 to 1440.",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-whatif",
+      "source": "admin/src/console/panels/spend.mjs#spendWhatif",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "What if",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Every run reserves the whole job cap before it starts, so a lower `maxCostUsd` holds less money while jobs run. The job sizes chart is there to show how far below the cap runs really land.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-sizes",
+      "source": "admin/src/console/panels/spend.mjs#spendSizes",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Job sizes",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The budget split is weights only: it never changes a cap.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-split",
+      "source": "admin/src/console/panels/spend.mjs#spendSplit",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Budget split",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "The what-if is an estimate from token counts and list prices. Outcomes may differ, because a cheaper model can take more turns or fail more often, so the screen names that uncertainty.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-whatif",
+      "source": "admin/src/console/panels/spend.mjs#spendWhatif",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "What if",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "Plan runs count against every cap, the dollar windows at their API-equivalent price.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-plan",
+      "source": "admin/src/console/panels/spend.mjs#spendPlans",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": "Metered and plan",
+      "reason": "The implementation follows issue #749: named windows, actual reservation holds, API-equivalent plan charges and role restrictions supersede illustrative fixture assumptions. Behavior is exercised in console-spend-goldens.test.mjs and the renderer tests."
+    },
+    {
+      "el": "**From the fixture:** the caps, today's $15.04 and the week's $33.07. Today's $5.23 metered and Wednesday's $5.25 are sums of the Runs list; the held $9.81 is the sum of four sample running-job reservations.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Design fixture values illustrate a deployment; deterministic goldens use the repository fixture and real pure folds."
+    },
+    {
+      "el": "**Computed from the Runs list:** cost by flow, model and project, and the job sizes, over the 46 metered runs listed since Tue 6 Oct, 15:11 UTC.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Design fixture values illustrate a deployment; deterministic goldens use the repository fixture and real pure folds."
+    },
+    {
+      "el": "**Sample:**",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Design fixture values illustrate a deployment; deterministic goldens use the repository fixture and real pure folds."
+    },
+    {
+      "el": "the daily bars for Fri 2 to Tue 6 (Mon and Tue add up to the week total);",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Design fixture values illustrate a deployment; deterministic goldens use the repository fixture and real pure folds."
+    },
+    {
+      "el": "the claude-haiku-5-5 run, the budget-split percentages and the other projects' used amounts;",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Design fixture values illustrate a deployment; deterministic goldens use the repository fixture and real pure folds."
+    },
+    {
+      "el": "the what-if estimate of $1.90.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Design fixture values illustrate a deployment; deterministic goldens use the repository fixture and real pure folds."
+    },
+    {
+      "el": "Shared Spend views, window and project links",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/spend.mjs#spendTabs",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": [
+        "Spend views",
+        "Budget split",
+        "Capacity",
+        "Breakdown",
+        "Flows map"
+      ]
+    },
+    {
+      "el": "State: spend-plan-model.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-plan-model.viewer"
+      ],
+      "shows": [
+        "plan:work",
+        "plan-provider/plan-model"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-whatif-runs.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-whatif-runs.viewer"
+      ],
+      "shows": [
+        "The same 3 runs",
+        "$0.30",
+        "API-equivalent amount"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-populated.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-populated.operator"
+      ],
+      "shows": [
+        "Today",
+        "$2.00",
+        "Held for 1 running jobs"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-populated.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-populated.viewer"
+      ],
+      "shows": [
+        "Full local paths are shown to operators only",
+        "Metered and plan"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-costs-unreadable.viewer",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-costs-unreadable.viewer"
+      ],
+      "shows": [
+        "Costs could not be read. The other Spend views still work."
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-unknown-holds.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-unknown-holds.operator"
+      ],
+      "shows": [
+        "Holds not published by: old-worker",
+        "Those jobs are not counted as zero"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    },
+    {
+      "el": "State: spend-counters-unreadable.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "panels/spend-counters-unreadable.operator"
+      ],
+      "shows": [
+        "The settings file or counters could not be read"
+      ],
+      "reason": "The whole page is drawn by renderPage over the named deterministic state. The tests assert these visible facts independently of the golden comparison."
+    }
+  ]
+}

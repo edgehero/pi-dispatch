@@ -10,17 +10,11 @@ informs; it changes nothing — no port, no database, no new dependency.
 
 ![The topology pane: triggers wired to their flows Node-RED style across the four skill tiers, a /wf command trigger with no flow edge, an amber not-at-HEAD flow, an observed chain edge with its count and recency, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=1.0.0)
 
-The topology is the lower half of the **insights page** ([`insights.md`](insights.md)), `/insights` on the
-operator console ([`console.md`](console.md)); `/dispatch insights` prints its URL. The topology
-renders there as a Node-RED-style diagram — trigger nodes wired to their flows, observed chain edges
-with their counts and recency, potential (mentioned) edges dashed, folders as group boxes, orphans
-dimmed and dashed, dangling triggers flagged, spend badged onto the triggers that earned it. Pan by
-dragging, zoom with the wheel, hover a node for its details (a cron's tip counts down to its next
-fire, or says how overdue it is), click one to highlight what it triggers and what reaches it, and
-press Escape to clear the selection. A label too long for its chip is shortened, with the full text in
-its tooltip. Clicking a row of the page's "spend by trigger" breakdown selects that trigger's chip and
-its wires the same way. The view (pan, zoom, selection) is kept in the URL fragment, so a reload keeps it.
-The page is drawn once per load: after editing triggers or skills, reload it to see the new topology.
+The Flows map is `/insights/flows` on the [operator console](console.md), one of the five [Spend views](insights.md). It draws trigger nodes, flows, observed and potential chain edges, grouped folders and forges, unresolved targets and spend badges. Map runs cover 30 days; spend follows `range=7d|30d|mtd`, with both windows stated.
+
+Drag to pan; use the wheel, zoom buttons and Fit. Tab and Enter select a chip; Escape clears it. The selected side card is also server-rendered from `select=<trigger index>`, so Breakdown links and scripts-disabled pages can select a trigger. A spent one-shot links to its run. The map retains its size on a phone and scrolls inside its card.
+
+Choose `view=list` for a server-rendered table over the same graph model, including trigger facts and unreachable flows, with no map node data or script dependency. Viewer paths remain basenames even with `paths=full`. The map names missing inputs, unverifiable skills, unattributed runs and bounded scans instead of inventing edges.
 
 This document explains the semantics behind what that pane draws.
 
