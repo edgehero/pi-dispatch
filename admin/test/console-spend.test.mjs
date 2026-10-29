@@ -642,3 +642,21 @@ test("the current neutral split is in force for both roles and offers no redunda
     }
   }
 });
+
+
+test("expiry's retained plan id never makes its neutral weights a duplicate of the old applied split", () => {
+  const at = "2026-10-29T12:00:00Z";
+  const old = "2026-10-28T12:00:00Z";
+  const p = { state: { planId: null, appliedAt: at, writer: "expiry", weights: { web: 1 } }, log: [
+    { planId: "same-id", at, writer: "expiry", outcome: "expired", weights: { web: 1 } },
+    { planId: "same-id", at: old, writer: "portfolio-job", outcome: "applied", weights: { web: 9 } },
+    { planId: "same-id", at: old, writer: "portfolio-job", outcome: "duplicate", weights: { web: 9 } },
+  ] };
+  for (const role of ["operator", "viewer"]) {
+    const text = String(splitHistory({ role, data: { insights: { allocation: p } } }));
+    assert.equal((text.match(/In force/g) ?? []).length, 1);
+    assert.match(text, /Same as row 2/);
+    assert.doesNotMatch(text, /Same as row 1/);
+    assert.equal(text.includes("Revert row 2"), role === "operator");
+  }
+});

@@ -903,15 +903,14 @@ export function splitHistory(v) {
             </thead>
             <tbody>
               ${rows.slice(0, 20).map((r, i) => {
-                const applied = rows.findIndex((other) => other.planId && other.planId === r.planId && other.outcome !== "duplicate" && other.outcome !== "refused");
-                const duplicate = applied >= 0 ? applied : rows.findIndex(
-                  (other) => other.planId && other.planId === r.planId,
-                );
+                const applied = rows.findIndex((other) => other.planId && other.planId === r.planId && ["applied", "reverted", "rebased"].includes(other.outcome));
                 const neutralCurrent = p.state && p.state.planId == null && p.state.appliedAt != null && r.at === p.state.appliedAt && r.writer === p.state.writer && r.weights && !["duplicate", "refused"].includes(r.outcome);
-                const current = neutralCurrent || (r.planId && r.planId === p.state?.planId && duplicate === i);
-                const historyFact = duplicate >= 0 && duplicate !== i
-                  ? `Same as row ${duplicate + 1}`
-                  : current ? "In force" : !r.weights ? "No split to go back to" : null;
+                const currentPlanRow = p.state?.planId ? rows.findIndex((other) => other.planId === p.state.planId && ["applied", "reverted", "rebased"].includes(other.outcome) && (p.state.appliedAt == null || other.at === p.state.appliedAt && other.writer === p.state.writer)) : -1;
+                const current = neutralCurrent || currentPlanRow === i;
+                // Expiry keeps the old plan id but writes neutral weights; equal ids alone cannot identify a duplicate.
+                const historyFact = current ? "In force" : r.outcome === "duplicate"
+                  ? applied >= 0 ? `Same as row ${applied + 1}` : "Duplicate plan; its applied row is outside the newest 20 rows"
+                  : !r.weights ? "No split to go back to" : null;
                 return html`<tr>
                   <td>${i + 1}</td>
                   <td>${when(r.at)}</td>
