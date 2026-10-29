@@ -91,7 +91,7 @@ test("object copy refuses links and alternates without reading host data", () =>
 test("run lineage is rebuilt and rejects task text, paths and malformed candidates", () => {
 	const value = { sourceJobId: "one", role: "editor", candidate: "anthropic/model", task: "private" };
 	assert.deepEqual(recordedCanary(value), { sourceJobId: "one", role: "editor", candidate: "anthropic/model" });
-	for (const update of [{ sourceJobId: "../secret" }, { role: "inherit" }, { candidate: "unknown" }, { sourceJobId: "x".repeat(201) }]) assert.equal(recordedCanary({ ...value, ...update }), null);
+	for (const update of [{ sourceJobId: "../secret" }, { role: "inherit" }, { role: true }, { candidate: "unknown" }, { sourceJobId: "x".repeat(201) }]) assert.equal(recordedCanary({ ...value, ...update }), null);
 	assert.deepEqual(buildRecord({ job: { id: "canary-one", data: { kind: "local", canary: value } }, result: { outcome: "completed" } }).canary, recordedCanary(value));
 	assert.equal(recordedCanary({ ...value, sourceJobId: "repeat:cron:123" }).sourceJobId, "repeat:cron:123");
 });

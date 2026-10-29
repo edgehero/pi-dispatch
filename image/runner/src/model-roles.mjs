@@ -69,7 +69,8 @@ export async function runRoleChild({ agent, task, model, signal, cwd, thinkingLe
 		const args = [RUN_JOB_PATH, "--mode", "json", "-p", "--no-session", "--model", model, "--append-system-prompt", prompt];
 		if (thinkingLevel) args.push("--thinking", thinkingLevel);
 		if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
-		args.push("--", task);
+		// pi still expands @file positionals after --. The example's Task prefix keeps all task text data.
+		args.push("--", `Task: ${task}`);
 		return await new Promise((resolve) => {
 			const child = spawnChild(process.execPath, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
 			let output = "";
