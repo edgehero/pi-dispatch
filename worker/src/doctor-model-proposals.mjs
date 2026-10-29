@@ -7,6 +7,7 @@ import { parseModelsJson } from "./models-json.mjs";
 import { endpointsForModel, loadModelEndpoints } from "./model-endpoints.mjs";
 import { lifecycleModels, roleProposalChecks } from "./model-proposals.mjs";
 import { getPricedModel } from "./pricing.mjs";
+import { splitModelEntry } from "./model-ref.mjs";
 
 // The default catalog omits retired models, which would make a role's warning vanish on retirement.
 // Match the provider SDK's bracket-array query encoding (internal/utils/query.ts).
@@ -28,7 +29,7 @@ export function parseProposalConfig(text) {
 		const proxy = new URL(value.proxyUrl);
 		if (!["http:", "https:"].includes(proxy.protocol) || proxy.username || proxy.password || proxy.pathname !== "/" || proxy.search || proxy.hash) throw new Error("invalid lifecycle egress proxy");
 	}
-	const ref = (v) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]*\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,200}$/.test(v);
+	const ref = (v) => splitModelEntry(v) !== null;
 	if (value.replacements !== undefined && (!value.replacements || typeof value.replacements !== "object" || Array.isArray(value.replacements) || Object.entries(value.replacements).some(([a, b]) => !ref(a) || !ref(b)))) throw new Error("invalid replacements");
 	if (value.routes !== undefined && (!Array.isArray(value.routes) || value.routes.length > 100 || value.routes.some((r) => !r || Object.keys(r).some((k) => !["model", "alternative"].includes(k)) || !ref(r.model) || !ref(r.alternative)))) throw new Error("invalid declared equivalent routes");
 	return { ...value, lifecycleProviders: providers };
