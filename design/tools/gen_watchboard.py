@@ -177,7 +177,7 @@ BOARD = card("The board", f"""<div class="wb-sec">
 <div class="wb-bact">{btn('Go back to v2', 'ghost', 'rerun')}{btn('Clear the adopted board', 'danger', 'cancel')}</div>""",
     sub="what you adopted, and what this run proposes", id_="p-wb-board")
 
-# ---- how the job went: the same view for 15 minutes or 6 hours ----
+# ---- how the job went: the same view for 15 minutes or the 30-minute cap ----
 def run_chart():
     spend = [0, .004, .01, .018, .026, .033, .041, .05, .058, .066, .074, .083, .091, .1, .106, .11]
     W, H, M = 300, 90, .40
@@ -197,13 +197,13 @@ def run_chart():
 
 RUN = card("How the job went", f"""{run_chart()}
 <div class="wb-mstats wb-mstats--2">
-  <span><b>$0.44 an hour</b>so its cap is about 55 minutes of work</span>
+  <span><b>$0.44 an hour</b>the time cap still ends the job within 30 minutes</span>
   <span><b>31%</b>of its context at the end, not compacted</span>
   <span><b>3, while it ran</b>board proposals, at 15:19, 15:24 and 15:28</span>
   <span><b>not armed</b>recovery: a local job is not recovered</span>
 </div>
 """,
-    sub=f"{code('local-7f21')}, 15:14 to 15:29 · the same view for a job of 15 minutes or 6 hours", id_="p-wb-run")
+    sub=f"{code('local-7f21')}, 15:14 to 15:29 · a fresh job ends within its 30-minute cap", id_="p-wb-run")
 
 # ---- streams ----
 def spark(vals, cls=""):
@@ -248,13 +248,12 @@ KPIS = f"""<div class="cards-4">
 </div>"""
 
 def page():
-    inner = (trigger_tabs("Watch") + KPIS + CHAIN +
-             f'<div class="cols"><div class="stack">{BOARD}</div><div class="stack">{RUN}{STREAMS}{MODELS}</div></div>' +
-             TRACECARD)
-    end = f'<span class="badge tone-running">{ic("running")}Watching</span>{btn("Open the rule", "", "bolt", sm=False)}'
-    return shell("Triggers", inner, "shop-5xx",
-                 sub=f"A watch on checkout errors from {code('prod-alerts')}. Every finding gets a fresh job; jobs propose board changes and you adopt them.",
-                 end=end, back="Watch")
+    rule = card("Rule shop-5xx", '<p><a href="#">All findings</a></p><p>A person approves code changes. Each finding runs in a fresh bounded job.</p>')
+    board = card("Board", '<p>Version 2</p><article><h3>Checkout errors</h3><p>37</p><p class="muted">Trace q1</p></article><article><h3>Investigation</h3><p>Pool saturation needs a person to review the follow-up issue.</p><p class="muted">Trace q2</p></article>' + btn("Freeze") + btn("Clear") + '<details><summary>Proposal proposal-1</summary><p>A proposed line chart of errors per minute.</p>' + btn("Preview adoption") + '</details>' + btn("Restore version 1"))
+    history = card("Finding history", '<p><a href="#">finding-1</a>: queued, 37 events</p>')
+    models = card("Decision models", '<p>Totals cover the loaded retained findings, at most 1,000.</p><p class="tx__b">openrouter/typesafe/jev-1.13: 1 decision, known spend $0.000020; 1 investigate, 0 file issue, 0 ignore.</p>')
+    trace = card("Evidence and trace", '<ol><li>stream: verified</li><li>rule: matched, cooldown passed, cap passed</li><li>decide: investigate, confidence 0.82; investigate 0.82, file issue 0.15, ignore 0.03</li></ol><div class="tx__b"><h3>Samples</h3><pre>Checkout TimeoutError: pool acquire exceeded the wait limit.</pre><details><summary>query: completed</summary><pre>sum(rate(checkout_errors[5m]))</pre></details><details><summary>decide: investigate</summary><p>State: severity error, count 37.</p></details></div><p><a href="#">Download private evidence as JSON</a></p>')
+    return shell("Configuration", '<div class="stack">' + rule + board + history + models + trace + '</div>', "Watch board", sub="Drawn at 2026-10-08 15:39 UTC, not live. Reload to read the current retained data.", live="off", end=btn("Reload"))
 
 CSS = """
 .tr-tabs { margin: var(--space-2) 0 var(--space-2); }
@@ -404,63 +403,26 @@ CSS = """
 """
 
 if __name__ == "__main__":
-    write("WatchBoard", card_marker("Planned for 5.0.0", 4470, 1440, "A watch rule's board: why each finding did what it did, every query and decision, Jev acting in the job and in shadow at the gate, and a board jobs propose and you adopt"),
+    write("WatchBoard", card_marker("Triggers", 1700, 1440, "Retained findings, operator evidence, classifier totals and an audited board that jobs propose and people adopt"),
           "shop-5xx watch board", page(), CSS)
     readme("WatchBoard", """
-A watch rule's own page. It shows why each finding did what it did, every query and decision on the way, and a board that gets better over time: jobs propose changes, and a person adopts them. It extends #735 (proposed in #743) and keeps #735's rules: no agent lives on, and nothing writes code without a person.
+A watch rule's retained finding history and board, built by #735 and #743. The delivered console uses a compact static page, reached from Watch. Reload reads current data; it is not a live shadow dashboard.
 
 **How a person uses it.**
-- **The numbers.** Findings in 24 hours and what held them, the jobs that ran, how often Jev in shadow agreed with what happened, and the spend of jobs and decisions apart.
-- **Why this finding started a job.** Four stages in a row, each with what it saw and what it concluded:
-  1. **Stream.** A signed finding, its count and fingerprint, and how many redacted samples were kept.
-  2. **Rules.** Every rule it passed, at no cost and with no model. The rules decide.
-  3. **Job.** The read-only triage job: its log queries, its decisions with Jev's `decide` tool, the board proposals it made while it ran, and its spend against its cap.
-  4. **Outcome.** Here, a follow-up that changes code, so it waits for a person.
+- Open a finding to see the source, deterministic rule checks, decision options and probabilities, and the resulting job or issue.
+- Read the adopted board version. Jobs propose inert blocks: number, line chart, table, note, hypotheses and timeline. Only an operator adopts, freezes, unfreezes, restores or clears it, through Preview and Confirm with an audit row and a version check.
+- Compare the proposed blocks in the adoption preview. The board stores data, never executable query configuration. Adoption does not install a query or automatically rerun one.
+- Read classifier totals for the loaded retained findings: decision count, known spend, missing cost count and actions. At the 1,000-finding bound the console says the figures are a floor.
+- An operator reads redacted samples, query text, decision state and questions as escaped text in the page's details. The JSON download uses the same operator-only boundary.
 
-  Under the stages, a hatched **shadow** strip shows what Jev at the gate would have chosen: the probability of each option, whether that agrees with what happened, and its 30-day record. A switch picks another finding.
-- **The board, in two parts.**
-  - **Adopted.** The blocks the operator adopted, as reviewed config. Each job re-runs the adopted queries on fresh data and refreshes the numbers. Versions show who adopted what, and the operator can go back a version or clear the board.
-  - **Proposed.** What this run proposed, each with a reason: add a chart with its query, or remove a block. *Adopt* opens a safe preview that names the query, the only endpoint it can reach, the new version and the undo. It is audited as `board-adopt`.
-  - **Run notes.** Hypotheses and a note, kept with this run only, as plain text.
-- **How the job went.** The run's spend against its cap, with board proposals, decisions and queries marked as they happened. Under it: the hourly rate and how long the cap lasts at that rate, how much of the context was used and whether it was compacted, and whether recovery was armed.
-- **Every stream, query and decision.** One log, newest first:
-  - **Who acted:** the collector, the rules, Jev in shadow, or the job.
-  - **The entry:** the query or question as plain text, the result, and the cost and time.
-  - **Used for:** what each entry fed.
-  - **Filters:** decisions, log queries, board proposals, model turns, and streams and rules.
-- **Streams.** Each source with a 24-hour sparkline and what happened to its findings, the log store the jobs read, and a source doctor says is broken.
-- **Decision models.**
-  - **Jev:** pinned to a dated snapshot. It acts inside the job as the `decide` tool and runs in shadow at the gate. The card shows its calls, spend and typical time, its 30-day shadow record (agreed 9, disagreed 2, and what the misses were), and a warning that its input leaves the EU.
-  - **The triage model:** reasons and queries inside the job.
-  - **Acting at the gate:** off, set by hand in triggers.json.
+**Panels.** The delivered page has one panel, `p-watch-board`, containing the rule, board, finding history, decision model totals and evidence.
 
-**Panels.** `p-wb-findings`, `p-wb-jobs`, `p-wb-shadow`, `p-wb-spend`, `p-wb-chain`, `p-wb-board`, `p-wb-run`, `p-wb-streams`, `p-wb-trace`, `p-wb-models`.
+**Who sees what.** A viewer sees counts, rule checks, chosen options and probabilities, and board version/block/proposal counts. Agent-authored board values, including numeric query results, remain operator only. Samples, query text, decision state, note text, proposed blocks and board controls are operator only. The static page reads private evidence only for an explicit operator session. No private field enters the shared hub or `/api/state`.
 
-**The server provides.**
-- The finding, its rule checks and cooldown state.
-- Each decision: model and snapshot, the state's fields (fields and counts only at the gate), the questions with their options, probabilities, confidence, cost and time.
-- Each query: the store, the text as written, rows and time, recorded by a read-only query tool.
-- The adopted board's versions, and each run's proposals and notes.
-- The job's spend over time, its cap, its context use and whether it was compacted, and recovery state.
-- Per source: deliveries and what happened to them.
-- The shadow record: what the gate would have chosen beside what happened.
+**Why it works this way.** Each finding is a fresh bounded job, at most 30 minutes. Free rule checks precede any paid decision or job. Gate decisions default to shadow and act only after a reviewed opt-in, in a one-call container. Human adoption is the board's persistence boundary; no transcript carries into the next job. The console renders its own block markup and the CSP is unchanged.
 
-**Who sees what.** Query text, decision state, run notes and samples are operator only, like transcripts. A viewer sees the counts, the rule checks, which option each decision chose with its probabilities, the stages and the adopted board's numbers. Only an operator adopts, goes back or clears.
+**Future design, not delivered.** The earlier live shadow charts, continuously refreshed query projections, spend-rate projections and historical shadow agreement dashboard remain possible future work. They are not claims about this compact screen.
 
-**Why it works this way.**
-- **No agent lives on.** Each finding is one fresh job with its reserve taken before it starts. Only what a person adopted carries over, and agent text never does: run notes stay with their run, as plain text, and are never shown to the next job.
-- **The rules decide at the gate**, with no model and at no cost.
-- **Decisions earn their place.** Jev acts only inside the read only job. At the gate it runs in shadow: it records what it would have chosen and changes nothing, until its record says it helps. It sees fingerprint fields and counts only.
-- **If it is allowed to act at the gate later**, it would investigate at confidence 0.70 or more, ignore at 0.90 or more, and otherwise file an issue for a person. It would run as a one-call job, so the host still never calls a model. That is set by hand in triggers.json, once the shadow results earn it.
-- **Log text stays in the job.** The gate sees fingerprint fields and counts. Sample text reaches only the read only job.
-- **Jobs propose, a person adopts.** The adopted board is reviewed config. A block's query reaches only the bundle's endpoints, every later job runs it on fresh data, and the console draws every block itself: no scripts, styles, images or outside links, never agent HTML.
-- **Ready for long runs.** Each decision and query is kept as a small record of its own, not read back from the transcript, so a run of hours keeps its first query too. Proposals appear while the job runs, and the cap projection updates every 30 seconds, so a job of six hours shows the same view, live.
-- **Jev gives no reasons.** Decisions show the state the model saw, the question and its options, and the probabilities, and that is the why. Jev answers yes or no, a choice, or a score, with no prose.
-- **A person before code.** A follow-up that writes code becomes an issue or an approval; nothing writes code until someone with write access says so.
-
-**Fixture note.** This is a planned screen, and all of it is sample:
-- the finding and the job are the Watch page's (checkout TimeoutError, `local-7f21`, `acme/shop#88`);
-- Jev's model id, dated snapshot, answer shapes and input-only price follow its Decisions API, and the note on EU routing follows its OpenRouter page;
-- the queries, probabilities, proposals, versions, shadow record and spend are illustrative.
+**Fixture note.** Finding counts, probabilities, costs, proposals and trace entries are illustrative. The finding and local-7f21 follow the shared Watch fixture. Runtime tests and pinned model artifacts establish behavior; the card does not establish provider pricing.
 """)
     print("watch board written")

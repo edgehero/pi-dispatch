@@ -218,6 +218,7 @@ export function createDashboardDeps(paths: any, seams: any = {}) {
   const reader = createFleetReader(paths, seams);
   return {
     fetchSnapshot: () => reader.snapshot(),
+    watch: reader.watch,
     pause: () => reader.pause(),
     resume: () => reader.resume(),
     cancelActive: ({ jobId }: any) => reader.cancelActive({ jobId }),
@@ -359,6 +360,8 @@ export function makeDashboard({
   // single-record dump; LIVE_TAIL tails a running job's `.log` inside the overlay. `selected` is the list
   // cursor; `detailRun` is the record captured on Enter.
   let view = "LIST";
+  let watchInfo: any = null;
+  let readingWatch = false;
   let selected = 0;
   let detailRun: any = null;
   // REQ-RESURRECTABLE-SANDBOX: whether the run opened in RUN_DETAIL still has a retained workspace, read
@@ -582,6 +585,18 @@ export function makeDashboard({
         () => {},
       );
   };
+  const readWatch = async () => {
+    if (readingWatch) return;
+    readingWatch = true;
+    try {
+      if (!deps.watch) { watchInfo = { unavailable: true }; return; }
+      const rules = await deps.watch.listRules();
+      const findings = await Promise.all(rules.slice(0, 20).map(async (rule: any) => ({ rule, findings: await deps.watch.listFindings(rule.id, { limit: 20 }) })));
+      watchInfo = { rules: findings };
+    } catch { watchInfo = { unavailable: true }; }
+    finally { readingWatch = false; if (!disposed) tui?.requestRender?.(); }
+  };
+
   const refresh = async () => {
     if (fetching || disposed) return;
     fetching = true;
@@ -589,6 +604,7 @@ export function makeDashboard({
 
     try {
       snapshot = await deps.fetchSnapshot();
+      if (view === "WATCH") await readWatch();
       // Stamp WHEN this data was fetched, and render that rather than reading the wall clock mid-paint.
       // The header's clock used to be `new Date()` inside the renderer, which made the same snapshot
       // render two different frames either side of a second boundary -- issue #293's own class, and it
@@ -676,6 +692,7 @@ export function makeDashboard({
       }
       return renderPanel(snapshot, width, {
         view,
+        watchInfo,
         selected,
         detailRun,
         detailTrigger,
@@ -723,6 +740,17 @@ export function makeDashboard({
       // same rule from the input side (refresh deliberately leaves it alone).
       copiedNote = null;
       actionNote = null;
+      if (view === "WATCH") {
+        if (matchesKey(data, "escape")) { view = "LIST"; tui?.requestRender?.(); }
+        return;
+      }
+      if (view === "LIST" && (data === "z" || data === "Z")) {
+        view = "WATCH";
+        watchInfo = null;
+        void readWatch();
+        tui?.requestRender?.();
+        return;
+      }
       // The armed cancel confirm eats every key first (the pendingDelete discipline: y confirms, n/Esc
       // stand down, anything buffered is inert). It can only be armed in LIST or HELD_LIST -- every key
       // that would leave either view is inert while the question is up -- and the guard keeps a stale
@@ -1583,6 +1611,13 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   const inner = Math.trunc(width) - 4;
   const title = "pi-dispatch";
 
+  if (view === "WATCH") {
+    const info = state.watchInfo;
+    const lines = !info ? ["Reading watch findings..."] : info.unavailable ? ["The watch store could not be read. Try again."] : info.rules.length === 0 ? ["No watch rules configured."] : info.rules.flatMap(({ rule, findings }: any) => [`${rule.id}: ${rule.source} (${Number.isSafeInteger(Number(rule.summary?.suppressed ?? 0)) ? Number(rule.summary?.suppressed ?? 0) : 0} suppressed, ${Number.isSafeInteger(Number(rule.summary?.capped ?? 0)) ? Number(rule.summary?.capped ?? 0) : 0} capped)`, ...findings.slice(0, 10).map((f: any) => `  ${f.fingerprint}: ${f.count} events, ${f.status}${f.runId ? `, run ${f.runId}` : ""}`)]);
+    if (!framed) return ["Watch", "", ...lines, "", "Esc back"];
+    return frame(styler, { title: "Watch", width: Math.trunc(width), lines, footer: "Esc back" });
+  }
+
   if (view === "TRIGGER_DETAIL") {
     const t = detailTrigger?.record;
     const detailTitle = `trigger · ${scrubControl(String(t?.type ?? "?"))}`;
@@ -1782,7 +1817,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
       ],
     },
     // The project secret bundles (issue #704) under the triggers; "" when the file binds none, so the section is as before.
-    { title: "TRIGGERS", lines: toLines([renderTriggers({ schedulers: snapshot.schedulers, triggers: snapshot.triggers }), renderSecretBundles(snapshot.secretBundles)].filter((x) => x !== "").join("\n\n")) },
+    { title: "TRIGGERS", lines: toLines([renderTriggers({ schedulers: snapshot.schedulers, triggers: snapshot.triggers }), (snapshot?.triggers?.triggers ?? []).some((t: any) => t.type === "watch") ? "z watch findings and outcomes" : "", renderSecretBundles(snapshot.secretBundles)].filter((x) => x !== "").join("\n\n")) },
     // The section TITLE carries the fleet fact, not a seventh cell in each row (issue #57, Gap 3). A cell
     // would compete with jobId and target inside one `fitLine(..., inner)` and clip silently at width 80;
     // the title answers the completeness question once rather than fifty times. Absent on a single host,
@@ -1922,7 +1957,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     // has no headroom for another hint (`keyHints`' arithmetic), the `j projects` precedent on the runs divider.
     { key: "spend", head: [`${SPEND_TITLE.toLowerCase()} & limits`, `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
     ...dollarSection(snapshot.dollars, inner, styler),
-    { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
+    { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: [...trg.lines, ...((snapshot?.triggers?.triggers ?? []).some((t: any) => t.type === "watch") ? ["z watch findings and outcomes"] : [])], priority: 3, viewKey: "tab" },
     ...bundlesSection(snapshot.secretBundles, inner, styler),
     ...profilesSection(snapshot.secretProfiles, inner, styler),
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },

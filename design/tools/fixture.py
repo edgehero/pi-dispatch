@@ -29,7 +29,7 @@ PROJECTS = {
     "api": ["acme/api", "acme/api-docs"],
     "billing": ["acme/billing", "acme/billing-ui", "local:billing-jobs"],
     "ops": ["local:site", "local:pm"],
-    "shop": [],          # planned: watch jobs only (Watch, #735)
+    "shop": [],          # watch jobs only (Watch, #735)
 }
 
 # number: (kind, when, flow)

@@ -2235,7 +2235,7 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
 		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs.
-		assert.equal(captured.extraClosers.length, 8, "runtimeQueue + registry + one closer per armed watch + the retention sweep + the doctor runs");
+		assert.equal(captured.extraClosers.length, 9, "runtimeQueue + registry + watch recovery drainer + one closer per armed watch + the retention sweep + the doctor runs");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -2663,7 +2663,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 	assert.equal(constructions.length, 0, "the factory is never called at all");
 	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
 	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
-	assert.equal(captured.extraClosers.length, 3, "runtimeQueue + registry + the doctor runs (issue #712), and nothing from the sweep");
+	assert.equal(captured.extraClosers.length, 4, "runtimeQueue + registry + watch recovery drainer + the doctor runs (issue #712), and nothing from the sweep");
 	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
@@ -2687,7 +2687,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
 	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "sandbox", "session", "recovery_host_lost"], "boot's own order");
-	assert.equal(captured.extraClosers.length, 4, "runtimeQueue + registry + the sweep + the doctor runs (no watch files in this env)");
+	assert.equal(captured.extraClosers.length, 5, "runtimeQueue + registry + watch recovery drainer + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
 
@@ -2714,7 +2714,7 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	const off = [];
 	const second = await runStart({ env: { PI_DOCTOR_INTERVAL_HOURS: "0" }, makeDoctorSpawner: (args) => (off.push(args), { start() {}, close: async () => {} }) });
 	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
-	assert.equal(second.captured.extraClosers.length, 3, "runtimeQueue + registry + the sweep");
+	assert.equal(second.captured.extraClosers.length, 4, "runtimeQueue + registry + watch recovery drainer + the sweep");
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 

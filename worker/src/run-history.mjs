@@ -16,6 +16,8 @@ import { secretProfileNeeded } from "./capabilities.mjs";
 import { scheduledForMillis } from "./repeat-slot.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
 import { recordReasonOf } from "./record-reason.mjs";
+import { WATCH_ID_RE } from "./watch-contract.mjs";
+import { recordedWatchDecision } from "./watch-record.mjs";
 
 export { EARLIER_MAX, recordedEarlier };
 
@@ -1096,6 +1098,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// settled (`metered` | `floor` | `refunded`, null when the job held none). Null when no dollar window applied to the job (no dollar setting, or a
 		// refusal before the reservation step), which is every record of a deployment that sets none.
 		dollars: dollarsOf(source.dollars),
+		...(recordedWatchDecision(data.watch?.decision ?? source.decision) ? { decision: recordedWatchDecision(data.watch?.decision ?? source.decision) } : {}),
 		...(approvalRecordOf(source.approval) ? { approval: approvalRecordOf(source.approval) } : {}),
 		// The refusal's detail (PR #558, the end-of-round check of #501 and #502): which rule of the reason refused the job, the same fixed token
 		// the worker's log line carries, e.g. `overlay-link` under `model-unknown`, so the drill-in can tell the
@@ -1382,6 +1385,7 @@ function dollarsOf(d) {
  * starts carrying a title.
  */
 export function targetFor(kind, data) {
+	if (kind === "watch") return typeof data.watch?.ruleId === "string" && WATCH_ID_RE.test(data.watch.ruleId) ? `watch:${data.watch.ruleId}` : null;
 	if (kind === "local") return `local:${basename(data.folder ?? "")}`;
 	if (isForgeKind(kind)) return `${data.repo}${targetSeparator(kind, data.target?.type)}${data.target?.number}`;
 	return null;
@@ -1464,7 +1468,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 	// `exitKey` (issue #545): the key this job's runner signs its exit line with, or null when none was issued (an image
 	// that does not declare `exitAuth`, or a caller that predates the field). With a key, the exit-line fields are read
 	// from the AUTHENTICATED lines only, and none at all reads exactly like a container that wrote no exit line.
-	return function openJobLog(jobId, { exitKey = null } = {}) {
+	return function openJobLog(jobId, { exitKey = null, suppressCapture = false } = {}) {
 		let tail = "";
 		let stream = null;
 
@@ -1472,7 +1476,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			try {
 				tail += typeof chunk === "string" ? chunk : chunk.toString("utf8");
 				if (tail.length > TAIL_CAP_BYTES) tail = tail.slice(tail.length - TAIL_CAP_BYTES);
-				if (!enabled) return;
+				if (!enabled || suppressCapture) return;
 				if (stream === null) {
 					stream = fs.createWriteStream(join(logsDir, `${sanitizeJobId(jobId)}.log`), { flags: "a" });
 					// Attach before the first write so an EPIPE/ENOSPC/EACCES surfaces as a log line rather

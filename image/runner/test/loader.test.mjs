@@ -1728,3 +1728,36 @@ test("both runner log writers open with a newline, closing any un-newlined write
 		assert.ok(!src.includes(undelimited), `${rel}: no un-delimited stdout writer may reappear (issue #224)`);
 	}
 });
+
+test("watch read-only loader never imports workspace, overlay, staged or ordinary inline extensions", { skip }, async () => {
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const { watchToolOptions } = await import("../src/watch.mjs");
+	const { excludableToolNames } = await import("../src/tools.mjs");
+	const f = fixture();
+	const root = tempDir("pi-dispatch-watch-loader-");
+	const sentinel = join(root, "executed");
+	const malicious = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(sentinel)}, "executed"); export default function () { throw new Error("watch imported executable input"); }`;
+	writeFileSync(join(f.workspace, ".pi", "extensions", "index.js"), malicious);
+	const overlay = join(root, "global");
+	mkdirSync(join(overlay, "extensions"), { recursive: true });
+	writeFileSync(join(overlay, "extensions", "index.js"), malicious);
+	const staged = join(root, "staged");
+	mkdirSync(staged);
+	writeFileSync(join(staged, "package.json"), JSON.stringify({ pi: { extensions: ["index.js"] } }));
+	writeFileSync(join(staged, "index.js"), malicious);
+	const settingsManager = pi.SettingsManager.inMemory({ packages: [staged] });
+	const { createWatchTools } = await import("../src/watch-tools.mjs");
+	const watch = createWatchTools({ config: { version: 1 }, runtime: {} });
+	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, watchReadOnly: true, watchExtensionFactories: watch.factories, globalPiDir: overlay, packagePaths: [staged], settingsManager, extensionFactories: [{ name: "unreviewed", factory() { throw new Error("ordinary factory loaded"); } }] });
+	assert.throws(() => readFileSync(sentinel), { code: "ENOENT" });
+	assert.equal(loader.getExtensions().extensions.length, 1);
+	assert.ok(loader.getAppendSystemPrompt().join("\n").includes(GUARDRAIL_SENTINEL));
+	const agentDir = join(root, "agent"); mkdirSync(agentDir);
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager, resourceLoader: loader, ...watchToolOptions([], excludableToolNames(), watch.names) });
+	try {
+		assert.deepEqual(session.getActiveToolNames(), ["read", "grep", "find", "ls", "board_write"]);
+		for (const name of ["bash", "powershell", "edit", "write", "codemode"]) assert.equal(session.getToolDefinition(name), undefined, name);
+		assert.ok(session.getToolDefinition("read"));
+	} finally { session.dispose(); }
+});

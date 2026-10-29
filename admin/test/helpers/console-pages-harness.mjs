@@ -71,6 +71,8 @@ export const SHOTS = Object.freeze([
   ["insights-whatif", "insights", "whatif=acme%2Fmodel-1&flow=fix"],
   ["fleet", "fleet", ""],
   ["config", "config", ""],
+  ["watch", "watch", "rule=shop-5xx"],
+  ["watch-board", "watch-board", "rule=shop-5xx&finding=finding-1"],
   ["audit", "audit", ""],
 ]);
 export const ROLES = Object.freeze(["viewer", "operator"]);
@@ -399,6 +401,14 @@ async function renderInChild() {
     reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW, readLiveHostsFn: (redis, opts) => W.hostRegistry.readLiveHosts(atBeat(redis), opts) });
     const deps = {
       fleet: reader,
+      watch: {
+        listSources: async () => [{ id: "prod-alerts", verify: "hmac-sha256", maxPerDay: 1000 }],
+        listRules: async () => [{ id: "shop-5xx", source: "prod-alerts", flow: "triage-incident", mode: "investigate", maxPerDay: 4, cooldownMs: 6 * 3600000, summary: { lastDeliveryAt: String(NOW), suppressed: "24", capped: "2" } }],
+        listFindings: async () => [{ id: "finding-1", ruleId: "shop-5xx", fingerprint: "a9b31c", severity: "error", count: 37, firstSeen: NOW - 600000, lastSeen: NOW, dueAt: NOW, status: "queued", runId: "local-7f21", decision: { model: "openrouter/typesafe/jev-1.13", action: "investigate", costUsd: 0.00002 } }],
+        readFinding: async (id, opts) => ({ id: "finding-1", ruleId: "shop-5xx", count: 37, status: "queued", ...(opts.private ? { samples: ["Checkout TimeoutError: pool acquire exceeded the wait limit."] } : {}) }),
+        readTrace: async (id, opts) => [{ kind: "stream", signature: "verified", source: "prod-alerts", count: 37, at: NOW }, { kind: "rule", status: "held", checks: { match: "passed", threshold: "at-window-end", cooldown: "passed", cap: "passed" }, at: NOW }, { kind: "decide", status: "answered", action: "investigate", model: "openrouter/typesafe/jev-1.13", modelReviewed: true, costUsd: 0.00002, at: NOW, confidence: 0.82, probabilities: { investigate: 0.82, file_issue: 0.15, ignore: 0.03 }, ...(opts.private ? { state: { severity: "error", count: 37 }, questions: { act: { type: "choice" } }, usage: { cost: 0.00002 } } : {}) }, { kind: "query", status: "completed", rows: 37, at: NOW, ...(opts.private ? { query: "sum(rate(checkout_errors[5m]))" } : {}) }],
+        readBoard: async () => ({ version: 2, frozen: false, blocks: [{ id: "count", type: "number", title: "Checkout errors", value: 37, traceId: "q1" }, { id: "note", type: "note", title: "Investigation", text: "Pool saturation needs a person to review the follow-up issue.", traceId: "q2" }], versions: [{ version: 1, blocks: [] }], proposals: [{ id: "proposal-1", blocks: [{ id: "trend", type: "line", title: "Errors per minute", traceId: "q3", points: [{ x: "12:00", y: 2 }, { x: "12:01", y: 8 }, { x: "12:02", y: 3 }] }] }] }),
+      },
       insights: (window) => assembleInsights(fleetPaths, window, { pricing: { ...pricing, piAiVersion: () => "0.99.1" }, nowMs: NOW, envFn: () => env }),
       // A canned catalog of two ids and a rate of $1 in and $5 out per million tokens: the what-if's own arithmetic over
       // the fixture's real records, with nothing a pi bump can move.
@@ -435,11 +445,11 @@ async function renderInChild() {
       if (parsed.refusal) throw new Error(`${shot}: ${parsed.refusal}`);
       const data = await P.loadPageData(name, parsed.query, deps);
       for (const role of ROLES) {
-        pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data, readOnly: false });
+        pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data: name === "watch-board" ? await P.loadPageData(name, parsed.query, deps, { role }) : data, readOnly: false });
       }
       // The operator's page on a read-only console (serve's read-only mode, issue #737 review round 2): the frame draws
       // its chip and every write form is withheld, so it is a page of its own, held to the same rules but to no golden.
-      readOnly[shot] = await draw(name, { query: parsed.query, session: { name: "ops", role: "operator" }, data, readOnly: true });
+      readOnly[shot] = await draw(name, { query: parsed.query, session: { name: "ops", role: "operator" }, data: name === "watch-board" ? await P.loadPageData(name, parsed.query, deps, { role: "operator", readOnly: true }) : data, readOnly: true });
     }
     if (hostile) {
       // The hostile run's own detail page: its id is outside the run-id charset, so the query is refused before any read.

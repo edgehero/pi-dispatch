@@ -50,6 +50,8 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 			// Belt-and-suspenders: a github parent has no /outbox mount at all (the request channel does not
 			// exist for it), but guard here too so a stray dir cannot chain off an untrusted issue author.
 			if (job?.data?.kind !== "local") return { enqueued: 0, refused: 0 };
+			// A collector signature is not a human's permission to start a write-capable child.
+			if (job.data.watch) { refuse("watch-human-required", 0); return { enqueued, refused }; }
 
 			const outboxDir = join(prepared.jobDir, "outbox");
 			let names;

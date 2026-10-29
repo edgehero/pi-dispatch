@@ -1,0 +1,71 @@
+import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { Readable } from "node:stream";
+import { writeFileSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { Queue } from "bullmq";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { makeRedisClient } from "../src/connection.mjs";
+import { enqueueWatchJob } from "../src/queue.mjs";
+import { makeWatchStore } from "../src/watch-store.mjs";
+import { makeWatchRuntime } from "../src/watch-runtime.mjs";
+import { parseTriggersDocument } from "../src/triggers.mjs";
+import { runJob } from "../src/processor.mjs";
+import { prepareLocalWorkspace } from "../src/prepare-local.mjs";
+import { makeCollectChain } from "../src/outbox.mjs";
+import { makeWatchHandler } from "../../receiver/src/watch.mjs";
+import { watchSigningMessage } from "../../receiver/src/verify-watch.mjs";
+const url = process.env.VALKEY_TEST_URL;
+if (!url && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") throw new Error("watch-pipeline.integration REQUIRES VALKEY_TEST_URL");
+const skip = url ? false : "needs VALKEY_TEST_URL";
+const CLOCK = Date.parse("2026-10-29T00:00:00Z");
+async function fixture(t, { minCount = 2, maxPerDay = 4 } = {}) {
+	const root = tempDir("watch-pipeline-"); const folder = tempDir("watch-workspace-");
+	const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_COMMITTER_NAME: "Test", GIT_AUTHOR_EMAIL: "edgehero@users.noreply.github.com", GIT_COMMITTER_EMAIL: "edgehero@users.noreply.github.com" };
+	execFileSync("git", ["init", "-q", folder]); execFileSync("git", ["-C", folder, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "test fixture"], { env: gitEnv });
+	const triggersPath = join(root, "triggers.json");
+	const authored = { watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SECRET" } }, triggers: [{ on: { type: "watch", id: "errors", source: "prod", fingerprint: ["service"], minCount, window: "1s", cooldown: "1m", maxPerDay }, run: { kind: "local", folder, flow: "triage", task: "Investigate", maxCostUsd: "0.40" } }] };
+	writeFileSync(triggersPath, JSON.stringify(authored)); const doc = parseTriggersDocument(JSON.stringify(authored), triggersPath);
+	let clock = CLOCK; const now = () => clock; const setNow = value => { clock = value; };
+	const name = `watch-pipeline-${Math.random().toString(36).slice(2)}`; const redis = makeRedisClient(url, {}); const queue = new Queue(name, { connection: redis });
+	t.after(async () => { await queue.obliterate({ force: true }); await queue.close(); const keys = await redis.keys(`${name}:*`); if (keys.length) await redis.del(...keys); redis.disconnect(); });
+	const store = makeWatchStore(redis, { now, prefix: name });
+	const enqueue = fields => enqueueWatchJob(queue, fields, { now });
+	const runtime = makeWatchRuntime({ store, triggersPath, enqueue, now, getSettings: () => ({ provider: "anthropic", model: "claude-sonnet-4-5-20250929" }) });
+	const handler = makeWatchHandler({ cfg: { triggers: { watchSources: doc.watchSources, watch: doc.triggers } }, store, enqueue, now, env: { WATCH_SECRET: "secret" } });
+	async function send(delivery, patch = {}) {
+		const raw = JSON.stringify({ fields: { service: "checkout" }, severity: "error", count: 1, firstSeen: "2026-10-29T00:00:00Z", lastSeen: "2026-10-29T00:00:00Z", samples: ["private attacker sample"], ...patch });
+		const timestamp = String(now() / 1000); const req = Readable.from([Buffer.from(raw)]); req.method = "POST"; req.url = "/watch/prod";
+		req.headers = { "content-type": "application/json", "x-watch-timestamp": timestamp, "x-watch-id": delivery, "x-watch-signature": "v1=" + createHmac("sha256", "secret").update(watchSigningMessage(timestamp, delivery, raw)).digest("hex") };
+		const res = { headersSent: false, writeHead(status) { this.statusCode = status; this.headersSent = true; }, end(body) { this.body = JSON.parse(body); } };
+		await handler(req, res); return res;
+	}
+	return { root, folder, authored, triggersPath, redis, queue, store, runtime, send, setNow, now, name };
+}
+test("authenticated finding passes actual Valkey digest and BullMQ delay to read-only job with budget before container", { skip }, async t => {
+	const f = await fixture(t); const first = await f.send("one"); await f.send("two"); await f.send("one");
+	assert.equal(first.statusCode, 202); const id = first.body.results[0].id; const jobs = await f.queue.getJobs(["delayed"]); assert.equal(jobs.length, 1);
+	assert.equal(JSON.stringify(jobs[0].data).includes("private attacker sample"), false); assert.equal(JSON.stringify(jobs[0].data).includes("checkout"), false);
+	assert.equal((await f.runtime.resolve(jobs[0].data, "run-before-due")).result.reason, "watch-window-pending");
+	f.setNow(CLOCK + 1000); const resolved = await f.runtime.resolve(jobs[0].data, "run-ready"); assert.equal(resolved.data.watch.finding.count, 2);
+	assert.equal(resolved.data.watch.finding.samples[0], "[redacted]"); assert.doesNotMatch(JSON.stringify(resolved.data), /private attacker sample|checkout/);
+	const events = []; const ledger = Object.fromEntries(["get", "incr", "decr", "expire", "incrby"].map(method => [method, async (key, ...args) => { if (method === "incr") events.push("reserve"); return f.redis[method](`${f.name}:${key}`, ...args); }]));
+	const jobDir = tempDir("watch-job-"); const prepared = await prepareLocalWorkspace({ folder: f.folder, task: resolved.data.task, jobDir, watch: resolved.data.watch });
+	assert.deepEqual(JSON.parse(readFileSync(join(jobDir, "watch.json"))), { version: 1, mode: "investigate" }); assert.equal(statSync(join(jobDir, "findings.json")).mode & 0o777, 0o444);
+	const result = await runJob(resolved.data, { redis: ledger, caps: { day: 1, week: null, month: null }, softHoldPct: null, now: new Date(f.now()), mintToken: async () => assert.fail("watch never mints forge token"), prepareWorkspace: async () => prepared, runContainer: async () => { events.push("container"); assert.ok(events.includes("reserve")); return { code: 0, aborted: false }; }, collectChain: async () => ({ enqueued: 0, refused: 0 }), cleanup: async () => {}, comment: async () => {} });
+	assert.equal(result.outcome, "completed"); assert.ok(events.indexOf("reserve") < events.indexOf("container"));
+	const denied = await runJob(resolved.data, { redis: ledger, caps: { day: 0, week: null, month: null }, now: new Date(f.now()), prepareWorkspace: async () => prepared, runContainer: async () => assert.fail("over-budget finding starts no container"), cleanup: async () => {}, comment: async () => {} }); assert.equal(denied.outcome, "policy");
+	writeFileSync(join(prepared.outboxDir, "request-1.json"), JSON.stringify({ flow: "fix", task: "change code" }));
+	const chain = makeCollectChain({ enqueue: async () => assert.fail("watch outbox cannot start writable child"), config: {} }); assert.deepEqual(await chain({ job: { id, data: resolved.data }, prepared }), { enqueued: 0, refused: 1 });
+});
+test("changed reviewed policy, low threshold and cooldown/caps are verified across real queue and store", { skip }, async t => {
+	const f = await fixture(t, { minCount: 2, maxPerDay: 1 }); const first = await f.send("one"); const queued = (await f.queue.getJobs(["delayed"]))[0];
+	f.setNow(CLOCK + 1000); assert.equal((await f.runtime.resolve(queued.data, "below")).result.reason, "watch-threshold");
+	assert.equal((await f.send("cooldown")).body.status, "suppressed"); assert.equal((await f.send("different", { fields: { service: "other" } })).body.status, "capped");
+	f.authored.triggers[0].run.task = "Changed reviewed policy"; writeFileSync(f.triggersPath, JSON.stringify(f.authored));
+	assert.equal((await f.runtime.resolve(queued.data, "changed")).result.reason, "watch-threshold");
+	const ready = await fixture(t, { minCount: 1 }); await ready.send("one"); ready.setNow(CLOCK + 1000); const readyJob = (await ready.queue.getJobs(["delayed"]))[0]; ready.authored.triggers[0].run.flow = "different-flow"; writeFileSync(ready.triggersPath, JSON.stringify(ready.authored));
+	assert.equal((await ready.runtime.resolve(readyJob.data, "changed-before-spend")).result.reason, "watch-config-changed");
+});

@@ -1995,3 +1995,22 @@ test("run context reads only the matching trigger's attribution and bounded safe
     await reader.dispose();
   }
 });
+
+test("live watch facts report a validated watch rule and discard private finding payloads", async () => {
+  const logsDir = tempDir("pd-watch-live-facts-");
+  const job = { id: "watch-job", name: "watch", data: { kind: "watch", watch: { ruleId: "shop-5xx", findingId: "f1" }, samples: ["PRIVATE WATCH SAMPLE"] }, timestamp: AT, opts: {} };
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir }, {
+    makeQueueFn: () => ({ name: "pi-jobs", getJob: async () => job, close: async () => {} }), parseConnectionFn: () => ({}), redisFn: () => emptyRedis(),
+    readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => AT,
+  });
+  try {
+    const facts = await reader.runLiveFacts("watch-job", { live: true });
+    assert.equal(facts.kind, "watch");
+    assert.equal(facts.target, "watch:shop-5xx");
+    assert.ok(!JSON.stringify(facts).includes("PRIVATE"));
+    job.data.watch.ruleId = "bad rule";
+    const invalid = await reader.runLiveFacts("watch-job", { live: true });
+    assert.equal(invalid.kind, null);
+    assert.equal(invalid.target, null);
+  } finally { await reader.dispose(); }
+});

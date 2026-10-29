@@ -38,6 +38,7 @@ function fileTrouble(v, what, s = null) {
 function triggerOn(t) {
   const list = (name, v) => (Array.isArray(v) && v.length > 0 ? `${name} ${v.join(", ")}` : null);
   switch (t.type) {
+    case "watch": return `watch ${cell(t.id)} from ${cell(t.source)}`;
     case "cron":
       return [`cron ${cell(t.id)}`, t.pattern].filter(Boolean).join(" ");
     case "label":
@@ -97,7 +98,7 @@ export const configTriggers = fromSnapshot("Triggers", (s, view) => {
   const trouble = fileTrouble(v, "triggers file", s);
   if (trouble) return html`<p class="warn">${trouble}</p>${triggersEditor(view)}`;
   const list = Array.isArray(v.triggers) ? v.triggers : [];
-  return html`${table(
+  return html`${list.some((t) => t.type === "watch") ? html`<p><a href="/watch">Watch findings and boards</a></p>` : null}${table(
     "Triggers",
     [{ num: "#" }, "On", "Runs", "Model", "Notes"],
     list.map((t, i) => {

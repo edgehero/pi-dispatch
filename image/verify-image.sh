@@ -770,6 +770,46 @@ BEPROBE
 				echo "$be_out" | grep -q '^bundle-env-probe plain=plain-value pem=line1|line2 flag=gone$' \
 					|| fail "the image declares 'bundleEnvFile' but a job with PI_BUNDLE_ENV=1 did not see the bundle's variables from /job/bundle-env.json in its environment ($(echo "$be_out" | grep '^bundle-env-probe' | tail -1))"
 				;;
+			watch)
+				# Watch evidence has no human author: executable resources must never run, even at import.
+				# The zero cap and --network none make both probes deterministic and provider-free.
+				watch_dir=$(mktemp -d)
+				mkdir -p "$watch_dir/job" "$watch_dir/ws/.pi/extensions" "$watch_dir/outbox"
+				echo 'Investigate the finding using read-only tools.' >"$watch_dir/job/prompt.md"
+				echo '{"version":1,"mode":"investigate"}' >"$watch_dir/job/watch.json"
+				echo 'console.log("WATCH-EXTENSION-EXECUTED"); export default function () {}' >"$watch_dir/ws/.pi/extensions/index.js"
+				chmod -R a+rX "$watch_dir/job" "$watch_dir/ws"
+				chmod a+rwx "$watch_dir" "$watch_dir/outbox"
+				watch_out=$(docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$watch_dir/job:/job:ro" -v "$watch_dir/ws:/workspace:ro" -v "$watch_dir/outbox:/outbox" --workdir /workspace \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_EXCLUDE_TOOLS=bash,edit,write,powershell \
+					"$IMAGE_REF" 2>&1) && watch_code=0 || watch_code=$?
+				watch_exit=$(echo "$watch_out" | grep '"event":"exit"' | tail -1)
+				watch_active=$(echo "$watch_out" | grep '"event":"tools_excluded"' | tail -1)
+				if [ "$watch_code" != 2 ] || ! echo "$watch_exit" | grep -q '"reason":"cost-cap"' || echo "$watch_out" | grep -q 'WATCH-EXTENSION-EXECUTED' || ! echo "$watch_active" | grep -q '"active":\["read","grep","find","ls","board_write"\]'; then
+					rm -rf "$watch_dir"
+					fail "the image declares watch but executable discovery or its read-only tool registry failed the zero-spend probe"
+				fi
+				cat >"$watch_dir/job/watch-decision.json" <<'WATCHDECIDE'
+{"version":1,"model":{"provider":"openrouter","id":"typesafe/jev-1.13"},"state":{"count":37},"questions":{"act":{"type":"choice","criteria":{"ignore":"noise","file_issue":"a person should decide"}}}}
+WATCHDECIDE
+				chmod a+r "$watch_dir/job/watch-decision.json"
+				watch_key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+				watch_gate=$(printf '%s\n' "$watch_key" | docker run -i --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$watch_dir/job:/job:ro" -v "$watch_dir/ws:/workspace:ro" -v "$watch_dir/outbox:/outbox" --workdir /workspace \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e OPENROUTER_API_KEY=not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_EXIT_AUTH=stdin \
+					"$IMAGE_REF" 2>&1) && watch_gate_code=0 || watch_gate_code=$?
+				watch_gate_exit=$(echo "$watch_gate" | grep '"event":"exit"' | tail -1)
+				watch_mac=$(echo "$watch_gate_exit" | sed -nE 's/.*,"auth":"([0-9a-f]{64})"\}$/\1/p')
+				watch_body=$(echo "$watch_gate_exit" | sed -E 's/,"auth":"[0-9a-f]{64}"\}$/}/')
+				watch_want=$(printf '%s' "$watch_body" | openssl dgst -sha256 -hmac "$watch_key" | awk '{print $NF}')
+				watch_decision=$(cat "$watch_dir/outbox/decision.json" 2>/dev/null || true)
+				rm -rf "$watch_dir"
+				[ "$watch_gate_code" = 2 ] && [ -n "$watch_mac" ] && [ "$watch_mac" = "$watch_want" ] && echo "$watch_gate_exit" | grep -q '"reason":"cost-cap"' && echo "$watch_gate_exit" | grep -Eq '"costRefused":1[,}]' && echo "$watch_decision" | grep -q '"stopReason":"aborted"' \
+					|| fail "the image declares watch but its deterministic classifier bypassed the cost guard or failed to write its bounded result"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

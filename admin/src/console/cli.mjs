@@ -454,6 +454,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const pricing = pricingOf(m.pricing);
     const pageDeps = {
       fleet,
+      watch: fleet.watch,
       insights: cachedPerWindow((window, opts) => m.insights.assembleInsights(side.paths, window, { pricing, nowMs: now(), envFn: () => side.env, ...(opts?.fullPaths ? { fullPaths: true } : {}) }), { now }),
       // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers
       // bounded and cached per (model, flow, scan window) (`whatif.mjs`).
@@ -506,6 +507,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // the tools use, over the paths and env the read side resolved, so a console write lands in the files and queues
       // the service reads, refused in the tools' own words.
       actionDeps: {
+        watch: fleet.watch,
         rm: m.readModel,
         plans: m.writePlans ?? null,
         paths: side.paths,

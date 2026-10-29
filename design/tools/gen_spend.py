@@ -372,57 +372,11 @@ SAMPLES = [
     "14:58:31Z checkout ERROR TimeoutError: acquire timed out after 5000ms pool=orders size=20 waiting=11 req=[redacted]",
 ]
 def watch_page():
-    kpis = f"""<div class="cards-4">
-  {card("Findings delivered", '<p class="kpi"><b>41</b><span>last 24 hours, all signed</span></p><p class="wt-k">From 2 sources.</p>', id_="p-delivered")}
-  {card("Jobs started", '<p class="kpi"><b>1</b><span>plus 1 issue filed</span></p><p class="wt-k">One finding, one job.</p>', id_="p-started")}
-  {card("Suppressed", '<p class="kpi"><b>36</b><span>by cooldown</span></p><p class="wt-k">A 6 hour cooldown per fingerprint.</p>', id_="p-suppressed")}
-  {card("Capped or unmatched", '<p class="kpi"><b>1</b><span>capped</span><b class="wt-k2">3</b><span>unmatched</span></p><p class="wt-k">Refused before spend: <span class="code">watch-cap</span>, <span class="code">watch-unmatched</span>.</p>', id_="p-refused")}
-</div>"""
-    samples = "".join(f"<li>{E(s)}</li>" for s in SAMPLES)
-    finding = f"""<div class="wt-f">
-  <div class="wt-f__h"><span class="tile tone-failed">{ic('attention')}</span>
-    <div><p class="wt-f__t">checkout <span class="code">TimeoutError</span> at <span class="code">db.pool.acquire</span></p>
-    <p class="card__sub">Fingerprint <span class="code">3e9a71c0…</span> from <span class="code">prod-alerts</span>, trigger <span class="code">shop-5xx</span></p></div>
-    <span class="wt-f__n">37×</span></div>
-  {facts([("Service", "checkout"), ("Error type", '<span class="code">TimeoutError</span>'), ("Top frame", '<span class="code">db.pool.acquire</span>'),
-          ("Severity", badge('failed', 'error')), ("First seen", "14:58 UTC"), ("Last seen", "15:36 UTC, 3m ago"), ("Project", tag('shop')), ("Cooldown", "5h 12m left")], cols=2)}
-  <div class="wt-s"><p class="wt-s__h">{ic('doctor', 'ic ic--sm')}8 samples of 37, redacted on the host.</p>
-    <ol class="wt-s__l">{samples}</ol></div>
-  <div class="wt-started">
-    <p class="wt-s__h">What it started</p>
-    <div class="wt-row">{badge('completed')}<span class="code">local-7f21</span>{tag('shop')}<span><b>triage-incident</b>, read-only, on mini2. Started 15:14 UTC, took 15m, $0.11.</span>{btn("Open run")}</div>
-    <div class="wt-row">{badge('approval', 'Waits for a person')}<span>The triage asked for <span class="code">fix-db-pool</span> through the outbox. It starts only after a person approves it.</span>{btn("Review", "answer", "parked")}</div>
-    <div class="wt-row">{badge('ok', 'Issue filed')}<a class="link" href="#">acme/shop#88</a><span>[watch] checkout TimeoutError db.pool.acquire (37x), filed by <span class="code">shop-5xx-issue</span>. Apply <span class="code">pi:fix</span> to start a fix.</span></div>
-  </div>
-</div>"""
-    fcard = card("Finding", finding, sub="the newest of 3 active fingerprints", id_="p-finding")
-    fps = f"""<div class="tbl-wrap"><table class="tbl">
-  <thead><tr><th>Fingerprint</th><th>Trigger</th><th class="num">Count</th><th>Last seen</th><th>Cooldown left</th><th>Jobs</th></tr></thead>
-  <tbody>
-    <tr><td><span class="code">checkout/TimeoutError/db.pool.acquire</span></td><td class="code">shop-5xx</td><td class="num"><b>37</b></td><td class="when">15:36</td>
-        <td><span class="wt-cd">{pbar(312/360, "attention", "5h 12m of 6h left", 8)}<span>5h 12m</span></span></td><td>{btn("local-7f21", "ghost")}</td></tr>
-    <tr><td><span class="code">checkout/HTTPError/payments.capture</span></td><td class="code">shop-5xx</td><td class="num">3</td><td class="when">15:29</td>
-        <td><span class="faint">holding: 3 of 5 in 10m</span></td><td class="faint">none yet</td></tr>
-    <tr><td><span class="code">search/MemoryError/indexer.flush</span></td><td class="code">shop-5xx</td><td class="num">6</td><td class="when">09:12</td>
-        <td><span class="wt-cd">{pbar(0, "attention", "cooldown over", 8)}<span>over</span></span></td><td>{btn("acme/shop#87", "ghost")}</td></tr>
-  </tbody></table></div>"""
-    fpcard = card("Active fingerprints", fps, id_="p-fingerprints", flush=False)
-    sources = f"""<ul class="wt-src">
-  <li><span class="dot tone-ok"></span><div><p><b class="code">prod-alerts</b>{tag('shop')}</p><p class="card__sub">hmac-sha256 verified, secret <span class="code">WATCH_PROD_SECRET</span> present, body up to 64 KiB</p></div><span class="wt-src__r"><b>3m ago</b><small>41 in 24h</small></span></li>
-  <li class="tone-attention"><span class="dot tone-attention"></span><div><p><b class="code">staging-logs</b>{tag('ops')}</p><p class="wt-src__w">{ic('attention', 'ic ic--sm')}Doctor: secret <span class="code">WATCH_STAGING_SECRET</span> is missing. Deliveries are refused.</p></div><span class="wt-src__r"><b>never</b><small>0 accepted</small></span></li>
-</ul>"""
-    srccard = card("Sources", sources, sub="POST /watch/&lt;source&gt;", id_="p-sources")
-    trig = f"""<div class="wt-trig">
-  <p class="wt-trig__h"><b class="code">shop-5xx</b><span class="card__sub">investigates, from prod-alerts</span>{btn("Open its board", "", "chev-r")}</p>
-  {facts([("Match", "severity error or critical, service checkout"), ("Fingerprint", '<span class="code">service</span>, <span class="code">error.type</span>, <span class="code">frame.top</span>'),
-          ("Threshold", "5 in 10m"), ("Cooldown", "6h"), ("Per day", "1 of 4 used"), ("Runs", '<b>triage-incident</b> in …/shop'), ("Tools", "edit and write excluded"), ("Job cap", "$0.40")], cols=1)}
-  <p class="wt-trig__h"><b class="code">shop-5xx-issue</b><span class="card__sub">opens one forge issue per fingerprint</span></p>
-</div>"""
-    trigcard = card("Watch rules", trig, sub="written by hand in triggers.json", id_="p-wtriggers", end=btn("All rules", "", "runs"))
-    inner = kpis + f'<div class="cols"><div class="stack">{fcard}{fpcard}</div><div class="stack">{srccard}{trigcard}</div></div>'
-    from gen_triggers import tabs as trigger_tabs
-    return shell("Triggers", trigger_tabs("Watch") + inner, "Watch", sub="Findings from logs and alerts, and what each one started.",
-                 end='<div class="seg sp-range" role="group" aria-label="Window"><button aria-pressed="false">1 hour</button><button aria-pressed="true">24 hours</button><button aria-pressed="false">7 days</button></div>')
+    sources = card("Sources", '<ul><li class="tx__b">prod-alerts: hmac-sha256, daily cap 1000; last delivery 2026-10-08 15:39 UTC; 24 suppressed, 2 capped. Credential health is unknown here; doctor checks on the receiver host.</li></ul>')
+    rules = card("Watch rules", '<p>Sources and rules are written by hand in triggers.json. Findings cannot choose a job permission.</p><ul><li><a href="#">shop-5xx</a>: prod-alerts, at most 4 findings per day, flow triage-incident, investigate</li></ul>')
+    findings = card("Findings for shop-5xx", '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Finding</th><th>Severity</th><th>Count</th><th>Outcome</th><th>Cooldown</th><th>Job</th></tr></thead><tbody><tr><td><a href="#">finding-1</a></td><td>error</td><td>37</td><td>queued</td><td>360m</td><td><a href="#">local-7f21</a></td></tr></tbody></table></div>')
+    return shell("Configuration", '<div class="stack">' + sources + rules + findings + '</div>', "Watch", sub="Drawn at 2026-10-08 15:39 UTC, not live. Reload to read the current retained data.", live="off", end=btn("Reload"))
+
 
 WATCH_CSS = """
 .tr-tabs { margin: var(--space-2) 0 var(--space-2); }
@@ -533,36 +487,19 @@ READMES = {
 
 **Fixture note.** This is a planned screen (#716, #717, #693). All of it is sample, except the model names (claude-sonnet-5-5, kimi-for-coding, claude-haiku-5-5) and the $80.00 weekly window for claude-sonnet-5-5.
 """,
-"WatchScreen": """Watch shows the findings that logs and alerts send in, what they started, and what was suppressed or refused, with a person in charge of any code change.
+"WatchScreen": """Watch shows configured sources and rules before the first finding, retained finding outcomes, cooldown left, and suppressed or capped counts. Built by #735.
 
-**How a person uses it.**
-- **Four counts:** findings delivered, jobs started, suppressed by cooldown, and capped or unmatched (both refused before spend).
-- **Finding.** The newest finding, as a card:
-  - service, error type and top frame, with the count (37×);
-  - first and last seen, severity, project and cooldown left;
-  - 8 redacted samples shown as escaped plain text;
-  - what it started: the read-only triage job, the follow-up that waits for a person, and the forge issue filed in issue mode.
-- **Active fingerprints.** Each fingerprint's count, last seen, cooldown left and jobs.
-- **Right column:** *Sources*, each with its signature check, secret name and last delivery (doctor flags a missing secret), and *Triggers*, each with its match, fingerprint fields, threshold, cooldown, daily cap, mode, flow and job cap.
+**How a person uses it.** Open Watch from Configuration's Triggers section when a watch rule is configured. The compact static screen lists source signatures, latest delivery, refusal counters and explicitly unknown credential health. Doctor checks source credentials on their owning host. Rules show source, reviewed flow, mode and daily cap. Select a rule's board for retained findings and operator-only evidence. The terminal panel's z key opens Watch findings and outcome counters.
 
-**Panels.** `p-delivered`, `p-started`, `p-suppressed`, `p-refused`, `p-finding`, `p-fingerprints`, `p-sources`, `p-wtriggers`.
+**Panels.** The delivered console has `p-watch`, containing Sources, Watch rules and Findings.
 
-**The server provides.**
-- Counters per window.
-- Fingerprints with counts and cooldown expiry.
-- Redacted samples, never stored in run history.
-- The jobs and issues each finding started.
-- Sources with signature and secret status.
-- The watch triggers from triggers.json.
+**Who sees what.** Both roles see counts and outcomes. Samples are operator only on the board's evidence section and never enter run history or application logs. Watch configuration is hand-written; the generic trigger editor does not author it.
 
-**Why it works this way.**
-- Rules decide what starts a job, never a model: a finding never picks the flow, model, tools or secrets.
-- Watch jobs are read-only, with edit and write excluded. A fix starts only after someone with write access labels the issue `pi:fix`. The ordinary label trigger then opens a pull request, which a person merges.
-- A source's signature is checked before any field of a delivery is read.
-- The same fingerprint stays quiet for its cooldown (6 hours here) after it starts a job, so a noisy error starts one job, not hundreds.
-- Samples are redacted on the host before they reach the queue, shown as plain text, and never kept in run history. Fingerprints use structured fields only, never message text.
+**Why it works this way.** Signature verification precedes parsing. Deterministic rules, cooldown and source and rule caps precede spend. Each investigation is a fresh read-only container, and a person with write access authorizes a code-change follow-up. A finding cannot choose the flow, model, folder, permissions, secrets or image.
 
-**Fixture note.** This is a planned screen (#735), and all of it is sample, built from the example in the issue: prod-alerts, shop-5xx, checkout/TimeoutError/db.pool.acquire, 37 events and 8 redacted samples.
+**Future design, not delivered.** The earlier multi-panel live Watch dashboard is a future presentation option. This card describes the compact retained-data screen, not live widgets or receiver credential-health telemetry.
+
+**Fixture note.** Counts and timestamps are illustrative and match the board's shared finding and local-7f21 job.
 """,
 }
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * `pi-dispatch doctor` — preflight the host before the first job. Prints a ✓/⚠/✗ line per prerequisite
  * with a one-line fix, and exits non-zero if any hard check fails, so it is usable in a setup script.
@@ -1781,11 +1782,12 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const modelRoleProjects = readProjectFacts(env, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(env, fileExists);
 	section("triggers");
+	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env }));
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -6286,7 +6288,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
+	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -6298,7 +6300,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		if (!statSync(path).isFile()) return { ...none, parseError: `triggers file is not a regular file: ${path}`, path };
 		const text = readFileSync(path, "utf8");
 		// The document parser, so the file's `secretBundles` (issue #704) is judged by the loaders' one rule too.
-		const { triggers, secretBundles, modelRoles } = parseTriggersDocument(text, path);
+		const { triggers, secretBundles, modelRoles, watchSources } = parseTriggersDocument(text, path);
 		// The one-shot facts are counted from the RAW entries, not the parsed records, because the
 		// validator collapses a disarmed entry to a sentinel that carries neither `once` nor
 		// `disarmed` -- exactly so nothing can match it -- which also erases it from every parsed
@@ -6319,6 +6321,8 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		const fleet = Boolean(declaredWorkerName);
 		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
 		return {
+			watchSources,
+			watchRules: triggers.filter(t => t.on.type === "watch").length,
 			secretBundles,
 			modelRoles,
 			onceArmed: rawEntries.filter((t) => t?.on?.once === true && t.on.disarmed === undefined).length,
@@ -10747,4 +10751,21 @@ export function liveRunVia(spawn, { bin = "docker" } = {}) {
 			child.on("error", () => finish(null, "error"));
 			child.on("close", (code) => finish(code, "close"));
 		});
+}
+
+/** Diagnose reviewed source bindings without resolving or printing credential values. */
+export function watchDoctorChecks({ sources = {}, rules = 0, env = {} } = {}) {
+	const entries = Object.entries(sources);
+	if (!entries.length) return [];
+	const checks = [{ id: "watch.sources", ok: true, label: `${entries.length} watch source(s), ${rules} watch rule(s); daily caps are required at load` }];
+	for (const [source, declaration] of entries) {
+		const identity = createHash("sha256").update(source).digest("hex").slice(0, 16);
+		const present = typeof env[declaration.secretEnv] === "string" && env[declaration.secretEnv].length > 0;
+		checks.push({ id: `watch.secret-${identity}`, ok: present, ...(!present ? { warn: true } : {}), label: present ? `watch source ${source}: signing secret is available` : `watch source ${source}: signing secret ${declaration.secretEnv} is missing; push requests return 503`, ...(!present ? { fix: `Set ${declaration.secretEnv} on the receiver host, or use the configured pull source without serving push requests.` } : {}) });
+		if (declaration.pull?.secretEnv) {
+			const name = declaration.pull.secretEnv; const available = typeof env[name] === "string" && env[name].length > 0;
+			checks.push({ id: `watch.pull-${identity}`, ok: available, ...(!available ? { warn: true } : {}), label: available ? `watch source ${source}: pull credential is available` : `watch source ${source}: pull credential ${name} is missing`, ...(!available ? { fix: `Set ${name} on the watch collector host.` } : {}) });
+		}
+	}
+	return checks;
 }

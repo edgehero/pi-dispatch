@@ -15,6 +15,8 @@
  * `{ missing }` rather than throwing to the command handler.
  */
 
+import { watchDurationMs, WATCH_ID_RE as WATCH_RULE_ID_RE } from "@edgehero/pi-dispatch/watch-contract";
+import { makeWatchStore } from "@edgehero/pi-dispatch/watch-store";
 import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import * as nodeFs from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -2845,6 +2847,8 @@ export function normalizeTriggerForDisplay(entry) {
     ...(run.secretBundle === false && { secretBundle: false }),
   };
   switch (on.type) {
+    case "watch":
+      return { type: "watch", id: typeof on.id === "string" ? on.id : null, source: typeof on.source === "string" ? on.source : null, mode: typeof run.mode === "string" ? run.mode : "investigate", maxPerDay: Number.isSafeInteger(on.maxPerDay) ? on.maxPerDay : null, cooldownMs: (() => { try { return watchDurationMs(on.cooldown); } catch { return null; } })(), folder: typeof run.folder === "string" ? run.folder : null, flow, command, ...modelRef, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, forge: null };
     case "cron":
       return {
         type: "cron",
@@ -3842,6 +3846,23 @@ export function createFleetReader(
   const activePerQueue = Number.isSafeInteger(activeLimit) ? Math.min(Math.max(activeLimit, 1), ACTIVE_PER_QUEUE_MAX) : 1;
   const queue = makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }));
   const redis = redisFn(paths.valkeyUrl);
+  const watchStore = makeWatchStore(redis, { now: nowFn });
+  const watch = { ...watchStore,
+    async listSources() {
+      let config;
+      try { config = JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")); } catch { throw new Error("watch configuration unreadable"); }
+      const sources = config.watchSources ?? {};
+      return Object.entries(sources).slice(0, 256).map(([id, source]) => ({ id, verify: source.verify, maxBodyBytes: source.maxBodyBytes, maxPerDay: source.maxPerDay }));
+    },
+    async listRules() {
+    const configured = readTriggers({ triggersPath: paths.triggersPath, fs });
+    if (configured.invalid) throw new Error("watch configuration unreadable");
+    const rules = (configured.triggers ?? []).filter((t) => t.type === "watch");
+    const observed = await watchStore.listRules();
+    const merged = new Map(observed.map((r) => [r.id, r]));
+    for (const rule of rules) merged.set(rule.id, { ...merged.get(rule.id), ...rule });
+    return [...merged.values()];
+  } };
 
   // EVERY named host drains a queue of its own, so the four things this reader does with a queue -- count, list
   // schedulers, pause, resume -- have to span them. Doing it here rather than through the fleet-aware one-shots above
@@ -4228,6 +4249,7 @@ export function createFleetReader(
   };
 
   return {
+    watch,
     // `waiting` (issue #737): true reads the waiting jobs into the snapshot's `waiting` (see the header); anything else
     // reads none, so a caller that draws no waiting job pays nothing for one.
     // `switchQueues` (issue #737): true reads every per-queue field over the queues the kill switch flips (`switchQueues`:
@@ -4653,7 +4675,9 @@ export function createFleetReader(
         const settings = readSettingsView({ settingsFile: paths.settingsFile, fs }).overlay ?? {};
         const projects = readProjects({ projectsPath: paths.projectsPath, fs }).projects ?? [];
         const host = lastHosts.find((h) => parseLiveJobs(h?.jobs).jobs?.some((j) => j.id === jobId));
-        const kind = RUN_KINDS.includes(data.kind ?? job.name) ? (data.kind ?? job.name) : null;
+        const reportedKind = data.kind ?? job.name;
+        const watchKind = reportedKind === "watch" && typeof data.watch?.ruleId === "string" && WATCH_RULE_ID_RE.test(data.watch.ruleId);
+        const kind = RUN_KINDS.includes(reportedKind) || watchKind ? reportedKind : null;
         const backend = data.backend ?? parseHostBackends(typeof host?.backends === "string" ? host.backends : null)?.default ?? null;
         const instant = (v) => Number.isSafeInteger(v) && v >= 0 && v <= 8.64e15 ? new Date(v).toISOString() : null;
         const maxTurns = data.maxTurns ?? settings.maxTurns;

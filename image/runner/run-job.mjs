@@ -1,4 +1,7 @@
 import { existsSync } from "node:fs";
+import { readWatchDecision, executeWatchDecision } from "./src/watch-decision.mjs";
+import { readWatchTools, createWatchTools } from "./src/watch-tools.mjs";
+import { readWatchMode, assertWatchCompatible, watchToolOptions } from "./src/watch.mjs";
 import {
 	createAgentSession,
 	createCodemodeExtension,
@@ -160,7 +163,12 @@ async function main() {
 	// Issue #686: whether the key came as frame 1 of the stdin frame channel, the one fact that admits PI_STEER on the
 	// sandbox layout (PI_EXIT_AUTH itself has already left the environment).
 	const cfg = parseRunnerEnv(process.env, { steerFrames: exitKey.frames === true });
+	const watchReadOnly = readWatchMode();
+	const watchDecisionInput = readWatchDecision();
+	if (watchDecisionInput && (!watchReadOnly || cfg.maxCostMicros === null)) throw configError("watch decisions require a read-only marker and a cost cap", "watch-config-invalid");
+	const watchToolsConfig = watchReadOnly && !watchDecisionInput ? readWatchTools() : null;
 	const roleInputs = readRoleInputs();
+	if (watchReadOnly) assertWatchCompatible(cfg, { roles: roleInputs });
 
 	// FIRST, before the prompt is read and before any auth or model lookup: a staged package root
 	// that did not mount is a pre-spend config failure (exit 2, not retried) and this is the only
@@ -212,6 +220,7 @@ async function main() {
 	// (src/mcp.mjs `readJobMcp`). Null for a job whose trigger names none, which then builds exactly what it always has.
 	// Read first, since the job's MCP adds the names an exclusion may carry (codemode, a server's tools).
 	const mcpDocument = readJobMcp();
+	if (watchReadOnly) assertWatchCompatible(cfg, { roles: roleInputs, mcp: mcpDocument });
 	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools, [...excludableToolNames(), ...mcpExcludableNames(mcpDocument)]);
 
 	// A command job's prompt is rebuilt from PI_COMMAND rather than read from disk: one in-container
@@ -260,6 +269,7 @@ async function main() {
 	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = cfg.fork
 		? openForkSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, fork: cfg.fork })
 		: openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
+	if (watchReadOnly && sessionResumed) throw configError("watch jobs require a fresh session", "watch-config-invalid");
 	applyApprovalDecision(sessionManager, approvalDecisionFromEvent(cfg.approvalDecision, { jobDir: JOB_DIR }));
 	const rootSessionId = sessionManager.getSessionId();
 	// Issue #645: a recovery attempt resumes the checkpoint the worker staged, or it does not run. An empty or quarantined
@@ -359,6 +369,18 @@ async function main() {
 		...policyEnforcement(usageMeter),
 	});
 
+
+	if (watchDecisionInput) {
+		// A deterministic classifier owns this container. No extension loader or agent session exists.
+		let result;
+		try { result = await executeWatchDecision({ input: watchDecisionInput, runtime: modelRuntime }); }
+		finally { usageMeter.uninstall(); failureObserver.uninstall(); }
+		const stop = meterStopAtExit();
+		const outcome = stop ?? (result.ok ? { code: 0, reason: "stop" } : { code: 2, reason: result.reason });
+		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false });
+		return outcome.code;
+	}
+
 	// Built only now, after the meter and the guards are installed (issue #543). Extension factories run in here,
 	// and one that makes a model call while it loads is metered, and judged against the cost cap and the model
 	// list, like any other call. A stop it causes ends the job before its prompt (below).
@@ -391,7 +413,10 @@ async function main() {
 	// transport.
 	inbox?.listen();
 	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(roleSubagents?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
+	const watchTools = watchReadOnly ? createWatchTools({ config: watchToolsConfig, runtime: modelRuntime }) : null;
 	const resourceLoader = await buildLoadedResourceLoader({
+		...(watchTools && { watchExtensionFactories: watchTools.factories }),
+		watchReadOnly,
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
 		packagePaths: cfg.packages,
@@ -494,6 +519,7 @@ async function main() {
 		// job's options object is byte-identical to today's -- at the pin `excludeTools: []` happens to
 		// behave the same, but it stores an empty Set on the session, and a future pi may distinguish.
 		...(cfg.excludeTools.length > 0 && { excludeTools: cfg.excludeTools }),
+		...(watchReadOnly && watchToolOptions(cfg.excludeTools, excludableToolNames(), watchTools?.names)),
 	}));
 	if (cfg.fork) recordForkSettings(sessionManager, model, session.thinkingLevel);
 

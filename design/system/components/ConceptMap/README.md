@@ -1,7 +1,7 @@
 A guide card, not a console screen: one picture of how the pieces fit, read left to right.
 
 **How a person uses it.**
-- **What starts work.** Triggers (cron, label, comment, issue and pull request rules, written by hand), the CLI, and the planned watch rules (#735) and proposed dispatchers, drawn dashed.
+- **What starts work.** Triggers (cron, label, comment, issue and pull request rules, written by hand), the CLI, and the watch rules (#735) and proposed dispatchers (only the latter are drawn dashed).
 - **Queue and host.** The queue holds a job until a slot is free. A worker on a host takes it after the caps are checked, and a venue runs it in one container.
 - **The run.** It becomes a run with a record, and ends completed, failed, refused or parked. Waiting for approval (#649) is planned.
 - **Where a person steps in.** Each outcome points at what a person does next: steer or cancel while it runs, merge the pull request (always theirs), open the sandbox, re-run, answer the question, send a drafted answer (#753, proposed), decide an approval (#649, planned).

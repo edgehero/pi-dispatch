@@ -52,7 +52,7 @@ def concept_svg():
     # column 1: what starts work
     n.append(node(C1, 36, 280, 64, "Triggers", ["cron, label, comment, issue,", "pull request: written by hand"], "", "bolt"))
     n.append(node(C1, 116, 280, 50, "The CLI", ["pi-dispatch run, from a shell"], "", "terminal"))
-    n.append(node(C1, 182, 280, 64, "Watch rules", ["a finding in logs or alerts"], "planned", "eye", ("planned, #735", "planned")))
+    n.append(node(C1, 182, 280, 64, "Watch rules", ["a finding in logs or alerts"], "", "eye"))
     n.append(node(C1, 262, 280, 64, "Dispatchers", ["start listed jobs, propose triggers"], "proposed", "flows",
                   ("proposed, no issue yet", "proposed")))
     # column 2: queue and host
@@ -84,8 +84,8 @@ def concept_svg():
     e = []
     # starts -> queue, through one bus: solid for what exists, dashed for planned and proposed
     e.append(edge("M296,68 H334", arrow=False)); e.append(edge("M296,141 H334", arrow=False))
-    e.append(edge("M296,214 H334", dashed=True, arrow=False)); e.append(edge("M296,294 H334", dashed=True, arrow=False))
-    e.append(edge("M334,68 V141", arrow=False)); e.append(edge("M334,141 V294", dashed=True, arrow=False))
+    e.append(edge("M296,214 H334", dashed=False, arrow=False)); e.append(edge("M296,294 H334", dashed=True, arrow=False))
+    e.append(edge("M334,68 V141", arrow=False)); e.append(edge("M334,141 V214", arrow=False)); e.append(edge("M334,214 V294", dashed=True, arrow=False))
     e.append(edge("M334,68 H368")); e.append(label(338, 61, "jobs"))
     # queue -> worker -> venue
     e.append(edge("M507,86 V122")); e.append(label(515, 108, "a free slot"))
@@ -109,7 +109,7 @@ def concept_svg():
     e.append(edge("M507,278 V498")); e.append(label(515, 400, "reserved first"))
     e.append(edge("M1199,458 V498", dashed=True)); e.append(label(1207, 482, "each one counted"))
 
-    desc = ("Triggers, the CLI, planned watch rules and proposed dispatchers put jobs on the queue. A worker on a host takes "
+    desc = ("Triggers, the CLI, watch rules and proposed dispatchers put jobs on the queue. A worker on a host takes "
             "one when a slot is free, and a venue runs it in one container. It becomes a run with a record, which ends "
             "completed, failed, refused or parked, or, planned, waits for approval. A person steers or cancels a running run, "
             "merges the pull request, opens the sandbox, re-runs, answers the question or sends a drafted answer, and "
@@ -130,7 +130,7 @@ LEGEND = [("", "Solid: in pi-dispatch today"), ("planned", "Dashed blue: planned
 LIST = [
     ("What starts work", [("bolt", "Triggers: cron, label, comment, issue and pull request rules, written by hand.", ""),
                           ("terminal", "The CLI: pi-dispatch run, from a shell.", ""),
-                          ("eye", "Watch rules: a finding in logs or alerts starts a read-only job.", "planned, #735"),
+                          ("eye", "Watch rules: a finding in logs or alerts starts a read-only job.", ""),
                           ("flows", "Dispatchers: start listed jobs and propose triggers.", "proposed")]),
     ("Queue and host", [("queue", "The queue holds each job until a slot, a time or a check is free.", ""),
                         ("fleet", "A worker on a host takes it, after the caps are checked.", ""),
@@ -248,9 +248,9 @@ G = [
         ("standing answer", "An answer an operator wrote once, which a draft may cite.", "Parked with an answer rule", "proposed, #753"),
     ]),
     ("Watch and dispatchers", [
-        ("watch rule", "A trigger that turns a finding in logs or alerts into a read-only job.", "Triggers, Watch tab", "planned, #735"),
-        ("finding", "One thing a watch rule matched in a stream, with its evidence.", "Watch", "planned, #735"),
-        ("board", "A page a watch rule's jobs propose changes to, and a person adopts.", "Watch board", "planned, #743"),
+        ("watch rule", "A trigger that turns a finding in logs or alerts into a read-only job.", "Configuration, Watch", ""),
+        ("finding", "One thing a watch rule matched in a stream, with its evidence.", "Watch", ""),
+        ("board", "A page a watch rule's jobs propose changes to, and a person adopts.", "Watch board", ""),
         ("dispatcher", "A trigger that reads git changes and infra streams, and may only start listed jobs and propose triggers.", "Triggers, Dispatchers tab", "proposed"),
         ("decision model (Jev)", "A model that answers choice questions with probabilities and no reasons, used to classify.", "Watch board, Parked with an answer rule", ""),
     ]),
@@ -350,7 +350,7 @@ def story_page():
         f'<li><b class="code">{h}</b><span class="ss-v">{"".join(venue(v) for v in vs)}</span><span class="ss-n">{E(what)}</span></li>'
         for h, (vs, what) in HOSTS.items()) + "</ul>", sub="the first venue is the default", id_="p-ss-hosts")
     projects = card("Projects", "<ul class=ss-list>" + "".join(
-        f'<li>{tag(p)}<span class="ss-m">{", ".join(code(m) for m in ms) if ms else "<span class=muted>watch jobs only, planned (#735)</span>"}</span></li>'
+        f'<li>{tag(p)}<span class="ss-m">{", ".join(code(m) for m in ms) if ms else "<span class=muted>watch jobs only (#735)</span>"}</span></li>'
         for p, ms in PROJECTS.items()) + "</ul>", id_="p-ss-projects")
     trig = card("Triggers", "<ol class=ss-trig>" + "".join(
         f'<li><span class="ss-tn">{n}</span><span><b>{E(kind)}</b> {E(when)}</span><span class="code">{E(flow)}</span></li>'
@@ -399,7 +399,7 @@ if __name__ == "__main__":
 A guide card, not a console screen: one picture of how the pieces fit, read left to right.
 
 **How a person uses it.**
-- **What starts work.** Triggers (cron, label, comment, issue and pull request rules, written by hand), the CLI, and the planned watch rules (#735) and proposed dispatchers, drawn dashed.
+- **What starts work.** Triggers (cron, label, comment, issue and pull request rules, written by hand), the CLI, and the watch rules (#735) and proposed dispatchers (only the latter are drawn dashed).
 - **Queue and host.** The queue holds a job until a slot is free. A worker on a host takes it after the caps are checked, and a venue runs it in one container.
 - **The run.** It becomes a run with a record, and ends completed, failed, refused or parked. Waiting for approval (#649) is planned.
 - **Where a person steps in.** Each outcome points at what a person does next: steer or cancel while it runs, merge the pull request (always theirs), open the sandbox, re-run, answer the question, send a drafted answer (#753, proposed), decide an approval (#649, planned).

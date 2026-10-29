@@ -238,7 +238,7 @@ export async function startReceiver(
 			};
 		}
 
-		const handler = makeReceiver({ queue, router, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority });
+		const handler = makeReceiver({ queue, router, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority, watchEnv: env });
 		const server = createServer(handler);
 		server.listen(cfg.port, cfg.bind, () =>
 			log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl }),

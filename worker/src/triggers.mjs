@@ -41,6 +41,9 @@ import { validateApprovalConfig } from "./approval-policy.mjs";
 // The project id rule, from its import-free module, so a bundle's `project` is held to the one rule projects.json is.
 import { PROJECT_ID_RE } from "./project-id.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
+import { normalizeWatchSources, normalizeWatchRule, watchDurationMs } from "./watch-contract.mjs";
+import { validateWatchDecision } from "./watch-decision.mjs";
+import { builtinModel } from "./model-catalog.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
 // the loader and the pickup gate cannot disagree about what a legal instant is: a second spelling here is
@@ -53,7 +56,7 @@ import { WAIT_CONDITION_KEYS, WAIT_CONDITION_MAX, afterInstantMs } from "./wait-
 export { validateModelRef, isModelRolesField };
 
 // EXPORTED for the same reason as PR_ACTIONS: the admin re-states this vocabulary to a MODEL.
-export const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue"]);
+export const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue", "watch"]);
 
 /**
  * The `on.type` a DISARMED one-shot normalizes to (issue #231). Producible only by this validator:
@@ -328,7 +331,8 @@ export function parseTriggersDocument(text, path) {
 		throw configError(`triggers file must have a "triggers" array: ${path}`);
 	}
 
-	const state = { seenCronIds: new Set(), commentCounts: {} };
+	const watchSources = normalizeWatchSources(parsed.watchSources);
+	const state = { seenCronIds: new Set(), seenWatchIds: new Set(), watchSources, commentCounts: {} };
 	const triggers = entries.map((entry, index) => normalizeTrigger(entry, index, path, state));
 	// AFTER the triggers, so a file broken in both places names the trigger first, the message every operator
 	// of an older file already knows.
@@ -342,7 +346,7 @@ export function parseTriggersDocument(text, path) {
 	const secretBundles = validateSecretBundles(parsed.secretBundles, path);
 	const modelRoles = validateModelRoles(parsed.modelRoles);
 	for (const key of Object.keys(parsed)) if (key !== "modelRoles" && isModelRolesField(key)) throw configError("triggers file: use modelRoles");
-	return { triggers, secretBundles, modelRoles };
+	return { triggers, secretBundles, modelRoles, ...(parsed.watchSources !== undefined ? { watchSources } : {}) };
 }
 
 function normalizeTrigger(entry, index, path, state) {
@@ -374,6 +378,7 @@ function normalizeTrigger(entry, index, path, state) {
 	}
 
 	// The on x run matrix -- the trust boundary, fail-loud (mirrors the old schedules kind:github refusal).
+	if (on.type === "watch") return normalizeWatch(entry, index, path, state);
 	if (on.type === "cron") {
 		if (run.kind !== "local") {
 			throw configError(`${at}: a cron trigger has no webhook delivery, issue/PR number, title, or body; run.kind must be "local" (got ${JSON.stringify(run.kind)}): ${path}`);
@@ -402,6 +407,66 @@ function normalizeTrigger(entry, index, path, state) {
 	// normalize to the sentinel, so its raw index survives and nothing downstream can match it.
 	if (on.disarmed !== undefined) return { on: { type: DISARMED_TYPE }, run: {} };
 	return normalized;
+}
+
+function normalizeWatch(entry, index, path, state) {
+	const on = normalizeWatchRule(entry.on, state.watchSources);
+	if (state.seenWatchIds.has(on.id)) throw configError("watch: duplicate trigger id");
+	state.seenWatchIds.add(on.id);
+	const raw = entry.run;
+	const mode = raw.mode ?? "investigate";
+	if (!["investigate", "issue"].includes(mode)) throw configError("watch: mode must be investigate or issue; direct fixes need a human approval");
+	const allowed = new Set(["kind", "mode", "folder", "flow", "task", "excludeTools", "maxCostUsd", "provider", "model", "maxTurns", "models", "image", "backend", "secrets", "secretBundle", "skillsDir", "issue", "queryLogs"]);
+	for (const key of Object.keys(raw)) if (!allowed.has(key)) throw configError("watch: unsupported run field");
+	if (raw.kind !== "local") throw configError("watch: run.kind must be local");
+	let issue;
+	if (raw.issue !== undefined) {
+		const target = raw.issue;
+		if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).some(k => !["kind", "repo", "closeAfter"].includes(k)) || !FORGE_KINDS.includes(target.kind) || typeof target.repo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target.repo)) throw configError("watch: issue requires a reviewed forge kind and owner/repository target");
+		if (target.closeAfter !== undefined) watchDurationMs(target.closeAfter);
+		issue = { kind: target.kind, repo: target.repo, ...(target.closeAfter !== undefined ? { closeAfter: target.closeAfter } : {}) };
+		if (target.kind === "azure") throw configError("watch: Azure issue mode needs a reviewed project and work-item contract; use github, gitlab or forgejo");
+		if (target.repo.split("/").some(part => part === "." || part === "..")) throw configError("watch: invalid issue repository");
+	}
+	if (mode === "issue") {
+		if (!issue) throw configError("watch: issue mode requires run.issue");
+		if (Object.keys(raw).some(k => !["kind", "mode", "issue"].includes(k))) throw configError("watch: issue mode cannot carry agent execution settings");
+		if (entry.decide !== undefined) throw configError("watch: decide is configured on investigate rules with an issue fallback");
+		return { on, run: { kind: "local", mode, issue } };
+	}
+	if (raw.maxCostUsd === undefined || parseUsdMicros(raw.maxCostUsd) === null) throw configError("watch: investigate requires maxCostUsd");
+	// Reuse the local execution validators with a synthetic schedule that is never returned or installed.
+	// Every admitted field is projected above; webhook-only authority cannot enter through this path.
+	const local = normalizeCron({ type: "cron", id: on.id, pattern: "0 0 * * *" }, { ...raw, packages: false, github: false }, index, path, { seenCronIds: new Set() });
+	if (local.run.model?.startsWith("role:")) throw configError("watch: investigate requires an explicit chat model or the deployment default");
+	if (local.run.backend && !["local", "podman"].includes(local.run.backend)) throw configError("watch: investigate requires a venue with read-only local bind mounts");
+	const excludeTools = [...new Set([...(local.run.excludeTools ?? []), "edit", "write", "bash", "powershell"])];
+	return { on, run: { ...local.run, mode, excludeTools, ...(issue ? { issue } : {}), ...(raw.queryLogs !== undefined ? { queryLogs: normalizeWatchQueries(raw.queryLogs) } : {}) }, ...(entry.decide !== undefined ? { decide: normalizeWatchDecisionConfig(entry.decide, issue) } : {}) };
+}
+
+function normalizeWatchQueries(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 16) throw configError("watch: queryLogs must name at most sixteen reviewed queries");
+	const out = {};
+	for (const [id, q] of Object.entries(value)) {
+		if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || !q || typeof q !== "object" || Object.keys(q).some(k => !["endpoint", "query", "credentialEnv"].includes(k)) || typeof q.query !== "string" || Buffer.byteLength(q.query) > 4096 || typeof q.endpoint !== "string" || (q.credentialEnv !== undefined && (typeof q.credentialEnv !== "string" || !ENV_NAME.test(q.credentialEnv)))) throw configError("watch: invalid reviewed log query");
+		let url;
+		try { url = new URL(q.endpoint); } catch { throw configError("watch: invalid log query endpoint"); }
+		if (url.protocol !== "https:" || url.username || url.password || url.hash) throw configError("watch: log queries require HTTPS without URL credentials");
+		out[id] = { endpoint: url.href, query: q.query, ...(q.credentialEnv ? { credentialEnv: q.credentialEnv } : {}) };
+	}
+	return out;
+}
+
+function normalizeWatchDecisionConfig(value, issue) {
+	if (!issue) throw configError("watch: decide requires a reviewed run.issue fallback");
+	if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(k => !["model", "maxCostUsd", "questions", "act", "fields", "shadow"].includes(k))) throw configError("watch: invalid decide block");
+	if (typeof value.model !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./:@~-]+$/.test(value.model) || value.maxCostUsd === undefined) throw configError("watch: decide requires a model and cost cap");
+	parseUsdMicros(value.maxCostUsd);
+	if (value.shadow !== undefined && typeof value.shadow !== "boolean") throw configError("watch: decide.shadow must be boolean");
+	const { shadow = true, ...policy } = value;
+	const checked = validateWatchDecision({ ...policy, maxCostUsd: String(policy.maxCostUsd) }, { resolveModel: ref => { const i = ref.indexOf("/"); return builtinModel(ref.slice(0, i), ref.slice(i + 1)); } });
+	if (!checked.ok) throw configError("watch: decide-refused; require a known input-only classifier and bounded questions");
+	return { ...checked.config, shadow };
 }
 
 function normalizeCron(on, run, index, path, state) {

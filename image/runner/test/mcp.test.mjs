@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -192,7 +192,7 @@ test("a real session: the stdio server connects with only the env it names, its 
 		assert.equal(started.shown.STUB_TOKEN, "secret-t2", "the reference it names is resolved");
 		assert.equal(started.shown.NODE_OPTIONS, "--no-warnings", "the meter's NODE_OPTIONS reaches it");
 		for (const name of ["ANTHROPIC_API_KEY", "GH_TOKEN", "FILES_TOKEN", "PI_MCP_SERVERS"]) assert.ok(!started.env.includes(name), `${name} reached the stdio server`);
-		assert.equal(started.cwd, f.workspace);
+		assert.equal(started.cwd, realpathSync(f.workspace), "the child cwd is the same physical directory, including macOS /private aliases");
 		// Tools register as the server's tools list arrives, after the handshake the wait observed.
 		for (let i = 0; i < 50 && !session.getAllTools().some((t) => t.name === "mcp__files__echo"); i++) await new Promise((r) => setTimeout(r, 20));
 		const tools = session.getAllTools();

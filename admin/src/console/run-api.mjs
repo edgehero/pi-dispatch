@@ -22,6 +22,7 @@
  * a 503 with a fixed sentence (the mode would otherwise be judged on half the facts, and a wrong mode is worse than
  * none).
  */
+import { WATCH_ID_RE as WATCH_RULE_ID_RE } from "@edgehero/pi-dispatch/watch-contract";
 import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import { LIVE_OUTCOMES } from "@edgehero/pi-dispatch/live-transcript";
 import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
@@ -109,13 +110,14 @@ const runAt = (r) => {
  */
 export function safeRunOf(id, record) {
   const r = record ?? {};
-  const target = str(r.target, TARGET_RE);
-  const repo = target !== null ? repoOfTarget(target) : null;
+  const watchTarget = r.kind === "watch" && typeof r.target === "string" && r.target.startsWith("watch:") && WATCH_RULE_ID_RE.test(r.target.slice(6));
+  const target = r.kind === "watch" ? (watchTarget ? r.target : null) : str(r.target, TARGET_RE);
+  const repo = target !== null && !watchTarget ? repoOfTarget(target) : null;
   const rec = record ? recordRecovery(record) : null;
   return {
     id,
     jobId: str(r.jobId, RUN_ID_RE),
-    kind: RUN_KINDS.includes(r.kind) ? r.kind : null,
+    kind: RUN_KINDS.includes(r.kind) || watchTarget ? r.kind : null,
     repo: typeof repo === "string" && TARGET_RE.test(repo) ? repo : null,
     target,
     triggerType: str(r.triggerType, TRIGGER_TYPE_RE),

@@ -588,6 +588,7 @@ passing, on the record — issue #80.)
   or operator-supplied**. A serviced repo's own files now qualify, and therefore **load**: the runner
   sets `noContextFiles: false` and `noExtensions: false` on the `DefaultResourceLoader` it constructs,
   so `/workspace/AGENTS.md` and `/workspace/.pi/extensions` are discovered natively, as in any pi run.
+  Watch investigations deliberately tighten executable loading: `noExtensions: true`, no explicit package or extension paths, sanitized in-memory settings and trusted runner factories only. Their read-only workspace and tool registry remove shells, edits, writes and codemode. This is an additional restriction, not permission for another job to weaken its boundary.
   `noSkills` stays **`true`** — a mechanical exception, not a trust judgement (see *Why*). What makes
   `/workspace` merge-gated is **construction**: a github job checks out the **base repo's
   default-branch SHA**, never a PR head. **Webhook issue/PR/comment text is unchanged and is still
@@ -690,7 +691,7 @@ passing, on the record — issue #80.)
 
 ## CONST-ISSUE-TEXT-IS-DATA
 
-- **Statement**: Event payloads — issue bodies, titles, comments — are data. They shall be placed in the
+- **Statement**: Event payloads — issue bodies, titles, comments, log samples, findings and job-authored board proposals — are data. They shall be placed in the
   user prompt, never in the system prompt, and never treated as instructions that can amend standing
   rules.
 - **Why**: Enforced by **placement**, not by filtering. Content-filtering natural language is not a
@@ -757,6 +758,7 @@ passing, on the record — issue #80.)
 
 - **Statement**: A job shall start from a webhook only on the say-so of an actor with **write access or
   above to the target repository**, established by whatever mechanism that forge offers.
+  **Watch exception (#735):** a signed collector finding has no human author. An operator-reviewed source/rule pairing may start only a fresh read-only investigation or a bounded deterministic decision container; it may file or update an issue in the reviewed target. Every code-changing job still requires the existing forge author gate. Direct watch fixes and watch outbox chaining are refused. A signature authenticates the collector, never a log line's author.
   **GitHub**: an allowlisted label, a comment from `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`,
   or a `pull_request` event whose approval gate is satisfied. For a `pull_request`, three arms, and
   **which field each reads is part of the constraint, not an implementation detail**: **labeling**
@@ -940,7 +942,7 @@ passing, on the record — issue #80.)
   shared-secret compare; Forgejo's `X-Hub-Signature-256`, which is GitHub's mechanism byte for byte; Azure
   DevOps' HTTP Basic credential or one operator-named header. The mechanism is **never negotiated from the
   request** — a delivery carrying a different mechanism's header is refused even when that header is
-  correct.
+  correct. Watch sources use HMAC-SHA256 over the raw bytes prefixed by `v1.<timestamp>.<delivery>.`, a timestamp within five minutes, and an authenticated idempotency identifier. The receiver verifies all three before parsing JSON.
 - **Why**: `express.json()` reserializes the body, which breaks the HMAC — verification after parsing
   either always fails or, worse, gets quietly skipped to make things work. `timingSafeEqual` rather than
   `===` denies a timing oracle. Without this the endpoint accepts forged events from anyone who learns
@@ -1413,6 +1415,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-29 (#735, #743) | `CONST-TRIGGER-AUTHOR-GATE`, `CONST-HMAC-OVER-RAW-BODY`, `CONST-ISSUE-TEXT-IS-DATA` and `CONST-NO-CONTEXT-FILES-MANDATORY` AMENDED for signed collector findings without authors and stricter watch executable loading. `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: decisions run inside fresh metered containers, deterministic gates precede spend, no direct code fix or chain is admitted, and evidence never widens reviewed authority. |
 | 2026-10-29 (#717) | `CONST-PI-VERSION-PINNED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-EGRESS-POLICY-IN-THE-ARGV`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked. Roles resolve before admission; children retain metering, policy and caps; proposals never adopt changes; canaries reserve before calls and carry no forge write authority; the bump compares data without executing candidate code. |
 | 2026-10-28 | Issue #693: `CONST-PI-VERSION-PINNED` evidence corrected against npm 1.4.0: sibling dependencies are now exact; resolved-package overrides retained, dead chord removed. Statement and Acceptance UNCHANGED, checked. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: capped calls still refuse before dispatch, policy outcomes are terminal, and the container remains the resource boundary. |
 | 2026-10-28 (#649) | Issue #649: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked. Gates end containers; only live host-validated approvals may raise a declared per-container budget inside unchanged aggregate limits. Push and PR-opening built-ins refuse instead of minting bypass credentials. Decisions remain data; public audit retains identifiers only. |

@@ -14,6 +14,14 @@ const PR_CLOSE_WORDS = new Set(Object.values(PR_CLOSE_ACTIONS));
 
 export const QUEUE = "pi-jobs";
 
+/** A private evidence reference, never collector-supplied execution authority. */
+export async function enqueueWatchJob(queue, fields, { now = Date.now, phase = "dispatch" } = {}) {
+	if (!/^[a-f0-9]{64}$/.test(fields.id) || !/^[A-Za-z0-9_-]{1,128}$/.test(fields.ruleId) || !["dispatch", "action"].includes(phase)) throw new Error("invalid watch queue reference");
+	const id = `watch-${phase}-${fields.id}`;
+	await queue.add("watch", { kind: "watch", watch: { findingId: fields.id, ruleId: fields.ruleId, phase } }, { jobId: id, delay: Math.max(0, (fields.dueAt ?? now()) - now()), attempts: 2, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 7 * 86400, count: 10000 }, removeOnFail: { age: 7 * 86400, count: 10000 } });
+	return id;
+}
+
 /**
  * The queue a HOST-AFFINE job goes to (issue #57): work only one machine can do, because the folder, the
  * secret resolver or the wait-check script lives there.

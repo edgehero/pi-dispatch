@@ -191,6 +191,7 @@ export function containerSpec({
 	extraFlags = [],
 	relabel = false,
 	workspaceOwned = false,
+	workspaceReadOnly = false,
 }) {
 	if (!image) throw new Error("docker run: image is required");
 	assertJobUser(user);
@@ -204,6 +205,7 @@ export function containerSpec({
 	// Booleans, strictly: a truthy string from a caller that forwarded an option bag must not re-own host directories.
 	if (typeof relabel !== "boolean") throw new Error(`docker run: relabel must be a boolean; got ${typeof relabel}`);
 	if (typeof workspaceOwned !== "boolean") throw new Error(`docker run: workspaceOwned must be a boolean; got ${typeof workspaceOwned}`);
+	if (typeof workspaceReadOnly !== "boolean") throw new Error("docker run: workspaceReadOnly must be a boolean");
 
 	// Issue #355. A SPREAD rather than a `relabel: null` field, so a spec built without it has mount objects byte-identical
 	// to every one built before this feature existed. PRIVATE, never shared: each of these directories is made for this
@@ -218,7 +220,7 @@ export function containerSpec({
 	// second container mounting it afterwards is denied, and the label an operator chose is gone. So only a workspace the
 	// worker made is relabelled; an operator's folder needs the `semanage fcontext` fix doctor names, and the runner
 	// refuses one it cannot read before any spend.
-	mounts.push({ host: workspace, container: "/workspace", readOnly: false, ...(workspaceOwned ? own : {}) });
+	mounts.push({ host: workspace, container: "/workspace", readOnly: workspaceReadOnly, ...(workspaceOwned ? own : {}) });
 	// Local jobs get a writable /outbox host bind, the same host-bind mechanism as /workspace
 	// (DES-WORKER-ON-HOST). github jobs pass no outboxDir, so the request channel does not exist for
 	// them -- an untrusted issue author cannot chain (INT-OUTBOX-CONTRACT).
