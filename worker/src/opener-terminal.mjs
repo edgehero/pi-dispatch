@@ -44,15 +44,30 @@ public static class PiDispatchConsole {
 	[DllImport("kernel32.dll", SetLastError = true)]
 	[return: MarshalAs(UnmanagedType.Bool)]
 	private static extern bool CloseHandle(IntPtr handle);
-	public static void Start(string application, string commandLine) {
+	[DllImport("kernel32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool IsProcessInJob(IntPtr process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
+	[DllImport("kernel32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+	[DllImport("kernel32.dll")]
+	private static extern IntPtr GetCurrentProcess();
+	public static string Start(string application, string commandLine) {
 		STARTUPINFO startup = new STARTUPINFO();
 		startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
 		startup.dwFlags = 0x00000001;
 		startup.wShowWindow = 1;
 		PROCESS_INFORMATION process;
 		if (!CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, 0x00000010, IntPtr.Zero, null, ref startup, out process)) throw new Win32Exception(Marshal.GetLastWin32Error());
-		try { CloseHandle(process.hThread); }
-		finally { CloseHandle(process.hProcess); }
+		try {
+			bool parentJob, childJob;
+			uint exitCode;
+			// The console already started. Optional observations must not turn that success into a refusal.
+			string parentState = IsProcessInJob(GetCurrentProcess(), IntPtr.Zero, out parentJob) ? parentJob.ToString() : "unknown:" + Marshal.GetLastWin32Error();
+			string childState = IsProcessInJob(process.hProcess, IntPtr.Zero, out childJob) ? childJob.ToString() : "unknown:" + Marshal.GetLastWin32Error();
+			string initialExit = GetExitCodeProcess(process.hProcess, out exitCode) ? exitCode.ToString() : "unknown:" + Marshal.GetLastWin32Error();
+			return "pid=" + process.dwProcessId + ";parentJob=" + parentState + ";childJob=" + childState + ";initialExit=" + initialExit;
+		} finally { CloseHandle(process.hThread); CloseHandle(process.hProcess); }
 	}
 }`;
 export function windowsPowerShellEnv(env) {
@@ -88,9 +103,10 @@ export function terminalLaunch({ platform, nodePath, cliPath, url, directory, en
 export function spawnTerminal(plan, { spawn = nodeSpawn, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
 	return new Promise((resolve, reject) => {
 		// Detachment also keeps libuv's process-job lifetime from owning the independently created console.
-		const child = spawn(plan.bin, plan.args, { detached: true, stdio: plan.waitForExit ? ["ignore", "ignore", "pipe"] : "ignore", windowsHide: true, ...(plan.env ? { env: plan.env } : {}) });
+		const child = spawn(plan.bin, plan.args, { detached: true, stdio: plan.waitForExit ? ["ignore", "pipe", "pipe"] : "ignore", windowsHide: true, ...(plan.env ? { env: plan.env } : {}) });
 		let timer;
-		let stderr = "";
+		let stdout = "", stderr = "";
+		child.stdout?.on("data", (chunk) => { stdout = (stdout + chunk.toString("utf8")).slice(-4096); });
 		child.stderr?.on("data", (chunk) => { stderr = (stderr + chunk.toString("utf8")).slice(-4096); });
 		const failed = (code) => Object.assign(new Error("Windows could not open an interactive console; check Windows PowerShell and use Copy until it is available"), { code, stderr });
 		child.once("error", (error) => { clearTimer(timer); reject(error); });
@@ -98,7 +114,7 @@ export function spawnTerminal(plan, { spawn = nodeSpawn, setTimer = setTimeout, 
 			// This dispatcher exits as soon as CreateProcessW returns. Waiting catches a refused launch without
 			// waiting for the person to press Enter, and the deadline bounds a blocked PowerShell/compiler.
 			timer = setTimer(() => { child.kill(); reject(failed()); }, 30_000);
-			child.once("exit", (code) => { clearTimer(timer); if (code === 0) resolve(); else reject(failed(code)); });
+			child.once("close", (code) => { clearTimer(timer); if (code === 0) resolve({ stdout, stderr }); else reject(failed(code)); });
 		} else child.once("spawn", () => { child.unref(); resolve(); });
 	});
 }

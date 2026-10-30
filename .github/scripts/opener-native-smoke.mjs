@@ -1,7 +1,7 @@
 /** Native URL delivery and terminal handoff, without Docker, SSH, credentials or a real sandbox (#771). */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { execFile as nodeExecFile } from "node:child_process";
+import { execFile as nodeExecFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,11 +31,18 @@ const env = { ...(process.platform === "win32" ? windowsPowerShellEnv(process.en
 const nativeId = "manual:native:smoke";
 const protocol = sandboxOpenUrl({ verb: "open", id: nativeId, host: "native" });
 const imported = pathToFileURL(resolve("worker/src/opener-cli.mjs")).href;
-fs.writeFileSync(stub, `import fs from "node:fs"; import {runOpener,promptSandboxCommand} from ${JSON.stringify(imported)};
+fs.writeFileSync(stub, `import fs from "node:fs";
 process.env.XDG_CONFIG_HOME=${JSON.stringify(configHome)}; process.env.XDG_DATA_HOME=${JSON.stringify(env.XDG_DATA_HOME)};
-const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(events)},JSON.stringify({args,pid:process.pid})+"\\n");
+const args=process.argv.slice(2); const record=(values)=>fs.appendFileSync(${JSON.stringify(events)},JSON.stringify({args,pid:process.pid,...values})+"\\n");
+record({});
 if(args[0]==="sandbox") fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify(args));
-else process.exitCode=await runOpener(args.slice(1),{env:process.env,deps:{home:${JSON.stringify(root)},nodePath:process.execPath,cliPath:${JSON.stringify(stub)},prompt:async(command)=>{let settled=false;const tty=Boolean(process.stdin.isTTY&&process.stdout.isTTY);const pending=promptSandboxCommand(command);pending.then(()=>settled=true,()=>settled=true);await new Promise(resolve=>setImmediate(resolve));fs.appendFileSync(${JSON.stringify(events)},JSON.stringify({args,pid:process.pid,phase:"prompt-waiting",tty,waiting:!settled,command})+"\\n");return pending;},err:(message)=>{fs.appendFileSync(${JSON.stringify(events)},JSON.stringify({args,pid:process.pid,error:message})+"\\n");process.stderr.write(message);}}});
+else try {
+ record({phase:"tty-probed",tty:Boolean(process.stdin.isTTY&&process.stdout.isTTY)});
+ const {runOpener,promptSandboxCommand}=await import(${JSON.stringify(imported)});
+ const {spawnTerminal}=await import(${JSON.stringify(imported.replace("opener-cli.mjs", "opener-terminal.mjs"))});
+ process.exitCode=await runOpener(args.slice(1),{env:process.env,deps:{home:${JSON.stringify(root)},nodePath:process.execPath,cliPath:${JSON.stringify(stub)},showTerminal:async(plan)=>{const result=await spawnTerminal(plan);record({phase:"dispatched",result});return result;},prompt:async(command)=>{let settled=false;const tty=Boolean(process.stdin.isTTY&&process.stdout.isTTY);const pending=promptSandboxCommand(command);pending.then(()=>settled=true,()=>settled=true);await new Promise(resolve=>setImmediate(resolve));record({phase:"prompt-waiting",tty,waiting:!settled,command});return pending;},err:(message)=>{record({error:message});process.stderr.write(message);}}});
+ record({phase:"returned",code:process.exitCode});
+} catch(error) { record({phase:"bootstrap-failed",error:String(error?.message??error).slice(0,1024)});throw error; }
 `, { mode: 0o600 });
 fs.writeFileSync(source, JSON.stringify({ version: 1, hosts: { native: { target: null, deployment: root, nodePath: process.execPath, cliPath: stub, shell: process.platform === "win32" ? "powershell" : "posix" } } }), { mode: 0o600 });
 
@@ -60,12 +67,17 @@ async function diagnoseWindowsDelivery() {
 		} catch { console.error(`Native diagnostic ${hive} command was unreadable.`); }
 	}
 	try {
+		const result = await execFile("reg.exe", ["query", "HKCU\\Console\\%%Startup", "/s"], { env, timeout: 5_000, maxBuffer: 64 * 1024 });
+		console.error(`Native diagnostic default console delegation: ${result.stdout.trim()}`);
+	} catch { console.error("Native diagnostic default console delegation key was absent or unreadable."); }
+	try {
 		const result = await execFile(process.execPath, [stub, "sandbox", "sb-diagnostic-recorder"], { env, timeout: 5_000, maxBuffer: 64 * 1024 });
 		console.error(`Native diagnostic direct recorder succeeded: ${JSON.stringify(rows())}; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}`);
 	} catch (error) { console.error(`Native diagnostic direct recorder failed: ${error.message}; stdout=${JSON.stringify(error.stdout)}; stderr=${JSON.stringify(error.stderr)}`); }
 	try {
 		const plan = terminalLaunch({ platform: "win32", nodePath: process.execPath, cliPath: stub, url: protocol, directory: join(openerDirectory(env), "prompts"), env });
 		const result = await execFile(plan.bin, plan.args, { env: plan.env, windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024 });
+		await new Promise((done) => setTimeout(done, 3_000));
 		console.error(`Native diagnostic exact terminal launcher exited; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}; rows=${JSON.stringify(rows())}`);
 	} catch (error) { console.error(`Native diagnostic exact terminal launcher failed: ${error.message}; stdout=${JSON.stringify(error.stdout)}; stderr=${JSON.stringify(error.stderr)}; rows=${JSON.stringify(rows())}`); }
 	try {
@@ -83,8 +95,17 @@ async function diagnoseWindowsDelivery() {
 		console.error("Native diagnostic plain-path protocol delivery succeeded; the original unusual-path assertion remains failed.");
 	} catch (error) { console.error(`Native diagnostic plain-path protocol delivery failed: ${error.message}`); }
 }
-let registered = false;
+let registered = false, exitWatcher;
+const exitEvents = join(root, "process-exits.jsonl"), exitReady = join(root, "process-exits-ready");
 try {
+	if (process.platform === "win32") {
+		const literal = (s) => `'${s.replaceAll("'", "''")}'`;
+		const script = `$ErrorActionPreference='Stop'; Register-WmiEvent -Query "SELECT * FROM Win32_ProcessStopTrace WHERE ProcessName='node.exe'" -SourceIdentifier NativeNodeExit | Out-Null; [IO.File]::WriteAllText(${literal(exitReady)},'ready'); while ($true) { $e=Wait-Event -SourceIdentifier NativeNodeExit; $p=$e.SourceEventArgs.NewEvent; [IO.File]::AppendAllText(${literal(exitEvents)},(@{pid=[int]$p.ProcessID;parent=[int]$p.ParentProcessID;status=[uint32]$p.ExitStatus}|ConvertTo-Json -Compress)+[Environment]::NewLine); Remove-Event -EventIdentifier $e.EventIdentifier }`;
+		exitWatcher = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, windowsHide: true, stdio: "ignore" });
+		exitWatcher.once("error", () => {});
+		try { await until(() => fs.existsSync(exitReady), "native process-exit observer readiness", 5_000); }
+		catch { console.error("Native diagnostic process-exit observer was unavailable; the actual opener assertions still run."); exitWatcher.kill(); }
+	}
 	if (process.platform === "win32") {
 		let existing = false;
 		try { await execFile("reg.exe", ["query", "HKCU\\Software\\Classes\\pi-dispatch-open"]); existing = true; } catch {}
@@ -108,6 +129,10 @@ try {
 	await until(() => rows().some((r) => r.args[0] === "opener" && r.args[1] === "handle" && r.args[2] === protocol), "native protocol delivery");
 	await until(() => rows().some((r) => r.args[0] === "opener" && r.args[1] === "prompt"), "native terminal approval helper");
 	await until(() => rows().some((r) => r.phase === "prompt-waiting"), "real terminal approval waiting");
+	await until(() => rows().some((r) => r.args[0] === "opener" && r.args[1] === "handle" && r.args[2] === protocol && r.phase === "returned"), "native URI handler completed its real opener call");
+	const returned = rows().find((r) => r.args[0] === "opener" && r.args[1] === "handle" && r.args[2] === protocol && r.phase === "returned");
+	assert.equal(returned.code, 0, "the original native handler completed successfully before Enter");
+	assert.equal(rows().some((r) => r.error), false, "neither handler nor helper refused during native terminal handoff");
 	const waiting = rows().find((r) => r.phase === "prompt-waiting");
 	assert.equal(waiting.tty, true, "the default terminal has real input and output TTYs");
 	assert.equal(waiting.waiting, true, "the real approval promise remains pending for Enter");
@@ -137,9 +162,13 @@ try {
 		console.log("Native PowerShell encoded-command quoting verified with spaces, apostrophes and literal metacharacters.");
 	}
 } catch (error) {
-	if (process.platform === "win32") await diagnoseWindowsDelivery();
+	if (process.platform === "win32") {
+		await diagnoseWindowsDelivery();
+		try { console.error(`Native diagnostic Node exit statuses: ${fs.readFileSync(exitEvents, "utf8").trim()}`); } catch { console.error("Native diagnostic no Node exit events were recorded."); }
+	}
 	throw error;
 } finally {
+	exitWatcher?.kill();
 	for (const row of rows()) if (row.args[1] === "prompt") { try { process.kill(row.pid, "SIGTERM"); } catch {} }
 	if (registered && process.platform === "win32") await execFile("reg.exe", ["delete", "HKCU\\Software\\Classes\\pi-dispatch-open", "/f"]).catch(() => {});
 	if (registered && process.platform === "darwin") await execFile("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", ["-u", join(root, "Applications", "pi-dispatch Opener.app")]).catch(() => {});
