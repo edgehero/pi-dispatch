@@ -31,11 +31,11 @@ const env = { ...(process.platform === "win32" ? windowsPowerShellEnv(process.en
 const nativeId = "manual:native:smoke";
 const protocol = sandboxOpenUrl({ verb: "open", id: nativeId, host: "native" });
 const imported = pathToFileURL(resolve("worker/src/opener-cli.mjs")).href;
-fs.writeFileSync(stub, `import fs from "node:fs"; import {runOpener} from ${JSON.stringify(imported)};
+fs.writeFileSync(stub, `import fs from "node:fs"; import {runOpener,promptSandboxCommand} from ${JSON.stringify(imported)};
 process.env.XDG_CONFIG_HOME=${JSON.stringify(configHome)}; process.env.XDG_DATA_HOME=${JSON.stringify(env.XDG_DATA_HOME)};
 const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(events)},JSON.stringify({args,pid:process.pid})+"\\n");
 if(args[0]==="sandbox") fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify(args));
-else process.exitCode=await runOpener(args.slice(1),{env:process.env,deps:{home:${JSON.stringify(root)},nodePath:process.execPath,cliPath:${JSON.stringify(stub)}}});
+else process.exitCode=await runOpener(args.slice(1),{env:process.env,deps:{home:${JSON.stringify(root)},nodePath:process.execPath,cliPath:${JSON.stringify(stub)},prompt:async(command)=>{let settled=false;const tty=Boolean(process.stdin.isTTY&&process.stdout.isTTY);const pending=promptSandboxCommand(command);pending.then(()=>settled=true,()=>settled=true);await new Promise(resolve=>setImmediate(resolve));fs.appendFileSync(${JSON.stringify(events)},JSON.stringify({args,pid:process.pid,phase:"prompt-waiting",tty,waiting:!settled,command})+"\\n");return pending;},err:(message)=>{fs.appendFileSync(${JSON.stringify(events)},JSON.stringify({args,pid:process.pid,error:message})+"\\n");process.stderr.write(message);}}});
 `, { mode: 0o600 });
 fs.writeFileSync(source, JSON.stringify({ version: 1, hosts: { native: { target: null, deployment: root, nodePath: process.execPath, cliPath: stub, shell: process.platform === "win32" ? "powershell" : "posix" } } }), { mode: 0o600 });
 
@@ -102,6 +102,13 @@ try {
 	await openProtocol();
 	await until(() => rows().some((r) => r.args[0] === "opener" && r.args[1] === "handle" && r.args[2] === protocol), "native protocol delivery");
 	await until(() => rows().some((r) => r.args[0] === "opener" && r.args[1] === "prompt"), "native terminal approval helper");
+	await until(() => rows().some((r) => r.phase === "prompt-waiting"), "real terminal approval waiting");
+	const waiting = rows().find((r) => r.phase === "prompt-waiting");
+	assert.equal(waiting.tty, true, "the default terminal has real input and output TTYs");
+	assert.equal(waiting.waiting, true, "the real approval promise remains pending for Enter");
+	const expected = sandboxCommand(JSON.parse(fs.readFileSync(source, "utf8")), { verb: "open", id: nativeId, host: "native" });
+	assert.deepEqual(waiting.command.argv, expected.argv, "the terminal's pending command uses the approved host's exact argv");
+	assert.equal(waiting.command.display, expected.display);
 	assert.equal(fs.existsSync(marker), false, "native URL delivery and terminal opening must execute no sandbox command");
 	console.log("Native per-user protocol delivery and terminal-helper launch verified; no command ran before Enter.");
 	if (process.platform === "linux") {
