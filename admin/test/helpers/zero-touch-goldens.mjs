@@ -37,7 +37,7 @@ export const ZERO_TOUCH_DRAW = Object.freeze({
   "zero-touch-populated.operator": () => draw(),
   "zero-touch-populated.viewer": () => draw({ role: "viewer" }),
   "zero-touch-readonly.operator": () => draw({ readOnly: true }),
-  "zero-touch-empty.viewer": () => draw({ role: "viewer", change: (r) => { r.projects = []; r.groups = []; r.fixes = []; r.totals = { runs: 0, touched: 0, rate: null, waitingHours: 0 }; r.trend = []; } }),
+  "zero-touch-empty.viewer": () => draw({ role: "viewer", change: (r) => { r.projects = []; r.groups = []; r.fixes = []; r.totals = { runs: 0, touched: 0, rate: null, waitingHours: 0 }; r.causes = cs([0, 0, 0, 0, 0, 0]); r.trend = []; } }),
   "zero-touch-unavailable.operator": () => draw({ raw: null }),
   "zero-touch-partial.operator": () => draw({ query: "days=90", change: (r) => { r.windowDays = 90; r.coverage = { fromMs: NOW - 20 * DAY, partial: true, reasons: ["touch-tracking-started"] }; r.totals.deltaPoints = null; r.trend = r.trend.map((v, i) => ({ ...v, partial: i < 5 })); } }),
   "zero-touch-observing.operator": () => draw({ change: (r) => { r.grouping = { enabled: true, state: "pending", pending: 1, unassigned: 2 }; r.groups[0].name = null; r.fixes[0].partial = true; r.fixes[0].subsequentRuns = 0; } }),

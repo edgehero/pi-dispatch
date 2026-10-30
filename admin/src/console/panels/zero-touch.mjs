@@ -114,12 +114,14 @@ function causeCounts(values) { return ZERO_TOUCH_CAUSES.map((c) => ({ ...c, coun
 // Percent geometry without a viewBox keeps labels at 12 CSS pixels on phones as well as desktops.
 function causeBar(values, max, name) {
   const rows = causeCounts(values); let at = 0;
+  // A partial or inconsistent summary must not put the stack outside its SVG viewport.
+  max = Math.max(1, max, rows.reduce((sum, row) => sum + row.count, 0));
   const all = rows.filter((r) => r.count > 0);
   const label = `${name}: ${all.map((r) => `${r.label} ${r.count}`).join(", ") || "no touches"}; full scale ${max} touched runs`;
   return html`<svg class="zt-cause-svg" width="100%" height="28" role="img" aria-label="${label}">${all.map((r) => { const x = at / Math.max(1, max) * 500, w = r.count / Math.max(1, max) * 500; at += r.count; return html`<g class="${`tone-${r.tone}`}"><rect class="zt-cause-rect" x="${`${ui.svgNum(x / 5, 0, 100)}%`}" y="0" width="${`${ui.svgNum(w / 5, 0, 100)}%`}" height="28" rx="5"/>${w >= 22 ? html`<text class="zt-cause-label" x="${`${ui.svgNum((x + w / 2) / 5, 0, 100)}%`}" y="18" text-anchor="middle">${r.count}</text>` : null}</g>`; })}</svg>`;
 }
 export function zeroTouchCauses(view) {
-  const m = model(view), max = Math.max(1, ...m.projects.map((p) => p.touched));
+  const m = model(view), max = Math.max(1, ...m.projects.map((p) => Math.max(p.touched, causeCounts(p.causes).reduce((sum, row) => sum + row.count, 0))));
   if (m.state !== "ready") return ui.card({ title: "What needed a person", body: fail(m) });
   const bars = m.projects.map((p) => html`<li class="zt-cb"><span class="zt-cb__n"><b>${p.name}</b><small>${p.touched} of ${p.runs}</small></span>${causeBar(p.causes, max, p.name)}<p class="zt-cb__t">${causeCounts(p.causes).filter((c) => c.count).map((c) => `${c.short} ${c.count}`).join(" · ") || "No touches"}</p></li>`);
   const scopeLabel = view?.query?.scope ? "selected repository" : view?.query?.project ? "selected project" : "all projects";
