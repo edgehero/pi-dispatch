@@ -72,8 +72,23 @@ test("a trusted runtime PATH replaces SSH's incomplete fallback while relative t
 	assert.equal(result.env.PATH, "/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin");
 	const absent = deployment("PI_WORKER_NAME=mini1\n");
 	assert.equal(sandboxDeploymentEnv({ dir: absent, env: { PATH: "/usr/bin:/bin" } }).env.PATH, "/usr/bin:/bin");
-	for (const path of [".:/usr/bin", "/usr/bin:", "", "relative/bin", "/usr/bin\n/bin"]) {
+	for (const path of [".:/usr/bin", "/usr/bin:", "", "relative/bin"]) {
 		const bad = deployment(`PI_WORKER_NAME=mini1\nPATH=${path}\n`);
 		assert.ok(sandboxDeploymentEnv({ dir: bad, env: {} }).refused, path);
 	}
+});
+
+test("PATH controls refuse as values while file newlines follow the service's actual loader", () => {
+	const absent = deployment("PI_WORKER_NAME=mini1\n");
+	for (const platform of ["linux", "darwin"]) {
+		for (const path of ["/usr/bin\n/bin", "/usr/bin\r/bin", "/usr/bin\x00/bin"]) {
+			assert.ok(sandboxDeploymentEnv({ dir: absent, env: { PATH: path }, platform }).refused, `${platform}: an actual PATH value cannot contain a control`);
+		}
+	}
+	const split = deployment("PI_WORKER_NAME=mini1\nPATH=/usr/bin\n/bin\n");
+	// systemd ignores the non-assignment line; a sourcing shell would execute it. It is not a newline in PATH.
+	const linux = sandboxDeploymentEnv({ dir: split, env: {}, platform: "linux" });
+	assert.equal(linux.refused, undefined, linux.message);
+	assert.equal(linux.env.PATH, "/usr/bin");
+	assert.ok(sandboxDeploymentEnv({ dir: split, env: {}, platform: "darwin" }).refused);
 });

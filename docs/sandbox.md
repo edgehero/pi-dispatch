@@ -363,6 +363,8 @@ pi-dispatch opener install --config ./approved-sandbox-hosts.json
 
 The imported mapping is local authority. A web page cannot enroll a different host or replace its SSH target. Re-export and explicitly import after changing a mapping. Installation is per user on macOS, Linux and Windows; Linux needs a supported terminal launcher. Missing integration refuses and names the copy-command route.
 
+Linux URL delivery is measured with GNOME/GIO's desktop dispatcher (`gio`, provided by `libglib2.0-bin`) and a real X11 terminal. The generic fallback in `xdg-utils` 1.1.3 does not parse standard quoted desktop-entry commands, including executable paths with spaces. Use a compliant desktop dispatcher such as GIO, or copy the command on that setup.
+
 The copy command always remains available, and is the route on phones. Selectable command text also works with JavaScript disabled; console writes require JavaScript and still pass through preview, confirmation and audit. Viewers receive no Sandboxes tab, shell list or terminal commands.
 
 An SSH command uses the configured absolute Node/CLI paths, a TTY and explicit `--deployment` loading. The deployment file must be owned by the account or root, have trusted parent directories and be readable exactly as the service loader reads it. Contradictory ambient runtime/capability settings refuse. If Docker or Podman is outside the SSH login's standard tool directories, set an absolute-directory `PATH` in the trusted deployment `.env`, as the worker service requires. The sandbox is re-executed in a clean environment so an SSH shell's `PI_EGRESS=0` cannot override an omitted deployment setting. Ordinary CLI invocations without `--deployment` still read their own environment.

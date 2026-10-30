@@ -11,7 +11,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { sandboxOpenUrl, parseSandboxOpenUrl } from "../src/opener-protocol.mjs";
 import { readSandboxHosts, planSandboxHost, writeSandboxHost, sandboxCommand, validateSandboxHosts, quoteSandboxArg } from "../src/sandbox-hosts.mjs";
 import { openerRegistration, openerDirectory, promptSandboxCommand, runOpener } from "../src/opener-cli.mjs";
-import { terminalLaunch } from "../src/opener-terminal.mjs";
+import { terminalLaunch, spawnTerminal } from "../src/opener-terminal.mjs";
 
 const mapping = { target: "rob@mini1", deployment: "/srv/pi dispatch", nodePath: "/usr/bin/node", cliPath: "/srv/pi dispatch/cli.mjs" };
 const config = () => ({ version: 1, hosts: { mini1: mapping, local1: { ...mapping, target: null } } });
@@ -117,6 +117,7 @@ test("all platform handlers are per-user, quote executable paths, and only launc
 	assert.equal(openerRegistration({ ...common, platform: "linux", dataHome: "/custom/desktop-data" }).files[0].path, "/custom/desktop-data/applications/pi-dispatch-opener.desktop");
 	assert.throws(() => openerRegistration({ ...common, platform: "linux", dataHome: "relative" }), /absolute/);
 	const mac = openerRegistration({ ...common, platform: "darwin" });
+	assert.match(mac.between.content, /<key>CFBundleTypeRole<\/key><string>Editor<\/string>/, "LaunchServices requires a role for the URL claim");
 	assert.match(mac.commands[0][1].at(-1), /on open location theURL/);
 	assert.match(mac.between.content, /pi-dispatch-open/);
 	assert.match(mac.commands[0][1][1], /\/home\/rob\/Applications\//);
@@ -137,6 +138,7 @@ test("installation imports a fixed map once, and a subsequent link cannot change
 	const commands = [];
 	assert.equal(await runOpener(["install", "--config", w.path], { env: w.env, deps: { platform: "linux", home: w.root, out: () => {}, execFile: async (...args) => commands.push(args) } }), 0);
 	assert.equal(commands.length, 1);
+	assert.equal(commands[0][2].env, w.env, "xdg-mime registers in the same explicit XDG directories as the desktop entry");
 	assert.equal(fs.existsSync(join(w.env.XDG_DATA_HOME, "applications", "pi-dispatch-opener.desktop")), true, "the handler is written where xdg-mime resolves its registered desktop id");
 	assert.equal(fs.existsSync(join(w.root, ".local", "share", "applications", "pi-dispatch-opener.desktop")), false);
 	let launched;
@@ -169,6 +171,17 @@ test("terminal launch starts an approval helper, never SSH or the sandbox, inclu
 	const windows = terminalLaunch({ ...common, platform: "win32" });
 	assert.match(windows.args.at(-1), /Start-Process/);
 	assert.match(windows.args.at(-1), /opener.*prompt/);
+});
+
+test("a Windows terminal child derives PS5 module paths even when its Node parent came from PowerShell 7", async () => {
+	const w = world();
+	const env = { ...w.env, PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules", pSmOdUlEpAtH: "another incompatible path", SystemRoot: "C:\\Windows" };
+	const plan = terminalLaunch({ platform: "win32", nodePath: "C:\\node\\node.exe", cliPath: "C:\\dispatch cli.mjs", url: uri(), directory: w.root, env });
+	let options;
+	await spawnTerminal(plan, { spawn: (_bin, _args, passed) => { options = passed; const child = new EventEmitter(); child.unref = () => {}; queueMicrotask(() => child.emit("spawn")); return child; } });
+	assert.equal(Object.keys(options.env).some((key) => key.toLowerCase() === "psmodulepath"), false);
+	assert.equal(options.env.SystemRoot, "C:\\Windows");
+	assert.equal(env.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules", "the invoking shell's environment is untouched");
 });
 
 test("readable POSIX commands round-trip literal arguments through a real shell without evaluating metacharacters", { skip: process.platform === "win32" ? "POSIX shell oracle" : false }, () => {

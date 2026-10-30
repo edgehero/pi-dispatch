@@ -36,11 +36,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xterm xdg-utils xvfb dbus-x11 xdotool
+          sudo apt-get install -y xterm xdg-utils xvfb dbus-x11 xdotool libglib2.0-bin
           sudo update-alternatives --set x-terminal-emulator /usr/bin/xterm
       - name: Native desktop protocol and Enter handoff (Linux)
         if: runner.os == 'Linux'
-        run: dbus-run-session -- xvfb-run -a node .github/scripts/opener-native-smoke.mjs
+        run: dbus-run-session -- xvfb-run -a env XDG_CURRENT_DESKTOP=GNOME node .github/scripts/opener-native-smoke.mjs
       - name: Native protocol and terminal helper (macOS and Windows)
         if: runner.os != 'Linux'
         run: node .github/scripts/opener-native-smoke.mjs

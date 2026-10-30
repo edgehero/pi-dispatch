@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { openerDirectory, runOpener } from "../../worker/src/opener-cli.mjs";
 import { sandboxOpenUrl } from "../../worker/src/opener-protocol.mjs";
 import { sandboxCommand } from "../../worker/src/sandbox-hosts.mjs";
+import { windowsPowerShellEnv } from "../../worker/src/opener-terminal.mjs";
 
 if (process.env.CI !== "true") throw new Error("native opener registration smoke runs only in an isolated CI account");
 const execFile = promisify(nodeExecFile);
@@ -21,7 +22,7 @@ fs.mkdirSync(executableDir);
 const stub = join(executableDir, "native cli.mjs");
 const source = join(root, "approved-hosts.json");
 const configHome = join(root, "config");
-const env = { ...process.env, XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: join(root, "desktop-data"), XDG_CURRENT_DESKTOP: "", DESKTOP_SESSION: "" };
+const env = { ...(process.platform === "win32" ? windowsPowerShellEnv(process.env) : process.env), XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: join(root, "desktop-data") };
 const protocol = sandboxOpenUrl({ verb: "open", id: "sb-native-smoke", host: "native" });
 const imported = pathToFileURL(resolve("worker/src/opener-cli.mjs")).href;
 fs.writeFileSync(stub, `import fs from "node:fs"; import {runOpener} from ${JSON.stringify(imported)};
@@ -57,7 +58,7 @@ try {
 	if (process.platform === "win32") {
 		const path = openerDirectory(env).replaceAll("'", "''");
 		const script = `(Get-Acl -LiteralPath '${path}').Access | ForEach-Object { [pscustomobject]@{sid=$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value;allow=($_.AccessControlType -eq 'Allow')} } | ConvertTo-Json -Compress`;
-		const { stdout } = await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+		const { stdout } = await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { env });
 		const parsed = JSON.parse(stdout);
 		const access = Array.isArray(parsed) ? parsed : [parsed];
 		assert.equal(access.some((r) => r.allow && r.sid === "S-1-1-0"), false, "the pre-existing Everyone grant must be removed");
