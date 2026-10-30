@@ -330,9 +330,10 @@ jobs:
   contract-tests:
     name: pinned assumptions still hold (offline, no API key)
     runs-on: ubuntu-latest
-    # Issue #657: a hung test once held this job for five hours, Actions' own cap being six. A healthy run takes about
-    # fifteen minutes; forty-five leaves room for a slow runner and still frees the check the same hour.
-    timeout-minutes: 45
+    # Issue #657: a hung test once held this job for five hours, Actions' own cap being six. Main's 2026-10-30
+    # run took 42 minutes before #771's additional browser coverage, so 45 leaves no runner headroom.
+    # Keep the file and step deadlines below; sixty minutes bounds the complete check without dropping coverage.
+    timeout-minutes: 60
     services:
       # A real Valkey backs the queue integration test (enqueue + dedup). AOF is not needed for a
       # test run; the point is a genuine Redis-protocol server, not the fake.
@@ -512,7 +513,7 @@ jobs:
       # #751 adds full-content exceptional states at nineteen widths in both themes, beside the unchanged shell
       # sweep. The measured expanded run reached the old 12-minute bound. Twenty-three minutes
       # gives its bounded run 3 minutes for the pinned Chrome download, verification and unzip,
-      # while a wait nothing ends still frees the job long before its 45 minutes.
+      # while a wait nothing ends still frees the job long before its overall deadline.
       # Quoted: unquoted, YAML reads " #737)" as a comment and the step is named "...(issue".
       - name: "The console under its CSP at two phone widths and eighteen desktop widths (issue #737)"
         if: (success() || failure()) && steps.install.outcome == 'success'
