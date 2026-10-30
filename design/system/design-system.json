@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-10-30T12:16:27Z",
+    "at": "2026-10-30T12:26:23Z",
     "via": "Claude",
-    "note": "The design follows main: the screens built by #747 to #750 show Built, and the Parked phone card says where to read the question instead of showing it, as the shipped page does."
+    "note": "The design follows main: the screens built by #747 to #750 show Built, the Parked phone card says where to read the question as the shipped page does, and every planned or proposed card names the issue that builds it (#770 to #776)."
   }
 }
