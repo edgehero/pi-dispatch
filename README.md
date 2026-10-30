@@ -15,4 +15,4 @@ The final capture set contains 112 service captures (104 JavaScript captures wit
 
 The remote Claude artifact returned a Cloudflare challenge and was inaccessible to the web tool. These images do not claim direct remote-artifact comparison. Evidence data contains no secret values, resolver lookup references or private home paths.
 
-This separate evidence branch is not implementation code. The implementation branch contains no screenshot binaries, scratch scripts, planning notes or generated build output.
+This separate evidence branch is not implementation code. This PR adds no screenshot binaries, scratch scripts, planning notes or generated build output to the implementation branch; pre-existing documentation images remain untouched.
