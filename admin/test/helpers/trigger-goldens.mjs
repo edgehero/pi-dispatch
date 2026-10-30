@@ -88,6 +88,9 @@ export const TRIGGER_DRAW = {
   "trigger-editor-refusals.operator": async () => {
     let page = String(await triggerGolden({ editor: true }));
     const error = triggerRefusalExamples().find(e=>e.field === "maxTurns").sentence;
+    const errorField = /<div class="field">(?:(?!<div class="field">)[^])*?name="maxTurns"/g;
+    assert.equal([...page.matchAll(errorField)].length, 1, "one field wrapper to mark");
+    page = page.replace(errorField, field => field.replace('class="field"', 'class="field field--err"'));
     const control = /<input\b[^>]*name="maxTurns"[^>]*>/g;
     assert.equal([...page.matchAll(control)].length, 1, "one maxTurns control to refuse");
     page = page.replace(control, tag => tag.replace(/value="[^"]*"/, 'value="0"').replace(/<input/, '<input aria-invalid="true" aria-describedby="trigger-turns-error"'));

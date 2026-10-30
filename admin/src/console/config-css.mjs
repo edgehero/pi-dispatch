@@ -2,7 +2,7 @@
 export const CONFIG_CSS = `
 @media(max-width:1100px){.config-layout{grid-template-columns:minmax(0,1fr)!important}.config-layout .facts,.config-layout .facts--3{grid-template-columns:minmax(0,1fr)}.config-layout .fact{grid-template-columns:128px minmax(0,1fr)}.config-layout .config-options{grid-template-columns:minmax(0,1fr)}}
 .config-sections{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;align-items:center}
-.config-sections>.btn{background:transparent;box-shadow:inset 0 0 0 1px var(--line-strong)}
+.config-sections>.btn{background:transparent;border:1px solid var(--line-strong)}
 .config-divider{height:24px;border-left:1px solid var(--line);margin:0 6px}
 .config-form{align-items:stretch;max-width:100%;margin-top:16px}
 .config-form .facts{grid-column:1/-1;grid-template-columns:minmax(0,1fr)}
