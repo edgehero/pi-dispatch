@@ -34,6 +34,27 @@ test("missing-project drilldowns preserve their reserved identity without changi
   assert.match(page, /href="\/runs\/zero-touch\?days=7&amp;project=%7E"/);
   assert.match(page, new RegExp(`href="/runs/zero-touch\\?days=7&amp;project=%7E&amp;scope=${scopeId}"`), "the selected phone project reveals its repository link");
   assert.match(page, /href="\/runs\?project=%7E&amp;touched=1&amp;days=7"/);
+  assert.match(page, /7 days, selected project/);
+  assert.doesNotMatch(page, /7 days, all projects/);
+});
+
+test("desktop and phone show incomplete waiting history without suppressing the valid current rate", async () => {
+  const scopeId = "a".repeat(64), day = 86400000;
+  const report = computeZeroTouch({ nowMs: NOW, windowDays: 7, coverage: { fromMs: NOW - 50 * day }, records: [
+    { jobId: "current", project: "api", touchScopeId: scopeId, touchTrackingVersion: 1, kind: "github", target: "acme/api#1", endedAt: new Date(NOW - day).toISOString() },
+    { jobId: "old-approval", project: "api", touchScopeId: scopeId, touchTrackingVersion: 1, kind: "github", target: "acme/api#2", reason: "awaiting-approval", endedAt: new Date(NOW - 60 * day).toISOString() },
+  ], events: [{ runId: "current", cause: "steer", at: NOW - day }] });
+  const projected = zeroTouchView(report, { role: "viewer", nowMs: NOW });
+  assert.deepEqual([projected.totals.rate, projected.totals.waitingHours, projected.totals.pending, projected.totals.waitingUnknown], [100, null, null, 1]);
+  assert.equal(projected.projects[0].streakDays, null);
+  assert.equal(projected.projects[0].zeroTouch, false);
+  const rendered = String((await renderPage("zero-touch", { session: { name: "viewer", role: "viewer" }, data: { now: NOW, zeroTouch: report }, query: { days: 7 } })).html);
+  assert.match(rendered, /100%/);
+  assert.match(rendered, /1 of 1 runs needed a person/);
+  assert.match(rendered, /class="zt-phone-summary"[^]*Waiting history is incomplete/);
+  assert.match(rendered, /Waiting for a person[^]*Pending count not known/);
+  assert.doesNotMatch(rendered, /0 waiting now|0 runs<\/b>|Not knownh/);
+  assert.doesNotMatch(rendered, /zero touch, 30\+ days/);
 });
 
 test("page reads its bounded report once, without a fleet snapshot or classifier side effect", async () => {

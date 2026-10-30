@@ -564,7 +564,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
   - question groups from a decision model over the question text, named by a person;
   - standing answers and sent drafts remain #772;
   - the fixes log, each change with the cause it targets and counts before and after.
-- The rate is a bounded read over records and fleet-wide touch facts. Grouping starts a capped job; naming a group and appending an instruction are operator-only writes through preview and Confirm. Private question context never enters this page.
+- The rate is an on-demand read over retained records and fleet-wide touch facts. Grouping starts a capped job; naming a group and appending an instruction are operator-only writes through preview and Confirm. Private question context never enters this page.
 
 **Who sees what.** A viewer sees the rates, counts, causes, streaks and fixes. Question groups and every action are operator only. No role sees question text on this page.
 
@@ -577,7 +577,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
 - **No question text here.** A group's name is written by a person, never by the model, because a question is the run's own text, which the console shows on the run page and nowhere else.
 - **Standing answers do not reach zero.** A draft may cite one, but the person still sends the answer. The way to zero is an instruction that stops the question being asked.
 
-**Coverage.** Built by #770. Windows are partial when retained records or touch tracking cover less than requested. A zero-touch badge needs 30 days of complete observed workload and no outstanding wait. Charts assign each run to its first intervention; fixes count their typed refusal/group predicate independently.
+**Coverage.** Built by #777. Project and repository selections constrain rates, question groups, pending counts and fix observations together. Windows are partial when retained records or touch tracking cover less than requested. A zero-touch badge needs 30 days of complete observed workload and no outstanding wait. A park older than known answer history makes waiting metrics and its streak explicitly unknown, while valid current rates remain readable. Charts assign each run to its first intervention; fixes count their typed refusal/group predicate independently.
 
 **Fixture note.** This screen's deployment and values are sample:
 - the 214 runs and 38 touches, and their split by project, repository and cause;
@@ -605,7 +605,7 @@ The Zero touch tab as a viewer sees it. The same numbers as the operator's page,
 
 **Who sees what.** This is the viewer's page. The Sandboxes tab is not in the tab row: it is an operator's tab, because a kept workspace holds issue text.
 
-**Fixture note.** As ZeroTouchScreen: built by #770, all illustrated values sample, with gh-2f6a and the projects from the fixture.
+**Fixture note.** As ZeroTouchScreen: built by #777, all illustrated values sample, with gh-2f6a and the projects from the fixture.
 """)
     write("ZeroTouchPhone", card_marker("Phone", 2620, 390, "Zero touch on a phone: the rate first, projects as a list, the causes, and the question groups with one action each"),
           "Zero touch on a phone", phone_page(), CSS + PHONE_CSS)
@@ -625,6 +625,6 @@ The Zero touch tab laid out for a phone rather than stacked: what the rate is fi
 
 **Who sees what.** An operator's phone. A viewer's phone shows ZeroTouchViewer's content in this order, without the question groups.
 
-**Fixture note.** As ZeroTouchScreen: built by #770, all illustrated values sample, with gh-2f6a and the projects from the fixture.
+**Fixture note.** As ZeroTouchScreen: built by #777, all illustrated values sample, with gh-2f6a and the projects from the fixture.
 """)
     print("zero touch written")

@@ -13,4 +13,4 @@ The Zero touch tab as a viewer sees it. The same numbers as the operator's page,
 
 **Who sees what.** This is the viewer's page. The Sandboxes tab is not in the tab row: it is an operator's tab, because a kept workspace holds issue text.
 
-**Fixture note.** As ZeroTouchScreen: built by #770, all illustrated values sample, with gh-2f6a and the projects from the fixture.
+**Fixture note.** As ZeroTouchScreen: built by #777, all illustrated values sample, with gh-2f6a and the projects from the fixture.

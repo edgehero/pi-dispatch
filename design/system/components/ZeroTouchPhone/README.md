@@ -13,4 +13,4 @@ The Zero touch tab laid out for a phone rather than stacked: what the rate is fi
 
 **Who sees what.** An operator's phone. A viewer's phone shows ZeroTouchViewer's content in this order, without the question groups.
 
-**Fixture note.** As ZeroTouchScreen: built by #770, all illustrated values sample, with gh-2f6a and the projects from the fixture.
+**Fixture note.** As ZeroTouchScreen: built by #777, all illustrated values sample, with gh-2f6a and the projects from the fixture.

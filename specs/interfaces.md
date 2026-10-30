@@ -11592,7 +11592,11 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   ```
   Optional rebuilt fields are opaque SHA-256 `scopeId`, validated project id and safe target, millisecond `endedAt`,
   `parkedAt`, `receivedAt`, closed `answerSource` (`forge`, `console`, `panel`, `draft`) and validated `draftRunId`.
-  Nonces determine ids but are not retained. A pre-start stop uses `type:"stop"` and no cause. No body carries a
+  Nonces determine ids but are not retained. A pre-start stop uses `type:"stop"` and no cause. A non-human
+  approval closure uses `type:"wait-end"`, no cause, and the closed reason `approval-expired` or
+  `approval-policy-changed` (`WAIT_END_REASONS`). It ends only an approval wait, never adds a touched run,
+  cause count, stop or human-answer median. Expiry uses the trusted deadline; withdrawal uses its first accepted
+  terminal time. Publication uses durable intent/repair and cannot replay a transition. No body carries a
   question, answer, instruction, identity credential or payload. Unsupported properties are dropped.
 - Events are idempotent by id, and one run contributes once to the numerator. Primary-cause charts use earliest
   successful event, breaking ties by vocabulary order; all causes remain available. Stops have their own distinct
@@ -11604,6 +11608,11 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   coverage gaps. An indexed-but-missing set is already unknown before a later write can reset its epoch.
 - Pending uncertainty conservatively makes the covered rate unavailable until repaired. A zero denominator has
   `rate:null`. Reads never interpret missing events or an older client as proof that no person intervened.
+- Waiting evidence is separately bounded: a park older than known touch history, without a retained terminal
+  answer, cannot prove it is still open. `totals.waitingPartial` and `waitingUnknown` expose that uncertainty;
+  waiting hours, median and pending count are null, while valid current-rate counts remain available. Affected
+  project/repository streaks are unknown and cannot earn a zero-touch badge. Retained terminal answer facts can
+  close that old wait without guessing from an expired index event.
 - `touch-outbox/<event-id>.json` below the private logs root holds `{state,event}` with `pending` or `applied` state.
   Publication repairs applied entries idempotently and never re-executes an action. An interrupted pending entry
   remains unknown until its owner can prove the outcome. Every successful action whose metric could not finish
@@ -11692,7 +11701,8 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   instruction append has a new confirmation identity and its own fix, rather than reviving the reverted metadata.
   A group comparison with unclassified sources is partial; no later runs or missing coverage establishes no success.
 - Console reads are `/runs/zero-touch?days=7|30|90` with optional project and opaque scope. The page is on-demand,
-  viewer-readable, and operator groups/actions are projected away before rendering for viewers. Read-only operators
+  viewer-readable, and operator groups/actions are projected away before rendering for viewers. Project/scope filters
+  constrain fix observations and pending/unassigned source counts as well as rates and groups. Read-only operators
   keep reads. `/runs?touched=1&days=...` preserves its window/scope through pagination and live canonical queries.
   The reserved analytics-only `project=~` selects missing project attribution without colliding with a real
   project named `unassigned`. It is accepted only here and on touched Runs, not in ordinary project-id fields.
@@ -12056,4 +12066,4 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-30 (#751) | `INT-CONSOLE-STATE-API` AMENDED to name page-scoped Configuration reads and safe resolver response text. Its shared state version/keys, `INT-CONSOLE-EVENT-STREAM`, action ticket/audit guards, run records, trigger/project/endpoint files, secret resolver processes and `INT-ON-FAILURE-HOOK-CONTRACT` UNCHANGED, checked. |
 | 2026-10-30 (#751, review) | Safe Connections tool projections add a selected provider-key name and closed source/fallback facts; manager variable names and values remain excluded. Typed project preflight facts stay internal to page assembly. `INT-CONSOLE-STATE-API`, state/event-stream versions and keys, confirmation tickets, audit, worker files/processes and run records UNCHANGED, checked. |
 | 2026-10-30 (#751, observation coverage) | Page/tool endpoint projections add closed counting coverage with nullable observed use and retained declared capacity. Delivery guidance distinguishes forge history from partial receiver logs. `INT-CONSOLE-STATE-API` shared version/keys, event streams, worker endpoint files/leases, host registry, receiver responses/logging and action confirmation/audit contracts UNCHANGED, checked. |
-| 2026-10-30 (#770) | NEW `INT-TOUCH-INDEX`, `INT-QUESTION-GROUPS` and `INT-ZERO-TOUCH-FIXES`: text-free fleet interventions and loss bounds, durable intent/repair, separate bounded private classification inputs and safe results, source-bound fixes and role-safe on-demand reads. `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED with optional tracking/scope/touches, preserved retry uncertainty and internal analysis purpose; `INT-SESSION-STORE-CONTRACT` AMENDED with v2 canonical-bound parked lineage; `INT-STEER-INBOX-CONTRACT` AMENDED with original held-reply receipt preservation; `INT-TRIGGERS-FILE-CONTRACT` AMENDED with strict optional `zeroTouch` configuration and human names; `INT-CONTAINER-JOB-INPUTS` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED with classifier-only input/output and two closed grouping policy reasons. UNCHANGED, checked: ordinary record keys and outcome/retry classes; container mounts/isolation; `INT-CONSOLE-AUDIT-LOG` hash/PII rules; `INT-CONSOLE-STATE-API` payload/version; `INT-CONSOLE-EVENT-STREAM` framing/version; approval authorization/state and trigger author gates. |
+| 2026-10-30 (#770) | NEW `INT-TOUCH-INDEX`, `INT-QUESTION-GROUPS` and `INT-ZERO-TOUCH-FIXES`: text-free fleet interventions and loss bounds, durable intent/repair, separate bounded private classification inputs and safe results, source-bound fixes and role-safe on-demand reads. Scoped fixes/grouping totals and ancient-park waiting uncertainty preserve the selected evidence boundary. `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED with optional tracking/scope/touches, preserved retry uncertainty and internal analysis purpose; `INT-SESSION-STORE-CONTRACT` AMENDED with v2 canonical-bound parked lineage; `INT-STEER-INBOX-CONTRACT` AMENDED with original held-reply receipt preservation; `INT-TRIGGERS-FILE-CONTRACT` AMENDED with strict optional `zeroTouch` configuration and human names; `INT-CONTAINER-JOB-INPUTS` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED with classifier-only input/output and two closed grouping policy reasons. UNCHANGED, checked: ordinary record keys and outcome/retry classes; container mounts/isolation; `INT-CONSOLE-AUDIT-LOG` hash/PII rules; `INT-CONSOLE-STATE-API` payload/version; `INT-CONSOLE-EVENT-STREAM` framing/version; approval authorization/state and trigger author gates. |

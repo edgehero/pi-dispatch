@@ -1,5 +1,5 @@
 import { readCapacityRecords } from "./capacity-records.mjs";
-import { TOUCH_CAUSES, makeTouchStore } from "./touch-state.mjs";
+import { TOUCH_CAUSES, WAIT_END_REASONS, makeTouchStore } from "./touch-state.mjs";
 
 const DAY = 86400_000;
 const ID = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -44,7 +44,12 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 		reasons.push("answer-source-unavailable");
 	}
 	const sourceEvents = [...events, ...[...byId.values()].flatMap((r) => Array.isArray(r.touches) ? r.touches : [])];
-	const allEvents = sourceEvents.filter((e) => e?.type !== "stop" && TOUCH_CAUSES.includes(e?.cause) && ID.test(e.runId ?? "") && validTime(e.at) && e.at <= nowMs);
+	const allEvents = sourceEvents.filter((e) => e?.type !== "stop" && e?.type !== "wait-end" && TOUCH_CAUSES.includes(e?.cause) && ID.test(e.runId ?? "") && validTime(e.at) && e.at <= nowMs);
+	const waitEndsByRun = new Map();
+	for (const event of sourceEvents) {
+		if (event?.type !== "wait-end" || !WAIT_END_REASONS.includes(event.reason) || !ID.test(event.runId ?? "") || !validTime(event.at) || event.at > nowMs) continue;
+		if (!waitEndsByRun.has(event.runId) || event.at < waitEndsByRun.get(event.runId)) waitEndsByRun.set(event.runId, event.at);
+	}
 	// A terminal cancel and the authenticated delivery counter are durable fallback evidence when their index write
 	// is being repaired. The index supplies the actual intervention time; record end is used only for older evidence.
 	for (const r of selected) {
@@ -74,17 +79,25 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 		let waitingMs = 0;
 		const completed = [];
 		const pending = [];
+		let unknown = 0;
 		for (const r of rows) {
 			if (!["awaiting-input", "awaiting-approval"].includes(r.reason)) continue;
 			const parkedAt = validTime(r.parkedAt) ? r.parkedAt : time(r.endedAt);
 			if (parkedAt > end) continue;
 			const answer = (eventsByRun.get(r.jobId) ?? []).find((e) => e.cause === "question-answer" || e.cause === "approval-decision");
 			const answeredAt = answer ? Math.max(parkedAt, answer.receivedAt ?? answer.at) : null;
-			waitingMs += Math.max(0, Math.min(end, answeredAt ?? end) - Math.max(start, parkedAt));
-			if (answeredAt !== null && answeredAt >= start && answeredAt < end) completed.push(answeredAt - parkedAt);
-			if (answeredAt === null) pending.push({ runId: r.jobId, parkedAt, project: r.project ?? null, scopeId: scopeOf(r) });
+			const terminal = r.reason === "awaiting-approval" ? waitEndsByRun.get(r.jobId) : undefined;
+			const closedAt = answeredAt === null && terminal === undefined ? null : Math.max(parkedAt, Math.min(answeredAt ?? Infinity, terminal ?? Infinity));
+			// An old park can outlive the index entry that ended it. Without a retained terminal answer,
+			// absence before the coverage epoch proves neither an open wait nor a completed one.
+			if (closedAt === null && parkedAt < fromMs) { unknown++; continue; }
+			waitingMs += Math.max(0, Math.min(end, closedAt ?? end) - Math.max(start, parkedAt));
+			// The median describes a person's answer. An automatic deadline/revocation closes the wait,
+			// but it must not manufacture either an answer sample or a human intervention.
+			if (answeredAt !== null && closedAt === answeredAt && answeredAt >= start && answeredAt < end) completed.push(answeredAt - parkedAt);
+			if (closedAt === null) pending.push({ runId: r.jobId, parkedAt, project: r.project ?? null, scopeId: scopeOf(r) });
 		}
-		return { waitingHours: waitingMs / 3600_000, medianWaitMs: median(completed), pending };
+		return { waitingHours: waitingMs / 3600_000, medianWaitMs: median(completed), pending, unknown, partial: unknown > 0 };
 	};
 	const waits = waitsOf(selected, intervalFrom, nowMs);
 	const rowMetric = (rows, name, extra) => {
@@ -95,13 +108,14 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 		// source record has expired; otherwise activity in one repository resets every sibling's streak.
 		const related = allEvents.filter((e) => ids.has(e.runId) || (extra.scopeId ? e.scopeId === extra.scopeId : extra.project && e.project === extra.project));
 		const lastTouch = related.length ? Math.max(...related.map((e) => e.at)) : null;
-		const pending = waitsOf(rows, intervalFrom, nowMs).pending;
+		const waiting = waitsOf(rows, intervalFrom, nowMs);
+		const pending = waiting.pending;
 		const observedSince = Math.max(fromMs, lastTouch ?? fromMs);
-		const streakDays = pending.length ? 0 : Math.max(0, Math.floor((nowMs - observedSince) / DAY));
+		const streakDays = waiting.partial ? null : pending.length ? 0 : Math.max(0, Math.floor((nowMs - observedSince) / DAY));
 		const topCause = [...cur.causes].sort((a, b) => b.count - a.count || TOUCH_CAUSES.indexOf(a.cause) - TOUCH_CAUSES.indexOf(b.cause))[0];
 		return { ...extra, name, ...cur, previousRate: prev?.rate ?? null, deltaPoints: cur.rate !== null && prev?.rate !== null && prev?.rate !== undefined ? cur.rate - prev.rate : null,
-			streakDays, zeroTouch: streakDays >= 30 && fromMs <= nowMs - 30 * DAY && !coverage.partial && rows.some((r) => time(r.endedAt) >= nowMs - 30 * DAY),
-			waiting: pending.length, waitingNow: pending.length, topCause: topCause?.count > 0 ? topCause.cause : null, lastTouchAt: lastTouch };
+			streakDays, zeroTouch: !waiting.partial && streakDays >= 30 && fromMs <= nowMs - 30 * DAY && !coverage.partial && rows.some((r) => time(r.endedAt) >= nowMs - 30 * DAY),
+			waiting: waiting.partial ? null : pending.length, waitingNow: waiting.partial ? null : pending.length, waitingPartial: waiting.partial, topCause: topCause?.count > 0 ? topCause.cause : null, lastTouchAt: lastTouch };
 	};
 	const projectGroups = new Map();
 	for (const r of selected) { const id = r.project ?? ZERO_TOUCH_NO_PROJECT; if (!projectGroups.has(id)) projectGroups.set(id, []); projectGroups.get(id).push(r); }
@@ -141,7 +155,7 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 		return { atMs, ...facts, partial: part || knownStart > start || coverage.partial === true };
 	});
 	const assignedQuestionRuns = new Set(groups.filter((g) => g.groupId ?? g.id).flatMap((g) => g.runIds ?? []));
-	const fixed = fixes.filter((f) => validTime(f?.at) && f.at <= nowMs).map((f) => {
+	const fixed = fixes.filter((f) => validTime(f?.at) && f.at <= nowMs && zeroTouchProjectMatches(f.project, project) && (scopeId === null || f.scopeId === scopeId)).map((f) => {
 		const reverted = validTime(f.undoneAt);
 		const spanMs = Math.max(0, Math.min(windowDays * DAY, nowMs - f.at, reverted ? f.undoneAt - f.at : Infinity));
 		const eligible = selected.filter((r) => (!f.scopeId || scopeOf(r) === f.scopeId) && (!f.project || r.project === f.project));
@@ -159,9 +173,9 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 		const status = partial || afterRows.length === 0 || reverted ? "observing" : after < before ? "improved" : after > before ? "worse" : "unchanged";
 		return { ...f, spanMs, before, after, beforeRuns: beforeRows.length, afterRuns: afterRows.length, beforeCount: before, afterCount: after, subsequentRuns: afterRows.length, partial, status, worked: status === "improved" };
 	});
-	const medianWaitMs = waits.medianWaitMs;
+	const medianWaitMs = waits.partial ? null : waits.medianWaitMs;
 	return { nowMs, windowDays, coverage: { requestedFromMs, fromMs: intervalFrom, toMs: nowMs, partial: coverage.partial === true || intervalFrom > requestedFromMs || reasons.length > 0, reasons: [...new Set(reasons)], unknownRuns: legacy.filter((r) => time(r.endedAt) >= requestedFromMs).length, stopsPartial: stoppedUnattributed.size > 0 },
-		totals: { runs: current.runs, touched: current.touched, rate: current.rate, previousRate: previous?.rate ?? null, deltaPoints: current.rate !== null && previous?.rate !== null && previous?.rate !== undefined ? current.rate - previous.rate : null, stopped: stopped.size, stoppedUnattributed: stoppedUnattributed.size, waitingHours: waits.waitingHours, medianWaitMs, medianWaitHours: medianWaitMs === null ? null : medianWaitMs / 3600_000, pending: waits.pending.length, waitingNow: waits.pending, draftAnswers: new Set(allEvents.filter((e) => e.answerSource === "draft" && current.touchedRunIds.includes(e.runId)).map((e) => e.runId)).size },
+		totals: { runs: current.runs, touched: current.touched, rate: current.rate, previousRate: previous?.rate ?? null, deltaPoints: current.rate !== null && previous?.rate !== null && previous?.rate !== undefined ? current.rate - previous.rate : null, stopped: stopped.size, stoppedUnattributed: stoppedUnattributed.size, waitingHours: waits.partial ? null : waits.waitingHours, waitingPartial: waits.partial, waitingUnknown: waits.unknown, medianWaitMs, medianWaitHours: medianWaitMs === null ? null : medianWaitMs / 3600_000, pending: waits.partial ? null : waits.pending.length, waitingNow: waits.pending, draftAnswers: new Set(allEvents.filter((e) => e.answerSource === "draft" && current.touchedRunIds.includes(e.runId)).map((e) => e.runId)).size },
 		trend, projects, causes: current.causes, fixes: fixed, groups, touchedRunIds: current.touchedRunIds };
 }
 

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomBytes } from "node:crypto";
+import { join } from "node:path";
 import { approvalAudit, approvalConfigDigest, approvalRequestId, makeCheckApprovalPolicy } from "../src/approval-policy.mjs";
 import { parseTriggers } from "../src/triggers.mjs";
 import { APPROVAL_EXPIRED_COMMENT, APPROVAL_REVOKED_COMMENT, approvalExpiryJobId, makeApprovalRuntime } from "../src/approval-runtime.mjs";
 import { makeApprovalStore, approvalDueKey, approvalTargetKey } from "../src/approval-state.mjs";
+import { cleanTouch, makeTouchStore, TOUCH_CAUSES, WAIT_END_REASONS } from "../src/touch-state.mjs";
+import { makeTouchOutbox } from "../src/touch-outbox.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 const AT = Date.parse("2026-10-28T10:00:00Z");
 const clock = () => AT;
@@ -308,5 +312,94 @@ test("accepted human approval decisions are touches even when the later continua
 	const system = accepted({ decision: { ...accepted().decision, actor: { kind: "system", id: "expiry" }, decision: "declined" } });
 	const expired = setup({ pending: system, hooks: { touchStore: { write: async (e) => writes.push(e) } } });
 	assert.equal((await expired.runtime.before(job())).refused, "approval-expired");
-	assert.equal(writes.length, 0);
+	assert.equal(writes.length, 1);
+	assert.equal(writes[0].type, "wait-end");
+	assert.equal(writes[0].reason, "approval-expired");
+	assert.equal(writes[0].cause, undefined, "system expiry ends waiting but never creates a human touch");
+});
+
+test("terminal approval wait facts have a closed vocabulary separate from all six human causes", () => {
+	assert.deepEqual(WAIT_END_REASONS, ["approval-expired", "approval-policy-changed"]);
+	assert.equal(TOUCH_CAUSES.length, 6);
+	const event = cleanTouch({ type: "wait-end", reason: "approval-expired", runId: "parked", at: AT, nonce: "request", text: "private answer" });
+	assert.equal(event.reason, "approval-expired");
+	assert.equal(event.cause, undefined);
+	assert.ok(!JSON.stringify(event).includes("private"));
+	assert.notEqual(event.id, cleanTouch({ ...event, id: undefined, reason: "approval-policy-changed", nonce: "request" }).id);
+	for (const value of [{ ...event, reason: "config-invalid" }, { ...event, cause: "approval-decision" }, { ...event, reason: undefined }]) assert.equal(cleanTouch(value), null);
+});
+
+test("revocation preserves an earlier decision's wait end and never invents closure when cancellation is refused", async () => {
+	const writes = [];
+	const hooks = { touchStore: { write: async (event) => { writes.push(event); return { ok: true }; } } };
+	const earlier = AT - 3600_000;
+	const changed = setup({ checkPolicy: () => ({ refused: "approval-policy-changed" }), hooks, methods: { cancel: async () => ({ ok: true, request: accepted({ state: "finished", decision: { ...accepted().decision, at: earlier } }) }) } });
+	assert.equal((await changed.runtime.before(job())).refused, "approval-policy-changed");
+	assert.equal(writes[0].at, earlier, "withdrawal cannot extend a wait that already ended at an immutable human decision");
+	const refused = setup({ checkPolicy: () => ({ refused: "approval-policy-changed" }), hooks, methods: { cancel: async () => ({ refused: "not-claimed" }) } });
+	assert.equal((await refused.runtime.before(job())).refused, "approval-state-conflict");
+	assert.equal(writes.length, 1, "a refused cancellation publishes no terminal proof");
+});
+
+test("real approval transitions publish nonhuman wait ends, and outbox repair never repeats a transition or continuation", { skip: live }, async (t) => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const redis = makeRedisClient(url);
+	const prefix = `pi-test-approval-wait-${randomBytes(12).toString("hex")}:`;
+	let at = AT - 86400_000;
+	const touches = makeTouchStore({ redis, prefix, now: () => at, retentionDays: 90 });
+	let available = true;
+	const outboxDir = join(tempDir("pd-approval-wait-"), "outbox");
+	const writer = { ...touches, write: (event) => available ? touches.write(event) : Promise.resolve({ error: "touch-index-unavailable" }) };
+	const outbox = makeTouchOutbox({ dir: outboxDir, store: writer });
+	const retained = [];
+	t.after(async () => {
+		for (const r of retained) { await redis.del(`run:approval:request:${r.requestId}`, approvalTargetKey(r)); await redis.zrem("run:approval:due", r.requestId); await redis.zrem(approvalDueKey(r.host), r.requestId); }
+		const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys);
+		await redis.quit();
+	});
+	await touches.initialize();
+	const modes = ["sweep-expiry", "bound-expiry", "deadline-race", "reply-revocation", "sweep-revocation", "synthetic-expiry"];
+	for (const [index, mode] of modes.entries()) {
+		at = AT + index * 5 * 86400_000;
+		const id = `wait-${randomBytes(8).toString("hex")}`;
+		const host = `${id}-host`;
+		const original = job({ id, approvalRequestId: undefined, repo: `org/${id}`, gateTimeout: mode === "reply-revocation" ? undefined : 1 });
+		const actualStore = makeApprovalStore({ redis, now: () => at });
+		const moves = { expire: 0, cancel: 0, decide: 0, claim: 0, enqueue: 0 };
+		const store = { ...actualStore };
+		for (const name of ["expire", "cancel", "decide", "claim"]) store[name] = async (...args) => { moves[name]++; return actualStore[name](...args); };
+		let revoked = false;
+		const runtime = makeApprovalRuntime({ store, now: () => at, host, touchOutbox: outbox, checkPolicy: () => revoked ? { refused: "approval-policy-changed" } : { ok: true, digest: "digest" }, enqueueExpiry: async () => { moves.enqueue++; return { ok: true }; } });
+		const parked = await runtime.afterPark({ job: original, session: { key: "saved-session" }, metadata: { action: "budget-raise", toolCallId: "call" } });
+		assert.equal(parked.ok, true);
+		retained.push(parked.request);
+		at += 2 * 86400_000;
+		const reply = { ...original, id: `${id}-reply`, approvalRequestId: parked.request.requestId };
+		if (mode.includes("revocation")) revoked = true;
+		if (["bound-expiry", "synthetic-expiry"].includes(mode)) assert.equal((await actualStore.expire(parked.request.requestId)).ok, true);
+		available = mode !== "sweep-expiry";
+		if (mode.startsWith("sweep")) assert.equal((await runtime.sweep()).ok, true);
+		else if (mode === "synthetic-expiry") assert.equal((await runtime.before({ ...reply, id: approvalExpiryJobId(parked.request.requestId), trigger: { deliveryId: `expiry-${parked.request.requestId}` } })).ok, true);
+		else assert.equal((await runtime.before(reply)).refused, mode === "reply-revocation" ? "approval-policy-changed" : "approval-expired");
+		if (mode === "bound-expiry") assert.equal((await runtime.before(reply)).refused, "approval-expired", "an already terminal read may republish proof, never move its original time");
+		const expectedAt = revoked ? at : parked.request.expiresAt;
+		if (!available) {
+			assert.equal((await touches.read()).coverage.partial, true, "an unpublished terminal transition remains visible as uncertainty");
+			const priorMoves = { ...moves };
+			available = true;
+			at += 3600_000;
+			assert.deepEqual(await makeTouchOutbox({ dir: outboxDir, store: writer }).repair(), { repaired: 1, pending: 0, invalid: 0 });
+			assert.deepEqual(moves, priorMoves, "publication repair cannot repeat approval operations or enqueue a continuation");
+			assert.equal((await touches.read()).coverage.partial, false);
+		}
+		const events = (await touches.read()).events.filter((event) => event.runId === id);
+		assert.equal(events.length, 1, mode);
+		assert.equal(events[0].type, "wait-end");
+		assert.equal(events[0].reason, revoked ? "approval-policy-changed" : "approval-expired");
+		assert.equal(events[0].at, expectedAt, "expiry uses the original deadline; revocation uses its trusted cancellation clock");
+		assert.equal(events[0].cause, undefined);
+		assert.equal(moves.enqueue, mode === "sweep-expiry" ? 1 : 0);
+		if (mode === "deadline-race") assert.equal(moves.claim, 0, "the late human cannot consume the system decline");
+	}
+	assert.equal((await touches.read()).events.length, modes.length);
 });
