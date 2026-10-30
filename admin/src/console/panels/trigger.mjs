@@ -57,7 +57,7 @@ export function triggerOn(v) {
         "Who may fire it",
         gateText(t),
       ],
-    ])}`,
+    ])}${t.type === "comment" ? html`<p>Write <code>${`${t.phrase} <flow>`}</code> to choose another flow named by a trigger in this file. Otherwise this trigger's default flow runs.</p>` : null}`,
   );
 }
 export function triggerRuns(v) {

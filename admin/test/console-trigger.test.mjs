@@ -60,3 +60,15 @@ test("editor refusal examples are the shared planner's exact sentences and the r
  const page=String(await TRIGGER_DRAW["trigger-editor-refusals.operator"]());
  assert.match(page,/aria-invalid="true" aria-describedby="trigger-turns-error"/);assert.match(page,/id="trigger-turns-error"/);assert.ok(page.includes(examples.find(e=>e.field==="maxTurns").sentence));
 });
+
+test("comment detail explains the actual phrase-and-flow override syntax, escaped for either role", async () => {
+  const { triggerOn } = await import("../src/console/panels/trigger.mjs");
+  for (const role of ["operator", "viewer"]) {
+    const trigger = { type: "comment", phrase: "@pi<safe>", flow: "fix", forge: "github" };
+    const markup = String(triggerOn({ role, query: { index: 0 }, data: { triggerDetail: { trigger } } }));
+    assert.match(markup, /<code>@pi&lt;safe&gt; &lt;flow&gt;<\/code>/);
+    assert.match(markup, /another flow named by a trigger in this file/);
+    assert.match(markup, /Otherwise this trigger&#39;s default flow runs|Otherwise this trigger's default flow runs/);
+    assert.doesNotMatch(markup, /@pi<safe>/);
+  }
+});

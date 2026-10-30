@@ -1611,6 +1611,10 @@ ${FIT_JS}
       var applies = message && message.toLowerCase().indexOf(key.toLowerCase()) >= 0;
       slots[i].textContent = applies ? message + " Nothing was changed." : "";
       slots[i].hidden = !applies;
+      if (slots[i].parentElement.classList) {
+        if (applies) slots[i].parentElement.classList.add("field--err");
+        else slots[i].parentElement.classList.remove("field--err");
+      }
       if (control) {
         if (applies) {
           var id = slots[i].getAttribute("id");

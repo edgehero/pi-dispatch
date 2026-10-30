@@ -73,7 +73,7 @@ export async function checkConfigBrowser({
         async ({ evaluate }) => {
           ensure(
             await evaluate(
-              `(()=>{const card=document.querySelector('.card'),select=document.querySelector('.config-form select');return card&&(${width}>1100||card.getBoundingClientRect().width>=${width}*.8)&&[...document.querySelectorAll('.facts dd')].every(e=>e.getBoundingClientRect().width>=60)&&parseFloat(getComputedStyle(card).borderRadius)>=10&&select&&getComputedStyle(select).fontFamily!=='Times New Roman'&&document.scrollingElement.scrollWidth<=${width};})()`,
+              `(()=>{const card=document.querySelector('.card'),select=document.querySelector('.config-form select');const outlineLinks=[...document.querySelectorAll('.config-sections>.btn')];const outlined=${JSON.stringify(pageName)}!=='config'||(outlineLinks.length===2&&outlineLinks.every(e=>{const s=getComputedStyle(e);return s.borderTopStyle==='solid'&&parseFloat(s.borderTopWidth)>=1;}));return outlined&&card&&(${width}>1100||card.getBoundingClientRect().width>=${width}*.8)&&[...document.querySelectorAll('.facts dd')].every(e=>e.getBoundingClientRect().width>=60)&&parseFloat(getComputedStyle(card).borderRadius)>=10&&select&&getComputedStyle(select).fontFamily!=='Times New Roman'&&document.scrollingElement.scrollWidth<=${width};})()`,
             ),
             "Pulse configuration styling or responsive layout is absent",
           );
@@ -121,7 +121,7 @@ export async function checkConfigBrowser({
     }
     ensure(
       await evaluate(
-        `(()=>{const f=document.querySelector('form[data-structured="trigger"]'),c=f.querySelector('[name="flow"]');return c.getAttribute('aria-invalid')==='true'&&!!document.getElementById(c.getAttribute('aria-describedby'))&&document.activeElement===c;})()`,
+        `(()=>{const f=document.querySelector('form[data-structured="trigger"]'),c=f.querySelector('[name="flow"]');const h=getComputedStyle(document.documentElement).getPropertyValue('--failed').trim(),hex=/^#([a-f0-9]{6})$/i.exec(h);const color=hex?'rgb('+[0,2,4].map(i=>parseInt(hex[1].slice(i,i+2),16)).join(', ')+')':h;return c.getAttribute('aria-invalid')==='true'&&!!document.getElementById(c.getAttribute('aria-describedby'))&&document.activeElement===c&&c.closest('.field').classList.contains('field--err')&&getComputedStyle(c).boxShadow.includes(color);})()`,
       ),
       "Refusal was not associated with and focused on its field",
     );

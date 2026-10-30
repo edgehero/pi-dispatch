@@ -1596,6 +1596,7 @@ stateTest("inline configuration errors keep unique stable associations across tw
     await w.fetch.open("/api/act/pause-window-edit/preview").answer(400,{refusal:`scope is invalid on row ${i+1}`});
     ids.push(controls[i].getAttribute("aria-describedby"));
     assert.equal(controls[i].getAttribute("aria-invalid"),"true");
+    assert.ok(controls[i].closest(".field").classList.contains("field--err"),"the refused control gets the kit error treatment");
     assert.match(w.document.getElementById(ids[i]).textContent,new RegExp(`row ${i+1}`));
     assert.ok(rowForms[i].contains(w.document.getElementById(ids[i])),"the association stays in its own form");
   }
@@ -1604,4 +1605,12 @@ stateTest("inline configuration errors keep unique stable associations across tw
   await w.fetch.open("/api/act/pause-window-edit/preview").answer(400,{refusal:"scope is still invalid on row 1"});
   assert.equal(controls[0].getAttribute("aria-describedby"),ids[0],"the same slot keeps its id on a later refusal");
   assert.match(w.document.getElementById(ids[1]).textContent,/row 2/,"another form's retained error stays associated");
+  controls[0].value = "github:acme/web";
+  w.submit(rowForms[0]);
+  await w.fetch.open("/api/act/pause-window-edit/preview").answer(200,{unchanged:true,html:String(unchangedBarHtml({summary:"The scope is already set"}))});
+  assert.ok(!controls[0].closest(".field").classList.contains("field--err"),"a corrected preview clears the old error treatment");
+  assert.equal(controls[0].getAttribute("aria-invalid"),null);
+  assert.equal(controls[0].getAttribute("aria-describedby"),null);
+  assert.ok(controls[1].closest(".field").classList.contains("field--err"),"another form retains its own error treatment");
+
 });
