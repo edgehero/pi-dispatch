@@ -4109,6 +4109,11 @@ with it: no delivery-id header, two actor representations, tags as a string, and
 
 ## INT-TRIGGERS-FILE-CONTRACT
 
+- **AMENDED 2026-10-30 (#750)**: The admin display conditionally adds task (boolean presence only), repository, reviewState, waitFor,
+  awaitInput, github, progress, statusComment, recover and steer, only when set, and cron stall counts from the shared
+  scheduler key. Task and instruction text are separate operator-only reads, never dispatch_triggers or shared state.
+  Human row references count from 1; index inputs and stored job identities remain zero-based or scheduler IDs.
+
 - **`modelRoles` (#717)**: optional top-level `{ "default": {"editor":"provider/model"}, "<project>": {"editor": {"model":"provider/model","fallbackModels":["provider/other"]}} }`. Project rows override default roles. Map validation and limits are `DES-MODEL-ROLES`; shared by worker and receiver. `run.model: "role:<name>"` is distinct from a physical id and resolves only at worker pickup. Provider conflicts, missing roles and effective-list overflow are policy refusals before paid gates. The worker owns the snapshot; receiver-supplied maps are not authority.
 
 - **`run.fallbackModels` (#716)**: optional ordered list of 1 to 16 distinct `provider/model` strings, using `run.models`' grammar and case-sensitive matching (case-insensitive duplicate detection). Null/absent means no failover. With trigger `run.models`, membership is held at load; otherwise pickup requires and checks `PI_ALLOWED_MODELS`. No effective allowlist refuses free. Propagated across every forge route, cron, queue and operator dispatch; a chained child inherits the parent's list, never the outbox request's. Tools cannot set or clear it, including near-miss spellings. The worker checks dropped lists as trigger skew.
@@ -10273,6 +10278,9 @@ in.
 
 ## INT-CONSOLE-AUDIT-LOG
 
+- **AMENDED 2026-10-30 (#750)**: The paid manual cron fire is kind `trigger-fire`, audited before enqueue and carrying only safe
+  identity/outcome metadata. It uses the same confirmation and compensating failure-row rules as other paid actions.
+
 **The console server, its CLI and (since issue #642) the pi extension → `audit verify`, doctor, and later a remote
 console.** The record of who did what through the console, and since #642 through the `/dispatch` TUI and the
 extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SECURITY` (h)).
@@ -10344,7 +10352,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     `secret-bundle-remove` (issue #704, AMENDED 2026-10-20), `cancel-active`,
     `cancel-held`, `fleet-pause`, `fleet-resume` and `run-enqueue`; and the console's own `queue-pause`,
     `queue-resume`, `failed-retry`, `failed-remove`, `failed-retry-all`, `failed-remove-all`, `held-cancel-all`,
-    `run-rerun`, `parked-answer`, (issue #646) `steer-withdraw` and (issue #737, PR 3a) `cancel-queued`, a job that
+    `run-rerun`, `trigger-fire`, `parked-answer`, (issue #646) `steer-withdraw` and (issue #737, PR 3a) `cancel-queued`, a job that
     never started taken out of its queue, `target` its job id; and `steer` (issue #646), which the console and
     the panel (the TUI's `t` and `T`) both write. The list is descriptive: the writer enforces the charset, not the list, and
     the console's configuration actions write the kind of their action's own name, plus `pause-windows-set` for the
@@ -11877,3 +11885,4 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-28 (#716) | **NEW `INT-MODEL-COOLDOWN-KEY`; `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-DEFER-REASON-KEY` AMENDED**: fallback list, signed failure/replay evidence, selected-model facts and two free wait reasons. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: required `modelFailover` image capability and pre-spend unsupported-image refusal. **Exit codes UNCHANGED, checked**: provider failures still exit 1. **`INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked**: weights do not choose models. **`INT-DOCTOR-RESULTS-KEY` UNCHANGED, checked**: cooldowns use existing redacted warning checks. |
 | 2026-10-29 (#748) | **`INT-CONSOLE-EVENT-STREAM`, `INT-HOST-REGISTRY-CONTRACT`, `INT-DEFER-REASON-KEY` AMENDED**: the page live flag defines stream admission; host telemetry adds orphan venue/time, retained workspace inventory, budget provenance and CPU-reserve facts; host-budget defer records identify memory, CPU or count while legacy budget remains readable. **`INT-CONSOLE-STATE-API`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: telemetry grants no authority and no job payload text is read for running targets. |
 | 2026-10-29 (#749) | `INT-HOST-REGISTRY-CONTRACT` and `INT-CAPACITY-REPORT` AMENDED: optional h/ha actual dollar holds and additive fleet metrics, shared with CLI and console. `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-CONSOLE-AUDIT-LOG`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked: no new API field, live route, audit kind, run fact or plan writer. |
+| 2026-10-30 (#750) | `INT-TRIGGERS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` AMENDED: safe display fields, human numbering and trigger-fire audit kind. `INT-CONFIG-OVERLAY-CONTRACT`, `INT-CONSOLE-STATE-API`, queue payload and runner exit protocol UNCHANGED, checked. Shared state never includes prompt text. |

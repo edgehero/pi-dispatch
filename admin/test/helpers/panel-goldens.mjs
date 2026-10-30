@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { TRIGGER_DRAW } from "./trigger-goldens.mjs";
 import { SPEND_DRAW } from "./spend-goldens.mjs";
 import { FLEET_DRAW } from "./fleet-goldens.mjs";
 import * as nodeFs from "node:fs";
@@ -40,7 +41,7 @@ import { tempDir } from "./temp-dir.mjs";
  * the script reveals one, sets text and moves the slot. A golden of such a state is the server's page with exactly
  * that done, here, each step asserted to apply exactly once, so a markup change the step no longer matches fails
  * instead of drawing a page the script would never make: the slot taken from the end of `<main>` and put after the
- * card that asked (out of its `.legacy` wrapper, `script.mjs` `slotAnchor`), opened and filled with the answer's `html`
+ * card that asked (`script.mjs` `slotAnchor`), opened and filled with the answer's `html`
  * (`fillSlot`) or titled "Previewing: <the button's words>" (`openSlot`); the live pill's class, word and title from
  * `LIVE_STATES` (`mark`); one live note unhidden (`note`); `main.stale` and the time last seen (`since`); the kept-still
  * note as a held panel's first child (`hold`). That the script really does each is `console-client-states.test.mjs`'s
@@ -240,8 +241,7 @@ function sectionEnd(page, at) {
 
 /**
  * The slot opened after panel `id`'s card, as `script.mjs` `openSlot` and `fillSlot` leave it: taken from the end of
- * `<main>`, where the shell draws it closed, and put after the panel, or after the `.legacy` wrapper the panel sits in
- * (`slotAnchor`), holding `inner` (an answer's `html`, a string), or the previewing skeleton titled for the button
+ * `<main>`, where the shell draws it closed, and put after the panel (`slotAnchor`), holding `inner` (an answer's `html`, a string), or the previewing skeleton titled for the button
  * that asked.
  */
 function openSlotAfter(page, id, { inner = null, label = null }) {
@@ -251,11 +251,6 @@ function openSlotAfter(page, id, { inner = null, label = null }) {
   const at = out.indexOf(head);
   assert.ok(at >= 0 && out.indexOf(head, at + 1) < 0, `the page holds panel ${id} once`);
   let end = sectionEnd(out, at);
-  const wrapper = '<div class="legacy">';
-  if (out.slice(at - wrapper.length, at) === wrapper) {
-    assert.equal(out.slice(end, end + 6), "</div>", `${id}'s legacy wrapper closes after it`);
-    end += 6;
-  }
   let slot;
   if (inner === null) {
     slot = once(String(confirmSlotHtml({ open: true })), "<span data-slot-title>Previewing</span>", String(html`<span data-slot-title>Previewing: ${label}</span>`), "the skeleton's title");
@@ -797,6 +792,7 @@ const RUN_CARD_STATES = {
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
 const DRAW = {
+  ...TRIGGER_DRAW,
   ...SPEND_DRAW,
   ...FLEET_DRAW,
   ...RUN_CARD_STATES,
@@ -804,7 +800,7 @@ const DRAW = {
   "confirm-previewing.operator": async () => openSlotAfter(await fleetLive(), "p-fleetbar", { label: "Pause the fleet" }),
   "confirm-preview.operator": async () => {
     const answer = await actionWorld().preview("setting-set", { key: "maxTurns", value: "40" });
-    return openSlotAfter(await screen("config"), "p-settings", { inner: answerHtml(answer, 200, "setting-set") });
+    return openSlotAfter(await screen("config"), "cf-settings", { inner: answerHtml(answer, 200, "setting-set") });
   },
   "confirm-preview-paid.operator": async () => {
     const answer = await actionWorld().preview("retry-failed", { jobId: "gh-5d10", queue: "pi-jobs" });
@@ -817,7 +813,7 @@ const DRAW = {
   "confirm-unchanged.operator": async () => {
     const answer = await actionWorld().preview("setting-set", { key: "maxTurns", value: "30" });
     assert.equal(answer.body.unchanged, true, "the file already says so");
-    return openSlotAfter(await screen("config"), "p-settings", { inner: answerHtml(answer, 200, "setting-set, unchanged") });
+    return openSlotAfter(await screen("config"), "cf-settings", { inner: answerHtml(answer, 200, "setting-set, unchanged") });
   },
   "confirm-bulk-preview.operator": async () => {
     const answer = await actionWorld().preview("retry-all-failed", { queue: "pi-jobs" });
@@ -830,7 +826,7 @@ const DRAW = {
   },
   "confirm-refused-preview.operator": async () => {
     const answer = await actionWorld().preview("setting-set", { key: "maxTurns", value: "lots" });
-    return openSlotAfter(await screen("config"), "p-settings", { inner: answerHtml(answer, 400, "setting-set, refused") });
+    return openSlotAfter(await screen("config"), "cf-settings", { inner: answerHtml(answer, 400, "setting-set, refused") });
   },
   "confirm-refused-confirm.operator": async () => {
     const world = actionWorld();
@@ -844,7 +840,7 @@ const DRAW = {
   "confirm-preview-long-line.operator": async () => {
     const answer = await actionWorld().preview("pause-window-add", { scope: "github:acme/api", from: "01:00", to: "02:00", tz: "UTC", days: "mon" });
     assert.match(answer.body.html ?? "", /<li>\{&quot;scope&quot;:&quot;github:acme\/api&quot;/, "the window's JSON is one of the bar's lines");
-    return openSlotAfter(await screen("config"), "p-pause-windows", { inner: answerHtml(answer, 200, "pause-window-add") });
+    return openSlotAfter(await screen("config"), "cf-pause-windows", { inner: answerHtml(answer, 200, "pause-window-add") });
   },
   // The longest names a bar draws (`LONG_NAMES`), on the overview, after the Hosts card that asked (in its column, so
   // under the card): Resume fleet over a fleet with two such host queues paused and the rest running, whose Undo and

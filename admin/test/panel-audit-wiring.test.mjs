@@ -331,6 +331,19 @@ const CASES = [
       });
     },
   },
+  {
+    site: "index.ts:trigger-fire",
+    name: "dispatch_trigger_fire",
+    kind: "trigger-fire",
+    outcomes: ["ok"],
+    state: (fx) => fx.fired ?? 0,
+    run: async (fx) => {
+      await indexMod.executeTriggerFire({ index: 0 }, { hasUI: true, ui: { confirm: async () => true } }, {
+        planFn: async () => ({ plan: { title: "Fire cron trigger now", message: "Fire daily now", schedulerId: "daily", fileDigest: "a".repeat(64), reserve: { dollarsMicros: 2_000_000 } } }),
+        enqueueFn: async () => { fx.fired = (fx.fired ?? 0) + 1; return { ok: true, jobId: "manual:daily:1", queue: "pi-jobs" }; },
+      }).catch((e) => { assert.match(e.message, /audit log/); });
+    },
+  },
   // ---- the operator-typed /dispatch subcommands ----
   { site: "index.ts:run-enqueue", name: "/dispatch run", kind: "run-enqueue", outcomes: ["ok", "failed"], reason: /./, run: () => command("run /nowhere fix go") },
   { site: "index.ts:fleet-pause|fleet-resume", name: "/dispatch pause", kind: "fleet-pause", outcomes: ["ok", "failed"], reason: NOT_REACHED, run: () => command("pause") },

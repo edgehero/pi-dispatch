@@ -303,6 +303,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "retry-all-failed": "failed-retry-all",
     "remove-all-failed": "failed-remove-all",
     "run-fork": "run-fork",
+    "trigger-fire": "trigger-fire",
     rerun: "run-rerun",
     "parked-answer": "parked-answer",
     steer: "steer",
@@ -335,7 +336,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "allocation-revert": "allocation-revert",
     "board-freeze": "board-freeze", "board-unfreeze": "board-unfreeze", "board-clear": "board-clear", "board-revert": "board-revert", "board-adopt": "board-adopt",
   });
-  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-fork", "steer"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-fork", "steer", "trigger-fire"]);
   assert.deepEqual(ACTIONS.filter((a) => a.bulk).map((a) => a.name).sort(), ["cancel-all-held", "remove-all-failed", "retry-all-failed"]);
   assert.equal(BULK_MAX, RM.BULK_MAX, "the console's bulk bound is job-actions' own");
 });
@@ -348,9 +349,10 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
     "run-fork": ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
+    "trigger-fire": ["index"],
     rerun: ["jobId"], "parked-answer": ["jobId", "text", "decision"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
     "fleet-pause": [], "fleet-resume": [], "queue-pause": ["queue"], "queue-resume": ["queue"],
-    "pause-windows": ["windows"], "trigger-add": ["trigger"], "trigger-edit": ["index", "flow", "backend", "provider", "model"], "trigger-delete": ["index"],
+    "pause-windows": ["windows"], "trigger-add": ["trigger"], "trigger-edit": ["index", "flow", "backend", "provider", "model", "maxTurns", "progress", "statusComment", "recover", "steer"], "trigger-delete": ["index"],
     "setting-set": ["key", "value"], "setting-unset": ["key"],
     "secret-profile-add": ["name", "path"], "secret-profile-remove": ["name"], "secret-bundle-add": ["name", "path", "format"], "secret-bundle-remove": ["name"],
     "pause-window-add": pause, "pause-window-edit": ["index", ...pause], "pause-window-delete": ["index"],
@@ -359,7 +361,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "envelope-set": ["envelope"], "priorities-set": ["projects", "validDays"], "allocation-revert": ["index"],
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
-  assert.equal(ACTIONS.length, 44);
+  assert.equal(ACTIONS.length, 45);
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
     assert.ok(Object.isFrozen(a.fields) && a.fields.every((f) => typeof f === "string"), `${a.name}: fields is a frozen list of names`);
@@ -437,6 +439,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["retry-all-failed", bulk([zero, uncapped, r(0)]), twice(U.retried), null, "Retry 3, no dollar reserve", "Retried 3 failed jobs", { done: 3, count: 3 }],
     ["remove-all-failed", bulk([null, null], { queue: "pi-jobs" }), twice(U.removed), null, "Remove 2 jobs", "Removed failed jobs in pi-jobs: 1 of 2 done", { done: 1, count: 2 }],
     ["remove-all-failed", bulk([null]), twice(U.removed), null, "Remove 1 job", "Removed 1 failed job", { done: 1, count: 1 }],
+    ["trigger-fire", { target: "daily", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Fire now for up to $2.00", "Fired cron trigger daily once"],
     ["rerun", { target: "gh-r", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Re-run for up to $2.00", "Queued a re-run of gh-r"],
     ["rerun", { target: "gh-r", reserve: zero }, twice(U.rerunBefore), null, "Re-run (zero-rated)", "Queued a re-run of gh-r"],
     ["parked-answer", { target: "gh-p", reserve: r(2_000_000) }, twice(U.answer), null, "Answer for up to $2.00", "Answered parked run gh-p"],
@@ -462,14 +465,14 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["queue-resume", { payload: { queue: "pi-jobs" } }, twice("Pause queue pi-jobs again"), { action: "queue-pause", body: { queue: "pi-jobs" } }, "Resume", "Resumed queue pi-jobs"],
     ["pause-windows", { beforeText: json({ windows: [windows] }), extra: { before: [windows] } }, twice("Put the previous pause windows back"), { action: "pause-windows", body: { windows: [windows] } }, "Confirm", "Replaced the pause windows"],
     ["pause-windows", { beforeText: "not json", extra: { before: [] } }, [U.tooBig, U.tooBigAfter], null, "Confirm", "Replaced the pause windows"],
-    ["trigger-add", { beforeText: json({ triggers: [{}, {}] }), plan: { entry: { on: { type: "label" } } } }, twice("Delete trigger at index 2"), { action: "trigger-delete", body: { index: 2 } }, "Confirm", "Added trigger at index 2 (label)"],
-    ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: {}, changes: [["flow", "triage", "review"]] } }, twice("Edit trigger at index 0 back to what it said"), { action: "trigger-edit", body: { index: 0, flow: "triage" } }, "Confirm", "Changed trigger at index 0: flow from triage to review"],
-    ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: { model: "m1" }, changes: [["flow", "triage", "triage"], ["model", "-", "m1"]] } }, twice("Edit trigger at index 0 back by hand: model had no value before, and an edit cannot remove one."), null, "Confirm", "Changed trigger at index 0: flow from triage to triage, model from - to m1"],
-    ["trigger-delete", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0 } }, DEL, null, "Delete trigger at index 0", "Deleted trigger at index 0"],
+    ["trigger-add", { beforeText: json({ triggers: [{}, {}] }), plan: { entry: { on: { type: "label" } } } }, twice("Delete trigger row 3"), { action: "trigger-delete", body: { index: 2 } }, "Confirm", "Added trigger row 3 (label)"],
+    ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: {}, changes: [["flow", "triage", "review"]] } }, twice("Edit trigger row 1 back to what it said"), { action: "trigger-edit", body: { index: 0, flow: "triage" } }, "Confirm", "Changed trigger row 1: flow from triage to review"],
+    ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: { model: "m1" }, changes: [["flow", "triage", "triage"], ["model", "-", "m1"]] } }, twice("Edit trigger row 1 back by hand: model had no value before, and an edit cannot remove one."), null, "Confirm", "Changed trigger row 1: flow from triage to triage, model from - to m1"],
+    ["trigger-delete", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0 } }, DEL, null, "Delete trigger row 1", "Deleted trigger row 1"],
     // A trigger that names secret references, which the preview's diff hides, is put back from the operator's copy.
-    ["trigger-delete", { beforeText: json({ triggers: [{ run: { flow: "triage" } }, { run: { flow: "fix", secrets: { T: "op://v/r" } } }] }), plan: { index: 1 } }, [U.deleteSecrets, U.deleteSecretsAfter], null, "Delete trigger at index 1", "Deleted trigger at index 1"],
+    ["trigger-delete", { beforeText: json({ triggers: [{ run: { flow: "triage" } }, { run: { flow: "fix", secrets: { T: "op://v/r" } } }] }), plan: { index: 1 } }, [U.deleteSecrets, U.deleteSecretsAfter], null, "Delete trigger row 2", "Deleted trigger row 2"],
     // An empty `run.secrets {}` names no reference, so the diff hides nothing and the plain delete sentence holds.
-    ["trigger-delete", { beforeText: json({ triggers: [{ run: { flow: "triage", secrets: {} } }] }), plan: { index: 0 } }, DEL, null, "Delete trigger at index 0", "Deleted trigger at index 0"],
+    ["trigger-delete", { beforeText: json({ triggers: [{ run: { flow: "triage", secrets: {} } }] }), plan: { index: 0 } }, DEL, null, "Delete trigger row 1", "Deleted trigger row 1"],
     ["setting-set", { beforeText: json({ maxTurns: 30 }), plan: { key: "maxTurns", value: 40 } }, twice("Set maxTurns back to 30"), { action: "setting-set", body: { key: "maxTurns", value: "30" } }, "Confirm", "Changed maxTurns from 30 to 40"],
     ["setting-set", { beforeText: json({}), plan: { key: "dailyCap", value: 5 } }, twice("Unset dailyCap again"), { action: "setting-unset", body: { key: "dailyCap" } }, "Confirm", "Set dailyCap to 5"],
     // An old value this form cannot send back (an empty string, an object): no inverse, so no Undo that refuses itself.
@@ -483,13 +486,13 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["secret-bundle-add", { beforeText: json({}), plan: { name: "op" } }, twice("Remove bundle resolver op"), { action: "secret-bundle-remove", body: { name: "op" } }, "Confirm", "Declared bundle resolver op"],
     ["secret-bundle-add", { beforeText: json({ secretBundles: { op: { path: "/b", format: "json" } } }), plan: { name: "op" } }, ["Put bundle resolver op back by hand: this preview's diff shows the resolver it replaced; the console keeps no copy.", "Put bundle resolver op back by hand: the console kept no copy of the resolver it replaced."], null, "Confirm", "Replaced bundle resolver op"],
     ["secret-bundle-remove", { plan: { name: "op" } }, DEL, null, "Remove bundle resolver op", "Removed bundle resolver op"],
-    ["pause-window-add", { beforeText: json({ windows: [windows] }) }, twice("Delete pause window at index 1"), { action: "pause-window-delete", body: { index: 1 } }, "Confirm", "Added pause window at index 1"],
-    ["pause-window-edit", { plan: { index: 0, before: windows, entry: { ...windows, to: "03:00" } } }, twice("Edit pause window at index 0 back to what it said"), { action: "pause-window-edit", body: { index: 0, ...windows } }, "Confirm", "Edited pause window at index 0"],
-    ["pause-window-edit", { plan: { index: 0, before: null, entry: windows } }, ["Edit pause window at index 0 back by hand: this preview's diff shows what it said.", "Edit pause window at index 0 back by hand: the console kept no copy of what it said."], null, "Confirm", "Edited pause window at index 0"],
-    ["pause-window-delete", { plan: { index: 0 } }, DEL, null, "Delete pause window at index 0", "Deleted pause window at index 0"],
-    ["limit-add", { beforeText: json({ limits: [{ scope: "a" }] }) }, twice("Delete scoped limit at index 1"), { action: "limit-delete", body: { index: 1 } }, "Confirm", "Added scoped limit at index 1"],
-    ["limit-edit", { plan: { index: 0, before: { scope: "a", day: 1 }, entry: { scope: "a", day: 2 } } }, twice("Edit scoped limit at index 0 back to what it said"), { action: "limit-edit", body: { index: 0, limit: { scope: "a", day: 1 } } }, "Confirm", "Edited scoped limit at index 0"],
-    ["limit-delete", { plan: { index: 0 } }, DEL, null, "Delete scoped limit at index 0", "Deleted scoped limit at index 0"],
+    ["pause-window-add", { beforeText: json({ windows: [windows] }) }, twice("Delete pause window row 2"), { action: "pause-window-delete", body: { index: 1 } }, "Confirm", "Added pause window row 2"],
+    ["pause-window-edit", { plan: { index: 0, before: windows, entry: { ...windows, to: "03:00" } } }, twice("Edit pause window row 1 back to what it said"), { action: "pause-window-edit", body: { index: 0, ...windows } }, "Confirm", "Edited pause window row 1"],
+    ["pause-window-edit", { plan: { index: 0, before: null, entry: windows } }, ["Edit pause window row 1 back by hand: this preview's diff shows what it said.", "Edit pause window row 1 back by hand: the console kept no copy of what it said."], null, "Confirm", "Edited pause window row 1"],
+    ["pause-window-delete", { plan: { index: 0 } }, DEL, null, "Delete pause window row 1", "Deleted pause window row 1"],
+    ["limit-add", { beforeText: json({ limits: [{ scope: "a" }] }) }, twice("Delete scoped limit row 2"), { action: "limit-delete", body: { index: 1 } }, "Confirm", "Added scoped limit row 2"],
+    ["limit-edit", { plan: { index: 0, before: { scope: "a", day: 1 }, entry: { scope: "a", day: 2 } } }, twice("Edit scoped limit row 1 back to what it said"), { action: "limit-edit", body: { index: 0, limit: { scope: "a", day: 1 } } }, "Confirm", "Edited scoped limit row 1"],
+    ["limit-delete", { plan: { index: 0 } }, DEL, null, "Delete scoped limit row 1", "Deleted scoped limit row 1"],
     ["project-add", { plan: { added: { id: "api" } } }, twice("Delete project api"), { action: "project-delete", body: { id: "api" } }, "Confirm", "Added project api"],
     ["project-edit", { plan: { before: { id: "web", members: ["github:acme/web"] } } }, twice("Edit project web back to what it said"), { action: "project-edit", body: { id: "web", name: "", members: ["github:acme/web"] } }, "Confirm", "Edited project web"],
     ["project-delete", { plan: { deleted: "web" } }, DEL, null, "Delete project web", "Deleted project web"],
@@ -510,7 +513,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   }
   // A re-run's way back is the cancel of the job it queued, asked again at the confirm with the apply's answer
   // (`atConfirm`); no other rule is, and no bulk one can be (a bulk confirm asks no rule again).
-  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-fork", "rerun"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-fork", "trigger-fire", "rerun"]);
   assert.ok(ACTIONS.every((a) => typeof a.atConfirm === "boolean" && !(a.atConfirm && a.bulk)), "atConfirm is a single act's, and a boolean on every action");
   const rerun = ACTIONS.find((a) => a.name === "rerun");
   const landed = { ok: true, jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" };
@@ -559,7 +562,7 @@ function goldenForms() {
   for (const f of files) {
     const text = readFileSync(join(root, String(f)), "utf8");
     for (const m of text.matchAll(/<form\b[^>]*\sdata-action="([^"]+)"[^>]*>([^]*?)<\/form>/g)) {
-      forms.push({ structured: /data-structured="(priorities|envelope)"/.exec(m[0])?.[1] ?? null, file: String(f), action: m[1], names: [...m[2].matchAll(/<(?:input|select|textarea|button)\b[^>]*\sname="([^"]+)"/g)].map((n) => n[1]) });
+      forms.push({ structured: /data-structured="(priorities|envelope|trigger)"/.exec(m[0])?.[1] ?? null, file: String(f), action: m[1], names: [...m[2].matchAll(/<(?:input|select|textarea|button)\b[^>]*\sname="([^"]+)"/g)].map((n) => n[1]) });
     }
   }
   return forms;
@@ -571,10 +574,10 @@ test("every form a golden draws names a known action and sends only fields that 
   for (const { file, action, names, structured } of forms) {
     const a = ACTIONS.find((x) => x.name === action);
     assert.ok(a, `${file}: form[data-action="${action}"] is an action`);
-    const sent = structured === "priorities" ? ["projects", "validDays"] : structured === "envelope" ? ["envelope"] : names;
+    const sent = structured === "trigger" ? ["trigger"] : structured === "priorities" ? ["projects", "validDays"] : structured === "envelope" ? ["envelope"] : names;
     if (structured) {
-      assert.equal(action, structured === "priorities" ? "priorities-set" : "envelope-set");
-      for (const name of names) assert.ok(structured === "priorities" ? name === "validDays" || /^weight:(?:_other|[a-z0-9-]+)$/.test(name) : ["window", "totalUsd", "enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"].includes(name) || /^(?:floor|weight):(?:_other|[a-z0-9-]+)$/.test(name), `${file}: structured ${name} is packed by bodyOf`);
+      assert.equal(action, structured === "trigger" ? "trigger-add" : structured === "priorities" ? "priorities-set" : "envelope-set");
+      for (const name of names) assert.ok(structured === "trigger" ? Object.values(WP.TRIGGER_ADD_FIELDS).some(fields=>fields.includes(name)) : structured === "priorities" ? name === "validDays" || /^weight:(?:_other|[a-z0-9-]+)$/.test(name) : ["window", "totalUsd", "enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"].includes(name) || /^(?:floor|weight):(?:_other|[a-z0-9-]+)$/.test(name), `${file}: structured ${name} is packed by bodyOf`);
     }
     for (const n of sent) assert.ok(a.fields.includes(n), `${file}: ${action} sends ${n}, which it does not take`);
   }
@@ -786,7 +789,7 @@ test("a refusal is the tool's own sentence, before any ticket: a tool-proof trig
   assert.equal(kind.error, "unknown trigger kind: kind must be one of cron, label, comment, pull_request, issue");
   assert.ok(!kind.html.includes("kind-canary") && !kind.html.includes("<img"), kind.html);
   assert.match((await c.act("setting-set", { key: "nope", value: "1" })).json().error, /^unknown key 'nope'/);
-  assert.match((await c.act("pause-window-delete", { index: 7 })).json().error, /no pause window at index 7 \(have 1\)/);
+  assert.match((await c.act("pause-window-delete", { index: 7 })).json().error, /no pause window row 8 \(have 1\)/);
   // A value the funnel's own parser refuses is refused at the preview (the dry run), with the parser's words.
   const bad = await c.act("pause-window-add", { scope: "*", from: "25:00", to: "02:00" });
   assert.equal(bad.status, 400);
@@ -799,34 +802,34 @@ test("a refusal is the tool's own sentence, before any ticket: a tool-proof trig
   assert.ok(bar.includes("<p class=\"banner__t\">The change was refused</p>") && bar.includes("data-close"), bar);
   assert.ok(bar.includes(" Nothing was changed.</p>"), "the planner's sentence lacks it, so the bar adds it");
   const said = (await c.act("pause-window-delete", { index: 7 })).json().html;
-  assert.ok(said.includes("No pause window at index 7 (have 1). Nothing was changed.</p>"), said);
+  assert.ok(said.includes("No pause window row 8 (have 1). Nothing was changed.</p>"), said);
   const already = (await c.act("pause-window-delete", { index: -1 })).json();
   assert.match(already.error, /; nothing was changed$/);
   assert.equal(already.html.match(/nothing was changed/gi).length, 1, "never said twice");
 });
 
-// Issue #737: until the Configuration page converts (PR 7a), the console names its rows by the 0-based index
-// its tables and forms show; the pi tools keep their 1-based "#1". A change reads "key: <b>before</b> to <b>after</b>".
-test("the console's Configuration sentences name a row by its index, the change in words with its values in bold; the pi tools still count from 1", async () => {
+// Human row numbers agree across the console's table, preview and Undo; hidden values retain their indexes.
+// A change reads "key: <b>before</b> to <b>after</b>".
+test("the console's Configuration sentences count rows from one, the change in words with its values in bold; machine indexes stay unchanged", async () => {
   const { paths } = deployment();
   const c = await start({ paths });
   const edit = (await c.act("trigger-edit", { index: 0, flow: "review" })).json();
-  assert.deepEqual(edit.summary, ["Edit trigger at index 0", "trigger at index 0 (label) flow: triage to review"]);
-  assert.ok(edit.html.includes("<p class=\"confirm__h\"><svg class=\"ic\" aria-hidden=\"true\"><use href=\"#i-done\"></use></svg>Edit trigger at index 0</p><ul class=\"confirm__list\"><li>trigger at index 0 (label) flow: <b>triage</b> to <b>review</b></li></ul>"), edit.html);
+  assert.deepEqual(edit.summary, ["Edit trigger row 1", "trigger row 1 (label) flow: triage to review"]);
+  assert.ok(edit.html.includes("<p class=\"confirm__h\"><svg class=\"ic\" aria-hidden=\"true\"><use href=\"#i-done\"></use></svg>Edit trigger row 1</p><ul class=\"confirm__list\"><li>trigger row 1 (label) flow: <b>triage</b> to <b>review</b></li><li>New deliveries use the edited fields. Jobs already in line retain their queued fields; a job missing a narrowing this trigger now sets is refused before spend and must be re-run.</li></ul>"), edit.html);
   const venue = (await c.act("trigger-edit", { index: 0, flow: "review", model: "m1" })).json();
-  assert.equal(venue.summary[1], "trigger at index 0 (label) flow: triage to review, model: - to m1");
-  assert.ok(venue.html.includes("<li>trigger at index 0 (label) flow: <b>triage</b> to <b>review</b>, model: <b>-</b> to <b>m1</b></li>"), venue.html);
+  assert.equal(venue.summary[1], "trigger row 1 (label) flow: triage to review, model: - to m1");
+  assert.ok(venue.html.includes("<li>trigger row 1 (label) flow: <b>triage</b> to <b>review</b>, model: <b>-</b> to <b>m1</b></li>"), venue.html);
   // The bar's line is the planner's words exactly, with only the bold added.
   const barLine = /<ul class="confirm__list"><li>([^]*?)<\/li>/.exec(venue.html)[1].replace(/<\/?b>/g, "");
   assert.equal(barLine, venue.summary[1]);
-  assert.match((await c.act("trigger-edit", { index: 0, flow: "x", model: "a b" })).json().error, /trigger at index 0/, "the loader's sentence names the row the same way");
-  assert.deepEqual((await c.act("trigger-delete", { index: 0 })).json().summary, ["Delete trigger at index 0", "Remove trigger at index 0 (label) flow: triage"]);
+  assert.match((await c.act("trigger-edit", { index: 0, flow: "x", model: "a b" })).json().error, /trigger row 1/, "the loader's sentence names the row the same way");
+  assert.deepEqual((await c.act("trigger-delete", { index: 0 })).json().summary, ["Delete trigger row 1", "Remove trigger row 1 (label) flow: triage"]);
   const pw = (await c.act("pause-window-edit", { index: 0, to: "03:00" })).json().summary;
-  assert.deepEqual(pw.slice(0, 2), ["Edit pause window at index 0", "pause window at index 0:"]);
+  assert.deepEqual(pw.slice(0, 2), ["Edit pause window row 1", "pause window row 1:"]);
   assert.match(pw[3], /^to \{"scope":"\*","from":"01:00","to":"03:00"/, "words, never an arrow");
-  assert.equal((await c.act("pause-window-delete", { index: 0 })).json().summary[0], "Delete pause window at index 0");
-  assert.equal((await c.act("limit-edit", { index: 0, limit: { day: 20 } })).json().summary[0], "Edit scoped limit at index 0");
-  assert.equal((await c.act("limit-delete", { index: 0 })).json().summary[0], "Delete scoped limit at index 0");
+  assert.equal((await c.act("pause-window-delete", { index: 0 })).json().summary[0], "Delete pause window row 1");
+  assert.equal((await c.act("limit-edit", { index: 0, limit: { day: 20 } })).json().summary[0], "Edit scoped limit row 1");
+  assert.equal((await c.act("limit-delete", { index: 0 })).json().summary[0], "Delete scoped limit row 1");
   // The pi tools' own planners, unchanged: the number a person counts by.
   assert.equal(WP.planTriggerDelete({ index: 0, paths }).plan.title, "Delete trigger #1");
   assert.equal(WP.planPauseWindowDelete({ index: 0, paths }).plan.title, "Delete pause window #1");
@@ -839,8 +842,8 @@ test("the bar shows every change and line the planner says: a trigger edit's bac
   const { paths } = deployment();
   const c = await start({ paths, a: { env: { PI_BACKENDS: "local" } } });
   const edit = (await c.act("trigger-edit", { index: 0, flow: "review", backend: "local" })).json();
-  assert.deepEqual(edit.summary, ["Edit trigger at index 0", "trigger at index 0 (label) flow: triage to review, backend: - to local"]);
-  assert.ok(edit.html.includes("<ul class=\"confirm__list\"><li>trigger at index 0 (label) flow: <b>triage</b> to <b>review</b>, backend: <b>-</b> to <b>local</b></li></ul>"), edit.html);
+  assert.deepEqual(edit.summary, ["Edit trigger row 1", "trigger row 1 (label) flow: triage to review, backend: - to local"]);
+  assert.ok(edit.html.includes("<ul class=\"confirm__list\"><li>trigger row 1 (label) flow: <b>triage</b> to <b>review</b>, backend: <b>-</b> to <b>local</b></li><li>New deliveries use the edited fields. Jobs already in line retain their queued fields; a job missing a narrowing this trigger now sets is refused before spend and must be re-run.</li></ul>"), edit.html);
   // No per-job cap anywhere, so a daily dollar cap leaves its window unbounded: the planner warns, never refuses.
   writeFileSync(paths.settingsFile, `${JSON.stringify({ maxTurns: 30 }, null, 2)}\n`);
   const s = (await c.act("setting-set", { key: "dailyCostUsd", value: "5" })).json();
@@ -1255,9 +1258,9 @@ test("the whole-list pause-windows refusals name a window by the index the Confi
   const { paths } = deployment();
   const c = await start({ paths });
   const say = async (windows) => (await c.act("pause-windows", { windows })).json().error;
-  assert.equal(await say(["x"]), "pause window at index 0 is not an object; nothing was changed");
-  assert.equal(await say([{ scope: "*", from: "01:00", to: "02:00" }, { scope: "*", from: "03:00", to: "04:00", colour: "red" }]), "pause window at index 1 has a field this file does not take (scope, from, to, tz, days, dateFrom, dateTo only); nothing was changed");
-  assert.equal(await say([{ scope: "*", from: 1, to: "02:00" }]), "pause window at index 0: from must be a string; nothing was changed");
+  assert.equal(await say(["x"]), "pause window row 1 is not an object; nothing was changed");
+  assert.equal(await say([{ scope: "*", from: "01:00", to: "02:00" }, { scope: "*", from: "03:00", to: "04:00", colour: "red" }]), "pause window row 2 has a field this file does not take (scope, from, to, tz, days, dateFrom, dateTo only); nothing was changed");
+  assert.equal(await say([{ scope: "*", from: 1, to: "02:00" }]), "pause window row 1: from must be a string; nothing was changed");
   const p = (await c.act("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }, { scope: "*", from: "07:00", to: "08:00" }] })).json();
   assert.equal(p.undo, "Put the previous pause windows back");
   assert.deepEqual(p.summary, ["Replace the pause windows", "1 window now, 2 after"], "a real plural");
@@ -1318,9 +1321,9 @@ test("the confirm button says what it does: a paid act's most, a destructive act
   assert.equal((await label("cancel-all-held")).confirmLabel, "Cancel 2 held jobs");
   assert.equal((await label("remove-all-failed")).confirmLabel, "Remove 1 job");
   // The Configuration page's rows by the index its table and forms show, until it converts (PR 7a).
-  assert.equal((await label("trigger-delete", { index: 0 })).confirmLabel, "Delete trigger at index 0");
-  assert.equal((await label("pause-window-delete", { index: 0 })).confirmLabel, "Delete pause window at index 0");
-  assert.equal((await label("limit-delete", { index: 0 })).confirmLabel, "Delete scoped limit at index 0");
+  assert.equal((await label("trigger-delete", { index: 0 })).confirmLabel, "Delete trigger row 1");
+  assert.equal((await label("pause-window-delete", { index: 0 })).confirmLabel, "Delete pause window row 1");
+  assert.equal((await label("limit-delete", { index: 0 })).confirmLabel, "Delete scoped limit row 1");
   assert.equal((await label("project-delete", { id: "web" })).confirmLabel, "Delete project web");
   const plain = await label("setting-set", { key: "maxTurns", value: "40" });
   assert.deepEqual([plain.confirmLabel, plain.danger, plain.undo], ["Confirm", false, "Set maxTurns back to 30"]);
@@ -1368,10 +1371,10 @@ test("an Undo is the way back as it was: a key that had no value is unset again,
   const f = await start({ paths: fresh });
   // A model a trigger did not name: an edit cannot remove it, so the way back is by hand.
   const edit = (await f.both("trigger-edit", { index: 0, flow: "review", model: "m1" })).confirm.json().change;
-  assert.deepEqual([edit.undo, edit.inverse], ["Edit trigger at index 0 back by hand: model had no value before, and an edit cannot remove one.", null]);
+  assert.deepEqual([edit.undo, edit.inverse], ["Edit trigger row 1 back by hand: model had no value before, and an edit cannot remove one.", null]);
   // Weekdays a pause window did not have: the same. (Its time zone it did have: the reader's default, UTC.)
   const pw = (await f.both("pause-window-edit", { index: 0, days: ["sat"] })).confirm.json().change;
-  assert.deepEqual([pw.undo, pw.inverse], ["Edit pause window at index 0 back by hand: days had no value before, and an edit cannot remove one.", null]);
+  assert.deepEqual([pw.undo, pw.inverse], ["Edit pause window row 1 back by hand: days had no value before, and an edit cannot remove one.", null]);
   // A resolver that REPLACED another: the console keeps no copy of the old path, so no inverse carries one.
   writeFileSync(fresh.settingsFile, `${JSON.stringify({ secretProfiles: { prod: "/opt/old-resolver" } }, null, 2)}\n`);
   const replaced = (await f.both("secret-profile-add", { name: "prod", path: "/opt/new-resolver" })).confirm.json().change;
@@ -1644,6 +1647,118 @@ test("cancel-queued refusals: the planner's sentence as it is, a Valkey that did
   assert.equal(unsure.confirm.status, 409);
   assert.match(unsure.confirm.json().html, /The change did not finish/);
   assert.ok(!unsure.confirm.json().html.includes("Nothing was changed"), unsure.confirm.json().html);
+});
+
+test("trigger add previews the actual per-run reserve and authorization without marking the file write paid (#750)", async () => {
+  const { paths } = deployment();
+  const modelEndpoints = { endpoints: [{ id: "ollama", host: "host.docker.internal", port: 11434, slots: 2 }], models: { providers: { ollama: { baseUrl: "http://host.docker.internal:11434/v1", api: "openai-completions", models: [{ id: "qwen3" }] } } } };
+  const estimates = [];
+  const rm = { ...RM, estimateReserve: (run, inputs) => { estimates.push({ run, inputs }); return RM.estimateReserve(run, inputs); } };
+  const c = await start({ paths, a: { rm, env: { PI_MAX_COST_USD: "9" }, modelEndpoints: () => modelEndpoints, builtinModel: () => null } });
+  const free = await c.act("trigger-add", { trigger: { kind: "comment", forge: "gitlab", phrase: "@pi", flow: "fix", provider: "ollama", model: "qwen3", maxTurns: 7 } });
+  assert.equal(free.status, 200, free.text);
+  assert.equal(free.json().paid, false, "the edit itself starts no run");
+  assert.match(free.json().summary.join("\n"), /Each future run is paid\. It holds 1 job slot and \$0\.00/);
+  assert.match(free.json().summary.join("\n"), /Developer access \(30\) or higher/);
+  assert.equal(estimates[0].run.maxTurns, 7);
+  assert.equal(estimates[0].inputs.modelEndpoints, modelEndpoints);
+  assert.equal(estimates[0].inputs.overlay.maxCostUsd, "2");
+  assert.equal(estimates[0].inputs.env.PI_MAX_COST_USD, "9");
+  const paid = await c.act("trigger-add", { trigger: { kind: "pull_request", forge: "github", action: ["review_submitted"], reviewState: ["approved"], flow: "review", provider: "anthropic", model: "priced-model" } });
+  assert.equal(paid.status, 200, paid.text);
+  assert.match(paid.json().summary.join("\n"), /reviewer's association must be OWNER, MEMBER or COLLABORATOR/);
+  assert.match(paid.json().summary.join("\n"), /1 job slot and \$2\.00/);
+  assert.doesNotMatch(paid.json().summary.join("\n"), /\$9\.00/, "overlay precedence is the worker's reserve rule");
+  for (const [trigger, who] of [
+    [{ kind: "cron", id: "daily", pattern: "0 6 * * *", folder: "/srv/repo", task: "t", flow: "fix" }, /scheduler starts it on its schedule/],
+    [{ kind: "label", labels: ["go"], flow: "fix" }, /label event supplies the approval/],
+    [{ kind: "pull_request", action: ["opened"], flow: "review" }, /pull request author's association must be OWNER, MEMBER or COLLABORATOR/],
+    [{ kind: "pull_request", action: ["labeled"], labels: ["ready"], flow: "review" }, /collaborator-applied matching label supplies approval/],
+    [{ kind: "comment", phrase: "@pi", flow: "fix" }, /commenter's GitHub association must be OWNER, MEMBER or COLLABORATOR/],
+    [{ kind: "issue", action: ["closed"], number: 7, once: true, flow: "fix" }, /closer must have repository write access/],
+    [{ kind: "comment", forge: "forgejo", phrase: "@pi", flow: "fix" }, /owner, admin or write permission/],
+    [{ kind: "comment", forge: "azure", repository: "web", phrase: "@pi", flow: "fix" }, /Azure DevOps project member/],
+  ]) {
+    const preview = await c.act("trigger-add", { trigger });
+    assert.equal(preview.status, 200, preview.text);
+    assert.match(preview.json().summary.join("\n"), who);
+  }
+  assert.equal(c.audit.rows.filter((r) => r.action === "write").length, 0, "preview starts and writes nothing");
+  const edit = await c.act("trigger-edit", { index: 0, flow: "review", progress: true });
+  assert.match(edit.json().html, /Jobs already in line retain their queued fields/);
+  assert.match(edit.json().html, /missing a narrowing this trigger now sets is refused before spend/);
+});
+
+test("every console trigger add writes exactly the tool planner's entry, including its secret-bundle opt-out (#750)", async () => {
+  const entries = [
+    { kind: "cron", id: "nightly", pattern: "0 6 * * *", folder: "/srv/repo", flow: "fix", task: "operator task", maxTurns: 7, progress: true, steer: true },
+    { kind: "label", forge: "github", labels: ["bug"], flow: "fix", provider: "anthropic", model: "claude-sonnet-4-5", maxTurns: 8 },
+    { kind: "comment", forge: "gitlab", phrase: "/agent", flow: "fix", statusComment: true, recover: true, steer: false },
+    { kind: "pull_request", forge: "github", action: ["review_submitted"], reviewState: ["approved"], flow: "review" },
+    { kind: "issue", forge: "github", action: ["closed"], number: 7, once: true, flow: "follow-up" },
+  ];
+  for (const trigger of entries) {
+    const { paths } = deployment();
+    const planned = WP.planTriggerAdd({ params: trigger, paths, env: {} });
+    assert.ok(planned.plan, planned.refusal);
+    const c = await start({ paths });
+    const result = await c.both("trigger-add", { trigger });
+    assert.equal(result.confirm.status, 200, result.confirm.text);
+    const actual = JSON.parse(read(paths.triggersPath)).triggers.at(-1);
+    assert.deepEqual(actual, planned.plan.entry, `${trigger.kind}: same entry as add tool`);
+    assert.equal(actual.run.secretBundle, false);
+    assert.match(result.preview.html, /secretBundle(?:&quot;|"):\s*false/, "the person sees the opt-out before approving");
+  }
+});
+
+test("console trigger edit writes all shared tool fields and its Undo restores numeric and false values (#750)", async () => {
+  const { paths } = deployment();
+  const before = { on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", maxTurns: 30, progress: false, statusComment: true, recover: true, steer: true, secrets: { TOKEN: "op://vault/secret-ref-canary" } } };
+  writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [before] }));
+  const c = await start({ paths });
+  const values = { index: 0, flow: "review", maxTurns: 12, progress: true, statusComment: false, recover: false, steer: false };
+  const result = await c.both("trigger-edit", values);
+  assert.equal(result.confirm.status, 200, result.confirm.text);
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)).triggers[0].run, { ...before.run, ...Object.fromEntries(Object.entries(values).filter(([k]) => k !== "index")) });
+  const inverse = result.confirm.json().change.inverse;
+  assert.deepEqual(inverse, { action: "trigger-edit", body: { index: 0, flow: "fix", maxTurns: 30, progress: false, statusComment: true, recover: true, steer: true } });
+  const undone = await c.both(inverse.action, inverse.body);
+  assert.equal(undone.confirm.status, 200, undone.confirm.text);
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)).triggers[0], before);
+  const invalid = await c.act("trigger-edit", { index: 0, flow: "fix", maxTurns: 0 });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.json().error, /maxTurns/);
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)).triggers[0], before, "invalid edit writes nothing");
+});
+
+test("Fire now uses paid single-use confirmation, protects the audit boundary and binds its trigger index (#750)", async () => {
+  const { paths } = deployment();
+  let queued = 0;
+  const rm = { ...RM,
+    planTriggerFire: async ({ index }) => ({ plan: { index, schedulerId: "daily", queue: "pi-jobs", fileDigest: "a".repeat(64), reserve: { slots: 1, dollarsMicros: 2_000_000, capMicros: 2_000_000, zeroRated: false }, summary: [`Fire cron trigger row ${index + 1} (daily) now, once`] } }),
+    enqueueTriggerFire: async (p) => { assert.equal(p.index, 0); queued++; return { ok: true, jobId: "manual:daily:1", queue: "pi-jobs" }; },
+  };
+  const c = await start({ paths, a: { rm } });
+  const viewer = await c.cookieFor(VIEW_TOKEN);
+  assert.equal((await c.act("trigger-fire", { index: 0 }, viewer)).status, 403);
+  const p = await c.act("trigger-fire", { index: 0 });
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.json().paid, true);
+  assert.equal(p.json().confirmLabel, "Fire now for up to $2.00");
+  assert.equal(queued, 0);
+  assert.equal((await c.confirm("trigger-fire", p.json().ticket)).status, 200);
+  assert.equal(queued, 1);
+  assert.equal((await c.confirm("trigger-fire", p.json().ticket)).status, 409);
+  const blocked = await c.act("trigger-fire", { index: 0 });
+  c.audit.failNext = 1;
+  assert.equal((await c.confirm("trigger-fire", blocked.json().ticket)).status, 500);
+  assert.equal(queued, 1, "audit failure queues nothing");
+  const stale = await c.act("trigger-fire", { index: 0 });
+  c.advance(300001);
+  assert.equal((await c.confirm("trigger-fire", stale.json().ticket)).status, 409);
+  assert.equal(queued, 1, "expired ticket queues nothing");
+  const ro = await start({ paths, a: { rm }, readOnly: true });
+  assert.equal((await ro.act("trigger-fire", { index: 0 })).status, 403);
 });
 
 test("managed forks use single-use paid confirmation, preserve point binding and redact the message from audit", async () => {
@@ -2322,9 +2437,11 @@ test("the controls: drawn for an operator, never for a viewer or on a read-only 
     parked: [{ jobId: "gh-4", kind: "github", target: "o/r#2", parkedAt: 1, ageMs: 1, pendingScan: { jobId: null } }],
     triggers: { triggers: [] },
   };
-  const panels = [fleetQueues, fleetActive, fleetHeld, fleetFailed, parkedQuestions, configTriggers];
+  const panels = [fleetQueues, fleetActive, fleetHeld, fleetFailed, parkedQuestions];
   // The parked answer form follows the planner's check the page read for the row (issue #737), as the page hands it.
   const view = (role, readOnly = false) => ({ data: { snapshot, now: 10, parkedChecks: { "gh-4": { ok: true } } }, role, readOnly, env: {}, now: 10, query: {} });
+  assert.match(String(configTriggers(view("operator"))), /href="\/config\/trigger-add"/, "an empty trigger list offers its editor");
+  for (const role of ["viewer", "operator"]) assert.doesNotMatch(String(configTriggers(view(role, true))), /href="\/config\/trigger-add"/, "read-only hides the add action");
   for (const render of panels) {
     assert.match(String(render(view("operator"))), /data-action="/, `${render.name || "panel"} has controls for an operator`);
     assert.ok(!String(render(view("viewer"))).includes("data-action"), "none for a viewer");

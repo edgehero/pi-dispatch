@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LEGACY_PAGES, PAGES, panelIds, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
+import { PAGES, panelIds, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { ICON_NAMES, SPRITE } from "../src/console/pulse-icons.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { confirmSlotHtml, doneBannerHtml, heldNoteHtml } from "../src/console/confirm-view.mjs";
@@ -9,7 +9,7 @@ import { html } from "../src/console/html.mjs";
 import { STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
 import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "../src/console/session-ends.mjs";
 import { LINK_NOTICES, LINK_STATES, LISTEN_FOOTERS, NO_SCRIPT_TEXT, linkContent, signInContent } from "../src/console/signin.mjs";
-import { HEADLINE_ID, LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, SEARCH_HREF, SHELL_PANEL_IDS, frameHtml, legacyWrap, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
+import { HEADLINE_ID, LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, SEARCH_HREF, SHELL_PANEL_IDS, frameHtml, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
 import { RESERVED_IDS, SEARCH_ID } from "../src/console/kit.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "../src/console/theme.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
@@ -78,7 +78,7 @@ test("every page, both roles: the pills in order, aria-current on the screen sho
       assert.equal(nav.includes('<details class="more">'), role === "operator", `${name}.${role}: More is the operator's`);
       if (role === "viewer") assert.ok(!html.includes('href="/audit"'), `${name}: a viewer is never offered the audit log`);
       const current = [...nav.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]);
-      const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : name === "watch" || name === "watch-board" ? "config" : name;
+      const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add"].includes(name) ? "config" : name;
       if (PAGES[here].auth === "operator" && role !== "operator") assert.deepEqual(current, [], `${name}.${role}: the refused page has no pill to mark`);
       else assert.deepEqual(current, [PAGES[here].path], `${name}.${role}: the one current pill`);
     }
@@ -286,47 +286,11 @@ test("the Parked count: from the snapshot or the reader's count, drawn only when
   assert.throws(() => shellHtml("nope", {}, null), /no such page/);
 });
 
-test("LEGACY_PAGES is a written-out frozen list: a page added to PAGES later is not legacy by default", () => {
-  // The list as written: a copy derived from PAGES would make every new page start in the old markup. PR 2
-  // converted the audit log, the two sign-in pages and the operators-only refusal; PR 3 the overview; PR 4 the runs and
-  // parked pages.
-  assert.deepEqual(LEGACY_PAGES, ["config"]);
-  assert.ok(Array.isArray(LEGACY_PAGES) && Object.isFrozen(LEGACY_PAGES), "an array, frozen: a frozen Set still takes .add()");
-  assert.throws(() => LEGACY_PAGES.push("models"), TypeError);
-  assert.equal(new Set(LEGACY_PAGES).size, LEGACY_PAGES.length);
-  for (const name of LEGACY_PAGES) assert.ok(Object.hasOwn(PAGES, name), `${name} is a screen`);
-  // A page PAGES does not hold is not legacy, however it is spelled; nor are the pages PR 2 and PR 3 converted.
-  for (const name of ["overview", "audit", "login", "login-code", "forbidden", "error", "models", "watch", "secrets", "connections", "project", "host", "Overview", "", "__proto__", "constructor"]) assert.equal(LEGACY_PAGES.includes(name), false, name);
-  assert.equal(String(legacyWrap("audit", html`<p>x</p>`)), "<p>x</p>", "a converted page's content is as it is");
-  assert.equal(String(legacyWrap("overview", html`<p>x</p>`)), "<p>x</p>");
-  assert.equal(String(legacyWrap("fleet", html`<p>x</p>`)), "<p>x</p>");
-  assert.equal(String(legacyWrap("config", html`<p>x</p>`)), '<div class="legacy"><p>x</p></div>');
-});
-
-test("the legacy wrapper: each section of a legacy page in a .legacy of its own, the frame and the slot outside every one", async () => {
-  for (const name of Object.keys(PAGES)) {
-    for (const role of ROLES) {
-      const { html } = await draw(name, { role });
-      const key = `${name}.${role}`;
-      const spans = boxSpans(html);
-      const sections = [...html.matchAll(/<section id="(p-[a-z0-9-]+|transcript)"(?: data-panel| class="transcript-section")>/g)];
-      if (!LEGACY_PAGES.includes(name)) {
-        assert.deepEqual(spans, [], `${key}: converted, no wrapper`);
-        continue;
-      }
-      assert.ok(sections.length > 0, `${key} has sections`);
-      assert.equal(spans.length, sections.length, `${key}: one wrapper per section`);
-      for (const [i, m] of sections.entries()) {
-        const [a, b] = spans[i];
-        assert.equal(m.index, a + '<div class="legacy">'.length, `${key}: ${m[1]} opens its own wrapper`);
-        assert.equal(html.slice(b - "</section></div>".length, b), "</section></div>", `${key}: and closes it`);
-      }
-      assert.ok(html.indexOf("<h1") < spans[0][0], `${key}: the title bar is the shell's, outside them`);
-      for (const needle of ['id="confirm-slot"', 'id="live-note"', '<template id="held-note">']) {
-        const at = html.indexOf(needle);
-        if (at !== -1) assert.ok(!spans.some(([a, b]) => at > a && at < b), `${key}: ${needle} is outside every wrapper`);
-      }
-    }
+test("every screen places its panels directly in the Pulse frame", async () => {
+  for (const name of Object.keys(PAGES)) for (const role of ROLES) {
+    const { html } = await draw(name, { role });
+    assert.deepEqual(boxSpans(html), [], `${name}.${role}: no compatibility wrappers`);
+    assert.doesNotMatch(html, /class="legacy"|--pd-/);
   }
 });
 
@@ -483,7 +447,9 @@ test("a page drawn once says when, beside Reload to its own address; a live page
   }
   const reload = (q) => `<a class="btn btn--sm btn--ghost" href="${q}"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a>`;
   const drawn = `<div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> \u00b7 not live</span></span>`;
-  assert.ok((await draw("config", { data: { now: NOW } })).html.includes(`<h1>Configuration</h1></div>${drawn}${reload("/config")}</div></div>`));
+  const config = (await draw("config", { data: { now: NOW } })).html;
+  assert.ok(config.includes("<h1>Configuration</h1>"));
+  assert.ok(config.includes(`${drawn}${reload("/config")}</div></div>`));
   // Reload is the page's own address, with its query as the page parser writes it back.
   const insights = (await draw("insights", { data: { now: NOW }, query: parsePageQuery("insights", "range=7d").query })).html;
   assert.ok(insights.includes(reload("/insights?range=7d")), "the query kept");
@@ -523,13 +489,13 @@ test("the read-only banner on every page of a read-only console; the done banner
       for (const readOnly of [false, true]) {
         const { html } = await draw(name, { role, readOnly });
         assert.equal(count(html, banner), readOnly ? 1 : 0, `${name}.${role}.${readOnly}`);
-        if (readOnly) assert.ok(html.indexOf(banner) > html.indexOf("<h1") && html.indexOf(banner) < html.indexOf('<section id="p-'), `${name}: under the title bar, above the panels`);
+        if (readOnly) assert.ok(html.indexOf(banner) > html.indexOf("<h1") && html.indexOf(banner) < html.search(/<section id="(?:p-|cf-)/), `${name}: under the title bar, above the panels`);
       }
     }
     const done = String(doneBannerHtml(flash));
     const { html } = await draw(name, { flash });
     assert.equal(count(html, done), 1, `${name}: the done banner, once`);
-    assert.ok(html.indexOf(done) < html.indexOf('<section id="p-'), `${name}: above the panels`);
+    assert.ok(html.indexOf(done) < html.search(/<section id="(?:p-|cf-)/), `${name}: above the panels`);
     assert.ok(!(await draw(name)).html.includes("Changed by"), `${name}: none without a flash`);
   }
   // The order: the read-only banner, then the done banner, then the live notes, then the panels.

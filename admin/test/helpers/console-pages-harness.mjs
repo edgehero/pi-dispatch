@@ -78,6 +78,8 @@ export const SHOTS = Object.freeze([
   ["fleet", "fleet", ""],
   ["host", "host", "name=build3"],
   ["venue", "venue", "name=podman"],
+  ["trigger", "trigger", "index=2"],
+  ["trigger-add", "trigger-add", ""],
   ["config", "config", ""],
   ["watch", "watch", "rule=shop-5xx"],
   ["watch-board", "watch-board", "rule=shop-5xx&finding=finding-1"],
@@ -408,6 +410,9 @@ async function renderInChild() {
     // As serve builds it (`cli.mjs`); the overview's load asks it for the waiting jobs (issue #737, `PAGE_READS`).
     reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW, readLiveHostsFn: (redis, opts) => W.hostRegistry.readLiveHosts(atBeat(redis), opts) });
     const deps = {
+      paths: fleetPaths,
+      // The fixture serves GitHub webhooks. Presence is metadata, never a credential in rendered output.
+      triggerEditor: () => RM.readTriggerEditor({ paths: fleetPaths, env: { ...env, WEBHOOK_SECRET: "fixture-webhook-configured" } }),
       // The transport endpoint comes from the test environment, not the fixture deployment. Keep its display
       // deterministic across local/CI ports; read-model tests separately assert the real urlShown projection.
       fleet: { ...reader, snapshot: async (...args) => ({ ...await reader.snapshot(...args), valkey: "redis://valkey:6379" }) },
@@ -438,6 +443,7 @@ async function renderInChild() {
       audit: ({ limit, before, positions }) => readConsoleAudit({ logsDir: paths.logs, limit, before, positions }),
       auditVerify: () => ({ ...verifyConsoleAudit({ logsDir: paths.logs, withLast: true }), checkedAt: NOW }),
       subscriptions: () => RM.readSubscriptions({ subscriptionsPath: paths.subs }),
+      configLocations: () => RM.configLocationsOf({ paths: fleetPaths, deploymentDir: work }),
       env: { ...env, GITLAB_URL: "https://gitlab.example.com" },
       now: () => NOW,
     };
@@ -647,7 +653,7 @@ export function assertClean(key, html) {
 export function assertPanelsMatch(key, page) {
   assert.ok(page.panels.length > 0, `${key} has panels`);
   for (const { id, html } of page.panels) {
-    assert.match(id, /^p-[a-z-]+$/, `${key}: panel id ${id}`);
+    assert.match(id, /^(?:p|cf)-[a-z-]+$/, `${key}: panel id ${id}`);
     const tag = SHELL_PANEL_IDS.includes(id) ? "span" : "section";
     assert.ok(page.html.includes(`<${tag} id="${id}" data-panel>${html}</${tag}>`), `${key}: panel ${id} is the page's ${tag}, byte for byte`);
   }

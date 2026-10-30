@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, capitalised, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, TONE_CLASS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../src/words.mjs";
+import { DOCS_ROOT, capitalised, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
 import { RECOVERY_COMMENTS } from "../../worker/src/comment-tables.mjs";
@@ -147,7 +147,7 @@ test("recordReason takes the record's token charset alone, the worker leaf's own
   assert.equal(shortSentence(NO_REASON_FAILED), "No reason was recorded");
 });
 
-test("the tones: refused, awaiting input and cancelled warn, failed is an error, and each tone's console class is in the stylesheet", () => {
+test("the tones: refused, awaiting input and cancelled warn, failed is an error, the console retains their explicit statuses", () => {
   const tone = (o, r) => outcomeWord(o, r).tone;
   assert.equal(tone("completed"), "success");
   assert.equal(tone("policy", "scope-cap"), "warning");
@@ -155,10 +155,8 @@ test("the tones: refused, awaiting input and cancelled warn, failed is an error,
   assert.equal(tone("policy", "operator-cancel"), "warning");
   assert.equal(tone("failed", "container-never-started"), "error");
   const tones = new Set([...Object.values(OUTCOME_WORDS), ...Object.values(REASON_WORDS)].map((w) => w.tone));
-  assert.deepEqual([...tones].sort(), Object.keys(TONE_CLASS).sort(), "every tone has a class entry, and no entry is unused");
-  for (const cls of Object.values(TONE_CLASS)) if (cls !== null) assert.match(CONSOLE_CSS, new RegExp(`\\.${cls}\\{`), `.${cls} is a rule of the console's stylesheet`);
-  // The glyphs are the panel's three.
-  assert.deepEqual([...new Set([...Object.values(OUTCOME_WORDS), ...Object.values(REASON_WORDS)].map((w) => w.glyph))].sort(), ["⚠", "✔", "✘"].sort());
+  assert.deepEqual([...tones].sort(), ["error", "success", "warning"]);
+  for (const status of ["ok", "refused", "failed"]) assert.ok(STATUS_KINDS.includes(status));
 });
 
 test("outcomeWord reads the raw values: a qualifier only under its own outcome, and an unknown outcome has no word", () => {

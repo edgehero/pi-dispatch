@@ -118,6 +118,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkConfigBrowser } from "./console-config-browser.mjs";
 import { checkSpendBrowser } from "./console-spend-browser.mjs";
 import { frozenDateSource, openChrome } from "../../launch/chrome-pipe.mjs";
 import { findOnPath } from "../../launch/server-binary.mjs";
@@ -1791,6 +1792,11 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		if (docs.some((d) => d.page === "insights-flows")) {
 			current = "spend-browser";
 			results.push(...await checkSpendBrowser({ browser, docs, origin, openPage, clockMs, shots }));
+			after();
+		}
+		if (docs.some((d) => d.page === "trigger-add")) {
+			current = "config-browser";
+			results.push(...await checkConfigBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
 		}
 		for (const s of strays) {

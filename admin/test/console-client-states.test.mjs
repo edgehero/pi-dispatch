@@ -7,10 +7,11 @@ import { actForm, area, editor, field } from "../src/console/panels/common.mjs";
 import { CONSOLE_SCRIPT, RETRY_MS, SIGN_IN_GAVE_UP, SIGN_IN_RETRY_FOR_MS, SIGN_IN_TRIES_MAX, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_TOKENS_BODY } from "../src/console/script.mjs";
 import { PERSON_CHANGED } from "../src/console/server.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, SIGN_IN_NOTICES, STREAM_ENDS, STREAM_SHUTDOWN } from "../src/console/session-ends.mjs";
-import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF, legacyWrap, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
+import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
 import { errorPage } from "../src/console/error-pages.mjs";
 import * as ui from "../src/console/kit.mjs";
 import { runTranscriptSection } from "../src/console/transcript.mjs";
+import * as configUi from "../src/console/panels/config-ui.mjs";
 import { CLIENT_STATES, LEDGER_CARDS, T } from "./helpers/client-states.mjs";
 import { parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
 
@@ -37,8 +38,7 @@ function fleetPage({ flash = null, maxStreams = 4 } = {}) {
   const failed = html`<section id="p-fleet-failed" data-panel><h2>Failed jobs</h2><div class="scroll"><table class="grid"><tbody><tr><td>gh-1</td><td class="acts">${actForm("retry-failed", { hidden: [["jobId", "gh-1"], ["queue", "jobs"]], label: "Retry" })}</td></tr></tbody></table></div>${editor("Retry failed jobs in bulk", actForm("retry-all-failed", { fields: field("repo", "Repository"), label: "Preview retry of all" }))}</section>`;
   const windows = html`<section id="p-fleet-windows" data-panel><h2>Pause windows</h2>${actForm("pause-windows", { fields: area("windows", "Pause windows, as JSON", { type: "json" }), label: "Preview the windows" })}</section>`;
   const ctx = { session: OPERATOR, readOnly: false, data: { parkedCount: 3, now: NOW }, query: {}, theme: null, flash, maxStreams };
-  // Exercise the legacy slot branch through the remaining config wrapper after Fleet migrates.
-  const body = shellHtml("fleet", ctx, html`${legacyWrap("config", state)}${legacyWrap("config", failed)}${legacyWrap("config", windows)}`);
+  const body = shellHtml("fleet", ctx, html`${state}${failed}${windows}`);
   return String(page({ title: "pi-dispatch console: Fleet", name: "fleet", body, live: "fleet", query: "" }));
 }
 
@@ -103,11 +103,10 @@ stateTest(T.previewing, async () => {
   assert.equal(slot.hidden, true, "drawn hidden");
   const skeleton = slot.innerHTML;
   w.submit(formOf(w, "fleet-pause"));
-  const wrapper = w.document.getElementById("p-fleet-state").parentElement;
-  assert.equal(wrapper.className, "legacy", "the panel sits in a wrapper of its own");
-  assert.ok(wrapper.nextElementSibling === slot, "the slot goes right after the wrapper of the panel that asked");
+  const panel = w.document.getElementById("p-fleet-state");
+  assert.ok(panel.nextElementSibling === slot, "the slot goes right after the panel that asked");
   assert.equal(slot.parentElement.id, "main");
-  assert.deepEqual(["[data-panel]", ".legacy", "td"].map((q) => slot.closest(q) === null), [true, true, true], "never inside a panel, a legacy wrapper or a table cell");
+  assert.deepEqual(["[data-panel]", "td"].map((q) => slot.closest(q) === null), [true, true], "never inside a panel or a table cell");
   assert.ok(shown(slot));
   assert.equal(text(slot.querySelector("[data-slot-title]")), "Previewing: Pause the fleet");
   assert.equal(slot.querySelector("[data-confirm]").disabled, true, "Confirm waits for a ticket");
@@ -119,7 +118,7 @@ stateTest(T.previewing, async () => {
   assert.equal(w.fetch.calls[0].init.headers[PERSON_HEADER], "ops.operator");
   // A form in a table cell: the slot goes after its panel, out of the cell and the scroll box.
   w.submit(formOf(w, "retry-failed"));
-  assert.ok(w.document.getElementById("p-fleet-failed").parentElement.nextElementSibling === slot);
+  assert.ok(w.document.getElementById("p-fleet-failed").nextElementSibling === slot);
   assert.ok(slot.closest("td") === null);
   assert.equal(text(slot.querySelector("[data-slot-title]")), "Previewing: Retry");
   assert.deepEqual(w.fetch.calls[1].body, { jobId: "gh-1", queue: "jobs" }, "the form's own fields, typed as drawn");
@@ -564,7 +563,7 @@ stateTest(T.refusedPreview, async () => {
   w.submit(formOf(w, "pause-windows"));
   assert.equal(w.fetch.calls.length, before, "nothing was sent");
   assert.equal(text(slot.querySelector("[data-slot-message]")), "windows is not valid JSON; nothing was sent.");
-  assert.ok(w.document.getElementById("p-fleet-windows").parentElement.nextElementSibling === slot);
+  assert.ok(w.document.getElementById("p-fleet-windows").nextElementSibling === slot);
 });
 
 stateTest(T.refusedConfirm, async () => {
@@ -1583,4 +1582,26 @@ test("the client-state table holds every state element of the ConfirmStates, Liv
       assert.ok(CLIENT_STATES.some((r) => r.card === card && r.state === el.el), `${card}: the state "${el.el}" is in helpers/client-states.mjs with the test that reaches it`);
     }
   }
+});
+
+stateTest("inline configuration errors keep unique stable associations across two row forms", async () => {
+  const forms = [0,1].map(index => configUi.actForm("pause-window-edit", {hidden:[["index",index,"int"]],fields:configUi.field("scope","Scope"),label:`Preview row ${index+1}`}));
+  const markup = String(page({title:"Configuration",name:"config",body:shellHtml("config",{session:OPERATOR,data:{now:NOW},query:{},theme:null},html`<section id="cf-pause-windows" data-panel>${forms}</section>`)}));
+  const w=boot(markup);
+  const rowForms=w.document.querySelectorAll('form[data-action="pause-window-edit"]');
+  const controls=rowForms.map(f=>f.querySelector('[name="scope"]'));
+  const ids=[];
+  for(let i=0;i<2;i++) {
+    w.submit(rowForms[i]);
+    await w.fetch.open("/api/act/pause-window-edit/preview").answer(400,{refusal:`scope is invalid on row ${i+1}`});
+    ids.push(controls[i].getAttribute("aria-describedby"));
+    assert.equal(controls[i].getAttribute("aria-invalid"),"true");
+    assert.match(w.document.getElementById(ids[i]).textContent,new RegExp(`row ${i+1}`));
+    assert.ok(rowForms[i].contains(w.document.getElementById(ids[i])),"the association stays in its own form");
+  }
+  assert.notEqual(ids[0],ids[1],"two failed forms never share an error id");
+  w.submit(rowForms[0]);
+  await w.fetch.open("/api/act/pause-window-edit/preview").answer(400,{refusal:"scope is still invalid on row 1"});
+  assert.equal(controls[0].getAttribute("aria-describedby"),ids[0],"the same slot keeps its id on a later refusal");
+  assert.match(w.document.getElementById(ids[1]).textContent,/row 2/,"another form's retained error stays associated");
 });

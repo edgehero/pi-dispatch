@@ -9,6 +9,9 @@ import {
   createFleetReader,
   enqueueParkedAnswer,
   enqueueRerun,
+  planTriggerFire,
+  enqueueTriggerFire,
+  checkDispatchRun,
   enqueueSteer,
   estimateReserve,
   planFailedBulk,
@@ -1274,4 +1277,58 @@ test("failed-job and steering refusals keep the result before a long job id", as
   const missing = await retryFailedJob({ ...fakes, queueFn: (_c, { name }) => ({ name, getJob: async () => null, close: async () => {} }), jobId, expect: { attemptsMade: 1, finishedOn: 1 } });
   assert.match(missing.invalid.slice(0, 200), /^Nothing was done;/);
   assert.ok(missing.invalid.endsWith(jobId));
+});
+
+
+test("Fire now uses the served BullMQ scheduler, preserves the cron template, and shares dispatch_run's hourly counter (#750)", live, async () => {
+  const v = await freshValkey();
+  try {
+    const now = () => Date.UTC(2026, 9, 20, 12, 0, 10);
+    const folder = gitRepo("pd-750-fire-live-");
+    mkdirSync(join(folder, ".pi", "skills", "fix"), { recursive: true });
+    writeFileSync(join(folder, ".pi", "skills", "fix", "SKILL.md"), "---\nname: fix\ndescription: test\nai-trigger: allow\n---\nFix the fixture.\n");
+    execFileSync("git", ["-C", folder, "add", ".pi"]);
+    execFileSync("git", ["-C", folder, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "flow"]);
+    const triggersPath = join(tempDir("pd-750-fire-config-"), "triggers.json");
+    const trigger = { on: { type: "cron", id: "fire-live", pattern: "0 6 * * *" }, run: { kind: "local", folder, flow: "fix", task: "private task", maxTurns: 7, progress: true, steer: true, maxCostUsd: "1" } };
+    writeFileSync(triggersPath, JSON.stringify({ triggers: [trigger] }));
+    const queue = await v.q("pi-jobs@mini1");
+    const options = { index: 0, url: URL12, triggersPath, env: { PI_WORKER_NAME: "mini1", PI_MAX_COST_USD: "2" }, grantsEnv: { VALKEY_URL: URL12, PI_DISPATCH_RUN_ROOTS: folder, PI_DISPATCH_RUN_PER_HOUR: "3" }, now };
+    assert.match((await planTriggerFire(options)).refusal, /schedule is not in/);
+    await queue.upsertJobScheduler("fire-live", { pattern: "0 6 * * *" }, { name: "local", data: { kind: "local", folder, flow: "fix" } });
+    const { plan } = await planTriggerFire(options);
+    assert.ok(plan);
+    assert.equal((await v.redis.keys("dispatch-run:*" )).length, 0, "preview consumes no hourly allowance");
+    assert.match((await enqueueTriggerFire(plan, { ...options, grantsEnv: {} })).refusal, /folder not under PI_DISPATCH_RUN_ROOTS/);
+    writeFileSync(join(folder, "README"), "dirty\n");
+    assert.match((await enqueueTriggerFire(plan, options)).refusal, /uncommitted changes/);
+    execFileSync("git", ["-C", folder, "checkout", "--", "README"]);
+    const skill = join(folder, ".pi", "skills", "fix", "SKILL.md");
+    const commitSkill = () => {
+      execFileSync("git", ["-C", folder, "add", ".pi"]);
+      execFileSync("git", ["-C", folder, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "gate"]);
+    };
+    writeFileSync(skill, "---\nname: fix\ndescription: test\n---\nNo opt-in.\n");
+    commitSkill();
+    assert.match((await enqueueTriggerFire(plan, options)).refusal, /not AI-triggerable/);
+    writeFileSync(skill, "---\nname: fix\ndescription: test\nai-trigger: allow\n---\nFix the fixture.\n");
+    commitSkill();
+    assert.equal((await v.redis.keys("dispatch-run:*")).length, 0, "determinate confirm refusals precede the rate write");
+    const results = await Promise.all([enqueueTriggerFire(plan, options), enqueueTriggerFire(plan, options)]);
+    assert.equal(results.filter((r) => r.ok).length, 1);
+    assert.equal(results.filter((r) => r.deduplicated).length, 1);
+    const made = results.find((r) => r.ok);
+    const job = await queue.getJob(made.jobId);
+    assert.equal(job.data.task, "private task");
+    assert.equal(job.data.maxTurns, 7);
+    assert.equal(job.data.steer, true);
+    assert.equal(job.data.progress, true);
+    assert.equal(job.data.trigger.id, "fire-live");
+    await job.remove();
+    assert.equal((await enqueueTriggerFire(plan, options)).deduplicated, true, "removing a job does not reopen the minute");
+    // The refused duplicate consumed the third attempt, like dispatch_run's refused attempts; both
+    // paths address the SAME rolling-hour counter, rather than giving Fire now its own allowance.
+    const check = await checkDispatchRun({ folder, flow: "fix", env: options.grantsEnv, now });
+    assert.match(check.refused, /hourly limit \(3\)/);
+  } finally { await v.done(); }
 });

@@ -4,9 +4,8 @@ One trigger on its own page: what starts it, every run field with where it can c
 - **Start.** The title says the trigger in one line: kind, phrase, flow, forge and row number (rows are numbered 1 to 7 everywhere). Open in Runs filters the Runs page to it. Delete is outlined red until its confirm step.
 - **What starts it.** Kind, phrase, how a comment can pick another flow, the one-comment-trigger-per-forge rule, and who may fire it.
 - **Runs it started.** The count and metered spend for 24 hours, then the last five runs with project, outcome and reason sentence.
-- **What it runs.** Every `run` field, set or not, in three groups:
-  - *Edit here*: flow, venue and model, which the Edit form changes;
-  - *When adding*: progress, statusComment, steer and recover, which the add form sets;
+- **What it runs.** Every `run` field, set or not, in two groups:
+  - *Edit here*: flow, venue, provider, model, maxTurns, progress, statusComment, steer and recover, which the Edit form changes;
   - *By hand*: everything else, including the job cap, allowed models, MCP servers, secrets and the bundle opt-out, which only the triggers file sets.
 - **Edit.** Changing the venue previews the triggers file as a diff, then a confirm bar with the plan's own line, what it means for runs in line, the undo and the ticket.
 - **Instructions.** The trigger's instructions, quoted and escaped.
@@ -15,7 +14,7 @@ One trigger on its own page: what starts it, every run field with where it can c
 
 A viewer sees the same facts and runs, and no Edit, Delete or Fire now.
 
-**Panels.** `p-trigger-on`, `p-trigger-runs`, `p-trigger-run`, `p-trigger-edit`, `p-trigger-instr`, `p-trigger-kinds`, `p-trigger-change`.
+**Panels.** `p-trigger-on`, `p-trigger-runs`, `p-trigger-run`, `p-trigger-edit`, `p-trigger-trust`, `p-trigger-kinds`, `p-trigger-change`.
 
 **The server provides.**
 - The trigger's display record, including the fields the current record leaves out: `task`, `repository`, `reviewState`, `waitFor`, `awaitInput`, `github`, `progress`, `statusComment`, `recover` and `steer`.

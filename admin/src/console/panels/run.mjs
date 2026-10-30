@@ -21,7 +21,7 @@ import { PROPERTY_LABEL, DECLARATION_TEXT } from "../../read-model.mjs";
 import { PARKED_ELSEWHERE_TITLE } from "./parked.mjs";
 import { sessionSavedOf } from "../run-api.mjs";
 import { coresText } from "@edgehero/pi-dispatch/size-suggest";
-import { NO_EXPLANATION, TONE_CLASS, VENUE_LABEL, capitalised, docsHref, outcomeWord, recordReason } from "../../words.mjs";
+import { NO_EXPLANATION, VENUE_LABEL, capitalised, docsHref, outcomeWord, recordReason } from "../../words.mjs";
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { rerunRefusalOf } from "../../job-actions.mjs";

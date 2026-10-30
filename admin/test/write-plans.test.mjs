@@ -128,7 +128,7 @@ test("each trigger plan says what its tool says: every refusal and the confirm, 
     for (const params of addCases) {
       assert.deepEqual(planSays(plans.planTriggerAdd({ params, paths, env })), await toolSays(t.dispatch_trigger_add, params), JSON.stringify(params));
     }
-    const editCases = [{ index: 0, flow: "review" }, { index: 0, flow: "review", backend: "local", model: "m1", provider: "openai" }, { index: 3, flow: "x" }, { index: 0, flow: "  " }, { index: 0, flow: "x", backend: "vapour" }, { index: 0, flow: "x", models: ["a/b"] }, { index: 0, flow: "x", progress: true, statusComment: false }, { index: 0, flow: "x", recover: true }, { index: 0, flow: "x", recover: "yes" }, { index: 0, flow: "x", steer: true }, { index: 0, flow: "x", steer: "yes" }];
+    const editCases = [{ index: 0, flow: "review", maxTurns: 17 }, { index: 0, flow: "review", maxTurns: 0 }, { index: 0, flow: "review", maxTurns: 1.5 }, { index: 0, flow: "review" }, { index: 0, flow: "review", backend: "local", model: "m1", provider: "openai" }, { index: 3, flow: "x" }, { index: 0, flow: "  " }, { index: 0, flow: "x", backend: "vapour" }, { index: 0, flow: "x", models: ["a/b"] }, { index: 0, flow: "x", progress: true, statusComment: false }, { index: 0, flow: "x", recover: true }, { index: 0, flow: "x", recover: "yes" }, { index: 0, flow: "x", steer: true }, { index: 0, flow: "x", steer: "yes" }];
     for (const params of editCases) {
       assert.deepEqual(planSays(plans.planTriggerEdit({ params, paths, env })), await toolSays(t.dispatch_trigger_edit, params), JSON.stringify(params));
     }
@@ -242,8 +242,8 @@ test("a trigger plan's mutate and expect drive the read-model funnel to the entr
     assert.equal(plans.changeText(edit.changes), "flow: fix to review");
     // The console's surface names the row by its index; the tool's counts from 1.
     const consoleEdit = plans.planTriggerEdit({ params: { index: 1, flow: "review" }, paths, env: {}, surface: "console" }).plan;
-    assert.deepEqual([consoleEdit.title, consoleEdit.message], ["Edit trigger at index 1", "trigger at index 1 (comment) flow: fix to review"]);
-    assert.deepEqual([plans.planTriggerDelete({ index: 1, paths }).plan.title, plans.planTriggerDelete({ index: 1, paths, surface: "console" }).plan.title], ["Delete trigger #2", "Delete trigger at index 1"]);
+    assert.deepEqual([consoleEdit.title, consoleEdit.message], ["Edit trigger row 2", "trigger row 2 (comment) flow: fix to review"]);
+    assert.deepEqual([plans.planTriggerDelete({ index: 1, paths }).plan.title, plans.planTriggerDelete({ index: 1, paths, surface: "console" }).plan.title], ["Delete trigger #2", "Delete trigger row 2"]);
     // A venue the edit sets is a pair of its own, after the flow: the pi panel's confirm and the console's
     // bar both say it, and the write sets it.
     const venue = plans.planTriggerEdit({ params: { index: 0, flow: "review", backend: "local" }, paths, env: { PI_BACKENDS: "local" } }).plan;
@@ -415,7 +415,7 @@ test("the pause-window and scoped-limit plans say what their tools say", async (
     for (const index of [0, 5]) assert.deepEqual(planSays(plans.planLimitDelete({ index, paths, env })), await toolSays(t.dispatch_limit_delete, { index }));
     // An edit says its row before and after in words, never an arrow (issue #737); the console's surface by index.
     assert.equal(plans.planLimitEdit({ params: { index: 0, week: 9 }, paths, env }).plan.message, 'scoped limit #1:\n{"scope":"acme/web","day":5}\nto {"scope":"acme/web","day":5,"week":9}');
-    assert.equal(plans.planLimitEdit({ params: { index: 0, week: 9 }, paths, env, surface: "console" }).plan.title, "Edit scoped limit at index 0");
+    assert.equal(plans.planLimitEdit({ params: { index: 0, week: 9 }, paths, env, surface: "console" }).plan.title, "Edit scoped limit row 1");
     assert.equal(plans.planPauseWindowEdit({ index: 0, fields: { to: "07:00" }, paths }).plan.message, 'pause window #1:\n{"scope":"acme/web","from":"22:00","to":"06:00","tz":"UTC"}\nto {"scope":"acme/web","from":"22:00","to":"07:00","tz":"UTC"}');
     assert.match(plans.planLimitEdit({ params: { index: 0, scope: "github:acme/web" }, paths, env }).plan.message, /starts a new count under a new key/);
     // The plan's writeArgs ARE the funnel's arguments, expect included: a concurrent change after the plan refuses.
@@ -655,7 +655,7 @@ test("a trigger the add tool writes opts out of its project's bundle, and no too
     assert.equal(add.entry.run.secretBundle, false, "the tool path writes the opt-out");
     assert.match(add.message, /"secretBundle":false/, "and the confirm shows it");
     const console = plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"] }, paths, env: {}, surface: "console" }).plan;
-    assert.equal("secretBundle" in console.entry.run, false, "the operator-typed console form keeps the entry as built");
+    assert.equal(console.entry.run.secretBundle, false, "console add has the same bundle opt-out as the tool (#750)");
     for (const params of [{ kind: "label", flow: "fix", labels: ["go"], secretBundle: true }, { kind: "label", flow: "fix", labels: ["go"], run: { secret_bundle: true } }, { kind: "label", flow: "fix", labels: ["go"], SecretBundles: false }]) {
       assert.match(plans.planTriggerAdd({ params, paths, env: {} }).refusal, /cannot set run\.secretBundle/, JSON.stringify(params));
     }
@@ -853,4 +853,23 @@ test("no trigger tool can carry fallbackModels or its near misses, even to clear
       }
     }
   }
+});
+
+
+test("trigger edit merges maxTurns and explicit false flags, preserves omitted fields and refuses invalid turns before confirmation (#750)", () => {
+  const { paths, restore } = deployment({ PI_BACKENDS: "local" });
+  try {
+    const before = { on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", maxTurns: 30, progress: true, statusComment: true, recover: true, steer: true, model: "kept", secretsProfile: "private" } };
+    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [before] }));
+    const params = { index: 0, flow: "review", maxTurns: 12, progress: false, statusComment: false, recover: false, steer: false };
+    const { plan } = plans.planTriggerEdit({ params, paths, env: process.env });
+    assert.ok(plan);
+    const after = plan.mutate([before])[0];
+    assert.deepEqual(after.run, { ...before.run, flow: "review", maxTurns: 12, progress: false, statusComment: false, recover: false, steer: false });
+    assert.ok(plan.changes.some(([k, a, b]) => k === "maxTurns" && a === "30" && b === "12"));
+    const unchangedTurns = plans.planTriggerEdit({ params: { index: 0, flow: "review" }, paths, env: process.env }).plan.mutate([before])[0];
+    assert.equal(unchangedTurns.run.maxTurns, 30);
+    assert.equal(unchangedTurns.run.steer, true);
+    for (const maxTurns of [0, -1, 1.5, "12", NaN]) assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "fix", maxTurns }, paths, env: process.env }).refusal, /maxTurns/);
+  } finally { restore(); }
 });

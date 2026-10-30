@@ -70,6 +70,7 @@ import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { html } from "./html.mjs";
+import { triggerWhoMayFire } from "../trigger-policy.mjs";
 import { cmd } from "./kit.mjs";
 import { WATCH_ID_RE, WATCH_RULE_ID_RE } from "./watch.mjs";
 import { timeHtml, utcText } from "./panels/common.mjs";
@@ -115,13 +116,8 @@ const codeOf = (e) => (typeof e?.code === "string" && /^[A-Z0-9_]{1,40}$/.test(e
 /** The count rule every sentence here follows (`confirm-view.mjs` `plural`), re-exported where it always was. */
 export { plural };
 
-/**
- * A row of a Configuration list as the console names it until that page converts (issue #737): by the 0-based
- * index its table and its forms show, "trigger at index 2", never "#3". The planners name the console's rows by the same
- * words (`write-plans.mjs` `rowName(what, index, "console")`, which a test holds equal to this); the pi panel keeps its
- * 1-based "#3".
- */
-export const atIndex = (what, index) => `${what} at index ${Number.isSafeInteger(index) && index >= 0 ? index : "?"}`;
+/** The console displays one-based rows while hidden controls carry the original zero-based index. */
+export const atIndex = (what, index) => `${what} row ${Number.isSafeInteger(index) && index >= 0 ? index + 1 : "?"}`;
 
 /**
  * A planner's `[key, before, after]` pairs as the bar draws them: "maxTurns: <b>30</b> to <b>40</b>" (issue #737, the
@@ -656,17 +652,26 @@ const configActions = [
     kind: "trigger-add",
     // The form's own word for itself (issue #737): a refusal the planner names its caller in ("... does not take
     // colour") says "this form" to a person on the console, never the pi tool's name.
-    build: (body, ctx) => ctx.a.plans.planTriggerAdd({ params: { ...obj(body, "trigger") }, paths: ctx.a.paths, env: ctx.a.env, tool: TRIGGER_FORM, surface: "console", fs: ctx.fs }),
+    build: (body, ctx) => {
+      const result = ctx.a.plans.planTriggerAdd({ params: { ...obj(body, "trigger") }, paths: ctx.a.paths, env: ctx.a.env, tool: TRIGGER_FORM, surface: "console", fs: ctx.fs });
+      if (!result.plan) return result;
+      const p = result.plan;
+      const { on, run } = p.entry;
+      const starts = on.type === "cron" ? `${on.id} (${on.pattern})` : (on.phrase ?? [Array.isArray(on.action) ? on.action.join(", ") : null, on.any?.length ? `labels ${on.any.join(", ")}` : null, on.reviewState?.length ? `verdict ${on.reviewState.join(", ")}` : null, on.number ? `#${on.number}` : null, on.once ? "once" : null].filter(Boolean).join("; ")) || "its configured event";
+      let reserve;
+      try { reserve = ctx.a.rm.estimateReserve(run, reserveInputs(ctx)); } catch { reserve = { unknown: true }; }
+      return { plan: { ...p, summary: [`${on.type} ${starts} runs flow ${run.flow}${on.type === "cron" ? " locally" : ` on ${run.kind}`}.`, triggerWhoMayFire(p.entry), `Each future run is paid. ${reserveText(reserve) ?? "The per-run reserve could not be estimated here."}`] } };
+    },
     target: (ctx) => ctx.a.paths.triggersPath,
     write: writeTriggersOf,
   }),
   fileAction({
     name: "trigger-edit",
     kind: "trigger-edit",
-    build: (body, ctx) => ctx.a.plans.planTriggerEdit({ params: { index: index(body), flow: str(body, "flow", { required: true }), backend: str(body, "backend"), provider: str(body, "provider"), model: str(body, "model") }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planTriggerEdit({ params: { index: index(body), flow: str(body, "flow", { required: true }), backend: str(body, "backend"), provider: str(body, "provider"), model: str(body, "model"), ...(body.maxTurns !== undefined && body.maxTurns !== "" ? { maxTurns: typeof body.maxTurns === "string" && /^\d+$/.test(body.maxTurns) ? Number(body.maxTurns) : body.maxTurns } : {}), ...Object.fromEntries(["progress", "statusComment", "recover", "steer"].filter((k) => body[k] !== undefined).map((k) => [k, body[k]])) }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.triggersPath,
     write: writeTriggersOf,
-    bar: (p) => [html`${p.row} (${p.type}) ${changesHtml(p.changes)}`, ...(Array.isArray(p.summary) ? p.summary.slice(1) : [])],
+    bar: (p) => [html`${p.row} (${p.type}) ${changesHtml(p.changes)}`, ...(Array.isArray(p.summary) ? p.summary.slice(1) : []), "New deliveries use the edited fields. Jobs already in line retain their queued fields; a job missing a narrowing this trigger now sets is refused before spend and must be re-run."],
   }),
   fileAction({
     name: "trigger-delete",
@@ -1210,6 +1215,25 @@ const jobActions = [
     },
   },
   {
+    name: "trigger-fire",
+    kind: "trigger-fire",
+    paid: true,
+    bulk: false,
+    needs: JOB_NEEDS,
+    async preview(body, ctx) {
+      const result = await ctx.a.rm.planTriggerFire({ index: index(body), triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now });
+      if (result.unreachable) return { refusal: "The deployment's queue could not be read, so Fire now could not be previewed. Nothing was changed." };
+      const got = planned(result);
+      if (!got.plan) return got;
+      const p = got.plan;
+      return { target: p.schedulerId, payload: { plan: p }, reserve: p.reserve, beforeDigest: p.fileDigest, summary: p.summary };
+    },
+    async apply(entry, ctx) {
+      const res = await ctx.a.rm.enqueueTriggerFire(entry.payload.plan, { triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now });
+      return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
+    },
+  },
+  {
     name: "rerun",
     kind: "run-rerun",
     paid: true,
@@ -1706,8 +1730,8 @@ function triggerEditBack(out) {
   const p = out.plan ?? {};
   const n = atIndex("trigger", p.index);
   const old = listBefore(out, "triggers")[p.index]?.run ?? {};
-  const set = ["flow", ...(p.backend !== undefined ? ["backend"] : []), ...["provider", "model"].filter((k) => p.ref?.[k] !== undefined)];
-  const missing = set.find((k) => typeof old[k] !== "string" || old[k] === "");
+  const set = ["flow", ...(p.backend !== undefined ? ["backend"] : []), ...["provider", "model", "maxTurns"].filter((k) => p.ref?.[k] !== undefined), ...Object.keys(p.flags ?? {})];
+  const missing = set.find((k) => old[k] === undefined || old[k] === null || old[k] === "" || !["string", "number", "boolean"].includes(typeof old[k]));
   if (missing !== undefined) return { undo: byHand(n, missing), inverse: null };
   return { undo: `Edit ${n} back to what it said`, inverse: { action: "trigger-edit", body: { index: p.index, ...Object.fromEntries(set.map((k) => [k, old[k]])) } } };
 }
@@ -1772,8 +1796,8 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
  * `undo(out, body)` and `inverse(out, body)` at the preview for the bar, then `undo(entry, null, result)` and
  * `inverse(entry, null, result)` at the confirm, with the apply's answer, for the banner.
  *
- * Indexes stay the 0-based values the forms send, and every sentence says them as the Configuration page does, "trigger
- * at index 2" (`atIndex`), until that page converts (PR 7a). An inverse never carries a secret reference or a
+ * Indexes stay the 0-based values hidden controls send; every human sentence uses the one-based row (`atIndex`).
+ * An inverse never carries a secret reference or a
  * resolver path: the deletes and the secret removes, whose only way back would, have none.
  */
 const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
@@ -1795,6 +1819,13 @@ const WRITE_RULES = {
     inverse: (out, body, result) => (rerunCancel(result) ? { action: "cancel-queued", body: { jobId: result.jobId, queue: result.queue } } : null),
     confirmLabel: (out) => paidLabel("Fork", out.reserve),
     done: (out) => `Queued a fork of ${out.target}`,
+  },
+  "trigger-fire": {
+    fields: ["index"], danger: false, atConfirm: true,
+    undo: (out, body, result) => (result === undefined ? UNDO_SENTENCES.rerunBefore : rerunCancel(result) ? `Cancel ${result.jobId} before it starts` : UNDO_SENTENCES.rerunUnnamed),
+    inverse: (out, body, result) => (rerunCancel(result) ? { action: "cancel-queued", body: { jobId: result.jobId, queue: result.queue } } : null),
+    confirmLabel: (out) => paidLabel("Fire now", out.reserve),
+    done: (out) => `Fired cron trigger ${out.target} once`,
   },
   rerun: {
     fields: ["jobId"],
@@ -1827,7 +1858,7 @@ const WRITE_RULES = {
   "queue-resume": { fields: ["queue"], danger: false, undo: (out) => `Pause queue ${out.payload.queue} again`, inverse: (out) => ({ action: "queue-pause", body: { queue: out.payload.queue } }), confirmLabel: () => "Resume", done: (out) => `Resumed queue ${out.payload.queue}` },
   "pause-windows": { fields: ["windows"], danger: false, undo: (out) => pauseListBack(out).undo, inverse: (out) => pauseListBack(out).inverse, confirmLabel: confirmWord, done: say("Replaced the pause windows") },
   "trigger-add": { fields: ["trigger"], danger: false, undo: (out) => `Delete ${atIndex("trigger", listBefore(out, "triggers").length)}`, inverse: (out) => ({ action: "trigger-delete", body: { index: listBefore(out, "triggers").length } }), confirmLabel: confirmWord, done: (out) => `Added ${atIndex("trigger", listBefore(out, "triggers").length)} (${out.plan?.entry?.on?.type ?? "a trigger"})` },
-  "trigger-edit": { fields: ["index", "flow", "backend", "provider", "model"], danger: false, undo: (out) => triggerEditBack(out).undo, inverse: (out) => triggerEditBack(out).inverse, confirmLabel: confirmWord, done: (out) => `Changed ${atIndex("trigger", out.plan.index)}: ${(out.plan.changes ?? []).map(([k, a, b]) => `${k} from ${a} to ${b}`).join(", ")}` },
+  "trigger-edit": { fields: ["index", "flow", "backend", "provider", "model", "maxTurns", "progress", "statusComment", "recover", "steer"], danger: false, undo: (out) => triggerEditBack(out).undo, inverse: (out) => triggerEditBack(out).inverse, confirmLabel: confirmWord, done: (out) => `Changed ${atIndex("trigger", out.plan.index)}: ${(out.plan.changes ?? []).map(([k, a, b]) => `${k} from ${a} to ${b}`).join(", ")}` },
   "trigger-delete": { fields: ["index"], danger: true, undo: triggerDeleteBack, inverse: none, confirmLabel: (out) => `Delete ${atIndex("trigger", out.plan?.index)}`, done: (out) => `Deleted ${atIndex("trigger", out.plan.index)}` },
   "setting-set": { fields: ["key", "value"], danger: false, undo: (out) => settingBack(out, out.plan.key).undo, inverse: (out) => settingBack(out, out.plan.key).inverse, confirmLabel: confirmWord, done: settingDone },
   "setting-unset": { fields: ["key"], danger: false, undo: (out) => settingBack(out, out.plan.key).undo, inverse: (out) => settingBack(out, out.plan.key).inverse, confirmLabel: confirmWord, done: (out) => `Unset ${out.plan.key}` },
@@ -1936,13 +1967,15 @@ function failureOf(result) {
 const clockOf = (deps) => (typeof deps.now === "function" ? deps.now() : Date.now());
 
 /**
- * A refusal answer: the `error` sentence exactly as the planner, the ticket store or the funnel said it (the tool and
- * the console share it byte for byte), and the slot's bar (`refusalHtml`), which adds "Nothing was changed." in its
+ * A refusal answer: the planner, ticket store or funnel's sentence, with machine indexes translated to the
+ * console's human row numbers, and the slot's bar (`refusalHtml`), which adds "Nothing was changed." in its
  * own markup when the sentence does not say so already, and never for a `partial` one (a write that may have done part
  * of its work). `state` names the bar's state when the status alone cannot; `sentenceHtml` is the bar's own markup of
  * the same words, for a sentence that names code (an action, a field).
  */
 function refuse(ctx, where, status, error, state = null, sentenceHtml = null) {
+  // Loader and tool diagnostics name machine indexes; the browser names the row its table displays.
+  error = String(error).replace(/\b(trigger|pause window|scoped limit) at index (\d+)\b/g, (_m, what, n) => `${what} row ${Number(n) + 1}`);
   return ctx.json(status, { error, html: String(refusalHtml({ where, sentence: error, status, state, sentenceHtml })) });
 }
 

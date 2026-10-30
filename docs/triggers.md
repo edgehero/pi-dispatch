@@ -21,6 +21,20 @@ Its signed finding schema, limits, read-only investigation and issue modes are d
 optional shadow/active decisions and board proposals are in [Watch decisions](watch-decisions.md).
 The forge and cron reference below keeps their existing behavior.
 
+## Editing and firing from the console
+
+The [Configuration page](console.md#configuration-and-trigger-pages) has Edit and Delete on each row,
+a page per trigger and a structured add editor. Human row labels count from 1; tool indexes remain zero-based.
+The add editor and its JSON fallback write the add tool's entry, including `run.secretBundle: false`.
+The edit form and `dispatch_trigger_edit` share flow, venue (`backend`), provider, model, `maxTurns`,
+progress, statusComment, steer and recover. Omitted fields keep their existing values; unrelated
+hand-written bounds are preserved. Cron cannot enable statusComment or recover.
+
+Fire now and `dispatch_trigger_fire(index)` start a served cron schedule after a person's confirmation.
+They apply the folder allowlist, clean-tree check, committed flow opt-in and hourly attempt count of
+`dispatch_run`, refuse command and portfolio triggers, and refuse a duplicate in the same minute.
+These extra gates do not change ordinary scheduled ticks or the CLI's `run --trigger` behavior.
+
 ## Trigger types: what fires each one, and what it runs
 
 pi-dispatch is the trigger layer. Every entry is one `{ on, run }` pair: **`on` is what fires it**, and

@@ -312,3 +312,16 @@ reaches commands either: a `run.command` fires from the reviewed triggers file o
 MIT, self hosted. Read [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md)
 before you rely on it: it states plainly what is and is not defended. Short version: the trust model is a
 GitHub Action's. Whoever can merge to your default branch can instruct the agent.
+
+## Configuration in the browser
+
+The [operator console](../docs/console.md#configuration-and-trigger-pages) includes a Pulse Configuration
+page, a page per trigger and a structured editor for five trigger kinds. Edit and Delete work from each
+row, with a diff, confirmation and Undo. Human row numbers count from 1; tool indexes remain zero-based.
+The editor and its JSON fallback preserve the add tool's secret-bundle opt-out.
+
+`dispatch_trigger_edit` also takes `maxTurns` and the four run-option flags. `dispatch_trigger_fire(index)`
+shares the console's Fire now planner, reserve and refusals. It fires a served cron trigger only after a
+person confirms and its folder, committed flow, clean tree and hourly attempt count pass the same bounds
+as `dispatch_run`. Configure `PI_DISPATCH_RUN_ROOTS` in the pi or console process environment to grant this.
+Viewers see trigger facts and runs without private prompt text or write controls.

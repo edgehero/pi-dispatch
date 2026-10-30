@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { colorOf, PULSE_TOKENS, PULSE_TOKENS_SHA256, tokenCss } from "../src/console/pulse-tokens.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
-import { LEGACY_CSS, specificity } from "../src/console/compat-css.mjs";
+import { specificity } from "./helpers/css-specificity.mjs";
+import { CONFIG_CSS } from "../src/console/config-css.mjs";
 import { capsule } from "../src/console/kit.mjs";
 import { PAGE_CSS, SHELL_CSS, cssBlocks, pageCss, splitSelectors } from "../src/console/page-css.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
@@ -418,7 +419,7 @@ test("on the overview a running pill's host is at full opacity, so its label is 
   assert.ok(CONSOLE_CSS.indexOf(rule) > CONSOLE_CSS.indexOf(PULSE_CSS) + PULSE_CSS.length - 1, "after bundle.css");
   assert.ok(specificity('body[data-page="overview"] .tp-l--run .tp-sub') > specificity(".tp-sub"));
   // Nothing else in the console's own rules touches that opacity, so the effective one there is 1.
-  const others = [SHELL_CSS, pageCss(), LEGACY_CSS].flatMap(rulesIn).filter(([sel, body]) => /\.tp-sub(?![\w-])/.test(sel) && /fill-opacity/.test(body));
+  const others = [SHELL_CSS, pageCss(), CONFIG_CSS].flatMap(rulesIn).filter(([sel, body]) => /\.tp-sub(?![\w-])/.test(sel) && /fill-opacity/.test(body));
   assert.deepEqual(others.map(([sel]) => sel), ['body[data-page="overview"] .tp-l--run .tp-sub']);
   // At full opacity the label is a pinned pair, which holds in both themes.
   assert.ok(PAIRS.includes("on-running on running 4.5"));

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { LEGACY_CSS, NEUTRALISED, SVG_EXTRA, insightsFont, specificity } from "../src/console/compat-css.mjs";
+import { specificity } from "./helpers/css-specificity.mjs";
+import { CONFIG_CSS } from "../src/console/config-css.mjs";
 import { AUDIT_LAYOUT, OVERVIEW_LAYOUT, PAGE_CSS, SECONDARY_BTN, SHELL_CSS, TOP_BAR, cssBlocks, pageCss, scopeCss, selectorsOf, splitSelectors, stackRules } from "../src/console/page-css.mjs";
 import { PULSE_CSS, PULSE_CSS_SHA256 } from "../src/console/pulse-css.mjs";
 import { PULSE_TOKENS, PULSE_TOKENS_SHA256, colorOf, tokenCss } from "../src/console/pulse-tokens.mjs";
@@ -15,12 +16,9 @@ import { LIVE_GLYPHS, LIVE_STATES } from "../src/console/shell.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { RUNS_CSS, RUNS_PHONE_MAX, RUNS_TABLE } from "../src/console/runs-css.mjs";
 import { PARKED_CSS, PARKED_LAYOUT, PARKED_PHONE_MAX, QCARD_CSS } from "../src/console/parked-css.mjs";
-import { PAGE_THEME } from "../src/graph-html.mjs";
-import { INSIGHTS_CSS } from "../src/insights-html.mjs";
 
 // The console's one stylesheet (issue #737): the design's tokens and bundle.css, pinned to the design files by hash, the
-// shell's own rules, each page's rules confined to it, and the legacy layer last. `console-compat.test.mjs` ratchets the
-// legacy layer itself.
+// shell's own rules and page rules. The last converted configuration screen retires the compatibility layer (#750).
 
 const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -38,11 +36,12 @@ test("bundle.css and tokens.json are pasted verbatim: each module's text hashes 
   assert.equal(sha256(JSON.stringify(PULSE_TOKENS, null, 1)), PULSE_TOKENS_SHA256, "PULSE_TOKENS is tokens.json, every value");
 });
 
-test("the stylesheet is the tokens, then bundle.css, the shell, the pages and the legacy layer, and it fetches nothing", () => {
-  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, pageCss(), LEGACY_CSS].join("\n"));
+test("the stylesheet is the tokens, then bundle.css, the shell and pages, and it fetches nothing", () => {
+  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, pageCss(), CONFIG_CSS].join("\n"));
   assert.ok(CONSOLE_CSS.startsWith(tokenCss()), "the tokens come first, so every later rule reads them");
   assert.ok(CONSOLE_CSS.indexOf(PULSE_CSS) > tokenCss().length - 1, "bundle.css after the tokens");
-  assert.ok(CONSOLE_CSS.endsWith(LEGACY_CSS), "the legacy layer last: it wins inside .legacy, where it alone applies");
+  assert.ok(CONSOLE_CSS.endsWith(CONFIG_CSS), "the configuration rules follow the bundle and shell");
+  assert.doesNotMatch(CONSOLE_CSS, /--pd-|\.legacy/);
   // Plain rules: no element a page could be broken out by, nothing loaded, no remote font or image.
   for (const needle of ["<", "@import", "url(", "expression(", "@font-face", "javascript:"]) assert.ok(!CONSOLE_CSS.includes(needle), `no ${needle}`);
   assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f]/.test(CONSOLE_CSS), "no control byte");
@@ -63,17 +62,13 @@ test("every custom property the bundle, the shell and the pages read is a token 
   for (const [label, css] of [["bundle.css", PULSE_CSS], ["SHELL_CSS", SHELL_CSS], ["pageCss()", pageCss()]]) {
     for (const name of read(css)) assert.ok(tokens.has(name) || own.has(name) || (label === "SHELL_CSS" && shellOwn.has(name)), `${label} reads ${name}, which tokenCss() defines`);
   }
-  // The legacy layer reads tokens, its own `--pd-*` set, which it defines from tokens on the wrapper, and the shell's
-  // ring.
-  const legacyOwn = declared(LEGACY_CSS);
-  for (const name of legacyOwn) assert.match(name, /^--pd-/, `${name}: the legacy layer declares only the old --pd-* names`);
-  for (const name of read(LEGACY_CSS)) assert.ok(tokens.has(name) || legacyOwn.has(name) || shellOwn.has(name), `the legacy layer reads ${name}, which is defined`);
-  // The old palette lives only in the legacy layer, which PR 7a deletes.
-  assert.ok(!/--pd-/.test(CONSOLE_CSS.slice(0, CONSOLE_CSS.length - LEGACY_CSS.length)), "no --pd-* outside the legacy layer");
+  for (const name of read(CONFIG_CSS)) assert.ok(tokens.has(name) || own.has(name), `CONFIG_CSS reads ${name}, which is defined`);
+  assert.doesNotMatch(CONSOLE_CSS, /--pd-/);
+
 });
 
-test("the shell's rules and the legacy layer's declarations hold no colour literal: every colour is a token", () => {
-  for (const [label, css] of [["SHELL_CSS", SHELL_CSS], ["LEGACY_CSS", LEGACY_CSS]]) {
+test("the shell and configuration declarations hold no colour literal: every colour is a token", () => {
+  for (const [label, css] of [["SHELL_CSS", SHELL_CSS], ["CONFIG_CSS", CONFIG_CSS]]) {
     for (const body of declarationsOf(css)) assert.ok(!/#[0-9a-f]{3,8}\b/i.test(body), `${label}: ${body} names a colour by hex`);
   }
   assert.match(SHELL_CSS, /(?:^|\n)section\[data-panel\]:empty\{display:none\}/, "an empty panel is still not drawn");
@@ -213,7 +208,6 @@ const SHELL = rulesOf(SHELL_CSS);
 
 /** The write flow's markup, as written (the Undo row's parts). */
 const CONFIRM_VIEW_SOURCE = readFileSync(new URL("../src/console/confirm-view.mjs", import.meta.url), "utf8");
-const LEGACY = rulesOf(LEGACY_CSS);
 
 /** WCAG 2 contrast of two `#rrggbb` colours (the formula console-contrast.test.mjs measures every token pair with). */
 function contrast(a, b) {
@@ -256,8 +250,6 @@ test("the media queries cover every width, fractional ones too: the desktop's ru
     assert.equal(on[SEARCH_OFF], w >= TOP_BAR.oneRowMin && w < TOP_BAR.oneRowMin + TOP_BAR.searchRoom, `${w}px: just past one row`);
     assert.equal(on[SEARCH_OFF_ONE_ROW_RO], w >= TOP_BAR.oneRowReadOnlyMin && w < TOP_BAR.oneRowReadOnlyMin + TOP_BAR.searchRoom, `${w}px: just past one row, read-only`);
   }
-  // The legacy layer's own phone block is the same query, so it switches with the shell's.
-  assert.ok(Object.hasOwn(LEGACY.media, PHONE));
 });
 
 test("above a phone the bar is a grid: the pi-dispatch pill and the end, then the navigation wrapping across the width; one row from 1440 (1600 read-only)", () => {
@@ -511,9 +503,9 @@ test("the parts a page draws hidden take no space until they show; a page shown 
   }
   assert.deepEqual(SHELL.top[".live-note__at:has(>time:empty)"], { display: "none" }, "the stale note says at only once it has a time");
   // The LiveStates card's dimmed row (`.ls-dim .hostrow{background:transparent;box-shadow:inset 0 0 0 1px
-  // var(--line)}`) on each panel's card, the converted one and the legacy panel that is its own card; no opacity and no
+  // var(--line)}`) on each panel's card; no opacity and no
   // filter anywhere on a stale page, so every word keeps its contrast and every button its look.
-  const STALE = "main.stale section[data-panel] .card:not(.card--tint),main.stale .legacy>section[data-panel]";
+  const STALE = "main.stale section[data-panel] .card:not(.card--tint)";
   assert.deepEqual(SHELL.top[STALE], { "--ink-faint": "var(--ink-muted)", "--stale-ring": "inset 0 0 0 1px var(--line-strong)", background: "transparent", "box-shadow": "inset 0 0 0 1px var(--line)" });
   // A secondary button (drawn by its surface-3 fill alone, 1.04:1 on the light canvas) keeps an edge there: the flat
   // panel hands down a line-strong ring (3:1 on the canvas in both themes, console-contrast.test.mjs), which every
@@ -525,20 +517,13 @@ test("the parts a page draws hidden take no space until they show; a page shown 
   assert.deepEqual(BTN_KINDS.filter((k) => !acts.includes(k)), ["sm", "lg", "round"], "the sizes set no fill and no ring");
   assert.equal(SECONDARY_BTN, `.btn${acts.map((k) => `:not(.btn--${k})`).join("")}`);
   assert.match(PULSE_CSS, /\n\.btn \{[^}]*background: var\(--surface-3\);/, "the plain button's fill");
-  // The legacy controls drawn with that fill wear it too; the legacy layer's other surface-3 rules are no control.
-  const legacyFill = cssBlocks(LEGACY_CSS).filter((b) => !b.prelude.startsWith("@") && /(?:^|;)background:var\(--surface-3\)/.test(b.body));
-  assert.deepEqual(legacyFill.filter((b) => /box-shadow:var\(--stale-ring,none\)/.test(b.body)).map((b) => b.prelude), [".legacy button", ".legacy details.editor>summary"]);
-  assert.deepEqual(legacyFill.filter((b) => !/--stale-ring/.test(b.body)).map((b) => b.prelude), [".legacy .badge"], "a badge is a mark, not a control");
-  assert.ok(!/--stale-ring:/.test(LEGACY_CSS) && !/--stale-ring:/.test(pageCss()), "the ring is declared on the flat panels alone");
+  assert.ok(!/--stale-ring:/.test(pageCss()) && !/--stale-ring:/.test(CONFIG_CSS), "the ring is declared on the flat panels alone");
   assert.ok(contrast(colorOf("ink-faint", "light"), colorOf("canvas", "light")) < 4.5, "the faint ink alone would miss AA on the light canvas");
-  for (const [label, css] of [["SHELL_CSS", SHELL_CSS], ["pageCss()", pageCss()], ["LEGACY_CSS", LEGACY_CSS]]) {
+  for (const [label, css] of [["SHELL_CSS", SHELL_CSS], ["pageCss()", pageCss()], ["CONFIG_CSS", CONFIG_CSS]]) {
     for (const rules of [rulesOf(css).top, ...Object.values(rulesOf(css).media)]) {
       for (const [sel, d] of Object.entries(rules)) if (/stale/.test(sel)) assert.ok(!("opacity" in d) && !("filter" in d), `${label} ${sel}: no dimming of the ink`);
     }
   }
-  // It outweighs the legacy layer's own panel ground (the layer comes last in the stylesheet, so weight must win).
-  assert.match(LEGACY_CSS, /\n\.legacy>section\[data-panel\]\{[^}]*background:var\(--surface\)/);
-  assert.ok(specificity("main.stale .legacy>section[data-panel]") > specificity(".legacy>section[data-panel]"));
   assert.deepEqual(SHELL.top[".titlebar__end .drawn"], { display: "inline-flex", "align-items": "center", gap: "8px", "font-size": "13px", color: "var(--ink-muted)" });
   // On a phone the drawn note takes its own line, and Reload (the ghost button shellHtml draws right after it, as
   // console-shell.test.mjs pins) starts the next, pulled back by the ghost's own side padding so its icon stands under
@@ -609,88 +594,13 @@ test("main stacks the title bar and the cards in one column that never widens a 
   assert.deepEqual(SHELL.top[".titlebar h1"], { "overflow-wrap": "anywhere", "min-width": "0" }, "a run id has nowhere else to break");
 });
 
-test("the legacy layer: a card per wrapper, the charts' own font, readable fields and table cells, and the phone's spacing", () => {
-  // The sign-in pages left the layer (PR 2): no rule of it names their form any more.
-  assert.doesNotMatch(LEGACY_CSS, /login-form/);
-  // Each old panel is a wrapper of its own, a cell of main's grid, so the card has no margin: the grid's gap
-  // spaces the cards, 16px (12px on a phone, main's own), what one wrapper's margins gave them.
-  assert.deepEqual(LEGACY.top[".legacy>section[data-panel]"], { "max-width": "none", "min-width": "0", margin: "0", padding: "var(--space-5)", border: "0", "border-radius": "var(--radius-lg)", background: "var(--surface)" });
-  assert.equal(LEGACY.top[".legacy>:last-child"], undefined, "no last-child margin to take back");
-  assert.deepEqual([SHELL.top.main.gap, SHELL.media[PHONE].main.gap], ["var(--space-4)", "12px"]);
-  // The charts keep the insights font their labels were sized for (label-fit-check.mjs measured cuts without it).
-  assert.equal(INSIGHTS_CSS.match(/(?:^|\n)body\{[^}]*?font:([^;}]+)/)[1], LEGACY.top[".legacy svg"].font);
-  assert.equal(LEGACY.top[".legacy"].font, "inherit", "the old panels' text takes the console's font");
-  assert.equal(LEGACY.top[".legacy textarea,.legacy form.act textarea"]["font-weight"], "400", "a field's text is not its label's bold");
-  assert.deepEqual(LEGACY.top[".legacy button[disabled]"], { opacity: ".45", cursor: "not-allowed" });
-  const phone = LEGACY.media[PHONE];
-  assert.deepEqual(phone[".legacy>section[data-panel]"], { padding: "var(--space-4)", "border-radius": "22px" });
-  assert.deepEqual(phone[".legacy table.grid td:not([colspan]):not(:has(br))"], { "white-space": "nowrap" }, "a model or an id never breaks at its hyphens in a cell");
-  assert.deepEqual([4, 6, 9].map((n) => phone[`.legacy table.grid:has(thead th:nth-child(${n}))`]["min-width"]), ["520px", "720px", "960px"]);
-});
 
-test("the neutraliser keeps each selector's own specificity: one :is() per specificity, every member of a rule alike", () => {
-  const rules = cssBlocks(LEGACY_CSS).filter((b) => b.prelude.startsWith(":where(.legacy) :is("));
-  assert.ok(rules.length > 1, "more than one specificity among the collisions");
-  const seen = [];
-  for (const { prelude } of rules) {
-    const members = splitSelectors(/^:where\(\.legacy\) :is\((.*)\)$/.exec(prelude)[1]);
-    const levels = new Set(members.map(specificity));
-    assert.equal(levels.size, 1, `${prelude}: one specificity`);
-    seen.push(...levels);
-  }
-  assert.equal(new Set(seen).size, rules.length, "one rule per specificity");
-  assert.deepEqual(rules.flatMap(({ prelude }) => splitSelectors(/^:where\(\.legacy\) :is\((.*)\)$/.exec(prelude)[1])).sort(), [...NEUTRALISED].sort());
-  assert.ok(specificity(".kpi b") > specificity(".kpi") && specificity(".phases .bar i") > specificity(".phases .bar"));
-  // Each selector's [ids, classes, types], pinned: a weighting that lets types reach a class's weight (mutant Z03) or
-  // drops attributes and pseudo-classes (Z06) changes a tuple.
-  const tuple = (n) => [Math.floor(n / 10000), Math.floor(n / 100) % 100, n % 100];
-  assert.deepEqual(Object.fromEntries(NEUTRALISED.map((s) => [s, tuple(specificity(s))])), {
-    ".badge": [0, 1, 0],
-    ".banner": [0, 1, 0],
-    ".cap": [0, 1, 0],
-    ".code": [0, 1, 0],
-    ".facts": [0, 1, 0],
-    ".kpi": [0, 1, 0],
-    ".kpi b": [0, 1, 1],
-    ".kpi span": [0, 1, 1],
-    ".note": [0, 1, 0],
-    ".wl": [0, 1, 0],
-  });
-  assert.ok(specificity(".x") > specificity("a b c d e"), "one class outweighs any run of types");
-  assert.deepEqual(tuple(specificity("#a .b c")), [1, 1, 1]);
-  assert.deepEqual(tuple(specificity("a[href]:hover")), [0, 2, 1], "an attribute and a pseudo-class weigh as classes");
-});
 
-test("insightsFont reads the insights page's own font from its body rule, and throws when the rule names none", () => {
-  assert.equal(insightsFont(), LEGACY.top[".legacy svg"].font, "the charts' font is the insights page's");
-  assert.equal(insightsFont("p{font:9px x}\nbody{margin:0;font:13px/1.4 Menlo, monospace}"), "13px/1.4 Menlo, monospace");
-  // A silent fallback (mutant Z01) would draw the charts in the console's font, which cuts their labels.
-  for (const bad of ["body{margin:0}", "p{font:13px x}", ".body{margin:0;font:13px x}", ""]) assert.throws(() => insightsFont(bad), /body rule names no font/, bad);
-});
 
-test("the charts' colours are re-pointed to the right tokens: status keeps its status, text reads, a meter track is a bed", () => {
-  assert.deepEqual(SVG_EXTRA, {
-    "#333": ["ink", "ink"],
-    "#d9d9d9": ["surface", "line-strong"],
-    "#a6bbcf": ["surface-3", "ink-faint"],
-    "#d8bfd8": ["surface-3", "line-strong"],
-    "#e7e7ae": ["surface-3", "line-strong"],
-    "#c0deed": ["surface-3", "line-strong"],
-    "#c7e9c0": ["surface-3", "line-strong"],
-    "#fdd0a2": ["surface-3", "line-strong"],
-    "#E6E0F8": ["ink-faint", "ink-faint"],
-    "#ff5f57": ["failed", "failed"],
-    "#6e7681": ["idle", "ink-muted"],
-    "#db6d28": ["attention", "attention"],
-  });
-  assert.deepEqual(LEGACY.top['.legacy svg [fill="#ff5f57"]'], { fill: "var(--failed)" }, "a failed square stays failed");
-  assert.deepEqual(LEGACY.top['.legacy svg [fill="#6e7681"]'], { fill: "var(--idle)" });
-  assert.deepEqual(LEGACY.top['.legacy svg [stroke="#6e7681"]'], { stroke: "var(--ink-muted)" });
-  // Chart text in a colour that is a chip's ground elsewhere is drawn in ink, after the fills, so it wins.
-  for (const hex of ["#999", "#a6bbcf"]) assert.deepEqual(LEGACY.top[`.legacy svg text[fill="${hex}"],.legacy svg tspan[fill="${hex}"]`], { fill: "var(--ink-muted)" }, hex);
-  assert.ok(LEGACY_CSS.indexOf('.legacy svg text[fill="#a6bbcf"]') > LEGACY_CSS.indexOf('.legacy svg [fill="#a6bbcf"]'));
-  assert.deepEqual(LEGACY.top[`.legacy svg rect[fill="none"][stroke="${PAGE_THEME.border}"]`], { fill: "var(--dot-off)", stroke: "none" }, "a meter's outlined track is a filled bed");
-});
+
+
+
+
 
 /** A declaration's value with the space after each comma dropped, as the console writes them and the cards do not. */
 const tightDecls = (d) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, v.replace(/,\s+/g, ",")]));
@@ -1111,21 +1021,18 @@ test("a command in a copy box wraps, everywhere the kit draws one, its one-line 
   assert.match(PULSE_CSS, /\n\.btn--sm \{ height: 30px;/);
   assert.equal(4 + 6 + 20 + 6 + 4, 40);
   // Nothing on a page sets the code back to one line.
-  for (const css of [pageCss(), LEGACY_CSS]) {
+  for (const css of [pageCss(), CONFIG_CSS]) {
     for (const rules of [rulesOf(css).top, ...Object.values(rulesOf(css).media)]) {
       for (const [sel, d] of Object.entries(rules)) if (/\.cmd(?![\w-])/.test(sel)) assert.ok(!Object.keys(d).some((k) => k === "white-space" || k.startsWith("overflow")), sel);
     }
   }
 });
 
-test("the kept-still note keeps its space and its chip's padding inside a legacy panel, whose layer resets both", () => {
-  // The legacy layer's reset (the insights page's `*`, confined): as heavy as a class, and later than the shell.
-  assert.ok(LEGACY_CSS.includes("\n.legacy *{box-sizing:border-box;margin:0;padding:0}"));
+test("the kept-still note keeps its space and its chip padding inside a panel", () => {
   assert.deepEqual(SHELL.top[".held"], { display: "flex", "flex-wrap": "wrap", "align-items": "center", gap: "6px var(--space-3)" });
   assert.deepEqual(SHELL.top["section[data-panel]>.held"], { margin: "0 0 var(--space-3)" });
   // The chip's padding is bundle.css's own, said again where the reset would take it.
   assert.equal(SHELL.top[".held>.chip"].padding, /\n\.chip \{[^}]*padding: ([^;]+);/.exec(PULSE_CSS)[1]);
-  for (const sel of ["section[data-panel]>.held", ".held>.chip"]) assert.ok(specificity(sel) > specificity(".legacy *"), `${sel} outweighs .legacy *`);
   // The script puts the note as the held panel's first child (script.mjs hold), the panel itself the section.
   assert.match(CONSOLE_SCRIPT, /el\.insertBefore\(copy, el\.firstChild\)/);
 });
@@ -1219,4 +1126,14 @@ test("the audit log: the side card beside the log from 1600 px and under it belo
   // At the console's browser floor (Chrome 88, Safari 14, Firefox 78): no container query and no :has() in the page's
   // layout, whose rules a browser that does not know them would drop.
   assert.doesNotMatch(PAGE_CSS.audit, /@container|:has\(/);
+});
+
+
+test("the plain-selector specificity helper weighs ids, classes, attributes, pseudo-classes and types independently", () => {
+  const tuple = (n) => [Math.floor(n / 10000), Math.floor(n / 100) % 100, n % 100];
+  assert.deepEqual(tuple(specificity("#a .b c")), [1, 1, 1]);
+  assert.deepEqual(tuple(specificity("a[href]:hover")), [0, 2, 1]);
+  assert.ok(specificity(".x") > specificity("a b c d e"));
+  assert.ok(specificity(".tbl tbody tr:target td") > specificity(".tbl td"));
+  for (const selector of [":is(.a,.b)", ":not(.a)", ":where(.a)", ":has(.a)", "a::before"]) assert.throws(() => specificity(selector), /not a plain selector/);
 });

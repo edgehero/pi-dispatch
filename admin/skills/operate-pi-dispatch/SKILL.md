@@ -65,11 +65,19 @@ dialog before it takes effect**:
   at most 6 decimals, no exponent), checked before the confirm; a window needs a per-job cap, and the confirm
   warns when none is visible.
 - `dispatch_trigger_add` / `dispatch_trigger_edit` / `dispatch_trigger_delete` — manage triggers.
-  Both writers can set a trigger's `provider` and `model` (add also `maxTurns`), on any trigger kind. A
+  Both writers can set a trigger's `provider`, `model` and `maxTurns`, on any trigger kind.
+  Edit also takes `progress`, `statusComment`, `steer` and `recover`; omitted fields keep their values.
+  Cron cannot enable `statusComment` or `recover`. A
   malformed id is refused with the loader's own message before the confirm dialog. Neither can check that
   the model exists: say so if asked. Neither can set `run.models` (which models a job may call) or
   `run.maxCostUsd` (its per-job dollar cap): a call that carries one is refused, and an edit keeps the values
   the entry has. The operator writes those by hand in the triggers file; `dispatch_triggers` shows them.
+- `dispatch_trigger_fire` takes a zero-based `index` from `dispatch_triggers` and fires a cron trigger now,
+  after a person's confirm showing the reserve. It requires the schedule in this deployment's queue,
+  a clean local repository under the process's `PI_DISPATCH_RUN_ROOTS`, the flow's `ai-trigger: allow`
+  at current HEAD and the shared `PI_DISPATCH_RUN_PER_HOUR` attempt count. Commands and portfolio
+  triggers are refused. Preview consumes no attempt; a second fire in the same minute is refused.
+  It preserves the trigger's full run configuration, including reviewed secrets and model overrides.
 - `dispatch_pause_add` / `dispatch_pause_edit` / `dispatch_pause_delete` — manage scheduled pause windows
   (per folder/repo "quiet hours": runs for a scope are deferred between certain times and auto-resume after;
   `dispatch_pauses` lists them with their index). `dispatch_pause_edit` is a partial change — pass the index

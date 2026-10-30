@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { TRIGGER_PANEL_STATES } from "./helpers/trigger-goldens.mjs";
 import { SPEND_PANEL_STATES } from "./helpers/spend-goldens.mjs";
 import { FLEET_PANEL_STATES } from "./helpers/fleet-goldens.mjs";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -46,7 +47,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const runs = ["runs-mirror-off.operator", "runs-mirror-degraded.operator", "runs-truncated.operator", "runs-unreadable.viewer", "runs-empty.viewer", "runs-unknown-reason.viewer"];
   const parked = ["parked-approval.operator", "parked-approval.viewer", "parked-answerable.operator", "parked-unanswerable.operator", "parked-being-answered.operator", "parked-unknown.operator", "parked-empty.viewer"];
   const more = ["run-not-found.operator", "run-not-found.viewer", "confirm-refused-timeout.operator", "confirm-preview-resume-incomplete.operator", "confirm-preview-many-queues.operator"];
-  assert.deepEqual([...PANEL_STATES], [...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
+  assert.deepEqual([...PANEL_STATES], [...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });
@@ -75,7 +76,7 @@ function slotOf(page) {
   const tag = new RegExp(`<div id="${CONFIRM_SLOT_ID}" class="cslot" role="region" aria-live="polite" aria-label="Preview"( hidden)?>`).exec(page);
   if (!tag) return null;
   const before = page.slice(0, tag.index);
-  const panel = [...before.matchAll(/<section id="(p-[a-z-]+)" data-panel>/g)].at(-1)?.[1] ?? null;
+  const panel = [...before.matchAll(/<section id="((?:p|cf)-[a-z-]+)" data-panel>/g)].at(-1)?.[1] ?? null;
   return { open: tag[1] === undefined, at: tag.index, panel, closesWrapper: before.endsWith("</section></div>"), closesPanel: before.endsWith("</section>"), body: page.slice(tag.index + tag[0].length) };
 }
 
@@ -86,15 +87,15 @@ test("the confirm states: the slot open right after the wrapper of the card that
   const pages = await rendered;
   const want = {
     "confirm-previewing": ["p-fleetbar", '<span data-slot-title>Previewing: Pause the fleet</span>'],
-    "confirm-preview": ["p-settings", '<p class="confirm__undo">'],
+    "confirm-preview": ["cf-settings", '<p class="confirm__undo">'],
     "confirm-preview-paid": ["p-failed", '<div class="confirm confirm--paid">'],
     "confirm-preview-danger": ["p-fleetbar", '<div class="confirm confirm--danger">'],
-    "confirm-unchanged": ["p-settings", '<div class="confirm confirm--none">'],
+    "confirm-unchanged": ["cf-settings", '<div class="confirm confirm--none">'],
     "confirm-bulk-preview": ["p-failed", '<div class="confirm confirm--paid">'],
     "confirm-bulk-results": ["p-failed", '<ul class="confirm__results">'],
-    "confirm-refused-preview": ["p-settings", "The change was refused"],
+    "confirm-refused-preview": ["cf-settings", "The change was refused"],
     "confirm-refused-confirm": ["p-failed", "This confirmation cannot be used"],
-    "confirm-preview-long-line": ["p-pause-windows", '<ul class="confirm__list">'],
+    "confirm-preview-long-line": ["cf-pause-windows", '<ul class="confirm__list">'],
     "confirm-refused-partial": ["p-fleetbar", "The change did not finish"],
     "confirm-refused-person": ["p-queues", "This browser is now signed in as someone else"],
     "confirm-preview-cancel-queued": ["p-queues", "build3 has no free job slot"],
@@ -246,7 +247,7 @@ test("the overview's states: all clear, the first run for each role, each kind o
   // A scheduler's overdue next run, named by its trigger and its run time (the raw id in its title): its cron trigger's
   // Edit, and no Cancel, which the queue would refuse.
   const due = panelOf(pages["waitlist-due.operator"], "p-waitlists");
-  assert.match(due, /<span class="code" title="repeat:hourly-sync:\d+">hourly-sync, <time[^>]*>[^<]+<\/time> run<\/span><span class="wl__t">Due since <time[^>]*>[^<]+<\/time>; no worker has taken it<\/span><a class="btn btn--sm btn--ghost" href="\/config">Edit<\/a><\/li>/);
+  assert.match(due, /<span class="code" title="repeat:hourly-sync:\d+">hourly-sync, <time[^>]*>[^<]+<\/time> run<\/span><span class="wl__t">Due since <time[^>]*>[^<]+<\/time>; no worker has taken it<\/span><a class="btn btn--sm btn--ghost" href="\/config\/trigger\?index=3">Edit<\/a><\/li>/);
   assert.equal((due.match(/data-action="cancel-queued"/g) ?? []).length, 1, "Cancel for the job that never started alone");
   // The registry's notes on a host.
   assert.ok(panelOf(pages["overview-host-skew.operator"], "p-hosts").includes(esc("build3's clock is about 1m 48s behind this console's: its beat says 2m ago, and Valkey last refreshed its row 12s ago.")), "the skew");

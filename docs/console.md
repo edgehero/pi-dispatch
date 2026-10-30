@@ -1911,3 +1911,40 @@ Board proposals wait for operator adoption. `board-adopt`, `board-freeze`, `boar
 `board-clear` use the existing preview, Confirm and audit-before-write pipeline. Freeze, clear and revert are
 destructive actions. A frozen board refuses adoption; stale expected versions refuse any conflicting mutation.
 See [Watch findings](watch.md) and [Watch decisions and boards](watch-decisions.md).
+
+## Configuration and trigger pages
+
+Configuration uses section pills with counts. Settings and triggers file locations appear below the title;
+paths never disclose the account home directory. All row labels count from 1. Edit and Delete on a row
+carry its machine index, so you never type a row number. Empty sections collapse to a single line.
+Packages, MCP servers and secret profiles/bundles remain available here until their dedicated pages arrive.
+Secret values and resolver references never appear.
+
+Open a trigger to see what starts it, who may fire it, its last 24 hours and last five runs, jobs in line,
+run-field defaults, sandbox capabilities and the effect of a change on queued jobs. A viewer sees these
+facts but no write controls or private task/instruction text. Instructions are escaped for operators.
+A spent one-shot explains how to re-arm it. Cron health uses the configured stall threshold.
+
+Add a trigger opens a structured editor for cron, label, comment, pull request and issue triggers. Only
+configured webhook forges and blessed venues are offered. Forge actions use that forge's own words.
+The JSON fallback accepts the same add-tool fields. Both forms retain the add tool's `run.secretBundle: false`;
+only a reviewed file edit can grant a project's bundle. The editor explains which fields are set by hand.
+
+Every edit previews a diff before confirmation, with where it is written, when it applies, the five-minute
+ticket and Undo. Refused fields keep their input and show the reason beside the field. A read-only console
+says forms are off. Editing a trigger also supports `maxTurns` and the progress, statusComment, steer and
+recover flags; cron does not offer statusComment or recover.
+
+### Fire a cron trigger now
+
+Fire now previews the reserve for a cron trigger with a scheduler in this deployment's queue. The tool
+`dispatch_trigger_fire` takes its zero-based `index` from `dispatch_triggers` and requires a person's confirm.
+Both paths refuse commands and portfolio triggers, require a clean repository under `PI_DISPATCH_RUN_ROOTS`,
+and require the flow's committed `SKILL.md` at current HEAD to set `ai-trigger: allow`. Grants come only
+from the console or pi process environment, never the deployment pointer or settings overlay.
+
+`PI_DISPATCH_RUN_PER_HOUR` bounds attempts with the same counter as `dispatch_run`. Preview does not
+consume an attempt. Confirm rechecks the trigger file, scheduler and admission gates, then counts the attempt.
+A second fire in the same minute is refused; it may still count as an attempt. A successful fire keeps the
+trigger's full model, image, secret and run configuration. Worker budget gates still run before spending.
+The result links the new job and offers cancellation while it has not started.

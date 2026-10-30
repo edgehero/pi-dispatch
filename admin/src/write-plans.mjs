@@ -92,16 +92,9 @@ function confirmOf(title, message) {
   return { title, message, summary: message.split("\n") };
 }
 
-/**
- * How a plan names a row of a list (issue #737). The pi tools and the `/dispatch` panel say "trigger #2" for index
- * 1, as they always have: the number a person counts by. The console's Configuration page still draws its tables and
- * forms by the 0-based index (the Triggers table's "#" column, its "Row #" fields, "History row # (newest is 0)"), so
- * until that page converts (PR 7a) the console's sentences name a row by that same index, "trigger at index 1", and the
- * page never says two numbers for one row. The value a form or a tool sends is the index on both surfaces; only the
- * words differ. `surface` is "console" for the console's actions, anything else for the tools and the panel.
- */
+/** Human console rows count from one; tool indexes remain zero-based machine values. */
 export function rowName(what, index, surface = "tool") {
-  return surface === "console" ? `${what} at index ${index}` : `${what} #${index + 1}`;
+  return surface === "console" ? `${what} row ${index + 1}` : `${what} #${index + 1}`;
 }
 
 /**
@@ -480,9 +473,10 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
   // Issue #704: a trigger a MODEL-CALLABLE tool writes is kept out of its project's secret bundle. Its task text (cron)
   // or its flow is the model's choice, and a bundle is the project's whole environment, granted to the triggers the
   // operator reviewed; an operator confirm on one entry does not review what that entry's jobs would hold. The
-  // operator removes the flag by hand in triggers.json when they mean it (docs/secrets.md). `surface: "console"` is
-  // the operator-typed console form, a person writing the entry, which keeps the entry as built, as the dialogs do.
-  const entry = surface === "tool" ? { ...built, run: { ...built.run, secretBundle: false } } : built;
+  // operator removes the flag by hand in triggers.json when they mean it (docs/secrets.md). The console's
+  // structured and JSON forms use this same entry, so switching surfaces cannot silently grant the bundle.
+  // The TUI's operator dialogs still build their entries directly with buildTriggerEntry.
+  const entry = { ...built, run: { ...built.run, secretBundle: false } };
   return {
     plan: {
       entry,
@@ -509,7 +503,7 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
   const list = triggerList(paths, fs);
   const cur = list[params.index];
-  if (!cur) return { refusal: `no trigger at index ${params.index} (have ${list.length})` };
+  if (!cur) return { refusal: surface === "console" ? `no trigger at row ${params.index + 1} (have ${list.length})` : `no trigger at index ${params.index} (have ${list.length})` };
   const row = rowName("trigger", params.index, surface);
   const flow = String(params.flow ?? "").trim();
   if (!flow) return { refusal: "flow must be non-empty" };
@@ -526,7 +520,7 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   // with the loader's own message instead of after the operator approved it.
   let ref;
   const alone = refusalOf(() => {
-    ref = validateModelRef({ provider: optStr(params.provider), model: optStr(params.model) }, row, paths.triggersPath);
+    ref = validateModelRef({ provider: optStr(params.provider), model: optStr(params.model), ...(params.maxTurns !== undefined ? { maxTurns: params.maxTurns } : {}) }, row, paths.triggersPath);
   });
   if (alone !== null) return { refusal: alone };
   // The display record carries no provider for a forge trigger, so the before half reads the raw
@@ -559,7 +553,7 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   const changes = [
     ["flow", String(cur.flow ?? "-"), flow],
     ...(backend === undefined ? [] : [["backend", String(cur.backend ?? "-"), backend]]),
-    ...["provider", "model"].filter((k) => ref[k] !== undefined).map((k) => [k, String(rawRun[k] ?? "-"), String(ref[k])]),
+    ...["provider", "model", "maxTurns"].filter((k) => ref[k] !== undefined).map((k) => [k, String(rawRun[k] ?? "-"), String(ref[k])]),
     ...Object.keys(flags).map((k) => [k, String(rawRun[k] ?? "-"), String(flags[k])]),
   ];
   return {
@@ -591,7 +585,7 @@ export function planTriggerDelete({ index, paths, surface = "tool", fs = nodeFs 
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
   const list = triggerList(paths, fs);
   const cur = list[index];
-  if (!cur) return { refusal: `no trigger at index ${index} (have ${list.length})` };
+  if (!cur) return { refusal: surface === "console" ? `no trigger at row ${index + 1} (have ${list.length})` : `no trigger at index ${index} (have ${list.length})` };
   const row = rowName("trigger", index, surface);
   return {
     plan: {

@@ -9,6 +9,7 @@ import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
 import * as server from "../src/console/server.mjs";
+import { readTriggerEditor, configLocationsOf } from "../src/read-model.mjs";
 import * as realWhatif from "../src/console/whatif.mjs";
 
 // `pi-dispatch-console` (issue #640) on injected modules: the token, session, code, ticket and audit modules are fakes
@@ -102,6 +103,8 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
     },
     confirm: { makeConfirmTickets: () => ({ issue: () => ({ ticket: "t", expiresAt: T0 + 300_000 }), redeem: () => ({ refusal: "no" }) }) },
     readModel: {
+      configLocationsOf,
+      readTriggerEditor,
       writePauseWindows: () => ({ ok: true }),
       panelEnv: ({ env }) => ({ env: { ...env }, dir: null, notice: undefined }),
       panelValkeyContext: (args) => (calls.push(["panel-context", args.pointerDir]), {}),
@@ -780,6 +783,24 @@ test("the console bundle does not reach the pi runtime (@earendil-works/pi-codin
   }
 });
 
+test("serve gives Fire now the process environment separately from deployment defaults (#750)", async () => {
+  const dep = deployment();
+  dep.env.PI_DISPATCH_RUN_ROOTS = dep.dir;
+  dep.env.PI_DISPATCH_RUN_PER_HOUR = "2";
+  const modules = fakeModules();
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  const errors = [];
+  const code = await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (line) => errors.push(line), until, onListening: () => stop() });
+  assert.equal(code, 0, errors.join("\n"));
+  assert.equal(captured.actionDeps.grantsEnv, dep.env);
+  assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_ROOTS, dep.dir);
+  assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_PER_HOUR, "2");
+  assert.equal(typeof captured.pageDeps.triggerFireCheck, "function");
+});
+
 test("serve hands each live load's who to loadPageData: a load no operator's stream shows says viewer, one an operator's shows names no role, each is marked live, and the console's readOnly rides along", async (t) => {
   const nullRes = () => ({ writableLength: 0, write: () => true, end() {}, destroy() {} });
   const dep = deployment();
@@ -827,4 +848,29 @@ test("Spend cache keeps views, projects, roles and path permissions apart and bo
   t += INSIGHTS_CACHE_MS;
   await cached("7d", args);
   assert.equal(calls, before + 1, "an expired answer is recomputed on the injected clock");
+});
+
+
+test("manual console editor metadata reads configured webhooks from deployment .env without widening process grants (#750)", async () => {
+  const dep = deployment();
+  writeFileSync(join(dep.dir, ".env"), "WEBHOOK_SECRET=PRIVATE_VALUE\nPI_DISPATCH_RUN_ROOTS=/file/grant\nPI_DISPATCH_RUN_PER_HOUR=999\n", { mode: 0o600 });
+  const modules = fakeModules();
+  modules.readModel.readTriggerEditor = readTriggerEditor;
+  modules.readModel.configLocationsOf = configLocationsOf;
+  const resolvePaths = modules.readModel.resolvePaths;
+  modules.readModel.resolvePaths = (env) => ({ ...resolvePaths(env), settingsFile: join(dep.dir, "settings.json"), triggersPath: join(dep.dir, "triggers.json") });
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  const code = await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: () => {}, until, onListening: () => stop() });
+  assert.equal(code, 0);
+  const metadata = await captured.pageDeps.triggerEditor();
+  assert.deepEqual(metadata.forges, ["github"]);
+  assert.doesNotMatch(JSON.stringify(metadata), /PRIVATE_VALUE|file\/grant|999/);
+  const locations = captured.pageDeps.configLocations();
+  assert.deepEqual(locations, { settings: `.../${basename(dep.dir)}/settings.json`, triggers: `.../${basename(dep.dir)}/triggers.json`, settingsOutsideDeployment: false });
+  assert.ok(!JSON.stringify(locations).includes(dep.dir), "the raw deployment path does not enter either role's display");
+  assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_ROOTS, undefined);
+  assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_PER_HOUR, undefined);
 });
