@@ -186,6 +186,7 @@ export function triggerRun(v) {
         Workspaces are kept for ${detail(v).sandbox?.retentionHours ?? 24} hours; 0
         keeps none.
       </p>
+      ${v.role === "operator" ? html`<p><a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ index: String(v.query.index) })}`}">Prepare a sandbox as this trigger</a></p>` : null}
       ${backend.startsWith("openshell")
         ? html`<p>
             OpenShell ${backend === "openshell-bind" ? "bind" : "copy"} mode.

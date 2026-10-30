@@ -106,15 +106,21 @@ test("BY SHAPE: every record write in index.mjs is immediately preceded by the s
 	}
 	// 3 above the gate (grouping source project, never-fits and wait refusals) and the 9 post-gate paths project-pickup counts,
 	// including a failover job with no eligible candidate.
-	assert.equal(sites.length, 12, "a new record site must be counted here, and settled");
+	assert.equal(sites.length, 13, "the twelve pickup records and the pre-slot sandbox refusal must all settle");
+	let beforePickup = 0;
 	for (const i of sites) {
 		const l = code(lines[i]);
 		const arg = /\{ job, (result: outcome|result|error: expired|error: loop|error)[,}]/.exec(l)?.[1];
 		assert.ok(arg, `line ${i + 1}: a record call this bolt can read: ${l}`);
 		let j = i - 1;
 		while (j >= 0 && code(lines[j]) === "") j -= 1;
-		assert.equal(code(lines[j]), `await settleSteer({ ${arg} });`, `line ${i + 1} is preceded by the settle of the same outcome`);
+		if (code(lines[j]) === "await settleSteerBeforePickup({ job, result });") {
+			beforePickup++;
+			assert.equal(arg, "result");
+			assert.equal(code(lines[j - 1]), "const result = { ...sandboxBoundary, budgetReserved: false };");
+		} else assert.equal(code(lines[j]), `await settleSteer({ ${arg} });`, `line ${i + 1} is preceded by the settle of the same outcome`);
 	}
+	assert.equal(beforePickup, 1, "only the pre-slot sandbox boundary uses the keeper-free settler");
 	// The helper is defined before the first site, decides finality itself (inbox-settle.mjs), and only for steer jobs.
 	const def = src.indexOf("const settleSteer = async");
 	assert.ok(def !== -1 && def < src.indexOf("await settleSteer("));

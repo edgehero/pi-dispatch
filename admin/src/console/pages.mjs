@@ -1,3 +1,4 @@
+import { SANDBOX_PANELS } from "./panels/sandboxes.mjs";
 import { ZERO_TOUCH_PANELS, zeroTouchTabs, zeroTouchControls } from "./panels/zero-touch.mjs";
 import { zeroTouchView } from "../zero-touch-view.mjs";
 /**
@@ -129,6 +130,7 @@ import { RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
 export const PAGES = Object.freeze({
   overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview", icon: "home" }),
   runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs", icon: "runs" }),
+  sandboxes: Object.freeze({ path: "/runs/sandboxes", auth: "operator", live: true, title: "Sandboxes", nav: null, icon: "box" }),
   "zero-touch": Object.freeze({ path: "/runs/zero-touch", auth: "viewer", live: false, title: "Zero touch", nav: null, icon: "flag" }),
   run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null, icon: "runs" }),
   parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked", icon: "parked" }),
@@ -155,6 +157,7 @@ export const PAGES = Object.freeze({
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
+  sandboxes: SANDBOX_PANELS,
   "zero-touch": ZERO_TOUCH_PANELS,
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
   connections: [["p-connection-problems", connectionsProblems], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
@@ -213,6 +216,7 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  sandboxes: [{ cls: "cols", items: [{ cls: "stack", items: ["p-sb-run", "p-sb-new"] }, { cls: "stack", items: ["p-sb-open", "p-sb-kept", "p-sb-browser"] }] }],
   "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
   connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-forges", "p-egress", "p-endpoints"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
   project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
@@ -260,6 +264,7 @@ export function panelIds(name) {
 
 /** The parameters each screen takes; any other refuses the request. */
 const PAGE_PARAMS = Object.freeze({
+  sandboxes: ["id", "repo", "index", "ref", "host", "pin", "request"],
   overview: ["rows", "zoom", "project"],
   runs: [...RUN_FILTER_FIELDS, "before", "touched", "days", "scope"],
   "zero-touch": ["days", "project", "scope"],
@@ -353,6 +358,17 @@ export function parsePageQuery(name, searchParams) {
     return v === null || v === "" ? null : v;
   };
   switch (name) {
+    case "sandboxes": {
+      const id = one("id"), repo = one("repo"), rawIndex = one("index"), ref = one("ref") ?? "HEAD", host = one("host"), pin = one("pin") ?? "0", request = one("request");
+      if (id !== null && !RUN_ID_RE.test(id)) return { refusal: "id must be a sandbox or run id" };
+      if (repo !== null && (!/^[A-Za-z0-9._/-]{1,200}$/.test(repo) || repo.split("/").some((part) => !part || part === "." || part === ".."))) return { refusal: "repo must be a repository path" };
+      if (rawIndex !== null && !/^(?:0|[1-9]\d{0,5})$/.test(rawIndex)) return { refusal: "index must be a triggers-file index" };
+      if (host !== null && !WORKER_NAME_RE.test(host)) return { refusal: "host must be a worker name" };
+      if (!ref || ref.length > 200 || /[\x00-\x20\x7f]/.test(ref) || ref.startsWith("-")) return { refusal: "ref must be a branch, tag, full SHA or pr:number without spaces or control bytes" };
+      if (!["0", "1"].includes(pin)) return { refusal: "pin must be 0 or 1" };
+      if (request !== null && !/^sb-[0-9a-f]{32}$/.test(request)) return { refusal: "request must be a sandbox preparation id" };
+      return { query: Object.freeze({ id, repo, index: rawIndex === null ? null : Number(rawIndex), ref, host, pin: pin === "1", request }) };
+    }
     case "triggers": {
       const kind = one("kind") ?? "all";
       if (!TRIGGER_LIST_KINDS.includes(kind)) return { refusal: `kind must be one of ${TRIGGER_LIST_KINDS.join(", ")}` };
@@ -477,6 +493,10 @@ export function pageQueryString(name, query) {
     if (q.scope) p.set("scope", q.scope);
   }
   if (name === "trigger" && Number.isSafeInteger(q.index)) p.set("index", String(q.index));
+  if (name === "sandboxes") {
+    for (const k of ["id", "repo", "index", "ref", "host", "request"]) if (q[k] !== null && q[k] !== undefined) p.set(k, String(q[k]));
+    if (q.pin) p.set("pin", "1");
+  }
   if (name === "triggers" && q.kind && q.kind !== "all") p.set("kind", q.kind);
   if (name === "watch" || name === "watch-board") {
     for (const k of ["rule", "finding"]) if (q[k]) p.set(k, q[k]);
@@ -548,6 +568,7 @@ export function returnPathOf(raw) {
  * `/api/state`, and a reader built to read them would make every other screen pay for a read it never draws.
  */
 const PAGE_READS = Object.freeze({
+  sandboxes: ["parkedCount"],
   "zero-touch": ["parkedCount"],
   overview: ["snapshot", "waiting"],
   runs: ["runsPage", "subscriptions", "runsWindow", "parkedCount"],
@@ -696,6 +717,13 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
   if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
   const reads = PAGE_READS[name];
+  // Private workspace and opener configuration reads never join /api/state or a viewer's shared load.
+  if ((who?.role === "operator" || who?.live === true && who?.role !== "viewer") && ["sandboxes", "run", "host", "trigger"].includes(name) && deps.sandboxes) {
+    try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
+    if (name === "sandboxes") {
+      try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
+    }
+  }
   if (name === "zero-touch") {
     try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role }) : null; } catch { data.zeroTouch = null; }
     // Role projection happens before page data can be inspected or reused, not just while rendering a group panel.
@@ -1041,8 +1069,8 @@ export async function renderPage(name, ctx) {
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
   const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
-  const titleOptions = configOptions ?? triggerListOptions ?? (name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
-  const body = shellHtml(name, ctx, html`${["runs", "zero-touch"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
+  const titleOptions = configOptions ?? triggerListOptions ?? (name === "sandboxes" ? { description: "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
+  const body = shellHtml(name, ctx, html`${["runs", "zero-touch", "sandboxes"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !runPlaces(places).shown ? 503 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${["host", "venue"].includes(name) ? ctx?.query?.name ?? meta.title : meta.title}`, name, body, live, query, theme, becauseRun: ctx?.query?.becauseRun ?? null }) };

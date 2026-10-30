@@ -54,12 +54,47 @@ function capture(over = {}) {
 			resolveJobUser: async () => ({ user: null, home: null }),
 			// Issue #452 gate round 2: the keeper holds, never read from a real Podman here.
 			keeperCheck: async () => null,
+			monitorSession: async () => ({ ownsNetwork: false, finish() {} }),
 			...over,
 		},
 	};
 }
 
 const envWith = (root, over = {}) => ({ VALKEY_URL: "redis://127.0.0.1:6399", PI_SANDBOX_DIR: root, ...over });
+
+test("new preparation passes the selected trigger/ref/pin and starts no runtime or monitor", async () => {
+	const clock = () => Date.now();
+	let request;
+	const c = capture({ now: clock, prepare: async (r) => (request = r, { id: "sb-" + "a".repeat(32), until: clock() + 86_400_000 }), running: async () => assert.fail("preparation must not inspect a sandbox runtime"), launch: async () => assert.fail("preparation must not start a container"), monitorSession: async () => assert.fail("preparation must not start a shell monitor") });
+	assert.equal(await runSandbox(["--new", "acme/web", "--ref", "pr:42", "--as", "0", "--pin"], { env: envWith("/unused", { PI_WORKER_NAME: "build1" }), deps: c.deps }), 0);
+	assert.deepEqual(request, { repo: "acme/web", ref: "pr:42", triggerIndex: 0, host: "build1", pin: true });
+	assert.match(c.text(), /no container started/);
+	for (const args of [["--new", "acme/web", "--ref", "main"], ["--new", "acme/web", "--ref", "main", "--as", "0", "gh-1"], ["--list", "--attach"], ["--ref", "main", "gh-1"], ["bad;command"]]) {
+		const bad = capture({ prepare: async () => assert.fail("malformed request"), running: async () => assert.fail("malformed request") });
+		assert.equal(await runSandbox(args, { env: envWith("/unused"), deps: bad.deps }), 1);
+	}
+});
+
+test("deployment invocation reexecutes in the clean loader result before any runtime call", async () => {
+	const c = capture({ deploymentEnv: async ({ dir, expectedHost }) => (assert.equal(dir, "/trusted/deploy"), assert.equal(expectedHost, "build1"), { env: { PI_EGRESS: "1", PI_WORKER_NAME: "build1" } }), runDeployment: async (args, childEnv) => { assert.deepEqual(args, ["gh-1", "--attach"]); assert.deepEqual(childEnv, { PI_EGRESS: "1", PI_WORKER_NAME: "build1" }); return 7; }, running: async () => assert.fail("must reexec first") });
+	assert.equal(await runSandbox(["gh-1", "--attach", "--deployment", "/trusted/deploy", "--expected-host=build1"], { env: { PI_EGRESS: "0", SECRET: "ambient" }, deps: c.deps }), 7);
+});
+
+test("attach uses the manifest runtime's immutable live container and repairs tracking without a new container", async () => {
+	const { root } = retained({ backend: "podman" });
+	const containerId = "a".repeat(64);
+	let repaired = false;
+	const c = capture({ inspectSession: async ({ bin }) => (assert.equal(bin, "podman"), { present: true, running: true, containerId, nonce: "b".repeat(32) }), ensureMonitor: async ({ state }) => { assert.equal(state.containerId, containerId); repaired = true; }, attach: async (opts) => (assert.equal(repaired, true), assert.deepEqual(opts, { bin: "podman", containerId }), { code: 9 }), launch: async () => assert.fail("attach must not launch") });
+	assert.equal(await runSandbox(["gh-1", "--attach"], { env: envWith(root, { PI_BACKENDS: "podman" }), deps: c.deps }), 9);
+});
+
+test("tracking refusal prevents launch and remains an actionable CLI result", async () => {
+	const { root } = retained();
+	const c = capture({ monitorSession: async () => { throw new Error("do not expose backend text"); }, launch: async () => assert.fail("untracked shell") });
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_EGRESS: "0" }), deps: c.deps }), 1);
+	assert.match(c.errText(), /tracking is unavailable.*Valkey/);
+	assert.doesNotMatch(c.errText(), /backend text/);
+});
 
 test("a missing job id refuses, and never shells out to docker", async () => {
 	let asked = false;

@@ -1491,6 +1491,32 @@ stateTest("a filter bar in use keeps its live panel still and says so, a viewer'
   assert.equal(a.document.getElementById("f-kind").value, "github", "swapped: the server's new choice");
 });
 
+stateTest("an explicitly held native GET picker keeps focused text, dirty text and changed selects through live panels, then releases reverted fields", () => {
+  const pickers = (fresh = false) => html`<form method="get" data-live-hold><input id="draft-ref" name="ref" value="HEAD"><textarea id="draft-note" name="note"></textarea><select id="draft-host" name="host"><option value="mini1" selected>mini1</option><option value="build3">build3</option></select>${ui.btn({ label: "Review", type: "submit" })}</form><p>${fresh ? "new host publication" : "old host publication"}</p>`;
+  for (const type of ["focused", "text", "textarea", "select"]) {
+    const w = boot(runsPage({ bar: pickers() })), ref = w.document.getElementById("draft-ref");
+    if (type === "focused") ref.focus();
+    if (type === "text") w.type(ref, "feature/draft");
+    if (type === "textarea") w.type(w.document.getElementById("draft-note"), "unfinished");
+    if (type === "select") {
+      const options = w.document.getElementById("draft-host").querySelectorAll("option");
+      options[0].liveSelected = false; options[1].liveSelected = true;
+    }
+    w.streams[0].emit("panel", { id: "p-filters", html: String(pickers(true)) });
+    assert.ok(w.document.getElementById("draft-ref") === ref, `${type}: original form survives the update`);
+    assert.match(text(w.document.getElementById("p-filters")), /old host publication/);
+    if (type === "text") assert.equal(ref.value, "feature/draft");
+    if (type === "textarea") assert.equal(w.document.getElementById("draft-note").value, "unfinished");
+    if (type === "select") assert.equal(w.document.getElementById("draft-host").value, "build3");
+    ref.value = "HEAD"; w.document.getElementById("draft-note").value = "";
+    const options = w.document.getElementById("draft-host").querySelectorAll("option");
+    options[0].liveSelected = true; options[1].liveSelected = false;
+    ref.focus(); ref.blur(); w.tick(0);
+    assert.ok(w.document.getElementById("draft-ref") !== ref, `${type}: reverted and unfocused form releases the newest update`);
+    assert.match(text(w.document.getElementById("p-filters")), /new host publication/);
+  }
+});
+
 stateTest("a filter bar's GET carries only the fields in use: its empty fields are left out as the form is sent, and enabled again a tick later", async () => {
   for (const [page, bar] of [["runs", filterBar({ q: "acme/web" })], ["audit", html`<form class="filterbar" method="get" action="/audit"><input type="search" name="q" value=""><select name="who"><option value="" selected>Who: all</option><option value="ops">Who: ops</option></select><select name="action"><option value="">Action: all</option><option value="fleet-pause" selected>Action: fleet-pause</option></select>${ui.btn({ label: "Filter", type: "submit" })}</form>`]]) {
     const w = boot(runsPage({ bar }), { url: `/${page}` });
@@ -1527,7 +1553,7 @@ test("the script's closed lists are written in from their one source each, never
   assert.deepEqual(named("mark"), Object.keys(LIVE_STATES).filter((k) => k !== "start").sort());
   // The sign-in page goes where a reason is the console's own, and nowhere else.
   // Sign-out's only one is its 200's (issue #737): an unconfirmed sign-out stays on the page.
-  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(isReason(r) ? "/login?ended=" + r : "/login");', 'location.assign("/");', 'location.assign("/login");']);
+  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(isReason(r) ? "/login?ended=" + r : "/login");', 'location.assign("/");', 'location.assign("/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
   assert.match(CONSOLE_SCRIPT, /if \(r\.status === 200\) location\.assign\("\/login"\);\n\s+else unconfirmed\(\);\n\s+\}, unconfirmed\);/);
   // The signed-out sentence is said as text, in the slot's message line (slotSays), never as markup.
   assert.match(CONSOLE_SCRIPT, /function signedOut\(r\) \{[^]*?slotSays\(CONFIRM_SIGNED_OUT\);/);

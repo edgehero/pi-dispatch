@@ -265,6 +265,18 @@ export function makeRunningJobs() {
 	};
 }
 
+// A free pre-pickup refusal needs its own project snapshot, before settlement can await a live configuration edit.
+// It never enters pickup, whose one snapshot must stay after lost-lock checks and immediately before pause gates.
+function makeSandboxBoundaryRecorder({ projects, settleSteerBeforePickup, recordRun, now }) {
+	return async (job, sandboxBoundary) => {
+		const project = projectOf(job.data, projects());
+		const result = { ...sandboxBoundary, budgetReserved: false };
+		await settleSteerBeforePickup({ job, result });
+		await recordRun({ job, result, project, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
+		return result;
+	};
+}
+
 export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs() }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
@@ -274,6 +286,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	const rejectedSeen = new Set();
 	// Watch producer refusals finish before pickup and cannot carry a steering session.
 	const recordWatchOutcome = recordRun;
+	// A kept-folder refusal happens before pickup creates a keeper or takes a host slot. Its existing inbox and
+	// held replies still need a final close before the record, just as every terminal path inside pickup does.
+	const settleSteerBeforePickup = async ({ job, result }) => {
+		let held = null;
+		if (job.data?.awaitInput === true && typeof deps?.settleHeld === "function") {
+			try { held = await deps.settleHeld({ job, result, afterTake: false }); } catch {}
+		}
+		if (job.data?.steer !== true) return;
+		const steered = await settleInbox({ redis, job, result, log: deps?.log ?? (() => {}), lateContext: { heldResumed: Number(held?.resumed) > 0 }, ...(typeof deps?.onLateForge === "function" ? { onLateForge: deps.onLateForge } : {}) });
+		if (steered) result.steered = steered;
+	};
+	const recordSandboxBoundary = makeSandboxBoundaryRecorder({ projects, settleSteerBeforePickup, recordRun, now });
 	// THE ONE DEFERRAL (issue #737, `defer-write.mjs`): every gate below that puts the job back on the delayed set goes
 	// through `deferTo`, which records the gate's reason in `defer:job:<id>` (bounded, fail-open) and then makes the move
 	// and the `DelayedError` throw the gates always made; `noteRetry` records an infrastructure retry's backoff before its
@@ -1894,6 +1918,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				return resolved.result;
 			}
 			job.data = resolved.data;
+		}
+		// Kept workspaces can hold an arbitrary prepared ref; they never become agent workspaces (#771).
+		const sandboxBoundary = await deps.checkSandboxWorkspace?.(job.data);
+		if (sandboxBoundary?.unavailable) throw new InfraRetry("the local workspace sandbox boundary could not be read");
+		if (sandboxBoundary?.outcome === "policy") {
+			return recordSandboxBoundary(job, sandboxBoundary);
 		}
 		if (!hostBudget) return pickup(job, token, signal, { budgetDeferred: false });
 		// The pickup's TICKET: the ledger entry this pickup takes carries it, and only this pickup's release or

@@ -67,7 +67,8 @@ jobs:
       - name: Install rootless Podman's parts
         run: |
           sudo apt-get update
-          sudo apt-get install -y podman uidmap netavark aardvark-dns catatonit slirp4netns
+          sudo apt-get install -y podman uidmap netavark aardvark-dns catatonit slirp4netns openssh-server redis-server
+          sudo mkdir -p /run/sshd
           podman --version
 
       # Ubuntu 24.04 forbids unprivileged user namespaces through AppArmor by default, and rootless Podman is one.
@@ -202,3 +203,6 @@ jobs:
       # `env -i`, so only what this line passes reaches the script.
       - name: Run the conformance harness against the real podman bundle
         run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_EGRESS=1 node .github/scripts/podman-conformance.mjs
+
+      - name: "Sandbox SSH uses this account's rootless store and holds detach, attach and End (#771)"
+        run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_EGRESS=1 PI_SANDBOX_SMOKE_VENUE=podman node .github/scripts/sandbox-ssh-smoke.mjs

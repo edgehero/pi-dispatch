@@ -42,6 +42,12 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch sandbox <jobId>
                            re-open a finished run's sandbox as a shell — same image, same workspace,
                            no credentials  [--publish <port>[:<containerPort>]] [--pin]
+  pi-dispatch sandbox <id> --attach
+                           return to the tracked shell on its original runtime
+  pi-dispatch sandbox --new <repo> --ref <branch|pr:N|sha> --as <trigger-index> [--pin]
+                           prepare a kept workspace without an agent, container, reservation or run slot
+  pi-dispatch opener install --config <approved Fleet export.json>
+                           register pi-dispatch-open for this account; terminal commands wait for Enter
   pi-dispatch sandbox --list
                            what is still re-openable, for how long, and what is running now
   pi-dispatch canary --role <role> --model <provider/model> --flow <flow> --cap-usd <amount>
@@ -156,6 +162,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 	if (cmd === "sandbox") {
 		const { runSandbox } = await import("./sandbox-cli.mjs");
 		return runSandbox(argv.slice(1), { env });
+	}
+	if (cmd === "opener") {
+		const { runOpener } = await import("./opener-cli.mjs");
+		return runOpener(argv.slice(1), { env });
 	}
 	if (cmd === "canary") {
 		const { runCanary } = await import("./canary-cli.mjs");

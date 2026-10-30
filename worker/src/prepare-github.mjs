@@ -41,53 +41,12 @@ import { managedForkPrompt } from "./fork-job.mjs";
  * github-host.mjs's 404-vs-other split: only the determinate class becomes policy.
  */
 
-import { GIT_SAFE_CONFIG } from "./git-hardening.mjs";
-import { execFile } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { buildGithubPrompt } from "./github-prompt.mjs";
 import { materializePiDir } from "./materialize.mjs";
 import { InfraRetry } from "./processor.mjs";
-
-const exec = promisify(execFile);
-
-// The -c flags that make a clone/checkout run no repo-supplied code, applied to EVERY git invocation
-// through `hardened()` below so they cannot be omitted at a call site. The shared bar comes from
-// git-hardening.mjs; the clone-specific transport/credential locks are this file's own, and they sit
-// BETWEEN the shared pairs and `--no-pager`, which is why that module exports the pairs separately from
-// the finished read prefix -- composing here must not reorder this argv.
-const HARDEN_FLAGS = [
-	...GIT_SAFE_CONFIG,
-	"-c",
-	"protocol.ext.allow=never",
-	"-c",
-	"credential.helper=",
-	"--no-pager",
-];
-
-/** Prepend the hardening flags to a bare git subcommand's args. */
-function hardened(args) {
-	return [...HARDEN_FLAGS, ...args];
-}
-
-// stderr fragments that mean the resolved SHA is provably gone from the remote: the default branch
-// advanced and git can no longer fetch/realise that commit. These are DETERMINATE, so they map to a
-// policy refusal, never a retry. Any other failure stays retryable (see fetch catch below).
-const SHA_GONE_MARKERS = [
-	"couldn't find remote ref",
-	"not our ref",
-	"unadvertised object",
-	"did not send all necessary objects",
-	"reference is not a tree",
-];
-
-/** True only when a git error's output names one of the determinate gone-SHA conditions. */
-function isShaGone(error) {
-	const text = `${error?.stderr ?? ""}\n${error?.message ?? ""}`.toLowerCase();
-	return SHA_GONE_MARKERS.some((marker) => text.includes(marker));
-}
+import { createAskpassHelper, defaultHostGit as defaultGit, hardenedCloneArgs as hardened, isCloneRefGone as isShaGone } from "./host-clone.mjs";
 
 /**
  * Prepare a GITHUB job's read-only /job inputs. Clones `job.repo` at the caller-resolved default-
@@ -294,32 +253,4 @@ function prEventBody(target) {
 	if (target.head) body.head = target.head;
 	if (target.base) body.base = target.base;
 	return body;
-}
-
-/**
- * Write the GIT_ASKPASS helper to a fresh host temp dir OUTSIDE jobDir/workspace. The script holds no
- * token: it prints GIT_ASKPASS_TOKEN, which git sets in the child's env only for the network fetch.
- * Returns `{ dir, path }`; the caller removes `dir` in a finally.
- */
-function createAskpassHelper() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-askpass-"));
-	const path = join(dir, "askpass.sh");
-	writeFileSync(path, "#!/bin/sh\nprintf '%s' \"$GIT_ASKPASS_TOKEN\"\n", { mode: 0o700 });
-	chmodSync(path, 0o700);
-	return { dir, path };
-}
-
-/**
- * Transport for one git invocation. `args` arrive already hardened by `hardened()`. Runs the real
- * binary via execFile (array args, NO shell); `cwd` is the workspace and `env` is passed only for the
- * network fetch (the askpass env), so local calls inherit the ambient environment.
- */
-async function defaultGit(cwd, args, { env } = {}) {
-	const { stdout } = await exec("git", args, {
-		cwd,
-		encoding: "utf8",
-		maxBuffer: 16 * 1024 * 1024,
-		env,
-	});
-	return stdout;
 }

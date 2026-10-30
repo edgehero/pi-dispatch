@@ -62,7 +62,7 @@ JOURNEYS = {
              "Re-run it. The preview shows the model, the reserve and today's cap before anything starts.", "Built", "#747",
              ("branch", "Or, when a run ran but built the wrong thing")),
             ("SandboxesScreen", ["#p-sb-run"], None,
-             "Open its workspace in your own terminal: the same image and files, no credentials.", "Proposed", "#771",
+             "Open its workspace in your own terminal: the same image and files, no credentials.", "Built", "#771",
              None),
         ]),
     "JourneySetup": dict(

@@ -1,3 +1,5 @@
+import { makeSandboxService } from "../src/sandbox-data.mjs";
+import { sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -297,6 +299,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
   }
   // The kinds the contract names, held to the table so a spec and the code cannot drift apart.
   assert.deepEqual(Object.fromEntries(ACTIONS.map((a) => [a.name, a.kind])), {
+    "sandbox-prepare": "sandbox-prepare", "sandbox-pin": "sandbox-pin", "sandbox-end": "sandbox-end", "sandbox-host-set": "sandbox-host-set",
     "cancel-active": "cancel-active",
     "cancel-held": "cancel-held",
     "cancel-all-held": "held-cancel-all",
@@ -350,6 +353,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
 test("every action has frozen fields, a danger flag never beside paid, and its undo, inverse and confirm label", () => {
   const pause = ["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"];
   const FIELDS = {
+    "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
     "run-fork": ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
@@ -366,7 +370,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "zero-touch-group": ["runId"], "zero-touch-name": ["groupId", "name"], "zero-touch-instruction": ["runId", "groupId", "index", "sentence"], "zero-touch-undo": ["fixId"],
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
-  assert.equal(ACTIONS.length, 49);
+  assert.equal(ACTIONS.length, 53);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -378,7 +382,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     // Issue #737: every one of the 38 says what it did, for the banner after the write.
     for (const fn of ["undo", "inverse", "confirmLabel", "done"]) assert.equal(typeof a[fn], "function", `${a.name}: ${fn}`);
   }
-  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["board-clear", "board-freeze", "board-revert", "cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "secret-bundle-remove", "secret-profile-remove", "trigger-delete"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["board-clear", "board-freeze", "board-revert", "cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "sandbox-end", "secret-bundle-remove", "secret-profile-remove", "trigger-delete"]);
   assert.ok(Object.isFrozen(UNDO_SENTENCES));
   for (const [k, v] of Object.entries(UNDO_SENTENCES)) assert.match(v, /^[A-Z][^]*\.$/, `${k}: a sentence`);
 });
@@ -423,6 +427,10 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   const windows = { scope: "*", from: "01:00", to: "02:00", tz: "UTC" };
   // [action, out, undo, inverse (or null), label, done, done's result for a bulk act]
   const rows = [
+    ["sandbox-prepare", { payload: { params: { host: "mini1" } } }, twice("The host sweeps the prepared clone when its retention window ends. No shell starts until you open it."), null, "Prepare sandbox", "Requested sandbox preparation on mini1"],
+    ["sandbox-pin", { payload: { params: { id: "gh-1" } } }, twice("The workspace is swept after its host's pin window. Restore an earlier deadline only from that host."), null, "Pin workspace", "Requested a pin for gh-1"],
+    ["sandbox-end", { payload: { params: { id: "gh-1" } } }, twice("Open a new shell from the kept workspace; the ended shell's processes cannot be restored."), null, "End this shell", "Ended the shell for gh-1"],
+    ["sandbox-host-set", { payload: { params: { host: "mini1" } } }, twice("Edit this host's terminal target again. Import the changed file into the opener on your own computer."), null, "Save terminal target", "Saved terminal target for mini1"],
     ["zero-touch-group", {}, twice("A completed classification cannot be withdrawn; it never answers the question."), null, "Start grouping job", "Queued the capped question grouping job"],
     ["zero-touch-name", {}, twice("Rename the group again from Zero touch."), null, "Save group name", "Saved the group name"],
     ["zero-touch-instruction", {}, twice("Remove this sentence while the trigger still matches the confirmed change."), null, "Add instruction sentence", "Added the instruction sentence and linked its cause"],
@@ -544,6 +552,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
 
 /** A value for each body key the preview may read, so a preview reads on past it (an index a number, an id its charset). */
 const SAMPLE_BODY = {
+  pin: false, shell: "posix", host: "mini1", repo: "acme/web", ref: "HEAD", nonce: "a".repeat(32), containerId: "b".repeat(64), target: "ops@mini1", deployment: "/srv/pi", nodePath: "/usr/bin/node", cliPath: "/srv/pi/cli.mjs",
   rule: "shop", expectedVersion: 2, version: 1, proposalId: "p1", decision: "decline", index: 0, validDays: 1, jobId: "gh-1", id: "a".repeat(32), mode: "steer", text: "x", windows: [], trigger: {}, limit: {}, envelope: {}, projects: [{ id: "p", weight: 1 }], members: ["m"], days: ["mon"] };
 /** A dependency that is anything: every property and every call is another one, so a preview runs until it needs a real value. */
 function anything() {
@@ -2950,6 +2959,33 @@ test("Zero touch real actions bind private-source references, exact instructions
     assert.equal((await c.confirm("zero-touch-instruction", stale.json().ticket)).status, 409);
     assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, "A later operator edit.");
   } finally { await f.done(); }
+});
+
+test("sandbox controls use the HTTP preview/ticket/audit pipeline; audit failure and viewer/read-only cannot dispatch", async () => {
+  const { dir, paths } = deployment(); paths.projectsPath = paths.projectsFile;
+  const now = () => T0;
+  const inv = sandboxFixture(T0), queued = [], ended = [];
+  const fleet = { sandboxInventory: async () => ({ hosts: inv.hosts }), sandboxSessions: async () => ({ sessions: inv.sessions }), sandboxPrepare: async (r) => { queued.push(r); return { id: r.id ?? `sb-${"f".repeat(32)}`, state: "pending" }; }, sandboxEnd: async (r) => { ended.push(r); return { ended: true }; } };
+  const service = makeSandboxService({ paths, deploymentDir: dir, fleet, now });
+  const c = await start({ paths, a: { sandboxes: service } });
+  const input = { host: "mini1", repo: "acme/web", index: 0, ref: "HEAD", pin: false };
+  const p = await c.act("sandbox-prepare", input);
+  assert.equal(p.status, 200, p.text); assert.equal(queued.length, 0);
+  assert.equal((await c.confirm("sandbox-prepare", p.json().ticket)).status, 200);
+  assert.equal(queued.length, 1); assert.equal(lastWrite(c).kind, "sandbox-prepare");
+  assert.equal((await c.confirm("sandbox-prepare", p.json().ticket)).status, 409); assert.equal(queued.length, 1);
+  const pin = await c.both("sandbox-pin", { host: "mini1", id: "gh-9575" });
+  assert.equal(pin.confirm.status, 200, pin.confirm.text); assert.equal(queued[1].op, "pin"); assert.equal(queued[1].expect.generation, "a".repeat(64));
+  const shell = inv.sessions[0], end = await c.both("sandbox-end", { host: shell.host, id: shell.id, nonce: shell.nonce, containerId: shell.containerId });
+  assert.equal(end.confirm.status, 200, end.confirm.text); assert.equal(end.preview.danger, true); assert.equal(ended.length, 1);
+  const mapping = await c.both("sandbox-host-set", { host: "mini1", target: "ops@mini1", deployment: "/srv/pi", nodePath: "/usr/bin/node", cliPath: "/srv/pi/cli.mjs", shell: "posix" });
+  assert.equal(mapping.confirm.status, 200, mapping.confirm.text); assert.equal(service.hosts().config.hosts.mini1.target, "ops@mini1");
+  const blocked = await c.act("sandbox-prepare", input); c.audit.failNext = 1;
+  assert.equal((await c.confirm("sandbox-prepare", blocked.json().ticket)).status, 500); assert.equal(queued.length, 2);
+  const viewer = await c.cookieFor(VIEW_TOKEN);
+  assert.equal((await c.act("sandbox-prepare", input, viewer)).status, 403); assert.equal(queued.length, 2);
+  const ro = await start({ paths, readOnly: true, a: { sandboxes: service } });
+  assert.equal((await ro.act("sandbox-prepare", input)).status, 403); assert.equal(queued.length, 2);
 });
 
 // Issue #737: the copy rules `heldToCopyRules` holds each preview to reached every action's preview at

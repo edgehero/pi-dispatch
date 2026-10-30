@@ -46,7 +46,7 @@ function stripComments(text) {
 const LIB = (name) => new RegExp(`["'\`]${name}(?:/[^"'\`]*)?["'\`]`);
 const RULES = [
 	{ what: "the ioredis driver", re: LIB("ioredis"), allowed: ["worker/src/connection.mjs"] },
-	{ what: "the bullmq library", re: LIB("bullmq"), allowed: ["worker/src/queue.mjs", "worker/src/index.mjs"] },
+	{ what: "the bullmq library", re: LIB("bullmq"), allowed: ["worker/src/queue.mjs", "worker/src/index.mjs", "worker/src/sandbox-prepare-requests.mjs"] },
 	// The two that load pi's own packages (undici, pi-coding-agent's keys) by pi's install path; neither names a Valkey library.
 	{ what: "createRequire", re: /\bcreateRequire\b/, allowed: ["admin/src/keys.mjs", "image/runner/src/env-proxy.mjs", "image/runner/src/loader.mjs"] },
 	{ what: "a computed dynamic import", re: /\bimport\(\s*(?:[^"'`\s)]|`[^`]*\$\{)/, allowed: ["image/runner/src/env-proxy.mjs", "image/runner/src/usage-meter.mjs", "image/runner/src/outcome.mjs", "image/runner/src/child-preload.mjs", "image/runner/src/child-meter.ts", "image/runner/src/child-route.mjs", "image/runner/src/model-runtime.mjs", "worker/src/doctor.mjs", "worker/src/pi-model-loader.mjs"] },
@@ -75,6 +75,12 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	// Issue #468: and each carries the one-line `error` listener, so BullMQ never prints the whole error object.
 	assert.match(at("worker/src/queue.mjs"), /const queue = new Queue\([^;]*\);\s*onValkeyError\(queue, /);
 	assert.match(at("worker/src/index.mjs"), /worker = new Worker\([\s\S]*?\}\);\s*onValkeyError\(worker, /);
+	// #771's host-bound control worker is a third construction, outside paid processors. Its injected constructor
+	// seam must not become a way around the same endpoint judgment or one-line error handling.
+	const control = at("worker/src/sandbox-prepare-requests.mjs");
+	assert.match(control, /assertJudgedConnection\(connection\);[\s\S]*?const worker = new WorkerClass\(/);
+	assert.match(control, /const worker = new WorkerClass\([\s\S]*?\}\);\s*onValkeyError\(worker, /);
+	assert.equal((control.match(/new WorkerClass\(/g) ?? []).length, 1);
 	// And connection.mjs' own client is built from parseConnection's options, never from a bare URL.
 	assert.match(at("worker/src/connection.mjs"), /return new Redis\(\{ \.\.\.parseConnection\(url,/);
 	assert.equal((at("worker/src/connection.mjs").match(/new Redis\(/g) ?? []).length, 1);

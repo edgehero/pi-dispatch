@@ -1829,6 +1829,10 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
  */
 const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
 const WRITE_RULES = {
+  "sandbox-prepare": { fields: ["repo", "index", "ref", "host", "pin"], danger: false, undo: () => "The host sweeps the prepared clone when its retention window ends. No shell starts until you open it.", inverse: () => null, confirmLabel: () => "Prepare sandbox", done: (out) => `Requested sandbox preparation on ${out.payload.params.host}` },
+  "sandbox-pin": { fields: ["host", "id"], danger: false, undo: () => "The workspace is swept after its host's pin window. Restore an earlier deadline only from that host.", inverse: () => null, confirmLabel: () => "Pin workspace", done: (out) => `Requested a pin for ${out.payload.params.id}` },
+  "sandbox-end": { fields: ["host", "id", "nonce", "containerId"], danger: true, undo: () => "Open a new shell from the kept workspace; the ended shell's processes cannot be restored.", inverse: () => null, confirmLabel: () => "End this shell", done: (out) => `Ended the shell for ${out.payload.params.id}` },
+  "sandbox-host-set": { fields: ["host", "target", "deployment", "nodePath", "cliPath", "shell"], danger: false, undo: () => "Edit this host's terminal target again. Import the changed file into the opener on your own computer.", inverse: () => null, confirmLabel: () => "Save terminal target", done: (out) => `Saved terminal target for ${out.payload.params.host}` },
   "zero-touch-group": { fields: ["runId"], danger: false, undo: () => "A completed classification cannot be withdrawn; it never answers the question.", inverse: none, confirmLabel: () => "Start grouping job", done: () => "Queued the capped question grouping job" },
   "zero-touch-name": { fields: ["groupId", "name"], danger: false, undo: () => "Rename the group again from Zero touch.", inverse: none, confirmLabel: () => "Save group name", done: () => "Saved the group name" },
   "zero-touch-instruction": { fields: ["runId", "groupId", "index", "sentence"], danger: false, atConfirm: true, undo: () => "Remove this sentence while the trigger still matches the confirmed change.", inverse: (out, body, result) => result?.fixId ? { action: "zero-touch-undo", body: { fixId: result.fixId } } : null, confirmLabel: () => "Add instruction sentence", done: () => "Added the instruction sentence and linked its cause" },
@@ -1988,6 +1992,21 @@ const zeroTouchActions = ["group", "name", "instruction", "undo"].map((operation
   apply(entry, ctx) { return ctx.a.zeroTouch.apply(this.name, entry); },
 }));
 
+const sandboxActions = ["prepare", "pin", "end", "host-set"].map((operation) => ({
+  name: `sandbox-${operation}`, kind: `sandbox-${operation}`, paid: false, bulk: false, needs: ["sandboxes"],
+  async preview(body, ctx) {
+    const host = str(body, "host", { required: true, max: 64 });
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(host)) throw new BadRequest("host must be a worker name");
+    const params = operation === "prepare" ? { host, repo: str(body, "repo", { required: true, max: 200 }), index: index(body, "index"), ref: str(body, "ref", { required: true, max: 200 }), pin: body.pin === undefined ? false : typeof body.pin === "boolean" ? body.pin : (() => { throw new BadRequest("pin must be true or false"); })() }
+      : operation === "host-set" ? { host, target: str(body, "target", { max: 256 }) ?? "", deployment: str(body, "deployment", { required: true, max: 4096 }), nodePath: str(body, "nodePath", { required: true, max: 4096 }), cliPath: str(body, "cliPath", { required: true, max: 4096 }), shell: str(body, "shell", { max: 16 }) ?? "posix" }
+      : { host, id: jobIdOf(body, "id"), ...(operation === "end" ? { nonce: str(body, "nonce", { required: true, max: 128 }), containerId: str(body, "containerId", { required: true, max: 128 }) } : {}) };
+    const out = await ctx.a.sandboxes.preview(this.name, params);
+    if (out.beforeText !== undefined) return { ...out, diff: diffHtmlOf(out.beforeText, out.afterText, { file: "sandbox-hosts.json" }) };
+    return out;
+  },
+  apply(entry, ctx) { return ctx.a.sandboxes.apply(this.name, entry, ctx.session.name); },
+}));
+
 /** Board writes use the same ticket and audit-before-write path as every other console change. */
 const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((operation) => ({
   name: `board-${operation}`, kind: `board-${operation}`, paid: false, bulk: false, needs: ["watch"],
@@ -2016,7 +2035,7 @@ const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((ope
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
 export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {

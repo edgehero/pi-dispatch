@@ -588,6 +588,7 @@ readers ([Live updates](#live-updates)).
 |---|---|
 | `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) with the caps under it, and beside them the waiting jobs by reason ([Waitlists](#waitlists)) and the hosts. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
+| `/runs/sandboxes` | Operators only: kept workspaces and registered shells across hosts, terminal handoff and copy commands, confirmed preparation/pin/End requests. See [Opening a sandbox](#opening-a-sandbox). |
 | `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status and numbers with a banner explaining what is hidden. |
 | `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/insights?range=30d` | Spend's five linked views: Spend, Budget split (`/insights/budget-split`), Capacity (`/insights/capacity`), Breakdown (`/insights/breakdown`) and Flows map (`/insights/flows`, also `view=list`). All are viewer-readable, drawn once per load, with supported range/project/path choices preserved. Budget split actions and plan reasons are operator-only. See [Spend views](insights.md). |
@@ -1416,7 +1417,7 @@ is refused here with the same words, and every action lands in the [audit log](#
 | Run | Re-run | Runs the same thing again ([below](#re-running-a-run)). Costs money. Its banner's Undo cancels the new run before it starts. |
 | After a re-run | Cancel a queued job | Takes the job the re-run queued out of its queue before it starts ([below](#cancelling-a-queued-job)). |
 | Run | Steer, Follow-up, Withdraw | Sends a message to a running, steer-armed job, or takes one back ([below](#steering-a-running-job)). Spends from the run's own reservation. |
-| Run | Sandbox | Shows the command that opens the run's sandbox on the host ([below](#opening-a-sandbox)). |
+| Run | Sandbox | Opens the operator’s terminal through its checked local handler, or copies the host command ([below](#opening-a-sandbox)). |
 | Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, secret profile names, and bundle resolvers (a name, a path and a format). |
 
 **Paid actions show what they reserve.** A re-run, an answer and a retry start a paid job, so their preview shows what the
@@ -1640,22 +1641,61 @@ read the panel says so rather than guess.
 
 ### Opening a sandbox
 
-An operator's run page shows the command that reopens its sandbox, `pi-dispatch sandbox <job id>`, to copy and run in a shell on
-the host that ran the job. Only for a run whose venue has a sandbox shell (`local` and `podman`): an `openshell` run says "Its workspace is not
-reopenable (openshell has no sandbox shell)" instead, and an `openshell-bind` run "Its workspace is not reopenable
-(openshell-bind has no sandbox shell)", the words the panel's sandbox pane uses. A run refused before it started has
-no workspace, and says so. For a run of the console's own host, the page also reads the run's sandbox manifest, as the
-panel's sandbox pane does, at most every 15 seconds: a workspace that was swept, never kept (retention off), moved or
-belongs to another run says so instead of the command, and one past its retention window gets the command with
-`--pin`. A kept workspace names its deadline and the `PI_SANDBOX_RETENTION_HOURS` window (24 hours by default; 0 keeps none). The Sandbox panel derives each venue's transcript, steering, recovery and sandbox-shell capabilities and credential custody from the worker's declarations. Its policy names the admitted rule hosts. Replicas link their sibling sandboxes. The Secrets panel names the profile, bundle and received variables, marking placeholders when the record names them, never showing a secret value. For a run of another host the console cannot see the manifest, so it shows the command and the CLI on that
-host decides. The console also never decides which venues your shell may open: that is the `PI_BACKENDS` of the shell
-you run the command in, which the console does not read, so a `podman` run always gets its command and
-`pi-dispatch sandbox` refuses it there, by name, if that shell does not bless `podman`. The console never opens a shell or starts a container itself: a terminal in the browser
-would put an interactive shell one stolen session away from anyone.
+The **Sandboxes** tab under Runs (`/runs/sandboxes`) is for operators only. It shows kept workspaces from every host,
+the host and opening time of live shells, and a form to prepare a fresh workspace without a run. Viewers cannot open
+the tab, its event stream or the opener configuration export. Private inventory and shell registrations do not join
+`/api/state`.
+
+On a desktop, **Open in Terminal** follows a credential-free `pi-dispatch-open://` link naming only an `open` or
+`attach` verb, workspace id and host. The locally installed opener checks its own approved host configuration and
+opens a terminal with the command shown. **Nothing runs until you press Enter.** The copied command stays available;
+on a phone it is the opening route. Without JavaScript the commands stay selectable, and navigation and **Review
+settings** remain ordinary GET forms. Writes require JavaScript for Preview and Confirm.
+
+Set each host's terminal target on its Fleet host page: an SSH host or `user@host` (use an SSH config alias for a port),
+the worker account's absolute Node and CLI paths, the absolute deployment directory, and POSIX or PowerShell. The console stores this file at `PI_SANDBOX_HOSTS_FILE` or `<deployment>/sandbox-hosts.json`. The desktop opener uses its own private copy. Leave the
+target blank only when the terminal should run on this computer. Rootless Podman must run as its worker account. The
+copied remote command loads sandbox settings from that deployment and checks the expected host; the console does
+not supply a runtime executable or credential in the link. PowerShell commands also show their expanded remote script.
+These operator command/configuration regions show absolute paths because they are part of the command being approved.
+
+Download the credential-free host configuration, inspect it, and register the opener on your computer:
+
+```sh
+pi-dispatch opener install --config sandbox-hosts.json
+```
+
+Re-running this command explicitly replaces the opener's approved hosts. A link cannot enroll or change a host. The
+console never sends its own host configuration to the local handler automatically.
+
+A run page and the Fleet host page offer the same Open/Copy handoff. Only `local` and `podman` support reopening;
+`openshell` and `openshell-bind` say that their venue has no sandbox shell. A run refused before it started has no
+workspace. For the console's own host, its run page still reads the retained manifest at most every 15 seconds,
+hiding an impossible command and adding `--pin` when the workspace is past its window. For other hosts, the terminal
+CLI makes the final decision. The Sandboxes tab uses each host's published deadline, pin window and capabilities,
+and says when a publication is stale, missing, unreadable or truncated.
+
+To prepare a fresh workspace, enter its repository, choose a forge trigger and an eligible host, and choose a ref:
+`HEAD` means the remote default branch; branches, tags, full commit SHAs and `pr:42` are accepted. **Review settings**
+shows that trigger's resolved image, size, venue, egress and the selected host's retention or pin window. **Preview
+preparation**, then **Prepare sandbox**, sends a bounded host request. The worker checks the trigger and plan digests
+again before cloning, so changed settings refuse the request before credentials are minted. It clones on the host
+with a repository-scoped credential, drops it and keeps an `sb-` workspace. No container or model starts, no dollars
+are spent and no run slot is taken. The request page reports pending, preparing, ready, refused, failed or unknown;
+refresh an unknown result before trying again. Open a ready workspace from your terminal.
+
+**Preview pin** binds the workspace's manifest generation and current deadline, then requests that host's configured
+pin window. A replacement workspace is refused. **Preview End**, then **End this shell**, binds the exact registered
+container and shell nonce; the terminal process closes it and acknowledges. The workspace remains kept. A missing
+acknowledgement is explicitly ambiguous and asks you to refresh before retrying. The short shell registration expires
+if its terminal stops answering; expiry alone does not prove the container stopped. Runtime-read failures and kept-network/cleanup failures appear as actionable host inspection notices, with an explicit warning if those notices could not be read. The console neither asks Docker for its list nor observes what is typed.
+
+The browser-terminal panel is an off/proposed note linking [#754](https://github.com/edgehero/pi-dispatch/issues/754).
+The console obtains no pty or WebSocket and never starts a shell or container itself.
 
 ## Live updates
 
-The overview, runs, parked, fleet and run pages update themselves while open; the run page reads its data about
+The overview, runs, Sandboxes, parked, fleet and run pages update themselves while open; the run page reads its data about
 every 2 seconds, for its progress ([Run progress](#run-progress)), and its live transcript shares the page stream
 ([The live transcript](#the-live-transcript)). Insights, configuration and the audit log are drawn once per load:
 their title bar says when ("Drawn at" and the time, with your date and in your own time zone once the page's script

@@ -171,6 +171,7 @@ import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } f
 import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
+import { makeSandboxMonitor } from "@edgehero/pi-dispatch/sandbox-session-watch";
 import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderAllocations } from "./render.mjs";
 import { makeDashboard, createDashboardDeps, switchFailure, withAuditedWrites } from "./dashboard.ts";
 // `/dispatch chat` (issue #647, part 2): pi-free, so its tests drive it with fakes; `chatIo` below wires it.
@@ -2297,6 +2298,7 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     ...(io.now ? { now: io.now } : {}),
     blessed: policy.blessed,
     backendFloor: policy.backendFloor,
+    monitorSession: io.monitorSession ?? makeSandboxMonitor({ env, config: { workerName: env.PI_WORKER_NAME || defaultWorkerName(), valkeyUrl: paths.valkeyUrl, egressProxy: egress.proxy }, now: io.now ?? Date.now }),
     beforeLaunch: ({ resolved, runtime: cli }: any) => {
       runtime = cli ?? runtime;
       write(`\nopening ${resolved.name} — image ${resolved.manifest.image}\n`);

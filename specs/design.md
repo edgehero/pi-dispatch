@@ -11973,6 +11973,10 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **Sandbox paths (#771)**: Operators may see explicitly configured deployment and executable paths in Fleet sandbox mapping editors/exports and constructed terminal command boxes. This exception exists so the person can inspect exactly what Enter will run. It does not admit paths to viewer output, unrelated page regions, telemetry or audit rows.
+
+- **Extension (#771)**: `outLink`'s HTTP(S)-only rule has one checked exception: the canonical opener URL from `opener-protocol.mjs`. Generic custom schemes remain refused. The Sandboxes tab and all sandbox commands, links, preparation results and live-shell observations are operator-only across pages, panels, APIs and streams. The console only reads publications and submits confirmed requests; it never invokes a runtime or starts a shell. Shared commands serve Run, Host, Trigger and Sandboxes pages. The visual system remains generator-first, with a SandboxesScreen ledger and Built status. The browser-terminal rejection and WebSocket rejection remain in force.
+
 - **Extension (#770)**: Issue #770 adds the three Zero touch cards as the second Runs tab, including operator-only projected groups and ordinary preview/Confirm actions. Grouping is explicitly paid work, never a GET side effect; the private corpus is not a console read surface. `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` and `INT-ZERO-TOUCH-FIXES` define the data and interactions.
 
 **CORRECTED 2026-10-30 (#751, review).** Configuration facts follow the published cards' compact hierarchy.
@@ -15846,8 +15850,9 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
 
 ## DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL
 
-- **Status**: **PROPOSED, spec only** (2026-10-27, issue #753). Nothing of it ships. It is the design of
-  `REQ-SANDBOX-FROM-THE-CONSOLE`, and the build amends it where it learns otherwise.
+- **As built (#771)**: The per-user opener imports a versioned Fleet mapping into a protected local file. The scheme handler validates before opening a terminal helper. That helper shows the full argv and waits for Enter, then spawns the constructed argv; it does not evaluate shell input. SSH uses absolute Node/CLI paths and explicit deployment loading. A separate `pi-sandbox-prepare@<host>` BullMQ control worker reuses lock/retry machinery but never enters paid `pi-jobs` processing, run history or budget/slot ledgers. Prepared IDs reconcile against immutable request/manifest fingerprints. The session monitor binds lease and End to a nonce and immutable runtime container ID, survives detach and owns eventual guarded network cleanup. Existing host telemetry supplies one cached inventory projection, additionally published with a bounded lifetime for offline-host evidence. No new zero-touch cause is introduced.
+
+- **Status**: **BUILT** (2026-10-30, issue #771), implementing `REQ-SANDBOX-FROM-THE-CONSOLE`.
 - **Decision**: The console opens a sandbox by handing a command to the operator's own terminal, through a URL
   handler on the operator's computer. It never starts a container or holds a shell itself. A sandbox with no run is a
   kept workspace the worker prepares, so it opens through the same command and the same rules as a run's.
@@ -15865,7 +15870,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   - **Another host is reached by SSH**, through a target set per host in Fleet, because a kept workspace opens only on
     the host that kept it.
     - The remote command must carry the deployment's sandbox settings. `pi-dispatch sandbox` reads them from its own
-      environment and never from the deployment's `.env` (`OQ-038`), and a non-interactive SSH command usually has
+      environment for ordinary invocations, with the explicit trusted deployment-aware path added in #771 (`OQ-038`), and a non-interactive SSH command usually has
       neither the settings nor the CLI on its `PATH`.
     - How the remote command loads them is the build's to decide and measure, on a podman run as well as a local one.
   - **A prepared sandbox is a kept workspace with no run.**
@@ -16500,3 +16505,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-30 (#751, endpoint phone review) | `DES-OPERATOR-CONSOLE` CORRECTED: uncounted/unknown endpoint explanations preserve readable neighbouring phone labels, checked with their actual pseudo-element font and available track width. Current main design issue references and its ParkedPhone correction are preserved; draft prefill remains proposed under #772. Endpoint enforcement, receiver logging, shared visual tokens and every unrelated contract UNCHANGED, checked. |
 | 2026-10-30 (#751, reference phone validation) | `DES-OPERATOR-CONSOLE` CORRECTED: the Connections source-card generator keeps alias hosts and uncounted facts in complete phone rows, bounds forge tracks, wraps the staging command and draws all four dots for four declared slots. Styled references are checked at phone, intermediate and desktop widths before comparison. Application behavior, `REQ-OPERATOR-CONSOLE-SCREENS`, shared tokens/styles, worker gates and every interface contract UNCHANGED, checked. |
 | 2026-10-30 (#770) | Issue #770 implements the Zero touch view. `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` AMENDED: shared touch writers and repair, capacity-reader coverage, separate private corpus, classifier-only jobs, human group names, typed fix predicates and on-demand card-based presentation. Internal grouping jobs are explicitly excluded from workload rates while retaining ordinary history/spend. UNCHANGED, checked: pi pins; container isolation; merge restriction; budget ordering; infrastructure-only retry; automatic answer prohibition (`OQ-051`); #771 and #772 scope. |
+| 2026-10-30 (#771) | Built DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL and amended DES-OPERATOR-CONSOLE outbound-link rule and private Sandboxes UI. Recorded explicit local enrollment, Enter-only argv execution, clean deployment environment, separate bounded control transport, immutable shell identity and durable inventory. UNCHANGED, checked: DES-SANDBOX-IS-A-FRESH-CONTAINER isolation principles, DES-DOCTOR-RESULTS-PUBLISHED existing records, ordinary paid processors and OQ-050 browser-terminal rejection. |

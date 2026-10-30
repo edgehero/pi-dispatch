@@ -1063,6 +1063,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
+- **Extension (#771)**: The sole additional outbound scheme is a canonical `pi-dispatch-open://` link built from a checked `open` or `attach` verb, sandbox ID and host. No credential, command or path is carried. Only operators receive these links, sandbox commands, preparation results or shell observations, including direct pages, APIs and event streams. Existing CSP and every write guard are UNCHANGED, checked.
+
 - **AMENDED 2026-10-30 (#750, trigger list)**: the hypothetical event checker is a viewer read carried by
   a JSON POST to keep comment text out of URLs. It meets the same Host, Origin, fetch-site, JSON, body-size,
   session and session-person guards as an action; it remains available in read-only mode and creates neither
@@ -1494,6 +1496,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
   `admin/test/helpers/script-dom.mjs`. This supersedes the older run-markup exception in clause (l).
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
+
+- **Extension (#771)**: Runs has an operator-only Sandboxes tab with kept-workspace selection, fresh preparation, tracked open shells and dated per-host inventory. Phones expose selectable/copyable commands only. Missing, stale, unreadable, truncated and unsupported-host/venue states are explicit. Viewer page, panel, API and event responses carry no private sandbox controls or shell list. The browser proposal remains off under `OQ-050`.
 
 - **Extension (#770)**: Issue #770 adds the on-demand, viewer-readable second Runs tab and its operator-only question groups. Covered windows, theme/role/width states and native no-script reads follow `REQ-ZERO-TOUCH-RATE`; no question text enters a list.
 
@@ -3004,8 +3008,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   job it queued, offered after the confirm, while a retry, which keeps the attempts it made, says what to do instead.
 - **Scope**: the console's write routes, the funnels and planners they call (`admin/src/job-actions.mjs`,
   `admin/src/write-plans.mjs`, the read model), the worker's trail comment for a console answer, and the panel's
-  audit rows. A config edit lands in the same files the TUI writes and is never committed to git. A sandbox is not
-  reopened from the browser: the page shows the command (`REQ-RESURRECTABLE-SANDBOX`, unchanged). The live
+  audit rows. A config edit lands in the same files the TUI writes and is never committed to git. A sandbox opens in the person's terminal through a checked opener link, with a copy command retained. Preparation, pin, End and Fleet host mappings use the existing confirmed/audited funnels (`REQ-SANDBOX-FROM-THE-CONSOLE`). The live
   transcript is #643's (`REQ-LIVE-TRANSCRIPT`, read only); approval gates are #649's.
 - **Why**: after #641 the console showed the whole deployment and could change one file. An operator who saw a failed
   job, a stuck queue or a parked question had to switch to a terminal to act on it, and the failed list was read only
@@ -3301,7 +3304,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     answer and every refusal carry `html` too, a refusal beside its `error`. `danger` is true for the destructive
     actions (`cancel-active`, `cancel-held`, `cancel-all-held`, `cancel-queued`, `remove-failed`, `remove-all-failed`,
     `fleet-pause`, `queue-pause`, `trigger-delete`, `pause-window-delete`, `limit-delete`, `project-delete`,
-    `secret-profile-remove`, `secret-bundle-remove`, `board-freeze`, `board-clear`, `board-revert`) and never beside `paid`, and the bar's ring and its Confirm's
+    `secret-profile-remove`, `secret-bundle-remove`, `board-freeze`, `board-clear`, `board-revert`, `sandbox-end`) and never beside `paid`, and the bar's ring and its Confirm's
     fill follow (paid, danger or plain). `confirmLabel` says what the button does: a paid act's most ("Retry for up to
     $2.00", "Re-run (reserve
     unknown)", "<verb>, 1 job slot" with no dollar cap, and "Answer (zero-rated)" for an act that cannot spend, since
@@ -6546,6 +6549,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-RESURRECTABLE-SANDBOX
 
+- **Extension (#771)**: A prepared `sb-` workspace has no run and uses the selected trigger's resolved image, size and venue, with the same bounded retention, pin, isolation and credential-free shell. CLI `--new` prepares only; the operator opens separately. The console can hand a checked command to the person's terminal and request preparation, pinning or End; it never starts a shell or container. Existing job-container behavior is UNCHANGED, checked.
+
 - **Statement**: A finished run's per-job directory shall be retained for a bounded window, and
   `pi-dispatch sandbox <jobId>` shall start a **new** container from that run's image with that run's
   mounts as an interactive operator shell holding **no credentials**. The job container is unchanged:
@@ -6634,9 +6639,10 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-SANDBOX-FROM-THE-CONSOLE
 
-- **Status**: **PROPOSED, spec only** (2026-10-27, issue #753). Nothing of it ships and no test holds it yet. Every
-  clause below is the acceptance surface the build will be held to, and the build amends this entry where it learns
-  otherwise. The design is `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`; the card is
+- **As built (#771)**: Fleet exports a credential-free host mapping; the person explicitly imports it with `pi-dispatch opener install --config <file>`. A fired link never enrolls a host or changes its mapping. The terminal helper displays the complete constructed command and accepts Enter; it never evaluates entered text. Deployment-aware invocations re-execute with a clean trusted deployment environment, so ambient capability overrides cannot widen the sandbox. Preparation accepts an optional pin and writes it before reporting ready, with durations from the selected host. A dedicated host-bound control queue transports prepare/pin requests outside the paid processor. A detached CLI monitor keeps the shell lease alive until its immutable container disappears. Unknown tracking is never proof that a shell ended. No browser terminal is implemented.
+
+- **Status**: **BUILT** (2026-10-30, issue #771). The CLI, worker control transport, opener and operator-only console
+  implement the acceptance surface below. The design is `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`; the card is
   `design/system/components/SandboxesScreen`.
 - **Statement**: An operator shall be able to open, from the console, a kept run's sandbox and a sandbox prepared for
   a repository with no run, **in their own terminal**. The console itself neither starts a container nor opens a
@@ -6664,7 +6670,7 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
     host in Fleet), shows the whole command in the terminal, and runs it only on Enter.
   - Anything outside the list, an id outside its charset, or an unknown host is refused by name and opens nothing.
   - **The remote command needs the deployment's sandbox settings.** `pi-dispatch sandbox` reads `PI_BACKENDS`,
-    `PI_SANDBOX_DIR` and the egress settings from its own environment, never the deployment's `.env`
+    `PI_SANDBOX_DIR` and the egress settings from its own environment for ordinary invocations; the explicit deployment-aware opener path loads the trusted deployment's `.env`
     (`INT-SANDBOX-CONTRACT`, `OQ-038`). A command run through `ssh -t` often has none of them, and no `PATH` to the
     CLI. So the opener's remote command runs the CLI with the deployment's settings loaded, and the build decides
     how. Until it does, a missing setting is refused by name, as today.
@@ -8066,3 +8072,4 @@ instead of drifting.
 | 2026-10-30 (#751, observation coverage) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: fleet endpoint occupancy is shown only where worker host-queue and per-machine gates take those leases; uncounted and unknown retain declared capacity. Delivery guidance distinguishes quiet 401/404 refusals in forge history from receiver logs that can help with 503/enqueue failures. Worker slot enforcement, receiver logging, security guards and every unrelated requirement UNCHANGED, checked. |
 | 2026-10-30 (#751, endpoint phone review) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: uncounted endpoint explanations retain declared capacity without squeezing adjacent phone table labels into zero-width tracks. The same actual-font word-width oracle checks mixed, unnamed and unknown fleet coverage. Worker rules, privacy, confirmation and every unrelated requirement UNCHANGED, checked. |
 | 2026-10-30 (#770) | Issue #770 implements the Zero touch view. `REQ-ZERO-TOUCH-RATE` AMENDED: exact workload denominator, six human causes, fleet evidence and rollout coverage, safe scope identity, waits/streaks, private paid grouping, explicit fixes and role boundaries. Internal grouping jobs are explicitly excluded from workload rates while retaining ordinary history/spend. UNCHANGED, checked: pi pins; container isolation; merge restriction; budget ordering; infrastructure-only retry; automatic answer prohibition (`OQ-051`); #771 and #772 scope. |
+| 2026-10-30 (#771) | Built REQ-SANDBOX-FROM-THE-CONSOLE under #771; amended REQ-RESURRECTABLE-SANDBOX, REQ-CONSOLE-SECURITY, REQ-OPERATOR-CONSOLE-SCREENS and REQ-OPERATOR-CONSOLE-ACTIONS for operator-only terminal links, free preparation, pin, End and Fleet mappings. Durations come from the owning host; no nonexistent removal undo is promised. UNCHANGED, checked: paid job admission, trigger author gates, zero-touch causes, recovery/session/outbox behavior and browser-terminal exclusion. |

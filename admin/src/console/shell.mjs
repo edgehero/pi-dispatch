@@ -294,9 +294,9 @@ const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(
  */
 export function shellHtml(name, ctx, inner, { headline = null, description = null, end = null, title = null } = {}) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
-  const meta = PAGES[name];
   const role = roleOf(ctx?.session);
-  const here = ["secrets", "connections", "project"].includes(name) ? "config" : name.startsWith("insights") ? "insights" : ["run", "zero-touch"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
+  const meta = mayOpen(name, role) ? PAGES[name] : { ...PAGES[name], live: false };
+  const here = !mayOpen(name, role) ? null : ["secrets", "connections", "project"].includes(name) ? "config" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
   // Drawn on a live page always, so the stream has a panel to fill; elsewhere only when there is a count to show.
   const count = navParkedHtml(ctx?.data);
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;

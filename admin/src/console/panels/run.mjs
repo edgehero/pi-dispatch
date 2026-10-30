@@ -1,3 +1,4 @@
+import { sandboxLinks } from "../sandbox-links.mjs";
 import { modelRolesTelemetryOf } from "@edgehero/pi-dispatch/run-history";
 /**
  * The run page's panels (the outcome banner, progress, inbox, chat and the record's panels), split out of
@@ -566,7 +567,7 @@ function sandboxLine(r, view) {
       if (typeof check.reason === "string") return html`<p class="note">Its workspace is ${check.reason}.</p>`;
     }
   }
-  return html`<p>Open its retained workspace on the host.</p>${ui.cmd(["pi-dispatch", "sandbox", r.jobId], { host: `Run it on ${r.host ?? "its host"}.` })}`;
+  return html`<p>Open its retained workspace on the host.</p>${view.role === "operator" && r.host ? sandboxLinks({ id: r.jobId, host: r.host, config: view.data?.sandboxHosts }) : ui.cmd(["pi-dispatch", "sandbox", r.jobId], { host: `Run it on ${r.host ?? "its host"}.` })}<a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ id: r.jobId, ...(r.host ? { host: r.host } : {}) })}`}">Open Sandboxes</a>`;
 }
 
 /**

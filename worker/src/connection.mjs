@@ -189,10 +189,12 @@ export function parseConnection(url, { failFast = false, servername = null, cont
  * `parseConnection`'s options, so it connects through `JudgedConnector` like every other client. `lazyConnect` and
  * `failFast` as ioredis and `parseConnection` read them.
  */
-export function makeRedisClient(url, { servername = null, context = null, failFast = false, lazyConnect = false, judge = null, withoutPassword = false, disconnectTimeoutMs = null } = {}) {
+export function makeRedisClient(url, { servername = null, context = null, failFast = false, lazyConnect = false, judge = null, withoutPassword = false, disconnectTimeoutMs = null, noOfflineQueue = false } = {}) {
 	// `disconnectTimeoutMs` (issue #599): how long ioredis's `disconnect()` waits for a socket to close before it destroys
 	// it (its default is 2 s, on a ref'd timer). A one-shot read that must not hold its process passes 0.
-	return new Redis({ ...parseConnection(url, { failFast, servername, context, judge, withoutPassword }), ...(lazyConnect ? { lazyConnect: true } : {}), ...(Number.isSafeInteger(disconnectTimeoutMs) && disconnectTimeoutMs >= 0 ? { disconnectTimeout: disconnectTimeoutMs } : {}) });
+	// A shell monitor must reconnect across an outage without accumulating stale control commands (#771).
+	// Keep the persistent retry strategy, but reject each command while disconnected and bound in-flight retries.
+	return new Redis({ ...parseConnection(url, { failFast, servername, context, judge, withoutPassword }), ...(noOfflineQueue ? { enableOfflineQueue: false, maxRetriesPerRequest: 1 } : {}), ...(lazyConnect ? { lazyConnect: true } : {}), ...(Number.isSafeInteger(disconnectTimeoutMs) && disconnectTimeoutMs >= 0 ? { disconnectTimeout: disconnectTimeoutMs } : {}) });
 }
 
 /**
