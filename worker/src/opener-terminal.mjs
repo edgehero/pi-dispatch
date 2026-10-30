@@ -18,6 +18,11 @@ export function windowsArgument(value) {
 	return `"${String(value).replace(/(\\*)"/g, "$1$1\\\"").replace(/(\\+)$/, "$1$1")}"`;
 }
 const psString = (value) => `'${String(value).replaceAll("'", "''")}'`;
+export function windowsPowerShellEnv(env) {
+	// env-internal PSModulePath: Windows PowerShell must derive its own module directories. A Node child of
+	// PowerShell 7 otherwise inherits incompatible modules ahead of the system's Start-Process implementation.
+	return Object.fromEntries(Object.entries(env).filter(([key]) => key.toLowerCase() !== "psmodulepath"));
+}
 export function terminalLaunch({ platform, nodePath, cliPath, url, directory, env, fs = nodeFs, terminal = findTerminal(env, { fs }) }) {
 	const args = [cliPath, "opener", "prompt", url];
 	if (platform === "linux") {
@@ -37,13 +42,13 @@ export function terminalLaunch({ platform, nodePath, cliPath, url, directory, en
 		// Start-Process allocates a console using Windows' configured default terminal. Its ArgumentList is one
 		// command-line string, so quote for the receiving executable, then quote that string for PowerShell.
 		const script = `Start-Process -FilePath ${psString(nodePath)} -ArgumentList ${psString(args.map(windowsArgument).join(" "))} -Wait`;
-		return { bin: win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args: ["-NoProfile", "-NonInteractive", "-Command", script] };
+		return { bin: win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args: ["-NoProfile", "-NonInteractive", "-Command", script], env: windowsPowerShellEnv(env) };
 	}
 	throw new Error("this operating system has no supported terminal opener; copy the sandbox command instead");
 }
 export function spawnTerminal(plan, { spawn = nodeSpawn } = {}) {
 	return new Promise((resolve, reject) => {
-		const child = spawn(plan.bin, plan.args, { detached: true, stdio: "ignore", windowsHide: true });
+		const child = spawn(plan.bin, plan.args, { detached: true, stdio: "ignore", windowsHide: true, ...(plan.env ? { env: plan.env } : {}) });
 		child.once("error", reject);
 		child.once("spawn", () => { child.unref(); resolve(); });
 	});

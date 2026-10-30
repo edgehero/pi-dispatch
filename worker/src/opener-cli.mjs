@@ -22,7 +22,7 @@ export function openerRegistration({ platform, home, directory, nodePath, cliPat
 	if (platform === "darwin") {
 		const app = join(home, "Applications", "pi-dispatch Opener.app");
 		const source = `on open location theURL\n do shell script (quoted form of ${apple(nodePath)} & " " & quoted form of ${apple(cliPath)} & " opener handle " & quoted form of theURL)\nend open location\n`;
-		const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>applet</string><key>CFBundleIdentifier</key><string>com.pi-dispatch.opener</string><key>CFBundleName</key><string>pi-dispatch Opener</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/><key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>pi-dispatch sandbox</string><key>CFBundleURLSchemes</key><array><string>pi-dispatch-open</string></array></dict></array></dict></plist>\n`;
+		const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>applet</string><key>CFBundleIdentifier</key><string>com.pi-dispatch.opener</string><key>CFBundleName</key><string>pi-dispatch Opener</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/><key>CFBundleURLTypes</key><array><dict><key>CFBundleTypeRole</key><string>Editor</string><key>CFBundleURLName</key><string>pi-dispatch sandbox</string><key>CFBundleURLSchemes</key><array><string>pi-dispatch-open</string></array></dict></array></dict></plist>\n`;
 		// osacompile signs its bundle. Our URL metadata changes its signed resources, so sign again after the
 		// plist write; registering a modified signature can compile cleanly and still refuse at native launch.
 		return { commands: [["/usr/bin/osacompile", ["-o", app, "-e", source]], ["/usr/bin/codesign", ["--force", "--sign", "-", app]], ["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", ["-f", app]]], between: { path: join(app, "Contents", "Info.plist"), content: plist }, directory: dirname(app) };
@@ -80,13 +80,13 @@ export async function runOpener(argv = [], { env = process.env, deps = {} } = {}
 			if (platform === "win32") {
 				// chmod does not express a Windows DACL. Protect the imported mapping using this account's SID,
 				// independently of a directory's inherited grants; the URL never supplies the principal or path.
-				const identity = await execFile("whoami.exe", ["/user", "/fo", "csv", "/nh"], { timeout: 10_000, maxBuffer: 64 * 1024 });
+				const identity = await execFile("whoami.exe", ["/user", "/fo", "csv", "/nh"], { env, timeout: 10_000, maxBuffer: 64 * 1024 });
 				const sid = /S-1-\d+(?:-\d+)+/.exec(identity.stdout ?? "")?.[0];
 				if (!sid) throw new Error("the Windows account SID could not be resolved; the opener configuration was not imported");
 				// /grant:r replaces only this SID's grants. Reset first so a pre-existing explicit Everyone ACE is
 				// not retained beside it; removing inheritance then leaves only the grant below on this directory.
-				await execFile("icacls.exe", [directory, "/reset"], { timeout: 10_000, maxBuffer: 64 * 1024 });
-				await execFile("icacls.exe", [directory, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`], { timeout: 10_000, maxBuffer: 64 * 1024 });
+				await execFile("icacls.exe", [directory, "/reset"], { env, timeout: 10_000, maxBuffer: 64 * 1024 });
+				await execFile("icacls.exe", [directory, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`], { env, timeout: 10_000, maxBuffer: 64 * 1024 });
 			}
 			const temporary = join(directory, `import-${randomBytes(12).toString("hex")}.json`);
 			try {
@@ -102,7 +102,8 @@ export async function runOpener(argv = [], { env = process.env, deps = {} } = {}
 			for (const file of plan.files ?? []) fs.writeFileSync(file.path, file.content, { mode: 0o600 });
 			for (let i = 0; i < plan.commands.length; i++) {
 				const [bin, args] = plan.commands[i];
-				await execFile(bin, args, { timeout: 30_000, maxBuffer: 1024 * 1024 });
+				// The MIME registration and the desktop entry must use the same XDG directories.
+				await execFile(bin, args, { env, timeout: 30_000, maxBuffer: 1024 * 1024 });
 				if (i === 0 && plan.between) fs.writeFileSync(plan.between.path, plan.between.content, { mode: 0o600 });
 			}
 			out("installed pi-dispatch-open for this account; commands wait for Enter in the terminal\n");

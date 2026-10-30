@@ -11,6 +11,7 @@ import { sandboxCommand } from "../../worker/src/sandbox-hosts.mjs";
 import { makeRedisClient } from "../../worker/src/connection.mjs";
 import { readSandboxSessions, requestSandboxEnd } from "../../worker/src/sandbox-sessions.mjs";
 import { readPodmanStore } from "../../worker/src/sandbox.mjs";
+import { waitSandboxSmokeTty } from "./sandbox-smoke-tty.mjs";
 
 const execFile = promisify(execFileCallback);
 const venue = process.env.PI_SANDBOX_SMOKE_VENUE ?? "local";
@@ -42,8 +43,9 @@ try {
 	const sshPort = await port();
 	const key = join(root, "client");
 	const hostKey = join(root, "host");
-	await execFile("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key]);
-	await execFile("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", hostKey]);
+	await execFile("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key]);
+	await execFile("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", hostKey]);
+	for (const path of [key, hostKey]) { fs.chmodSync(path, 0o600); assert.equal(fs.statSync(path).mode & 0o777, 0o600); }
 	const authorized = join(root, "authorized_keys");
 	fs.copyFileSync(`${key}.pub`, authorized); fs.chmodSync(authorized, 0o600);
 	const sshdConfig = join(root, "sshd_config");
@@ -53,7 +55,10 @@ try {
 	fs.writeFileSync(known, `[127.0.0.1]:${sshPort} ${fs.readFileSync(`${hostKey}.pub`, "utf8")}`);
 	const sshConfig = join(root, "ssh_config");
 	fs.writeFileSync(sshConfig, `Host sandbox-smoke\n HostName 127.0.0.1\n Port ${sshPort}\n User ${userInfo().username}\n IdentityFile ${key}\n UserKnownHostsFile ${known}\n StrictHostKeyChecking yes\n BatchMode yes\n LogLevel ERROR\n`, { mode: 0o600 });
-	await until(() => execFile("ssh", ["-F", sshConfig, "sandbox-smoke", "true"], { timeout: 2_000 }).then(() => true, () => { if (sshd.exitCode !== null) throw new Error(`isolated sshd failed: ${sshd.failure()}`); return false; }), "private SSH server");
+	let sshFailure = "";
+	try {
+		await until(() => execFile("/usr/bin/ssh", ["-F", sshConfig, "sandbox-smoke", "true"], { timeout: 2_000 }).then(() => true, (error) => { sshFailure = String(error.stderr ?? error.code ?? "SSH unavailable"); if (sshd.exitCode !== null) throw new Error(`isolated sshd failed: ${sshd.failure()}`); return false; }), "private SSH server");
+	} catch (error) { throw new Error(`${String(error.message).replaceAll(password, "[redacted]")}; SSH ${sshFailure.replaceAll(password, "[redacted]").slice(-3000)}; server ${sshd.failure().replaceAll(password, "[redacted]").slice(-3000)}`); }
 
 	const dir = join(root, "sandboxes", id);
 	const workspace = join(dir, "workspace"); fs.mkdirSync(workspace, { recursive: true });
@@ -72,15 +77,35 @@ try {
 		const command = sandboxCommand(mappings, { verb, id, host });
 		assert.equal(command.argv[0], "ssh");
 		// CI has no local terminal. -tt supplies the remote TTY a real terminal's -t supplies.
-		const child = spawn("ssh", ["-F", sshConfig, "-tt", "--", "sandbox-smoke", command.argv.at(-1)], { stdio: ["pipe", "pipe", "pipe"] });
+		const remote = `printf '\\nSANDBOX_REMOTE_TTY:%s\\n' "$(tty)"\n${command.argv.at(-1)}`;
+		const child = spawn("/usr/bin/ssh", ["-F", sshConfig, "-tt", "--", "sandbox-smoke", remote], { stdio: ["pipe", "pipe", "pipe"] });
 		child.output = ""; child.stdout.on("data", (b) => child.output += b); child.stderr.on("data", (b) => child.output += b); processes.push(child); return child;
+	}
+	const terminalDiagnostic = (child) => `SSH exit ${child.exitCode ?? "running"}; output ${JSON.stringify(child.output.replaceAll(password, "[redacted]").slice(-6000))}`;
+	async function terminalUntil(child, predicate, description) {
+		try { return await until(() => { if (child.exitCode !== null) throw new Error("SSH terminal exited"); return predicate(); }, description); }
+		catch (error) { throw new Error(`${error.message}; ${terminalDiagnostic(child)}`); }
+	}
+	async function runtimeAttached(child) {
+		// A lease can be published before `run -it` owns stdin. Its raw-mode transition can flush an early line.
+		// Read the actual remote TTY instead of sleeping or assuming container registration means attachment.
+		try {
+			await waitSandboxSmokeTty({ child, until, description: "runtime SSH terminal raw mode", inspect: async (tty) => {
+				const { stdout } = await execFile("/usr/bin/ssh", ["-F", sshConfig, "sandbox-smoke", "/bin/stty", process.platform === "darwin" ? "-f" : "-F", tty, "-a"], { timeout: 2_000 });
+				return stdout;
+			} });
+		} catch (error) { throw new Error(`${error.message}; ${terminalDiagnostic(child)}`); }
 	}
 	const opened = terminal("open");
 	const current = () => readSandboxSessions(redis, { hosts: [host] }).then((r) => r.sessions[0]);
-	const first = await until(async () => { if (opened.exitCode !== null) throw new Error(`SSH sandbox exited before registration: ${opened.output}`); return current(); }, "SSH sandbox lease");
+	const first = await terminalUntil(opened, current, "SSH sandbox lease");
 	assert.equal(first.venue, venue);
-	opened.stdin.write("node -e 'const bad=Object.keys(process.env).filter(k=>/TOKEN|SECRET|PASSWORD|API_KEY/.test(k));if(bad.length)process.exit(3);console.log(\"SANDBOX_CREDENTIALS_CLEAR\")'\n");
-	await until(() => /\r?\nSANDBOX_CREDENTIALS_CLEAR\r?\n/.test(opened.output), "credential-free shell environment");
+	await runtimeAttached(opened);
+	opened.stdin.write("node -e 'const bad=Object.keys(process.env).filter(k=>/TOKEN|SECRET|PASSWORD|API_KEY/.test(k));if(bad.length){console.log(\"SANDBOX_CREDENTIAL_KEYS:\"+JSON.stringify(bad));process.exit(3);}console.log(\"SANDBOX_CREDENTIALS_CLEAR\")'\n");
+	await terminalUntil(opened, () => {
+		if (/\r?\nSANDBOX_CREDENTIAL_KEYS:/.test(opened.output)) throw new Error("sandbox shell contains credential key names");
+		return /\r?\nSANDBOX_CREDENTIALS_CLEAR\r?\n/.test(opened.output);
+	}, "credential-free shell environment");
 	opened.stdin.write("\x10\x11");
 	await until(() => opened.exitCode !== null, "terminal detach");
 	const renewed = await until(async () => { const s = await current(); return s && s.at > first.at + 500 ? s : null; }, "lease renewal after detach");
@@ -90,8 +115,10 @@ try {
 	controlServer = daemon(process.env.PI_SANDBOX_SMOKE_REDIS ?? "redis-server", [redisConfig]);
 	await until(() => redis.ping().then(() => true, () => false), "control store restart");
 	const recovered = await until(async () => { const s = await current(); return s?.containerId === first.containerId && s.at > renewed.at ? s : null; }, "monitor reconnect and lease recovery");
-	const attached = terminal("attach"); attached.stdin.write("printf 'SANDBOX_ATTACH_READY\\n'\n");
-	await until(() => /\r?\nSANDBOX_ATTACH_READY\r?\n/.test(attached.output), "SSH attach to original runtime");
+	const attached = terminal("attach");
+	await runtimeAttached(attached);
+	attached.stdin.write("printf 'SANDBOX_ATTACH_READY\\n'\n");
+	await terminalUntil(attached, () => /\r?\nSANDBOX_ATTACH_READY\r?\n/.test(attached.output), "SSH attach to original runtime");
 	assert.deepEqual(await requestSandboxEnd({ redis, ...recovered }), { ended: true });
 	await until(() => attached.exitCode !== null, "End reaching attached terminal");
 	assert.ok(fs.existsSync(workspace), "End preserves the kept workspace");
