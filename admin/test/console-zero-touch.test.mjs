@@ -218,3 +218,32 @@ test("fix observations distinguish improvement, regression, unchanged and unprov
     if (tone !== "ok") assert.ok(!page.includes('<span>After</span><svg class="pbar tone-ok"'));
   }
 });
+
+test("a stacked cause chart contains all causes even when the supplied summary is smaller than its stack", async () => {
+  const report = zeroTouchFixture(NOW);
+  report.totals.touched = 0;
+  const page = String((await renderPage("zero-touch", { session: { name: "ops", role: "viewer" }, data: { now: NOW, zeroTouch: report }, query: { days: 30 } })).html);
+  const chart = page.match(/<div class="zt-phone-causes">([\s\S]*?)<\/div>/)?.[1];
+  assert.ok(chart);
+  assert.match(chart, /full scale 38 touched runs/);
+  const segments = [...chart.matchAll(/x="([\d.]+)%" y="0" width="([\d.]+)%"/g)].map((m) => ({ start: Number(m[1]), width: Number(m[2]) }));
+  assert.equal(segments.length, 6, "every nonzero cause survives; clipping or dropping the last cause is not a fix");
+  for (const segment of segments) assert.ok(segment.start >= 0 && segment.width > 0 && segment.start + segment.width <= 100.1, JSON.stringify(segment));
+  assert.ok(Math.abs(segments.at(-1).start + segments.at(-1).width - 100) < 0.1);
+  for (const [label, value] of [["Questions", 17], ["Approvals", 5], ["Failed or refused, then re-run", 7], ["Refused until config was fixed", 5], ["Steered", 3], ["Cancelled", 1]]) assert.ok(chart.includes(`${label} ${value}`));
+  report.projects = [report.projects[1], report.projects[0]];
+  report.projects[0].touched = 0; // Thirteen actual cause occurrences, beside the nine-count sibling.
+  const scoped = String((await renderPage("zero-touch", { session: { name: "ops", role: "viewer" }, data: { now: NOW, zeroTouch: report }, query: { days: 30 } })).html);
+  const desktop = scoped.match(/<ul class="zt-bars zt-desktop-causes">([\s\S]*?)<\/ul>/)?.[1];
+  assert.ok(desktop);
+  assert.deepEqual([...desktop.matchAll(/full scale (\d+) touched runs/g)].map((m) => Number(m[1])), [13, 13], "unequal project stacks retain one shared scale even with an inconsistent summary");
+  const ends = [...desktop.matchAll(/<svg class="zt-cause-svg"[^>]*>([\s\S]*?)<\/svg>/g)].map((svg) => {
+    const last = [...svg[1].matchAll(/x="([\d.]+)%" y="0" width="([\d.]+)%"/g)].at(-1);
+    return Number(last[1]) + Number(last[2]);
+  });
+  assert.ok(Math.abs(ends[0] - 100) < 0.1);
+  assert.ok(Math.abs(ends[1] - 9 / 13 * 100) < 0.1, "the smaller stack is visibly smaller on the common scale");
+  const empty = await ZERO_TOUCH_DRAW["zero-touch-empty.viewer"]();
+  assert.ok(!empty.includes('<rect class="zt-cause-rect"'), "a true empty report has no invented cause segments");
+  assert.ok(empty.includes("No workload runs ended in the covered interval."));
+});

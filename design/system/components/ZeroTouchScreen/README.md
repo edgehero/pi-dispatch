@@ -14,7 +14,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
   - the most common cause.
 
   A row opens to its repositories or folders with the same columns (api is shown open: acme/api at 31%, acme/api-docs at 4%). *Open as runs* lists the touched runs on the Runs tab.
-- **What needed a person** (side). One stacked bar per project on one scale, each with its counts in words under it. Under the bars, the six causes with what the record says for each and their counts (17, 5, 7, 5, 3 and 1, which make 38), and one line: merging is never a touch, with a link to how touches are counted.
+- **What needed a person** (side). One stacked bar per project on one scale that contains the complete stack, each with its counts in words under it. Under the bars, the six causes with what the record says for each and their counts (17, 5, 7, 5, 3 and 1, which make 38), and one line: merging is never a touch, with a link to how touches are counted.
 - **Questions it keeps asking** (operator only). Questions with the same meaning, grouped by a decision model, per repository. A person names each group (an unnamed one says how many similar questions it holds and offers *Name this group*), and the page shows the name, the count and links to the runs, never the questions. Each group offers the fix that removes it:
   - *Add to instructions*: shown open, a preview with the diff of `triggers.json` and *Add to trigger 3*. The undo is to remove the sentence.
   - Standing answers and drafting arrive with #772; #770 offers no inactive draft or standing-answer control. Product-decision sample wording is illustrative.
