@@ -185,7 +185,7 @@ test("the local PS5 launcher transports the entire nested argv script as UTF16LE
 	assert.deepEqual(plan.args.slice(0, -1), ["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
 	const decoded = Buffer.from(plan.args.at(-1), "base64").toString("utf16le");
 	assert.ok(decoded.endsWith(String.raw`[PiDispatchConsole]::Start('C:\Program Files\node''s $bin%\node.exe', '"C:\Program Files\node''s $bin%\node.exe" "C:\worker''s $name%\dispatch cli.mjs" "opener" "prompt" "${uri()}"')`));
-	assert.match(decoded, /CloseHandle\(process.hThread\);[\s\S]*finally \{ CloseHandle\(process.hProcess\); \}/);
+	assert.match(decoded, /finally \{ CloseHandle\(process.hThread\); CloseHandle\(process.hProcess\); \}/);
 	assert.equal(plan.waitForExit, true, "only the finite dispatcher is awaited, never the interactive helper");
 });
 
@@ -194,7 +194,7 @@ test("a Windows terminal child derives PS5 module paths even when its Node paren
 	const env = { ...w.env, PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules", pSmOdUlEpAtH: "another incompatible path", SystemRoot: "C:\\Windows" };
 	const plan = terminalLaunch({ platform: "win32", nodePath: "C:\\node\\node.exe", cliPath: "C:\\dispatch cli.mjs", url: uri(), directory: w.root, env });
 	let options;
-	await spawnTerminal(plan, { spawn: (_bin, _args, passed) => { options = passed; const child = new EventEmitter(); queueMicrotask(() => child.emit("exit", 0)); return child; } });
+	await spawnTerminal(plan, { spawn: (_bin, _args, passed) => { options = passed; const child = new EventEmitter(); queueMicrotask(() => child.emit("close", 0)); return child; } });
 	assert.equal(Object.keys(options.env).some((key) => key.toLowerCase() === "psmodulepath"), false);
 	assert.equal(options.env.SystemRoot, "C:\\Windows");
 	assert.equal(options.detached, true, "the finite dispatcher does not give libuv ownership of its console's lifetime");
@@ -210,17 +210,35 @@ test("the Windows dispatcher must finish successfully; process creation alone ca
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(settled, false, "a spawned PowerShell has not yet confirmed CreateProcessW succeeded");
 	child.stderr.write("x".repeat(10_000));
-	child.emit("exit", 1);
+	child.emit("close", 1);
 	await assert.rejects(pending, (error) => /could not open an interactive console/.test(error.message) && error.code === 1 && error.stderr.length === 4096);
 	const failed = new Error("PowerShell executable unavailable");
 	await assert.rejects(spawnTerminal(plan, { spawn: () => { const c = new EventEmitter(); queueMicrotask(() => c.emit("error", failed)); return c; } }), (error) => error === failed);
+});
+
+test("a successful Windows dispatcher drains its bounded process diagnostic before returning", async () => {
+	const child = new EventEmitter();
+	child.stdout = new PassThrough();
+	child.stderr = new PassThrough();
+	let settled = false;
+	const pending = spawnTerminal({ bin: "powershell.exe", args: ["dispatcher"], waitForExit: true }, { spawn: () => child });
+	pending.then(() => settled = true);
+	child.emit("exit", 0);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(settled, false, "the exit event does not prove the diagnostic pipe has drained");
+	child.stdout.write("x".repeat(5_000));
+	child.stdout.write("pid=123;parentJob=False;childJob=False;initialExit=259\n");
+	child.emit("close", 0);
+	const result = await pending;
+	assert.equal(result.stdout.length, 4096);
+	assert.match(result.stdout, /pid=123;parentJob=False;childJob=False;initialExit=259\n$/);
 });
 
 test("a failed Windows console dispatcher makes the opener refuse instead of announcing an opened terminal", async () => {
 	const w = world(), errors = [];
 	fs.mkdirSync(openerDirectory(w.env), { recursive: true, mode: 0o700 });
 	fs.writeFileSync(join(openerDirectory(w.env), "hosts.json"), JSON.stringify(config()), { mode: 0o600 });
-	const result = await runOpener(["handle", uri()], { env: w.env, deps: { platform: "win32", err: (s) => errors.push(s), showTerminal: (plan) => spawnTerminal(plan, { spawn: () => { const c = new EventEmitter(); queueMicrotask(() => c.emit("exit", 1)); return c; } }) } });
+	const result = await runOpener(["handle", uri()], { env: w.env, deps: { platform: "win32", err: (s) => errors.push(s), showTerminal: (plan) => spawnTerminal(plan, { spawn: () => { const c = new EventEmitter(); queueMicrotask(() => c.emit("close", 1)); return c; } }) } });
 	assert.equal(result, 1);
 	assert.match(errors.join(""), /could not open an interactive console/);
 });
