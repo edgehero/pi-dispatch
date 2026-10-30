@@ -1,6 +1,8 @@
 # Console configuration evidence, issue #751
 
-Implementation commit: `5e17f674d02240460a3cecbdcdced8381c33ffb7`.
+Capture implementation commit: `5e17f674d02240460a3cecbdcdced8381c33ffb7`.
+
+The PR history was later made linear as `2d3a6c7897a91805fdc762c0afb1e70d483e36ed` on current main. Both commits have the identical Git tree `6d2abb5a20403f67e97f34e701ab9fd2bfbdf18f`, with zero changed files. These captures therefore show the current implementation; the capture commit is retained here as provenance.
 Baseline: Configuration from main `0c9ef5e9d3c9d583871b828295dd29fbaed58174`, served with that revision's stylesheet, script and security headers. The later main changes incorporated by the implementation concern design documentation.
 
 The after images show the served console against a synthetic deployment. Captures follow the last relevant UI changes. Size-add and size-edit previews came from actual browser interactions through the normal preview/confirmation funnel; the confirmed file changes were checked. The members-only preview was exercised and cancelled without a file mutation. The 375-pixel chart and 390-pixel forge table are close captures of the actual panels.
