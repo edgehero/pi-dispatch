@@ -1262,7 +1262,9 @@ export function readProjects({ projectsPath, fs = nodeFs }) {
  * `writeScopedLimits` uses, because the admin cannot see what the worker has live. When the scoped-limits file cannot
  * be read or parsed and the write removes an id, the row cannot be checked, so it is refused.
  *
- * Returns `{ text, projects, pending? }` or `{ invalid }`. No message quotes a `name`.
+ * Returns `{ text, projects, pending? }` or `{ invalid, blocker? }`. Optional typed blocker facts let a person page
+ * name the actual bundle, row, floor or unread source without parsing or repeating the tool's diagnostic. No message
+ * quotes a `name`.
  */
 export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, triggersPath = null, mutate, envelope = null, fs = nodeFs }) {
   if (projectsPath === null || projectsPath === undefined) return { invalid: PROJECTS_UNSET };
@@ -1303,12 +1305,12 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, trigg
     // not parse, cannot rule a row out, so a write that removes an id refuses (PR #569's review).
     raw = fileSnapshot(fs, scopedLimitsPath);
     if (isUnreadable(raw)) {
-      if (removed.length > 0) return { invalid: `the scoped-limits file ${scopedLimitsPath} could not be read (${unreadableCode(raw)}), so a row naming ${removed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+      if (removed.length > 0) return { invalid: `the scoped-limits file ${scopedLimitsPath} could not be read (${unreadableCode(raw)}), so a row naming ${removed.join(", ")} cannot be ruled out; fix it first. Nothing was written`, blocker: { kind: "source", source: "scoped-limits" } };
     } else if (raw !== null) {
       try {
         limits = parseScopedLimits(raw, scopedLimitsPath);
       } catch (e) {
-        if (removed.length > 0) return { invalid: `the scoped-limits file does not load (${e?.message ?? String(e)}), so a row naming ${removed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+        if (removed.length > 0) return { invalid: `the scoped-limits file does not load (${e?.message ?? String(e)}), so a row naming ${removed.join(", ")} cannot be ruled out; fix it first. Nothing was written`, blocker: { kind: "source", source: "scoped-limits" } };
         limits = [];
       }
     }
@@ -1331,34 +1333,37 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, trigg
     };
     if (isUnreadable(triggersText)) {
       const changed = touched([...new Set([...current, ...written].map((p) => p.id))]);
-      if (changed.length > 0) return { invalid: `the triggers file ${triggersPath} could not be read (${unreadableCode(triggersText)}), so a secret bundle naming ${changed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+      if (changed.length > 0) return { invalid: `the triggers file ${triggersPath} could not be read (${unreadableCode(triggersText)}), so a secret bundle naming ${changed.join(", ")} cannot be ruled out; fix it first. Nothing was written`, blocker: { kind: "source", source: "triggers" } };
     } else if (triggersText !== null) {
       let bundles = null;
       try {
         bundles = parseTriggersDocument(triggersText, triggersPath).secretBundles;
-      } catch (e) {
+      } catch {
         const changed = touched([...new Set([...current, ...written].map((p) => p.id))]);
-        if (changed.length > 0) return { invalid: `the triggers file does not load (${e?.message ?? String(e)}), so a secret bundle naming ${changed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+        // Parser diagnostics can quote a rejected declaration, including its secret reference. Every project
+        // surface shares this planner, so keep those diagnostics on the host's doctor, never in a page or tool.
+        if (changed.length > 0) return { invalid: `the triggers file does not load, so a secret bundle naming ${changed.join(", ")} cannot be ruled out; run pi-dispatch doctor and fix the triggers file first. Nothing was written`, blocker: { kind: "source", source: "triggers" } };
       }
       if (bundles !== null) {
         const byProject = new Map(Object.entries(bundles).map(([id, b]) => [b.project, id]));
         const changed = touched([...byProject.keys()]);
         if (changed.length > 0) {
           const named = changed.map((p) => `secretBundles ${JSON.stringify(byProject.get(p))} (project ${p})`).join(", ");
-          return { invalid: `${named} in ${triggersPath} names this project, and a change to its members would change which jobs hold that bundle's secrets; change the bundle in triggers.json first. Nothing was written` };
+          return { invalid: `${named} in ${triggersPath} names this project, and a change to its members would change which jobs hold that bundle's secrets; change the bundle in triggers.json first. Nothing was written`, blocker: { kind: "bundle", bindings: changed.map((project) => ({ project, bundle: byProject.get(project) })) } };
         }
       }
     }
   }
   // Issue #504 part C: a project removed or renamed that the allocation envelope floors would leave the envelope
   // invalid (`envelopeRefusal`), so it is refused here, before the confirm and again after it, naming the conflict.
-  const broken = envelope ? envelopeRefusal({ envelopeFile: envelope.file, projectsPath, scopedLimitsPath, maxCostMicros: envelope.maxCostMicros, next: { projects: written }, fs }) : null;
-  if (broken) return { invalid: broken };
+  let envelopeBlocker = null;
+  const broken = envelope ? envelopeRefusal({ envelopeFile: envelope.file, projectsPath, scopedLimitsPath, maxCostMicros: envelope.maxCostMicros, next: { projects: written }, fs, onRefusal: (facts) => { envelopeBlocker = facts; } }) : null;
+  if (broken) return { invalid: broken, ...(envelopeBlocker ? { blocker: envelopeBlocker } : {}) };
   const dangling = danglingProjectRows(limits, written);
   const blocking = dangling.filter((d) => removed.includes(d.id));
   if (blocking.length > 0) {
     const rows = blocking.map((d) => `project:${d.id} (index ${d.index})`).join(", ");
-    return { invalid: `${rows} in ${scopedLimitsPath} names this project, and the worker keeps its last good projects while a row names a missing one; delete or change that row first (dispatch_limit_delete or dispatch_limit_edit). Nothing was written` };
+    return { invalid: `${rows} in ${scopedLimitsPath} names this project, and the worker keeps its last good projects while a row names a missing one; delete or change that row first (dispatch_limit_delete or dispatch_limit_edit). Nothing was written`, blocker: { kind: "limits", rows: blocking.map((d) => ({ project: d.id, index: d.index })) } };
   }
   if (dangling.length > 0) {
     const ids = [...new Set(dangling.map((d) => d.id))].join(", ");
@@ -1455,13 +1460,14 @@ export function readEnvelope({ envelopeFile, projectsPath = null, scopedLimitsPa
  * they are, null: that envelope is broken already, doctor names it, and refusing every unrelated edit would only keep
  * the operator from the edit that fixes it.
  */
-export function envelopeRefusal({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, next = {}, fs = nodeFs }) {
+export function envelopeRefusal({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, next = {}, fs = nodeFs, onRefusal = null }) {
   if (envelopeFile === null || envelopeFile === undefined) return null;
   const text = fileSnapshot(fs, envelopeFile);
   if (text === null || isUnreadable(text)) return null;
   const cur = envelopeContext({ projectsPath, scopedLimitsPath, fs });
+  let loaded;
   try {
-    parseEnvelope(text, envelopeFile, { ...cur, maxCostMicros });
+    loaded = parseEnvelope(text, envelopeFile, { ...cur, maxCostMicros });
   } catch {
     return null;
   }
@@ -1474,6 +1480,12 @@ export function envelopeRefusal({ envelopeFile, projectsPath = null, scopedLimit
     parseEnvelope(text, envelopeFile, after);
     return null;
   } catch (e) {
+    // The parser's message is for existing tool callers. A person page gets only verified semantic blockers.
+    if (typeof onRefusal === "function" && Array.isArray(after.projects) && loaded?.floors && typeof loaded.floors === "object") {
+      const kept = new Set(after.projects.map((p) => p.id));
+      const projects = Object.keys(loaded.floors).filter((id) => !kept.has(id) && id !== "_other");
+      if (projects.length) onRefusal({ kind: "envelope-floor", projects });
+    }
     return `this change would leave the allocation envelope invalid (${e?.message ?? String(e)}), and the worker would keep its last good envelope and refuse to start on it; change the envelope first (dispatch_envelope_set) or in the same edit. Nothing was written`;
   }
 }
@@ -3171,6 +3183,44 @@ export function readStagedPackages({ globalPiDir, fs = nodeFs, readManifest = re
 export { FORGE_MCP_SERVER_NAME };
 
 /**
+ * The parser's diagnostic may quote a header/env name, an unaccepted field, or a normalized URL containing private
+ * path text. Select fixed explanations by its rule, never echo its diagnostic. The real-parser tests keep these
+ * categories tied to worker behavior; an unfamiliar future diagnostic remains explicitly invalid, never silent.
+ */
+function mcpProblemForDisplay(name, problem) {
+  if (!MCP_SERVER_NAME_RE.test(name)) return "the server name must use lowercase letters and digits, joined by single hyphens, up to 32 characters";
+  if (name.includes("dispatch")) return "a name holding `dispatch` is reserved for the dispatch admin";
+  if (name === FORGE_MCP_SERVER_NAME) return "forge is reserved for the worker’s own forge server";
+  const why = typeof problem === "string" ? problem : "";
+  if (why.startsWith("the name must")) return "the server name must use lowercase letters and digits, joined by single hyphens, up to 32 characters";
+  if (why === "the entry is not an object") return "the server declaration must be an object";
+  if (why.startsWith("the legacy SSE")) return "the legacy SSE transport is not supported; use a streamable HTTP URL";
+  if (why.startsWith("`type`") || why.startsWith("the entry needs exactly one")) return "declare exactly one HTTP URL or stdio command, with a matching supported transport type";
+  if (why.startsWith("`description`")) return "a server description is required, one line of at most 300 characters with no control or format characters";
+  if (why.startsWith("`toolExposure`")) return "tool exposure must map tool names or patterns to supported exposure modes";
+  if (why.startsWith("`exposure`")) return "the server exposure must be one of the worker's supported exposure modes";
+  if (why.startsWith("`enabled`")) return "the enabled switch must be true or false";
+  if (why.startsWith("`timeout`")) return "the timeout must be a whole number of seconds from 1 to 600";
+  if (why.startsWith("`url` query value")) return "URL query values must be whole named credential references; literal query values are refused";
+  if (why.startsWith("`url` holds a reference in its host")) return "the HTTP URL's host must be written literally; a credential reference cannot choose the egress host";
+  if (why.startsWith("`url` must not carry a user name or password")) return "the HTTP URL must not carry credentials; supply them through a named header reference";
+  if (why.startsWith("`url`")) return "the HTTP URL must be a plain http or https URL, with a literal host, no fragment and only complete named references";
+  if (why.startsWith("`headers`")) return "HTTP headers must map header names to named credential references";
+  if (why.startsWith("header name ")) return "an HTTP header name is invalid or reserved";
+  if (why.startsWith("header ")) return "HTTP header credentials must use complete named references; literal header values are refused";
+  if (why.startsWith("`command`") && why.includes("fetches the server from a package registry")) return "a package runner fetches the server at job start; install it in the image or explicitly allow the package runner and its registry";
+  if (why.startsWith("`command`")) return "the stdio command must be an admitted image executable or a bare name on its PATH, without substitutions or home-folder shorthand";
+  if (why.startsWith("`allowPackageRunner`")) return "the package-runner permission must be true or false";
+  if (why.startsWith("`args`")) return "stdio arguments must be a list of strings";
+  if (why.startsWith("an argument ")) return "stdio arguments may use complete named references; command execution and home-folder shorthand are refused";
+  if (why.startsWith("`env`")) return "the stdio environment must map variable names to complete named credential references";
+  if (why.startsWith("env name ")) return "an environment variable name is invalid or reserved";
+  if (why.startsWith("env ")) return "stdio environment values must be complete named credential references; literal values are refused";
+  if (/ is not a key a (?:streamable HTTP|stdio) server takes here$/.test(why) || /^`[^`]+` is not accepted: /.test(why)) return "the server declaration contains a field this transport does not accept";
+  return "the server declaration is invalid; check it with pi-dispatch doctor";
+}
+
+/**
  * The overlay's MCP servers for display (REQ-MCP-OPERATOR-SERVERS): what a trigger's `run.mcp` names resolve to. Read
  * through the worker's OWN parser (`@edgehero/pi-dispatch/mcp-config`), so the panel and the pickup cannot disagree
  * on which servers are offered. Per server its name, transport, where it runs (a url's host, or a command's
@@ -3196,7 +3246,10 @@ export function readOverlayMcpView({ globalPiDir, read = readOverlayMcp } = {}) 
     enabled: server.enabled !== false,
     refs: Array.isArray(server.refs) ? [...server.refs] : [],
   }));
-  return { servers, refused: (parsed.refused ?? []).map((r) => r.name).filter((n) => typeof n === "string"), unreadable: null };
+  const refused = (parsed.refused ?? []).filter((r) => typeof r.name === "string");
+  const invalidNameCount = refused.filter((r) => !MCP_SERVER_NAME_RE.test(r.name)).length;
+  const displayName = (name) => MCP_SERVER_NAME_RE.test(name) ? name : "invalid server name";
+  return { servers, refused: refused.map((r) => displayName(r.name)), problems: refused.map((r) => ({ name: displayName(r.name), problem: mcpProblemForDisplay(r.name, r.problem) })), ...(invalidNameCount > 0 ? { invalidNameCount } : {}), unreadable: null };
 }
 
 /** One manifest entry as `name@version`, or bare `name` when the entry pins no version string. */
@@ -4721,7 +4774,7 @@ export function createFleetReader(
         projects: projectsView,
         // The project secret bundles (issue #704): null when the triggers file binds none. Names, profiles and the
         // newest run's received variable names; never a reference or a value, and never resolved here.
-        secretBundles: secretBundlesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs }),
+        secretBundles: secretBundlesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, fs }),
         // Issue #712: the secret profiles view (`secretProfilesView`): each profile's source, roots status, triggers,
         // projects, last resolve and the live hosts that advertise it. Names and words only, never a resolver path.
         secretProfiles: secretProfilesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, hosts: fleetDegraded ? null : lastHosts.map(hostRowOf), hostsUnreadable: Boolean(fleetDegraded), fs }),
@@ -6671,14 +6724,14 @@ export function secretProfilesView({ triggers = null, settings = null, env = {},
 export const PROFILE_SOURCE_TEXT = Object.freeze({
   env: "declared in PI_SECRET_PROFILES",
   overlay: "declared in the settings overlay",
-  ambiguous: "AMBIGUOUS: declared in both PI_SECRET_PROFILES and the settings overlay, so the worker refuses every secrets job",
+  ambiguous: "Ambiguous: declared in both PI_SECRET_PROFILES and the settings overlay, so the worker refuses every secrets job",
   undeclared: "named by a trigger, declared in no source this view can see",
 });
 
 /** An overlay row's `roots` in words; no path, so the console and the panel can show it. */
 export const PROFILE_ROOTS_TEXT = Object.freeze({
   inside: "its resolver's real path on this host is inside PI_SECRET_RESOLVER_ROOTS as written",
-  outside: "its resolver's real path on this host is OUTSIDE PI_SECRET_RESOLVER_ROOTS, so the worker refuses every job naming it",
+  outside: "its resolver's real path on this host is outside PI_SECRET_RESOLVER_ROOTS, so the worker refuses every job naming it",
   unresolved: "its resolver cannot be resolved on this host, so only the worker can judge it against PI_SECRET_RESOLVER_ROOTS (doctor --secrets)",
   unseen: "PI_SECRET_RESOLVER_ROOTS is not visible here, so the roots are the worker's to judge (doctor --secrets)",
   empty: "PI_SECRET_RESOLVER_ROOTS is set and empty, so the worker refuses every overlay resolver",
@@ -6690,7 +6743,7 @@ export function secretProfileFacts(row, view = null) {
   const out = [PROFILE_SOURCE_TEXT[row.source] ?? PROFILE_SOURCE_TEXT.undeclared];
   if (row.source === "undeclared" && view?.envSeen === false) out[0] += " (PI_SECRET_PROFILES is not visible here)";
   if (row.roots !== null && Object.hasOwn(PROFILE_ROOTS_TEXT, row.roots)) out.push(PROFILE_ROOTS_TEXT[row.roots]);
-  const trig = row.triggers.length > 0 ? `used by trigger${row.triggers.length + row.triggersMore === 1 ? "" : "s"} ${row.triggers.map((i) => `#${i}`).join(", ")}${row.triggersMore > 0 ? ` and ${row.triggersMore} more` : ""}` : "used by no trigger";
+  const trig = row.triggers.length > 0 ? `used by trigger${row.triggers.length + row.triggersMore === 1 ? "" : "s"} ${row.triggers.map((i) => `#${rowNumber(i)}`).join(", ")}${row.triggersMore > 0 ? ` and ${row.triggersMore} more` : ""}` : "used by no trigger";
   out.push(trig);
   if (row.projects.length > 0 || row.anyRepo) out.push(`projects: ${[...row.projects, ...(row.projectsMore > 0 ? [`${row.projectsMore} more`] : []), ...(row.anyRepo ? ["any (a webhook trigger)"] : [])].join(", ")}`);
   out.push(profileLastText(row.last));
@@ -6782,13 +6835,12 @@ export function renderBundleProfiles(bundles) {
  * `byIndex` maps a trigger's raw index to `{ id, optedOut }`: the bundle a cron trigger's jobs hold (id null for a
  * trigger outside every bundled project or a webhook trigger, which belongs to no project until a repo does).
  */
-export function secretBundlesView({ triggers, settings = null, env = {}, projects = null, runs = [] } = {}) {
+export function secretBundlesView({ triggers, settings = null, env = {}, projects = null, runs = [], fs = nodeFs } = {}) {
   const list = Array.isArray(triggers?.secretBundles) ? triggers.secretBundles : [];
   if (list.length === 0) return null;
   const fromEnv = envBundleProfiles(env?.PI_SECRET_BUNDLES);
   const fromOverlay = overlayBundleProfiles(settings);
   const ambiguous = Object.keys(fromOverlay).some((n) => Object.hasOwn(fromEnv.profiles, n));
-  const roots = delimitedList(env?.PI_SECRET_RESOLVER_ROOTS);
   // Whether the panel sees PI_SECRET_RESOLVER_ROOTS at all (final review): unset in what it reads is not proof the
   // worker's host has no roots, so "outside the roots" is claimed only against roots the panel can see.
   const rootsSeen = typeof env?.PI_SECRET_RESOLVER_ROOTS === "string";
@@ -6814,11 +6866,12 @@ export function secretBundlesView({ triggers, settings = null, env = {}, project
   const bundles = list.map((b) => {
     const inEnv = b.profile !== null && Object.hasOwn(fromEnv.profiles, b.profile);
     const inOverlay = b.profile !== null && Object.hasOwn(fromOverlay, b.profile);
-    // An overlay resolver the worker would not use: its path outside PI_SECRET_RESOLVER_ROOTS (unset is empty, fail
-    // closed). LEXICAL, the worker's own `withinRoots` on the declared path: the worker checks the REALPATH, which only
-    // the host that runs the jobs can resolve, so a lexical yes is not a yes (doctor --secrets is the check that it
-    // runs) and a lexical no is a no.
-    const outside = inOverlay && rootsSeen && !withinRoots(fromOverlay[b.profile].path, roots);
+    // A symlink crosses the roots in either direction (/tmp on macOS is a common example), so neither lexical yes
+    // nor lexical no says what the worker will do. Use the profile view's realpath rule; another host's unresolved
+    // path stays unknown, never a refusal or a claim that the resolver is inside.
+    let rootsStatus = null;
+    if (inOverlay) { try { rootsStatus = resolverRootsStatus(fromOverlay[b.profile].path, env, fs).status; } catch { rootsStatus = "unresolved"; } }
+    const outside = inOverlay && ["outside", "empty"].includes(rootsStatus);
     const declared = fromEnv.malformed ? "env-malformed" : ambiguous ? "ambiguous" : inEnv ? "env" : outside ? "overlay-outside-roots" : inOverlay ? "overlay" : envSeen ? "missing" : "unseen";
     const format = declared === "env" ? fromEnv.profiles[b.profile].format : inOverlay && (declared === "overlay" || declared === "overlay-outside-roots") ? fromOverlay[b.profile].format : null;
     const optedOut = entries.filter((t) => t?.secretBundle === false && Number.isInteger(t.index) && (t.type !== "cron" || byIndex[t.index]?.id === b.id)).map((t) => t.index);
@@ -6828,9 +6881,10 @@ export function secretBundlesView({ triggers, settings = null, env = {}, project
       declared,
       format,
       rootsSeen,
+      roots: rootsStatus,
       projectKnown: projectList === null || b.project === null ? null : projectList.some((p) => p.id === b.project),
       optedOut,
-      last: hit ? { jobId: typeof hit.r.jobId === "string" ? hit.r.jobId : null, variables: hit.b.variables } : null,
+      last: hit ? { jobId: typeof hit.r.jobId === "string" ? hit.r.jobId : null, at: Number.isFinite(runAt(hit.r)) ? new Date(runAt(hit.r)).toISOString() : null, variables: hit.b.variables } : null,
     };
   });
   return { bundles, byIndex };
@@ -6842,13 +6896,14 @@ export function bundleDeclaredText(row) {
     case "env":
       return `declared in PI_SECRET_BUNDLES${row.format ? `, ${row.format}` : ""}; doctor --secrets checks it runs`;
     case "overlay":
+      if (row.roots === "unresolved") return `declared in the settings overlay${row.format ? `, ${row.format}` : ""}; its resolver cannot be resolved on this host, so only the worker can judge it against PI_SECRET_RESOLVER_ROOTS; doctor --secrets checks it runs`;
       return row.rootsSeen === false
         ? `declared in the settings overlay${row.format ? `, ${row.format}` : ""}; PI_SECRET_RESOLVER_ROOTS is not visible to the panel; doctor --secrets checks it runs`
         : `declared in the settings overlay${row.format ? `, ${row.format}` : ""}, inside PI_SECRET_RESOLVER_ROOTS as written; doctor --secrets checks it runs`;
     case "overlay-outside-roots":
       return "declared in the settings overlay but outside PI_SECRET_RESOLVER_ROOTS, so the worker will not run it and this project's jobs are refused before they spend";
     case "ambiguous":
-      return "declared in BOTH PI_SECRET_BUNDLES and the overlay: the worker refuses every bundled job until one goes";
+      return "declared in both PI_SECRET_BUNDLES and the overlay: the worker refuses every bundled job until one goes";
     case "env-malformed":
       return "PI_SECRET_BUNDLES does not parse: the worker does not start";
     case "unseen":

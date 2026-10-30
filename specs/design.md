@@ -2843,7 +2843,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the fold as JSON whose every monetary value carries its `class`, so a model consuming it cannot launder
   an estimate into a fact; the `dollars` beside it are enforcement amounts in integer micro-dollars, with no
   class), `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`,
-  `dispatch_allocations`, `dispatch_capacity` (issue #599: the capacity report through the CLI's own read and
+  `dispatch_secrets`, `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity` (issue #599: the capacity report through the CLI's own read and
   function, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue**
   `dispatch_run`; the **confirm-gated writes** `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`,
   `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`,
@@ -11973,6 +11973,59 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+**CORRECTED 2026-10-30 (#751, review).** Configuration facts follow the published cards' compact hierarchy.
+State glyphs accompany words; webhook method/state and route are separate lines, providers show one selected
+environment candidate or none there, and Notifications/MCP use compact rows. General mechanism explanations live
+in linked operator documentation. A missing file-declared GitHub webhook secret is a startup warning qualified
+for possible service-environment settings, never a claim about a running receiver's health.
+
+Project spend leads with a known combined total when its settled/held split is unknown, and labels the meter's
+amounts. Short reason/refusal sentences retain source meaning without raw planner diagnostics; typed preflight
+facts come from the actual refusal sites. The member editor contains only its members and a compact action.
+Memory verdicts use GiB beside the chart without changing worker measurements or exact command units. Wider
+axis gutters accommodate native Linux fonts as well as macOS fonts; font, bounds and overlap assertions remain.
+Primary spend typography is checked on rendered descendant text, so a secondary-label selector cannot shrink or
+mute a formatted money span while its parent still reports the correct heading style.
+Mobile forge tracks are bounded independently of long state content; supporting fields span the row. Numeric
+trigger links keep full accessible names. The browser measures stacked label words using their actual pseudo-element
+font and cell content width, catching unreadable one-letter columns even when the document fits the viewport.
+Connections separates endpoint declaration from observation: fleet lease occupancy is counted only where the
+worker takes those leases (a declared host queue and a non-per-machine endpoint). Per-machine aliases and an
+absent PI_WORKER_NAME declaration read not counted, retaining declared slots; unavailable metadata/leases read
+unknown. Longer occupancy explanations do not control the width available to adjacent phone table labels. The source card follows the same phone field rules: an alias host and its occupancy explanation span complete rows, forge tracks stay bounded, long commands wrap, and a slot graphic draws its declared number of slots. The page does not equate no published fleet lease with unused local capacity. Delivery guidance sends
+401/404 investigation to forge history and qualifies receiver-log help for 503/enqueue failures, since early
+request refusals and some 503 paths write no line. No new telemetry or logging is added.
+Worker validation, execution, budget, confirmation and wire/file contracts are UNCHANGED, checked.
+
+**AMENDED 2026-10-30 (#751).** Secrets, Connections and project detail are static viewer-readable routes under
+Configuration. Their PAGE_READS request only the facts each draws; forge settings, deployment key presence,
+allowlist, endpoints and leases never join the shared snapshot or /api/state. Each source fails independently,
+with unread distinguished from empty. The console states worker rules, and adds no resolver invocation, network
+probe, auth check, notification history collection or admission decision.
+
+The published SecretsScreen, ConnectionsScreen and ProjectDetail retain complete card sections and the shared
+Pulse kit: full-width secret tables, two-column Connections and three project KPIs above main/side columns.
+Paths are shortened at the person-facing projection, including every diff context line and refusal, while
+server-held plans retain the real operands. A duplicate resolver removal ends ambiguity instead of claiming to
+remove secrets. Both project refusals call the existing planners before a control is offered. Size previews use
+the existing add/edit action and machine row index. Chart positions and legends describe measured run data,
+with OOM and unknown coverage distinct; no sample card fact is substituted for missing telemetry. Phone SVG
+axis type compensates for viewBox scaling, keeps units outside the plot and is measured in actual screen pixels,
+not accepted from its source font-size declaration. The browser oracle checks legibility, bounds and overlaps.
+
+Provider key names come from a generated data-only leaf (`admin/src/provider-key-names.mjs`), derived from the
+pinned worker candidate order and pi provider list. Its whole-file source hash of pi-ai's `env-api-keys.js` and
+exhaustive derivation test both gate upgrades; the existing bundle test keeps provider SDKs out of the console.
+The generator is maintainer tooling, never a runtime import. No dependency pin changes for this feature.
+
+The two new read tools expose a narrower projection: secrets are names/counts without variable names, and
+connections expose safe names/hosts/presence. Expanded projects expose share/spend/sizing/refusals without
+paths. Resolver writes remain person-only. Rejected: sending the browser snapshot directly to the agent,
+which would disclose variable names and paths, and introducing a new write funnel just for these pages.
+Remote artifact access is not assumed; source-card comparisons prove tokens/styles/system fonts loaded before
+capture. Every published card is accounted for as implemented, a family variant, a guide or separate issue,
+so completing these three pages cannot silently imply unrelated proposed pages were built.
+
 **AMENDED 2026-10-30 (#750, trigger list).** TriggersScreen, TriggersViewer and TriggersPhone are built
 on `/triggers`; the checker also has `/triggers/check` for a phone. The console reuses the receiver's pure
 trigger grouping and actual forge filters for hypothetical event checks rather than maintaining a second
@@ -16437,3 +16490,10 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-30 (#750) | `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION` and `DES-AI-TRIGGER-FLOW-GATE` AMENDED: Pulse configuration and shared bounded trigger fire. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: no paid container starts here, worker gates and isolation still apply; no merge path is added. |
 | 2026-10-30 (#750, trigger list) | `DES-OPERATOR-CONSOLE` AMENDED: TriggersScreen, TriggersViewer and TriggersPhone, actual receiver-filter reuse behind a private read POST, bounded role-safe history and timezone-aware schedules, and corrected quiet-window scope copy. `DES-ADMIN-VIA-PI-EXTENSION`, worker delivery handling, paid-start gates, queue payloads, container isolation and merge policy UNCHANGED, checked. |
 | 2026-10-30 (#737, design) | `DES-OPERATOR-CONSOLE` AMENDED, words only: the ParkedPhone card no longer draws the question; like the shipped Parked page it says where the question is read (`PARKED_QUESTION_WHERE`), so the design and `REQ-CONSOLE-SECURITY` (l) agree. The page, its panels and the rejected alternative's reason UNCHANGED, checked. |
+| 2026-10-30 (#751) | `DES-OPERATOR-CONSOLE` and `DES-ADMIN-VIA-PI-EXTENSION` AMENDED: three Configuration detail routes, complete source cards, independently bounded reads, safe person/agent projections, an SDK-free generated credential-key catalogue held to pinned source/hash and candidate order, planner-backed refusal previews and project size actions. `DES-SIZE-SUGGESTIONS`, worker isolation/admission, the visual token/bundle contract and every unrelated decision UNCHANGED, checked. |
+| 2026-10-30 (#751, review) | `DES-OPERATOR-CONSOLE` CORRECTED after rendered design review: compact card hierarchy, one selected provider candidate, state glyphs, source-qualified receiver startup warning, typed planner-backed refusal sentences, known combined spend and readable native-font chart axes. `DES-ADMIN-VIA-PI-EXTENSION`, worker enforcement, budget/isolation, token and stylesheet contracts UNCHANGED, checked. |
+| 2026-10-30 (#751, phone/type review) | `DES-OPERATOR-CONSOLE` CORRECTED: scoped trigger-description wrapping preserves complete phone rows, and primary money typography is verified on actual descendant text rather than only its parent box. Visual tokens, worker behavior, confirmation and every unrelated contract UNCHANGED, checked. |
+| 2026-10-30 (#751, stacked-label review) | `DES-OPERATOR-CONSOLE` CORRECTED: mobile forge tracks stay bounded and label words are measured in their rendered font against content width. Page fit alone cannot prove readability. Visual tokens, data facts, shared state, confirmation and worker rules UNCHANGED, checked. |
+| 2026-10-30 (#751, observation coverage) | `DES-OPERATOR-CONSOLE` CORRECTED: endpoint declaration and fleet observation are separate states, respecting worker host-queue/per-machine gates; unavailable local occupancy is never zero. Delivery-history and receiver-log guidance follows actual quiet refusal paths. Endpoint enforcement, receiver logging, visual tokens, shared state and confirmation contracts UNCHANGED, checked. |
+| 2026-10-30 (#751, endpoint phone review) | `DES-OPERATOR-CONSOLE` CORRECTED: uncounted/unknown endpoint explanations preserve readable neighbouring phone labels, checked with their actual pseudo-element font and available track width. Current main design issue references and its ParkedPhone correction are preserved; draft prefill remains proposed under #772. Endpoint enforcement, receiver logging, shared visual tokens and every unrelated contract UNCHANGED, checked. |
+| 2026-10-30 (#751, reference phone validation) | `DES-OPERATOR-CONSOLE` CORRECTED: the Connections source-card generator keeps alias hosts and uncounted facts in complete phone rows, bounds forge tracks, wraps the staging command and draws all four dots for four declared slots. Styled references are checked at phone, intermediate and desktop widths before comparison. Application behavior, `REQ-OPERATOR-CONSOLE-SCREENS`, shared tokens/styles, worker gates and every interface contract UNCHANGED, checked. |

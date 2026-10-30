@@ -42,7 +42,7 @@ STATUS = {
                                               "TopologyScreen", "SpendPhone"]},
     "TriggersScreen": (BUILT, "Built by #767 (#750). Watch links its existing screen; Dispatchers remains proposed."),
     "TriggerDetail": (BUILT, "Built by #767 (#750)."), "TriggerEditor": (BUILT, "Built by #767 (#750)."), "ConfigScreen": (BUILT, "Built by #767 (#750)."),
-    **{n: (PLANNED, "#751.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
+    **{n: (BUILT, "Built by #751, Secrets, Connections and project detail.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
     "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),
     "ModelsScreen": (PLANNED, "#773. The worker side shipped with #717 (roles), #716 (failover) and #693 (Radius)."),

@@ -1,0 +1,183 @@
+{
+  "card": "ConnectionsScreen",
+  "pr": 751,
+  "panels": [
+    "p-connection-problems",
+    "p-forges",
+    "p-egress",
+    "p-endpoints",
+    "p-notify",
+    "p-mcp",
+    "p-env",
+    "p-packages"
+  ],
+  "elements": [
+    {
+      "el": "p-connection-problems",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsProblems",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-forges",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ],
+      "shows": [
+        "X-GitHub-Delivery",
+        "HMAC-SHA256",
+        "Developer or above"
+      ]
+    },
+    {
+      "el": "p-egress",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsEgress",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ],
+      "shows": [
+        "and 1 more",
+        "egress-allowlist.conf"
+      ]
+    },
+    {
+      "el": "p-endpoints",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ],
+      "shows": [
+        "1 of 2",
+        "0 of 4",
+        "ANTHROPIC_API_KEY"
+      ]
+    },
+    {
+      "el": "p-notify",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-mcp",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsMcp",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-env",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsEnvironment",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ],
+      "shows": [
+        "this shell and the .env differ",
+        "unknown (worker env or default)"
+      ]
+    },
+    {
+      "el": "p-packages",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsPackages",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ]
+    },
+    {
+      "el": "Forge activation, token source, verification, delivery identity, polling and authority",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsForges"
+    },
+    {
+      "el": "Posture, allowlist, host proxy state and dated doctor evidence",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsEgress"
+    },
+    {
+      "el": "Loaded endpoints and fleet slot leases, provider key names and sources",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints"
+    },
+    {
+      "el": "Fixed comments, status comments, hook timeout/exclusions and unpublished history",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsNotify"
+    },
+    {
+      "el": "Overlay MCP states and refusals, image-owned forge server",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsMcp"
+    },
+    {
+      "el": "Typed deployment key projection, unknown caps and shell/file conflict",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsEnvironment"
+    },
+    {
+      "el": "Exact versions, staging receipt and opt-out count",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsPackages"
+    },
+    {
+      "el": "The server provides only the existing worker facts, with unknown/unread states retained",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/connections-view.mjs#readConnections"
+    },
+    {
+      "el": "A failed proxy names the host and latest refused run with the fix",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsProblems",
+      "panel": "p-connection-problems",
+      "golden": [
+        "panels/connections-proxy.operator"
+      ],
+      "shows": [
+        "build3",
+        "gh-e9a0",
+        "pi-dispatch up"
+      ]
+    },
+    {
+      "el": "Card sample names, amounts, runs and counts",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The published card uses illustrative data; the production fixture and behavioral counterexamples verify actual source semantics, not these sample values."
+    }
+  ]
+}

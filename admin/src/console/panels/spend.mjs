@@ -1276,8 +1276,7 @@ export const capacityStates = capacityPulse.capacityStates;
 export function capacityHosts(v) {
   const tips = [];
   const charts = capacityPulse.capacityHosts(v, tips);
-  const sizing = normSizing(payload(v).sizing);
-  return html`<div class="stack">${charts}${sizing ? card("Memory and CPU sizing", responsiveLegacy(sizingSectionHtml(sizing, tips, v.now))) : null}${tipsHtml(tips)}</div>`;
+  return html`<div class="stack">${charts}<p class="muted">Job sizes and their suggestions are on each <a class="link" href="/config#cf-projects">project page</a>.</p>${tipsHtml(tips)}</div>`;
 }
 export function breakdownSpend(v) {
   const f = fold(v);

@@ -35,6 +35,18 @@ and naming `pi-dispatch up` as the way to start it: loud, free (no budget slot, 
 as a Quadlet unit that comes back at boot: [`podman.md`](podman.md)), and `doctor` fails
 until it is running, so both commands you already run say it before a single job does.
 
+## Inspect connections in the console
+
+`/config/connections` shows the deployment's egress posture and first allowlisted hosts, per-host doctor proxy
+state/time/age, and model endpoints with live fleet slot usage. It reads these sources only for this page;
+missing or unreadable data stays explicit. A host's failing endpoints-file check describes that host's own copy.
+Per-host endpoint slot counts are not published. Provider credentials appear by variable name/source, never value.
+The page keeps posture, allowlist and host state concise; the network rules and their limits are explained below.
+An absent proxy check and an unread doctor result remain distinct, with a shared explanation below the table.
+The page changes no file or network policy. A viewer reads fixes as sentences; writable operators can copy commands.
+See [Connections](console.md#connections). Bundle endpoints do not widen egress, and HTTP MCP hosts still need
+an allowlist entry.
+
 ## The hosts, and they are yours
 
 `pi-dispatch init` writes `egress-allowlist.conf` next to your `.env` and never overwrites it. One bare

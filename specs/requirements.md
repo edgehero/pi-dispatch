@@ -774,8 +774,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
   `parseTriggers`, atomic — and reloaded **live** by both services, `OQ-008`). The model-callable tools are
   the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`,
-  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_allocations`,
-  `dispatch_capacity` (issue #599: the capacity report, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; the **confirm-gated writes**
+  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_secrets`,
+  `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity` (issue #599: the capacity report, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; the **confirm-gated writes**
   `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`, `dispatch_trigger_delete`, `dispatch_pause_add`,
   `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`,
   `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`,
@@ -1053,6 +1053,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   page names it by the 0-based index its Triggers table shows ("index 0") until that page converts
   (`REQ-OPERATOR-CONSOLE-SCREENS` (g)) (`admin/test/secret-bundles-view.test.mjs`). The tool enumeration is UNCHANGED,
   checked: no tool is added, removed or renamed.
+
+**AMENDED 2026-10-30 (#751):** Secrets and Connections add read tools. `dispatch_secrets` returns profile/bundle
+names, source/problem words and per-project variable counts; no variable name, path, root, reference or value.
+`dispatch_connections` returns safe forge/env key presence, hosts/egress, endpoints/slots, provider sources, MCP and
+package names, never key values, paths or references. `dispatch_projects` adds spend/share, safe size suggestion/call
+and edit/delete refusal facts. Resolver declarations remain person-only via OPERATOR_ONLY_KEYS; project and size
+writes retain their existing interactive confirmation. This adds no unattended policy from #766.
 
 ## REQ-CONSOLE-SECURITY
 
@@ -2362,6 +2369,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     Every visible row reference counts from 1; hidden indexes and Runs filters keep their machine values.
     A setting is chosen from the closed key list. Every form preserves input on refusal and associates an inline
     field error. Previews show a diff, applicability, destination, Undo and the ticket's five minutes.
+    **AMENDED 2026-10-30 (#751)**: The four MCP, staged-package, profile and bundle sections each collapse to
+    a linked summary. Secrets and Connections navigation and every project row resolve to the pages below.
+    Their full panels and forms live only on their own page, keeping Configuration concise.
   - (g1) **One trigger** (`/config/trigger?index=`, page `trigger`, viewer, not live). The title identifies kind,
     phrase, flow, forge and row. Panels `p-trigger-on`, `p-trigger-runs`, `p-trigger-run`, `p-trigger-edit`,
     `p-trigger-trust`, `p-trigger-kinds` and `p-trigger-change` explain selectors, authorization, last-24-hour count
@@ -2404,6 +2414,92 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     Loading, invalid input, unreadable configuration, session/network failure and no match have actionable
     states; an old response cannot replace a newer event's answer. No-JavaScript checker controls are disabled
     with an explanation, so comment text cannot fall through into a native URL submission.
+  - (g5) **Secrets** (`/config/secrets`, page `secrets`, viewer, not live; #751). SecretsScreen draws
+    profiles, bundles, one resolver declaration form and What a run gets (`p-secret-profiles`,
+    `p-secret-bundles`, `p-secret-add`, `p-secret-help`, with `p-secret-problems` before them). The subtitle starts "Names and states only."
+    and counts the named problems. The leading banner chooses, in order: malformed env declarations; a name in
+    both sources; set-but-empty resolver roots; a missing/outside resolver refusing its own jobs; no live host.
+    Every refusing row is tinted whole and says why, in sentence case. Profile rows retain source, roots judgement,
+    linked one-based triggers, projects, last resolve/run and serving hosts; refused cron rows give next fire.
+    Bundle resolvers include both sources and formats, and bound bundles show missing projects, declaration state,
+    fork reviews, OpenShell endpoint names/hosts, opt-outs and newest received variable names with run/time.
+    Binding remains an edit of triggers.json. Declaration explains host-account execution, profile once per
+    reference, bundle once per job start, and root count before preview; a relative path is refused under its field.
+    Removal opens a red confirmed diff under the table. Overlay-only removal names affected triggers and says
+    they are refused before spend; removing a duplicate ends ambiguity and leaves the env resolver in use.
+    The script stays on disk. Undo says to declare the name again with its resolver; no full path is replayed.
+    Every server page, preview and refusal shortens resolver/root paths to their last folder, including diff context;
+    no reference or value is exposed. Help explains the 16-variable profile and 64-variable/256-KiB-output/64-KiB-value
+    bundle bounds, precedence and shadowed names, all five bundle exclusions and local/Podman versus OpenShell custody.
+    No declaration date is invented: absent history reads "no run in view". Viewer and read-only pages have no writes.
+  - (g6) **Connections** (`/config/connections`, page `connections`, viewer, not live; #751). ConnectionsScreen
+    draws Forges, Egress, Model endpoints, Notifications, MCP servers, Deployment environment and Staged pi packages
+    (`p-forges`, `p-egress`, `p-endpoints`, `p-notify`, `p-mcp`, `p-env`, `p-packages`), with
+    `p-connection-problems` first. Problems lead in order:
+    failing host proxy with newest refused run and catalog fix, armed GitHub without WEBHOOK_SECRET in the deployment
+    file, failing forge doctor check, unreadable host endpoints. The missing-secret warning is qualified: the receiver
+    refuses startup unless its service environment supplies it; file metadata cannot prove the running service lacks it.
+    Forges show configured receiver port (3000 default), never an invented host, each forge's actual enablement,
+    linked trigger rows, token source/scope, webhook verification mode and secret variable presence, route and
+    delivery identity, GitHub polling and fire authority. A disabled forge says its route answers 404; implicit
+    defaults are labelled. Every state pairs a glyph with words. Webhook method/key state and muted route/delivery
+    identity occupy separate lines; polling shows off, on with its interval, or unknown. Mobile table tracks remain
+    bounded when many triggers arm a forge, and label words retain enough space to read whole. Visible trigger
+    numbers count from one and retain full accessible link names. Delivery health is explicitly
+    unpublished. The forge delivery history holds 401/404 refusals; receiver logs can help with 503/enqueue
+    failures, without implying that early request refusals or every 503 are logged. Egress gives one concise PI_EGRESS posture fact, the allowlist's first hosts/count and each host's
+    doctor proxy state/time/age. A missing check and an unavailable doctor result remain distinct, with their shared
+    explanation below the table. Linked operator documentation explains ports 443/80, exact model endpoints,
+    subdomain-dot semantics, isolation and the OpenShell policy.
+    Endpoints use the worker loader and show host, port, keyless state and declared slots. Fleet occupancy is
+    counted only with a declared PI_WORKER_NAME and outside the host.docker.internal/host.containers.internal
+    per-machine aliases. Those two uncounted cases say not counted, never zero; unread declaration/lease facts
+    remain unknown. Those longer explanations keep adjacent endpoint labels readable on phones. A verified fleet zero remains 0 of N. No per-host count is invented; unread file doctor checks retain their fix. Compact provider rows name the first candidate
+    set in the .env, or none there, and its configured source. Actual per-host credentials are unpublished, stated once.
+    Notifications use compact icon rows for forge comments, status-comment triggers and hook basename, with hook
+    history in the worker log. Timing, arguments and exclusions live in linked documentation. MCP retains its facts
+    and refusal reason in compact per-server rows,
+    adds the image-owned forge server without inventing its version and explains import-pi. Environment values
+    are shown only through closed numeric/switch/vocabulary rules; URLs/tokens/secrets read set, paths by basename,
+    unset caps unknown, shell/file conflicts named. Packages show receipt time, exact versions and opt-out count.
+    Source failures leave the other sections drawn. Provider-key metadata unreadable is unknown, never an env
+    absence. Every unset dollar cap uses the actual DOLLAR_ENV_NAMES catalogue and stays unknown.
+    Viewers read fixes as sentences, without commands to copy.
+    PAGE_READS keeps forge/env/file/lease reads off overview and /api/state; this page changes no configuration.
+  - (g7) **One project** (`/config/project?id=`, page `project`, viewer, not live; #751). ProjectDetail validates
+    PROJECT_ID_RE. An unknown id in a successfully read file yields the dedicated no-project 404; an unread file
+    yields an unavailable state. Configuration stays current, with its back link and Runs filtered to the id.
+    Three cards give window spend/share with held separate (never counted twice), 24-hour outcomes/in-line/worst
+    reason, and memory/CPUs with per-field project/env/default source and oversized flag. When combined spend is known
+    but its settled/held split is not, the known total leads with that qualification. The allocation meter labels
+    both total and share. Primary spend text retains heading size and ink, including nested formatted amounts.
+    The worst run uses one short catalog-grounded sentence. No envelope means no share.
+    Members retain weekly runs and last run; local folders display by basename. Invalid or unreadable triggers
+    make bundle state unknown, never absent, with a fixed actionable source-load sentence that never repeats parser
+    text, secret references, values or paths. The planner's bundle edit refusal
+    appears as a concise glyph-and-word sentence before any press and replaces the form. The members-only form has
+    a compact preview action and adjacent hint; naming remains available on Configuration and through existing tools.
+    Other edits preview joining from next pickup, leaving widening
+    spend, retained historical ids, audit kind and Undo. The size chart plots measured peaks and OOM kills against
+    each configured size, solid, and the suggestion, dashed, over 30 days/at most 50 measured runs. Labels, key and
+    text alternatives explain every mark. Visible units sit outside the scaled SVG; numeric/date axis text renders
+    at least 10 CSS pixels, stays inside the chart and does not overlap, including on a phone. Known single sizes
+    and suggestions have their values in the key; varying configured sizes say they change per run. Memory verdicts
+    use GiB with one decimal beside the chart while the exact tool call retains the worker's units. Worker memory/CPU
+    verdicts retain host CPU-ceiling time and advisory status; general execution mechanisms belong in linked docs.
+    A valid exact add/edit call has Copy and Preview this size through the existing row-aware confirmed action.
+    No suggestion means no button and its reason. Recent runs show the last five with link-coloured run ids,
+    the same title-case outcome labels as Runs, and the filtered total link. Trigger labels use human kind and forge;
+    long descriptions wrap independently while the trigger link and run count remain whole, including at 320px.
+    The side gives allocation weight/total, floor/share, split author/id/expiry/refusals; scoped fields including
+    unset local concurrency; bundle names, resolver/format, newest variables/run/time, opt-outs/fork reviews;
+    24-hour trigger counts and forge/local membership rules; and the delete planner's actual blockers (limits,
+    bundle, envelope floor), expressed as concise sentences from typed planner facts rather than raw diagnostics.
+    A blocked delete has a disabled, aria-disabled control for a writable operator; otherwise it uses a red confirm.
+    Viewers/read-only pages retain facts and chart but
+    no member/size/delete mutation controls; viewers receive no copy call. Existing records keep their project.
+    The three source cards and ledgers preserve their complete sections, layout, roles and exceptional states;
+    behavioral and actual-CSP browser checks cover themes, keyboard/no-JavaScript states and phone/intermediate/desktop.
   - (h) **Audit** (`/audit`). For the operator role, the page shows the console audit rows newest first, pages with
     `before`, and shows a line that is not a row as broken, in its place, rather than skipping it; for a viewer, it is
     refused (`REQ-CONSOLE-SECURITY` (l)). Tests: `worker/test/console-audit.test.mjs` (`readConsoleAudit`),
@@ -4079,7 +4175,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-SIZE-SUGGESTIONS
 
-- **AMENDED 2026-10-29 (#749)**: Project memory/CPU suggestions remain below Capacity’s host cards until #751 moves them to the project page; Spend’s job sizes are instead a histogram of per-run metered cost.
+- **AMENDED 2026-10-30 (#751)**: Project memory/CPU suggestions and measured peak series move from Capacity to the project detail page. Spend’s job sizes remain a histogram of per-run metered cost.
 
 - **Statement**: The operator shall be told, per project, what job size its recent runs suggest (issue #596, phase 3):
   its memory and CPUs now, the p95 of what its runs used, and either "fits", "not enough runs", or a suggested size
@@ -4093,8 +4189,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   offers, and for a size admission would refuse), in the panel's
   PROJECTS view (the call wrapped, never cut and never broken inside a JSON string, with a line saying to join it), in
   the `dispatch_limit_edit` confirm when a size field of a project row is edited, and on the operator console's
-  `/insights` page (`REQ-OPERATOR-CONSOLE-SCREENS` (e); it was the static insights export until 2026-10-18), which also
-  draws each run's peak memory over time against its size, and each live host's budget and use. A suggestion is NEVER
+  project detail page (`REQ-OPERATOR-CONSOLE-SCREENS` (g7)), which draws each run's peak memory over time against its size.
+  Capacity retains each live host's budget and use. A suggestion is NEVER
   applied by anything but that call, confirmed by the operator. **The call is offered exactly when admission would
   accept the suggested job** (the suggested size per dimension, else the current one), one rule on every surface:
   doctor withholds it when its host's budget is a number in some dimension and refuses that job (above the budget,
@@ -7983,3 +8079,9 @@ instead of drifting.
 | 2026-10-29 (#749, review) | `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH` and `REQ-OPERATOR-CONSOLE-SCREENS` (e) clarified: unreserved ledger zero is not zero paid cost; missing prices retain unknown/floor/estimate marks and counter charges stay separate. Graph validation uses the worker loader on one byte snapshot; unread files differ from missing ones. Current, duplicate and neutral history facts remain visible to viewers. All other requirements UNCHANGED, checked. |
 | 2026-10-30 (#750) | `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: Pulse configuration, trigger detail/editor, row controls, safe reads, edit parity and bounded paid manual cron fire. `REQ-CONSOLE-SECURITY`, worker budget gates and forge authorization UNCHANGED, checked. |
 | 2026-10-30 (#750, trigger list) | `REQ-OPERATOR-CONSOLE-SCREENS` (g3/g4) and `REQ-CONSOLE-SECURITY` AMENDED: dedicated rules, viewer and phone screens, source-faithful schedule/quiet-window projections, retained-history attribution and a private read-only event checker using actual receiver matching. Worker authorization, admission, spend, isolation, action confirmation and audit-write requirements UNCHANGED, checked. |
+| 2026-10-30 (#751) | `REQ-OPERATOR-CONSOLE-SCREENS` (g/g5/g6/g7), `REQ-ADMIN-VIA-PI-EXTENSION` and `REQ-SIZE-SUGGESTIONS` AMENDED: complete Secrets, Connections and project detail cards with bounded page-specific reads, safe resolver confirmations, source-faithful connection facts, measured size previews and count-only agent secret reads. `REQ-CONSOLE-SECURITY` guards, worker secret/egress/size rules, admission, spend, isolation and all unrelated requirements UNCHANGED, checked. |
+| 2026-10-30 (#751, review) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6/g7) CORRECTED: qualify missing file-declared webhook secrets against possible service environment, compact glyph-and-word connection facts, known-total spend headlines and labelled meters, concise typed planner refusals, members-only editing, GiB verdicts with unchanged exact calls, and native-font-safe chart gutters. `REQ-CONSOLE-SECURITY`, worker rules, admission, spend and confirmation UNCHANGED, checked. |
+| 2026-10-30 (#751, phone/type review) | `REQ-OPERATOR-CONSOLE-SCREENS` (g7) CORRECTED: long human trigger descriptions wrap without pushing their link or run count outside a 320px card; formatted money retains primary headline type and ink. The permanent fractional fixture and a long-flow counterexample retain the same viewport/text bounds oracle. Every other requirement, action guard and worker contract UNCHANGED, checked. |
+| 2026-10-30 (#751, stacked-label review) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: bounded phone forge tracks, full-row polling facts and accessible numeric trigger links prevent long state content from squeezing labels into vertical letters. Actual pseudo-element word widths join the browser oracle; a many-trigger fixture exercises the case. Existing viewport, chart, typography, CSP, role and worker-contract assertions are UNCHANGED, checked. |
+| 2026-10-30 (#751, observation coverage) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: fleet endpoint occupancy is shown only where worker host-queue and per-machine gates take those leases; uncounted and unknown retain declared capacity. Delivery guidance distinguishes quiet 401/404 refusals in forge history from receiver logs that can help with 503/enqueue failures. Worker slot enforcement, receiver logging, security guards and every unrelated requirement UNCHANGED, checked. |
+| 2026-10-30 (#751, endpoint phone review) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: uncounted endpoint explanations retain declared capacity without squeezing adjacent phone table labels into zero-width tracks. The same actual-font word-width oracle checks mixed, unnamed and unknown fleet coverage. Worker rules, privacy, confirmation and every unrelated requirement UNCHANGED, checked. |

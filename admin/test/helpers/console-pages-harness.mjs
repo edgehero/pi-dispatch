@@ -84,6 +84,9 @@ export const SHOTS = Object.freeze([
   ["trigger", "trigger", "index=2"],
   ["trigger-add", "trigger-add", ""],
   ["config", "config", ""],
+  ["secrets", "secrets", ""],
+  ["connections", "connections", ""],
+  ["project", "project", "id=billing"],
   ["watch", "watch", "rule=shop-5xx"],
   ["watch-board", "watch-board", "rule=shop-5xx&finding=finding-1"],
   ["audit", "audit", ""],
@@ -304,6 +307,9 @@ async function renderInChild() {
   };
   const RM = await import("../../src/read-model.mjs");
   const { triggerListOf } = await import("../../src/trigger-list.mjs");
+  const { secretsView } = await import("../../src/secrets-view.mjs");
+  const { readConnections } = await import("../../src/connections-view.mjs");
+  const { readProjectView } = await import("../../src/project-view.mjs");
   const DW = await import("../../src/dollar-windows.mjs");
   const { assembleInsightsView } = await import("../../src/insights-assembly.mjs");
   const { makeWhatIfReader } = await import("../../src/console/whatif.mjs");
@@ -414,6 +420,9 @@ async function renderInChild() {
     // As serve builds it (`cli.mjs`); the overview's load asks it for the waiting jobs (issue #737, `PAGE_READS`).
     reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW, readLiveHostsFn: (redis, opts) => W.hostRegistry.readLiveHosts(atBeat(redis), opts) });
     const deps = {
+      secretsView: (snapshot) => secretsView({ snapshot, env }),
+      connections: (snapshot) => readConnections({ snapshot, env, deploymentDir: deployment, paths: fleetPaths, now: NOW, redis: admin }),
+      projectView: (id, snapshot) => readProjectView({ id, snapshot, env, paths: fleetPaths, now: NOW, fleet: reader, pricing }),
       paths: fleetPaths,
       // Registry fixture workers all publish UTC. Use the actual read snapshot and bounded record payloads,
       // retaining the same incompleteness contract as serve rather than inventing card totals.

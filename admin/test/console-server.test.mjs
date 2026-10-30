@@ -757,7 +757,7 @@ test("every page: signed out it redirects to /login; signed in it loads its data
     assert.equal(anon.status, 303, spec.path);
     assert.equal(anon.headers.location, "/login");
     // `run` needs an id; every other page renders bare.
-    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
+    const path = name === "project" ? `${spec.path}?id=billing` : name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, 200, `${path}: ${res.text.slice(0, 200)}`);
     assert.equal(c.loads.at(-1).name, name);
@@ -773,7 +773,7 @@ test("a viewer is refused an operator page 403, and gets every viewer page", asy
   const c = await start();
   const { cookie } = await c.login(VIEW_TOKEN);
   for (const [name, spec] of Object.entries(realPages.PAGES)) {
-    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
+    const path = name === "project" ? `${spec.path}?id=billing` : name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, spec.auth === "operator" ? 403 : 200, path);
   }
@@ -1920,7 +1920,7 @@ test("ERROR_SENTENCES: one per kind, frozen, each tile a STATUS_KINDS status and
 const SOMEONE = Object.freeze({ name: "alice-nav-mark", role: "operator" });
 
 test("errorPage: each kind's status, its one panel, data-page error, and a bar with the person only where the kind keeps the nav", () => {
-  const want = { "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405, "no-run": 404 };
+  const want = { "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405, "no-run": 404, "no-project": 404 };
   for (const kind of ERROR_KINDS) {
     const out = errorPage({ kind, session: SOMEONE, readOnly: true, host: "myhost.lan", port: 7788, page: "insights", sentence: "range must be one of 7d, 30d, mtd" });
     const text = String(out.html);
@@ -1928,7 +1928,7 @@ test("errorPage: each kind's status, its one panel, data-page error, and a bar w
     assert.match(text, /data-page="error"/, kind);
     assert.deepEqual(panelsOf(text), [kind === "host" ? "p-error-421" : "p-error"], kind);
     assert.match(panelText(text, kind === "host" ? "p-error-421" : "p-error"), new RegExp(`<p class="er-code">${want[kind]}</p>`), kind);
-    const nav = ["no-page", "bad-query", "operators-only", "method", "no-run"].includes(kind);
+    const nav = ["no-page", "bad-query", "operators-only", "method", "no-run", "no-project"].includes(kind);
     assert.equal(text.includes(SOMEONE.name), nav, `${kind}: the person ${nav ? "is" : "is not"} named`);
     assert.equal(text.includes('id="logout"'), nav, `${kind}: sign-out ${nav ? "is" : "is not"} drawn`);
     assert.ok(!text.includes("pdc_"), kind);

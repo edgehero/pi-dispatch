@@ -19,7 +19,11 @@ import {
   secretBundlesView,
   triggerBundleOf,
 } from "../src/read-model.mjs";
-import { pagePanels } from "../src/console/pages.mjs";
+import { PAGES, pagePanels } from "../src/console/pages.mjs";
+import { secretsView } from "../src/secrets-view.mjs";
+import { secretsBundles } from "../src/console/panels/secrets.mjs";
+import { configTriggers } from "../src/console/panels/config.mjs";
+import { parseDocument } from "./helpers/script-dom.mjs";
 import { BUNDLE_FORMATS as WORKER_BUNDLE_FORMATS, parseSecretBundleProfiles } from "../../worker/src/secret-profiles.mjs";
 import { BUNDLE_SKIPPED_REASONS } from "../../worker/src/run-history.mjs";
 
@@ -105,7 +109,7 @@ function fixture({ env = {}, overlay = {} } = {}) {
     { jobId: "gh-new", endedAt: "2026-10-20T10:00:00Z", bundle: { id: "shop", variables: ["B_TOKEN", "A_URL"], shadowed: ["A_URL"] } },
     { jobId: "gh-bad", endedAt: "2026-10-21T10:00:00Z", bundle: { id: "shop", variables: ["not a name"], shadowed: [] } },
   ];
-  return secretBundlesView({ triggers, settings, env, projects, runs });
+  return secretBundlesView({ triggers, settings, env, projects, runs, fs: { realpathSync: (p) => p } });
 }
 
 test("secretBundlesView: where each profile is declared, the project, the opted-out triggers and the newest run's names", () => {
@@ -120,7 +124,7 @@ test("secretBundlesView: where each profile is declared, the project, the opted-
   assert.deepEqual(by.shop.optedOut, [1, 3]);
   assert.deepEqual(by.web.optedOut, [3]);
   // The newest VALID record: a record whose names break the charset is the worker's rebuild's null, never shown.
-  assert.deepEqual(by.shop.last, { jobId: "gh-new", variables: ["A_URL", "B_TOKEN"] });
+  assert.deepEqual(by.shop.last, { jobId: "gh-new", at: "2026-10-20T10:00:00.000Z", variables: ["A_URL", "B_TOKEN"] });
   assert.equal(by.web.last, null);
   assert.deepEqual(triggerBundleOf({ index: 0 }, v), { id: "shop", optedOut: false });
   assert.deepEqual(triggerBundleOf({ index: 1 }, v), { id: "shop", optedOut: true });
@@ -193,7 +197,7 @@ test("the console's run page shows the variables received, the shadowed names, t
   for (const hostile of [{ bundle: { id: "<script>", variables: [], shadowed: [] } }, { bundleSkipped: "<b>x</b>" }]) assert.equal(await page(hostile), none, JSON.stringify(hostile));
 });
 
-test("the console's configuration lists each bundle with its facts, the resolvers by name and format, never a ref or a resolver path", async () => {
+test("the console's Secrets page lists each bundle with its facts, the resolvers by name and format, never a ref or a resolver path", async () => {
   const bundles = fixture({ env: { PI_SECRET_BUNDLES: "op-shop:/opt/r/shop.mjs:json" } });
   bundles.bundles.push({ id: "<img src=x>", project: "p", profile: "q", forkReviews: false, endpoints: [], optedOut: [], declared: "missing", format: null, projectKnown: null, last: null });
   const snapshot = {
@@ -206,18 +210,21 @@ test("the console's configuration lists each bundle with its facts, the resolver
     overlayMcp: { servers: [], refused: [], unreadable: null },
     stagedPackages: { stagedAt: null, packages: [] },
   };
-  const panels = await pagePanels("config", ctxOf("operator", { snapshot }));
-  const html = panels.map((p) => p.html).join("");
-  const one = panels.find((p) => p.id === "cf-secret-bundles")?.html.replace(/\s+/g, " ") ?? "";
-  assert.match(one, /<li class="mono">op-web \(dotenv\)<\/li>/);
-  assert.match(one, /<td class="mono">shop<\/td><td>shop<\/td><td>op-shop \(declared in PI_SECRET_BUNDLES, json; doctor --secrets checks it runs\)<\/td><td>yes<\/td><td class="mono">STRIPE_KEY at api\.stripe\.com<\/td><td>row 2, row 4<\/td>/, "the opt-outs by the index the Triggers table shows; the pi panel counts from 1");
-  assert.match(one, /A_URL, B_TOKEN \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)/);
-  assert.match(one, /class="warn">nowhere \(not declared in the overlay or PI_SECRET_BUNDLES/, "an undeclared profile is marked");
-  assert.match(one, /data-action="secret-bundle-add"/);
-  assert.match(one, /&lt;img src=x&gt;/);
-  assert.ok(!one.includes("<img"), "escaped");
-  assert.ok(!html.includes("/opt/r/") && !html.includes(REF), "no resolver path, no reference");
+  const data = secretsView({ snapshot, env: { PI_SECRET_BUNDLES: "op-shop:/opt/r/shop.mjs:json" } });
+  const one = String(secretsBundles({ data: { secrets: data }, role: "operator" }));
+  const doc = parseDocument(`<html><body>${one}</body></html>`);
+  assert.match(doc.textContent, /op-web.*dotenv.*settings overlay/);
+  const row = doc.querySelector('a[href="/run?id=gh-new"]').closest("tr");
+  assert.match(row.textContent, /shop.*op-shop.*PI_SECRET_BUNDLES.*json.*yes.*STRIPE_KEY at api\.stripe\.com/);
+  assert.equal(row.querySelector('a[href="/config/trigger?index=1"]').textContent, "2");
+  assert.equal(row.querySelector('a[href="/config/trigger?index=3"]').textContent, "4");
+  assert.match(row.textContent, /A_URL.*B_TOKEN/);
+  assert.match(doc.textContent, /nowhere.*not declared in the overlay or PI_SECRET_BUNDLES/);
+  assert.ok(doc.querySelector('form[data-action="secret-bundle-remove"]'));
+  assert.doesNotMatch(one, /<img|&lt;img src=x&gt;/, "invalid bundle identifiers are not published as identities");
+  assert.ok(!one.includes("/opt/r/") && !one.includes(REF), "no resolver path, no reference");
   // The trigger table names the bundle a cron trigger's jobs hold, or its opt-out.
+  const html = String(configTriggers({ data: { snapshot }, role: "operator", pages: PAGES }));
   assert.match(html, /<td>bundle shop; staged packages<\/td>/);
   assert.match(html, /<td>opted out of bundle shop; staged packages<\/td>/);
 });

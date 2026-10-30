@@ -459,14 +459,14 @@ test("the project, envelope, secret-profile and priorities plans", async () => {
     assert.match(badd.message, /\n\nThis replaces the current resolver, op-shop: \/opt\/b\.mjs \(json\)\n\nThe worker executes/);
     assert.match(badd.message, /The worker executes this script, as the account it runs as, once per job start of every project a bundle in triggers\.json binds to it, and hands that job every variable it prints \(dotenv\)/);
     assert.match(plans.planSecretProfileAdd({ name: "dev", path: "/opt/d2.sh", profiles: { dev: "/opt/d.sh" }, settingsFile: "/s" }).plan.message, /\n\nThis replaces the current resolver, dev: \/opt\/d\.sh\n\nThe worker executes this script/);
-    assert.equal(plans.planSecretProfileRemove({ name: "dev", profiles: { dev: "/d" }, settingsFile: "/s" }).plan.message, "dev: /d\n\nEvery trigger naming it refuses pre-spend after this, rather than running without its secrets.");
+    assert.equal(plans.planSecretProfileRemove({ name: "dev", profiles: { dev: "/d" }, settingsFile: "/s" }).plan.message, "dev: /d\n\nEvery trigger naming it is refused before spend after this, rather than running without its secrets. The triggers file could not be read, so its users cannot be named.\nThe resolver script stays on disk; only the declaration goes.");
     for (const plan of [badd, add]) assert.doesNotMatch(plan.message, /\b(?:REPLACES|EXECUTES|EVERY|PRE-SPEND|AMBIGUOUS|ABSOLUTE)\b/);
     const brm = plans.planSecretBundleRemove({ name: "op-shop", bundles: { "op-shop": { path: "/opt/b.mjs", format: "json" } }, bound: ["shop", "web"], settingsFile: "/s" }).plan;
     assert.deepEqual(brm.mutate({}), { secretBundles: {} });
     assert.match(brm.message, /The jobs of bundles shop, web are refused pre-spend .*, or on a multi-host worker's shared queue held for a host that declares it/);
     const one = { "op-shop": { path: "/b", format: "json" } };
     assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: null, settingsFile: "/s" }).plan.message, /The triggers file could not be read, so the jobs of any bundle naming it are refused/);
-    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: [], settingsFile: "/s" }).plan.message, /No bundle in triggers\.json names it, so no project's jobs depend on it\.$/);
+    assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: [], settingsFile: "/s" }).plan.message, /No bundle in triggers\.json names it, so no project's jobs depend on it\.\nThe resolver script stays on disk; only the declaration goes\.$/);
     assert.match(plans.planSecretBundleRemove({ name: "op-shop", bundles: one, bound: ["shop"], envBundles: { "op-shop": { path: "/e", format: "json" } }, settingsFile: "/s" }).plan.message, /PI_SECRET_BUNDLES also declares op-shop, so removing it here resolves the ambiguity/);
     // Any colliding name makes EVERY bundle ambiguous (mergeSecretProfiles), so another collision left keeps it so.
     const two = { "op-shop": { path: "/b", format: "json" }, "op-web": { path: "/w", format: "json" } };

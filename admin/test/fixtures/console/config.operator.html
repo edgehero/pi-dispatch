@@ -77,7 +77,7 @@
 <main id="main" tabindex="-1">
 <div class="titlebar"><div class="titlebar__lead"><h1>Configuration</h1><p class="titlebar__sub">Settings: .../deployment/settings.json. Triggers: .../deployment/triggers.json.</p></div><div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> · not live</span></span><a class="btn btn--sm btn--ghost" href="/config"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a></div></div>
 <div class="stack"><section id="cf-navigation" data-panel><nav class="config-sections" aria-label="Configuration sections">
-<a class="fpill" href="#cf-settings">Settings <b>13</b></a><a class="fpill" href="#cf-triggers">Triggers <b>7</b></a><a class="fpill" href="#cf-pause-windows">Pause windows <b>1</b></a><a class="fpill" href="#cf-scoped-limits">Scoped limits <b>6</b></a><a class="fpill" href="#cf-projects">Projects <b>4</b></a><a class="fpill" href="#cf-files">Files <b>2</b></a><a class="fpill" href="#cf-unset">Unset <b>0</b></a><a class="fpill" href="#cf-mcp-servers">MCP servers <b>1</b></a><span class="config-divider" aria-hidden="true"></span><a class="btn btn--sm" href="/config">Secrets</a><a class="btn btn--sm" href="/config">Connections</a>
+<a class="fpill" href="#cf-settings">Settings <b>13</b></a><a class="fpill" href="#cf-triggers">Triggers <b>7</b></a><a class="fpill" href="#cf-pause-windows">Pause windows <b>1</b></a><a class="fpill" href="#cf-scoped-limits">Scoped limits <b>6</b></a><a class="fpill" href="#cf-projects">Projects <b>4</b></a><a class="fpill" href="#cf-files">Files <b>2</b></a><a class="fpill" href="#cf-unset">Unset <b>0</b></a><a class="fpill" href="#cf-mcp-servers">MCP servers <b>1</b></a><span class="config-divider" aria-hidden="true"></span><a class="btn btn--sm" href="/config/secrets">Secrets</a><a class="btn btn--sm" href="/config/connections">Connections</a>
 </nav></section></div><div class="cols cols--wide-side config-layout"><div class="stack"><section id="cf-settings" data-panel><div class="card"><div class="card__head"><h2>Settings overlay</h2></div><dl class="facts"><div class="fact"><dt>model</dt><dd>claude-sonnet-5-5</dd></div><div class="fact"><dt>provider</dt><dd>anthropic</dd></div><div class="fact"><dt>maxTurns</dt><dd>30</dd></div><div class="fact"><dt>dailyCap</dt><dd>40</dd></div><div class="fact"><dt>weeklyCap</dt><dd>200</dd></div><div class="fact"><dt>monthlyCap</dt><dd>600</dd></div><div class="fact"><dt>maxTokens</dt><dd>400000</dd></div><div class="fact"><dt>dailyTokenCap</dt><dd>8000000</dd></div><div class="fact"><dt>concurrency</dt><dd>4</dd></div><div class="fact"><dt>softHoldPct</dt><dd>80</dd></div><div class="fact"><dt>maxCostUsd</dt><dd>2</dd></div><div class="fact"><dt>dailyCostUsd</dt><dd>25</dd></div><div class="fact"><dt>weeklyCostUsd</dt><dd>120</dd></div><div class="fact"><dt>monthlyCostUsd</dt><dd>deployment default</dd></div></dl><details class="config-editor">
 <summary>Change a setting</summary>
 <div class="stack"><form
@@ -1216,7 +1216,7 @@ Actions
 <tbody>
 <tr>
 <td>1</td>
-<td class="code">web</td>
+<td class="code"><a href="/config/project?id=web">web</a></td>
 <td>-</td>
 <td class="mono">
 github:acme/web
@@ -1288,7 +1288,7 @@ value="web"
 </td>
 </tr><tr>
 <td>2</td>
-<td class="code">api</td>
+<td class="code"><a href="/config/project?id=api">api</a></td>
 <td>-</td>
 <td class="mono">
 github:acme/api
@@ -1360,7 +1360,7 @@ value="api"
 </td>
 </tr><tr>
 <td>3</td>
-<td class="code">billing</td>
+<td class="code"><a href="/config/project?id=billing">billing</a></td>
 <td>-</td>
 <td class="mono">
 github:acme/billing, gitlab:acme/billing-ui
@@ -1432,7 +1432,7 @@ value="billing"
 </td>
 </tr><tr>
 <td>4</td>
-<td class="code">ops</td>
+<td class="code"><a href="/config/project?id=ops">ops</a></td>
 <td>-</td>
 <td class="mono">
 .../site, .../pm
@@ -1659,193 +1659,7 @@ monthlyCostUsd
 </fieldset>
 <noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
 <p class="field__err" data-form-error hidden role="alert"></p>
-</form></div></section><section id="cf-mcp-servers" data-panel><div class="card"><div class="card__head"><h2>MCP servers</h2></div><div class="tbl-wrap">
-<table class="tbl" aria-label="MCP servers">
-<thead>
-<tr>
-<th scope="col">
-Server
-</th><th scope="col">
-Transport
-</th><th scope="col">
-Where
-</th><th scope="col">
-Exposure
-</th><th scope="col">
-On
-</th><th scope="col">
-References
-</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td class="mono">linear</td>
-<td>http</td>
-<td class="mono">mcp.example.com</td>
-<td>codemode</td>
-<td>yes</td>
-<td class="mono">
-LINEAR_API_KEY
-</td>
-</tr>
-</tbody>
-</table>
-</div></div></section><section id="cf-packages" data-panel><div class="card"><div class="card__head"><h2>Staged pi packages</h2></div><p class="note">No pi package is staged.</p></div></section><section id="cf-secret-profiles" data-panel><div class="card"><div class="card__head"><h2>Secret profiles</h2></div><p class="note">
-No secret profile is
-declared in the settings overlay.
-</p>
-<details class="config-editor">
-<summary>Change the secret profiles</summary>
-<div class="stack"><form
-class="act config-form stack"
-data-action="secret-profile-add"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><div class="field">
-<label
->Resolver (absolute path)<input
-class="input"
-name="path"
-type="text"
-value=""
- required
-maxlength="4096"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="path" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form><form
-class="act config-form stack"
-data-action="secret-profile-remove"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the removal</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form></div>
-</details></div></section><section id="cf-secret-bundles" data-panel><div class="card"><div class="card__head"><h2>Secret bundles</h2></div><p class="note">
-No bundle resolver is declared in the settings overlay.
-</p><p class="muted">The triggers file binds no secret bundle.</p><details class="config-editor">
-<summary>Change the bundle resolvers</summary>
-<div class="stack"><form
-class="act config-form stack"
-data-action="secret-bundle-add"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><div class="field">
-<label
->Resolver (absolute path)<input
-class="input"
-name="path"
-type="text"
-value=""
- required
-maxlength="4096"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="path" hidden></p>
-</div><div class="field">
-<label
->Format it prints (dotenv or json)<input
-class="input"
-name="format"
-type="text"
-value=""
- required placeholder="dotenv"
-maxlength="16"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="format" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form><form
-class="act config-form stack"
-data-action="secret-bundle-remove"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the removal</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form></div>
-</details></div></section></div></div><div id="confirm-slot" class="cslot" role="region" aria-live="polite" aria-label="Preview" hidden><div class="confirm confirm--busy" aria-busy="true"><p class="confirm__h"><span data-slot-icon="busy"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"></use></svg></span><span data-slot-icon="said"><svg class="ic" aria-hidden="true"><use href="#i-attention"></use></svg></span><span data-slot-title>Previewing</span></p><ul class="confirm__list confirm__ghost"><li><span></span></li><li><span></span></li></ul><p class="confirm__note" data-slot-message hidden></p><div class="confirm__act"><button class="btn btn--confirm" type="button" data-confirm disabled>Confirm</button><button class="btn btn--ghost" type="button" data-cancel>Cancel</button></div></div></div>
+</form></div></section><section id="cf-mcp-servers" data-panel><div class="card"><div class="card__head"><h2>MCP servers</h2></div><p>1 overlay servers. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p></div></section><section id="cf-packages" data-panel><div class="card"><div class="card__head"><h2>Staged pi packages</h2></div><p>0 packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a></p></div></section><section id="cf-secret-profiles" data-panel><div class="card"><div class="card__head"><h2>Secret profiles</h2></div><p>0 profiles in view. <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p></div></section><section id="cf-secret-bundles" data-panel><div class="card"><div class="card__head"><h2>Secret bundles</h2></div><p>0 project bundles in view. <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p></div></section></div></div><div id="confirm-slot" class="cslot" role="region" aria-live="polite" aria-label="Preview" hidden><div class="confirm confirm--busy" aria-busy="true"><p class="confirm__h"><span data-slot-icon="busy"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"></use></svg></span><span data-slot-icon="said"><svg class="ic" aria-hidden="true"><use href="#i-attention"></use></svg></span><span data-slot-title>Previewing</span></p><ul class="confirm__list confirm__ghost"><li><span></span></li><li><span></span></li></ul><p class="confirm__note" data-slot-message hidden></p><div class="confirm__act"><button class="btn btn--confirm" type="button" data-confirm disabled>Confirm</button><button class="btn btn--ghost" type="button" data-cancel>Cancel</button></div></div></div>
 </main>
 </div>
 </body>

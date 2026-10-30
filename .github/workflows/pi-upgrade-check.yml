@@ -508,14 +508,15 @@ jobs:
       # maintainer's Mac said. worker/test/console-width-check.test.mjs runs this block with its tools
       # stubbed and holds that order.
       #
-      # timeout-minutes: the script has its own deadlines (20 s a navigation, 12 minutes a run).
-      # The 20-width shell sweep keeps all prior checks and adds breakpoint neighbours; 15 minutes
+      # timeout-minutes: the script has its own deadlines (20 s a navigation, 20 minutes a run).
+      # #751 adds full-content exceptional states at nineteen widths in both themes, beside the unchanged shell
+      # sweep. The measured expanded run reached the old 12-minute bound. Twenty-three minutes
       # gives its bounded run 3 minutes for the pinned Chrome download, verification and unzip,
       # while a wait nothing ends still frees the job long before its 45 minutes.
       # Quoted: unquoted, YAML reads " #737)" as a comment and the step is named "...(issue".
       - name: "The console under its CSP at two phone widths and eighteen desktop widths (issue #737)"
         if: (success() || failure()) && steps.install.outcome == 'success'
-        timeout-minutes: 15
+        timeout-minutes: 23
         run: |
           zip="$RUNNER_TEMP/chrome-linux64.zip"
           url="$(node .github/scripts/console-width-check.mjs --check-pin --platform linux64)"

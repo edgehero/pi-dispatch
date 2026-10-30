@@ -77,7 +77,7 @@
 <main id="main" tabindex="-1">
 <div class="titlebar"><div class="titlebar__lead"><h1>Configuration</h1><p class="titlebar__sub">Settings: settings overlay unavailable. Triggers: triggers file unavailable.</p></div><div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> · not live</span></span><a class="btn btn--sm btn--ghost" href="/config"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a></div></div>
 <div class="stack"><section id="cf-navigation" data-panel><nav class="config-sections" aria-label="Configuration sections">
-<a class="fpill" href="#cf-settings">Settings <b>2</b></a><a class="fpill" href="#cf-triggers">Triggers <b>1</b></a><a class="fpill" href="#cf-pause-windows">Pause windows <b>1</b></a><a class="fpill" href="#cf-scoped-limits">Scoped limits <b>1</b></a><a class="fpill" href="#cf-projects">Projects <b>1</b></a><a class="fpill" href="#cf-files">Files <b>2</b></a><a class="fpill" href="#cf-unset">Unset <b>0</b></a><a class="fpill" href="#cf-mcp-servers">MCP servers <b>0</b></a><span class="config-divider" aria-hidden="true"></span><a class="btn btn--sm" href="/config">Secrets</a><a class="btn btn--sm" href="/config">Connections</a>
+<a class="fpill" href="#cf-settings">Settings <b>2</b></a><a class="fpill" href="#cf-triggers">Triggers <b>1</b></a><a class="fpill" href="#cf-pause-windows">Pause windows <b>1</b></a><a class="fpill" href="#cf-scoped-limits">Scoped limits <b>1</b></a><a class="fpill" href="#cf-projects">Projects <b>1</b></a><a class="fpill" href="#cf-files">Files <b>2</b></a><a class="fpill" href="#cf-unset">Unset <b>0</b></a><a class="fpill" href="#cf-mcp-servers">MCP servers <b>0</b></a><span class="config-divider" aria-hidden="true"></span><a class="btn btn--sm" href="/config/secrets">Secrets</a><a class="btn btn--sm" href="/config/connections">Connections</a>
 </nav></section></div><div class="cols cols--wide-side config-layout"><div class="stack"><section id="cf-settings" data-panel><div class="card"><div class="card__head"><h2>Settings overlay</h2></div><dl class="facts"><div class="fact"><dt>model</dt><dd>deployment default</dd></div><div class="fact"><dt>provider</dt><dd>deployment default</dd></div><div class="fact"><dt>maxTurns</dt><dd>30</dd></div><div class="fact"><dt>dailyCap</dt><dd>deployment default</dd></div><div class="fact"><dt>weeklyCap</dt><dd>deployment default</dd></div><div class="fact"><dt>monthlyCap</dt><dd>deployment default</dd></div><div class="fact"><dt>maxTokens</dt><dd>deployment default</dd></div><div class="fact"><dt>dailyTokenCap</dt><dd>deployment default</dd></div><div class="fact"><dt>concurrency</dt><dd>deployment default</dd></div><div class="fact"><dt>softHoldPct</dt><dd>deployment default</dd></div><div class="fact"><dt>maxCostUsd</dt><dd>2</dd></div><div class="fact"><dt>dailyCostUsd</dt><dd>deployment default</dd></div><div class="fact"><dt>weeklyCostUsd</dt><dd>deployment default</dd></div><div class="fact"><dt>monthlyCostUsd</dt><dd>deployment default</dd></div></dl><details class="config-editor">
 <summary>Change a setting</summary>
 <div class="stack"><form
@@ -745,7 +745,7 @@ Actions
 <tbody>
 <tr>
 <td>1</td>
-<td class="code">web</td>
+<td class="code"><a href="/config/project?id=web">web</a></td>
 <td>-</td>
 <td class="mono">
 github:acme/web
@@ -972,161 +972,7 @@ monthlyCostUsd
 </fieldset>
 <noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
 <p class="field__err" data-form-error hidden role="alert"></p>
-</form></div></section><section id="cf-mcp-servers" data-panel><div class="card"><div class="card__head"><h2>MCP servers</h2></div><p class="muted">The overlay declares no MCP server.</p></div></section><section id="cf-packages" data-panel><div class="card"><div class="card__head"><h2>Staged pi packages</h2></div><p class="note">No pi package is staged.</p></div></section><section id="cf-secret-profiles" data-panel><div class="card"><div class="card__head"><h2>Secret profiles</h2></div><p class="note">
-No secret profile is
-declared.
-</p>
-<details class="config-editor">
-<summary>Change the secret profiles</summary>
-<div class="stack"><form
-class="act config-form stack"
-data-action="secret-profile-add"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><div class="field">
-<label
->Resolver (absolute path)<input
-class="input"
-name="path"
-type="text"
-value=""
- required
-maxlength="4096"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="path" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form><form
-class="act config-form stack"
-data-action="secret-profile-remove"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the removal</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form></div>
-</details></div></section><section id="cf-secret-bundles" data-panel><div class="card"><div class="card__head"><h2>Secret bundles</h2></div><p class="note">
-No bundle resolver is declared in the settings overlay.
-</p><p class="muted">The triggers file binds no secret bundle.</p><details class="config-editor">
-<summary>Change the bundle resolvers</summary>
-<div class="stack"><form
-class="act config-form stack"
-data-action="secret-bundle-add"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><div class="field">
-<label
->Resolver (absolute path)<input
-class="input"
-name="path"
-type="text"
-value=""
- required
-maxlength="4096"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="path" hidden></p>
-</div><div class="field">
-<label
->Format it prints (dotenv or json)<input
-class="input"
-name="format"
-type="text"
-value=""
- required placeholder="dotenv"
-maxlength="16"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="format" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form><form
-class="act config-form stack"
-data-action="secret-bundle-remove"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<div class="field">
-<label
->Name<input
-class="input"
-name="name"
-type="text"
-value=""
- required
-maxlength="64"
-autocomplete="off"
-spellcheck="false"
-/></label
->
-<p class="field__err" data-field-error="name" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview the removal</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form></div>
-</details></div></section></div></div>
+</form></div></section><section id="cf-mcp-servers" data-panel><div class="card"><div class="card__head"><h2>MCP servers</h2></div><p>0 overlay servers. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p></div></section><section id="cf-packages" data-panel><div class="card"><div class="card__head"><h2>Staged pi packages</h2></div><p>0 packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a></p></div></section><section id="cf-secret-profiles" data-panel><div class="card"><div class="card__head"><h2>Secret profiles</h2></div><p>0 profiles in view. <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p></div></section><section id="cf-secret-bundles" data-panel><div class="card"><div class="card__head"><h2>Secret bundles</h2></div><p>0 project bundles in view. <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p></div></section></div></div>
 </main>
 </div>
 </body>

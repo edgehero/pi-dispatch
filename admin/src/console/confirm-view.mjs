@@ -23,6 +23,7 @@ import { capitalised } from "../words.mjs";
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
 import { PAGES } from "./pages.mjs";
+import { resolverPathShown } from "./secrets-privacy.mjs";
 
 /**
  * A count with the words that agree with it, "1 job" or "3 jobs", "1 job waits" or "3 jobs wait", never "job(s)"
@@ -364,6 +365,11 @@ export function heldNoteHtml() {
 
 /** A JSON value with every `secrets` map's values replaced by a marker: the diff shows that one changed, not what. */
 function redacted(value, keyName = null) {
+  if (keyName === "secretProfiles" && value && typeof value === "object" && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).map(([name, path]) => [name, resolverPathShown(path)]));
+  if (keyName === "secretBundles" && value && typeof value === "object") {
+    if (Array.isArray(value)) return value.map((binding) => binding && typeof binding === "object" ? redacted({ ...binding, ...(Object.hasOwn(binding, "ref") ? { ref: "(a secret reference, not shown)" } : {}) }) : binding);
+    return Object.fromEntries(Object.entries(value).map(([name, profile]) => [name, profile && typeof profile === "object" ? { ...profile, ...(Object.hasOwn(profile, "path") ? { path: resolverPathShown(profile.path) } : {}), ...(Object.hasOwn(profile, "ref") ? { ref: "(a secret reference, not shown)" } : {}) } : "(resolver declaration, not shown)"]));
+  }
   if (Array.isArray(value)) return value.map((v) => redacted(v));
   if (value === null || typeof value !== "object") return value;
   if (keyName === "secrets") return Object.fromEntries(Object.keys(value).map((k) => [k, "(a secret reference, not shown)"]));

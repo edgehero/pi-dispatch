@@ -11,6 +11,8 @@ import { AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_PARAMS, AUDIT_Q_MAX, AUDI
 import { AUDIT_BULK_KINDS, AUDIT_OPERATORS_ONLY, AUDIT_WAITING_KINDS, auditAbout, auditChain, auditFilter, auditLog } from "../src/console/panels/audit.mjs";
 import { ACTIONS } from "../src/console/actions.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { secretsView } from "../src/secrets-view.mjs";
+import { secretsProfiles, secretsProblems } from "../src/console/panels/secrets.mjs";
 
 // The console's panels (issue #641): the cost class per run, the formatting, the role rule and determinism, on small
 // hand-built data. The pages over a real seeded deployment are console-pages.test.mjs's.
@@ -112,19 +114,21 @@ test("the role rule: a failure reason is the operator's, in a details element, a
 });
 
 test("the secret profiles list PI_SECRET_PROFILES' names beside the overlay's, and never says none while the env holds some (#712)", async () => {
-  const profilesOf = async (extra) => {
-    const html = (await pagePanels("config", ctxOf("operator", { snapshot: { ...snapshot(), ...extra } }))).map((p) => p.html).join("");
-    return html.slice(html.indexOf("<h2>Secret profiles</h2>"), html.indexOf("<h2>Secret bundles</h2>")).replace(/\s+/g, " ");
+  const profilesOf = async (extra, env = {}) => {
+    const secrets = secretsView({ snapshot: { ...snapshot(), ...extra }, env });
+    return String(secretsProfiles({ data: { secrets }, role: "operator" })) + String(secretsProblems({ data: { secrets }, role: "operator" }));
   };
   const noOverlay = { settings: { overlay: {} } };
-  const envOnly = await profilesOf({ ...noOverlay, secretProfilesEnv: { names: ["prod"], malformed: false, seen: true } });
-  assert.match(envOnly, /<li class="mono">prod \(PI_SECRET_PROFILES\)<\/li>/);
-  assert.ok(!envOnly.includes("No secret profile is declared"), envOnly);
-  assert.match(await profilesOf({ ...noOverlay, secretProfilesEnv: { names: [], malformed: false, seen: true } }), /No secret profile is declared\./, "both sources seen and empty");
-  assert.match(await profilesOf({ ...noOverlay, secretProfilesEnv: { names: [], malformed: false, seen: false } }), /No secret profile is declared in the settings overlay\./, "the env not visible: says which source it read");
-  assert.match(await profilesOf({ ...noOverlay, secretProfilesEnv: { names: [], malformed: true, seen: true } }), /PI_SECRET_PROFILES does not parse/);
-  const both = await profilesOf({ settings: { overlay: { secretProfiles: { prod: "/opt/secret/p" } } }, secretProfilesEnv: { names: ["prod"], malformed: false, seen: true } });
-  assert.match(both, /prod \(AMBIGUOUS: also in PI_SECRET_PROFILES, so the worker refuses every secrets job\)/);
+  const envOnly = await profilesOf(noOverlay, { PI_SECRET_PROFILES: "prod:/opt/secret/p" });
+  assert.match(envOnly, /prod.*declared in PI_SECRET_PROFILES/);
+  assert.ok(!envOnly.includes("No secret profiles are declared"), envOnly);
+  const empty = await profilesOf(noOverlay, { PI_SECRET_PROFILES: "" });
+  assert.match(empty, /No secret profiles are declared or named by the triggers in view\./, "both sources seen and empty");
+  assert.doesNotMatch(empty, /environment declarations are unknown/);
+  assert.match(await profilesOf(noOverlay), /PI_SECRET_PROFILES is not visible here; the worker's environment declarations are unknown/, "an unseen env is unknown, not empty");
+  assert.match(await profilesOf(noOverlay, { PI_SECRET_PROFILES: "prod:relative" }), /PI_SECRET_PROFILES does not parse/);
+  const both = await profilesOf({ settings: { overlay: { secretProfiles: { prod: "/opt/secret/p" } } } }, { PI_SECRET_PROFILES: "prod:/opt/secret/p" });
+  assert.match(both, /Ambiguous: declared in both PI_SECRET_PROFILES and the settings overlay, so the worker refuses every secrets job/);
   assert.ok(!both.includes("/opt/secret"), "names only");
 });
 
@@ -133,7 +137,9 @@ test("the configuration shows names and basenames, never a parser message or a r
   assert.ok(!html.includes("/srv/"), html);
   assert.match(html, /flow tidy in \.\.\.\/site/);
   assert.match(html, /The scoped-limits file does not load; run pi-dispatch doctor/);
-  assert.match(html, /<li class="mono">vault<\/li>/, "a secret profile by name");
+  assert.match(html, /href="\/config\/secrets"/, "configuration now links to the dedicated Secrets facts");
+  const secrets = secretsView({ snapshot: { ...snapshot(), settings: { overlay: { secretProfiles: { vault: "/opt/secret/resolver" } } } } });
+  assert.match(String(secretsProfiles({ data: { secrets }, role: "operator" })), /vault.*declared in the settings overlay/, "the actual profile name and source are on Secrets");
   assert.ok(!html.includes("/opt/secret"));
 });
 

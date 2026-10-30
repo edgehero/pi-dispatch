@@ -51,7 +51,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -76,8 +76,11 @@ export async function loadModules() {
     import("../trigger-list.mjs"),
     import("../trigger-check.mjs"),
     import("../trigger-schedule-zones.mjs"),
+    import("../secrets-view.mjs"),
+    import("../connections-view.mjs"),
+    import("../project-view.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -461,6 +464,9 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       fleet,
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
+      secretsView: (snapshot) => m.secretsView.secretsView({ snapshot, env: side.env, fs }),
+      connections: (snapshot) => m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid }),
+      projectView: (id, snapshot) => m.projectView.readProjectView({ id, snapshot, paths: side.paths, env: side.env, deploymentDir: config.dir, pricing, fleet, fs, now: now(), platform: io.platform ?? process.platform, uid }),
       triggerCheck: (input) => m.triggerCheck.checkTriggerEvent({ input, triggersPath: side.paths.triggersPath, fs }),
       triggerList: async (snapshot) => {
         const [history, zones] = await Promise.all([

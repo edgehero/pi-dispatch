@@ -31,6 +31,7 @@ export const DOCTOR_FILE_CHECKS = Object.freeze({
   "scoped-limits file": "scoped-limits.file",
   "projects file": "projects.file",
   "settings overlay": "settings.overlay",
+  "model-endpoints file": "model-endpoints.file",
 });
 
 /** The snapshot's doctor rows, readable ones first by name; `[]` when nothing was published or read. */

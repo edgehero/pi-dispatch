@@ -312,7 +312,8 @@ test("a signature over different bytes is rejected 401 before onVerified -- noth
 	const raw = JSON.stringify(payload);
 
 	const { calls, queue } = recordingQueue();
-	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: () => {} });
+	const logs = [];
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: (entry) => logs.push(entry) });
 	// Signature computed over tampered bytes: D2 rejects before onVerified runs.
 	const req = mockReq({ headers: headersFor("issues", delivery, raw, raw + "tampered") });
 	const res = mockRes();
@@ -320,6 +321,7 @@ test("a signature over different bytes is rejected 401 before onVerified -- noth
 
 	assert.equal(res.statusCode, 401);
 	assert.equal(calls.length, 0);
+	assert.deepEqual(logs, [], "signature refusals have no receiver log line; delivery history holds the 401");
 });
 
 test("Valkey down: an enqueue that throws maps to 503, no unhandled rejection", async () => {
@@ -341,7 +343,8 @@ test("Valkey down: an enqueue that throws maps to 503, no unhandled rejection", 
 				throw new Error("ECONNREFUSED");
 			},
 		};
-		const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: () => {} });
+		const logs = [];
+		const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: (entry) => logs.push(entry) });
 		const req = mockReq({ headers: headersFor("issues", delivery, raw) });
 		const res = mockRes();
 		await drive(handler, req, res, raw);
@@ -350,6 +353,7 @@ test("Valkey down: an enqueue that throws maps to 503, no unhandled rejection", 
 		await new Promise((r) => setImmediate(r));
 
 		assert.equal(res.statusCode, 503);
+		assert.deepEqual(logs, [{ event: "enqueue_failed", delivery, reason: "ECONNREFUSED" }], "an enqueue outage supplies a useful 503 log counterexample");
 		assert.equal(rejections.length, 0, "enqueue failure must be handled, not an unhandled rejection");
 	} finally {
 		process.removeListener("unhandledRejection", onRej);
@@ -477,7 +481,8 @@ test("POST / on a github-free deployment is 404 -- not 401, not 405 -- and nothi
 	// endpoint that does not exist. 405 would be just as misleading -- it discusses the method of a live
 	// endpoint. The status has to say "there is nothing here".
 	const { calls, queue } = recordingQueue();
-	const handler = makeReceiver({ queue, selfId: undefined, cfg: githubFreeCfg, log: () => {} });
+	const logs = [];
+	const handler = makeReceiver({ queue, selfId: undefined, cfg: githubFreeCfg, log: (entry) => logs.push(entry) });
 
 	const raw = JSON.stringify(LABELED_PAYLOAD);
 	const post = mockRes();
@@ -491,6 +496,7 @@ test("POST / on a github-free deployment is 404 -- not 401, not 405 -- and nothi
 	const get = mockRes();
 	await drive(handler, mockReq({ method: "GET", headers: {} }), get, undefined);
 	assert.equal(get.statusCode, 404, "not 405");
+	assert.deepEqual(logs, [], "unconfigured routes have no receiver log line; delivery history holds the 404");
 });
 
 test("an unrouted path on a github-free deployment is 404 too -- the fallthrough itself is gone", async () => {
@@ -679,13 +685,15 @@ test("an armed close rule with NO resolver wired answers 503, never an unbacked 
 	const delivery = "d-close-nodep";
 	const raw = JSON.stringify(closedPayload());
 	const { calls, queue } = recordingQueue();
-	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: closeCfg, log: () => {} });
+	const logs = [];
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: closeCfg, log: (entry) => logs.push(entry) });
 	const res = mockRes();
 	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
 
 	assert.equal(res.statusCode, 503);
 	assert.deepEqual(JSON.parse(res.body), { error: "permission-lookup-failed" });
 	assert.equal(calls.length, 0);
+	assert.deepEqual(logs, [], "not every 503 has a receiver log line, so console guidance only promises possible help");
 });
 
 // --- the semantic swallow is visible (issue #289) -------------------------------------------------------

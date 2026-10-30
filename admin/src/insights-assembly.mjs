@@ -621,7 +621,6 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
     // Slot context is a current registry fact, not a sum of separately timed recorded capacities.
     const slots = reportHosts.map((host) => Number(byName.get(host.name)?.concurrency));
     out.capacity.totalSlots = !out.capacity.venuesUnreadable && slots.length > 0 && slots.every((n) => Number.isSafeInteger(n) && n > 0) && Number.isSafeInteger(slots.reduce((sum, n) => sum + n, 0)) ? slots.reduce((sum, n) => sum + n, 0) : null;
-    out.sizing = await io.sizing(paths, nowMs, { envFn });
     return out;
   }
   const pv = io.projects({ projectsPath: paths.projectsFile });

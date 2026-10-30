@@ -207,6 +207,11 @@ and merges it.
   - If `worker/test/pi-derived.test.mjs` is red, run `node .github/scripts/pi-derived.mjs --write` on the branch and
     commit the result. It prints the catalog hosts added and removed: **a new host widens the cost guard**, so check
     which output field pi sends there.
+  - If `admin/test/provider-key-names.test.mjs` is red, read the new pinned pi-ai artifact's
+    `dist/env-api-keys.js` and the worker's `providerKeyCandidates` before running
+    `node .github/scripts/provider-key-names.mjs --write`. The console's generated data-only table carries that
+    whole-file source hash and every provider's candidate order, so re-generation follows verification, never
+    replaces it. Keep provider SDKs out of the console; its bundle guard checks that boundary.
   - Read the linked pi releases (linked, never pasted). Check the human-judged copies their tests name (steering
     variables, pricing pins, the width table).
   - Every other red test is a pinned assumption that no longer holds: fix the code or the copy against the new

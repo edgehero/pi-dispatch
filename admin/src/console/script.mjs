@@ -1556,6 +1556,30 @@ ${FIT_JS}
   });
   var configControls = typeof document.querySelectorAll === "function" ? document.querySelectorAll("[data-config-controls]") : [];
   for (var ci = 0; ci < configControls.length; ci++) configControls[ci].disabled = false;
+  // One native picker keeps keyboard and touch behavior, while both declarations use their existing action paths.
+  function resolverFields(form) {
+    var kind = form.querySelector('[name="kind"]');
+    var bundle = kind && kind.value === "bundle";
+    form.setAttribute("data-action", bundle ? "secret-bundle-add" : "secret-profile-add");
+    var box = form.querySelector("[data-resolver-format]");
+    if (box) { box.hidden = !bundle; var format = box.querySelector('[name="format"]'); if (format) format.disabled = !bundle; }
+    var button = form.querySelector('[type="submit"]');
+    if (button) button.textContent = bundle ? "Preview the bundle resolver" : "Preview the profile";
+    var hint = form.querySelector("[data-resolver-frequency]");
+    if (hint) hint.textContent = bundle ? "The worker runs this script as the account it runs as, once per job start of each bound project, and hands the job every variable it prints. Only declare a resolver you trust." : "The worker runs this script as the account it runs as, once per reference before the container starts. Only declare a resolver you trust.";
+  }
+  var resolverForms = typeof document.querySelectorAll === "function" ? document.querySelectorAll('form[data-structured="resolver"]') : [];
+  for (var ri = 0; ri < resolverForms.length; ri++) resolverFields(resolverForms[ri]);
+  function resolverChanged(ev) {
+    var form = ev.target && ev.target.closest ? ev.target.closest('form[data-structured="resolver"]') : null;
+    if (!form) return;
+    // A preview belongs to exactly what the person submitted, including the resolver kind. Closing also advances
+    // slotGen, so a late answer for the old fields cannot arm a confirm under the new declaration.
+    if (form === slotForm && slot) closeSlot();
+    resolverFields(form);
+  }
+  document.addEventListener("change", resolverChanged);
+  document.addEventListener("input", resolverChanged);
   var TRIGGER_ACTIONS = ${JSON.stringify(Object.fromEntries(Object.entries(PR_ACTIONS).map(([k,v])=>[k,[...v]])))};
   function triggerFields(form) {
     var kind = form.querySelector('[name="kind"]');
@@ -1699,6 +1723,7 @@ ${FIT_JS}
       if (!Array.isArray(out.writers)) out.writers = [];
       return { envelope: out };
     }
+    if (structured === "resolver") { delete out.kind; if (form.getAttribute("data-action") === "secret-profile-add") delete out.format; return out; }
     if (structured === "trigger") { if (out.once === false) delete out.once; return { trigger: out }; }
     return out;
   }

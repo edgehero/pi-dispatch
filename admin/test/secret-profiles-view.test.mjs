@@ -23,6 +23,8 @@ import {
 import { resolverRootsJudgement } from "../src/write-plans.mjs";
 import { pagePanels } from "../src/console/pages.mjs";
 import { parseDocument } from "./helpers/script-dom.mjs";
+import { secretsView } from "../src/secrets-view.mjs";
+import { secretsProfiles } from "../src/console/panels/secrets.mjs";
 
 // Issue #712, PR D: a run's OpenShell policy facts and secrets profile on the run views, and the secret profiles view
 // (source, roots, triggers, projects, last resolve, the hosts that advertise each) on the console, the panel and
@@ -138,7 +140,7 @@ test("renderSecretProfilesView: one scrubbed line per profile, the registry said
   const view = secretProfilesView({ triggers: TRIGGERS, settings: { overlay: { secretProfiles: { "pr\u001bod": "/x" } } }, env: {}, hosts: null });
   const text = renderSecretProfilesView(view);
   assert.match(text, /^Secret profiles in use \(names only; the resolver paths are listed above\):/);
-  assert.match(text, /\n  prod: named by a trigger, declared in no source this view can see \(PI_SECRET_PROFILES is not visible here\); used by trigger #0; last resolve: no run in view recorded it; served by: the registry is not read here/);
+  assert.match(text, /\n  prod: named by a trigger, declared in no source this view can see \(PI_SECRET_PROFILES is not visible here\); used by trigger #1; last resolve: no run in view recorded it; served by: the registry is not read here/);
   assert.ok(!text.includes("pr\u001bod") && !text.includes("pr od"), "a name outside the charset is no profile");
   assert.ok(!text.includes("\u001b"));
   assert.equal(renderSecretProfilesView(null), "");
@@ -187,14 +189,14 @@ test("the console's run page: the sandbox policy, the rule hosts and the secrets
   }
 });
 
-test("the console's configuration: each profile's use in a table, words and names only, never a resolver path", async () => {
+test("the console's Secrets page: each profile's use in a table, words and names only, never a resolver path", async () => {
   const profiles = secretProfilesView({
     triggers: TRIGGERS,
     settings: { overlay: { secretProfiles: { prod: PATH } } },
     env: { PI_SECRET_RESOLVER_ROOTS: "/opt/secret-resolvers" },
     projects: PROJECTS,
     runs: [{ jobId: "gh-new", endedAt: "2026-10-21T10:00:00Z", secretsProfile: "prod", outcome: "policy", reason: "secret-unresolved" }],
-    hosts: [{ name: "mini<1>", caps: ["s:prod"] }],
+    hosts: [{ name: "mini1", caps: ["s:prod"] }, { name: "mini<hostile>", caps: ["s:prod"] }],
     fs: fsWith({ [PATH]: "/tmp/elsewhere.sh" }),
   });
   const snapshot = {
@@ -208,15 +210,18 @@ test("the console's configuration: each profile's use in a table, words and name
     overlayMcp: { servers: [], refused: [], unreadable: null },
     stagedPackages: { stagedAt: null, packages: [] },
   };
-  const panels = await pagePanels("config", ctxOf("operator", { snapshot }));
-  const one = panels.find((p) => p.id === "cf-secret-profiles")?.html.replace(/\s+/g, " ") ?? "";
-  assert.match(one, /aria-label="Secret profiles in use"/);
-  assert.match(one, /<td class="mono">prod<\/td><td>declared in the settings overlay<\/td><td class="warn">its resolver&#39;s real path on this host is OUTSIDE PI_SECRET_RESOLVER_ROOTS/);
-  // Issue #737: a trigger by the index the Triggers table shows, in the page's one wording.
-  assert.match(one, /<td>row 1<\/td><td class="mono">shop<\/td><td class="warn">refused \(secret-unresolved\) at 2026-10-21T10:00:00\.000Z \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)<\/td><td class="mono">mini&lt;1&gt;<\/td>/);
-  assert.match(one, /<td class="mono">default<\/td><td class="warn">named by a trigger/);
-  const html = panels.map((p) => p.html).join("");
-  assert.ok(!html.includes("/opt/secret-resolvers") && !html.includes("/tmp/elsewhere"), "no resolver path, not even its real one");
+  const data = secretsView({ snapshot, env: { PI_SECRET_RESOLVER_ROOTS: "/opt/secret-resolvers" }, fs: fsWith({ [PATH]: "/tmp/elsewhere.sh" }) });
+  const one = String(secretsProfiles({ data: { secrets: data }, role: "operator" }));
+  const doc = parseDocument(`<html><body>${one}</body></html>`);
+  const row = doc.querySelector('a[href="/config/trigger?index=0"]').closest("tr");
+  assert.match(row.textContent, /prod.*declared in the settings overlay.*outside PI_SECRET_RESOLVER_ROOTS/);
+  assert.equal(row.className, "row--failed");
+  assert.equal(row.querySelector('a[href="/config/trigger?index=0"]').textContent, "1");
+  assert.ok(row.querySelector('a[href="/config/project?id=shop"]'));
+  assert.ok(row.querySelector('a[href="/run?id=gh-new"]'));
+  assert.match(row.textContent, /refused \(secret-unresolved\).*mini1/);
+  assert.doesNotMatch(one, /mini&lt;hostile&gt;|mini<hostile>/, "invalid host names are not published as host identities");
+  assert.ok(!one.includes("/opt/secret-resolvers") && !one.includes("/tmp/elsewhere"), "no resolver path, not even its real one");
 });
 
 // ---- the panel -------------------------------------------------------------------------------------------------------------

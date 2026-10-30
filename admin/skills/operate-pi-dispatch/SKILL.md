@@ -27,8 +27,15 @@ Observe (no approval needed):
   <provider/model> --flow <flow>` prints that URL) estimates what a flow would cost per run on another
   model's rates.
 - `dispatch_triggers` — the configured triggers with their array `index` (needed to edit/delete one).
-- `dispatch_projects` - the projects (projects.json): each id, display name, members, and the scoped-limits
-  rows that cap it. `dispatch_costs` folds spend `byProject` by the id each run recorded, and its `project`
+- `dispatch_secrets`: profile and bundle names, sources and problem states, plus variables as counts for each
+  project's runs. It never returns variable names, resolver paths, roots, references or values. Declaring or
+  removing a resolver remains a person's action in the Secrets page or command.
+- `dispatch_connections`: forges by deployment key name, egress per host, model endpoints and live fleet slots,
+  provider key sources, MCP servers and staged packages, and which deployment keys are set. Unknown source
+  states are not absence or healthy connections. Editing these sources remains a person's action.
+- `dispatch_projects` - the projects (projects.json): each id, display name, members, scoped-limits rows,
+  spend against its share with held amounts separate, job size and its suggested call, and the edit/delete
+  refusals. A size still needs the operator's confirm. `dispatch_costs` folds spend `byProject` by the id each run recorded, and its `project`
   filter (an id) scopes the whole fold to that project's runs. A run outside every project, or recorded before
   projects existed, is `(no project)`: say so rather than guessing which project an old run "belongs to".
 - `dispatch_allocations` - the allocation envelope (a dollar total per window and a floor per project) and the

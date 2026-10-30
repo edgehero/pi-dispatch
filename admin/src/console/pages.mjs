@@ -24,6 +24,10 @@
  */
 import { triggerOn, triggerRuns, triggerRun, triggerEdit, triggerTrust, triggerKinds, triggerChange, triggerAdd, triggerKindHelp, triggerForgeWords, triggerRefusals, triggerTitle } from "./panels/trigger.mjs";
 import { configNavigation, configFiles, configUnset, configDescription } from "./panels/config.mjs";
+import { secretsView } from "../secrets-view.mjs";
+import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
+import { connectionsDescription, connectionsProblems, connectionsForges, connectionsEgress, connectionsEndpoints, connectionsNotify, connectionsMcp, connectionsEnvironment, connectionsPackages } from "./panels/connections.mjs";
+import { projectTitle, projectDescription, projectSpend, projectRuns, projectSize, projectMembers, projectSizing, projectRecent, projectAllocation, projectLimits, projectBundle, projectTriggers, projectDelete } from "./panels/project.mjs";
 import { triggersNavigation, triggersViewer, triggersCount, triggersNext, triggersSpend, triggersFilters, triggersWeek, triggersSchedules, triggersGithub, triggersGitlab, triggersForgejo, triggersAzure, triggersUnknown, triggersCheck, triggerCheckPage, triggersDescription } from "./panels/triggers.mjs";
 import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
@@ -138,6 +142,9 @@ export const PAGES = Object.freeze({
   "trigger-check": Object.freeze({ path: "/triggers/check", auth: "viewer", live: false, title: "Check an event", nav: null, icon: "bolt" }),
   "trigger-add": Object.freeze({ path: "/config/trigger-add", auth: "operator", live: false, title: "Add a trigger", nav: null, icon: "config" }),
   config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration", icon: "config" }),
+  secrets: Object.freeze({ path: "/config/secrets", auth: "viewer", live: false, title: "Secrets", nav: null, icon: "config" }),
+  connections: Object.freeze({ path: "/config/connections", auth: "viewer", live: false, title: "Connections", nav: null, icon: "config" }),
+  project: Object.freeze({ path: "/config/project", auth: "viewer", live: false, title: "Project", nav: null, icon: "config" }),
   watch: Object.freeze({ path: "/watch", auth: "viewer", live: false, title: "Watch", nav: null, icon: "bolt" }),
   "watch-board": Object.freeze({ path: "/watch/board", auth: "viewer", live: false, title: "Watch board", nav: null, icon: "bolt" }),
   audit: Object.freeze({ path: "/audit", auth: "operator", live: false, title: "Audit log", nav: "Audit", icon: "audit" }),
@@ -145,6 +152,9 @@ export const PAGES = Object.freeze({
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
+  secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
+  connections: [["p-connection-problems", connectionsProblems], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
+  project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
   triggers: [["p-tr-tabs", triggersNavigation], ["p-tr-viewer", triggersViewer], ["p-tr-count", triggersCount], ["p-tr-next", triggersNext], ["p-tr-spend", triggersSpend], ["p-tr-filters", triggersFilters], ["p-tr-week", triggersWeek], ["p-tr-schedule", triggersSchedules], ["p-tr-github", triggersGithub], ["p-tr-gitlab", triggersGitlab], ["p-tr-forgejo", triggersForgejo], ["p-tr-azure", triggersAzure], ["p-tr-unknown", triggersUnknown], ["p-tr-check", triggersCheck]],
   "trigger-check": [["p-tr-check", triggerCheckPage]],
   // Issue #737: the first run's checklist (empty once the deployment runs), then what needs a person first, what waits,
@@ -185,7 +195,7 @@ function hostHeadline(view) {
   return html`${venues.length ? venues.map((name) => `${name}${host.backends.default === name ? " (default)" : ""}`).join(", ") : "Venues not published"} · worker ${host.version ?? "not published"} · ${occupied} · last beat ${beat === null ? "not known" : `${ageText(beat)} ago`}`;
 }
 
-const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadline, host: hostHeadline });
+const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadline, host: hostHeadline, secrets: secretsHeadline });
 
 /**
  * How a screen's panels are laid out (issue #737), for a screen whose cards stand in a grid rather than one under
@@ -199,6 +209,8 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-forges", "p-egress", "p-endpoints"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
+  project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
   triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
   ...SPEND_LAYOUTS,
   config: [{ cls: "stack", items: ["cf-navigation"] }, { cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["cf-settings", "cf-triggers", "cf-pause-windows", "cf-scoped-limits", "cf-projects", "cf-files"] }, { cls: "stack", items: ["cf-unset", "cf-mcp-servers", "cf-packages", "cf-secret-profiles", "cf-secret-bundles"] }] }],
@@ -252,6 +264,9 @@ const PAGE_PARAMS = Object.freeze({
   host: ["name"],
   venue: ["name"],
   config: [],
+  secrets: [],
+  connections: [],
+  project: ["id"],
   trigger: ["index"],
   triggers: ["kind"],
   "trigger-check": [],
@@ -352,6 +367,12 @@ export function parsePageQuery(name, searchParams) {
       }
       return { query: Object.freeze({ filter: f.filter, before }) };
     }
+    case "project": {
+      const id = one("id");
+      if (id === null) return { refusal: "the project page needs ?id= with a project id" };
+      if (!PROJECT_ID_RE.test(id)) return { refusal: "id must be a project id (lowercase letters, digits and '-', at most 32 characters)" };
+      return { query: Object.freeze({ id }) };
+    }
     case "run": {
       const id = one("id");
       if (id === null) return { refusal: "the run page needs ?id= with a run's job id" };
@@ -422,7 +443,7 @@ export function pageQueryString(name, query) {
     for (const k of RUN_FILTER_FIELDS) if (q.filter?.[k] !== undefined) p.set(k, q.filter[k]);
     if (q.before !== null && q.before !== undefined) p.set("before", String(q.before));
   } else if ((name === "host" || name === "venue") && q.name) p.set("name", q.name);
-  else if (name === "run" && q.id) p.set("id", q.id);
+  else if ((name === "run" || name === "project") && q.id) p.set("id", q.id);
   else if (name.startsWith("insights")) {
     for (const k of PAGE_PARAMS[name]) if (typeof q[k] === "string" && q[k] !== "") p.set(k, q[k]);
   }
@@ -499,6 +520,9 @@ const PAGE_READS = Object.freeze({
   host: ["snapshot", "waiting", "hostCapacity"],
   venue: ["snapshot"],
   config: ["snapshot"],
+  secrets: ["snapshot", "secrets"],
+  connections: ["snapshot", "connections"],
+  project: ["snapshot", "waiting", "project"],
   trigger: ["snapshot", "waiting"],
   triggers: ["snapshot", "waiting"],
   "trigger-check": ["parkedCount"],
@@ -642,6 +666,18 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
     }
+  }
+  if (reads.includes("secrets")) {
+    try { data.secrets = typeof deps.secretsView === "function" ? await deps.secretsView(data.snapshot) : secretsView({ snapshot: data.snapshot, env: deps.env ?? {} }); }
+    catch { data.secrets = null; }
+  }
+  if (reads.includes("connections")) {
+    try { data.connections = typeof deps.connections === "function" ? await deps.connections(data.snapshot) : null; }
+    catch { data.connections = null; }
+  }
+  if (reads.includes("project")) {
+    try { data.projectView = typeof deps.projectView === "function" ? await deps.projectView(q.id, data.snapshot) : { id: q.id, state: "unreadable" }; }
+    catch { data.projectView = { id: q.id, state: "unreadable" }; }
   }
   if (name === "triggers") {
     try { data.triggerList = typeof deps.triggerList === "function" ? await deps.triggerList(data.snapshot) : triggerListOf({ snapshot: data.snapshot, now }); }
@@ -943,6 +979,9 @@ export async function renderPage(name, ctx) {
   if (places !== null && runAbsent(places)) {
     return errorPage({ kind: "no-run", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), theme, runId: typeof ctx?.query?.id === "string" ? ctx.query.id : null });
   }
+  if (name === "project" && ctx?.data?.projectView?.state === "missing") {
+    return errorPage({ kind: "no-project", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), theme });
+  }
   const panels = panelFragments(name, ctx);
   // The run detail's live transcript (issue #643) is a section of its own, never a panel: a panel is what the hub
   // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
@@ -954,9 +993,10 @@ export async function renderPage(name, ctx) {
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
-  const titleOptions = triggerListOptions ?? (name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
+  const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
+  const titleOptions = configOptions ?? triggerListOptions ?? (name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   const body = shellHtml(name, ctx, html`${name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${inner}`, { ...titleOptions, ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
-  const status = places !== null && !runPlaces(places).shown ? 503 : 200;
+  const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !runPlaces(places).shown ? 503 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${["host", "venue"].includes(name) ? ctx?.query?.name ?? meta.title : meta.title}`, name, body, live, query, theme }) };
 }

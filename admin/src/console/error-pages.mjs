@@ -41,13 +41,13 @@ import { frameHtml } from "./shell.mjs";
  * The kinds of error page, one per refusal the server answers with a page. `no-run` is the run page's own 404 (PR 4 of
  * issue #737): `pages.mjs` `renderPage` answers it for a run id that no record, no queue and no live stream knows.
  */
-export const ERROR_KINDS = Object.freeze(["no-page", "bad-query", "operators-only", "host", "unavailable", "failed", "method", "no-run"]);
+export const ERROR_KINDS = Object.freeze(["no-page", "bad-query", "operators-only", "host", "unavailable", "failed", "method", "no-run", "no-project"]);
 
 /** Each kind's status when the caller gives none: the status the server answers it with. */
-const KIND_STATUS = Object.freeze({ "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405, "no-run": 404 });
+const KIND_STATUS = Object.freeze({ "no-page": 404, "bad-query": 400, "operators-only": 403, host: 421, unavailable: 503, failed: 500, method: 405, "no-run": 404, "no-project": 404 });
 
 /** The kinds whose page keeps the console's navigation (when a session is known); the rest draw the sign-in bar. */
-const NAV_KINDS = new Set(["no-page", "bad-query", "operators-only", "method", "no-run"]);
+const NAV_KINDS = new Set(["no-page", "bad-query", "operators-only", "method", "no-run", "no-project"]);
 
 /** The most characters of a refused Host a 421 page shows; a longer one is cut, with an ellipsis. */
 export const HOST_SHOWN_MAX = 64;
@@ -85,6 +85,7 @@ export const ERROR_SENTENCES = Object.freeze({
   failed: entry("Something went wrong", "The console could not draw this page.", "The console failed on this request", "Its log has the reason. Reload to try again.", "failed", "failed"),
   method: entry("Not a page", "The browser opened an address that only takes the console's own requests.", "This address is not a page", "It takes requests from the console's own buttons, which send them themselves. Go to one of its screens instead.", "idle", "info"),
   "no-run": entry("Run not found", "The console could not find a run with this id.", "No run with this id", "No run with that id is in this host's history, the fleet's run mirror or the queue. It may be another host's run with the fleet's run mirror off, or one the history no longer keeps.", "idle", "search"),
+  "no-project": entry("Project not found", "The console could not find a project with this id.", "No project with this id", "No project with that id is in the projects file. It may have been removed; records already written keep their project id.", "idle", "search"),
 });
 
 /** The kit's tone of a catalog status (`ui.STATUS`), or a throw: the catalog is code, so an unknown status is a bug. */
@@ -116,7 +117,7 @@ function errorCard({ status, said, sentence = ui.withCode(said.sentence), action
  */
 function backTo(page) {
   if (typeof page !== "string" || !Object.hasOwn(PAGES, page)) return null;
-  return page === "run" ? "runs" : page;
+  return page === "run" ? "runs" : page === "project" ? "config" : page;
 }
 
 /**
@@ -215,6 +216,8 @@ function cardOf(kind, { status, sentence, page, runId }) {
   switch (kind) {
     case "no-page":
       return errorCard({ status, said, actions: html`${goTo("runs", true)}${goTo("overview", false)}` });
+    case "no-project":
+      return errorCard({ status, said, actions: goTo("config", true) });
     case "no-run":
       return errorCard({ status, said, extra: runSearch(runId), actions: html`${goTo("runs", true)}${goTo("overview", false)}` });
     case "bad-query": {
@@ -251,6 +254,6 @@ export function errorPage({ status, kind, theme = null, session = null, readOnly
   const inner = kind === "host" ? hostCard({ status: code, host, port, address }) : cardOf(kind, { status: code, sentence, page, runId });
   return {
     status: code,
-    html: frameHtml({ name: "error", title: said.title, sub: said.sub, theme, session: nav ? session : null, readOnly: nav ? Boolean(readOnly) : false, nav, here: kind === "no-run" ? "runs" : null }, inner),
+    html: frameHtml({ name: "error", title: said.title, sub: said.sub, theme, session: nav ? session : null, readOnly: nav ? Boolean(readOnly) : false, nav, here: kind === "no-run" ? "runs" : kind === "no-project" ? "config" : null }, inner),
   };
 }

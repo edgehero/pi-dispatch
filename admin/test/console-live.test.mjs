@@ -1548,6 +1548,7 @@ test("integration: every real page renders through the server, and a real live s
   const sessions = sessionsModule.makeSessionStore({ now });
   const run = { jobId: "job-1", target: "o/r#12", kind: "github", flow: "fix", outcome: "completed", startedAt: "2026-10-14T11:00:00.000Z", endedAt: "2026-10-14T11:05:00.000Z" };
   const pageDeps = {
+    projectView: async () => (await import("./helpers/console-project-fixture.mjs")).consoleProjectFixture(now()),
     fleet: {
       snapshot: async () => SNAPSHOT,
       runsPage: async () => ({ runs: [run], next: null, mirror: "off", truncated: false, examined: 1 }),
@@ -1598,7 +1599,7 @@ test("integration: every real page renders through the server, and a real live s
   const viewer = await login(VIEW_TOKEN);
 
   for (const [name, spec] of Object.entries(realPages.PAGES)) {
-    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
+    const path = name === "project" ? `${spec.path}?id=billing` : name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
     const res = await send({ path, headers: { cookie: op } });
     assert.equal(res.status, 200, `${path}: ${res.text.slice(0, 300)}`);
     assert.match(res.text, /<link rel="stylesheet" href="\/static\/console.css">|href="\/static\/console.css"/, `${path} links the stylesheet`);

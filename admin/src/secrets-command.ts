@@ -76,7 +76,7 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
   if (action === "list") {
     // A deployment with no bundle resolver and no bundle reads exactly as it did before the feature.
     const projects = typeof paths.projectsFile === "string" ? readProjects({ projectsPath: paths.projectsFile, ...fsSeam }) : null;
-    const bound = renderSecretBundles(secretBundlesView({ triggers: triggersView, settings: view, env, projects }), { names: false });
+    const bound = renderSecretBundles(secretBundlesView({ triggers: triggersView, settings: view, env, projects, ...fsSeam }), { names: false });
     // Issue #712: the env-declared profiles beside the overlay's, as the worker merges them.
     // Issue #712: each profile's use (source, roots, triggers, projects, the last resolve off this host's newest run
     // records), under the tables that carry its path. The registry is not read here, and the view says so.
@@ -209,7 +209,7 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
 
   if (action === "remove") {
     const name = (words[1] ?? "").trim();
-    const planned: any = planSecretProfileRemove({ name, profiles, settingsFile: paths.settingsFile });
+    const planned: any = planSecretProfileRemove({ name, profiles, envProfiles: envSecretProfiles(env.PI_SECRET_PROFILES).profiles, triggers: triggersView, settingsFile: paths.settingsFile });
     if (planned.refusal) {
       notify?.(planned.refusal, "warning");
       return;
