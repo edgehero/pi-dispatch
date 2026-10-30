@@ -33,6 +33,8 @@ import {
 	PIN_FILE,
 	PROBE_WIDTH,
 	RUN_ID_LENGTH,
+	RUN_MS,
+	NAV_MS,
 	Refusal,
 	SHELL_WIDTHS,
 	SIGN_IN,
@@ -484,7 +486,7 @@ test("the bar holds its height across the live words and the theme button, and a
 	], "a jump judged along each thing with the others held: the theme button's shown first, whichever is taller");
 });
 
-test("every read of the bar: the page's width in each, every live word read, no two words alike on a phone, one row from 1440 px", () => {
+test("every read of the bar: the page's width in each, every live word read, no two words alike on a phone, one row from the production threshold", () => {
 	const words = ["Not live", "Live", "Reconnecting", "Signed out"];
 	const reads = ["shown", "hidden"].flatMap((theme) => words.map((live) => ({ live, theme, parked: "128", scrollWidth: 375 })));
 	assert.deepEqual(readWidthProblems(reads, 375), [], "the page fits in every read");
@@ -518,15 +520,15 @@ test("every read of the bar: the page's width in each, every live word read, no 
 	// One row: every part that shows meets the pi-dispatch pill's row.
 	const brand = part("pi-dispatch", box(16, 180, 16, 64), [], { cls: "brandpill" });
 	const row = (navTop) => ({ live: "Live", theme: "shown", parked: "128", nav: [part("Overview", box(200, 320, navTop, navTop + 48)), part("Runs", box(326, 430, navTop, navTop + 48))], end: [part("Live", box(1100, 1200, 16, 64), [], { tag: "span", id: "live-status", cls: "live" })], brand });
-	assert.equal(ONE_ROW_WIDTH, 1440);
-	assert.deepEqual(oneRowProblems([row(16)], { width: 1440 }), [], "the Shell card's row");
-	assert.deepEqual(oneRowProblems([row(76)], { width: 1440 }), ['the top bar is not one row at 1440 px, as the Shell card draws it from 1440 px: <a> "Overview" is off the pi-dispatch pill\'s row']);
-	assert.deepEqual(oneRowProblems([row(76)], { width: 1600 }).length, 1, "and wider");
-	assert.deepEqual(oneRowProblems([row(76)], { width: 1439 }), [], "below it two rows are the layout");
-	assert.deepEqual(oneRowProblems([row(76)], { width: 1440, readOnly: true }), [], "a read-only console's end holds the chip too: its one row starts later");
-	assert.deepEqual(oneRowProblems([row(16), { ...row(76), live: "Reconnecting" }], { width: 1440 }), ['the top bar is not one row at 1440 px, as the Shell card draws it from 1440 px: <a> "Overview" is off the pi-dispatch pill\'s row (live pill: Reconnecting)'], "told once, with the reads it was seen in");
-	assert.deepEqual(oneRowProblems([{ ...row(16), brand: null }], { width: 1440 }), ["the top bar shows no pi-dispatch pill to hold its one row to"]);
-	assert.deepEqual(oneRowProblems([{ ...row(16), nav: [part("hidden", box(0, 0, 0, 0))] }], { width: 1440 }), [], "a part that draws nothing is on no row");
+	assert.ok(Number.isSafeInteger(ONE_ROW_WIDTH));
+	assert.deepEqual(oneRowProblems([row(16)], { width: ONE_ROW_WIDTH }), [], "the Shell card's row");
+	assert.deepEqual(oneRowProblems([row(76)], { width: ONE_ROW_WIDTH }), [`the top bar is not one row at ${ONE_ROW_WIDTH} px, as the Shell card draws it from ${ONE_ROW_WIDTH} px: <a> "Overview" is off the pi-dispatch pill\'s row`]);
+	assert.deepEqual(oneRowProblems([row(76)], { width: ONE_ROW_WIDTH + 1 }).length, 1, "and wider");
+	assert.deepEqual(oneRowProblems([row(76)], { width: ONE_ROW_WIDTH - 1 }), [], "below it two rows are the layout");
+	assert.deepEqual(oneRowProblems([row(76)], { width: ONE_ROW_WIDTH, readOnly: true }), [], "a read-only console's end holds the chip too: its one row starts later");
+	assert.deepEqual(oneRowProblems([row(16), { ...row(76), live: "Reconnecting" }], { width: ONE_ROW_WIDTH }), [`the top bar is not one row at ${ONE_ROW_WIDTH} px, as the Shell card draws it from ${ONE_ROW_WIDTH} px: <a> "Overview" is off the pi-dispatch pill\'s row (live pill: Reconnecting)`], "told once, with the reads it was seen in");
+	assert.deepEqual(oneRowProblems([{ ...row(16), brand: null }], { width: ONE_ROW_WIDTH }), ["the top bar shows no pi-dispatch pill to hold its one row to"]);
+	assert.deepEqual(oneRowProblems([{ ...row(16), nav: [part("hidden", box(0, 0, 0, 0))] }], { width: ONE_ROW_WIDTH }), [], "a part that draws nothing is on no row");
 });
 
 test("the signed-in name: cut off only with an ellipsis and itself whole as its title, and the longest one always cut", () => {
@@ -649,15 +651,15 @@ test("one shell run: the CSP, the emulation, the width rule at the window's widt
 	const jumped = "the top bar is 116.0 px tall with the live pill reading Reconnecting and 56.0 px with it reading Live: it jumps when the live word changes";
 	assert.deepEqual(shellVerdict({ ...base, metrics: metricsOf(jumpy) }).failures, [jumped]);
 	assert.deepEqual(shellVerdict({ width: 375, csp: [], measured: { scrollWidth: 375, clientWidth: 375, elements: [] }, emulation: PHONE, metrics: metricsOf(jumpy) }).failures, [jumped], "a phone's bar may not move either");
-	// Every live word read, the page's width in each read, and one row from 1440 px unless read-only.
+	// Every live word read, the page's width in each read, and one row from the production threshold unless read-only.
 	const states = ["Live", "Reconnecting", "Signed out"].map((word) => ({ cls: "live", word }));
 	assert.deepEqual(shellVerdict({ ...base, metrics: metricsOf(fits), liveStates: states }).failures, ["the bar was never read with the live pill reading Reconnecting, Signed out, so no rule was held there"]);
 	assert.deepEqual(shellVerdict({ ...base, metrics: metricsOf([{ ...fits[0], scrollWidth: 830 }]) }).failures, ["the page is 830 px wide at a 800 px viewport in every read of the bar: it scrolls sideways"]);
 	assert.deepEqual(shellVerdict({ ...base, measured: { scrollWidth: 830, clientWidth: 800, elements: [] }, metrics: metricsOf([{ ...fits[0], scrollWidth: 830 }]) }).failures, ["the page is 830 px wide at a 800 px viewport", "no element's box ends past the edge: text running out of its box (a word that cannot wrap), a margin, a pseudo-element or a transform widens the page"], "where the page was wide as the script left it, the width rule says so once");
 	const twoRows = [{ ...fits[0], brand: part("pi-dispatch", box(16, 180, 0, 48)), nav: [part("Configuration", box(600, 640, 56, 104), [])] }];
-	const at1440 = { ...base, width: 1440, measured: { scrollWidth: 1440, clientWidth: 1440, elements: [] }, emulation: desk(1440) };
-	assert.deepEqual(shellVerdict({ ...at1440, metrics: metricsOf(twoRows) }).failures, ['the top bar is not one row at 1440 px, as the Shell card draws it from 1440 px: <a> "Configuration" is off the pi-dispatch pill\'s row']);
-	assert.deepEqual(shellVerdict({ ...at1440, metrics: metricsOf(twoRows), readOnly: true }).failures, [], "a read-only console's one row starts at a wider window");
+	const atOneRow = { ...base, width: ONE_ROW_WIDTH, measured: { scrollWidth: ONE_ROW_WIDTH, clientWidth: ONE_ROW_WIDTH, elements: [] }, emulation: desk(ONE_ROW_WIDTH) };
+	assert.deepEqual(shellVerdict({ ...atOneRow, metrics: metricsOf(twoRows) }).failures, [`the top bar is not one row at ${ONE_ROW_WIDTH} px, as the Shell card draws it from ${ONE_ROW_WIDTH} px: <a> "Configuration" is off the pi-dispatch pill\'s row`]);
+	assert.deepEqual(shellVerdict({ ...atOneRow, metrics: metricsOf(twoRows), readOnly: true }).failures, [], "a read-only console's one row starts at a wider window");
 	assert.deepEqual(shellVerdict({ ...base, metrics: metricsOf(fits, { widened: false }) }).failures, ["the Parked count could not be widened: its panel never read 128, so the bar was not read with 12,345"]);
 	// The name, and More.
 	const longName = { text: "m".repeat(32), title: null, scrollWidth: 160, clientWidth: 160, textOverflow: "ellipsis", overflowX: "hidden", part: part("m", box(600, 760, 20, 36)) };
@@ -691,8 +693,8 @@ test("a shell run's glue: the window it asked for, its doc's longest name, and t
 	const read = { ...got, bar: { ...got.bar, reads: [{ live: "Live", theme: null, snap: bare.snap }], name: null } };
 	const plain = { ...longest, doc: { longest: false } };
 	assert.deepEqual(shellRunVerdict(plain, read, [{ cls: "live", word: "Live" }, { cls: "live live--off live--out", word: "Signed out" }]).failures, ["the bar was never read with the live pill reading Signed out, so no rule was held there"], "the words come from the run, not from what the page chose to read");
-	const wide = { ...plain, width: 1440, doc: { longest: false, readOnly: false } };
-	const atWide = { ...read, measured: { scrollWidth: 1440, clientWidth: 1440, elements: [] }, emulation: desk(1440) };
+	const wide = { ...plain, width: ONE_ROW_WIDTH, doc: { longest: false, readOnly: false } };
+	const atWide = { ...read, measured: { scrollWidth: ONE_ROW_WIDTH, clientWidth: ONE_ROW_WIDTH, elements: [] }, emulation: desk(ONE_ROW_WIDTH) };
 	assert.match(shellRunVerdict(wide, atWide).failures.join("\n"), /the top bar shows no pi-dispatch pill to hold its one row to/, "one row is judged for a console that is not read-only");
 	assert.deepEqual(shellRunVerdict({ ...wide, doc: { longest: false, readOnly: true } }, atWide).failures, [], "and not for a read-only one, by the doc's flag");
 });
@@ -821,7 +823,7 @@ test("the shell sweep signs in as an operator, a viewer, a read-only console and
 	assert.deepEqual(contexts.map((c) => [c.id, c.session.role, c.readOnly, c.longest]), [["operator", "operator", false, false], ["viewer", "viewer", false, false], ["read-only", "operator", true, false], ["longest-name", "operator", true, true]], "the longest name is the one whose name must be cut off");
 	assert.equal(contexts[3].session.name, longest);
 	for (const c of contexts) assert.ok(TOKEN_NAME_RE.test(c.session.name), `${c.id} signs in with a name a token can have`);
-	assert.deepEqual([...SHELL_WIDTHS], [320, 375, 761, 800, 940, 1024, 1180, 1280, 1440, 1600], "the narrowest phone, the usual one, the desktop widths the reviews measured the bar failing at, and the layout's tightest places");
+	assert.deepEqual([...SHELL_WIDTHS], [320, 375, 759, 760, 761, 800, 940, 1024, 1058, 1059, 1060, 1180, 1280, 1440, 1599, 1600, 1601, 1759, 1760, 1761], "the narrowest phone, the usual one, the desktop widths the reviews measured the bar failing at, and the layout's tightest places");
 	assert.ok(SHELL_WIDTHS.includes(VIEWPORT.width), "the phone is one of them");
 	assert.ok(SHELL_WIDTHS.includes(CONTROL_WIDTH) && CONTROL_WIDTH > PHONE_MAX, "the first control is drawn at a desktop width the sweep loads, where its nine rules apply");
 	assert.ok(SHELL_WIDTHS.includes(PHONE_CONTROL_WIDTH) && PHONE_CONTROL_WIDTH <= VIEWPORT.width, "the phone's control at a phone width the sweep loads, emulated as a phone");
@@ -831,7 +833,10 @@ test("the shell sweep signs in as an operator, a viewer, a read-only console and
 test("the sweep's widths and the one-row width are the top bar's own breakpoints", async () => {
 	const { TOP_BAR } = await at("admin/src/console/page-css.mjs");
 	assert.equal(PHONE_MAX, TOP_BAR.phoneMax, "the phone breakpoint the check judges by is the bar's");
-	assert.equal(ONE_ROW_WIDTH, TOP_BAR.oneRowMin, "one row for a console that is not read-only from the bar's own threshold, the Shell card's 1440");
+	assert.equal(ONE_ROW_WIDTH, TOP_BAR.oneRowMin, "one row for a console that is not read-only from the bar's own threshold, the production threshold");
+	for (const threshold of [TOP_BAR.phoneMax, TOP_BAR.navBreakMax, TOP_BAR.oneRowMin, TOP_BAR.oneRowReadOnlyMin]) {
+		for (const delta of [-1, 0, 1]) assert.ok(SHELL_WIDTHS.includes(threshold + delta), `production breakpoint ${threshold} and adjacent pixel ${delta} are exercised`);
+	}
 	for (const [what, width] of [["the first width above a phone", TOP_BAR.phoneMax + 1], ["the first two-row width with the navigation unbroken", TOP_BAR.navBreakMax + 1], ["the first one-row width", TOP_BAR.oneRowMin], ["a read-only console's first one-row width", TOP_BAR.oneRowReadOnlyMin]]) {
 		assert.ok(SHELL_WIDTHS.includes(width), `${what}, ${width} px, is loaded: a moved breakpoint moves the sweep`);
 	}
@@ -1338,7 +1343,7 @@ test("the summary: any failed run, a setup problem or the wrong Chrome in CI mak
 	const base = { product, pin, ci: true, results: [goldenResult("overview")], shell: [...sweep, noScriptResult()], controls: [control, phone], pages: ["overview"], seconds: "1.0" };
 	const clean = summarize(base);
 	assert.equal(clean.code, 0);
-	assert.deepEqual(clean.lines, ["ok    the negative control at 1024 px failed as it was built to (1 problem)", "ok    the phone's negative control at 375 px failed as it was built to (2 problems)", "ok    overview.operator.html (page overview, operator, light)", "ok    shell /shell/operator/overview (page overview, operator) at 320, 375, 761, 800, 940, 1024, 1180, 1280, 1440, 1600 px", "ok    shell /shell/operator/overview (page overview, operator, no JavaScript) at 1024 px", "1 runs over 1 pages and 11 shell runs over 2 pages, 0 failed, 0 other problems, in 1.0 s"]);
+	assert.deepEqual(clean.lines, ["ok    the negative control at 1024 px failed as it was built to (1 problem)", "ok    the phone's negative control at 375 px failed as it was built to (2 problems)", "ok    overview.operator.html (page overview, operator, light)", `ok    shell /shell/operator/overview (page overview, operator) at ${SHELL_WIDTHS.join(", ")} px`, "ok    shell /shell/operator/overview (page overview, operator, no JavaScript) at 1024 px", `1 runs over 1 pages and ${SHELL_WIDTHS.length + 1} shell runs over 2 pages, 0 failed, 0 other problems, in 1.0 s`]);
 	// A check that never made the run without page scripts held the CSS-alone rule nowhere.
 	const noBare = summarize({ ...base, shell: sweep });
 	assert.equal(noBare.code, 1, "every page passing is no proof without it");
@@ -1596,7 +1601,7 @@ test("chrome-pipe's frozen clock is the one render-images always injected: no-ar
 
 const WORKFLOW = readFileSync(join(repo, ".github/workflows/pi-upgrade-check.yml"), "utf8");
 /** A small count as the workflow's prose writes it. */
-const WORDS = Object.freeze(["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen"]);
+const WORDS = Object.freeze(["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]);
 /** The widths as a sentence lists them: "a, b and c". */
 const listed = (ns) => (ns.length < 2 ? ns.join("") : `${ns.slice(0, -1).join(", ")} and ${ns.at(-1)}`);
 const PHONE_WIDTHS = SHELL_WIDTHS.filter((w) => w <= VIEWPORT.width);
@@ -1635,7 +1640,11 @@ test("the workflow: the width step is in the required contract-tests job, after 
 	const width = step(job, (line) => line === `      - name: ${STEP_NAME}`);
 	assert.ok(width.index > install.index, "after the install");
 	assert.equal(width.key("if"), "(success() || failure()) && steps.install.outcome == 'success'", "runs after a red suite, never without node_modules");
-	assert.equal(width.key("timeout-minutes"), "10");
+	assert.equal(width.key("timeout-minutes"), "15", "20 widths preserve prior coverage and add breakpoint neighbours; the step allows bounded browser time plus Chrome setup");
+	assert.equal(RUN_MS, 12 * 60_000, "the browser retains its hard 12-minute deadline");
+	assert.equal(NAV_MS, 20_000, "each navigation keeps its existing deadline");
+	assert.equal(Number(width.key("timeout-minutes")) * 60_000 - RUN_MS, 3 * 60_000, "the workflow reserves exactly three further minutes for download, verification and unzip");
+	assert.ok(job.some(line => line.includes(`${RUN_MS / 60_000} minutes a run`)), "workflow comment matches the script deadline");
 	assert.deepEqual(width.keys, ["name", "if", "timeout-minutes", "run"], "nothing else on the step: no env (a CONSOLE_WIDTH_PIN there would check CI against another pin) and no continue-on-error (a red that blocks nothing)");
 	assert.ok(!job.some((line) => /^\s*continue-on-error:/.test(line)), "no step of the required job, nor the job, may go red without failing it");
 	assert.ok(!job.some((line) => /^ {4}if:/.test(line)), "the required job has no job-level `if:`: a skipped required job reports as passed");
@@ -1664,7 +1673,7 @@ test("what the workflow's comment, the docs and the specs say the check does is 
 	assert.ok(comment.includes(`blind to one of those ${WORDS[desk + phone]} cannot pass`), "and what the two prove together, no more");
 	const read = (path) => prose(readFileSync(join(repo, path), "utf8"));
 	const docs = read("docs/console.md");
-	assert.ok(docs.includes(`at ${listed(PHONE_WIDTHS)} pixels as a phone and at ${listed(DESKTOP_WIDTHS)}`), "docs/console.md names the sweep's widths");
+	assert.ok(docs.includes(`at ${listed(PHONE_WIDTHS)} pixels as mobile-emulated windows and at ${listed(DESKTOP_WIDTHS)}`), "docs/console.md names the sweep's widths");
 	assert.ok(docs.includes(`one built to break ${WORDS[desk]} of its rules`) && docs.includes(`a phone's bar built to break ${WORDS[phone]}`), "and each control's count");
 	assert.ok(read("SECURITY.md").includes(`at ${WORDS[PHONE_WIDTHS.length]} phone widths and ${WORDS[DESKTOP_WIDTHS.length]} desktop widths`), "SECURITY.md counts them");
 	for (const spec of ["specs/design.md", "specs/requirements.md"]) {

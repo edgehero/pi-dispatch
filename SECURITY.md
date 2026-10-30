@@ -340,7 +340,7 @@ The threat model, and what answers each part:
   is cosmetic, since the cookie reaches no session, no page content and no write. The redesign left
   the CSP exactly as it was: one stylesheet and one script, both the console's own files, no inline style or script,
   no external resource, and a check in CI loads every page in a real browser, at a phone's width and its top bar at
-  two phone widths and eight desktop widths, and fails on any violation it reports.
+  two phone widths and eighteen desktop widths, and fails on any violation it reports.
 - **A leaked tokens file grants nothing.** The file stores sha256 hashes, never a token; a token is shown once, at
   `token add` or `token rotate`, and appears in no log, audit row or page. Revoking or rotating a token, or
   `sessions end-all`, ends the affected sessions on their next request.

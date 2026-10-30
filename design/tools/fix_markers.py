@@ -40,7 +40,7 @@ STATUS = {
     **{n: (BUILT, "Built by #748, Fleet with host and venue detail.") for n in ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"]},
     **{n: (BUILT, "Built by #749, Spend as five views.") for n in ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown",
                                               "TopologyScreen", "SpendPhone"]},
-    "TriggersScreen": (PLANNED, "#750. Its Watch and Dispatchers tabs are planned and proposed elsewhere."),
+    "TriggersScreen": (BUILT, "Built by #767 (#750). Watch links its existing screen; Dispatchers remains proposed."),
     "TriggerDetail": (BUILT, "Built by #767 (#750)."), "TriggerEditor": (BUILT, "Built by #767 (#750)."), "ConfigScreen": (BUILT, "Built by #767 (#750)."),
     **{n: (PLANNED, "#751.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
@@ -53,7 +53,7 @@ STATUS = {
     "ZeroTouchPhone": (PROPOSED, "#753. On a phone."),
     "ParkedDraftViewer": (PROPOSED, "#753. As a viewer sees it."), "ParkedDraftPhone": (PROPOSED, "#753. On a phone."),
     "RunLivePhone": (BUILT, "Built by #747, the run page on a phone."),
-    "TriggersPhone": (PLANNED, "#750, on a phone."), "TriggersViewer": (PLANNED, "#750. As a viewer sees it."),
+    "TriggersPhone": (BUILT, "Built by #767 (#750), on a phone."), "TriggersViewer": (BUILT, "Built by #767 (#750), as a viewer sees it."),
     "FleetPhone": (BUILT, "Built by #748, on a phone."), "FleetViewer": (BUILT, "Built by #748. As a viewer sees it."),
     "ParkedAnswerer": (PROPOSED, "#753. Sending with no person's confirm is not proposed: OQ-051."),
 }

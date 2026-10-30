@@ -1,0 +1,5412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>pi-dispatch console: Triggers</title>
+<link rel="stylesheet" href="/static/console.css">
+<script src="/static/console.js" defer></script>
+</head>
+<body data-page="triggers">
+<a class="skip" href="#main">Skip to content</a>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="i-runs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-parked" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path d="M10.2 8.7a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.6-.8 1.1"/><circle cx="12" cy="13.6" r=".95" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-spend" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16a8 8 0 1 1 16 0"/><path d="M12 16l3.5-4.5"/><circle cx="12" cy="16" r="1.4" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-fleet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4.5" width="16" height="6" rx="1.6"/><rect x="4" y="13.5" width="16" height="6" rx="1.6"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor" stroke="none"/><circle cx="7.5" cy="16.5" r="1" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-config" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h9M18 7h1M5 17h3M12 17h7M5 12h1M10 12h9"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/><circle cx="8" cy="12" r="2"/></symbol>
+<symbol id="i-audit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5V3.5h6v1M9 12l2 2 4-4"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.2-4.2"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></symbol>
+<symbol id="i-chev-l" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 7l-5 5 5 5"/></symbol>
+<symbol id="i-chev-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 7l5 5-5 5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor"/></symbol>
+<symbol id="i-theme" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol>
+<symbol id="i-git" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="6" r="2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="9" r="2"/><path d="M7 8v8M17 11c0 3-3 4-10 5"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M7.5 10l2.5 2-2.5 2M12.5 15h4"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 19 6v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/><path d="M9 12l2.2 2.2L15.5 10"/></symbol>
+<symbol id="i-queue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4 20 8l-8 4-8-4z"/><path d="M4 12l8 4 8-4M4 16l8 4 8-4"/></symbol>
+<symbol id="i-rerun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19.5 4.5V8H16"/></symbol>
+<symbol id="i-done" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 12.5 10 17l8.5-9.5"/></symbol>
+<symbol id="i-failed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7 7 17"/></symbol>
+<symbol id="i-refused" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7.5"/><path d="M6.8 17.2 17.2 6.8"/></symbol>
+<symbol id="i-attention" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4 21 19.5H3z"/><path d="M12 10v4.2"/><circle cx="12" cy="16.9" r="1.1" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-running" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></symbol>
+<symbol id="i-hourglass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4h10M7 20h10M8 4v2.5l4 5.5-4 5.5V20M16 4v2.5L12 12l4 5.5V20"/></symbol>
+<symbol id="i-beat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12.5h3.5l2-5 3.5 10 2.4-6.2 1.3 1.2H21"/></symbol>
+<symbol id="i-doctor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="4.5" width="15" height="15" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></symbol>
+<symbol id="i-cancel" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol>
+<symbol id="i-slot-held" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 11V8a4 4 0 0 1 8 0v3"/><rect x="5.5" y="11" width="13" height="9" rx="2"/></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M14 8l4 4-4 4M18 12H9"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol>
+<symbol id="i-fit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></symbol>
+<symbol id="i-steer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h11M11 7l5 5-5 5M20 5v14"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 11v5"/><circle cx="12" cy="8" r="1.1" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19l1.2-4.2L15.5 5.5l3 3-9.3 9.3z"/><path d="M13.5 7.5l3 3"/></symbol>
+<symbol id="i-chain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+<symbol id="i-slot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="10" rx="5"/><circle cx="9" cy="12" r="2" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15.5" r="3.5"/><path d="M10.5 13 19 4.5M15.5 8l2.5 2.5M17.5 6l2 2"/></symbol>
+<symbol id="i-tag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5h7.5l8 8-7 7L4 11z"/><circle cx="8.3" cy="8.8" r="1.3" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-comment" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10.5h-8.5L7 19.5V16H4z"/><path d="M8 9.5h8M8 12.5h5"/></symbol>
+<symbol id="i-pr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="6" r="2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/><path d="M7 8v8M17 16v-6a3 3 0 0 0-3-3h-3M13 4.5 10.5 7 13 9.5"/></symbol>
+<symbol id="i-issue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.4 2.3 3.5 5 3.5 8s-1.1 5.7-3.5 8c-2.4-2.3-3.5-5-3.5-8s1.1-5.7 3.5-8z"/></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5V8M15 3.5V8M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5v4"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path d="M10 20.5h4"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.5l2 2.5H19A1.5 1.5 0 0 1 20.5 9.5V17a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol>
+<symbol id="i-pie" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path d="M15 3.8A8.5 8.5 0 0 1 20.2 9H15z"/></symbol>
+<symbol id="i-flows" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="5" rx="2.5"/><rect x="14" y="15" width="7" height="5" rx="2.5"/><rect x="14" y="4" width="7" height="5" rx="2"/><path d="M10 6.5h4M17.5 9v6"/></symbol>
+<symbol id="i-skill" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h8l4 4v13H6z"/><path d="M14 3.5v4h4M9 12.5h6M9 16h4"/></symbol>
+<symbol id="i-flag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V4"/><path d="M6 4h11l-2.5 4L17 12H6"/></symbol>
+<symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4 20 8.5 12 13 4 8.5z"/><path d="M4 12.5 12 17l8-4.5"/><path d="M4 16.5 12 21l8-4.5"/></symbol>
+<pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-bg" width="6" height="6"/><rect class="hatch-ln" width="2" height="6"/></pattern>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0 10 5 0 10z"/></marker>
+</defs></svg>
+<div class="page">
+<header class="top"><a class="brandpill" href="/"><span class="brandpill__m" aria-hidden="true">pi</span>pi-dispatch</a><nav class="pillnav" aria-label="Console screens"><a href="/"><svg class="ic" aria-hidden="true"><use href="#i-home"></use></svg>Overview</a><a href="/runs"><svg class="ic" aria-hidden="true"><use href="#i-runs"></use></svg>Runs</a><a href="/parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"></use></svg>Parked</a><a href="/fleet"><svg class="ic" aria-hidden="true"><use href="#i-fleet"></use></svg>Fleet</a><a href="/insights"><svg class="ic" aria-hidden="true"><use href="#i-spend"></use></svg>Spend</a><a href="/triggers" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-bolt"></use></svg>Triggers</a><a href="/config"><svg class="ic" aria-hidden="true"><use href="#i-config"></use></svg>Configuration</a><details class="more"><summary aria-label="More: Audit" title="More"><svg class="ic" aria-hidden="true"><use href="#i-more"></use></svg></summary><div><a href="/audit"><svg class="ic" aria-hidden="true"><use href="#i-audit"></use></svg>Audit</a></div></details></nav><div class="top__end"><a class="roundbtn hide-phone top__search" href="/runs#q" aria-label="Search runs" title="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></a><button class="roundbtn" type="button" data-theme-toggle hidden aria-label="Theme: follows the system" title="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"></use></svg></button><span class="who" data-name="ops" data-role="operator" title="ops, Operator"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span><button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out"><svg class="ic" aria-hidden="true"><use href="#i-logout"></use></svg></button></div></header>
+<main id="main" tabindex="-1">
+<div class="titlebar"><div class="titlebar__lead"><h1>Triggers</h1><p class="titlebar__sub">What starts a job, in plain words. Rules in the triggers file.</p></div><div class="titlebar__end"><a class="btn btn--primary" href="/config/trigger-add">Add a trigger</a><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> · not live</span></span><a class="btn btn--sm btn--ghost" href="/triggers"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a></div></div>
+<div class="stack"><section id="p-tr-tabs" data-panel><nav class="tabs tr-tabs" aria-label="Triggers views">
+<a
+href="/triggers"
+aria-current="page"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"></use></svg>Rules
+<span class="count">4</span></a
+><a href="/watch"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-eye"></use></svg>Watch
+<span class="count">0</span></a
+><span class="tr-tab-unavailable" aria-disabled="true"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"></use></svg>Dispatchers
+<span class="count">proposed</span></span
+>
+</nav></section><section id="p-tr-viewer" data-panel></section></div><div class="cards-3 triggers-kpis"><section id="p-tr-count" data-panel><div class="card"><div class="card__head"><h2>Set up</h2></div><p class="kpi"><b>4</b><span>rules</span></p>
+<p class="tr-kp">
+1 on a schedule,
+3 from
+forges; 0 spent one-shots.
+</p>
+<p class="tr-problem">
+<svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"></use></svg>History uses saved row, type and forge, or a cron id. Editing or renumbering rules can associate runs from an older configuration; these are not stable rule identities.
+</p><p class="tr-problem">
+<svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"></use></svg>Counts and spend cover retained history only and may be lower bounds.
+</p></div></section><section id="p-tr-next" data-panel><div class="card"><div class="card__head"><h2>Next to fire</h2></div><p class="kpi"><b>1h 0m</b><span>until nightly</span></p>
+<p class="tr-kp">
+<time datetime="2026-10-08T16:39:08.000Z">2026-10-08 16:39 UTC</time> ·
+<a href="/config/trigger?index=0">row 1</a>
+</p></div></section><section id="p-tr-spend" data-panel><div class="card"><div class="card__head"><h2>Recorded this UTC week</h2></div><p class="kpi"><b>$0.01</b><span>attributed to these rules</span></p>
+<p class="tr-kp">
+at least 1 run records since
+<time datetime="2026-10-05T00:00:00.000Z">2026-10-05 00:00 UTC</time>.
+Coverage is retained or partially metered history. Shared
+flows alone never attribute a run.
+</p></div></section></div><div class="cols triggers-layout"><div class="stack triggers-rules"><section id="p-tr-filters" data-panel><nav class="tr-filters" aria-label="Show rules">
+<a class="fpill fpill--on" href="/triggers" aria-current="page">All <b>4</b></a><a class="fpill" href="/triggers?kind=schedule">Schedules <b>1</b></a><a class="fpill" href="/triggers?kind=label">Labels <b>1</b></a><a class="fpill" href="/triggers?kind=comment">Comments <b>1</b></a><a class="fpill" href="/triggers?kind=pull_request">Pull requests <b>1</b></a><a class="fpill" href="/triggers?kind=issue">Issues <b>0</b></a>
+</nav></section><section id="p-tr-week" data-panel><div class="card"><div class="card__head"><h2>When schedules fire</h2><span class="card__sub">UTC instants, not an execution guarantee</span></div><div class="tr-week-desktop">
+<div class="wk-scroll">
+<div class="wk">
+<div class="wk-labels">
+<p><b>1 · nightly</b><span>UTC</span></p><p><b>Quiet: github:acme/web</b><span>forge jobs only</span></p>
+</div>
+<div class="wk-track">
+<svg
+class="wk-svg"
+height="100"
+role="img"
+aria-label="Seven-day UTC projection: 1 schedules and 1 quiet windows. Filled dots are recorded runs; outlined dots are future fires."
+>
+<rect
+class="wk-band"
+x="0"
+y="5"
+width="100%"
+height="26"
+rx="13"
+/><circle
+class="wk-next"
+cx="9.912%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:39:08.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.325%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.335%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.345%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.355%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.365%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.375%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.385%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.395%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.405%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.415%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.425%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.435%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.444%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.454%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.464%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.474%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.484%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.494%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.504%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.514%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T15:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.524%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.534%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.544%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.554%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.563%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.573%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.583%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.593%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.603%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.613%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.623%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.633%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.643%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.653%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.663%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.673%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.683%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.692%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.702%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.712%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.722%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.732%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.742%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.752%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.762%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.772%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.782%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.792%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.802%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.812%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.821%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.831%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.841%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.851%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.861%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.871%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.881%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.891%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.901%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.911%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.921%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.931%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.940%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.950%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.960%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.970%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.980%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="9.990%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.000%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.010%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.020%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.030%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.040%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.050%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.060%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.069%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.079%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.089%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.099%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.109%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T16:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.119%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.129%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.139%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.149%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.159%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.169%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.179%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.188%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.198%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.208%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.218%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.228%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.238%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.248%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.258%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.268%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.278%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.288%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.298%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.308%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.317%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.327%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.337%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.347%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.357%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.367%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.377%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.387%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.397%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.407%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.417%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.427%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.437%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.446%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.456%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.466%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.476%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.486%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.496%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.506%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.516%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.526%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.536%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.546%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.556%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.565%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.575%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.585%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.595%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.605%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.615%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.625%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.635%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.645%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.655%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.665%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.675%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.685%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.694%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.704%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T17:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.714%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.724%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.734%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.744%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.754%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.764%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.774%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.784%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.794%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.804%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.813%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.823%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.833%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.843%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.853%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.863%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.873%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.883%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.893%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.903%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.913%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.923%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.933%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.942%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.952%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.962%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.972%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.982%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="10.992%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.002%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.012%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.022%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.032%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.042%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.052%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.062%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.071%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.081%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.091%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.101%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.111%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.121%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.131%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.141%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.151%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.161%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.171%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.181%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.190%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.200%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.210%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.220%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.230%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.240%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.250%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.260%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.270%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.280%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.290%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.300%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T18:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.310%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.319%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.329%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.339%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.349%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.359%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.369%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.379%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.389%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.399%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.409%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.419%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.429%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.438%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.448%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.458%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.468%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.478%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.488%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.498%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.508%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.518%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.528%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.538%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.548%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.558%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.567%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.577%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.587%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.597%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.607%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.617%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.627%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.637%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.647%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.657%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.667%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.677%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.687%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.696%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.706%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.716%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.726%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.736%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.746%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.756%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.766%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.776%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.786%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.796%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.806%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.815%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.825%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.835%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.845%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.855%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.865%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.875%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.885%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.895%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T19:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.905%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.915%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.925%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.935%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.944%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.954%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.964%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.974%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.984%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="11.994%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.004%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.014%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.024%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.034%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.044%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.054%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.063%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.073%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.083%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.093%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.103%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.113%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.123%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.133%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.143%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.153%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.163%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.173%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.183%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.192%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.202%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.212%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.222%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.232%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.242%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.252%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.262%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.272%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.282%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.292%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.302%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.312%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.321%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.331%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.341%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.351%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.361%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.371%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.381%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.391%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.401%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.411%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.421%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.431%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.440%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.450%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.460%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.470%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.480%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.490%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T20:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.500%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.510%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.520%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.530%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.540%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.550%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.560%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.569%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.579%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.589%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.599%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.609%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.619%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.629%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.639%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.649%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.659%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.669%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.679%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.688%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.698%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.708%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.718%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.728%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.738%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.748%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.758%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.768%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.778%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.788%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.798%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.808%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.817%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.827%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.837%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.847%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.857%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.867%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.877%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.887%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.897%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.907%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.917%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.927%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.937%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.946%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.956%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.966%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.976%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.986%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="12.996%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.006%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.016%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.026%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.036%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.046%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.056%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.065%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.075%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.085%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T21:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.095%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.105%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.115%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.125%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.135%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.145%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.155%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.165%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.175%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.185%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.194%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.204%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.214%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.224%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.234%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.244%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.254%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.264%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.274%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.284%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.294%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.304%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.313%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.323%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.333%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.343%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.353%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.363%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.373%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.383%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.393%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.403%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.413%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.423%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.433%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.442%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.452%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.462%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.472%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.482%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.492%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.502%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.512%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.522%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.532%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.542%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.552%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.562%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.571%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.581%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.591%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.601%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.611%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.621%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.631%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.641%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.651%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.661%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.671%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.681%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T22:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.690%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.700%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.710%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.720%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.730%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.740%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.750%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.760%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.770%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.780%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.790%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:10:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.800%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:11:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.810%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:12:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.819%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:13:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.829%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:14:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.839%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:15:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.849%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:16:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.859%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:17:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.869%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:18:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.879%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:19:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.889%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:20:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.899%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:21:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.909%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:22:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.919%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:23:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.929%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:24:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.938%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:25:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.948%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:26:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.958%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:27:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.968%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:28:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.978%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:29:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.988%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:30:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="13.998%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:31:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.008%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:32:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.018%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:33:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.028%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:34:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.038%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:35:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.048%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:36:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.058%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:37:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.067%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:38:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.077%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:39:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.087%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:40:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.097%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:41:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.107%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:42:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.117%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:43:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.127%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:44:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.137%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:45:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.147%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:46:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.157%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:47:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.167%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:48:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.177%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:49:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.187%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:50:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.196%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:51:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.206%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:52:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.216%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:53:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.226%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:54:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.236%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:55:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.246%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:56:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.256%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:57:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.266%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:58:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.276%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-08T23:59:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.286%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:00:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.296%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:01:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.306%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:02:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.315%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:03:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.325%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:04:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.335%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:05:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.345%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:06:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.355%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:07:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.365%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:08:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.375%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:09:00.000Z
+</title></circle
+><circle
+class="wk-next"
+cx="14.385%"
+cy="18"
+r="6"
+><title>
+Projected fire:
+2026-10-09T00:10:00.000Z
+</title></circle
+><rect
+class="wk-band"
+x="0"
+y="41"
+width="100%"
+height="26"
+rx="13"
+/><rect
+class="wk-quiet"
+x="0.000%"
+y="44"
+width="2.381%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-08T00:00:00.000Z
+to 2026-10-08T04:00:00.000Z
+</title></rect
+><rect
+class="wk-quiet"
+x="11.905%"
+y="44"
+width="4.762%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-08T20:00:00.000Z
+to 2026-10-09T04:00:00.000Z
+</title></rect
+><rect
+class="wk-quiet"
+x="26.190%"
+y="44"
+width="4.762%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-09T20:00:00.000Z
+to 2026-10-10T04:00:00.000Z
+</title></rect
+><rect
+class="wk-quiet"
+x="40.476%"
+y="44"
+width="4.762%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-10T20:00:00.000Z
+to 2026-10-11T04:00:00.000Z
+</title></rect
+><rect
+class="wk-quiet"
+x="54.762%"
+y="44"
+width="4.762%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-11T20:00:00.000Z
+to 2026-10-12T04:00:00.000Z
+</title></rect
+><rect
+class="wk-quiet"
+x="69.048%"
+y="44"
+width="4.762%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-12T20:00:00.000Z
+to 2026-10-13T04:00:00.000Z
+</title></rect
+><rect
+class="wk-quiet"
+x="83.333%"
+y="44"
+width="4.762%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-13T20:00:00.000Z
+to 2026-10-14T04:00:00.000Z
+</title></rect
+><rect
+class="wk-quiet"
+x="97.619%"
+y="44"
+width="2.381%"
+height="20"
+rx="8"
+><title>
+Quiet: github:acme/web: 2026-10-14T20:00:00.000Z
+to 2026-10-15T00:00:00.000Z
+</title></rect
+><text
+class="wk-ax"
+x="7.143%"
+y="92"
+text-anchor="middle"
+>10-08</text
+><line
+class="wk-day"
+x1="14.286%"
+x2="14.286%"
+y1="0"
+y2="72"
+/><text
+class="wk-ax"
+x="21.429%"
+y="92"
+text-anchor="middle"
+>10-09</text
+><line
+class="wk-day"
+x1="28.571%"
+x2="28.571%"
+y1="0"
+y2="72"
+/><text
+class="wk-ax"
+x="35.714%"
+y="92"
+text-anchor="middle"
+>10-10</text
+><line
+class="wk-day"
+x1="42.857%"
+x2="42.857%"
+y1="0"
+y2="72"
+/><text
+class="wk-ax"
+x="50.000%"
+y="92"
+text-anchor="middle"
+>10-11</text
+><line
+class="wk-day"
+x1="57.143%"
+x2="57.143%"
+y1="0"
+y2="72"
+/><text
+class="wk-ax"
+x="64.286%"
+y="92"
+text-anchor="middle"
+>10-12</text
+><line
+class="wk-day"
+x1="71.429%"
+x2="71.429%"
+y1="0"
+y2="72"
+/><text
+class="wk-ax"
+x="78.571%"
+y="92"
+text-anchor="middle"
+>10-13</text
+><line
+class="wk-day"
+x1="85.714%"
+x2="85.714%"
+y1="0"
+y2="72"
+/><text
+class="wk-ax"
+x="92.857%"
+y="92"
+text-anchor="middle"
+>10-14</text
+>
+<line
+class="wk-now"
+x1="9.317%"
+x2="9.317%"
+y1="0"
+y2="72"
+/>
+<text
+class="wk-now-label"
+x="9.317%"
+y="-10"
+text-anchor="middle"
+>
+now
+</text>
+</svg>
+</div>
+</div>
+</div>
+<p class="keyrow tr-week-key">
+<span><i class="wk-k wk-k--ran"></i>recorded run</span
+><span><i class="wk-k wk-k--next"></i>projected fire</span
+><span><i class="wk-k wk-k--quiet"></i>quiet window</span>
+</p>
+</div>
+<div class="tr-week-phone">
+<h3>Next fires</h3>
+<ul class="tr-next-fires">
+<li>
+<b><time datetime="2026-10-08T16:39:08.000Z">2026-10-08 16:39 UTC</time></b
+><a href="/config/trigger?index=0"
+>nightly · row 1</a
+><span
+>on time</span
+>
+</li>
+</ul>
+<p>
+<b>Quiet: github:acme/web</b> <time datetime="2026-10-08T00:00:00.000Z">2026-10-08 00:00 UTC</time> to
+<time datetime="2026-10-08T04:00:00.000Z">2026-10-08 04:00 UTC</time>;
+forge jobs only.
+</p>
+</div>
+<p class="tr-sub">
+Next 7 days, UTC. Schedule times use their owning host's verified timezone and
+are plotted as UTC instants. Forge repository quiet windows do not hold
+cron; matching local-folder and global windows can hold it.
+</p>
+<p class="tr-problem">
+1 · nightly:
+Dense schedule: only the first projected ticks are shown.
+</p></div></section><section id="p-tr-schedule" data-panel><div class="card card--flush"><div class="card__head"><h2>On a schedule</h2><span class="card__sub">1 rule</span></div><ol class="tr-list">
+<li class="tr">
+<span class="tr-n" aria-label="Row 1">1</span>
+<div class="tr-when">
+<span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg></span>
+<div>
+<p class="tr-k">Schedule</p>
+<p class="tr-s"><a href="/config/trigger?index=0">Schedule
+<span class="code">* * * * *</span></a></p>
+<p class="tr-sub">
+In
+<span class="code"
+>.../web</span
+>;
+owning host not published; schedule zone UTC
+</p>
+</div>
+</div>
+<span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"></use></svg></span>
+<div class="tr-then">
+<p class="tr-s">
+runs
+<span class="tr-flow"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"></use></svg>tidy</span
+>
+</p>
+<p class="tr-sub">
+deployment default model
+· each host&#39;s default venue
+</p>
+<p class="tr-chips">
+<span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-edit"></use></svg>Writes: edits its local folder</span>
+</p>
+</div>
+<div class="tr-status">
+<p class="tr-sub">
+No run in retained history
+</p><p class="tr-next">
+Next: <time datetime="2026-10-08T16:39:08.000Z">2026-10-08 16:39 UTC</time> ·
+on time · stalls
+unknown of 3
+</p>
+
+<p class="tr-sub">
+unknown runs in 30 days ·
+unknown spend this UTC week
+</p>
+
+</div>
+<a
+class="tr-open btn btn--sm btn--ghost"
+href="/config/trigger?index=0"
+aria-label="Open row 1"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"></use></svg></a
+>
+</li>
+</ol></div></section><section id="p-tr-github" data-panel><div class="card card--flush"><div class="card__head"><h2>From GitHub</h2><span class="card__sub">2 rules</span></div><ol class="tr-list">
+<li class="tr">
+<span class="tr-n" aria-label="Row 2">2</span>
+<div class="tr-when">
+<span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-tag"></use></svg></span>
+<div>
+<p class="tr-k">Label</p>
+<p class="tr-s"><a href="/config/trigger?index=1">An issue has labels matching any of <span class="code">go</span></a></p>
+<p class="tr-sub">
+A collaborator applies the matching issue label; the label event supplies the approval.
+In repositories wired to this deployment.
+</p>
+</div>
+</div>
+<span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"></use></svg></span>
+<div class="tr-then">
+<p class="tr-s">
+runs
+<span class="tr-flow"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"></use></svg>fix</span
+>
+</p>
+<p class="tr-sub">
+deployment default model
+· each host&#39;s default venue
+</p>
+<p class="tr-chips">
+<span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-spend"></use></svg>Costs more: 2 independent sandboxes</span>
+</p>
+</div>
+<div class="tr-status">
+<p>
+<span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"></use></svg>completed</span><time datetime="2026-10-08T15:38:08.000Z">2026-10-08 15:38 UTC</time>
+</p>
+<p class="tr-sub">
+<a class="mono" href="/run?id=gh-list">gh-list</a>
+</p>
+
+<p class="tr-sub">
+at least 1 runs in 30 days ·
+$0.01 (retained or partially metered history) this UTC week
+</p>
+
+</div>
+<a
+class="tr-open btn btn--sm btn--ghost"
+href="/config/trigger?index=1"
+aria-label="Open row 2"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"></use></svg></a
+><p class="tr-note tr-note-desktop">
+<svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>GitHub matches the issue&#39;s whole label set. Re-labelling or reopening can start another paid run, including each configured replica.</span>
+</p>
+<details class="tr-note tr-note-phone">
+<summary><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg>Good to know</summary>
+<p>GitHub matches the issue&#39;s whole label set. Re-labelling or reopening can start another paid run, including each configured replica.</p>
+</details>
+</li><li class="tr">
+<span class="tr-n" aria-label="Row 3">3</span>
+<div class="tr-when">
+<span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-comment"></use></svg></span>
+<div>
+<p class="tr-k">Comment</p>
+<p class="tr-s"><a href="/config/trigger?index=2">A comment contains
+<span class="code">@pi</span></a></p>
+<p class="tr-sub">
+The commenter&#39;s GitHub association must be OWNER, MEMBER or COLLABORATOR; the service&#39;s own comments are refused.
+In repositories wired to this deployment.
+</p>
+</div>
+</div>
+<span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"></use></svg></span>
+<div class="tr-then">
+<p class="tr-s">
+runs
+<span class="tr-flow"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"></use></svg>fix</span
+>
+</p>
+<p class="tr-sub">
+deployment default model
+· each host&#39;s default venue
+</p>
+<p class="tr-chips">
+<span class="chip tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-edit"></use></svg>Writes: keeps a session</span>
+</p>
+</div>
+<div class="tr-status">
+<p class="tr-sub">
+No run in retained history
+</p>
+<p class="tr-sub">
+unknown runs in 30 days ·
+unknown spend this UTC week
+</p>
+
+</div>
+<a
+class="tr-open btn btn--sm btn--ghost"
+href="/config/trigger?index=2"
+aria-label="Open row 3"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"></use></svg></a
+><p class="tr-note tr-note-desktop">
+<svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>A comment can select another declared flow. It still uses this comment rule&#39;s options and reviewed constraints.</span>
+</p>
+<details class="tr-note tr-note-phone">
+<summary><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg>Good to know</summary>
+<p>A comment can select another declared flow. It still uses this comment rule&#39;s options and reviewed constraints.</p>
+</details>
+</li>
+</ol></div></section><section id="p-tr-gitlab" data-panel><div class="card card--flush"><div class="card__head"><h2>From GitLab</h2><span class="card__sub">1 rule</span></div><ol class="tr-list">
+<li class="tr">
+<span class="tr-n" aria-label="Row 4">4</span>
+<div class="tr-when">
+<span class="tile tile--sm tr-kind"><svg class="ic" aria-hidden="true"><use href="#i-pr"></use></svg></span>
+<div>
+<p class="tr-k">Pull request</p>
+<p class="tr-s"><a href="/config/trigger?index=3">A pull request
+has action <span class="code">open</span></a></p>
+<p class="tr-sub">
+The actor must be a GitLab project member with Developer access (30) or higher, including inherited membership.
+In repositories wired to this deployment.
+</p>
+</div>
+</div>
+<span class="tr-arrow" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-chev-r"></use></svg></span>
+<div class="tr-then">
+<p class="tr-s">
+runs
+<span class="tr-flow"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"></use></svg>review</span
+>
+</p>
+<p class="tr-sub">
+deployment default model
+· each host&#39;s default venue
+</p>
+<p class="tr-chips">
+
+</p>
+</div>
+<div class="tr-status">
+<p class="tr-sub">
+No run in retained history
+</p>
+<p class="tr-sub">
+unknown runs in 30 days ·
+unknown spend this UTC week
+</p>
+
+</div>
+<a
+class="tr-open btn btn--sm btn--ghost"
+href="/config/trigger?index=3"
+aria-label="Open row 4"
+><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-r"></use></svg></a
+><p class="tr-note tr-note-desktop">
+<svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>On GitLab, changing labels counts as an update. A merge does not fire a close rule.</span>
+</p>
+<details class="tr-note tr-note-phone">
+<summary><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg>Good to know</summary>
+<p>On GitLab, changing labels counts as an update. A merge does not fire a close rule.</p>
+</details>
+</li>
+</ol></div></section><section id="p-tr-forgejo" data-panel></section><section id="p-tr-azure" data-panel></section><section id="p-tr-unknown" data-panel></section></div><div class="stack triggers-check-side"><section id="p-tr-check" data-panel><div class="card"><div class="card__head"><h2>Which rule would run?</h2><span class="card__sub">Hypothetical matching, not delivery authentication</span></div><p class="tr-p">
+Describe an event and see which rule matches, and why the others do not.
+Nothing is sent to a forge or spent.
+</p>
+<p class="tr-check-phone-link">
+<a class="btn btn--primary" href="/triggers/check"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-search"></use></svg>Check an event</a>
+</p>
+<div class="tr-check-embedded"><form data-trigger-check autocomplete="off">
+<fieldset data-trigger-check-fields disabled>
+<legend class="sr">Describe a hypothetical forge event</legend>
+<div class="tr-form">
+<div class="field" data-check-field="forge">
+<label
+>Forge<select class="select" name="forge">
+<option value="github">github</option><option value="gitlab">gitlab</option><option value="forgejo">forgejo</option><option value="azure">azure</option>
+</select></label
+>
+</div>
+<div class="field" data-check-field="repository">
+<label
+>Repository<input
+class="input input--code"
+name="repository"
+maxlength="200"
+placeholder="owner/repository"
+required
+autocomplete="off"
+spellcheck="false"
+/></label>
+</div>
+<div class="field" data-check-field="event">
+<label
+>What happens<select class="select" name="event">
+<option value="issue-labeled" data-check-forge="github">
+issue-labeled
+</option><option value="issue-opened" data-check-forge="github">
+issue-opened
+</option><option value="issue-comment" data-check-forge="github">
+issue-comment
+</option><option value="pull-request" data-check-forge="github">
+pull-request
+</option><option value="pull-request-comment" data-check-forge="github">
+pull-request-comment
+</option><option value="issue-closed" data-check-forge="github">
+issue-closed
+</option><option value="issue-labeled" data-check-forge="gitlab">
+issue-labeled
+</option><option value="issue-opened" data-check-forge="gitlab">
+issue-opened
+</option><option value="issue-comment" data-check-forge="gitlab">
+issue-comment
+</option><option value="pull-request" data-check-forge="gitlab">
+pull-request
+</option><option value="pull-request-comment" data-check-forge="gitlab">
+pull-request-comment
+</option><option value="issue-closed" data-check-forge="gitlab">
+issue-closed
+</option><option value="issue-labeled" data-check-forge="forgejo">
+issue-labeled
+</option><option value="issue-opened" data-check-forge="forgejo">
+issue-opened
+</option><option value="issue-comment" data-check-forge="forgejo">
+issue-comment
+</option><option value="pull-request" data-check-forge="forgejo">
+pull-request
+</option><option value="pull-request-comment" data-check-forge="forgejo">
+pull-request-comment
+</option><option value="issue-closed" data-check-forge="forgejo">
+issue-closed
+</option><option value="issue-labeled" data-check-forge="azure">
+issue-labeled
+</option><option value="issue-opened" data-check-forge="azure">
+issue-opened
+</option><option value="issue-comment" data-check-forge="azure">
+issue-comment
+</option><option value="pull-request" data-check-forge="azure">
+pull-request
+</option><option value="pull-request-comment" data-check-forge="azure">
+pull-request-comment
+</option>
+</select></label
+>
+</div><div class="field" data-check-field="actor">
+<label
+>Who acts (assumed authority)<select class="select" name="actor">
+<option value="write">write</option><option value="read">read</option><option value="self">self</option>
+</select></label
+>
+</div>
+<div class="field" data-check-field="number">
+<label
+>Issue or pull request number<input
+class="input"
+type="number"
+name="number"
+min="1"
+max="2147483647"
+placeholder="1"
+autocomplete="off"
+/></label>
+</div>
+<div class="field" data-check-field="action">
+<label
+>Pull request action<select class="select" name="action">
+<option value="labeled" data-check-forge="github">
+labeled
+</option><option value="opened" data-check-forge="github">
+opened
+</option><option value="synchronize" data-check-forge="github">
+synchronize
+</option><option value="reopened" data-check-forge="github">
+reopened
+</option><option value="review_submitted" data-check-forge="github">
+review_submitted
+</option><option value="closed" data-check-forge="github">
+closed
+</option><option value="open" data-check-forge="gitlab">
+open
+</option><option value="update" data-check-forge="gitlab">
+update
+</option><option value="reopen" data-check-forge="gitlab">
+reopen
+</option><option value="approved" data-check-forge="gitlab">
+approved
+</option><option value="close" data-check-forge="gitlab">
+close
+</option><option value="label_updated" data-check-forge="forgejo">
+label_updated
+</option><option value="opened" data-check-forge="forgejo">
+opened
+</option><option value="synchronized" data-check-forge="forgejo">
+synchronized
+</option><option value="reopened" data-check-forge="forgejo">
+reopened
+</option><option value="closed" data-check-forge="forgejo">
+closed
+</option><option value="created" data-check-forge="azure">
+created
+</option><option value="updated" data-check-forge="azure">
+updated
+</option>
+</select></label
+>
+</div><div class="field" data-check-field="prAuthor">
+<label
+>Pull request author&#39;s authority<select class="select" name="prAuthor">
+<option value="write">write</option><option value="read">read</option>
+</select></label
+>
+</div><div class="field" data-check-field="reviewState">
+<label
+>Review verdict<select class="select" name="reviewState">
+<option value="approved">approved</option><option value="changes_requested">changes_requested</option><option value="commented">commented</option>
+</select></label
+>
+</div><div class="field" data-check-field="reviewBody">
+<label
+>Review body<select class="select" name="reviewBody">
+<option value="present">present</option><option value="empty">empty</option>
+</select></label
+>
+</div>
+<div class="field tr-span" data-check-field="labels">
+<label
+>Current labels, one per line<textarea
+class="textarea"
+name="labels"
+rows="2"
+maxlength="4128"
+spellcheck="false"
+></textarea>
+</label>
+</div>
+<div class="field tr-span" data-check-field="previousLabels">
+<label
+>Previous labels, one per line<textarea
+class="textarea"
+name="previousLabels"
+rows="2"
+maxlength="4128"
+spellcheck="false"
+></textarea>
+</label>
+</div>
+<div class="field tr-span" data-check-field="comment">
+<label
+>Comment<textarea
+class="textarea"
+name="comment"
+rows="3"
+maxlength="4096"
+spellcheck="false"
+></textarea>
+</label>
+</div>
+</div>
+<p class="tr-sub">
+Authority is a hypothetical assumption. Comment text stays in this
+request; it is never placed in the address bar or audit log.
+</p>
+<button class="btn btn--primary" type="submit">
+<svg class="ic ic--sm" aria-hidden="true"><use href="#i-search"></use></svg>Check an event
+</button>
+</fieldset>
+<noscript
+><p class="tr-problem">
+Enable JavaScript to check an event. Rules, filters and navigation
+remain available; no event text can be submitted into the address bar.
+</p></noscript
+>
+<div
+data-trigger-check-result
+role="region"
+aria-label="Event check result"
+aria-live="polite"
+tabindex="-1"
+>
+<p class="tr-sub">
+Describe an event to see hypothetical matching. Nothing will be sent to
+a forge, queued or spent.
+</p>
+</div>
+</form></div></div></section></div></div><div id="confirm-slot" class="cslot" role="region" aria-live="polite" aria-label="Preview" hidden><div class="confirm confirm--busy" aria-busy="true"><p class="confirm__h"><span data-slot-icon="busy"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"></use></svg></span><span data-slot-icon="said"><svg class="ic" aria-hidden="true"><use href="#i-attention"></use></svg></span><span data-slot-title>Previewing</span></p><ul class="confirm__list confirm__ghost"><li><span></span></li><li><span></span></li></ul><p class="confirm__note" data-slot-message hidden></p><div class="confirm__act"><button class="btn btn--confirm" type="button" data-confirm disabled>Confirm</button><button class="btn btn--ghost" type="button" data-cancel>Cancel</button></div></div></div>
+</main>
+</div>
+</body>
+</html>

@@ -1,3 +1,4 @@
+import { TRIGGER_LIST_DRAW } from "./trigger-list-goldens.mjs";
 import assert from "node:assert/strict";
 import { TRIGGER_DRAW } from "./trigger-goldens.mjs";
 import { SPEND_DRAW } from "./spend-goldens.mjs";
@@ -792,6 +793,7 @@ const RUN_CARD_STATES = {
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
 const DRAW = {
+  ...TRIGGER_LIST_DRAW,
   ...TRIGGER_DRAW,
   ...SPEND_DRAW,
   ...FLEET_DRAW,

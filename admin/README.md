@@ -325,3 +325,9 @@ shares the console's Fire now planner, reserve and refusals. It fires a served c
 person confirms and its folder, committed flow, clean tree and hourly attempt count pass the same bounds
 as `dispatch_run`. Configure `PI_DISPATCH_RUN_ROOTS` in the pi or console process environment to grant this.
 Viewers see trigger facts and runs without private prompt text or write controls.
+
+The Triggers page groups rules by schedule and forge, with retained history, spend and a timezone-aware
+schedule view. Its phone and viewer layouts keep the same facts readable. **Check an event** uses the
+receiver filters to explain a hypothetical match without a forge call, queue write or spend. It is a
+viewer read, available even on a read-only console; entered permissions remain assumptions and comment
+text is neither saved nor logged. Rules and filters still work without JavaScript.

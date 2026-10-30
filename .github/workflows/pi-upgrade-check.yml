@@ -478,11 +478,12 @@ jobs:
       # required check. The goldens it loads are the ones the suite above pins byte for byte, so this sees
       # exactly what the console serves. Then the top bar, the part that changes with the window: every page
       # drawn for an operator, a viewer, a read-only console and the longest token name, at 320 and 375 px
-      # as a phone and at 761, 800, 940, 1024, 1180, 1280, 1440 and 1600 px, read with each live word, the
+      # as a phone and at 759, 760, 761, 800, 940, 1024, 1058, 1059, 1060, 1180, 1280, 1440,
+      # 1599, 1600, 1601, 1759, 1760 and 1761 px, read with each live word, the
       # theme button shown and hidden, and the Parked count as drawn, emptied and five digits long, fails on
       # a page that scrolls sideways in any of those, any two parts of the bar that overlap, a navigation
       # pill not shown whole above a phone's width, a bar whose height changes with any of them (a phone's
-      # too), a bar that is not one row from 1440 px on a console that is not read-only, a name or role word
+      # too), a bar that is not one row from 1600 px on a console that is not read-only, a name or role word
       # cut without an ellipsis or a title, or a More menu that a click (on a phone, with its button cut at
       # the row's edge) does not open whole inside the window right under its own button; and More must open
       # under its button with the page's script off too. Two negative controls run first, a bar built to
@@ -507,12 +508,14 @@ jobs:
       # maintainer's Mac said. worker/test/console-width-check.test.mjs runs this block with its tools
       # stubbed and holds that order.
       #
-      # timeout-minutes: the script has its own deadlines (20 s a navigation, 6 minutes a run); this caps
-      # the download and the unzip too, so a wait nothing ends frees the job long before its 45 minutes.
+      # timeout-minutes: the script has its own deadlines (20 s a navigation, 12 minutes a run).
+      # The 20-width shell sweep keeps all prior checks and adds breakpoint neighbours; 15 minutes
+      # gives its bounded run 3 minutes for the pinned Chrome download, verification and unzip,
+      # while a wait nothing ends still frees the job long before its 45 minutes.
       # Quoted: unquoted, YAML reads " #737)" as a comment and the step is named "...(issue".
-      - name: "The console under its CSP at two phone widths and eight desktop widths (issue #737)"
+      - name: "The console under its CSP at two phone widths and eighteen desktop widths (issue #737)"
         if: (success() || failure()) && steps.install.outcome == 'success'
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           zip="$RUNNER_TEMP/chrome-linux64.zip"
           url="$(node .github/scripts/console-width-check.mjs --check-pin --platform linux64)"

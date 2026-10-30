@@ -1,0 +1,499 @@
+{
+  "card": "TriggersPhone",
+  "pr": 750,
+  "panels": [
+    "p-tr-count",
+    "p-tr-check",
+    "p-tr-week",
+    "p-tr-schedule",
+    "p-tr-github",
+    "p-tr-gitlab"
+  ],
+  "elements": [
+    {
+      "el": "p-tr-tabs",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersNavigation",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Rules"
+    },
+    {
+      "el": "p-tr-viewer",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersViewer",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Viewer."
+    },
+    {
+      "el": "p-tr-count",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCount",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Set up"
+    },
+    {
+      "el": "p-tr-next",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersNext",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Next to fire"
+    },
+    {
+      "el": "p-tr-spend",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersSpend",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Recorded this UTC week"
+    },
+    {
+      "el": "p-tr-filters",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersFilters",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "All"
+    },
+    {
+      "el": "p-tr-week",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersWeek",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "When schedules fire"
+    },
+    {
+      "el": "p-tr-schedule",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersSchedules",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "On a schedule"
+    },
+    {
+      "el": "p-tr-github",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "From GitHub"
+    },
+    {
+      "el": "p-tr-gitlab",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGitlab",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "From GitLab"
+    },
+    {
+      "el": "p-tr-forgejo",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersForgejo",
+      "golden": [
+        "triggers.viewer"
+      ]
+    },
+    {
+      "el": "p-tr-azure",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersAzure",
+      "golden": [
+        "triggers.viewer"
+      ]
+    },
+    {
+      "el": "p-tr-unknown",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersUnknown",
+      "golden": [
+        "triggers.viewer"
+      ]
+    },
+    {
+      "el": "p-tr-check",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCheck",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Which rule would run?"
+    },
+    {
+      "el": "Numbers: count by kind, next fire and current UTC week spend",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCount",
+      "panel": "p-tr-count",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "rules"
+    },
+    {
+      "el": "Next published schedule and raw row number",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersNext",
+      "panel": "p-tr-next",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "row"
+    },
+    {
+      "el": "Recorded past dots and projected outlined future ticks in verified owning timezone",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersWeek",
+      "panel": "p-tr-week",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "recorded run"
+    },
+    {
+      "el": "Rolling seven UTC days, quiet windows and truthful local/global scope",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersWeek",
+      "panel": "p-tr-week",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Next 7 days, UTC"
+    },
+    {
+      "el": "Rules grouped by schedule, then forge",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersSchedules",
+      "panel": "p-tr-schedule",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "On a schedule"
+    },
+    {
+      "el": "One-based saved row number, matching detail/editor index",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "/config/trigger?index="
+    },
+    {
+      "el": "When sentence, permitted sender and repository scope",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "When"
+    },
+    {
+      "el": "Runs flow pill with configured model and venue",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Runs"
+    },
+    {
+      "el": "Named glyph chips describe paid or broader options",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Costs more"
+    },
+    {
+      "el": "Last outcome and 30-day counts with UTC week spend and missing-history disclosure",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "30 days"
+    },
+    {
+      "el": "Forge surprises: repeat labels and comment flow choice",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Good to know"
+    },
+    {
+      "el": "GitLab label-update semantics",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGitlab",
+      "panel": "p-tr-gitlab",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Good to know"
+    },
+    {
+      "el": "Spent one-shot state and instruction to re-arm",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "panels/triggers-spent.operator"
+      ],
+      "shows": "Spent"
+    },
+    {
+      "el": "Which rule would run is read-only and available to both roles",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCheck",
+      "panel": "p-tr-check",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Nothing is sent"
+    },
+    {
+      "el": "Check describes forge, repository, event and hypothetical authority",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCheck",
+      "panel": "p-tr-check",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Who acts"
+    },
+    {
+      "el": "Phone action opens the separate checker page",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCheck",
+      "panel": "p-tr-check",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "/triggers/check"
+    },
+    {
+      "el": "Phone next-fire list replaces dense week strip",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersWeek",
+      "panel": "p-tr-week",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Next fires"
+    },
+    {
+      "el": "Tabs scroll, Watch navigates and Dispatchers stays proposed",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersNavigation",
+      "panel": "p-tr-tabs",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "proposed"
+    },
+    {
+      "el": "Match uses receiver winner, per-row reasons and explicitly unverified delivery gates",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#renderTriggerCheckResult",
+      "panel": "p-tr-check",
+      "golden": [
+        "panels/trigger-check-match.viewer"
+      ],
+      "shows": [
+        "Rule 2 would match",
+        "Checks a real delivery must still pass"
+      ]
+    },
+    {
+      "el": "No match is a reasoned result, not an error",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#renderTriggerCheckResult",
+      "panel": "p-tr-check",
+      "golden": [
+        "panels/trigger-check-no-match.viewer"
+      ],
+      "shows": "No rule would match this description"
+    },
+    {
+      "el": "Malformed input refuses without echoing supplied content",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#renderTriggerCheckResult",
+      "panel": "p-tr-check",
+      "golden": [
+        "panels/trigger-check-invalid.viewer"
+      ],
+      "shows": "The event could not be checked"
+    },
+    {
+      "el": "Unreadable configuration is unknown, not zero rules",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCount",
+      "panel": "p-tr-count",
+      "golden": [
+        "panels/triggers-unreadable.viewer"
+      ],
+      "shows": "The triggers file is not available"
+    },
+    {
+      "el": "Empty valid configuration has no fabricated rows",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCount",
+      "panel": "p-tr-count",
+      "golden": [
+        "panels/triggers-empty.viewer"
+      ],
+      "shows": "0"
+    },
+    {
+      "el": "Missing history stays unknown",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersGithub",
+      "panel": "p-tr-github",
+      "golden": [
+        "panels/triggers-history-unknown.viewer"
+      ],
+      "shows": "History unavailable"
+    },
+    {
+      "el": "Retained bounded history is labelled as lower bounds",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersCount",
+      "panel": "p-tr-count",
+      "golden": [
+        "panels/triggers-history-cut.operator"
+      ],
+      "shows": "retained history"
+    },
+    {
+      "el": "Missing owning timezone forbids guessed future expansion",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersWeek",
+      "panel": "p-tr-week",
+      "golden": [
+        "panels/triggers-zone-unknown.operator"
+      ],
+      "shows": "timezone"
+    },
+    {
+      "el": "Read-only deployment keeps checker and omits adding",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersViewer",
+      "panel": "p-tr-viewer",
+      "golden": [
+        "panels/triggers-readonly.operator"
+      ],
+      "shows": "Changes are off"
+    },
+    {
+      "el": "Viewer explains operator-only changes",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersViewer",
+      "panel": "p-tr-viewer",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Adding and changing rules is for operators"
+    },
+    {
+      "el": "Dense schedule projection is explicitly bounded",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/triggers.mjs#triggersWeek",
+      "panel": "p-tr-week",
+      "golden": [
+        "panels/triggers-dense.operator"
+      ],
+      "shows": "Dense schedule: only the first projected ticks are shown."
+    },
+    {
+      "el": "Card fixture seven rules, sample run counts, spend, last runs, spent id and example comment",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Published card numbers and sample checker text are illustrative. Production goldens use the seeded deployment, real retained records and actual receiver filters; no sample count or match is claimed as a live fact."
+    },
+    {
+      "el": "Per-rule selectors, scope, flow/model/venue, chip options, one-shot state, history, next fires and pause windows",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/trigger-list.mjs#triggerListOf",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "rules"
+    },
+    {
+      "el": "Viewer reads detail without Add, Edit, Delete or Fire now; phone shares role policy",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "triggers.viewer"
+      ],
+      "shows": "Rules from the triggers file."
+    }
+  ]
+}

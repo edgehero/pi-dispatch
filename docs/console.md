@@ -422,12 +422,9 @@ called "a field it was sent", and a value you sent is never repeated. The AI too
 its trigger type does not take the same way, before you are asked to confirm ([`triggers.md`](triggers.md)); the
 console's own trigger form says "this form does not take ..." in the same words.
 
-**Row numbers.** The pages drawn in the new design count their rows from 1 (the audit page's "row 41" is the 41st
-row the log ever held). The Configuration page still draws its tables and forms by the 0-based index its files use (the
-Triggers table's "#" column, the "Row #" fields, "History row # (newest is 0)"), so until its row buttons arrive
-everything the console says about one of its rows uses that same index, worded "index N": "Delete trigger at index
-1", "pause window at index 0", the opted-out triggers of a secret bundle. In pi, the `/dispatch` panel and the tools
-count from 1 ("Delete trigger #2" for index 1).
+**Row numbers.** Configuration and Triggers show rows counted from 1, including their edit, delete and
+preview sentences. Buttons carry the existing zero-based machine index invisibly. Runs filters and tool
+parameters retain their documented machine identities; the audit page's row number is its chain position.
 
 Writes are refused (403) when:
 
@@ -546,12 +543,12 @@ set). It then checks:
 
 ## The screens
 
-A viewer sees every page except the audit log, never the reason text of a failed job (below), and never a full local
+A viewer sees the read pages, but not the audit log or trigger-add editor, never the reason text of a failed job (below), and never a full local
 folder path on the insights page (an operator can ask for those with `?paths=full`). The buttons and
 forms that change something ([Actions](#actions)) are shown to operators only, and not at all on a read only
 console.
 
-Every page has the same bar along the top: the navigation (Overview, Runs, Parked, Fleet, Spend and Configuration), a
+Every page has the same bar along the top: the navigation (Overview, Runs, Parked, Fleet, Spend, Triggers and Configuration), a
 round **Search** button, which opens the runs page with its search field ready to type in
 ([Finding runs](#finding-runs)), the live pill on the pages that update themselves ([Live updates](#live-updates)), the
 theme button ([Look and theme](#look-and-theme)), a "Read-only console" chip when `PI_CONSOLE_READ_ONLY=1` is set, who
@@ -559,17 +556,17 @@ is signed in, and Sign out. Spend opens `/insights`, with five linked views. Par
 kept current on the pages that update themselves; it shows no number when none is waiting or the count could not be
 read. An operator also gets **More**, which holds the audit log; a viewer has no More. The first thing the keyboard
 reaches is a "Skip to content" link, which jumps past the bar. A read-only console also says so in a banner under every
-screen's title ("This console is read-only"): every change is refused and no page shows a form.
+screen's title ("This console is read-only"): every change is refused. The event checker remains available because it only reads.
 
 The bar's layout depends only on the window's width and on whether the console is read-only, never on what the bar
 shows, so it does not move, on a phone or a desktop, when the live pill's state changes, when the theme button
 appears or when the Parked count changes. The theme button's place is kept for it while the page loads (and, without
 JavaScript, stays an empty gap), so showing it moves nothing either.
 
-- On a wide window (1440 pixels or more, 1600 on a read-only console) the bar is one row: pi-dispatch, the
+- On a wide window (1600 pixels or more, 1760 on a read-only console) the bar is one row: pi-dispatch, the
   navigation, then the rest.
 - On a narrower desktop window it is two rows: pi-dispatch with the rest of the bar, then the navigation across the
-  whole width with every pill in view (below 940 pixels it breaks after Fleet onto a second line). Where the first row
+  whole width with every pill in view (below 1060 pixels it breaks after Fleet onto a second line). Where the first row
   is short of room the signed-in name and role give way, cut with an ellipsis; the tooltip over who is signed in
   holds both whole ("ops, Operator").
 - On a phone (760 pixels or less) the navigation is a row of its own that scrolls sideways. The page you are on is
@@ -577,7 +574,7 @@ JavaScript, stays an empty gap), so showing it moves nothing either.
   focus ring included; the row never scrolls back by itself, so where you scrolled it stays.
 - The Search button is not on a phone's bar (the runs page keeps its search field in view there), and on a desktop it is
   left out for its own width (56 pixels) just past the three widths where the bar is tightest (761 pixels on a read-only
-  console, 1440 on any other, and 1600 on a read-only console), so the signed-in name never has less room than it had
+  console, 1600 on any other, and 1760 on a read-only console), so the signed-in name never has less room than it had
   without it. It is a plain link to `/runs#q`: without JavaScript the runs page opens scrolled to the field, and with it
   the field takes the keyboard's focus.
 
@@ -681,12 +678,12 @@ its slot, another such host gone from the registry with a job left in its queue,
 Scheduled, and a long doctor result), and the preview bar under the Hosts card with the longest names in it (Resume
 fleet with two such hosts' queues paused, which its lines and its Undo name, and one such queue's Pause, which its
 lines, its Undo and its Confirm button name). The top bar is checked too, at 320 and 375
-pixels as a phone and at 761, 800, 940, 1024, 1180, 1280, 1440 and 1600, for an operator, a viewer, a read-only
+pixels as mobile-emulated windows and at 759, 760, 761, 800, 940, 1024, 1058, 1059, 1060, 1180, 1280, 1440, 1599, 1600, 1601, 1759, 1760 and 1761, for an operator, a viewer, a read-only
 console and the longest name a token can have, with the bar read in every combination of the live pill's states,
 the theme button shown and hidden, and the Parked count as drawn, emptied and five digits long. In each of those
 reads no two of its parts overlap and the page does not scroll sideways; above a phone's width every pill of the
 navigation is wholly in view, focus ring included; at every width, a phone's too, the bar keeps its height through
-all of those reads; from 1440 pixels the bar of a console that is not read-only is one row, as the design draws it; a
+all of those reads; from 1600 pixels the bar of a console that is not read-only is one row, as the design draws it; a
 name or role that is cut ends in an ellipsis and its tooltip holds it whole, and the longest name is always cut where
 the bar shows it; and More, opened by a click (on a phone with its button left half scrolled out of the navigation and
 nothing focused, as a screen reader's activation is), opens inside the window right under its button, its button
@@ -1934,6 +1931,37 @@ Every edit previews a diff before confirmation, with where it is written, when i
 ticket and Undo. Refused fields keep their input and show the reason beside the field. A read-only console
 says forms are off. Editing a trigger also supports `maxTurns` and the progress, statusComment, steer and
 recover flags; cron does not offer statusComment or recover.
+
+### The rules page and event checker
+
+Triggers (`/triggers`) groups schedules and forge rules. Each row says when it matches, who may start it,
+which flow it runs and what its options add. Kind filters work as ordinary links. A row opens its trigger
+page; an operator can add a trigger. Viewers see the same rule facts, history and checker without write controls.
+The Watch tab opens the existing Watch page. Dispatchers is marked proposed and has no route.
+
+The summary and rows distinguish retained 30-day run counts from metered spend since Monday 00:00 UTC.
+History limits, unreadable records, missing prices and ambiguous attribution are disclosed rather than
+turned into zero. A row index or shared flow alone cannot prove that an old run belongs to the current rule.
+
+The schedule strip covers seven UTC dates starting today. Recurrences follow the owning worker's published
+timezone, then appear as UTC instants. If that zone is unknown or conflicting, the page says projection is
+unavailable; a published next fire can still be shown. Filled run marks require observed matching history.
+Future fires use outlined marks, and dense projections disclose their bound. Quiet windows use the worker's
+scope, timezone and date rules: forge/repository windows leave local cron runs alone; folder/global windows
+can hold them too. On a phone, a readable next-fire list replaces the chart.
+
+**Which rule would run?** describes an event and applies the same grouping and filters as the receiver.
+The result identifies a match, special steering or parked routing, first-wins precedence and why the other
+rules do not match. A comment can borrow another allowed flow while retaining the comment rule's settings.
+The actor and author permissions are the assumptions you enter, not a live permission lookup. Real signature,
+identity, deduplication, job-image and spend checks still happen when a delivery arrives. Nothing is sent or spent.
+
+The checker is a viewer read, usable on a read-only console. On a phone, **Check an event** opens
+`/triggers/check`. Its JSON POST keeps comment text out of URLs; input is neither saved nor logged, and
+results contain no private trigger prompt text. Invalid configuration refuses the whole check. Loading,
+refusal and connection/session errors stay beside the form; a newer input cannot acquire an older answer.
+Without JavaScript the checker explains that it is unavailable, and its controls remain disabled; rules,
+kind filters and native disclosures still work.
 
 ### Fire a cron trigger now
 

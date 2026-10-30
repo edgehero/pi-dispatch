@@ -163,7 +163,7 @@ export const configTriggers = fromSnapshot("Triggers", (s, view) => {
     return html`<p class="warn">${trouble}</p>
       ${triggersEditor(view)}`;
   const list = Array.isArray(v.triggers) ? v.triggers : [];
-  return html`${list.some((t) => t.type === "watch")
+  return html`<p><a class="btn" href="/triggers">Read trigger rules and check an event</a></p>${list.some((t) => t.type === "watch")
     ? html`<p><a href="/watch">Watch findings and boards</a></p>`
     : null}${table(
     "Triggers",

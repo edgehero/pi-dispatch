@@ -61,7 +61,7 @@ import { themeLabel } from "./theme.mjs";
  * their issues land. Every name is a `PAGES` key with a `nav` label; the shell test holds `NAV` and
  * `NAV_MORE` together to exactly those pages.
  */
-export const NAV = Object.freeze(["overview", "runs", "parked", "fleet", "insights", "config"]);
+export const NAV = Object.freeze(["overview", "runs", "parked", "fleet", "insights", "triggers", "config"]);
 
 /** What the More menu holds: the audit log, for operators only, so a viewer has no More at all. */
 export const NAV_MORE = Object.freeze(["audit"]);
@@ -296,7 +296,7 @@ export function shellHtml(name, ctx, inner, { headline = null, description = nul
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const meta = PAGES[name];
   const role = roleOf(ctx?.session);
-  const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add"].includes(name) ? "config" : name;
+  const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
   // Drawn on a live page always, so the stream has a panel to fill; elsewhere only when there is a count to show.
   const count = navParkedHtml(ctx?.data);
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;

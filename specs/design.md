@@ -11973,6 +11973,26 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+**AMENDED 2026-10-30 (#750, trigger list).** TriggersScreen, TriggersViewer and TriggersPhone are built
+on `/triggers`; the checker also has `/triggers/check` for a phone. The console reuses the receiver's pure
+trigger grouping and actual forge filters for hypothetical event checks rather than maintaining a second
+matching algorithm. The server accepts their bounded inputs as a same-origin JSON POST read, with viewer
+and session-person guards, separately from writes. A GET carrying comment text was rejected because it
+would persist that text in browser history and intermediaries. The result is projected to row identity,
+flow, fixed reasons and unverified gate explanations, never the receiver's constructed job or private prompt.
+Native filters and rule disclosures remain available without JavaScript; the checker fails visibly closed.
+
+The list read joins validated trigger identity to retained records, keeping incomplete scans and unknown
+costs explicit. Its UTC calendar-week spend is separate from its rolling seven-day UTC schedule strip.
+Cron recurrence uses the pinned BullMQ dependency's cron parser in the owning worker's published IANA
+zone, never an assumed UTC worker. A shared scheduler requires verified clock agreement from every live
+consumer, including named workers and cron abstainers, because the consuming worker advances its recurrence. Unknown/conflicting ownership or zones disclose missing projection;
+observed runs and hypothetical future fires have different marks. Quiet windows use the worker's own
+scope and time evaluator: forge/repository windows leave local cron alone, folder/global windows may
+hold it. The card's earlier universal sentence was wrong and is corrected in its generator. Dense rules,
+unknown data, invalid files and additional Forgejo/Azure groups retain readable exceptional states.
+
+
 - **AMENDED 2026-10-30 (#750)**: Configuration and trigger detail/editor use the Pulse kit and source cards. Human row references count from 1,
   while hidden machine indexes remain zero-based. The final config migration removes the compatibility layer.
   Structured and JSON adds share the tool builder and its secret-bundle opt-out. Private prompt text is read only
@@ -13297,8 +13317,8 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
     the current pill (More's button for a page inside More), and never re-centres it on a resize or a change of the live
     word, so a reader's own scrolling stands. ABOVE A PHONE the bar is a grid and the navigation never scrolls, so every
     pill shows and any pointer reaches it: two rows (the brand pill and the end, then the navigation across the whole
-    width, wrapping, and up to 939 px broken after its fourth pill so a Parked count that appears or gains a digit
-    cannot move a pill to another line), and one row, as the Shell card draws it at 1440, from 1440 px, or from 1600 px
+    width, wrapping, and up to 1059 px broken after its fourth pill so a Parked count that appears or gains a digit
+    cannot move a pill to another line), and one row from 1600 px, or from 1760 px
     on a read-only console, whose end also holds the read-only chip. The breakpoints were measured in DejaVu Sans, the
     wider font of the Linux runner CI measures on, against the widest end (the word Reconnecting, the theme button, the
     read-only chip, the name, Sign out) and the widest navigation (an operator's, with More and a three-digit Parked
@@ -13360,7 +13380,7 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
     page in `PAGES` drawn by `renderPage` (empty page data, the Parked count drawn, the run page titled with a
     120-character unbroken id) for an operator, a viewer, an operator on a read-only console and the longest name
     `TOKEN_NAME_RE` takes (32 characters, derived from the rule) on a read-only console, at 320 and 375 px (as a phone),
-    761, 800, 940, 1024, 1180, 1280, 1440 and 1600 (761, 940 and 1600 the layout's tightest places, held to `TOP_BAR`
+    759, 760, 761, 800, 940, 1024, 1058, 1059, 1060, 1180, 1280, 1440, 1599, 1600, 1601, 1759, 1760 and 1761 (761, 1060, 1600 and 1760 the layout's boundary cases, held to `TOP_BAR`
     by the worker test), with the bar read in every combination of what the script changes after the page is drawn,
     each live word, the theme button shown and hidden, and the Parked count as drawn, emptied and five digits long
     (`barSource`), fails on a page wider than its window, as the script left it and in any of those reads; on any two
@@ -16415,3 +16435,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-29 (#749) | `DES-OPERATOR-CONSOLE`, `DES-COST-FOLD-BY-SCAN`, `DES-CAPACITY-FROM-RECORDS`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED: independent views and role-safe cache reads, reservation telemetry, shared fleet aggregates and structured allocation. Enforcement thresholds, read-only analytics and static export privacy UNCHANGED, checked. |
 | 2026-10-29 (#749, review) | `DES-COST-FOLD-BY-SCAN` clarified: record cost and enforcement ledger charges are distinct in unreserved/legacy runs, so no display infers zero paid work from a zero reservation. `DES-OPERATOR-CONSOLE` retains unknown/floor/estimate marks and role-independent history facts. Graph input validation now shares the worker loader and the display reader’s byte snapshot. Enforcement and static-export privacy UNCHANGED, checked. |
 | 2026-10-30 (#750) | `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION` and `DES-AI-TRIGGER-FLOW-GATE` AMENDED: Pulse configuration and shared bounded trigger fire. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: no paid container starts here, worker gates and isolation still apply; no merge path is added. |
+| 2026-10-30 (#750, trigger list) | `DES-OPERATOR-CONSOLE` AMENDED: TriggersScreen, TriggersViewer and TriggersPhone, actual receiver-filter reuse behind a private read POST, bounded role-safe history and timezone-aware schedules, and corrected quiet-window scope copy. `DES-ADMIN-VIA-PI-EXTENSION`, worker delivery handling, paid-start gates, queue payloads, container isolation and merge policy UNCHANGED, checked. |

@@ -1,6 +1,7 @@
 """Triggers as their own page: every rule read as 'when this happens, run that', with its status, a week of schedules,
 and a check that says which rule a given event would start. Pulse kit."""
 from pulse import *
+from triggers_controls import TRIGGERS_CSS
 
 def readme(name, text):
     open(f"{ROOT}/{name}/README.md", "w").write(text.strip() + "\n")
@@ -19,7 +20,7 @@ KIND = {"cron": ("clock", "Schedule"), "label": ("tag", "Label"), "comment": ("c
         "pull_request": ("pr", "Pull request"), "issue": ("issue", "Issue closed")}
 
 def tabs(cur):
-    items = [("Rules", "runs", "7"), ("Watch", "eye", "planned"), ("Dispatchers", "flows", "planned")]
+    items = [("Rules", "runs", "7"), ("Watch", "eye", "available"), ("Dispatchers", "flows", "proposed")]
     return '<nav class="tabs tr-tabs" aria-label="Triggers views">' + "".join(
         f'<a href="#"{" aria-current=" + chr(34) + "page" + chr(34) if n == cur else ""}>{ic(i, "ic ic--sm")}{n}<span class="count">{c}</span></a>'
         for n, i, c in items) + "</nav>"
@@ -134,14 +135,14 @@ def week():
     <svg class="wk-svg" height="{H + 20}" role="img" aria-label="This week: nightly-tidy fires every day at 03:00 UTC, today's run is done; pm-weekly fires Monday at 06:00 UTC; quiet hours for github:acme/web run 20:00 to 04:00 UTC on weekday nights.">{''.join(g)}{days}</svg>
   </div>
 </div></div>
-<p class="keyrow"><span><i class="wk-k wk-k--ran"></i>ran</span><span><i class="wk-k wk-k--next"></i>will fire</span><span><i class="wk-k wk-k--quiet"></i>quiet hours: forge jobs for acme/web wait, schedules are not affected</span></p>"""
+<p class="keyrow"><span><i class="wk-k wk-k--ran"></i>ran</span><span><i class="wk-k wk-k--next"></i>projected fire</span><span><i class="wk-k wk-k--quiet"></i>this forge-scoped quiet window: acme/web forge jobs wait; matching local/global windows can also hold schedules</span></p>"""
 
 WEEK = card("When schedules fire", week(), sub="this week, UTC", id_="p-tr-week")
 
-KPIS = f"""<div class="cards-3">
+KPIS = f"""<div class="cards-3 triggers-kpis">
 {card('Set up', f'<p class="kpi"><b>7</b><span>2 on a schedule, 5 from forges</span></p><p class="tr-kp"><span>{ic("done", "ic ic--sm")}1 spent one-shot</span><span>{ic("parked", "ic ic--sm")}1 waiting for an answer</span></p>', id_="p-tr-count")}
 {card('Next to fire', f'<p class="kpi"><b>11h 21m</b><span>until nightly-tidy</span></p><p class="tr-kp">03:00 UTC tomorrow, in {code("site")} on mini1</p>', id_="p-tr-next")}
-{card('Started this week', f'<p class="kpi"><b>$27.71</b><span>by these rules</span></p><p class="tr-kp">plus nightly-tidy on plan:kimi · $33.07 for the whole deployment</p>', id_="p-tr-spend")}
+{card('Recorded this UTC week', f'<p class="kpi"><b>$27.71</b><span>by these rules</span></p><p class="tr-kp">plus nightly-tidy on plan:kimi · $33.07 for the whole deployment</p>', id_="p-tr-spend")}
 </div>"""
 
 FILTERS = f"""<div class="tr-filters" role="group" aria-label="Show rules">
@@ -171,16 +172,16 @@ CHECK = card("Which rule would run?", f"""<p class="muted tr-p">Describe an even
 </div>
 <div class="tr-btnrow">{btn('Check', 'primary', 'search', sm=False)}</div>
 <div class="tr-result" role="region" aria-live="polite" aria-label="Result">
-  <p class="tr-res__h">{ic('done')}Rule 3 starts a job with flow <b>triage</b></p>
-  <p class="tr-res__s">The comment contains {code('@pi')}, so rule 3 matches. Its next word, <b>triage</b>, is rule 7's flow, so the job runs triage. Everything else comes from rule 3: it keeps a session, and its instructions go above the issue text.</p>
+  <p class="tr-res__h">{ic('done')}Rule 3 would match with flow <b>triage</b></p>
+  <p class="tr-res__s">This hypothetical comment contains {code('@pi')}, so rule 3 matches. Identity and permissions are assumptions; no delivery is authenticated or queued. Its next word, <b>triage</b>, is rule 7's flow, so the job runs triage. Everything else comes from rule 3: it keeps a session, and its instructions go above the issue text.</p>
   <p class="tr-res__k">The other rules</p>
   <ul class="tr-why">
     {why_not("1", "a schedule, not an event")}{why_not("6", "a schedule, not an event")}
     {why_not("2", "adding a label, and this is a comment")}{why_not("7", "adding a label; only its flow is borrowed")}
     {why_not("5", "spent, and only for closing #40")}{why_not("4", "GitLab only")}
   </ul>
-  <p class="tr-res__k">Checks it still passes when it arrives</p>
-  <ul class="tr-gates">{''.join(f'<li>{ic("done", "ic ic--sm")}<b>{h}</b><span>{s}</span></li>' for i, h, s in GATES)}</ul>
+  <p class="tr-res__k">Checks a real delivery must still pass</p>
+  <ul class="tr-gates">{''.join(f'<li>{ic("info", "ic ic--sm")}<b>{h}</b><span>not checked here: {s}</span></li>' for i, h, s in GATES)}</ul>
 </div>""", sub="reads the triggers file and the gates as they are now", id_="p-tr-check")
 
 
@@ -188,7 +189,7 @@ def page(role="operator"):
     if role == "viewer":
         return viewer_page()
     inner = (tabs("Rules") + KPIS +
-             f'<div class="cols"><div class="stack">{FILTERS}{WEEK}{SCHED}{GITHUB}{GITLAB}</div><div class="stack">{CHECK}</div></div>')
+             f'<div class="cols triggers-layout"><div class="stack triggers-rules">{FILTERS}{WEEK}{SCHED}{GITHUB}{GITLAB}</div><div class="stack triggers-check-side">{CHECK}</div></div>')
     return shell("Triggers", inner, "Triggers",
                  sub=f"What starts a job, in plain words. 7 rules in {code('…/deploy/triggers.json')}.",
                  end=btn("Add a trigger", "primary", "plus", sm=False))
@@ -199,7 +200,7 @@ VIEWER_NOTE = (f'<p class="collapsed" id="p-tr-viewer" data-panel>{ic("eye", "ic
 
 def viewer_page():
     inner = (tabs("Rules") + VIEWER_NOTE + KPIS +
-             f'<div class="cols"><div class="stack">{FILTERS}{WEEK}{SCHED}{GITHUB}{GITLAB}</div><div class="stack">{CHECK}</div></div>')
+             f'<div class="cols triggers-layout"><div class="stack triggers-rules">{FILTERS}{WEEK}{SCHED}{GITHUB}{GITLAB}</div><div class="stack triggers-check-side">{CHECK}</div></div>')
     return shell("Triggers", inner, "Triggers", sub="What starts a job, in plain words. 7 rules in the triggers file.", role="viewer")
 
 # ---------------- the phone card: each rule as when this, run that; a short list of next fires; one action ----------------
@@ -395,7 +396,7 @@ Triggers on a phone. Each rule is a short block that reads as a sentence, the we
 """
 
 if __name__ == "__main__":
-    CSS = CSS.replace("NOWPCT", f"{NOWX:.2f}%")
+    CSS = TRIGGERS_CSS
     write("TriggersScreen", card_marker("Triggers", 2400, 1440, "Triggers in plain words: when this happens, run that, with each rule's status, a week of schedules and a check for which rule an event starts"),
           "Triggers", page(), CSS)
     readme("TriggersScreen", """
@@ -403,7 +404,7 @@ Triggers get their own page, and every rule reads as a sentence: when this happe
 
 **How a person uses it.**
 - **The numbers.** How many rules there are and of which kind, which fires next and when, and what the rules started this week.
-- **When schedules fire.** A week strip in UTC with a dot for each time a schedule fires (filled when it ran, outlined when it will) and the quiet hours that hold forge jobs. The quiet hours do not hold schedules, and the key says so.
+- **When schedules fire.** A seven-day strip in UTC beginning today with a dot for each time a schedule fires (filled when it ran, outlined for its projected fires) and the quiet hours that hold forge jobs. Forge/repository quiet windows do not hold schedules. Matching local-folder and global windows can hold schedules; the key names the scope.
 - **Rules, grouped by where they come from.** On a schedule, then one card per forge. Every rule is one row:
   - **Its number.** The same number is used in the editor, in previews and in the audit log.
   - **When.** The kind's glyph and word, then the event as a sentence ("The label `pi:frontend` is added to an issue"), with who may make it happen and where under it ("by someone with write access, in any repository wired to this deployment").
@@ -412,8 +413,8 @@ Triggers get their own page, and every rule reads as a sentence: when this happe
   - **Status.** The last run's outcome and when it happened, the next fire for a schedule (with on time, overdue or stalled), and runs in 30 days with spend this week.
   - **Good to know.** A grey line under a rule, for the forge rules that surprise people. On GitHub, re-labelling fires a label rule again. A comment can pick another rule's flow. On GitLab, a label counts as an update.
   - **Spent one-shots.** The row is struck through with a light hatch and says how to arm the rule again.
-- **Which rule would run?** The person describes an event (forge, repository, what happens, the comment text, who did it). The check names the rule that starts a job and the flow it runs, says in one line why each other rule does not match, and lists the checks the event must still pass when it arrives. It sends nothing and spends nothing.
-- A row opens the trigger's own page. *Add a trigger* opens the editor. The compact *Watch* screen (#735) is reached from Configuration today. Its second tab here belongs to this planned Triggers screen (#750), because a watch rule is a trigger too.
+- **Which rule would run?** The person describes an event (forge, repository, what happens, the comment text, who did it). The check names the rule that would match and the flow it would use, says in one line why each other rule does not match, and lists the checks the event must still pass when it arrives. It sends nothing and spends nothing.
+- A row opens the trigger's own page. *Add a trigger* opens the editor. The *Watch* tab links the existing compact Watch screen (#735); Dispatchers remains proposed. The Rules filter counts the five event/schedule kinds, with Watch counted separately.
 
 **Panels.** `p-tr-count`, `p-tr-next`, `p-tr-spend`, `p-tr-week`, `p-tr-schedule`, `p-tr-github`, `p-tr-gitlab`, `p-tr-check`.
 
@@ -421,7 +422,7 @@ Triggers get their own page, and every rule reads as a sentence: when this happe
 - Per rule: kind, selectors, forge, folder and host, flow, model, venue, the options behind each chip, and the one-shot state.
 - The last run's outcome and time, runs in 30 days, spend this week, and the next fire and health of each schedule.
 - The pause windows.
-- For the check: a read-only match of a described event against the triggers file, the same match the receiver makes, plus each always-on gate's current state. The check is new: the console has no such route today.
+- For the check: a read-only match of a described event against the triggers file, the same match the receiver makes, plus each always-on gate's current state. The check shares the receiver's pure match and describes identity assumptions; delivery authentication and admission gates are explicitly not checked here.
 
 A viewer sees the same rules, statuses and the check, without *Add a trigger* or edits.
 
@@ -441,6 +442,6 @@ A viewer sees the same rules, statuses and the check, without *Add a trigger* or
           "Triggers, as a viewer", page("viewer"), CSS)
     readme("TriggersViewer", VIEWER_README)
     write("TriggersPhone", card_marker("Phone", 2600, 390, "Triggers on a phone: each rule as when this, run that, the next fires, and the check as the one action"),
-          "Triggers on a phone", phone_page(), CSS + PHONE_CSS)
+          "Triggers on a phone", phone_page(), CSS)
     readme("TriggersPhone", PHONE_README)
     print("triggers written")

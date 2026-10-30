@@ -51,7 +51,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -73,8 +73,11 @@ export async function loadModules() {
     import("@edgehero/pi-dispatch/model-catalog"),
     import("./whatif.mjs"),
     import("../sandbox-verdict.mjs"),
+    import("../trigger-list.mjs"),
+    import("../trigger-check.mjs"),
+    import("../trigger-schedule-zones.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -453,10 +456,27 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const pricing = pricingOf(m.pricing);
+    const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
     const pageDeps = {
       fleet,
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
+      triggerCheck: (input) => m.triggerCheck.checkTriggerEvent({ input, triggersPath: side.paths.triggersPath, fs }),
+      triggerList: async (snapshot) => {
+        const [history, zones] = await Promise.all([
+          triggerHistory(),
+          m.scheduleZones.readTriggerScheduleZones({ url: side.paths.valkeyUrl, triggers: snapshot?.triggers?.triggers ?? [], now }),
+        ]);
+        const mirrored = snapshot?.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : Array.isArray(snapshot?.runs) ? snapshot.runs : null;
+        const records = Array.isArray(history) ? [...history, ...(mirrored ?? [])] : mirrored;
+        return m.triggerList.triggerListOf({
+          snapshot, records, now: now(), pricing, scheduleZones: zones,
+          subscriptions: m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs }).subscriptions ?? [],
+          // The local scan has the full retained window; foreign history is only the bounded mirror. A fleet
+          // view cannot promise completeness from a readable local directory alone.
+          coverage: { complete: false, partial: !Array.isArray(history) },
+        });
+      },
       triggerEditor: () => m.readModel.readTriggerEditor({ paths: side.paths, env: side.env, deploymentDir: config.dir, fs, platform: io.platform ?? process.platform, uid }),
       triggerFireCheck: (index) => m.readModel.planTriggerFire({
         index, triggersPath: side.paths.triggersPath, url: side.paths.valkeyUrl,

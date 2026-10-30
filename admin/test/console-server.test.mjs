@@ -466,11 +466,12 @@ test("the route table: every route declares auth and write, writes are POST, and
   for (const r of ROUTES) {
     assert.ok(["none", "viewer", "operator"].includes(r.auth), r.path);
     assert.equal(typeof r.write, "boolean", r.path);
-    assert.equal(r.write, r.method === "POST", `${r.path}: a POST is a write and only a POST is`);
+    assert.equal(Boolean(r.write || r.readJson), r.method === "POST", `${r.path}: every POST meets the JSON request guards`);
     assert.equal(typeof r.handler, "function");
   }
-  // Only signing in and out may pass a read-only console.
+  // Only signing in and out exempt a write from read-only mode; reads need no exemption.
   assert.deepEqual(ROUTES.filter((r) => r.readOnlyExempt).map((r) => r.path).sort(), ["/login", "/login/code", "/logout"]);
+  assert.deepEqual(ROUTES.filter((r) => r.readJson).map((r) => [r.path, r.auth, r.write]), [["/api/trigger-check", "viewer", false]], "the event checker is the sole read-only JSON POST, never an operator action");
   assert.deepEqual(lookupRoute("PUT", "/login"), { allow: ["GET", "HEAD", "POST"] });
   assert.equal(lookupRoute("HEAD", "/healthz").route.path, "/healthz");
   assert.equal(lookupRoute("GET", "/missing"), null);
@@ -2135,4 +2136,105 @@ test("saved flow what-if links redirect to Breakdown before reading data, retain
     assertSecurityHeaders(out, method);
   }
   assert.equal(c.loads.length, before, "redirect performs no assembly");
+});
+
+const emptyTriggerCheck = { matched: null, rules: [], gates: [], notice: "This describes a hypothetical event. Nothing is sent or spent." };
+
+test("the event checker is a viewer read on a read-only console, with no ticket, file write or audit row", async () => {
+  const inputs = [];
+  const c = await start({ config: { readOnly: true }, pageDeps: { triggerCheck: (input) => (inputs.push(input), emptyTriggerCheck) } });
+  const { cookie } = await c.login(VIEW_TOKEN);
+  const before = c.audit.rows.length;
+  const privateComment = "private-event-body-must-not-be-logged";
+  const input = { forge: "github", event: "issue-comment", repository: "acme/web", actor: "write", comment: privateComment };
+  const res = await c.post("/api/trigger-check", input, { cookie, [PERSON_HEADER]: "vic.viewer" });
+  assert.equal(res.status, 200);
+  assertSecurityHeaders(res, "read-only event check");
+  assert.equal(typeof res.json().html, "string");
+  assert.ok(res.json().html.length > 0);
+  assert.ok(!res.text.includes(privateComment), "a read result must not echo its input text");
+  assert.deepEqual(inputs, [input]);
+  assert.equal(c.audit.rows.length, before);
+  assert.equal(c.tickets.held.size, 0);
+  assert.equal(c.writes.length, 0);
+  assert.ok(!seen.logs.some((line) => line.includes(privateComment)));
+});
+
+test("the read-only event POST still refuses hostile origins, content types, methods and query input before checking", async () => {
+  let calls = 0;
+  const c = await start({ pageDeps: { triggerCheck: () => (calls++, emptyTriggerCheck) } });
+  const { cookie } = await c.login(VIEW_TOKEN);
+  const before = c.audit.rows.length;
+  for (const site of ["cross-site", "same-site"]) {
+    const res = await c.post("/api/trigger-check", {}, { cookie, "sec-fetch-site": site });
+    assert.equal(res.status, 403, site);
+  }
+  for (const headers of [
+    { ...c.writeHeaders({ cookie }), origin: undefined },
+    c.writeHeaders({ cookie, origin: "https://evil.test" }),
+    c.writeHeaders({ cookie, "content-type": "text/plain" }),
+    c.writeHeaders({ cookie, "content-type": "application/x-www-form-urlencoded" }),
+  ]) {
+    const usable = Object.fromEntries(Object.entries(headers).filter(([, v]) => v !== undefined));
+    assert.equal((await c.send({ method: "POST", path: "/api/trigger-check", headers: usable, body: "{}" })).status, 403);
+  }
+  for (const method of ["GET", "HEAD", "PUT"]) assert.equal((await c.send({ method, path: "/api/trigger-check", headers: { cookie } })).status, 405, method);
+  const query = await c.post("/api/trigger-check?comment=private-query-marker", {}, { cookie });
+  assert.equal(query.status, 400);
+  assert.ok(!query.text.includes("private-query-marker"));
+  assert.ok(!seen.logs.some((line) => line.includes("private-query-marker")));
+  assert.equal(calls, 0);
+  assert.equal(c.audit.rows.length, before);
+});
+
+test("event checks require the same signed-in person and a bounded JSON object, and never expose backend errors", async () => {
+  let calls = 0;
+  const c = await start({ pageDeps: { triggerCheck: () => { calls++; throw new Error("private-backend-path-and-prompt"); } } });
+  assert.equal((await c.post("/api/trigger-check", {})).status, 401);
+  const { cookie } = await c.login(VIEW_TOKEN);
+  assert.equal((await c.post("/api/trigger-check", {}, { cookie, [PERSON_HEADER]: "alice.operator" })).status, 409);
+  for (const body of ["{bad", "[]", "null", "1"]) assert.equal((await c.send({ method: "POST", path: "/api/trigger-check", headers: c.writeHeaders({ cookie }), body })).status, 400, body);
+  assert.equal((await c.send({ method: "POST", path: "/api/trigger-check", headers: c.writeHeaders({ cookie }), body: "x".repeat(BODY_LIMIT + 1) })).status, 413);
+  assert.equal(calls, 0);
+  const failed = await c.post("/api/trigger-check", {}, { cookie });
+  assert.equal(failed.status, 503);
+  assert.ok(!failed.text.includes("private-backend"));
+  assert.ok(!seen.logs.some((line) => line.includes("private-backend")));
+  assert.equal(calls, 1);
+  const unavailable = await start();
+  const logged = await unavailable.login(VIEW_TOKEN);
+  assert.equal((await unavailable.post("/api/trigger-check", {}, { cookie: logged.cookie })).status, 503);
+});
+
+test("a real viewer event check runs the shared receiver rules but returns no job, prompt or input text", async () => {
+  const { checkTriggerEvent } = await import("../src/trigger-check.mjs");
+  const dir = tempDir("trigger-check-http-");
+  const path = join(dir, "triggers.json");
+  const privatePrompt = "operator-instructions-that-a-viewer-must-never-read";
+  const document = JSON.stringify({ triggers: [
+    { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } },
+    { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "second" } },
+    { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", instructions: privatePrompt } },
+  ] });
+  writeFileSync(path, document);
+  const results = [];
+  const c = await start({ pageDeps: { triggerCheck: (input) => {
+    const result = checkTriggerEvent({ input, triggersPath: path });
+    results.push(result);
+    return result;
+  } } });
+  const { cookie } = await c.login(VIEW_TOKEN);
+  const before = c.audit.rows.length;
+  const res = await c.post("/api/trigger-check", { forge: "github", event: "issue-comment", repository: "acme/web", actor: "write", comment: "@pi triage private-comment-marker" }, { cookie });
+  assert.equal(res.status, 200);
+  assert.equal(results[0].matched?.index, 2);
+  assert.equal(results[0].matched?.flow, "triage");
+  assert.match(res.json().html, /triage/);
+  assert.match(res.json().html, /3/);
+  for (const text of [privatePrompt, "private-comment-marker", '"job"', '"instructions"']) assert.ok(!res.text.includes(text), text);
+  assert.equal(readFileSync(path, "utf8"), document);
+  assert.equal(c.audit.rows.length, before);
+  assert.equal(c.writes.length, 0);
+  assert.equal(c.tickets.held.size, 0);
+  assert.ok(!seen.logs.some((line) => line.includes("private-comment-marker") || line.includes(privatePrompt)));
 });

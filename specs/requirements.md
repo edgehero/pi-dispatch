@@ -1056,6 +1056,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-CONSOLE-SECURITY
 
+- **AMENDED 2026-10-30 (#750, trigger list)**: the hypothetical event checker is a viewer read carried by
+  a JSON POST to keep comment text out of URLs. It meets the same Host, Origin, fetch-site, JSON, body-size,
+  session and session-person guards as an action; it remains available in read-only mode and creates neither
+  a ticket nor an audit row. This explicit read exception grants no write capability or delivery authority.
+
 - **Statement**: The operator console (`pi-dispatch-console serve`, `DES-OPERATOR-CONSOLE`) shall be a separate
   process that listens only on loopback or on a 0600 unix socket unless the operator opts into a public bind; shall
   answer every request but `/healthz`, `/favicon.ico` (an empty 204, issue #737), the console's script and stylesheet
@@ -2374,6 +2379,31 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     the add tool's fields. Both forms persist exactly the tool-built entry, including `run.secretBundle: false`.
     The preview shows added lines, who may fire, per-run reserve, destination and Undo. Inline refusals change nothing.
     Read-only operators see forms are off; viewers cannot open the editor. Existing overview page-name links resolve.
+  - (g3) **Triggers** (`/triggers`, page `triggers`, viewer, not live; #750). TriggersScreen,
+    TriggersViewer and TriggersPhone share one read: kind-filtered rules grouped into schedules and each forge,
+    with one-based row numbers, sentence selectors, described authority, flow/model/venue, option chips,
+    the latest outcome, retained 30-day counts and UTC-calendar-week metered spend. Spent one-shots say how to
+    re-arm them. Counts and spend distinguish complete, bounded, unreadable and unpriced history; a stale index
+    or same flow alone is not proof that a historical run belongs to today's rule. All roles can open detail;
+    only writable operators see Add. Existing Watch links work; proposed Dispatchers has no pretend route.
+    The seven-day strip starts at UTC midnight today, separate from Monday's statistics window. Future fires
+    expand the worker's cron semantics in its published timezone, then plot UTC instants; missing or conflicting
+    timezone evidence is unknown. Only observed matching runs get ran dots. Dense projections are bounded and
+    labelled. Quiet intervals use the worker's window evaluator, including DST, dates and overnight spill:
+    forge/repository scopes do not hold local cron runs; folder/global scopes can. Phone layouts replace the
+    strip with next-fire and quiet-window facts. Rules, filters and disclosures remain usable without scripts.
+  - (g4) **Check an event** (`/triggers/check`, viewer, not live, and the desktop rules panel; #750).
+    The bounded described-event form posts privately to `/api/trigger-check`, outside the action/ticket funnel.
+    Both roles and a read-only console may use it. The whole triggers file must validate before any winner is
+    named. The actual receiver grouping and four forge filters decide matches, first-wins precedence, flow
+    overrides, disarmed rules and special steering/parked routes. Each other rule gets its reason. The result
+    describes a hypothesis, never a verified delivery or permission: signature, real identity, deduplication,
+    image and spend admission remain separately unverified unless a read proves a narrower fact. No check
+    enqueues, mints a token, calls a forge, reserves money, persists input, issues a ticket or appends an audit row.
+    No input comment, stored task/instructions, job payload or raw parser error enters the response or logs.
+    Loading, invalid input, unreadable configuration, session/network failure and no match have actionable
+    states; an old response cannot replace a newer event's answer. No-JavaScript checker controls are disabled
+    with an explanation, so comment text cannot fall through into a native URL submission.
   - (h) **Audit** (`/audit`). For the operator role, the page shows the console audit rows newest first, pages with
     `before`, and shows a line that is not a row as broken, in its place, rather than skipping it; for a viewer, it is
     refused (`REQ-CONSOLE-SECURITY` (l)). Tests: `worker/test/console-audit.test.mjs` (`readConsoleAudit`),
@@ -2696,7 +2726,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     fails the run), empty since PR 1. And given every page in `PAGES` drawn by `renderPage`, with its data empty but for
     a Parked count and the run page titled with a 120-character unbroken run id, for an operator, a viewer, an operator
     on a read-only console and the longest name `TOKEN_NAME_RE` allows (32 characters) on a read-only console, at 320
-    and 375 (as a phone) and 761, 800, 940, 1024, 1180, 1280, 1440 and 1600 CSS pixels, the bar read in every
+    and 375 (as a phone) and 759, 760, 761, 800, 940, 1024, 1058, 1059, 1060, 1180, 1280, 1440, 1599, 1600, 1601, 1759, 1760 and 1761 CSS pixels, the bar read in every
     combination of each live word, the theme button shown and hidden, and the Parked count as drawn, emptied and five
     digits long: then the window is the one asked for (a phone's emulation read back from the page, not trusted from the
     call that set it); the page never scrolls sideways (the same element rule, at the window's width, and its
@@ -2761,7 +2791,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     the navigation is a row of its own that scrolls inside itself, the script scrolling a focused pill wholly into view
     and, once on load, the current one (More's button for a page inside More), never re-centring on a resize or a live
     word; above it the navigation never scrolls, on a row of its own under the brand pill and the bar's end, and from
-    1440 px (1600 px on a read-only console) on one row with them; the Parked pill carries the number of unanswered
+    1600 px (1760 px on a read-only console) on one row with them; the Parked pill carries the number of unanswered
     parked runs as a panel, which the stream updates on a live page, drawn only when that number is known and above
     zero; a live page has the live pill, which reads Not live until the script connects to the stream, then Live,
     Reconnecting (the stream dropped and the browser tries again every 2 seconds, or, CORRECTED 2026-10-24 by #737 PR
@@ -2786,7 +2816,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     pressed while the address already ends with it, and focuses nothing otherwise; it is off a phone's bar (bundle.css's
     `hide-phone`), where the runs page's search pill stays in view while the other filters fold, and off a desktop bar
     for its own width (`TOP_BAR.searchRoom`, 56 px) past each width where the bar's end is tightest (761 px read-only,
-    1440 px, and 1600 px read-only), so the bar there is what it was without it and the signed-in name never has less
+    1600 px, and 1760 px read-only), so the bar there is what it was without it and the signed-in name never has less
     room than it had at a breakpoint; the run-id 404 marks Runs current, as the run detail does (`frameHtml`'s `here`).
     Tests: `admin/test/console-shell.test.mjs` ("the Search button: a round link to the runs page's search field, first
     in the bar's end, on every page for both roles, off a phone", "frameHtml marks a screen's pill current only where
@@ -7952,3 +7982,4 @@ instead of drifting.
 | 2026-10-29 (#749) | `REQ-OPERATOR-CONSOLE-SCREENS` (e), `REQ-CONSOLE-SECURITY` (m), `REQ-TOPOLOGY-GRAPH`, `REQ-COST-ANALYTICS`, `REQ-CAPACITY-INSIGHTS`, `REQ-DELEGATED-ALLOCATION`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-SIZE-SUGGESTIONS` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: five Spend routes, held-money facts, fleet capacity, window-scoped estimates, structured allocation and accessible map/list. All unrelated requirements UNCHANGED, checked. |
 | 2026-10-29 (#749, review) | `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH` and `REQ-OPERATOR-CONSOLE-SCREENS` (e) clarified: unreserved ledger zero is not zero paid cost; missing prices retain unknown/floor/estimate marks and counter charges stay separate. Graph validation uses the worker loader on one byte snapshot; unread files differ from missing ones. Current, duplicate and neutral history facts remain visible to viewers. All other requirements UNCHANGED, checked. |
 | 2026-10-30 (#750) | `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: Pulse configuration, trigger detail/editor, row controls, safe reads, edit parity and bounded paid manual cron fire. `REQ-CONSOLE-SECURITY`, worker budget gates and forge authorization UNCHANGED, checked. |
+| 2026-10-30 (#750, trigger list) | `REQ-OPERATOR-CONSOLE-SCREENS` (g3/g4) and `REQ-CONSOLE-SECURITY` AMENDED: dedicated rules, viewer and phone screens, source-faithful schedule/quiet-window projections, retained-history attribution and a private read-only event checker using actual receiver matching. Worker authorization, admission, spend, isolation, action confirmation and audit-write requirements UNCHANGED, checked. |

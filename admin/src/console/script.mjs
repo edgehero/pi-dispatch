@@ -180,8 +180,8 @@
  *     live update swaps in, with the reader's date before it. A time the server marks `data-day`, whose row names its UTC
  *     day (the runs table's Ended cell, `panels/runs.mjs` `endedHtml`), stays alone where the reader's day is that day
  *     and gains the reader's date where it is not. Without the script a page reads UTC, as it always did.
- * Server text is shown with `textContent`, never as markup. The markup writes are exactly three, all of server-escaped
- * fragments into elements the server marked for them: the slot's (`fillSlot`: an answer's `html`, or the skeleton put
+ * Server text is shown with `textContent`, never as markup. The markup writes are exactly four, all of server-escaped
+ * fragments into elements the server marked for them (including the hypothetical checker result): the slot's (`fillSlot`: an answer's `html`, or the skeleton put
  * back), the panel swap (`swapPanel`, behind `data-panel`) and the transcript append.
  *
  * Every browser global past the DOM is checked before it is used (`fetch`, the timers, `requestAnimationFrame`), and
@@ -1710,6 +1710,121 @@ ${FIT_JS}
     if (!/^[a-z0-9-]{1,40}$/.test(action) || !slot) return;
     preview(form, action, submitText(form, ev), submitterOf(form, ev));
   });
+  // The hypothetical checker never submits a navigation or a paid action. Its one markup sink accepts only the
+  // server's rendered answer; descriptions and transport failures stay in controls or text nodes.
+  var checkForm = document.querySelector("form[data-trigger-check]");
+  var checkResult = document.querySelector("[data-trigger-check-result]");
+  if (checkForm && checkResult) {
+    var checkFields = checkForm.querySelector("[data-trigger-check-fields]");
+    var checkSeq = 0;
+    var checkTimer = null;
+    var checkBusy = false;
+    function checkControl(name) { return checkForm.querySelector('[name="' + name + '"]'); }
+    function checkValue(name) { var el = checkControl(name); return el ? el.value : ""; }
+    function checkStatus(text) { checkResult.textContent = text; }
+    function checkFinish() {
+      checkBusy = false;
+      checkForm.removeAttribute("aria-busy");
+      if (checkTimer !== null) clearTimeout(checkTimer);
+      checkTimer = null;
+      var submit = checkForm.querySelector('[type="submit"]');
+      if (submit) submit.disabled = false;
+    }
+    function checkCondition(name, active) {
+      var box = checkForm.querySelector('[data-check-field="' + name + '"]');
+      var el = checkControl(name);
+      if (box) box.hidden = !active;
+      if (el) el.disabled = !active;
+    }
+    function checkOptions(name, forge) {
+      var select = checkControl(name);
+      if (!select) return;
+      var options = select.querySelectorAll("option");
+      var first = null, firstIndex = -1, valid = false, selected = -1;
+      for (var i = 0; i < options.length; i++) {
+        var owner = options[i].getAttribute("data-check-forge");
+        var active = !owner || owner === forge;
+        options[i].hidden = !active;
+        options[i].disabled = !active;
+        if (active && first === null) { first = options[i].value; firstIndex = i; }
+        if (active && options[i].value === select.value) { valid = true; selected = i; }
+      }
+      if (!valid && first !== null) { select.value = first; selected = firstIndex; }
+      if (selected >= 0) select.selectedIndex = selected;
+    }
+    function checkConditions() {
+      var forge = checkValue("forge");
+      checkOptions("event", forge);
+      checkOptions("action", forge);
+      var event = checkValue("event"), action = checkValue("action");
+      var pr = event === "pull-request", prEvent = pr || event === "pull-request-comment";
+      var review = forge === "github" && pr && action === "review_submitted";
+      checkCondition("action", pr);
+      checkCondition("prAuthor", forge === "github" && pr && ["opened", "synchronize", "reopened", "review_submitted"].indexOf(action) >= 0);
+      checkCondition("reviewState", review);
+      checkCondition("reviewBody", review);
+      checkCondition("comment", event === "issue-comment" || event === "pull-request-comment");
+      checkCondition("labels", !(forge === "azure" && prEvent));
+      checkCondition("previousLabels", (forge === "gitlab" && ["issue-labeled", "issue-closed", "pull-request"].indexOf(event) >= 0) || (forge === "azure" && event === "issue-labeled"));
+    }
+    function checkInput() {
+      var out = {};
+      var controls = checkForm.querySelectorAll("[name]");
+      for (var i = 0; i < controls.length; i++) {
+        var el = controls[i];
+        if (el.disabled || !el.name || el.value === "") continue;
+        if (el.name === "labels" || el.name === "previousLabels") out[el.name] = el.value.split(/\\r?\\n/).map(function (s) { return s.trim(); }).filter(function (s) { return s !== ""; });
+        else if (el.name === "number") out.number = Number(el.value);
+        else out[el.name] = el.value;
+      }
+      return out;
+    }
+    function checkChanged() {
+      checkSeq++;
+      var hadBusy = checkBusy;
+      checkFinish();
+      checkConditions();
+      checkStatus(hadBusy ? "The description changed. Check again for this event." : "Check this description to see a hypothetical match. No delivery will be sent.");
+    }
+    checkForm.addEventListener("input", checkChanged);
+    checkForm.addEventListener("change", checkChanged);
+    checkForm.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      if (checkBusy) return;
+      checkConditions();
+      var input = checkInput(), fingerprint = JSON.stringify(input), mine = ++checkSeq;
+      checkBusy = true;
+      checkForm.setAttribute("aria-busy", "true");
+      var submit = checkForm.querySelector('[type="submit"]');
+      if (submit) submit.disabled = true;
+      checkStatus("Checking the described event. Nothing is being sent or queued.");
+      checkTimer = later(function () {
+        if (mine !== checkSeq) return;
+        checkSeq++;
+        checkFinish();
+        checkStatus("The check timed out. Your description is preserved; try again.");
+      }, 10000);
+      post("/api/trigger-check", input, true).then(function (r) {
+        if (mine !== checkSeq) return;
+        checkFinish();
+        if (fingerprint !== JSON.stringify(checkInput())) { checkSeq++; checkStatus("The description changed. Check again for this event."); return; }
+        if (r.status === 401 || r.status === 409) {
+          checkStatus("The session changed or ended. Sign in again before checking. Your description has been preserved.");
+          return;
+        }
+        if ((r.status === 200 || r.status === 400) && r.body && typeof r.body.html === "string") {
+          checkResult.innerHTML = r.body.html;
+          if (typeof checkResult.focus === "function") checkResult.focus();
+        } else checkStatus("The check is unavailable. Your description is preserved; try again.");
+      }).catch(function () {
+        if (mine !== checkSeq) return;
+        checkFinish();
+        checkStatus("The check could not connect. Your description is preserved; try again.");
+      });
+    });
+    if (checkFields) checkFields.disabled = false;
+    checkConditions();
+  }
   // ---- the live stream (issue #641) and how a page says what it is showing (issue #737) ----
   var live = document.body ? document.body.getAttribute("data-live") : null;
   var es = null;

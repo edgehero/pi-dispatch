@@ -35,6 +35,19 @@ They apply the folder allowlist, clean-tree check, committed flow opt-in and hou
 `dispatch_run`, refuse command and portfolio triggers, and refuse a duplicate in the same minute.
 These extra gates do not change ordinary scheduled ticks or the CLI's `run --trigger` behavior.
 
+## Reading and checking rules in the browser
+
+The [Triggers page](console.md#the-rules-page-and-event-checker) groups rules by schedule and forge,
+with their selectors, option chips, latest outcomes, retained run counts and metered spend. The schedule
+view plots UTC instants using each worker's published timezone; it says when a projection or history is
+unknown. Forge/repository quiet windows do not hold local cron runs, while folder/global windows can.
+
+The event checker is a hypothetical read available to viewers too. It uses the receiver's actual filters
+and explains first-wins precedence, comment flow overrides, spent rules and special steering/parked routes.
+Entered permissions are assumptions. The check verifies no delivery signature, makes no forge request,
+starts no job and reserves no money. It saves and logs no comment text. Normal receiver and worker gates
+remain authoritative when an event arrives.
+
 ## Trigger types: what fires each one, and what it runs
 
 pi-dispatch is the trigger layer. Every entry is one `{ on, run }` pair: **`on` is what fires it**, and

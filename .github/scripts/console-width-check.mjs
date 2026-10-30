@@ -58,7 +58,7 @@
  *   - a bar never read with one of the live words or Parked counts (`liveReadProblems`, `parkedReadProblems`), a
  *     Parked count the read could not widen, and two live words drawn with the same classes, which a phone's glyph
  *     cannot tell apart (`liveStateProblems`, before any run);
- *   - from `ONE_ROW_WIDTH` (1440, the Shell card's own width) a bar of a console that is not read-only that is not one
+ *   - from `ONE_ROW_WIDTH` (the production top bar's own threshold) a bar of a console that is not read-only that is not one
  *     row (`oneRowProblems`);
  *   - a signed-in name or role word cut off without an ellipsis or without the title a reader sees there holding it
  *     whole, and the longest name not cut off at all (`nameProblems`);
@@ -112,12 +112,14 @@
  * check it with `--verify-zip <zip> --platform mac-arm64`, unzip it outside the repository, and run with
  * CHROME=".../chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing".
  */
+import { TOP_BAR } from "../../admin/src/console/page-css.mjs";
 import { createHash } from "node:crypto";
 import { accessSync, constants, createReadStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkTriggersBrowser } from "./console-triggers-browser.mjs";
 import { checkConfigBrowser } from "./console-config-browser.mjs";
 import { checkSpendBrowser } from "./console-spend-browser.mjs";
 import { frozenDateSource, openChrome } from "../../launch/chrome-pipe.mjs";
@@ -142,17 +144,20 @@ export const DESKTOP = Object.freeze({ height: 900, scale: 1 });
  * phone), then the desktop range the reviews measured the top bar failing in, at the window sizes people use: from
  * 761 to about 1315 px its pills ran under its end cluster (and up to 1440 on a read-only console), and once the
  * navigation scrolled at every width it hid pills there and jumped 60 px in content-dependent bands (1180 is inside
- * one). 1440 is the Shell card's own width, one row for an operator. And the layout's tightest places, where a bar
- * that is short of room shows it first: 761, the first width above a phone; 940, the first two-row width whose
- * navigation is not broken after its fourth pill; 1600, the first one-row width of a read-only console. The worker test
- * holds these to `page-css.mjs` `TOP_BAR`, so a moved breakpoint moves the sweep.
+ * one). The production bar now needs seven navigation pills, so its own thresholds drive the sweep. Keep the
+ * historical widths too: a breakpoint fix must not stop exercising a previously failing layout. Every production
+ * breakpoint and both adjacent pixels are included; the worker test holds the sweep to `page-css.mjs` `TOP_BAR`.
  */
-export const SHELL_WIDTHS = Object.freeze([320, 375, 761, 800, 940, 1024, 1180, 1280, 1440, 1600]);
+export const SHELL_WIDTHS = Object.freeze([...new Set([
+	320, 375, 761, 800, 940, 1024, 1180, 1280, 1440, 1600,
+	...[TOP_BAR.phoneMax, TOP_BAR.navBreakMax, TOP_BAR.oneRowMin, TOP_BAR.oneRowReadOnlyMin]
+		.flatMap((width) => [width - 1, width, width + 1]),
+])].sort((a, b) => a - b));
 /**
  * From this width the top bar of a console that is not read-only is one row (the pi-dispatch pill, the navigation, the
- * rest), as the Shell card draws it at its own 1440 px (`oneRowProblems`).
+ * rest), from the production bar's own one-row threshold (`oneRowProblems`).
  */
-export const ONE_ROW_WIDTH = 1440;
+export const ONE_ROW_WIDTH = TOP_BAR.oneRowMin;
 /**
  * The bundle's phone breakpoint (`@media (max-width: 760px)`, pinned by the test): at and below it the navigation is a
  * row of its own that scrolls inside itself; above it every pill must show whole, and the bar must not change height.
@@ -1797,6 +1802,11 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		if (docs.some((d) => d.page === "trigger-add")) {
 			current = "config-browser";
 			results.push(...await checkConfigBrowser({ browser, docs, origin, openPage, clockMs, shots }));
+			after();
+		}
+		if (docs.some((d) => d.page === "triggers")) {
+			current = "triggers-browser";
+			results.push(...await checkTriggersBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
 		}
 		for (const s of strays) {

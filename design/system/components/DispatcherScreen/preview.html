@@ -1,4 +1,4 @@
-<!-- @dsCard group="Planned and proposed" height=2500 width=1440 subtitle="A dispatcher: reads git changes and infra streams, and only starts jobs and proposes triggers with the right flow and model; a Jev loop or an LLM flow" -->
+<!-- @dsCard group="Planned and proposed" height=2560 width=1440 subtitle="A dispatcher: reads git changes and infra streams, and only starts jobs and proposes triggers with the right flow and model; a Jev loop or an LLM flow" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -88,7 +88,7 @@
 <main id="main" class="page">
 <header class="top">
   <a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
-  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="1 waiting">1</span></a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
+  <nav class="pillnav" aria-label="Console"><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg>Overview</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-runs"/></svg>Runs</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Parked <span class="count tone-parked" aria-label="1 waiting">1</span></a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg>Fleet</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg>Spend</a><a href="#" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Triggers</a><a href="#"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg>Configuration</a><a href="#" class="pillnav__more" aria-label="More: Models, Audit"><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></a></nav>
   <div class="top__end">
     <button class="roundbtn hide-phone" type="button" aria-label="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></button>
     <span class="live" role="status"><span class="dot"></span>Live</span>
@@ -101,7 +101,7 @@
   <div class="titlebar__lead"><a class="back" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"/></svg>Dispatchers</a><h1>infra-dispatch</h1><p class="titlebar__sub">Purpose: turn infra alarms and log findings into read-only triage. One of 5 dispatchers; it only starts jobs from its list and proposes watch rules.</p></div>
   <div class="titlebar__end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Jev loop, running</span><a class="btn btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Pause</a></div>
 </div>
-<nav class="tabs tr-tabs" aria-label="Triggers views"><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Rules<span class="count">7</span></a><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-eye"/></svg>Watch<span class="count">planned</span></a><a href="#" aria-current="page"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"/></svg>Dispatchers<span class="count">planned</span></a></nav><div class="cards-4">
+<nav class="tabs tr-tabs" aria-label="Triggers views"><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Rules<span class="count">7</span></a><a href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-eye"/></svg>Watch<span class="count">available</span></a><a href="#" aria-current="page"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"/></svg>Dispatchers<span class="count">proposed</span></a></nav><div class="cards-4">
 <section class="card" id="p-dp-events" data-panel>
   <div class="card__head"><h2>Events read, 24h</h2></div>
   <p class="kpi"><b>1,227</b><span>from 4 inputs</span></p><p class="dp-kp">1,204 infra events from 3 streams · 23 merged commits for context</p>

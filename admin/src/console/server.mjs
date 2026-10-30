@@ -83,6 +83,7 @@ import { readRawBody } from "@edgehero/pi-dispatch/http-body";
 import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { ACTIONS, actionNamed, confirmAction, plural, previewAction } from "./actions.mjs";
 import { refusalHtml } from "./confirm-view.mjs";
+import { renderTriggerCheckResult } from "./panels/triggers.mjs";
 import { errorPage as realErrorPage } from "./error-pages.mjs";
 import { contentTypeRefusal, hostnameOf, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
@@ -596,10 +597,26 @@ function actionRoutes(actions) {
   ]);
 }
 
+/** A hypothetical delivery is a read. POST keeps comment text out of URLs and browser history; it still meets the
+ * same origin, JSON, size and session-person guards as a write, without creating a ticket or an audit row. */
+async function postTriggerCheck(ctx) {
+  if ([...ctx.searchParams].length) return sendError(ctx.res, 400, "the trigger check takes no query parameters");
+  if (typeof ctx.deps.pageDeps?.triggerCheck !== "function") return sendError(ctx.res, 503, "the trigger check is not available in this console");
+  let result;
+  try {
+    result = await ctx.deps.pageDeps.triggerCheck(ctx.body);
+  } catch {
+    return sendError(ctx.res, 503, "the trigger check could not read its inputs; reload and try again");
+  }
+  return sendJson(ctx.res, result?.refusal ? 400 : 200, { html: String(renderTriggerCheckResult(result)) });
+}
+
 /**
  * The route table. `write: true` means: Origin and Sec-Fetch-Site checked, JSON only, body read and bounded, refusals
- * audited. `readOnlyExempt` is for signing in and out only: a read-only console still has to let people in. `anyHost`
- * (issue #737) is for the public files alone, the script, the stylesheet and the favicon: they answer before the Host
+ * audited. `readOnlyExempt` is for signing in and out only: a read-only console still has to let people in.
+ * `readJson: true` is the event check: a viewer read sent as JSON, with the same Origin and body guards but no write,
+ * ticket or audit side effect. It remains usable on a read-only console. `anyHost` (issue #737) is for the public
+ * files alone, the script, the stylesheet and the favicon: they answer before the Host
  * check (see the header), since they hold nothing a session or a rebound name could use, and the 421 page needs them.
  */
 export const ROUTES = Object.freeze([
@@ -632,6 +649,7 @@ export const ROUTES = Object.freeze([
     ctx.res.end();
   } },
   { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
+  { method: "POST", path: "/api/trigger-check", auth: "viewer", write: false, readJson: true, handler: postTriggerCheck },
   // Issue #647: one run and the chat it can have (`run-api.mjs`); a viewer's, since the answer carries no text at all.
   { method: "GET", path: "/api/fork-points", auth: "operator", write: false, handler: getForkPoints },
   { method: "GET", path: "/api/watch-trace", auth: "operator", write: false, handler: getWatchTrace },
@@ -681,7 +699,7 @@ function resolveSession(deps, req) {
   return { session: null, presented: true, ended: endedReasonOf(deps.sessions.endedOf?.(id) ?? null) };
 }
 
-/** Read and parse a write's body: `{body}`, or `{status, sentence}` for 413 or 400. */
+/** Read and parse a guarded JSON body: `{body}`, or `{status, sentence}` for 413 or 400. */
 async function readBody(req) {
   const declared = Number.parseInt(req.headers["content-length"] ?? "", 10);
   const tooLarge = { status: 413, sentence: `the request body is larger than ${BODY_LIMIT} bytes` };
@@ -777,15 +795,15 @@ async function dispatch(req, res, deps) {
   }
   const ctx = { req, res, deps, route, pathname, session: null, body: null, record, searchParams, json: (status, body, headers) => sendJson(res, status, body, headers), actor: () => actorOf(ctx) };
 
-  if (route.write) {
+  if (route.write || route.readJson) {
     const checks = [
       ["origin", originRefusal(req.headers)],
       ["content-type", contentTypeRefusal(req.headers)],
-      ["read-only", route.readOnlyExempt ? null : readOnlyRefusal(deps.config)],
+      ["read-only", !route.write || route.readOnlyExempt ? null : readOnlyRefusal(deps.config)],
     ];
     for (const [guard, refusal] of checks) {
       if (refusal) {
-        record({ actor: ANONYMOUS, action: "refused", target: route.path, outcome: "refused", reason: `${guard}: ${refusal}` });
+        if (route.write) record({ actor: ANONYMOUS, action: "refused", target: route.path, outcome: "refused", reason: `${guard}: ${refusal}` });
         return sendError(res, 403, refusal);
       }
     }
@@ -831,13 +849,13 @@ async function dispatch(req, res, deps) {
     }
   }
 
-  if (route.write) {
+  if (route.write || route.readJson) {
     const read = await readBody(req);
     if (!read.body) {
       // Audited like every other refusal of a write: the signed-in session's own row (a valid session is needed, so no
       // anonymous flood), or a rate-limited anonymous one for a sign-in. The row names the fixed sentence, never a byte
       // of the body.
-      record({ actor: actorOf(ctx), action: "refused", target: route.path, outcome: "refused", reason: `body: ${read.sentence}` });
+      if (route.write) record({ actor: actorOf(ctx), action: "refused", target: route.path, outcome: "refused", reason: `body: ${read.sentence}` });
       return sendError(res, read.status, read.sentence, read.status === 413 ? { connection: "close" } : {});
     }
     ctx.body = read.body;
