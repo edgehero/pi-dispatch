@@ -28,7 +28,8 @@ const stub = join(executableDir, "native cli.mjs");
 const source = join(root, "approved-hosts.json");
 const configHome = join(root, "config");
 const env = { ...(process.platform === "win32" ? windowsPowerShellEnv(process.env) : process.env), XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: join(root, "desktop-data") };
-const protocol = sandboxOpenUrl({ verb: "open", id: "sb-native-smoke", host: "native" });
+const nativeId = "manual:native:smoke";
+const protocol = sandboxOpenUrl({ verb: "open", id: nativeId, host: "native" });
 const imported = pathToFileURL(resolve("worker/src/opener-cli.mjs")).href;
 fs.writeFileSync(stub, `import fs from "node:fs"; import {runOpener} from ${JSON.stringify(imported)};
 process.env.XDG_CONFIG_HOME=${JSON.stringify(configHome)}; process.env.XDG_DATA_HOME=${JSON.stringify(env.XDG_DATA_HOME)};
@@ -110,7 +111,7 @@ try {
 		await execFile("xdotool", ["windowfocus", "--sync", window, "key", "Return"], { env });
 		await until(() => fs.existsSync(marker), "Enter dispatch through the native terminal");
 		const invoked = JSON.parse(fs.readFileSync(marker, "utf8"));
-		assert.deepEqual(invoked, ["sandbox", "sb-native-smoke", "--deployment", root, "--expected-host", "native"]);
+		assert.deepEqual(invoked, ["sandbox", nativeId, "--deployment", root, "--expected-host", "native"]);
 		console.log("Linux X11 native Enter dispatch verified against a harmless command recorder.");
 	} else console.log("Native GUI keystrokes were not synthesised on this platform; the Enter/cancel decision is covered by behavioral tests and the POSIX PTY oracle.");
 	if (process.platform === "win32") {

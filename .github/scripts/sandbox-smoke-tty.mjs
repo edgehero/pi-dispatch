@@ -7,6 +7,14 @@ export function sandboxSmokeLines(output) {
 	return stripVTControlCharacters(output).replaceAll("\r", "").split("\n").slice(0, -1);
 }
 
+export async function sendSandboxSmokeDetach(input, pause) {
+	// Podman 4.9.3's vendored detach.Copy recognises each key only in a one-byte Read. A single write of
+	// both keys is forwarded into bash. Pace the two actual keypresses, as an operator's terminal does.
+	input.write("\x10");
+	await pause(250);
+	input.write("\x11");
+}
+
 export function sandboxSmokeTty(output) {
 	const match = /(?:^|\r?\n)SANDBOX_REMOTE_TTY:(\/dev\/(?:pts\/\d+|ttys[A-Za-z0-9]+))\r?\n/.exec(output);
 	return match?.[1] ?? null;

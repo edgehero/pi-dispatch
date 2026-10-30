@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { sandboxSmokeLines, sandboxSmokeTty, sandboxSmokeTtyRaw, waitSandboxSmokeTty } from "../../.github/scripts/sandbox-smoke-tty.mjs";
+import { sandboxSmokeLines, sandboxSmokeTty, sandboxSmokeTtyRaw, sendSandboxSmokeDetach, waitSandboxSmokeTty } from "../../.github/scripts/sandbox-smoke-tty.mjs";
+
+test("Podman detach is two paced terminal keypresses, never a combined two-byte read", async () => {
+	const chunks = [];
+	let release;
+	const boundary = new Promise((resolve) => { release = resolve; });
+	const sending = sendSandboxSmokeDetach({ write: (bytes) => chunks.push(Buffer.from(bytes)) }, async (ms) => { assert.equal(ms, 250); await boundary; });
+	assert.deepEqual(chunks, [Buffer.from([16])], "the first key is independently available for Podman's one-byte matcher");
+	release();
+	await sending;
+	assert.deepEqual(chunks, [Buffer.from([16]), Buffer.from([17])], "the second key cannot share the first write");
+});
 
 test("actual Linux readline controls preserve exact oracle output without mistaking echoed command source for execution", () => {
 	const echo = "\u001b[?2004h\u001b]0;pi@container: /workspace\u0007pi@container:/workspace$ node -e 'console.log(\"SANDBOX_CREDE\rNTIALS_CLEAR\")'\r\n";

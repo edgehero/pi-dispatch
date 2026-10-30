@@ -11,7 +11,7 @@ import { sandboxCommand } from "../../worker/src/sandbox-hosts.mjs";
 import { makeRedisClient } from "../../worker/src/connection.mjs";
 import { readSandboxSessions, requestSandboxEnd } from "../../worker/src/sandbox-sessions.mjs";
 import { readPodmanStore } from "../../worker/src/sandbox.mjs";
-import { sandboxSmokeLines, waitSandboxSmokeTty } from "./sandbox-smoke-tty.mjs";
+import { sandboxSmokeLines, sendSandboxSmokeDetach, waitSandboxSmokeTty } from "./sandbox-smoke-tty.mjs";
 
 const execFile = promisify(execFileCallback);
 const venue = process.env.PI_SANDBOX_SMOKE_VENUE ?? "local";
@@ -107,8 +107,9 @@ try {
 		if (lines.some((line) => line.startsWith("SANDBOX_CREDENTIAL_KEYS:"))) throw new Error("sandbox shell contains credential key names");
 		return lines.includes("SANDBOX_CREDENTIALS_CLEAR");
 	}, "credential-free shell environment");
-	opened.stdin.write("\x10\x11");
-	await until(() => opened.exitCode !== null, "terminal detach");
+	await sendSandboxSmokeDetach(opened.stdin, sleep);
+	try { await until(() => opened.exitCode !== null, "terminal detach"); }
+	catch (error) { throw new Error(`${error.message}; ${terminalDiagnostic(opened)}`); }
 	const renewed = await until(async () => { const s = await current(); return s && s.at > first.at + 500 ? s : null; }, "lease renewal after detach");
 	assert.equal(renewed.containerId, first.containerId);
 	controlServer.kill("SIGTERM");

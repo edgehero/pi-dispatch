@@ -127,6 +127,8 @@ test("all platform handlers are per-user, quote executable paths, and only launc
 	assert.equal(windows.commands.length, 3);
 	for (const [, args] of windows.commands) assert.match(args[1], /^HKCU\\/);
 	assert.ok(windows.commands.at(-1)[1].includes('"/Program Files/node" "/work/dispatch/cli.mjs" opener handle "%1"'));
+	const percent = openerRegistration({ ...common, platform: "win32", nodePath: "C:\\node%20path\\node.exe", cliPath: "C:\\literal%1%TEMP%\\cli.mjs" }).commands.at(-1)[1];
+	assert.ok(percent.includes('"C:\\node%%20path\\node.exe" "C:\\literal%%1%%TEMP%%\\cli.mjs" opener handle "%1"'), "fixed path percents are literal; only the final URI placeholder is substituted by ShellExecute");
 	assert.throws(() => openerRegistration({ ...common, platform: "freebsd" }), /no supported/);
 	assert.throws(() => openerRegistration({ ...common, platform: "linux", nodePath: "/home/x=y/node" }), /cannot name/);
 });
