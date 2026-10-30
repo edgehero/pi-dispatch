@@ -1184,7 +1184,7 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
       intent = await tracker.begin({ ...plan.touchSource, at: now(), nonce: `rerun:${plan.jobId}:${plan.deliveryId ?? now()}` });
     }
     if (kind === "local") {
-      const { id, existing } = await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task });
+      const { id, existing } = await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task, now: new Date(now()) });
       if (existing) return { refusal: swallowedRunSentence(id, existing), deduplicated: true, jobId: id };
       return await done({ ok: true, jobId: id, queue: plan.queue });
     }

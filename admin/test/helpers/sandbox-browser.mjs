@@ -47,5 +47,5 @@ export async function startSandboxBrowserFixture(dir, { readOnly = false } = {})
   const server = createConsoleServer({ config, now, sessions, cookies, tickets: makeConfirmTickets({ now }), limiter: makeLoginLimiter({ now }), audit: makeConsoleAudit({ logsDir, now }), readTokens: () => ({ file }), findToken,
     hub, pageDeps, actionDeps: { sandboxes: service }, log: (line) => effects.logs.push(line) });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, config, service, effects, inventory, advance: () => { clock += 6000; }, liveSize: hub.size, refresh: async () => { clock += 6000; await hub.tick(); }, origin: `http://127.0.0.1:${server.address().port}`, async close() { hub.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } };
+  return { server, config, service, effects, inventory, requests, advance: () => { clock += 6000; }, liveSize: hub.size, refresh: async () => { clock += 6000; await hub.tick(); }, origin: `http://127.0.0.1:${server.address().port}`, async close() { hub.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } };
 }

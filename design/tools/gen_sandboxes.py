@@ -57,6 +57,9 @@ def page():
     return shell('Runs',tabs+'<div class="cols">'+main+side+'</div>','Sandboxes',sub='A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.',end=btn('New sandbox','','plus',sm=False))
 
 CSS = """
+/* Published ids and bounded request ids must wrap inside cards and state banners, including on a phone. */
+.code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.banner__t, .banner__s { overflow-wrap: anywhere; }
 /* Keep fact values readable inside a narrow desktop card as well as on a phone. */
 .facts, .facts--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .facts--1 { grid-template-columns: minmax(0, 1fr); }

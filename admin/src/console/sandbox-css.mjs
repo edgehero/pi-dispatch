@@ -1,5 +1,8 @@
 /** SandboxesScreen page rules, pasted from its generator (#771). */
 export const SANDBOX_CSS = `
+/* Published ids and bounded request ids must wrap inside cards and state banners, including on a phone. */
+.code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.banner__t, .banner__s { overflow-wrap: anywhere; }
 /* Keep fact values readable inside a narrow desktop card as well as on a phone. */
 .facts, .facts--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .facts--1 { grid-template-columns: minmax(0, 1fr); }

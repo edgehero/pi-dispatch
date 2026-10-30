@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { openChrome } from "../../launch/chrome-pipe.mjs";
-import { findChrome } from "./console-width-check.mjs";
+import { EDGE_SLACK, findChrome, measureSource, widthVerdict } from "./console-width-check.mjs";
 import { parseSandboxOpenUrl } from "../../worker/src/opener-protocol.mjs";
 import { startSandboxBrowserFixture, SANDBOX_BROWSER_TOKENS } from "../../admin/test/helpers/sandbox-browser.mjs";
 
@@ -84,6 +84,28 @@ export async function checkSandboxBrowser({ chrome, shots = null } = {}) {
       measurements.push({ theme, width, ...m });
       if ([375, 1024, 1440].includes(width)) await shot(`sandboxes-${theme}-${width}`);
     }
+    const exceptional = ["long-names", "failed", "pending", "preparing", "ready", "refused", "unknown"];
+    const originalId = fixture.inventory.hosts[0].rows[0].id;
+    const longId = "gh-" + "a".repeat(190), requestId = "sb-" + "e".repeat(32);
+    for (const theme of ["light", "dark"]) for (const width of [320, 375, 1024, 1440]) for (const state of exceptional) {
+      stage = `exception ${state} ${theme} ${width}`;
+      await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width <= 760 });
+      await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+      fixture.inventory.hosts[0].rows[0].id = state === "long-names" ? longId : originalId;
+      fixture.requests.set(requestId, { id: requestId, host: "mini1", state, ...(state === "ready" ? { result: { id: requestId, host: "mini1", backend: "local", until: fixture.inventory.hosts[0].rows[0].until, pinned: false } } : state === "refused" ? { message: "The host's image, size, venue, egress or retention changed; preview the sandbox again." } : {}) });
+      fixture.advance();
+      await navigate(state === "long-names" ? `/runs/sandboxes?${new URLSearchParams({ id: longId, host: "mini1", repo: "owner/" + "repository-with-a-long-name-".repeat(5), index: "0", ref: "HEAD" })}` : `/runs/sandboxes?${new URLSearchParams({ id: originalId, host: "mini1", request: requestId })}`);
+      const identifier = state === "long-names" ? longId : requestId;
+      const identifierSelector = state === "long-names" ? "#p-sb-kept a.code" : "#p-sb-run .banner__s .code";
+      assert.equal(await evaluate(`document.querySelector(${JSON.stringify(identifierSelector)})?.textContent`), identifier, "the complete identifier remains visible, without shortening the counterexample");
+      const measured = await evaluate(measureSource(width, EDGE_SLACK));
+      const verdict = widthVerdict(measured, width);
+      assert.equal(verdict.ok, true, `${stage}: ${JSON.stringify(verdict)}`);
+      assert.deepEqual(await evaluate("window.__sandboxCsp"), []);
+      if ([320, 375].includes(width) || state === "long-names" && width === 1024) await shot(`sandboxes-${state}-${theme}-${width}`);
+    }
+    fixture.inventory.hosts[0].rows[0].id = originalId;
+    fixture.advance();
     if (shots) {
       for (const theme of ["light", "dark"]) for (const width of [375, 1024, 1440]) {
         stage = `companion captures ${theme} ${width}`;
@@ -197,7 +219,7 @@ export async function checkSandboxBrowser({ chrome, shots = null } = {}) {
     await navigate("/runs/sandboxes"); assert.match(await evaluate("document.body.innerText"), /operator/i); assert.doesNotMatch(await evaluate("document.body.innerText"), /gh-9575|ops@mini1/); await shot("sandboxes-viewer-denied");
     for (const url of ["/api/sandbox-hosts", "/api/events?page=sandboxes&as=watcher.viewer"]) assert.equal(await evaluate(`fetch(${JSON.stringify(url)}).then(r=>r.status)`), 403);
     assert.equal(fixture.effects.queued.length, 1);
-    return { measurements, queued: fixture.effects.queued.length, ended: fixture.effects.ended.length };
+    return { measurements, exceptionalRenders: exceptional.length * 8, queued: fixture.effects.queued.length, ended: fixture.effects.ended.length };
   } catch (error) { throw new Error(`Sandbox browser ${stage}: ${error.message}; effects ${JSON.stringify({queued:fixture?.effects.queued.length,ended:fixture?.effects.ended.length,requests:fixture?.effects.logs.slice(-10)})}`, { cause: error }); } finally {
     if (tab) await tab.close().catch(() => {}); if (browser) { await browser.close(); browser.removeSingleton(); }
     for (const child of children) child.kill("SIGKILL"); await fixture?.close(); if (extraFixture && extraFixture !== fixture) await extraFixture.close(); rmSync(work, { recursive: true, force: true });
@@ -206,5 +228,5 @@ export async function checkSandboxBrowser({ chrome, shots = null } = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const chrome = findChrome();
   if (!chrome?.path) { if (process.argv.includes("--require")) throw new Error("Chrome is required"); console.log("SKIP: Chrome is unavailable"); }
-  else { const at = process.argv.indexOf("--shots"), out = await checkSandboxBrowser({ chrome: typeof chrome === "string" ? chrome : chrome.path, shots: at < 0 ? null : process.argv[at + 1] }); console.log(`Sandbox browser: ${out.measurements.length} responsive/theme renders, real preview/confirm, preparation, End, Fleet settings, role isolation and no-JavaScript GET passed.`); }
+  else { const at = process.argv.indexOf("--shots"), out = await checkSandboxBrowser({ chrome: typeof chrome === "string" ? chrome : chrome.path, shots: at < 0 ? null : process.argv[at + 1] }); console.log(`Sandbox browser: ${out.measurements.length} responsive/theme renders, ${out.exceptionalRenders} exceptional renders, real preview/confirm, preparation, End, Fleet settings, role isolation and no-JavaScript GET passed.`); }
 }

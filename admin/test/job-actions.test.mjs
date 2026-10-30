@@ -504,6 +504,8 @@ test("a forge re-run takes its authority from the trigger NOW: deleted, replaced
 test("planRerun of a local run re-runs its folder, flow and task on this host's queue, after the folder rule", live, async () => {
   const v = await freshValkey();
   const logsDir = join(tempDir("pd-642-rerun-l-"), "logs");
+  let at = Date.UTC(2026, 9, 30, 12);
+  const now = () => at;
   try {
     const folder = gitRepo("pd-642-repo-");
     const shared = await v.q("pi-jobs");
@@ -512,19 +514,23 @@ test("planRerun of a local run re-runs its folder, flow and task on this host's 
     const env = { PI_WORKER_NAME: "mini1" };
     const planned = await planRerun({ url: URL12, logsDir, jobId: "local-abc", env });
     assert.deepEqual([planned.plan.kind, planned.plan.queue, planned.plan.job], ["local", "pi-jobs@mini1", { folder, flow: "fix", task: "do it" }], "a root run: the folder, flow and task only");
-    const ok = await enqueueRerun(planned.plan, { url: URL12 });
+    const ok = await enqueueRerun(planned.plan, { url: URL12, now });
     assert.equal(ok.ok, true);
     assert.equal(ok.queue, "pi-jobs@mini1");
     const queued = await (await v.q("pi-jobs@mini1")).getJob(ok.jobId);
     assert.deepEqual([queued.data.folder, queued.data.flow, queued.data.task], [folder, "fix", "do it"]);
     // The same run again in the same minute: the local dedup answers, and the enqueue says nothing new was queued.
-    const again = await enqueueRerun(planned.plan, { url: URL12 });
+    const again = await enqueueRerun(planned.plan, { url: URL12, now });
     assert.equal(again.deduplicated, true);
     assert.match(again.refusal, /an identical run was queued/);
+    at += 60_000;
+    const nextMinute = await enqueueRerun(planned.plan, { url: URL12, now });
+    assert.equal(nextMinute.ok, true, "a different minute admits another deliberate re-run");
+    assert.notEqual(nextMinute.jobId, ok.jobId);
     // The folder rule: a dirty tree refuses at the plan, and at the enqueue when it turned dirty after the preview.
     writeFileSync(join(folder, "dirty"), "x\n");
     assert.match((await planRerun({ url: URL12, logsDir, jobId: "local-abc", env })).refusal, /uncommitted changes/);
-    assert.match((await enqueueRerun(planned.plan, { url: URL12 })).refusal, /uncommitted changes .*changed since the preview/);
+    assert.match((await enqueueRerun(planned.plan, { url: URL12, now })).refusal, /uncommitted changes .*changed since the preview/);
     // Expired data names its retention.
     writeRecord(logsDir, { jobId: "local-old", kind: "local", target: "local:x", outcome: "completed" });
     assert.match((await planRerun({ url: URL12, logsDir, jobId: "local-old", env })).refusal, /24 hours after it completes and 7 days after it fails/);

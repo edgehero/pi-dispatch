@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { execFile as nodeExecFile } from "node:child_process";
 import { promisify } from "node:util";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { openerDirectory, runOpener } from "../../worker/src/opener-cli.mjs";
@@ -13,7 +13,12 @@ import { windowsPowerShellEnv } from "../../worker/src/opener-terminal.mjs";
 
 if (process.env.CI !== "true") throw new Error("native opener registration smoke runs only in an isolated CI account");
 const execFile = promisify(nodeExecFile);
-const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), "pi-dispatch-opener-native-")));
+// LaunchServices silently ignores scheme claims beneath the OS temporary directory. Exercise the same
+// Applications location as a real install, within an isolated directory the smoke always removes.
+const parent = process.platform === "darwin" ? join(homedir(), "Applications") : tmpdir();
+const madeParent = !fs.existsSync(parent);
+fs.mkdirSync(parent, { recursive: true });
+const root = fs.realpathSync(fs.mkdtempSync(join(parent, "pi-dispatch-opener-native-")));
 fs.chmodSync(root, 0o700);
 const events = join(root, "events.jsonl");
 const marker = join(root, "executed");
@@ -39,10 +44,38 @@ async function until(test, description, ms = 30_000) {
 	while (performance.now() < deadline) { if (test()) return; await new Promise((done) => setTimeout(done, 100)); }
 	throw new Error(`${description} did not happen; observed ${JSON.stringify(rows())}`);
 }
-async function openProtocol() {
-	if (process.platform === "darwin") await execFile("/usr/bin/open", [protocol], { env });
-	else if (process.platform === "linux") await execFile("xdg-open", [protocol], { env, timeout: 10_000 });
-	else await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Start-Process '${protocol}'`], { env });
+async function openProtocol(url = protocol) {
+	if (process.platform === "darwin") await execFile("/usr/bin/open", [url], { env });
+	else if (process.platform === "linux") await execFile("xdg-open", [url], { env, timeout: 10_000 });
+	else await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Start-Process '${url}'`], { env });
+}
+async function diagnoseWindowsDelivery() {
+	// Diagnostics never satisfy the native assertion. The disposable recorder is invoked only after a failed
+	// handoff, distinguishing registration/dispatch failure from a recorder that Windows could not execute.
+	for (const hive of ["HKCU\\Software\\Classes", "HKCR"]) {
+		try {
+			const result = await execFile("reg.exe", ["query", `${hive}\\pi-dispatch-open\\shell\\open\\command`, "/ve"], { env, timeout: 5_000, maxBuffer: 64 * 1024 });
+			console.error(`Native diagnostic ${hive} command: ${result.stdout.trim()}`);
+		} catch { console.error(`Native diagnostic ${hive} command was unreadable.`); }
+	}
+	try {
+		const result = await execFile(process.execPath, [stub, "sandbox", "sb-diagnostic-recorder"], { env, timeout: 5_000, maxBuffer: 64 * 1024 });
+		console.error(`Native diagnostic direct recorder succeeded: ${JSON.stringify(rows())}; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}`);
+	} catch (error) { console.error(`Native diagnostic direct recorder failed: ${error.message}; stdout=${JSON.stringify(error.stdout)}; stderr=${JSON.stringify(error.stderr)}`); }
+	try {
+		const script = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('pi-dispatch-opener-native-') } | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress`;
+		const result = await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { env, timeout: 5_000, maxBuffer: 64 * 1024 });
+		console.error(`Native diagnostic matching processes: ${result.stdout.trim()}`);
+	} catch { console.error("Native diagnostic matching processes were unreadable."); }
+	try {
+		const plain = join(root, "recorder.mjs");
+		fs.copyFileSync(stub, plain);
+		assert.equal(await runOpener(["install", "--config", source], { env, deps: { home: root, nodePath: process.execPath, cliPath: plain } }), 0, "diagnostic plain-path registration and native association notification");
+		const url = sandboxOpenUrl({ verb: "open", id: "sb-diagnostic-delivery", host: "native" });
+		await openProtocol(url);
+		await until(() => rows().some((r) => r.args[0] === "opener" && r.args[1] === "handle" && r.args[2] === url), "diagnostic plain-path native delivery", 5_000);
+		console.error("Native diagnostic plain-path protocol delivery succeeded; the original unusual-path assertion remains failed.");
+	} catch (error) { console.error(`Native diagnostic plain-path protocol delivery failed: ${error.message}`); }
 }
 let registered = false;
 try {
@@ -90,9 +123,13 @@ try {
 		assert.deepEqual(JSON.parse(fs.readFileSync(marker, "utf8")), ["sandbox", "sb-powershell-smoke", "--attach", "--deployment", quotedDir, "--expected-host", "native"]);
 		console.log("Native PowerShell encoded-command quoting verified with spaces, apostrophes and literal metacharacters.");
 	}
+} catch (error) {
+	if (process.platform === "win32") await diagnoseWindowsDelivery();
+	throw error;
 } finally {
 	for (const row of rows()) if (row.args[1] === "prompt") { try { process.kill(row.pid, "SIGTERM"); } catch {} }
 	if (registered && process.platform === "win32") await execFile("reg.exe", ["delete", "HKCU\\Software\\Classes\\pi-dispatch-open", "/f"]).catch(() => {});
 	if (registered && process.platform === "darwin") await execFile("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", ["-u", join(root, "Applications", "pi-dispatch Opener.app")]).catch(() => {});
 	fs.rmSync(root, { recursive: true, force: true });
+	if (madeParent) { try { fs.rmdirSync(parent); } catch {} }
 }
