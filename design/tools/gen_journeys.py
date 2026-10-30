@@ -29,19 +29,19 @@ JOURNEYS = {
              "Needs you puts the question first, with its project and how long it has waited.", "Built", "#745",
              ("person", "You open it")),
             ("ParkedAnswerer", ["#p-drafted"], None,
-             "On Parked, an answer rule has drafted an answer and lists its sources.", "Proposed", "#753",
+             "On Parked, an answer rule has drafted an answer and lists its sources.", "Proposed", "#772",
              ("person", "Read and send on the run page")),
             ("RunParked", ["#p-chat"], None,
-             "The run page shows the question beside the answer box, filled from the draft.", "Planned", "#747",
+             "The run page shows the question beside the answer box, filled from the draft.", "Built", "#747",
              ("person", "Preview answer")),
             ("RunParked", ["#p-chat .confirm", "#p-chat"], None,
-             "The preview says what it posts, where, and what the resumed run may cost.", "Planned", "#747",
+             "The preview says what it posts, where, and what the resumed run may cost.", "Built", "#747",
              ("system", "Confirm: the worker posts it and the run resumes")),
             ("RunLive", ["#p-progress"], None,
-             "The run picks up from its session and reports its phases as it goes.", "Planned", "#747",
+             "The run picks up from its session and reports its phases as it goes.", "Built", "#747",
              ("system", "It is counted")),
             ("ZeroTouchScreen", ["#p-zt-handled", "#p-zt-rate"], None,
-             "Zero touch counts it as a touch: a quicker one, because the draft was ready.", "Proposed", "#753",
+             "Zero touch counts it as a touch: a quicker one, because the draft was ready.", "Proposed", "#770",
              None),
         ]),
     "JourneyFailure": dict(
@@ -53,16 +53,16 @@ JOURNEYS = {
              "Runs shows gh-e9a0 as refused, with the reason in one sentence.", "Built", "#746",
              ("person", "Open the run")),
             ("RunRefused", ["#p-outcome"], None,
-             "The run page says it was refused before it started, nothing was spent, and what to do.", "Planned", "#747",
+             "The run page says it was refused before it started, nothing was spent, and what to do.", "Built", "#747",
              ("person", "Open Connections")),
             ("ConnectionsScreen", ["#p-egress"], 'tr:has-text("build3")',
              "Egress shows build3's proxy is missing, so every job there is refused before spend.", "Planned", "#751",
              ("person", "Start the proxy and run doctor again")),
             ("RunEnded", ["#p-actions .confirm", "#p-actions"], None,
-             "Re-run it. The preview shows the model, the reserve and today's cap before anything starts.", "Planned", "#747",
+             "Re-run it. The preview shows the model, the reserve and today's cap before anything starts.", "Built", "#747",
              ("branch", "Or, when a run ran but built the wrong thing")),
             ("SandboxesScreen", ["#p-sb-run"], None,
-             "Open its workspace in your own terminal: the same image and files, no credentials.", "Proposed", "#753",
+             "Open its workspace in your own terminal: the same image and files, no credentials.", "Proposed", "#771",
              None),
         ]),
     "JourneySetup": dict(
@@ -71,13 +71,13 @@ JOURNEYS = {
         sub="One command in a terminal, then everything else from the console.",
         steps=[
             ("SetupScreen", ["#p-setup-start"], None,
-             "One command starts the console and opens this page.", "Proposed", "no issue yet",
+             "One command starts the console and opens this page.", "Proposed", "#774",
              ("system", "The console opens")),
             ("SetupScreen", ["#p-setup"], None,
-             "Getting ready runs each step from the page: the worker, the proxy, a provider key.", "Proposed", "no issue yet",
+             "Getting ready runs each step from the page: the worker, the proxy, a provider key.", "Proposed", "#774",
              ("person", "Add the first trigger")),
             ("TriggerEditor", ["#p-trigger-preview", "#p-trigger-add"], None,
-             "The first trigger is previewed as the lines it adds to the triggers file.", "Planned", "#750",
+             "The first trigger is previewed as the lines it adds to the triggers file.", "Built", "#750",
              ("system", "Confirm: the next matching event starts a run")),
             ("OverviewScreen", ["#p-active"], None,
              "The Overview shows what is running, and the slots it takes.", "Built", "#745",
@@ -263,7 +263,7 @@ README = {
   4. the first run on the Overview;
   5. its result on Runs.
 - Under each step, the next line says who moves it on: *you* or *pi-dispatch*.
-- The ribbon on each step says whether that screen is built, planned or proposed, and its issue. Setting up from the browser is proposed with no issue yet.
+- The ribbon on each step says whether that screen is built, planned or proposed, and its issue. Setting up from the browser is proposed in #774.
 
 **Panels.** The strip of steps (`j-strip`); there are no console panels on a guide card.
 

@@ -32,7 +32,7 @@ WORD = {BUILT: ("ok", "done", "Built"), PLANNED: ("running", "clock", "Planned")
 STATUS = {
     "OverviewScreen": (BUILT, "In main since #745."), "OverviewAllClear": (BUILT, "In main since #745."),
     "OverviewPhone": (BUILT, "In main since #745."),
-    "SetupScreen": (PROPOSED, "No issue yet. Today the overview draws the first-run checklist (#745); setting up from the browser is new."),
+    "SetupScreen": (PROPOSED, "#774. Today the overview draws the first-run checklist (#745); setting up from the browser is new."),
     "RunsScreen": (BUILT, "In main since #746."), "RunsPhone": (BUILT, "In main since #746."),
     "ParkedPhone": (BUILT, "In main since #746."),
     **{n: (BUILT, "Built by #747; managed forks added by #648. Watch remains separate work.") for n in ["RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered",
@@ -45,17 +45,17 @@ STATUS = {
     **{n: (PLANNED, "#751.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
     "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),
-    "ModelsScreen": (PLANNED, "#717 roles, #716 failover, #693 the Radius gateway."),
+    "ModelsScreen": (PLANNED, "#773. The worker side shipped with #717 (roles), #716 (failover) and #693 (Radius)."),
     "WatchScreen": (BUILT, "Built by #735: compact retained source, rule and finding view."), "WatchBoard": (BUILT, "Built by #743: retained trace, classifier totals and operator-adopted inert board; live projections remain future work."),
-    "DispatchersScreen": (PROPOSED, "No issue yet; it grew out of #735."), "DispatcherScreen": (PROPOSED, "No issue yet; it grew out of #735."),
-    "SandboxesScreen": (PROPOSED, "#753. The browser terminal part needs a decision first: #754."),
-    "ZeroTouchScreen": (PROPOSED, "#753."), "ZeroTouchViewer": (PROPOSED, "#753. As a viewer sees it."),
-    "ZeroTouchPhone": (PROPOSED, "#753. On a phone."),
-    "ParkedDraftViewer": (PROPOSED, "#753. As a viewer sees it."), "ParkedDraftPhone": (PROPOSED, "#753. On a phone."),
+    "DispatchersScreen": (PROPOSED, "#776, specs first; it grew out of #735."), "DispatcherScreen": (PROPOSED, "#776, specs first; it grew out of #735."),
+    "SandboxesScreen": (PROPOSED, "#771, part of #753. The browser terminal part needs a decision first: #754."),
+    "ZeroTouchScreen": (PROPOSED, "#770, part of #753."), "ZeroTouchViewer": (PROPOSED, "#770. As a viewer sees it."),
+    "ZeroTouchPhone": (PROPOSED, "#770. On a phone."),
+    "ParkedDraftViewer": (PROPOSED, "#772. As a viewer sees it."), "ParkedDraftPhone": (PROPOSED, "#772. On a phone."),
     "RunLivePhone": (BUILT, "Built by #747, the run page on a phone."),
     "TriggersPhone": (BUILT, "Built by #767 (#750), on a phone."), "TriggersViewer": (BUILT, "Built by #767 (#750), as a viewer sees it."),
     "FleetPhone": (BUILT, "Built by #748, on a phone."), "FleetViewer": (BUILT, "Built by #748. As a viewer sees it."),
-    "ParkedAnswerer": (PROPOSED, "#753. Sending with no person's confirm is not proposed: OQ-051."),
+    "ParkedAnswerer": (PROPOSED, "#772, part of #753. Sending with no person's confirm is not proposed: OQ-051."),
 }
 RIBBON_RE = re.compile(r'<div class="ds-status[^"]*" role="note"[^>]*>.*?</div>\n', re.S)
 # The ribbon is a note on the card, not console styling, so its rules live here and are added to each card that

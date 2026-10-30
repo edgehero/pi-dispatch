@@ -54,7 +54,7 @@ def concept_svg():
     n.append(node(C1, 116, 280, 50, "The CLI", ["pi-dispatch run, from a shell"], "", "terminal"))
     n.append(node(C1, 182, 280, 64, "Watch rules", ["a finding in logs or alerts"], "", "eye"))
     n.append(node(C1, 262, 280, 64, "Dispatchers", ["start listed jobs, propose triggers"], "proposed", "flows",
-                  ("proposed, no issue yet", "proposed")))
+                  ("proposed, #776", "proposed")))
     # column 2: queue and host
     n.append(node(C2, 36, 270, 50, "The queue", ["waits for a slot, a time or a check"], "", "queue"))
     n.append(node(C2, 126, 270, 50, "A worker on a host", ["caps checked before anything spends"], "", "fleet"))
@@ -66,7 +66,7 @@ def concept_svg():
     n.append(node(OX, 166, OW, 50, "Failed", ["the infrastructure gave out"], "failed", "failed"))
     n.append(node(OX, 226, OW, 50, "Refused", ["a rule said no; nothing spent"], "refused", "refused"))
     n.append(node(OX, 286, OW, 50, "Parked", ["awaiting input"], "parked", "parked"))
-    n.append(node(OX, 346, OW, 64, "Waiting for approval", ["a named action"], "planned", "shield", ("planned, #649", "planned")))
+    n.append(node(OX, 346, OW, 64, "Waiting for approval", ["a named action, then parked"], "parked", "shield"))
     # column 4: where a person steps in
     n.append(node(C4, 36, 290, 50, "Steer or cancel", ["while it runs"], "you", "steer"))
     n.append(node(C4, 92, 290, 50, "Merge the pull request", ["always yours, never automatic"], "you", "git"))
@@ -74,12 +74,11 @@ def concept_svg():
     n.append(node(C4, 204, 290, 50, "Re-run", ["its cost is previewed first"], "you", "rerun"))
     n.append(node(C4, 262, 290, 50, "Answer the question", ["the run resumes from its session"], "you", "parked"))
     n.append(node(C4, 320, 290, 64, "Send a drafted answer", ["from an answer rule; you send it"], "you proposed", "edit",
-                  ("proposed, #753", "proposed")))
-    n.append(node(C4, 394, 290, 64, "Decide the approval", ["approve, or decline with a reason"], "you planned", "shield",
-                  ("planned, #649", "planned")))
+                  ("proposed, #772", "proposed")))
+    n.append(node(C4, 394, 290, 64, "Decide the approval", ["approve, or decline with a reason"], "you", "shield"))
     # what is counted
     n.append(node(C2, 502, 606, 50, "Spend against caps", ["every job reserves before it calls a model"], "", "spend"))
-    n.append(node(C4, 502, 290, 64, "Touches", ["each run a person acted on"], "proposed", "pie", ("Zero touch, proposed, #753", "proposed")))
+    n.append(node(C4, 502, 290, 64, "Touches", ["each run a person acted on"], "proposed", "pie", ("Zero touch, proposed, #770", "proposed")))
 
     e = []
     # starts -> queue, through one bus: solid for what exists, dashed for planned and proposed
@@ -95,7 +94,7 @@ def concept_svg():
     # run -> how it ends
     e.append(edge("M734,86 V378", arrow=False)); e.append(label(744, 100, "ends as"))
     for cy in (131, 191, 251, 311, 378):
-        e.append(edge(f"M734,{cy} H746", dashed=(cy == 378)))
+        e.append(edge(f"M734,{cy} H746"))
     # how it ends -> where a person steps in
     e.append(edge("M978,61 H1050")); e.append(label(986, 54, "running"))
     e.append(edge("M978,131 H1012", arrow=False)); e.append(edge("M1012,117 V171", arrow=False))
@@ -104,14 +103,14 @@ def concept_svg():
     e.append(edge("M978,311 H1012", arrow=False)); e.append(edge("M1012,287 V311", arrow=False))
     e.append(edge("M1012,311 V352", dashed=True, arrow=False))
     e.append(edge("M1012,287 H1050")); e.append(edge("M1012,352 H1050", dashed=True))
-    e.append(edge("M978,378 H1012 V426 H1050", dashed=True))
+    e.append(edge("M978,378 H1012 V426 H1050"))
     # counted
     e.append(edge("M507,278 V498")); e.append(label(515, 400, "reserved first"))
     e.append(edge("M1199,458 V498", dashed=True)); e.append(label(1207, 482, "each one counted"))
 
     desc = ("Triggers, the CLI, watch rules and proposed dispatchers put jobs on the queue. A worker on a host takes "
             "one when a slot is free, and a venue runs it in one container. It becomes a run with a record, which ends "
-            "completed, failed, refused or parked, or, planned, waits for approval. A person steers or cancels a running run, "
+            "completed, failed, refused or parked, or waits for approval. A person steers or cancels a running run, "
             "merges the pull request, opens the sandbox, re-runs, answers the question or sends a drafted answer, and "
             "decides approvals. Every job reserves spend against caps first, and the runs a person acted on are counted as "
             "touches.")
@@ -138,16 +137,16 @@ LIST = [
     ("The run", [("runs", "It becomes a run with a record: outcome, reason, tokens and cost.", ""),
                  ("done", "Completed, failed or refused, always with its word.", ""),
                  ("parked", "Parked: it ended to wait for an answer.", ""),
-                 ("shield", "Waiting for approval of a named action.", "planned, #649")]),
+                 ("shield", "Waiting for approval of a named action.", "")]),
     ("Where a person steps in", [("steer", "Steer or cancel while it runs.", ""),
                                  ("git", "Merge the pull request: always yours, never automatic.", ""),
                                  ("terminal", "Open its sandbox: the kept workspace, no credentials.", ""),
                                  ("rerun", "Re-run, with the cost previewed first.", ""),
                                  ("parked", "Answer the question; the run resumes.", ""),
-                                 ("edit", "Send a drafted answer from an answer rule.", "proposed, #753"),
-                                 ("shield", "Decide the approval.", "planned, #649")]),
+                                 ("edit", "Send a drafted answer from an answer rule.", "proposed, #772"),
+                                 ("shield", "Decide the approval.", "")]),
     ("What is counted", [("spend", "Spend against caps: every job reserves before it calls a model.", ""),
-                         ("pie", "Touches: each run a person acted on, in Zero touch.", "proposed, #753")]),
+                         ("pie", "Touches: each run a person acted on, in Zero touch.", "proposed, #770")]),
 ]
 
 def concept_list():
@@ -225,27 +224,27 @@ G = [
         ("run", "A job whose container started, from its start to its outcome.", "Runs, the run page", ""),
         ("run record", "What a run leaves behind: outcome, reason, tokens, cost and times. It holds no issue text.", "Runs, the run page", ""),
         ("re-run", "Start the same issue, flow and model again. A paid action, previewed first.", "The run page", ""),
-        ("fork", "Start again from an earlier point in a run's session, optionally with another model.", "Fork a run", "planned, #648"),
+        ("fork", "Start again from an earlier point in a run's session, optionally with another model.", "Fork a run", ""),
         ("steer", "A message that reaches a running agent at its next turn.", "The run page", ""),
         ("follow up", "A message that waits until the agent would stop, then reaches it.", "The run page", ""),
     ]),
     ("Waiting for a person", [
         ("parked", "A run that ended to wait for a person's answer. Nothing waits in a container meanwhile.", "Parked, Overview", ""),
         ("awaiting input", "The record's reason for a parked run, and its outcome word on the Runs page.", "Runs", ""),
-        ("approval", "A run asks permission for a named action and waits until a person approves or declines.", "Parked, Approvals tab", "planned, #649"),
+        ("approval", "A run asks permission for a named action and waits until a person approves or declines.", "Parked, with the questions", ""),
     ]),
     ("Sandboxes", [
         ("sandbox", "A fresh container over a run's workspace, with the job's isolation, no credentials and no agent.", "The run page, Sandboxes", ""),
         ("kept workspace", "A run's workspace kept after it ends: 24 hours by default, 7 days when pinned.", "Sandboxes", ""),
-        ("prepared sandbox", "A kept workspace with no run behind it, cloned as one trigger's jobs would see it.", "Sandboxes", "proposed, #753"),
+        ("prepared sandbox", "A kept workspace with no run behind it, cloned as one trigger's jobs would see it.", "Sandboxes", "proposed, #771"),
     ]),
     ("Zero touch and answers", [
-        ("touch", "A run a person had to act on: an answer, an approval, a re-run, a config fix after a refusal, a steer or a cancel.", "Zero touch", "proposed, #753"),
-        ("touch rate", "Touched runs out of the runs that ended, per project and repository.", "Zero touch", "proposed, #753"),
-        ("zero touch", "A project whose runs needed no person over the window. Merging never counts.", "Zero touch", "proposed, #753"),
-        ("answer rule", "A hand-written rule that starts a draft job when a run parks. Current word: earlier cards said \"answerer\".", "Parked with an answer rule", "proposed, #753"),
-        ("draft job", "The job an answer rule starts: it classifies the question and drafts an answer from cited sources. A person sends it.", "Parked with an answer rule", "proposed, #753"),
-        ("standing answer", "An answer an operator wrote once, which a draft may cite.", "Parked with an answer rule", "proposed, #753"),
+        ("touch", "A run a person had to act on: an answer, an approval, a re-run, a config fix after a refusal, a steer or a cancel.", "Zero touch", "proposed, #770"),
+        ("touch rate", "Touched runs out of the runs that ended, per project and repository.", "Zero touch", "proposed, #770"),
+        ("zero touch", "A project whose runs needed no person over the window. Merging never counts.", "Zero touch", "proposed, #770"),
+        ("answer rule", "A hand-written rule that starts a draft job when a run parks. Current word: earlier cards said \"answerer\".", "Parked with an answer rule", "proposed, #772"),
+        ("draft job", "The job an answer rule starts: it classifies the question and drafts an answer from cited sources. A person sends it.", "Parked with an answer rule", "proposed, #772"),
+        ("standing answer", "An answer an operator wrote once, which a draft may cite.", "Parked with an answer rule", "proposed, #772"),
     ]),
     ("Watch and dispatchers", [
         ("watch rule", "A trigger that turns a finding in logs or alerts into a read-only job.", "Configuration, Watch", ""),
@@ -401,9 +400,9 @@ A guide card, not a console screen: one picture of how the pieces fit, read left
 **How a person uses it.**
 - **What starts work.** Triggers (cron, label, comment, issue and pull request rules, written by hand), the CLI, and the watch rules (#735) and proposed dispatchers (only the latter are drawn dashed).
 - **Queue and host.** The queue holds a job until a slot is free. A worker on a host takes it after the caps are checked, and a venue runs it in one container.
-- **The run.** It becomes a run with a record, and ends completed, failed, refused or parked. Waiting for approval (#649) is planned.
-- **Where a person steps in.** Each outcome points at what a person does next: steer or cancel while it runs, merge the pull request (always theirs), open the sandbox, re-run, answer the question, send a drafted answer (#753, proposed), decide an approval (#649, planned).
-- **What is counted.** Spend against caps, reserved before any model call, and touches (Zero touch, #753, proposed).
+- **The run.** It becomes a run with a record, and ends completed, failed, refused or parked, or waits for approval of a named action (#649).
+- **Where a person steps in.** Each outcome points at what a person does next: steer or cancel while it runs, merge the pull request (always theirs), open the sandbox, re-run, answer the question, send a drafted answer (#772, proposed), decide an approval (#649).
+- **What is counted.** Spend against caps, reserved before any model call, and touches (Zero touch, #770, proposed).
 - **The legend** says what solid, dashed blue, dashed grey, a violet edge and a tint mean. Every planned or proposed box also says so in words, with its issue.
 - **On a phone** the map becomes the same content as a list, in the same five groups.
 
