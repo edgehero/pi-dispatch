@@ -1485,3 +1485,77 @@ What to do: check watch runtime configuration and worker availability.
 A reviewed log query requires a host credential that is unavailable. No investigation started.
 
 What to do: configure the named read-only query credential on the worker host.
+
+## Question grouping
+
+### question-group-unavailable
+
+Question grouping is not configured on this worker.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-config-changed
+
+The reviewed question grouping settings changed.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-source-expired
+
+The private source for this question expired.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-source-unavailable
+
+The private source for this question could not be read.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-source-oversize
+
+The private source exceeds the grouping input limit.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-candidates-expired
+
+A group exemplar expired, so matching would be incomplete.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-limit
+
+The repository has reached the bounded candidate group limit.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-stale
+
+The question groups changed while a job was being prepared.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-refused
+
+Stopped: the reviewed grouping model or private input could not be used. Check Zero touch status. Not retried.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-unanswered
+
+Stopped: the classifier returned no confident grouping. Check Zero touch status. Not retried.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### question-group-output-invalid
+
+The grouping result did not satisfy the closed result contract.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+### job-image-question-grouping-unsupported
+
+The job image does not declare isolated question grouping.
+
+What to do: Check the Zero touch grouping status and reviewed configuration before trying again.

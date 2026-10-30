@@ -157,8 +157,9 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	assert.notEqual(at, -1, "the recorder is bound once, carrying the pickup project, the size resolved beside it (#596), the capacity set at admission and the earlier attempts read at pickup (#599)");
 	assert.ok(at > src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), "the size is resolved from the same limits snapshot and pickup project, before the recorder");
 	// One read of the projects ref per pickup (issue #504 part B reuses the same snapshot for the resolved folder).
-	assert.ok(at > src.indexOf("const project = projectOf(job.data, pickupProjects);"), "and after the pickup resolution");
-	assert.ok(src.indexOf("const pickupProjects = projects();") < src.indexOf("const project = projectOf(job.data, pickupProjects);"));
+	assert.ok(at > src.indexOf("const project = grouping ? sourceProject : projectOf(job.data, pickupProjects);"), "and after the pickup resolution");
+	assert.ok(src.indexOf("const pickupProjects = projects();") < src.indexOf("const project = grouping ? sourceProject : projectOf(job.data, pickupProjects);"));
+	assert.ok(src.indexOf("!pickupProjects.some((row) => row.id === sourceProject)") < src.indexOf("const project = grouping ? sourceProject : projectOf(job.data, pickupProjects);"), "internal classification validates its source project before binding the same recorder and gates");
 	// Comments stripped first (they name `recordRun` in prose), then NO `recordRun` identifier at all: that refuses a
 	// bare call, an optional call (`recordRun?.(`) and an alias (`const rec = recordRun`) alike.
 	const code = src
@@ -206,7 +207,7 @@ test("BY SHAPE: the pickup project is resolved right above the pause gate, so ev
 	assert.ok(at("await settledRecord(job.id,") < at("const nowMs = now();"));
 	assert.ok(at("earlierFrom(priorAttemptRecord)") < at("const nowMs = now();"));
 	assert.ok(at("const nowMs = now();") < at("const pickupProjects = projects();"));
-	assert.ok(at("const project = projectOf(job.data, pickupProjects);") < at("const until = pauseUntil(job.data, nowMs);"));
+	assert.ok(at("const project = grouping ? sourceProject : projectOf(job.data, pickupProjects);") < at("const until = pauseUntil(job.data, nowMs);"));
 	assert.match(body, /if \(until && until > nowMs \+ 1000\) await deferTo\(job, token, until, "pause-window", \{ project \}\);/);
 	// The limits snapshot and the size stay below the pause gate, where a paused job never reads them.
 	assert.ok(at("const until = pauseUntil(job.data, nowMs);") < at("const limits = scopedLimits();"));

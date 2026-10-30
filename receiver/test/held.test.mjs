@@ -228,6 +228,7 @@ for (const forge of Object.keys(FORGES)) {
 		assert.equal(h.runId, "run-1");
 		assert.equal(h.entry.id, forgeMessageId("d-1"));
 		assert.equal(h.entry.route, "pre-label");
+		assert.equal(h.entry.at, NOW, "the receipt is the injected receiver clock, independent of forge payload timestamps");
 		assert.equal(h.entry.fallback.parkedReply, true);
 		assert.equal(h.entry.fallback.kind, forge);
 		// The fallback is exactly the job the marker would have enqueued, as the late steer stores it (one spelling).

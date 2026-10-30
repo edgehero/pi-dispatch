@@ -2166,7 +2166,7 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
  * own words (`removeHeldJob`'s refusal can be a client's error, or a parse of the job's data) reach the answer only
  * through `boundedText`: this answer is a page's, the audit's and the model's.
  */
-export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, queueFn = makeQueue, timeoutMs = 2500 } = {}) {
+export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, queueFn = makeQueue, timeoutMs = 2500, touchStore = undefined, touchOutbox = null, now = Date.now } = {}) {
   if (typeof jobId !== "string" || jobId === "") return { invalid: "a job id is required" };
   let redis;
   const queues = [];
@@ -2217,7 +2217,7 @@ export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, que
       // worker's cancel-state.mjs since issue #287 gave it a second caller: one body, imported rather than
       // re-implemented, which is this module's own rule for everything it shares with the worker.
       asked = true;
-      const res = await removeHeldJob({ redis, queue, jobId });
+      const res = await removeHeldJob({ redis, queue, jobId, touchStore, touchOutbox, now });
       if (res?.ok) return res;
       if (res?.cleared !== true) return heldRefused(jobId, res?.invalid);
       // The hold is gone and the job stayed (issue #737): never "nothing was changed", and never the error's own words.

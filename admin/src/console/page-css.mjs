@@ -1,3 +1,4 @@
+import { ZERO_TOUCH_CSS } from "./zero-touch-css.mjs";
 /**
  * The console's own rules after the Pulse stylesheet (issue #737): what the shell needs that `components/bundle.css`
  * does not draw (`SHELL_CSS`), each page's own rules (`PAGE_CSS`), and the one function that confines a block of rules
@@ -749,7 +750,7 @@ ${FLEET_CSS}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
+export const PAGE_CSS = Object.freeze({ "zero-touch": ZERO_TOUCH_CSS, insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
 ${FLEET_CSS}`, venue: VENUE_CSS });
 
 /**

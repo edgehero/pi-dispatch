@@ -1,3 +1,4 @@
+import { ZERO_TOUCH_DRAW } from "./zero-touch-goldens.mjs";
 import { CONFIGURATION_DRAW } from "./configuration-goldens.mjs";
 import { TRIGGER_LIST_DRAW } from "./trigger-list-goldens.mjs";
 import assert from "node:assert/strict";
@@ -794,6 +795,7 @@ const RUN_CARD_STATES = {
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
 const DRAW = {
+  ...ZERO_TOUCH_DRAW,
   ...CONFIGURATION_DRAW,
   ...TRIGGER_LIST_DRAW,
   ...TRIGGER_DRAW,

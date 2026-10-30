@@ -11,9 +11,9 @@ import { makeConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/cons
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dispatch/queue";
-import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
+import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
-import { ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
+import { ACTIONS, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
@@ -26,6 +26,9 @@ import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parke
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
+import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
+import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
 
 // The console's action table over HTTP (issue #642, REQ-OPERATOR-CONSOLE-ACTIONS): every action through its GENERATED
 // route, preview then confirm, against the read model's real funnels and the tools' real planners. File actions run on
@@ -334,9 +337,10 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "envelope-set": "envelope-set",
     "priorities-set": "priorities-set",
     "allocation-revert": "allocation-revert",
+    "zero-touch-group": "zero-touch-group", "zero-touch-name": "zero-touch-name", "zero-touch-instruction": "zero-touch-instruction", "zero-touch-undo": "zero-touch-undo",
     "board-freeze": "board-freeze", "board-unfreeze": "board-unfreeze", "board-clear": "board-clear", "board-revert": "board-revert", "board-adopt": "board-adopt",
   });
-  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-fork", "steer", "trigger-fire"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-fork", "steer", "trigger-fire", "zero-touch-group"]);
   assert.deepEqual(ACTIONS.filter((a) => a.bulk).map((a) => a.name).sort(), ["cancel-all-held", "remove-all-failed", "retry-all-failed"]);
   assert.equal(BULK_MAX, RM.BULK_MAX, "the console's bulk bound is job-actions' own");
 });
@@ -359,9 +363,11 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "limit-add": ["limit"], "limit-edit": ["index", "limit"], "limit-delete": ["index"],
     "project-add": ["id", "name", "members"], "project-edit": ["id", "name", "members"], "project-delete": ["id"],
     "envelope-set": ["envelope"], "priorities-set": ["projects", "validDays"], "allocation-revert": ["index"],
+    "zero-touch-group": ["runId"], "zero-touch-name": ["groupId", "name"], "zero-touch-instruction": ["runId", "groupId", "index", "sentence"], "zero-touch-undo": ["fixId"],
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
-  assert.equal(ACTIONS.length, 45);
+  assert.equal(ACTIONS.length, 49);
+  for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
     assert.ok(Object.isFrozen(a.fields) && a.fields.every((f) => typeof f === "string"), `${a.name}: fields is a frozen list of names`);
@@ -417,6 +423,10 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   const windows = { scope: "*", from: "01:00", to: "02:00", tz: "UTC" };
   // [action, out, undo, inverse (or null), label, done, done's result for a bulk act]
   const rows = [
+    ["zero-touch-group", {}, twice("A completed classification cannot be withdrawn; it never answers the question."), null, "Start grouping job", "Queued the capped question grouping job"],
+    ["zero-touch-name", {}, twice("Rename the group again from Zero touch."), null, "Save group name", "Saved the group name"],
+    ["zero-touch-instruction", {}, twice("Remove this sentence while the trigger still matches the confirmed change."), null, "Add instruction sentence", "Added the instruction sentence and linked its cause"],
+    ["zero-touch-undo", {}, twice("Add a new reviewed sentence from the same cause."), null, "Remove instruction sentence", "Removed the instruction sentence"],
     ...["freeze", "unfreeze", "clear", "revert", "adopt"].map((op) => [`board-${op}`, { target: "shop" }, twice("Restore a retained board version, or change its freeze state."), null, `${op[0].toUpperCase() + op.slice(1)} board`, "Changed board shop"]),
     ["run-fork", { target: "gh-f", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Fork for up to $2.00", "Queued a fork of gh-f"],
     ["cancel-active", { payload: { jobId: "gh-1" } }, twice(U.cancelled), null, "Cancel the run", "Cancelled running job gh-1"],
@@ -513,7 +523,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   }
   // A re-run's way back is the cancel of the job it queued, asked again at the confirm with the apply's answer
   // (`atConfirm`); no other rule is, and no bulk one can be (a bulk confirm asks no rule again).
-  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-fork", "trigger-fire", "rerun"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-fork", "trigger-fire", "rerun", "zero-touch-instruction"]);
   assert.ok(ACTIONS.every((a) => typeof a.atConfirm === "boolean" && !(a.atConfirm && a.bulk)), "atConfirm is a single act's, and a boolean on every action");
   const rerun = ACTIONS.find((a) => a.name === "rerun");
   const landed = { ok: true, jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" };
@@ -933,14 +943,14 @@ test("a body key the action does not take is refused 400 by name, with the field
   const before = read(paths.triggersPath);
   const named = await c.act("trigger-delete", { index: 0, colour: "red-canary" });
   assert.equal(named.status, 400);
-  assert.equal(named.json().error, "trigger-delete takes index only; colour is not one of them, so nothing was changed");
-  assert.equal((await c.act("pause-window-add", { scope: "*", from: "01:00", to: "02:00", tz: "UTC", weekday: "mon" })).json().error, "pause-window-add takes scope, from, to, tz, days, dateFrom, dateTo only; weekday is not one of them, so nothing was changed");
+  assert.equal(named.json().error, "trigger-delete takes index, becauseRun only; colour is not one of them, so nothing was changed");
+  assert.equal((await c.act("pause-window-add", { scope: "*", from: "01:00", to: "02:00", tz: "UTC", weekday: "mon" })).json().error, "pause-window-add takes scope, from, to, tz, days, dateFrom, dateTo, becauseRun only; weekday is not one of them, so nothing was changed");
   assert.equal((await c.act("fleet-pause", { all: true })).json().error, "fleet-pause takes no fields; it refuses all, so nothing was changed");
-  assert.equal((await c.act("trigger-delete", { index: 0, ticket: "t" })).json().error, "trigger-delete takes index only; ticket is not one of them, so nothing was changed", "a ticket belongs to the confirm");
+  assert.equal((await c.act("trigger-delete", { index: 0, ticket: "t" })).json().error, "trigger-delete takes index, becauseRun only; ticket is not one of them, so nothing was changed", "a ticket belongs to the confirm");
   for (const key of ["a b", "x".repeat(41), "__proto__", "c\u202eolour", "<img src=x>", "<b>", "a<b", "x>"]) {
     const res = await c.post("/api/act/trigger-delete/preview", JSON.parse(`{"index":0,${JSON.stringify(key)}:"value-canary"}`), { cookie: c.op });
     assert.equal(res.status, 400, JSON.stringify(key));
-    assert.equal(res.json().error, "trigger-delete takes index only; a field it was sent is not one of them, so nothing was changed", JSON.stringify(key));
+    assert.equal(res.json().error, "trigger-delete takes index, becauseRun only; a field it was sent is not one of them, so nothing was changed", JSON.stringify(key));
     assert.ok(!res.text.includes("value-canary") && !res.text.includes("<img") && !res.text.includes("<b>") && !res.text.includes("&lt;"), "neither the key nor its value is echoed");
   }
   // A key holding a markup character is never a name, whatever else it holds.
@@ -950,10 +960,10 @@ test("a body key the action does not take is refused 400 by name, with the field
   assert.match(named.json().html, /tone-refused/);
   // The bar names the action and the fields as code (issue #737), so its first word is never "Trigger-delete" or
   // "Setting-set": the JSON's sentence starts with the action's own name, and capitalising that names no action.
-  assert.ok(named.json().html.includes('<p class="banner__s"><span class="code">trigger-delete</span> takes <span class="code">index</span> only; <span class="code">colour</span> is not one of them, so nothing was changed.</p>'), named.json().html);
+  assert.ok(named.json().html.includes('<p class="banner__s"><span class="code">trigger-delete</span> takes <span class="code">index</span>, <span class="code">becauseRun</span> only; <span class="code">colour</span> is not one of them, so nothing was changed.</p>'), named.json().html);
   const setting = (await c.act("setting-set", { key: "maxTurns", value: "40", colour: "red" })).json();
-  assert.equal(setting.error, "setting-set takes key, value only; colour is not one of them, so nothing was changed");
-  assert.ok(setting.html.includes('<span class="code">setting-set</span> takes <span class="code">key</span>, <span class="code">value</span> only;') && !setting.html.includes("Setting-set"), setting.html);
+  assert.equal(setting.error, "setting-set takes key, value, becauseRun only; colour is not one of them, so nothing was changed");
+  assert.ok(setting.html.includes('<span class="code">setting-set</span> takes <span class="code">key</span>, <span class="code">value</span>, <span class="code">becauseRun</span> only;') && !setting.html.includes("Setting-set"), setting.html);
   assert.ok((await c.act("fleet-pause", { all: true })).json().html.includes('<span class="code">fleet-pause</span> takes no fields; it refuses <span class="code">all</span>, so nothing was changed.</p>'));
   const unnamed = (await c.post("/api/act/trigger-delete/preview", { index: 0, "a b": 1 }, { cookie: c.op })).json();
   assert.ok(unnamed.html.includes("only; a field it was sent is not one of them, so nothing was changed.</p>"), "an unnamed field is plain words, not code");
@@ -1861,6 +1871,29 @@ test("an Undo decided at the confirm that cannot be offered costs the banner its
   }
   assert.equal(enqueued, 2, "each write landed once");
   assert.deepEqual(rows.map((r) => [r.kind, r.outcome]), [["run-rerun", "ok"], ["run-rerun", "ok"]], "one ok row each, no failed row: the write landed");
+});
+
+test("a successful re-run with incomplete touch accounting keeps success and warns in its response and next-page banner", async () => {
+  const { paths } = deployment();
+  let enqueued = 0;
+  const rm = {
+    ...RM,
+    planRerun: async () => ({ plan: { kind: "cron", queue: "pi-jobs", schedule: {}, job: {}, runFields: null, reserve: null } }),
+    enqueueRerun: async () => { enqueued++; return { ok: true, jobId: "cron:t0:1", queue: "pi-jobs", touchWarning: "touch-tracking-incomplete" }; },
+    planCancelQueued: async () => ({ error: "already-started" }),
+  };
+  const c = await start({ paths, a: { rm } });
+  const preview = await c.act("rerun", { jobId: "cron:t0:0" });
+  assert.equal(preview.status, 200, preview.text);
+  const result = await c.confirm("rerun", preview.json().ticket);
+  assert.equal(result.status, 200, result.text);
+  assert.equal(result.json().ok, true);
+  assert.equal(result.json().touchWarning, "touch-tracking-incomplete");
+  assert.match(result.json().change.summary, /accounting is incomplete and pending repair/);
+  const banner = String(doneBannerHtml(c.sessions.flashes.at(-1).change));
+  assert.match(banner, /The action succeeded; do not repeat it for its metric/);
+  assert.equal((await c.confirm("rerun", preview.json().ticket)).status, 409);
+  assert.equal(enqueued, 1, "a telemetry warning never retries the successful paid action");
 });
 
 test("fleet-pause and fleet-resume: the kill switch's decision refuses a resume at the preview; the reader's funnel at the confirm", async () => {
@@ -2853,6 +2886,70 @@ test("board adoption is previewed, confirmed once, audited without proposal text
   assert.equal(failed.status, 500, failed.text);
   assert.equal(failed.json().error, AUDIT_FAILED);
   assert.equal(calls.length, 1, "an unwritable audit prevents the board mutation");
+});
+
+test("Zero touch real actions bind private-source references, exact instructions and refusal context to confirmed writes", live, async () => {
+  const f = await freshValkey();
+  try {
+    const { paths } = deployment(URL13);
+    const document = JSON.parse(read(paths.triggersPath));
+    document.zeroTouch = { capture: true, model: "classifier/small", maxCostUsd: "0.01", names: {} };
+    writeFileSync(paths.triggersPath, `${JSON.stringify(document, null, 2)}\n`);
+    const now = () => T0;
+    const scope = "a".repeat(64);
+    const questions = makeQuestionGroupStore({ redis: f.redis, now });
+    for (const runId of ["gh-question", "gh-unassigned"]) {
+      const captured = await questions.capture({ runId, scopeId: scope, project: "web", repo: "acme/web", at: T0 - 1000, text: "PRIVATE-QUESTION-CONTENT", redact: (text) => text, triggerIndex: 0 });
+      assert.equal(captured.ok, true);
+    }
+    const source = await questions.privateInput("gh-question");
+    const assigned = await questions.assign({ runId: "gh-question", digest: source.meta.digest, revision: source.revision });
+    const writer = makeRecordWriter({ logsDir: paths.logsDir });
+    for (const [runId, outcome, reason] of [["gh-question", "completed", "awaiting-input"], ["gh-refusal", "policy", "secret-unresolved"]]) {
+      const record = buildRecord({ job: { id: runId, data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome, reason }, startedAt: new Date(T0 - 2000).toISOString(), endedAt: new Date(T0 - 1000).toISOString(), project: "web", host: "test", touchTracking: true });
+      record.touchScopeId = scope;
+      writer(record);
+    }
+    const service = makeZeroTouchService({ paths, now });
+    const c = await start({ paths, a: { zeroTouch: service } });
+    const grouping = await c.act("zero-touch-group", { runId: "gh-unassigned" });
+    assert.equal(grouping.status, 200, grouping.text);
+    assert.doesNotMatch(grouping.text, /PRIVATE-QUESTION-CONTENT/);
+    const queued = await c.confirm("zero-touch-group", grouping.json().ticket);
+    assert.equal(queued.status, 200, queued.text);
+    const queue = await f.q("pi-jobs");
+    await queue.add("github", { kind: "github", repo: "acme/web", flow: "triage", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label", label: "pi" } } }, { jobId: "gh-question" });
+    const job = await queue.getJob(queued.json().jobId);
+    assert.deepEqual(Object.keys(job.data).sort(), ["kind", "questionGrouping"]);
+    assert.doesNotMatch(JSON.stringify(job.data), /PRIVATE-QUESTION-CONTENT/);
+    const named = await c.act("zero-touch-name", { groupId: assigned.groupId, name: "Package manager" });
+    assert.equal(named.status, 200, named.text);
+    assert.equal((await c.confirm("zero-touch-name", named.json().ticket)).status, 200);
+    assert.equal(JSON.parse(read(paths.triggersPath)).zeroTouch.names[assigned.groupId], "Package manager");
+    const instruction = await c.act("zero-touch-instruction", { runId: "gh-question", groupId: assigned.groupId, index: 0, sentence: "Use pnpm for all test commands." });
+    assert.equal(instruction.status, 200, instruction.text);
+    assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, undefined, "preview does not write");
+    const changed = await c.confirm("zero-touch-instruction", instruction.json().ticket);
+    assert.equal(changed.status, 200, changed.text);
+    assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, "Use pnpm for all test commands.");
+    assert.equal((await c.confirm("zero-touch-instruction", instruction.json().ticket)).status, 409, "single use");
+    const undo = await c.act("zero-touch-undo", { fixId: changed.json().fixId });
+    assert.equal(undo.status, 200, undo.text);
+    assert.equal((await c.confirm("zero-touch-undo", undo.json().ticket)).status, 200);
+    assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, undefined);
+    const linked = await c.act("setting-set", { key: "maxTurns", value: "35", becauseRun: "gh-refusal" });
+    assert.equal(linked.status, 200, linked.text);
+    assert.match(linked.text, /gh-refusal/);
+    assert.equal((await c.confirm("setting-set", linked.json().ticket)).status, 200);
+    const facts = await makeTouchStore({ redis: f.redis, now }).read();
+    assert.equal(facts.events.filter((e) => e.cause === "config-fix").length, 2);
+    assert.ok(facts.events.some((e) => e.runId === "gh-refusal"));
+    assert.doesNotMatch(JSON.stringify(c.audit.rows), /PRIVATE-QUESTION-CONTENT|Use pnpm/);
+    const stale = await c.act("zero-touch-instruction", { runId: "gh-question", groupId: assigned.groupId, index: 0, sentence: "Keep this exact sentence." });
+    const newer = JSON.parse(read(paths.triggersPath)); newer.triggers[0].run.instructions = "A later operator edit."; writeFileSync(paths.triggersPath, JSON.stringify(newer));
+    assert.equal((await c.confirm("zero-touch-instruction", stale.json().ticket)).status, 409);
+    assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, "A later operator edit.");
+  } finally { await f.done(); }
 });
 
 // Issue #737: the copy rules `heldToCopyRules` holds each preview to reached every action's preview at

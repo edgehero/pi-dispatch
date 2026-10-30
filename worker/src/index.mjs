@@ -7,6 +7,7 @@ import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { jobContainerName } from "./backend-local.mjs";
 import { scrubCredentials } from "./redact.mjs";
+import { cleanTouch } from "./touch-state.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
 import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS, runJob } from "./processor.mjs";
@@ -32,6 +33,7 @@ import { releaseSemanticWindow } from "./queue.mjs";
 import { runIdOf } from "./recovery-queue.mjs";
 import { isFinalOutcome, settleInbox } from "./inbox-settle.mjs";
 import { makeAwaitKeeper } from "./held-settle.mjs";
+import { isProjectId } from "./project-id.mjs";
 
 
 export const QUEUE = "pi-jobs";
@@ -342,6 +344,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (selectedEffective?.modelWhy) { target.modelWhy = selectedEffective.modelWhy; target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
 				if (providerFailureRan) target.providerFailure = providerFailureRan;
 				if (modelRolesRan) target.modelRoles = modelRolesRan;
+				// Every attempt replaces the same record. Carry intervention fallback and uncertainty from the
+				// prior attempt, or a later cold start would erase the only proof of an earlier resumed answer.
+				if (priorAttemptRecord?.touchLineageSkipped === "source-unavailable") target.touchLineageSkipped = "source-unavailable";
+				const touches = [...(Array.isArray(priorAttemptRecord?.touches) ? priorAttemptRecord.touches : []), ...(Array.isArray(target.touches) ? target.touches : [])].map(cleanTouch).filter(Boolean);
+				if (touches.length) target.touches = [...new Map(touches.map((event) => [event.id, event])).values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)).slice(0, 16);
 			} catch {}
 		};
 		const settleSteer = async ({ result = null, error = null } = {}) => {
@@ -422,7 +429,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// past the wait gate through `recordAfterGate`); the wait gate's refusals carry none and are resolved from the live
 		// ref (start.mjs). An id or null, never a name.
 		const pickupProjects = projects();
-		const project = projectOf(job.data, pickupProjects);
+		const grouping = job.data?.purpose === "zero-touch-grouping" ? job.data.questionGrouping : null;
+		const sourceProject = grouping?.project;
+		// The classifier has an empty internal workspace, so folder membership would bill it to "other".
+		// Its private runtime resolved the source's historical project; reject a deleted binding before any
+		// reserve instead of silently charging another project's allowance.
+		if (grouping && (sourceProject !== null && (!isProjectId(sourceProject) || !pickupProjects.some((row) => row.id === sourceProject)))) {
+			const result = { outcome: "policy", reason: "question-group-config-changed", budgetReserved: false };
+			await settleSteer({ result });
+			await recordRun({ job, result, startedAt: new Date(nowMs).toISOString(), endedAt: new Date(nowMs).toISOString(), project: null });
+			return result;
+		}
+		const project = grouping ? sourceProject : projectOf(job.data, pickupProjects);
 		// BullMQ marks this pickup active before entering here. The canary takes its exclusive
 		// lease before proving all active lists empty, so either side of that race sees the other.
 		if (await deps?.canaryBusy?.()) await deferTo(job, token, nowMs + SCOPE_BUSY_RECHECK_MS, "canary", { project });
@@ -1630,6 +1648,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// The processor tests inject `prepareWorkspace` directly and never see this wrapper, which is
 				// why nothing caught it (REQ-RESUMABLE-SESSION).
 				...(deps.prepareWorkspace ? { prepareWorkspace: (j, t, opts) => deps.prepareWorkspace(j, t, { ...opts, queueJobId: job.id }) } : {}),
+				replyReceivedAt: Number.isSafeInteger(job.data?.replyReceivedAt) && job.data.replyReceivedAt >= 0 ? job.data.replyReceivedAt : Number.isSafeInteger(job.timestamp) ? job.timestamp : null,
 				// The one-shot pre-spend check (issue #231) needs the REAL BullMQ job's `.id` to excuse this
 				// delivery's own earlier attempt -- runJob's effectiveJob has no `.id`, prepareWorkspace's
 				// own injection above states why, and this one mirrors it. Omitted when unwired so a bare
@@ -1857,6 +1876,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 	};
 	return async function processor(job, token, signal) {
+		if (job.data?.kind === "zero-touch-grouping" || job.data?.questionGrouping) {
+			if (!deps.questionGroupRuntime) return { outcome: "policy", reason: "question-group-unavailable", budgetReserved: false };
+			const resolved = await deps.questionGroupRuntime.resolve(job.data, job.id);
+			if (resolved.result) {
+				await recordWatchOutcome({ job, result: resolved.result, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
+				return resolved.result;
+			}
+			job.data = resolved.data;
+		}
 		if (job.data?.kind === "watch" || job.data?.watch) {
 			if (!deps.watchRuntime) return { outcome: "policy", reason: "watch-unavailable" };
 			const resolved = await deps.watchRuntime.resolve(job.data, job.id);

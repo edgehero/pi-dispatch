@@ -11973,6 +11973,8 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **Extension (#770)**: Issue #770 adds the three Zero touch cards as the second Runs tab, including operator-only projected groups and ordinary preview/Confirm actions. Grouping is explicitly paid work, never a GET side effect; the private corpus is not a console read surface. `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` and `INT-ZERO-TOUCH-FIXES` define the data and interactions.
+
 **CORRECTED 2026-10-30 (#751, review).** Configuration facts follow the published cards' compact hierarchy.
 State glyphs accompany words; webhook method/state and route are separate lines, providers show one selected
 environment candidate or none there, and Notifications/MCP use compact rows. General mechanism explanations live
@@ -15904,42 +15906,42 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
 
 ## DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT
 
-- **Status**: **PROPOSED, spec only** (2026-10-27, issue #753). Nothing of it ships. It is the design of
-  `REQ-ZERO-TOUCH-RATE`.
-- **Decision**: The touch rate is a fold over run records and one closed word per touch, written fleet wide by the
-  process that makes the touch. Free text never joins it.
-  - **Per run, not per touch.** The question a person asks is "how many runs could not finish without me". A run
-    steered three times is still one such run.
-  - **Out of the runs that ended with a record.** Jobs stopped before they started have no record and no outcome.
-    They are counted beside the rate, so they are visible without bending what it is out of.
-  - **Merging is excluded by the constitution, not by taste.** Every merge is a person's
-    (`CONST-MERGE-NEVER-AUTOMATIC`), so counting it would make zero touch unreachable by design.
-  - **Written where the touch happens, readable from every host.** The audit log is per host, and its Valkey mirror is
-    the console's last 500 rows. So a touch goes on the touched run's record where that run is the one written (a
-    resumed run's reply source, a re-run's source), and otherwise into a touch index in Valkey keyed by run id. That
-    index is written by the console, the panel, the CLI and the worker alike.
-  - **No longer than what is kept.** The fold reads what `PI_LOG_RETENTION_DAYS` and the run mirror keep, and a longer
-    window says it is partial.
-  - **Question groups come from a decision model, and their names from a person.**
-    - The model only assigns a question to a group, and it runs as a job, through every gate a job passes.
-    - The operator writes the group's name. The page shows names, counts and run ids.
-    - A name generated from the questions would be transcript text by another route, which `REQ-CONSOLE-SECURITY` (l)
-      keeps off every page but the run page.
-  - **A fix is linked to its cause by where it was started**, so the before and after counts compare the same cause
-    over equal spans, and no attribution is guessed.
-- **Why**: Most touches are already written down by the actions themselves, so a rate built on them can be checked by
-  a recount. The new words are few and closed, and the code that performs the touch writes them.
-- **Rejected**:
-  - *Reading the rate from audit logs.* They are per host, and the mirror is short, so one console would count only
-    its own host's touches.
-  - *Counting an answered-from-a-draft run as untouched.* A person confirmed the answer. The rate would fall without
-    anything getting better, which is the failure this page exists to show.
-  - *Quoting the questions on the page*, or a model-written summary of them. Both are transcript text outside the run
-    page.
-  - *Inferring a configuration fix from timing* (a write that followed a refusal). Two unrelated edits would be
-    credited to the wrong cause. The link is made when the person starts the write from the refusal, or not at all.
+- **Status**: Implemented in issue #770, fulfilling `REQ-ZERO-TOUCH-RATE`.
+- **Decision**: calculate a workload touch rate from retained run records and closed, fleet-visible touch facts.
+  Read records through the existing capacity reader, preserving its local/mirror provenance, start and loss bounds.
+  Do not infer events from the short per-host audit mirror. Add a separate touch coverage boundary, because legacy
+  records cannot establish the absence of an intervention.
+- **Identity**: one source run counts once. Preserve failure/refusal provenance before a same-id retry replaces its
+  record. Record host-authored opaque scope identities for repositories and local folders; display safe labels without
+  treating equal basenames as equal folders. Human-event timestamps drive streaks; record end timestamps choose the
+  denominator. The earliest successful cause partitions charts while all cause tags remain available.
+- **Reliability**: use shared domain writers for console, panel, CLI and worker events. Durable pending intents and
+  idempotent completion/repair separate telemetry failure from action failure. A missing accounting write cannot
+  silently become zero, and repairing one never repeats a cancellation, configuration write or paid run.
+- **Questions**: opt-in bounded redacted excerpts are a distinct private text store, never part of the PII-free touch
+  index or record. A confirmed grouping request queues references/digests only. A worker privately stages frozen
+  source/exemplar data into a separate classifier-only runner input, with no Valkey credential or writable forge
+  integration. Reuse pinned pi's guarded deterministic classifier execution, not an AgentSession or a browser call.
+  Every free admission check precedes reserve/call. The model returns validated candidate slots only; the worker maps
+  them to opaque group ids. Human names stay operator-authored configuration. Finite byte/count/retention bounds also
+  apply when ordinary logs are kept forever. Missing, uncertain or stale classification remains explicitly ungrouped.
+- **No self-improvement of the denominator**: internal grouping jobs keep normal metering and run history, but do not
+  enter workload rates or streak activity. Adding analysis must not improve a project's score by increasing its run
+  count.
+- **Fix attribution**: a cause-to-fix interaction carries its source identity through the ordinary preview/Confirm
+  ticket. A narrow console-only append action respects the instruction tool prohibition. The fix stores a typed
+  occurrence predicate and safe change metadata, not question or instruction text. Compare equal elapsed spans and
+  state coverage and run exposure; untouched refusals and unanswered repeated questions still count.
+- **Presentation**: the on-demand Zero touch tab uses the three published cards, native project disclosure and GET
+  window/scope navigation. Viewer projection happens before rendering. No question or model-written name reaches a
+  list, panel, generic tool result or state API. #771 and #772 remain separate, with honest deferred dispositions.
+- **Rejected**: audit-only counting (host-local and truncated); treating missing lineage as untouched; grouping jobs in
+  workload rates (analysis dilutes its own metric); summaries as group names (transcript disclosure); name-only rules
+  presented as semantic discovery (cannot discover unnamed groups); timing-based fix attribution (unrelated changes);
+  a longer pre-span than post-span (false improvement); zero-touch claims without observed activity and full coverage.
 - **Traces to**: `REQ-ZERO-TOUCH-RATE`, `REQ-CONSOLE-SECURITY`, `INT-RUN-HISTORY-FILE-CONTRACT`,
-  `INT-CONSOLE-AUDIT-LOG`, `CONST-MERGE-NEVER-AUTOMATIC`, `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN`
+  `INT-SESSION-STORE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-CONSOLE-AUDIT-LOG`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-MERGE-NEVER-AUTOMATIC`.
 
 ## DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN
 
@@ -16497,3 +16499,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-30 (#751, observation coverage) | `DES-OPERATOR-CONSOLE` CORRECTED: endpoint declaration and fleet observation are separate states, respecting worker host-queue/per-machine gates; unavailable local occupancy is never zero. Delivery-history and receiver-log guidance follows actual quiet refusal paths. Endpoint enforcement, receiver logging, visual tokens, shared state and confirmation contracts UNCHANGED, checked. |
 | 2026-10-30 (#751, endpoint phone review) | `DES-OPERATOR-CONSOLE` CORRECTED: uncounted/unknown endpoint explanations preserve readable neighbouring phone labels, checked with their actual pseudo-element font and available track width. Current main design issue references and its ParkedPhone correction are preserved; draft prefill remains proposed under #772. Endpoint enforcement, receiver logging, shared visual tokens and every unrelated contract UNCHANGED, checked. |
 | 2026-10-30 (#751, reference phone validation) | `DES-OPERATOR-CONSOLE` CORRECTED: the Connections source-card generator keeps alias hosts and uncounted facts in complete phone rows, bounds forge tracks, wraps the staging command and draws all four dots for four declared slots. Styled references are checked at phone, intermediate and desktop widths before comparison. Application behavior, `REQ-OPERATOR-CONSOLE-SCREENS`, shared tokens/styles, worker gates and every interface contract UNCHANGED, checked. |
+| 2026-10-30 (#770) | Issue #770 implements the Zero touch view. `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` AMENDED: shared touch writers and repair, capacity-reader coverage, separate private corpus, classifier-only jobs, human group names, typed fix predicates and on-demand card-based presentation. Internal grouping jobs are explicitly excluded from workload rates while retaining ordinary history/spend. UNCHANGED, checked: pi pins; container isolation; merge restriction; budget ordering; infrastructure-only retry; automatic answer prohibition (`OQ-051`); #771 and #772 scope. |

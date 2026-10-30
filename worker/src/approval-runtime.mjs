@@ -1,3 +1,4 @@
+import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 /** Host orchestration of durable approvals. No queue field can manufacture a system expiry decision: it must match
  * the private store and the one deterministic expiry job. All refusals happen before the caller's spend gates. */
 import { approvalActor, approvalAudit, approvalReply, approvalRequestId, validateApprovalConfig } from "./approval-policy.mjs";
@@ -9,7 +10,7 @@ const failed = (out) => out?.error ? { error: out.error } : { refused: typeof ou
 
 /** checkPolicy(job) returns {ok:true,digest}; enqueueExpiry(request) must use approvalExpiryJobId(request.requestId).
  * The comment hook receives (request, fixedText); it owns forge delivery/idempotence, never a model summary. */
-export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now(), host, hostQueue = null, requireSessionDigest = false, enqueueExpiry, comment = async () => {} } = {}) {
+export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now(), host, hostQueue = null, requireSessionDigest = false, enqueueExpiry, comment = async () => {}, touchStore = null, touchOutbox = null } = {}) {
 	if (!store || typeof checkPolicy !== "function" || typeof host !== "string" || !host) throw new TypeError("approval runtime needs store, checkPolicy and host");
 	const policy = async (job, request = null) => {
 		let out;
@@ -57,12 +58,19 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 				if (job.approvalRequestId !== request.requestId) return { refused: "approval-request-unbound" };
 				const actor = approvalActor(job);
 				if (!actor) return { refused: "approval-author-missing" };
+				const touch = { runId: request.runId, cause: "approval-decision", at: now(), parkedAt: request.createdAt, scopeId: touchScopeOf(request.resumeJob, host), nonce: job.id };
+				const writer = touchOutbox ?? (touchStore?.begin ? { begin: (event) => touchStore.begin(event), applied: (intent) => touchStore.write(intent.event), abort: (intent) => touchStore.abort(intent.event) } : null);
+				const intent = writer ? await writer.begin(touch) : null;
 				const decided = await store.decide({ requestId: request.requestId, decisionId: job.id, ...approvalReply(job.trigger.comment.body, { phrase: job.trigger?.matched?.phrase }), actor });
-				if (!decided.ok) return failed(decided);
+				if (!decided.ok) { if (intent) await writer.abort(intent); return failed(decided); }
 				request = decided.request;
 				// A human racing the exact deadline may cause the store to persist an expiry decline. Only its own
 				// synthetic job may consume it; otherwise both the human job and the sweep could start containers.
-				if (request.decision.actor.kind === "system") return { refused: "approval-expired" };
+				if (request.decision.actor.kind === "system") { if (intent) await writer.abort(intent); return { refused: "approval-expired" }; }
+				const event = cleanTouch({ ...touch, at: request.decision.at, nonce: request.decision.decisionId });
+				if (intent) await writer.applied({ ...intent, event });
+				else if (touchStore) await touchStore.write(event);
+
 			}
 			const claimed = await store.claim({ requestId: request.requestId, jobId: job.id });
 			if (!claimed.ok) return failed(claimed);

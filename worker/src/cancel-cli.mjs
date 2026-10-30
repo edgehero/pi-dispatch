@@ -46,7 +46,7 @@ export function boundedText(text) {
  * Run the cancel. Returns the process exit code. Every collaborator is a seam with the production default,
  * so tests drive states and races without a queue; `write` is the stdout seam cli.mjs already injects.
  */
-export async function runCancel(jobId, url, { write = (chunk) => process.stdout.write(chunk), errWrite = (chunk) => process.stderr.write(chunk), redisFn, queueFn, parseConnectionFn, readLiveHostsFn, discoverHostQueuesFn, fleetQueueNamesFn, unionQueueNamesFn, ackTimeoutMs = 10_000, pollMs = 250, sleep, refusalFn } = {}) {
+export async function runCancel(jobId, url, { write = (chunk) => process.stdout.write(chunk), errWrite = (chunk) => process.stderr.write(chunk), redisFn, queueFn, parseConnectionFn, readLiveHostsFn, discoverHostQueuesFn, fleetQueueNamesFn, unionQueueNamesFn, ackTimeoutMs = 10_000, pollMs = 250, sleep, refusalFn, touchStore, touchOutbox = null, now = Date.now } = {}) {
 	const fail = (message) => {
 		errWrite(`error: ${message}\n`);
 		return 1;
@@ -119,7 +119,8 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		// console's cancel-queued runs too. It judges the hold by the `wait:job` hash's `since`, the clock that makes it a
 		// real hold rather than a counter key, and deletes the removed job's defer record. This verb's reach is its own:
 		// it removes a job waiting to retry as well, which the console refuses.
-		const queued = await removeQueuedJob({ redis: probe, queue: owner, job, jobId });
+		const queued = await removeQueuedJob({ redis: probe, queue: owner, job, jobId, touchStore, touchOutbox, now });
+		if (queued.ok && queued.touchWarning) errWrite("warning: the job was removed; touch tracking is incomplete. Do not repeat the cancellation.\n");
 		if (queued.ok && queued.held) {
 			// A hold consumes no attempt (`skipAttempt`), so a held job that ran is a retry held again by its conditions.
 			write(`cancelled ${jobId}: it was held on its wait condition, and ${ranBefore(queued)}\n`);

@@ -36,6 +36,8 @@ import { EXIT_OOM_KILLED } from "./run-history.mjs";
 export const MODEL_AGENTS_INVALID_COMMENT = "Refused: the base commit's agent definitions are invalid. Fix their frontmatter and retry. Not run.";
 
 export const TERMINAL_COMMENTS = {
+	"question-group-refused": "Stopped: the reviewed grouping model or private input could not be used. Check Zero touch status. Not retried.",
+	"question-group-unanswered": "Stopped: the classifier returned no confident grouping. Check Zero touch status. Not retried.",
 	"model-roles-invalid": "Stopped: the job image could not read its reviewed model roles and agent definitions. Rebuild the image and check its job inputs. Not retried.",
 	"model-roles-shadowed": "Stopped: another extension registered the reserved subagent tool, so reviewed model role resolution cannot be guaranteed. Remove the conflicting extension. Not retried.",
 	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",

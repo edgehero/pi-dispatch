@@ -84,7 +84,7 @@ const FILTER_LABELS = Object.freeze({ repo: "Repository", kind: "Forge", flow: "
  */
 function runsHref(filter, extra = {}) {
   const p = new URLSearchParams();
-  for (const k of RUN_FILTER_FIELDS) if (typeof filter?.[k] === "string" && filter[k] !== "") p.set(k, filter[k]);
+  for (const k of [...RUN_FILTER_FIELDS, "touched", "days", "scope"]) if (typeof filter?.[k] === "string" && filter[k] !== "") p.set(k, filter[k]);
   for (const [k, v] of Object.entries(extra)) p.set(k, String(v));
   const qs = p.toString();
   return qs === "" ? "/runs" : `/runs?${qs}`;
@@ -107,6 +107,7 @@ function chipValue(field, v) {
   if (field === "outcome") return Object.hasOwn(OUTCOME_KEY_WORDS, v) ? OUTCOME_KEY_WORDS[v].word : v;
   if (field === "trigger") return triggerLabel(v);
   if (field === "problems") return "only problems";
+  if (field === "project" && v === "~") return "No project recorded";
   return v;
 }
 
@@ -144,7 +145,7 @@ export function runsFiltersModel(view) {
     projects: [
       { label: "All", count: w ? windowTotal(w) : null, href: runsHref(without(f, "project")), on: f.project === undefined },
       ...listed.map((p) => ({ label: ui.ptag(p.project), count: Number.isSafeInteger(p.count) ? p.count : null, href: runsHref({ ...f, project: p.project }), on: f.project === p.project })),
-      ...(typeof f.project === "string" && !listed.some((p) => p.project === f.project) ? [{ label: ui.ptag(f.project), count: null, href: runsHref(f), on: true }] : []),
+      ...(typeof f.project === "string" && !listed.some((p) => p.project === f.project) ? [{ label: f.project === "~" ? "No project recorded" : ui.ptag(f.project), count: null, href: runsHref(f), on: true }] : []),
     ],
     selects: [
       pick("outcome", OUTCOME_KEYS, outcomeLabel),
@@ -157,7 +158,7 @@ export function runsFiltersModel(view) {
       pick("model", listOf(values.model)),
     ],
     repo: { label: FILTER_LABELS.repo, id: "rf-repo", input: { id: "rf-repo", name: "repo", value: f.repo ?? null, placeholder: "owner/name", autocomplete: "off", spellcheck: false } },
-    hidden: ["project", "problems"].filter((k) => typeof f[k] === "string").map((k) => [k, f[k]]),
+    hidden: ["project", "problems", "touched", "days", "scope"].filter((k) => typeof f[k] === "string").map((k) => [k, f[k]]),
     applied: set.map((k) => ({ label: FILTER_LABELS[k], value: chipValue(k, f[k]), href: runsHref(without(f, k)) })),
   };
 }
@@ -234,6 +235,7 @@ export function runsSummaryModel(view) {
 
 /** The summary panel (`runsSummaryModel`, drawn), or `RUNS_WINDOW_UNREAD` alone. */
 export function runsSummary(view) {
+  if (view.query?.filter?.touched === "1") return html`<p class="note">Runs that needed a person over ${view.query.filter.days} days: ${view.data?.runsPage?.touchTotal ?? "not known"}.${view.data?.runsPage?.touchCoverage?.partial ? " The window is partial; missing evidence is not counted as untouched." : null} <a class="link" href="/runs/zero-touch">Return to Zero touch</a>.</p>`;
   const m = runsSummaryModel(view);
   if (m === null) return ui.card({ body: html`<p class="muted">${RUNS_WINDOW_UNREAD}</p>` });
   const unpriced = m.unpriced > 0 ? html`<span class="muted">, ${count(m.unpriced)} ${m.unpriced === 1 ? "run" : "runs"} with no settled amount</span>` : null;

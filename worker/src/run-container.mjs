@@ -315,7 +315,7 @@ export function makeRunContainer({
 		const env = beforeSpawn(() => buildContainerEnv({
 			size,
 			provider: job.provider,
-			...(job.watch && job.watchDecisionModel ? { secondaryProvider: job.watchDecisionModel.provider } : {}),
+			...(job.questionGrouping && job.questionGroupModel ? { secondaryProvider: job.questionGroupModel.provider } : job.watch && job.watchDecisionModel ? { secondaryProvider: job.watchDecisionModel.provider } : {}),
 			model: job.model,
 			fork: job.fork ?? null,
 			thinkingLevel: job.thinkingLevel ?? null,
@@ -330,7 +330,7 @@ export function makeRunContainer({
 			hostEnv,
 			egress, // REQ-EGRESS-ALLOWLIST: emits HTTPS_PROXY/HTTP_PROXY/NO_PROXY/NODE_USE_ENV_PROXY, or nothing
 			egressProxy,
-			allowGlobalExtensions: job.watch ? false : allowGlobalExtensions,
+			allowGlobalExtensions: job.watch || job.questionGrouping ? false : allowGlobalExtensions,
 			// REQ-GLOBAL-PI-OVERLAY: the per-job value comes off `job` (like maxTurns), the staged set off
 			// the closure (like allowGlobalExtensions) -- so a trigger can withhold what the operator staged.
 			// `!== false`, because staged packages LOAD unless a trigger explicitly opts out
@@ -342,7 +342,7 @@ export function makeRunContainer({
 			// Issue #683: the staged packages' container paths are the overlay's, so on the sandbox layout their prefix moves
 			// with it (`/opt/pi-global` to `/sandbox/pi-global`). A path not under the overlay is passed as it was.
 			packagePaths: (job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths).map((p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p)),
-			forwardEnv: job.watch ? [] : forwardEnv,
+			forwardEnv: job.watch || job.questionGrouping ? [] : forwardEnv,
 			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript file, which
 			// since issue #643 is every prepared job (the live file), resume or not. The constant is imported rather than
 			// re-typed so the mount below and this variable name one path -- two literals is how they drift with both
@@ -449,7 +449,7 @@ export function makeRunContainer({
 			// Both facts, the kind the preparers branch on AND containment in this job's own directory, so a kind added later
 			// that works on a folder in place fails closed rather than relabelling it.
 			workspaceOwned: job?.kind !== "local" && insideDir(prepared.jobDir, prepared.workspace),
-			workspaceReadOnly: Boolean(job.watch),
+			workspaceReadOnly: Boolean(job.watch || job.questionGrouping),
 			// Issue #545: `-i`, so the container's stdin is the pipe the key is written to. Absent otherwise, and the argv is
 			// byte-identical to one built before the signed exit line.
 			...(exitKey !== null ? { extraFlags: ["-i"] } : {}),
@@ -517,6 +517,10 @@ export function makeRunContainer({
 		// are not in it by name or at all: the minted token and the exit-line key. An opener that throws costs the stream,
 		// never the run.
 		let live = null;
+		// Question grouping reads the canonical (raw) transcript after promotion. Keep the exact job-env
+		// redactor available even when live streaming is disabled: token shapes alone miss forwarded values.
+		try { Object.defineProperty(prepared, "questionRedact", { value: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }) }), configurable: true }); }
+		catch { log("question_redactor_unavailable", {}); }
 		if (job.watch) Object.defineProperty(prepared, "watchRedact", { value: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }) }), configurable: true });
 		// Issue #645: a container whose unpause failed UNPAUSE_TRIES times never runs again, and the worker would wait on it
 		// for the whole job timeout. It is killed (SIGKILL reaches a frozen container: the runtime thaws it to deliver it),

@@ -1,3 +1,4 @@
+import { prepareQuestionGrouping } from "./question-group-runtime.mjs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -114,6 +115,7 @@ export function makePrepareWorkspace({
 	};
 
 	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size, mcp, pin, watchSecrets }) {
+		if (job.questionGrouping) return prepareQuestionGrouping(job, { jobDir });
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
 		//

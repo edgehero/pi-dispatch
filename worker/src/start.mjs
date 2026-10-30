@@ -1,6 +1,10 @@
 import { readBusy as canaryBusy } from "./canary-lock.mjs";
 import { makeReadModelRoles } from "./model-roles-file.mjs";
 import { makeWatchStore } from "./watch-store.mjs";
+import { makeTouchStore } from "./touch-state.mjs";
+import { makeTouchOutbox } from "./touch-outbox.mjs";
+import { makeQuestionGroupStore } from "./question-groups.mjs";
+import { makeQuestionGroupRuntime } from "./question-group-runtime.mjs";
 import { makeWatchRuntime } from "./watch-runtime.mjs";
 import { makeWatchDrainer } from "./watch-drainer.mjs";
 import { makeWatchIssuePublisher } from "./watch-issue.mjs";
@@ -708,6 +712,10 @@ export async function startWorker(
 		// sandbox reaper against a real retention root without spawning docker or podman.
 		listRunningSandboxes: listRunningSandboxesFn = listRunningSandboxes,
 		makeRetentionSweep: makeRetentionSweepFn = makeRetentionSweep,
+		makeTouchStore: makeTouchStoreFn = makeTouchStore,
+		makeTouchOutbox: makeTouchOutboxFn = makeTouchOutbox,
+		makeQuestionGroupStore: makeQuestionGroupStoreFn = makeQuestionGroupStore,
+		makeQuestionGroupRuntime: makeQuestionGroupRuntimeFn = makeQuestionGroupRuntime,
 		// Issue #712: the worker's own doctor runs, a seam so a wiring test sees the interval and never spawns a doctor.
 		makeDoctorSpawner: makeDoctorSpawnerFn = makeDoctorSpawner,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
@@ -1436,6 +1444,13 @@ export async function startWorker(
 	// Its errors as one message-only line (PR #475's review, round 2), like every Queue and Worker's: without a listener
 	// ioredis printed a stack per reconnect attempt.
 	onValkeyError(redis, "shared client");
+	// Accounting is repaired independently of work: publication failure must never replay a human action.
+	const touchStore = makeTouchStoreFn({ redis, now, retentionDays: config.logRetentionDays });
+	const touchOutbox = makeTouchOutboxFn({ dir: join(config.logsDir, "touch-outbox"), store: touchStore, log });
+	const touchInitialized = await touchStore.initialize();
+	if (!touchInitialized.ok) log("touch_tracking_unavailable", { reason: touchInitialized.error });
+	await touchOutbox.repair();
+	const questionGroupStore = makeQuestionGroupStoreFn({ redis, now, retentionDays: config.logRetentionDays });
 
 	// Issue #504 part B: the applied split lives in Valkey (`alloc:plan`), shared by every host. Only with an envelope.
 	// The boot reconcile seeds the neutral split when there is none, expires a plan past its life and re-bases on an
@@ -1704,7 +1719,13 @@ export async function startWorker(
 	// Issue #646 (DES-STEER-VIA-READONLY-INBOX-MOUNT): the inbox relay's opener, handed to every venue's runContainer, which
 	// opens one per steer-ARMED attempt (on openshell, issue #686, one writing frames on the exec's stdin). Bound here to the worker's client and to the host name the run checkpointer
 	// writes (`durableHost`), the one this host is known by in the fleet: the open key names it.
-	const openInboxRelay = steerWired ? (args) => makeInboxRelayFn({ redis, host: durableHost, now, log, ...args }) : null;
+	const openInboxRelay = steerWired ? (args) => makeInboxRelayFn({ redis, host: durableHost, now, log, ...args,
+		onDelivered: async ({ runId, id, at }) => {
+			const intent = await touchOutbox.begin({ runId, cause: "steer", at, nonce: id });
+			const result = await touchOutbox.applied(intent);
+			if (!result.ok) log("touch_record_pending", { reason: result.error });
+		},
+	}) : null;
 	// Issue #644: the final edit for an attempt that registered no commenter, so nothing else would edit the comment again.
 	// That is an attempt refused before its container (a cost cap, a policy gate) after an earlier attempt posted the
 	// comment and left it saying "attempt ended, retrying": with no edit here it said so for good. The comment's id is
@@ -1737,7 +1758,7 @@ export async function startWorker(
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
 		// The default venue rides the same way and for the same reason (#277): it is the value the registry
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier, maxTurns });
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier, maxTurns, touchTracking: true });
 		writeRecord(record);
 		// Issue #644: the status comment's last edit, from the record's classification. An infrastructure failure the queue
 		// will retry says the attempt ended and is being retried, not "finished": BullMQ retries an error that is not
@@ -1859,6 +1880,17 @@ export async function startWorker(
 		reportClose: async (outcome, mapping) => { if (mapping?.ruleId) await watchStore.recordIssueOutcome(mapping.ruleId, outcome); },
 	});
 	const watchRuntime = makeWatchRuntime({ store: watchStore, triggersPath: onceTriggersFile, now, log, getSettings, pauseUntil: (job, at) => pauseUntilMs(pauseWindows.current, job, at), enqueue: (fields, opts) => enqueueWatchJob(cronQueue, fields, { now, ...opts }), publishIssue: watchPublisher });
+	const questionGroupRuntime = makeQuestionGroupRuntimeFn({ store: questionGroupStore, triggersPath: onceTriggersFile, getSettings,
+		resolveClassifier: ({ provider, id }) => {
+			const models = readOverlayModels(config.globalPiDir);
+			const entry = models?.providers?.[provider];
+			const custom = entry?.models?.find((model) => model.id === id);
+			if (custom) return custom;
+			const base = builtinModel(provider, id);
+			const override = entry?.modelOverrides?.[id];
+			return base ? { ...base, ...override, cost: { ...base.cost, ...override?.cost } } : null;
+		},
+	});
 
 	// Issue #505. One live-file check, shared by the pickup gate, the snapshot and the plan collector, so the three ask one
 	// file by one rule: the same file and rule as the one-shot checks below (`onceTriggersFile`). `pi-dispatch run
@@ -2520,6 +2552,8 @@ export async function startWorker(
 	const approvalStore = makeApprovalStore({ redis, now });
 	const approvalRuntime = makeApprovalRuntime({
 		store: approvalStore,
+		touchStore,
+		touchOutbox,
 		checkPolicy: makeCheckApprovalPolicy({ triggersPath: onceTriggersFile, parseTriggers }),
 		now,
 		host: durableHost,
@@ -2746,10 +2780,19 @@ export async function startWorker(
 		deps: {
 			collectChain,
 			collectPlan,
-			watchRuntime,
-			collectWatch: watchRuntime.collect,
 			// Issue #646: the late-message branches at the processor's settle (index.mjs `settleSteer`).
 			onLateForge: lateForge,
+			watchRuntime,
+			questionGroupRuntime,
+			questionGroupStore,
+			questionCaptureEnabled: () => {
+				try { return parseTriggersDocument(readFileSync(onceTriggersFile, "utf8"), onceTriggersFile).zeroTouch?.capture === true; }
+				catch { log("question_capture_unavailable", { reason: "configuration-unreadable" }); return false; }
+			},
+			touchStore,
+			touchOutbox,
+			touchNow: now,
+			collectWatch: watchRuntime.collect,
 			// Issue #638: held replies at the processor's settle (index.mjs `settleSteer` calls it first). Wired, it also arms
 			// the keeper that makes an awaitInput run reachable while it runs.
 			settleHeld: heldSettle,
@@ -2774,7 +2817,7 @@ export async function startWorker(
 			// Issue #503: `modelEndpoints` is the pickup's snapshot, the same one runContainer hands buildContainerEnv.
 			checkProviderCredential: (job, { modelEndpoints = null } = {}) => {
 				try {
-					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.watch ? [] : config.forwardEnv, modelEndpoints });
+					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.watch || job.questionGrouping ? [] : config.forwardEnv, modelEndpoints });
 					return { ok: true };
 				} catch (error) {
 					// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)
@@ -2860,6 +2903,7 @@ export async function startWorker(
 			// Issue #645: a recovery stages its checkpoint's transcript as the job's session (`reason: "recovered"`).
 			...(typeof sessionStore.stageRecovered === "function" ? { stageRecovered: sessionStore.stageRecovered } : {}),
 			isParked: sessionStore.isParked,
+			readParkedInfo: sessionStore.readParkedInfo,
 			approvalRuntime,
 			approvalSessionCheck,
 			parkedLabel,
@@ -3335,6 +3379,7 @@ export async function startWorker(
 					// Issue #504 part B: where boot runs it, right after the run history it sits beside.
 					{ name: "allocation_log", reap: reapAllocationLogs },
 					{ name: "console_audit", reap: reapConsoleAudit },
+					{ name: "touch_outbox", reap: () => touchOutbox.repair() },
 					{ name: "sandbox", reap: reapSandboxes },
 					{ name: "session", reap: () => sessionStore.reapSessions() },
 					...(reapForkSources ? [{ name: "fork_source", reap: reapForkSources }] : []),

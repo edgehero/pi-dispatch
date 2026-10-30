@@ -587,6 +587,8 @@ Evidence convention as in `constitution.md`.
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
 
+**Extension (#770):** `INT-QUESTION-GROUPS` defines classifier-only execution under the existing authenticated exit and meter. `question-group-refused` and `question-group-unanswered` are determinate policy results; the exit and signing protocol is unchanged.
+
 - **Roles (#717)**: invalid/missing role inputs and a shadowed role subagent tool are terminal exit 2 reasons `model-roles-invalid` and `model-roles-shadowed`. A local subagent refusal instead returns tool error output and bounded authenticated `modelRoles` telemetry, leaving the parent running.
 
 - **Signed failover evidence (#716)**: the runner's authenticated exit line may carry `providerFailure: { kind, resetAt? }`, with closed `kind` (`rate-limited`, `quota-exhausted`, `overloaded`, `context-overflow`) and optional nonnegative safe-integer epoch milliseconds `resetAt` no later than 253402300799999 (the last four-digit year); no body, header text or arbitrary error message crosses this channel. `toolsStarted` is the run-wide monotonic root-tool latch; `replaySafe` additionally requires a metered, observed root-only call history with no child/secondary uncertainty. The worker requires verified metadata matching exit 1, `toolsStarted: false` and `replaySafe: true` before permitting a cross-model retry. Missing fields are unsafe, not false. Existing exit codes and supervisor precedence are unchanged. Provider errors are read from SDK terminal events even when `session.prompt()` resolves; the runner does not infer success from CLI JSON exit status.
@@ -1282,6 +1284,8 @@ refactor apart.
   obvious implementation gets silently wrong.
 
 ## INT-CONTAINER-JOB-INPUTS
+
+**Extension (#770):** `INT-QUESTION-GROUPS` defines the classifier-only private `question-grouping.json` input and guarded execution mode. It is never copied into the public event or queue envelope.
 
 - **Role inputs (#717)**: an image must declare `modelRoles`. The worker stages read-only `model-roles.json` as `{version:1,roles:{"<role>":"provider/model"},parent:"provider/model",models:["provider/model"]}` and `agents.json` as `{version:1,agents:[{name,description,content,model?,tools?:["tool"]}]}` inside the existing job directory. `PI_MODEL_ROLES_FILE` and `PI_AGENTS_FILE` name their closed layout paths (`/job/...` or `/sandbox/job/...`), never workspace paths. The merged map holds at most 32 aliases and its executable list at most 16 physical references; the complete JSON-encoded agent snapshot is at most 16 MiB, checked before reserves. Names are reserved against forwarding and secrets. Map and base-commit agent inputs are staged before cap reads/reserves. Missing/malformed inputs refuse `model-roles-invalid`; a conflicting `subagent` registration refuses `model-roles-shadowed`.
 
@@ -4109,6 +4113,8 @@ with it: no delivery-id header, two actor representations, tags as a string, and
 
 ## INT-TRIGGERS-FILE-CONTRACT
 
+**Extension (#770):** `INT-QUESTION-GROUPS` defines the strict optional top-level `zeroTouch` configuration and human names. Existing trigger matching and instruction limits are unchanged.
+
 - **AMENDED 2026-10-30 (#750)**: The admin display conditionally adds task (boolean presence only), repository, reviewState, waitFor,
   awaitInput, github, progress, statusComment, recover and steer, only when set, and cron stall counts from the shared
   scheduler key. Task and instruction text are separate operator-only reads, never dispatch_triggers or shared state.
@@ -5583,6 +5589,8 @@ validator rather than a second copy of it.
 
 ## INT-RUN-HISTORY-FILE-CONTRACT
 
+**Extension (#770):** `INT-TOUCH-INDEX` defines optional tracking facts, preserved retry uncertainty and internal grouping purpose. Unresolved grouping references retain `kind:null`; resolved executions use the existing local kind. The forge/local vocabulary is unchanged.
+
 - **Roles/canary (#717)**: optional `modelRole` is a validated mapped operator role of 1 to 32 lowercase letters/digits/underscore/dash. `provider`/`model` remain physical. Optional `modelRoles:{refusals:[{agentHash,reason}]}` is rebuilt from an authenticated exit only: at most eight 64-character lowercase SHA-256 hashes and fixed `unknown-role`, `model-not-allowed`, `unknown-agent`, `invalid-arguments` or `aborted` reasons. Arbitrary agent names never enter history. Optional canary lineage follows the rebuilt source job id, role and candidate reference contract implemented by `recordedCanary`; it names a separate paid run and never replaces an original.
 
 - **Failover facts (#716)**: opt-in runs carry the actual selected `provider`/`model` and closed `modelWhy`: `primary`, `fallback-cooldown`, `fallback-window`, `fallback-unavailable` or `fallback-context`. Authenticated terminal failure detail is preserved as `providerFailure` (the closed object from `INT-RUNNER-EXIT-CODE-PROTOCOL`), without provider error text. The selection reason is opt-in; authenticated provider-failure detail can also be recorded for jobs without fallbacks. Pre-container refusals do not invent a selected fallback.
@@ -5604,7 +5612,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -6817,6 +6825,8 @@ validator rather than a second copy of it.
 
 ## INT-OUTBOX-CONTRACT
 
+**Extension (#770):** `INT-QUESTION-GROUPS` defines the closed `question-group.json` result, containing only version, candidate slot and confidence.
+
 - **Roles (#717)**: a chained job keeps the authored `role:` model reference and resolves the current reviewed map at its own pickup. A recovery is different: it keeps its checkpoint physical main model and must still satisfy current reviewed role/model policy. Canary jobs enqueue no outbox children.
 
 **container (agent) → worker.**
@@ -6944,6 +6954,8 @@ validator rather than a second copy of it.
   to the audit file or `alloc:log`.
 
 ## INT-SESSION-STORE-CONTRACT
+
+**Extension (#770):** `INT-TOUCH-INDEX` defines v2 canonical-bound parked sidecars and staged answer lineage. Legacy parks remain resumable but cannot establish a human-answer touch without source proof.
 
 **Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
@@ -11566,6 +11578,132 @@ Board audit `beforeDigest` hashes the read snapshot. The request-backed `afterDi
 
 Proposals are retained separately from adopted blocks. Board updates compare expectedVersion atomically, retain at most twenty versions/proposals and expire after seven days without a store refresh. A frozen board refuses adoption. Audited operator actions board-freeze, board-unfreeze, board-adopt, board-revert and board-clear use the existing preview/confirm mechanism; freeze, revert and clear are destructive. `INT-CONSOLE-AUDIT-LOG` is extended by these action kinds with the same audit-before-write and failed-write correlation semantics. A stale preview refuses rather than adopting onto changed state. Viewer board projections exclude private text/query/proposal data.
 
+## INT-TOUCH-INDEX
+
+**Worker, CLI and admin → fleet readers**, issue #770 (`REQ-ZERO-TOUCH-RATE`).
+
+- `touch:index` is a bounded sorted set of event ids scored by the trusted human-event time; `touch:event:<id>` is
+  its rebuilt JSON body. `touch:meta` holds `since`, `indexed` and a monotonic loss `horizon`. `touch:pending` holds
+  unresolved intent ids and times. The source is `worker/src/touch-state.mjs`.
+- A touch body contains `v:1`, a lowercase SHA-256 `id`, `type:"touch"`, validated `runId`, `at` (nonnegative integer
+  milliseconds), and one closed `cause`:
+  ```json
+  ["question-answer", "approval-decision", "rerun", "config-fix", "steer", "cancel"]
+  ```
+  Optional rebuilt fields are opaque SHA-256 `scopeId`, validated project id and safe target, millisecond `endedAt`,
+  `parkedAt`, `receivedAt`, closed `answerSource` (`forge`, `console`, `panel`, `draft`) and validated `draftRunId`.
+  Nonces determine ids but are not retained. A pre-start stop uses `type:"stop"` and no cause. No body carries a
+  question, answer, instruction, identity credential or payload. Unsupported properties are dropped.
+- Events are idempotent by id, and one run contributes once to the numerator. Primary-cause charts use earliest
+  successful event, breaking ties by vocabulary order; all causes remain available. Stops have their own distinct
+  job count and never enter the denominator. Internal grouping jobs do not enter workload stops either.
+- Scope identity distinguishes local host/folder pairs without publishing paths. An unbound shared-queue local
+  cancellation has no invented host identity. Scoped stop counts report unassignable evidence separately.
+- Retention follows the writer's history setting, bounded to 365 days and 30,000 indexed events; zero history
+  retention still means this finite bound. Trim, missing bodies, lost index/start and unresolved intents are named
+  coverage gaps. An indexed-but-missing set is already unknown before a later write can reset its epoch.
+- Pending uncertainty conservatively makes the covered rate unavailable until repaired. A zero denominator has
+  `rate:null`. Reads never interpret missing events or an older client as proof that no person intervened.
+- `touch-outbox/<event-id>.json` below the private logs root holds `{state,event}` with `pending` or `applied` state.
+  Publication repairs applied entries idempotently and never re-executes an action. An interrupted pending entry
+  remains unknown until its owner can prove the outcome. Every successful action whose metric could not finish
+  returns a fixed warning; CLI, panel and console preserve it without turning success into a retry.
+- **Run-record extension** (`INT-RUN-HISTORY-FILE-CONTRACT`): wired writers stamp optional `touchTrackingVersion:1`
+  and `touchScopeId`; at most 16 rebuilt `touches` carry source facts. The optional fixed
+  `touchLineageSkipped:"source-unavailable"` records an admitted answer whose exact parked source could not be proved.
+  These facts survive a same-id retry's record replacement while its fresh outcome and usage remain authoritative.
+  `purpose:"zero-touch-grouping"` identifies internal analysis, including pre-container refusals; it remains ordinary
+  history/spend but is excluded from workload rates and activity. Missing legacy fields are unknown, never false.
+- **Session extension** (`INT-SESSION-STORE-CONTRACT`): new parked sidecars use
+  `{v:2,runId,at,transcriptIdentity}`. The identity is the store's private canonical-file identity, not a path. Staging
+  attaches `parkedSource:{runId,at}` only when that sidecar matches the exact canonical descriptor already checked
+  and copied. Timestamp-only and v1 sidecars still establish a parked session but cannot prove answer lineage.
+  A proven runner resume uses its staged source, never an earlier lookup that a concurrent promotion could replace.
+- **Held-reply receipt extension** (`INT-STEER-INBOX-CONTRACT`): a released held comment carries optional host-authored
+  `replyReceivedAt` at job level, copied only from its validated held entry time for a resumable comment. Pickup uses
+  it before the new queue timestamp, so queueing or park delays never extend the wait after an answer arrived. It
+  never enters the forge event payload. Phrase-prefixed and phrase-free replies both need exact staged source proof.
+- **Acceptance**: real Valkey duplicate/loss/retention tests and production producer tests recount two hosts, retain
+  uncertainty across repair/retry, distinguish stops and scopes, and reject false source attribution and false zero.
+
+## INT-QUESTION-GROUPS
+
+**Operator configuration → worker → classifier container → safe assignment readers**, issue #770.
+
+- Optional top-level `zeroTouch` in `INT-TRIGGERS-FILE-CONTRACT` contains `capture` (boolean), explicit classifier
+  `model`, dollar-string `maxCostUsd`, optional `confidence` (default 0.9, above 0.5 and at most 1), and `names` mapping
+  opaque 32-hex group ids to human names of 1 to 120 Unicode characters without control/bidi formatting characters.
+  It is strictly validated; unknown keys are refused. Names are operator configuration, never model output.
+- The text-bearing `zero-touch:questions:private:*` corpus is separate from safe `meta:*`, `index`, `corpus` and
+  repository `groups:*` state. Queue jobs contain only `questionGrouping:{runId,digest,configDigest}`. Neither public
+  snapshots nor ordinary configuration/state/tool results fetch the private bodies.
+- Opt-in capture reads a bounded contiguous final context from the parked transcript because `await_human_input`
+  has no question argument. It uses the actual job's complete credential redactor before storing anything. Missing
+  redactor, unreadable source or an oversized last entry becomes a named status, not guessed earlier text.
+- Limits come from `QUESTION_GROUP_LIMITS`: 16,384 excerpt bytes, 262,144 total input bytes, 1,000 private entries,
+  5,000 safe metadata entries, 14 existing candidate groups plus `new`/`unassigned`, and at most 90 private days
+  (the shorter of positive history retention and 90; zero is still 90). Loss or expiry never establishes a new group.
+- Safe statuses are closed:
+  ```json
+  ["unassigned", "pending", "assigned", "source-expired", "source-unavailable", "source-oversize", "candidates-expired", "group-limit", "stale", "refused", "failed"]
+  ```
+  Safe metadata carries validated source id/scope/project/repository/time/digest, optional trigger index and bounded
+  context-truncation fact. Assigned groups hold opaque ids, counts and source links. The private exemplar is read
+  only by workers constructing an explicitly confirmed classification, including unnamed exemplars across hosts.
+- Each paid request has one queue attempt. On every pickup, including after deferral JSON serialization, the worker
+  re-resolves the narrow reference against current reviewed configuration and private evidence; queued execution
+  settings are not authority. Source project billing remains in force, and a removed source project refuses.
+- The free gate checks classifier type, input-only finite pricing and a conservative full-context cost bound before
+  ordinary admission/reservation. Primary text-model and secondary classifier credentials must pass the same free
+  probe as container environment construction. There is no provider call on GET.
+- `questionGrouping` in the image capability label gates this mode before reserve. The worker stages private
+  `question-grouping.json` in read-only `/job`, with a read-only empty workspace and writable per-job `/outbox`.
+  No Valkey, forge or unrelated forwarded credential, package or global extension is admitted. The guarded runner
+  branches before extension loading or an agent session; the normal model/cost meter is already installed.
+- `question-group.json` is exactly `{version:1,slot,confidence}` with a reviewed candidate slot, `new` or `unassigned`.
+  It has no names, answers or summaries. The collector validates bounds, confidence, config/source digest and group
+  revision before atomic assignment; concurrent stale imports and malformed output never buy another call. A person
+  may explicitly confirm another paid request for an uncertain pending result, with that cost stated in its preview.
+- **Acceptance**: actual queue/store/runtime/admission/executor/collector tests plus the image's authenticated
+  network-free zero-cap probe prove guards, no extension/tool execution, privacy, idempotence and stale-source refusal.
+
+## INT-ZERO-TOUCH-FIXES
+
+**Confirmed operator write → fleet telemetry and on-demand console**, issue #770.
+
+- `zero-touch:fixes:meta:*` stores safe typed fix facts: opaque id, `instructions` or `config` kind, time, source run,
+  scope/project, one refusal reason or group id, optional trigger index, state and optional undone time. Bounded
+  private Undo/proof state is separate. Index entries expire with history retention, with a finite 365-day/5,000-row
+  ceiling when history is unlimited.
+- Stage a pending fix before a nonurgent write, then commit or refuse its metadata. Exact file/trigger proof can
+  repair an applied write without executing it again. Arbitrary paths outside the configured file allowlist are
+  never read for repair; uncertain conflicting state remains partial. Safe public reads omit instruction text and actors.
+- Instruction planning is console-only, uses retained source-job identity plus the current loader's trigger match,
+  and binds the raw trigger digest and file comparison to the ticket. Kind/index alone is insufficient. A stale or
+  expired source refuses. Append obeys the existing 2,000-character limit and cron restriction. Undo requires the
+  exact confirmed trigger/instructions and preserves later edits rather than overwriting them.
+- Ordinary configuration previews may carry validated `becauseRun` context from a retained refusal. The parsed
+  configuration page says which source it carries; its script preserves the source across configuration navigation
+  and adds it only to the derived configuration-action set. Confirm uses the normal action funnel and records a fix
+  only if that write actually succeeds. An unrelated write has no attribution.
+- Counts measure occurrences of a typed refusal reason or question group, including untouched refusals and
+  unanswered questions. Before and after spans are equal actual elapsed spans, with subsequent workload exposure.
+  Undo ends the observation at the reversal time and never establishes current effectiveness. A later identical
+  instruction append has a new confirmation identity and its own fix, rather than reviving the reverted metadata.
+  A group comparison with unclassified sources is partial; no later runs or missing coverage establishes no success.
+- Console reads are `/runs/zero-touch?days=7|30|90` with optional project and opaque scope. The page is on-demand,
+  viewer-readable, and operator groups/actions are projected away before rendering for viewers. Read-only operators
+  keep reads. `/runs?touched=1&days=...` preserves its window/scope through pagination and live canonical queries.
+  The reserved analytics-only `project=~` selects missing project attribution without colliding with a real
+  project named `unassigned`. It is accepted only here and on touched Runs, not in ordinary project-id fields.
+  Neither feature changes the version or payload of `/api/state` or the existing event stream.
+- Actions are `zero-touch-group` (paid), `zero-touch-name`, `zero-touch-instruction` and `zero-touch-undo`. They use
+  existing same-origin/session/role/read-only guards, single-use preview tickets, exact comparison and audit-before-write.
+  No model-callable instruction tool is introduced. Native reads work without script; writes stay disabled.
+- **Acceptance**: HTTP persistence and real-browser tests exercise diff/Confirm/Undo, stale writes, source binding,
+  linked configuration, roles, no JavaScript, CSP, live filters and >50 touched-run pagination.
+
+
 ## Revision History
 
 | Date | Change |
@@ -11918,3 +12056,4 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-30 (#751) | `INT-CONSOLE-STATE-API` AMENDED to name page-scoped Configuration reads and safe resolver response text. Its shared state version/keys, `INT-CONSOLE-EVENT-STREAM`, action ticket/audit guards, run records, trigger/project/endpoint files, secret resolver processes and `INT-ON-FAILURE-HOOK-CONTRACT` UNCHANGED, checked. |
 | 2026-10-30 (#751, review) | Safe Connections tool projections add a selected provider-key name and closed source/fallback facts; manager variable names and values remain excluded. Typed project preflight facts stay internal to page assembly. `INT-CONSOLE-STATE-API`, state/event-stream versions and keys, confirmation tickets, audit, worker files/processes and run records UNCHANGED, checked. |
 | 2026-10-30 (#751, observation coverage) | Page/tool endpoint projections add closed counting coverage with nullable observed use and retained declared capacity. Delivery guidance distinguishes forge history from partial receiver logs. `INT-CONSOLE-STATE-API` shared version/keys, event streams, worker endpoint files/leases, host registry, receiver responses/logging and action confirmation/audit contracts UNCHANGED, checked. |
+| 2026-10-30 (#770) | NEW `INT-TOUCH-INDEX`, `INT-QUESTION-GROUPS` and `INT-ZERO-TOUCH-FIXES`: text-free fleet interventions and loss bounds, durable intent/repair, separate bounded private classification inputs and safe results, source-bound fixes and role-safe on-demand reads. `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED with optional tracking/scope/touches, preserved retry uncertainty and internal analysis purpose; `INT-SESSION-STORE-CONTRACT` AMENDED with v2 canonical-bound parked lineage; `INT-STEER-INBOX-CONTRACT` AMENDED with original held-reply receipt preservation; `INT-TRIGGERS-FILE-CONTRACT` AMENDED with strict optional `zeroTouch` configuration and human names; `INT-CONTAINER-JOB-INPUTS` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED with classifier-only input/output and two closed grouping policy reasons. UNCHANGED, checked: ordinary record keys and outcome/retry classes; container mounts/isolation; `INT-CONSOLE-AUDIT-LOG` hash/PII rules; `INT-CONSOLE-STATE-API` payload/version; `INT-CONSOLE-EVENT-STREAM` framing/version; approval authorization/state and trigger author gates. |

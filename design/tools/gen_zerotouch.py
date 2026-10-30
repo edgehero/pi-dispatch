@@ -166,15 +166,15 @@ QUESTIONS = card("Questions it keeps asking", f"""<p class="zt-intro">Grouped by
 {theme("Test command", "acme/api", 6, "named by ops · all from runs of trigger 3 · last on 6 Oct",
        ["gh-71c2", "gh-6a0e", "gh-5d19"],
        chip("Open", "parked", "parked"),
-       btn("Add to instructions", "primary", "edit") + btn("Save standing answer", "", "comment"), open_=CONFIRM)}
+       btn("Add to instructions", "primary", "edit"), open_=CONFIRM)}
 {theme("Rate limit scope", "acme/api", 3, "named by ops · from triage runs of trigger 7 · one waiting now",
        ["gh-2f6a", "gh-48b0", "gh-3e77"],
        chip("Product decision", "idle", "flag"),
-       btn("Draft it for me", "", "flows") + btn("Answer gh-2f6a", "ghost", "parked"))}
+       btn("Answer gh-2f6a", "ghost", "parked"))}
 {theme("2 similar questions, not named yet", "acme/web", 2, "from runs of trigger 2 · last on 30 Sep",
        ["gh-1b9d", "gh-0c4e"],
        chip("Open", "parked", "parked"),
-       btn("Name this group", "", "edit") + btn("Save standing answer", "ghost", "comment"), unnamed=True)}
+       btn("Name this group", "", "edit"), unnamed=True)}
 {theme("Package manager", "acme/web and acme/billing", 5, "named by ops · from runs of trigger 3 · none since 24 Sep",
        ["gh-09fa", "gh-7f21"],
        chip("Fixed", "ok", "done") + '<span class="zt-q__d">24 Sep</span>',
@@ -209,7 +209,7 @@ KPIS = f"""<div class="cards-4">
 {card('Touch rate, 30 days', f'<p class="kpi"><b>18%</b><span>38 of 214 runs needed a person</span></p>{spark()}<p class="zt-kp"><span class="zt-kt">{ic("flag", "ic ic--sm")}goal under 5%</span><span class="zt-kt zt-kt--ok">{ic("done", "ic ic--sm")}down 6 points</span></p>', id_="p-zt-rate")}
 {card('Zero-touch streak', f'<p class="kpi"><b>9 days</b><span>ops, the longest now</span></p><p class="zt-kp"><span class="zt-kt">shop 4 days</span><span class="zt-kt">web 2 days</span>{chip("api waiting now", "parked", "parked")}</p>', id_="p-zt-streak")}
 {card('Waiting for a person', f'<p class="kpi"><b>41h</b><span>runs waited on a person in 30 days</span></p><p class="zt-kps">Median wait for an answer <b>34m</b></p><p class="zt-kp">{chip("waiting: gh-2f6a, 26m", "parked", "parked")}</p>', id_="p-zt-wait")}
-{card('Answered from a draft', f'<p class="kpi"><b>11</b><span>of 17 answers you sent</span></p><p class="zt-kps">drafted by an answer rule, sent by you. Median 2 minutes to answer.</p>', id_="p-zt-handled")}
+{card('Answered from a draft', '<p class="kpi"><b>Coming next</b><span>Answer rules, #772</span></p><p class="zt-kps">Answer-rule drafts arrive with #772. A draft sent by a person will still count as a touch.</p>', id_="p-zt-handled")}
 </div>"""
 
 def fix(date, who, what, metric, before, after, span):
@@ -217,7 +217,8 @@ def fix(date, who, what, metric, before, after, span):
     def mb(label, v):
         w = max(v / mx * 100, 0)
         fill = f'<rect class="pbar__fill" width="{w:.1f}%" height="8" rx="4"/>' if v else ""
-        return (f'<p class="zt-ba"><span>{label}</span><svg class="pbar tone-{"attention" if label == "Before" else "ok"}" height="8" role="img" aria-label="{label}: {v}">'
+        tone = "attention" if label == "Before" else "ok" if after < before else "failed" if after > before else "idle"
+        return (f'<p class="zt-ba"><span>{label}</span><svg class="pbar tone-{tone}" height="8" role="img" aria-label="{label}: {v}">'
                 f'<rect class="pbar__bed" width="100%" height="8" rx="4"/>{fill}</svg><b>{v}</b></p>')
     return f"""<li class="zt-fx">
   <p class="zt-fx__d">{date} · {who}</p>
@@ -242,7 +243,7 @@ def fixes(role="operator"):
 FIXES = fixes()
 
 def tabs(role="operator"):
-    items = [("All runs", "runs", "", False), ("Zero touch", "flag", "18%", True), ("Sandboxes", "box", "2 open", False)]
+    items = [("All runs", "runs", "", False), ("Zero touch", "flag", "18%", True)]
     if role != "operator":
         items = items[:2]   # Sandboxes is an operator's tab: a kept workspace holds issue text
     return '<nav class="tabs zt-tabs" aria-label="Runs views">' + "".join(
@@ -272,7 +273,7 @@ def phone_rate():
 <ul class="ztp-now">
   <li><span>{ic("flag", "ic ic--sm")}Longest streak</span><b>ops, 9 days</b></li>
   <li><span>{ic("clock", "ic ic--sm")}Waited on a person</span><b>41h, median 34m</b></li>
-  <li><span>{ic("edit", "ic ic--sm")}Answered from a draft</span><b>11 of 17</b></li>
+  <li><span>{ic("edit", "ic ic--sm")}Answered from a draft</span><b>Available with #772</b></li>
   <li class="ztp-now--wait"><span>{ic("parked", "ic ic--sm")}Waiting now</span>{chip("gh-2f6a, 26m", "parked", "parked")}</li>
 </ul>""", id_="p-zt-rate")
 
@@ -490,6 +491,36 @@ PHONE_CSS = """
 
 """
 
+CSS += """
+.zt-kpis .card{height:100%}.zt-note{padding:var(--space-4);font-size:14px;line-height:21px;color:var(--ink-muted)}
+.zt-coverage{font-size:12px;line-height:18px;margin-top:12px;color:var(--ink-muted)}.zt-coverage b{color:var(--ink)}
+.zt-cause-svg{display:block;width:100%;height:28px;min-width:0}.zt-cause-rect{fill:var(--tone)}.zt-cause-label{fill:var(--on-tone);font-size:12px;font-weight:750}
+.zt-phone-summary,.zt-phone-causes{display:none}.zt-q__t,.zt-name b,.zt-fx__w,.zt-cb__n b{overflow-wrap:anywhere}
+.zt-said span{display:flex;gap:4px;flex-wrap:wrap}.zt-editor{max-width:100%;min-width:0}.zt-editor summary{cursor:pointer}
+.zt-editor form{display:grid;gap:10px;margin-top:10px;max-width:100%}.zt-editor textarea{width:100%;box-sizing:border-box}
+.zt-ungrouped{display:grid;gap:8px;margin-top:12px}.zt-ungrouped li{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+@media(max-width:1100px){.zt-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.zt-layout{grid-template-columns:minmax(0,1fr)}.zt-row{grid-template-columns:18px minmax(0,1fr) minmax(0,1fr) 120px minmax(0,1fr)}}
+@media(max-width:760px){.zt-kpis{grid-template-columns:minmax(0,1fr)}.zt-kpis>section:not(#p-zt-rate){display:none}.zt-phone-summary,.zt-phone-causes{display:block}.zt-desktop-causes{display:none}.zt-layout,.zt-main,.zt-side{display:contents}#p-zt-projects{order:2}#p-zt-causes{order:3}#p-zt-questions{order:4}#p-zt-fixes{order:5}.zt-row{grid-template-columns:18px minmax(0,1fr) auto}.zt-row>.zt-name{grid-column:2/-1}.zt-row>.zt-n{grid-column:2;grid-row:auto;text-align:left}.zt-row>.zt-st{grid-row:auto}.zt-row>.zt-tr{grid-column:2/-1}.zt-q__act{display:grid;gap:12px}.zt-row>.zt-c{grid-column:2/-1}}
+"""
+
+CSS += """
+.zt-action fieldset{border:0;padding:0;margin:0;min-width:0;display:grid;gap:10px}.zt-action fieldset>.btn{justify-self:start}.zt-action fieldset:disabled{opacity:.65}
+"""
+
+CSS += """
+.zt-phone-projects{display:none}
+@media(max-width:760px){.zt-desktop-projects{display:none}.zt-phone-projects{display:block}.ztp-p__c .zt-tr{font-size:12px}.ztp-p[data-repository]{background:var(--surface-2)}.ztp-p__n b{overflow-wrap:anywhere}.ztp-p__r{max-width:115px}.zt-why small{display:none}.zt-why{padding:8px 0}}
+"""
+
+CSS += """
+.ztp-qs.zt-phone-questions,.zt-phone-fixes{display:none}.zt-counting{margin-top:10px;font-size:12px;color:var(--ink-muted)}.zt-counting summary{cursor:pointer}.zt-group-link{color:inherit;text-decoration:none}.zt-group-link:hover{text-decoration:underline}
+@media(max-width:760px){.zt-desktop-questions,.zt-desktop-fixes{display:none}.ztp-qs.zt-phone-questions,.zt-phone-fixes{display:block}#p-zt-fixes .card__head{display:none}.zt-phone-fixes>summary{display:flex;align-items:start;gap:8px;list-style:none;cursor:pointer;font-size:13px;line-height:20px;color:var(--ink-muted)}.zt-phone-fixes>summary>b,.zt-phone-fixes b{color:var(--ink)}.zt-phone-fixes>summary .ic{flex:none;margin-top:3px}.zt-phone-fixes>summary::-webkit-details-marker{display:none}.zt-fix-observations{padding-top:16px}.ztp-q__a>.zt-editor{width:100%}.ztp-q__a>.zt-editor>summary{display:inline-flex;background:var(--ink);color:var(--canvas);border-radius:999px;padding:6px 12px;font-weight:650;text-decoration:none}.ztp-q__a .zt-action{margin-top:8px}.ztp-q .ztp-q__t small{overflow-wrap:anywhere}.zt-counting{font-size:12px}}
+"""
+
+CSS += """
+.zt-phone-label{display:none}@media(max-width:760px){.zt-desktop-label{display:none}.zt-phone-label{display:inline}}
+"""
+
 if __name__ == "__main__":
     write("ZeroTouchScreen", card_marker("Planned and proposed", 3070, 1440, "Zero touch: how often a run needed a person, per project and repository, why, which questions keep coming back, and the fixes that brought the rate down"),
           "Zero touch", page(), CSS)
@@ -501,7 +532,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
   - *Touch rate*: runs that needed a person out of runs that ended, over the window (7, 30 or 90 days), with a sparkline of the rolling rate each week, a dashed goal line, and the change against the window before in words.
   - *Zero-touch streak*: the project that has gone longest without a touch, and the others.
   - *Waiting for a person*: the hours runs waited on a person, the median wait for an answer, and what waits now.
-  - *Answered from a draft*: answers the person sent from an answer rule's draft. They are touches, in the rate, shown apart only because they were quicker. Nothing answers a run without a person (OQ-051).
+  - *Answered from a draft*: an explicit coming-next state for #772. A draft the person sends will be a touch; #770 does not draft or send answers.
 - **By project.** One row per project:
   - the rate as a meter, with the goal tick at 5% and a word beside it (*Under goal*, *Above goal*, *High* from 30%), so colour never carries it alone;
   - the change against the 30 days before, as an arrow and words ("down 8 points, from 24%");
@@ -513,28 +544,27 @@ A second tab on Runs that counts how often a run needed a person, per project an
 - **What needed a person** (side). One stacked bar per project on one scale, each with its counts in words under it. Under the bars, the six causes with what the record says for each and their counts (17, 5, 7, 5, 3 and 1, which make 38), and one line: merging is never a touch, with a link to how touches are counted.
 - **Questions it keeps asking** (operator only). Questions with the same meaning, grouped by a decision model, per repository. A person names each group (an unnamed one says how many similar questions it holds and offers *Name this group*), and the page shows the name, the count and links to the runs, never the questions. Each group offers the fix that removes it:
   - *Add to instructions*: shown open, a preview with the diff of `triggers.json` and *Add to trigger 3*. The undo is to remove the sentence.
-  - *Save standing answer*: later drafts for the group cite it; the person still sends each answer.
-  - *Draft it for me*, or the *Product decision* state for questions only a person should answer.
+  - Standing answers and drafting arrive with #772; #770 offers no inactive draft or standing-answer control. Product-decision sample wording is illustrative.
   - A fixed group stays listed, with when it was fixed and *none since*.
 - **Fixes that worked** (side). Each change a person made against a cause, with before and after bars over equal spans: the pnpm sentence on trigger 3 (package manager questions 5 to 0), and the vault reference fix (`secret-unresolved` refusals 4 to 0).
+  Green means an established reduction. More occurrences use the failure colour and say so; unchanged, partial, unexposed and reverted observations never claim effectiveness.
 
-**Panels.** `p-zt-rate`, `p-zt-streak`, `p-zt-wait`, `p-zt-handled`, `p-zt-projects`, `p-zt-causes`, `p-zt-questions`, `p-zt-fixes`.
+**Panels.** `p-zt-rate`, `p-zt-streak`, `p-zt-wait`, `p-zt-handled`, `p-zt-projects`, `p-zt-questions`, `p-zt-causes`, `p-zt-fixes`.
 
 **The server provides.**
 - From run records, today:
   - outcome and reason (`awaiting-input`, `operator-cancel`, policy refusals and failures);
   - steering messages received;
-  - re-runs of the same target;
+  - explicit source-run lineage for re-runs and retries; never inferred from the target;
   - the project and repository each run recorded;
-  - parked times and answer times.
+  - park source and answer-receipt times recorded by #770, not inferred from pickup time.
 - New:
   - approvals decided (with ApprovalRequest);
   - linking a configuration change to the refusal it answered;
   - question groups from a decision model over the question text, named by a person;
-  - standing answers;
-  - answers sent from an answer rule's draft (with REQ-PARKED-ANSWERER);
+  - standing answers and sent drafts remain #772;
   - the fixes log, each change with the cause it targets and counts before and after.
-- The rate is a read over records. The only write on the page is a trigger edit, through the usual preview and Confirm.
+- The rate is a bounded read over records and fleet-wide touch facts. Grouping starts a capped job; naming a group and appending an instruction are operator-only writes through preview and Confirm. Private question context never enters this page.
 
 **Who sees what.** A viewer sees the rates, counts, causes, streaks and fixes. Question groups and every action are operator only. No role sees question text on this page.
 
@@ -547,7 +577,9 @@ A second tab on Runs that counts how often a run needed a person, per project an
 - **No question text here.** A group's name is written by a person, never by the model, because a question is the run's own text, which the console shows on the run page and nowhere else.
 - **Standing answers do not reach zero.** A draft may cite one, but the person still sends the answer. The way to zero is an instruction that stops the question being asked.
 
-**Fixture note.** This is a proposed screen (issue #753, REQ-ZERO-TOUCH-RATE), and all of it is sample:
+**Coverage.** Built by #770. Windows are partial when retained records or touch tracking cover less than requested. A zero-touch badge needs 30 days of complete observed workload and no outstanding wait. Charts assign each run to its first intervention; fixes count their typed refusal/group predicate independently.
+
+**Fixture note.** This screen's deployment and values are sample:
 - the 214 runs and 38 touches, and their split by project, repository and cause;
 - the trend, the streaks and the waits;
 - the question groups and their wording, the trigger 3 instructions line (from `triggers.example.json`) and the sentence added to it;
@@ -561,19 +593,19 @@ Projects, repositories, trigger 3 and `gh-2f6a` follow the fixture.
 The Zero touch tab as a viewer sees it. The same numbers as the operator's page, so a viewer can follow a project towards zero touch; nothing on it acts, and nothing on it quotes a run.
 
 **How a person uses it.**
-- **The numbers.** Touch rate, the zero-touch streak, the time runs waited for a person and the answers sent from a draft, as on the operator's page. The waiting run is named by its id.
+- **The numbers.** Touch rate, the zero-touch streak, the time runs waited for a person and the answers sent from a draft, as on the operator's page. The waiting run is named by its id. The draft tile says it arrives with #772.
 - **By project.** The same rows and meters, opening to repositories. There is no *Open as runs* link: it leads to the Runs tab's actions.
 - **What needed a person.** The same bars and the six causes with their counts.
 - **Fixes that worked.** What changed and what it did, before and after. Who made the change is left out (that is the audit log's, which a viewer never sees), and so is the text of an instruction: "Trigger 3's instructions gained a sentence".
 - **Questions it keeps asking** is one line saying it is for operators.
 
-**Panels.** `p-zt-rate`, `p-zt-streak`, `p-zt-wait`, `p-zt-handled`, `p-zt-projects`, `p-zt-questions` (one line), `p-zt-causes`, `p-zt-fixes`.
+**Panels.** `p-zt-rate`, `p-zt-streak`, `p-zt-wait`, `p-zt-handled`, `p-zt-projects`, `p-zt-questions` (one line), `p-zt-fixes`, `p-zt-causes`.
 
 **The server provides.** The operator page's reads, for a viewer's session: the rates, counts, causes, streaks and the fixes log, without the person on each fix, the instruction text, the question groups or any action.
 
 **Who sees what.** This is the viewer's page. The Sandboxes tab is not in the tab row: it is an operator's tab, because a kept workspace holds issue text.
 
-**Fixture note.** As ZeroTouchScreen: proposed (issue #753, REQ-ZERO-TOUCH-RATE), all of it sample, with gh-2f6a and the projects from the fixture.
+**Fixture note.** As ZeroTouchScreen: built by #770, all illustrated values sample, with gh-2f6a and the projects from the fixture.
 """)
     write("ZeroTouchPhone", card_marker("Phone", 2620, 390, "Zero touch on a phone: the rate first, projects as a list, the causes, and the question groups with one action each"),
           "Zero touch on a phone", phone_page(), CSS + PHONE_CSS)
@@ -584,7 +616,7 @@ The Zero touch tab laid out for a phone rather than stacked: what the rate is fi
 - **Touch rate.** The big number, its 8-week trend, the goal and the change, then four short lines: the longest streak, the time runs waited, the answers sent from a draft, and the run waiting now.
 - **By project.** One row per project, tappable: its rate with a word (*Under goal*, *Above goal*, *High*), how many runs needed a person, its most common cause and the change against the 30 days before. A row opens the project's own view.
 - **What needed a person.** One bar for all projects, each segment with its count, and the six causes as a list. Merging is never a touch.
-- **Questions it keeps asking** (operator only). Each group in one row: how often it was asked, its name, its state (*Open*, *Product decision*, *Fixed*) and one action: *Add to instructions*, *Answer gh-2f6a*, *Name this group*, or *See the fix*. The preview and diff of an instruction open on their own page.
+- **Questions it keeps asking** (operator only). Each group in one row: how often it was asked, its name, its state (*Open*, *Product decision*, *Fixed*) and one action: *Add to instructions*, *Answer gh-2f6a*, *Name this group*, or *See the fix*. The one relevant action opens the group's editor; the preview and diff use the console's confirmed-write flow. The group's title links to its source run.
 - **Fixes that worked** is one line, with how far each fix brought its cause down.
 
 **Panels.** `p-zt-rate`, `p-zt-projects`, `p-zt-causes`, `p-zt-questions`, `p-zt-fixes` (one line).
@@ -593,6 +625,6 @@ The Zero touch tab laid out for a phone rather than stacked: what the rate is fi
 
 **Who sees what.** An operator's phone. A viewer's phone shows ZeroTouchViewer's content in this order, without the question groups.
 
-**Fixture note.** As ZeroTouchScreen: proposed (issue #753, REQ-ZERO-TOUCH-RATE), all of it sample, with gh-2f6a and the projects from the fixture.
+**Fixture note.** As ZeroTouchScreen: built by #770, all illustrated values sample, with gh-2f6a and the projects from the fixture.
 """)
     print("zero touch written")

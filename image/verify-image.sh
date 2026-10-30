@@ -770,6 +770,40 @@ BEPROBE
 				echo "$be_out" | grep -q '^bundle-env-probe plain=plain-value pem=line1|line2 flag=gone$' \
 					|| fail "the image declares 'bundleEnvFile' but a job with PI_BUNDLE_ENV=1 did not see the bundle's variables from /job/bundle-env.json in its environment ($(echo "$be_out" | grep '^bundle-env-probe' | tail -1))"
 				;;
+			questionGrouping)
+				# The dedicated classifier mode must reach the cost guard before any executable discovery.
+				# A zero cap and no network make this a real runner proof that cannot spend provider tokens.
+				qg_dir=$(mktemp -d)
+				mkdir -p "$qg_dir/job" "$qg_dir/ws/.pi/extensions" "$qg_dir/outbox"
+				printf '' >"$qg_dir/job/prompt.md"
+				cat >"$qg_dir/job/question-grouping.json" <<'QUESTIONGROUP'
+{"version":1,"model":{"provider":"openrouter","id":"typesafe/jev-1.13"},"source":"Which test command should I use?","candidates":[],"confidence":0.9}
+QUESTIONGROUP
+				echo 'console.log("QUESTION-GROUP-EXTENSION-EXECUTED"); export default function () { throw new Error("must not load"); }' >"$qg_dir/ws/.pi/extensions/index.js"
+				chmod -R a+rX "$qg_dir/job" "$qg_dir/ws"
+				chmod a+rwx "$qg_dir" "$qg_dir/outbox"
+				qg_key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+				qg_out=$(printf '%s\n' "$qg_key" | docker run -i --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$qg_dir/job:/job:ro" -v "$qg_dir/ws:/workspace:ro" -v "$qg_dir/outbox:/outbox" --workdir /workspace \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e OPENROUTER_API_KEY=not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_EXIT_AUTH=stdin \
+					"$IMAGE_REF" 2>&1) && qg_code=0 || qg_code=$?
+				qg_exit=$(echo "$qg_out" | grep '"event":"exit"' | tail -1)
+				qg_mac=$(echo "$qg_exit" | sed -nE 's/.*,"auth":"([0-9a-f]{64})"\}$/\1/p')
+				qg_body=$(echo "$qg_exit" | sed -E 's/,"auth":"[0-9a-f]{64}"\}$/}/')
+				qg_want=$(printf '%s' "$qg_body" | openssl dgst -sha256 -hmac "$qg_key" | awk '{print $NF}')
+				qg_written=no
+				[ ! -f "$qg_dir/outbox/question-group.json" ] || qg_written=yes
+				rm -rf "$qg_dir"
+				[ "$qg_code" = 2 ] && [ -n "$qg_mac" ] && [ "$qg_mac" = "$qg_want" ] \
+					&& echo "$qg_exit" | grep -q '"reason":"cost-cap"' \
+					&& echo "$qg_exit" | grep -Eq '"costRefused":1[,}]' \
+					&& echo "$qg_exit" | grep -Eq '"calls":0[,}]' \
+					&& echo "$qg_exit" | grep -Eq '"toolsStarted":0[,}]' \
+					&& ! echo "$qg_out" | grep -q 'QUESTION-GROUP-EXTENSION-EXECUTED' \
+					&& [ "$qg_written" = no ] \
+					|| fail "the image declares questionGrouping but its signed classifier probe bypassed the zero cap, loaded an extension, called a tool or emitted a group"
+				;;
 			watch)
 				# Watch evidence has no human author: executable resources must never run, even at import.
 				# The zero cap and --network none make both probes deterministic and provider-free.

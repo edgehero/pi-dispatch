@@ -1120,7 +1120,7 @@ function registerTools(pi: ExtensionAPI): void {
         async () => {
           const res: any = await panelWrite(auditDir(), { kind: "cancel-held", target: params.jobId }, () => cancelHeldJob({ url: paths.valkeyUrl, jobId: params.jobId }));
           if ((res as any).invalid) throw new Error(`rejected: ${(res as any).invalid}`);
-          return { applied: true, jobId: params.jobId };
+          return { applied: true, jobId: params.jobId, ...(res.touchWarning ? { warning: "The job was removed; touch tracking is incomplete. Do not repeat the cancellation." } : {}) };
         },
       );
       return toolText(JSON.stringify(result));

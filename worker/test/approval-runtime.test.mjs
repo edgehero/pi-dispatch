@@ -294,3 +294,19 @@ test("a valid comment reply cannot approve a timeless request after its initiati
 		}
 	}
 });
+
+test("accepted human approval decisions are touches even when the later continuation cannot claim, system expiry is not", async () => {
+	const writes = [];
+	const { runtime } = setup({ hooks: { touchStore: { write: async (e) => { writes.push(e); return { ok: true }; } } }, methods: { async claim() { return { refused: "claim-conflict" }; } } });
+	await runtime.before(job());
+	assert.equal(writes.length, 1);
+	assert.equal(writes[0].runId, "parked-1");
+	assert.equal(writes[0].cause, "approval-decision");
+	assert.equal(writes[0].at, AT);
+	assert.ok(!JSON.stringify(writes).includes("private reason"));
+	writes.length = 0;
+	const system = accepted({ decision: { ...accepted().decision, actor: { kind: "system", id: "expiry" }, decision: "declined" } });
+	const expired = setup({ pending: system, hooks: { touchStore: { write: async (e) => writes.push(e) } } });
+	assert.equal((await expired.runtime.before(job())).refused, "approval-expired");
+	assert.equal(writes.length, 0);
+});

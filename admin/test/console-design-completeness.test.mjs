@@ -25,9 +25,6 @@ const OUTSIDE_LEDGERS = Object.freeze({
   DispatchersScreen: "Proposed by #776; grew from #735, outside #751.",
   DispatcherScreen: "Proposed by #776; grew from #735, outside #751.",
   SandboxesScreen: "Proposed by #771 under #753; browser terminal needs #754's decision, outside #751.",
-  ZeroTouchScreen: "Proposed by #770 under #753, outside #751.",
-  ZeroTouchViewer: "The proposed #770 screen's viewer variant, outside #751.",
-  ZeroTouchPhone: "The proposed #770 screen's phone variant, outside #751.",
   ParkedAnswerer: "Proposed by #772 under #753; unattended answers need OQ-051's decision, outside #751.",
   ParkedDraftViewer: "The proposed #772 draft's viewer variant, outside #751.",
   ParkedDraftPhone: "The proposed #772 draft's phone variant, outside #751.",
@@ -44,6 +41,8 @@ function assertDispositionOwner(card, disposition, preview) {
 const COMPONENTS = new URL("../../design/system/components/", import.meta.url);
 const LEDGERS = new URL("./fixtures/console-ledger/", import.meta.url);
 const CARDS = Object.freeze({
+  ZeroTouchScreen: { page: "zero-touch", path: "/runs/zero-touch" },
+  ZeroTouchViewer: { page: "zero-touch", path: "/runs/zero-touch" },
   SecretsScreen: { page: "secrets", path: "/config/secrets" },
   ConnectionsScreen: { page: "connections", path: "/config/connections" },
   ProjectDetail: { page: "project", path: "/config/project" },

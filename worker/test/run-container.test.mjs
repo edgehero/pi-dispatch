@@ -25,6 +25,30 @@ const HOST = { ANTHROPIC_API_KEY: "sk-real" };
 const JOB = { kind: "local", provider: "anthropic", model: "m", maxTurns: 5 };
 const PREPARED = { workspace: "/host/folder", jobDir: "/host/jobs/j1" };
 
+test("private question capture inherits provider and forwarded-value redaction even without live streaming", { skip }, async () => {
+	const prepared = { ...PREPARED };
+	const providerSecret = "opaque-provider-credential";
+	const forwardedSecret = "opaque-forwarded-credential";
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: { ANTHROPIC_API_KEY: providerSecret, PRIVATE_DATABASE: forwardedSecret }, forwardEnv: ["PRIVATE_DATABASE"], spawnFn: fakeSpawn({}) })({ job: JOB, prepared, name: "question-redaction", signal: new AbortController().signal });
+	assert.equal(typeof prepared.questionRedact, "function");
+	assert.equal(prepared.questionRedact(`Question echoed ${providerSecret} and ${forwardedSecret}`), "Question echoed [redacted] and [redacted]");
+	assert.equal(Object.keys(prepared).includes("questionRedact"), false, "the private function is not serialised as preparation metadata");
+});
+
+test("a grouping container receives its two provider credentials but no forwarded Valkey, forge or unrelated values", { skip }, async () => {
+	const recorder = {};
+	const hostEnv = { ANTHROPIC_API_KEY: "primary-provider-key", OPENROUTER_API_KEY: "classifier-provider-key", VALKEY_URL: "redis://credential@private-host", GITHUB_TOKEN: "forge-token-not-needed", PRIVATE_DATABASE: "unrelated-secret" };
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, forwardEnv: ["VALKEY_URL", "PRIVATE_DATABASE"], allowGlobalExtensions: true, packagePaths: ["/opt/pi-global/packages/unrelated"], spawnFn: fakeSpawn(recorder) });
+	await run({ job: { ...JOB, packages: false, questionGrouping: { runId: "source" }, questionGroupModel: { provider: "openrouter", id: "typesafe/jev-1.13" } }, prepared: { ...PREPARED }, name: "grouping-env", signal: new AbortController().signal });
+	const env = Object.fromEntries(recorder.args.flatMap((arg, i, all) => arg === "-e" ? [all[i + 1].split(/=(.*)/s).slice(0, 2)] : []));
+	assert.equal(env.ANTHROPIC_API_KEY, hostEnv.ANTHROPIC_API_KEY);
+	assert.equal(env.OPENROUTER_API_KEY, hostEnv.OPENROUTER_API_KEY);
+	for (const key of ["VALKEY_URL", "GITHUB_TOKEN", "GH_TOKEN", "PRIVATE_DATABASE"]) assert.equal(env[key], undefined, key);
+	assert.equal(env.PI_GLOBAL_ALLOW_EXTENSIONS, "0");
+	assert.ok(!JSON.stringify(env).includes("packages/unrelated"));
+	assert.ok(recorder.args.includes("/host/folder:/workspace:ro"), "the grouping workspace is bound read-only by the worker");
+});
+
 /** A fake `docker` child: records argv, lets the test drive its exit. */
 function fakeSpawn(recorder, exitCode = 0) {
 	return (cmd, args) => {

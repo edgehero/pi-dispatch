@@ -453,7 +453,7 @@ async function snapshotOf(ctx, opts = {}) {
 
 /** A funnel's answer in the pipeline's three shapes. */
 function funnelResult(res, okFields = {}) {
-  if (res?.ok) return { ok: true, ...okFields };
+  if (res?.ok) return { ok: true, ...okFields, ...(res.touchWarning || res.warning ? { touchWarning: "touch-tracking-incomplete" } : {}) };
   // A refusal that came after the write was sent (`partial`) keeps that mark, so the confirm never says nothing changed.
   if (typeof res?.invalid === "string") return res.partial === true ? { invalid: res.invalid, partial: true } : { invalid: res.invalid };
   if (typeof res?.refusal === "string") return { invalid: res.refusal };
@@ -1103,7 +1103,7 @@ const CANCEL_QUEUED_LINE = "It is removed from its queue before it starts; the r
  * done" of a job whose hold may be gone.
  */
 function resultRow(r) {
-  if (r?.ok) return { jobId: String(r.jobId), ok: true, ...(r.queue ? { queue: String(r.queue) } : {}) };
+  if (r?.ok) return { jobId: String(r.jobId), ok: true, ...(r.queue ? { queue: String(r.queue) } : {}), ...(r.touchWarning || r.warning ? { touchWarning: "touch-tracking-incomplete" } : {}) };
   return { jobId: r?.jobId === null || r?.jobId === undefined ? null : String(r.jobId), ok: false, ...(r?.partial === true ? { partial: true } : {}), reason: r?.unreachable !== undefined ? "Valkey could not be reached for this job" : String(r?.invalid ?? "refused") };
 }
 
@@ -1829,6 +1829,10 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
  */
 const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
 const WRITE_RULES = {
+  "zero-touch-group": { fields: ["runId"], danger: false, undo: () => "A completed classification cannot be withdrawn; it never answers the question.", inverse: none, confirmLabel: () => "Start grouping job", done: () => "Queued the capped question grouping job" },
+  "zero-touch-name": { fields: ["groupId", "name"], danger: false, undo: () => "Rename the group again from Zero touch.", inverse: none, confirmLabel: () => "Save group name", done: () => "Saved the group name" },
+  "zero-touch-instruction": { fields: ["runId", "groupId", "index", "sentence"], danger: false, atConfirm: true, undo: () => "Remove this sentence while the trigger still matches the confirmed change.", inverse: (out, body, result) => result?.fixId ? { action: "zero-touch-undo", body: { fixId: result.fixId } } : null, confirmLabel: () => "Add instruction sentence", done: () => "Added the instruction sentence and linked its cause" },
+  "zero-touch-undo": { fields: ["fixId"], danger: false, undo: () => "Add a new reviewed sentence from the same cause.", inverse: none, confirmLabel: () => "Remove instruction sentence", done: () => "Removed the instruction sentence" },
   ...Object.fromEntries(["freeze", "unfreeze", "clear", "revert", "adopt"].map((op) => [`board-${op}`, { fields: ["rule", "expectedVersion", ...(op === "revert" ? ["version"] : []), ...(op === "adopt" ? ["proposalId"] : [])], danger: op !== "unfreeze" && op !== "adopt", undo: () => "Restore a retained board version, or change its freeze state.", inverse: () => null, confirmLabel: () => `${op[0].toUpperCase() + op.slice(1)} board`, done: (out) => `Changed board ${out.target}` }])),
   "cancel-active": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.cancelled), inverse: none, confirmLabel: () => "Cancel the run", done: (out) => `Cancelled running job ${out.payload.jobId}` },
   "cancel-held": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: () => "Cancel the held job", done: (out) => `Cancelled held job ${out.payload.jobId}` },
@@ -1937,8 +1941,52 @@ function withRules(a) {
   if (r.danger && a.paid) throw new Error(`console action ${a.name} is paid and destructive; it is one or the other`);
   // `atConfirm` is carried as the rule says it, false when absent: the action test holds it a boolean and never on a
   // bulk act (a bulk confirm asks no rule for its Undo again, `confirmBulk`, so one would keep its preview's in silence).
-  return Object.freeze({ ...a, fields: Object.freeze([...r.fields]), danger: r.danger, atConfirm: r.atConfirm ?? false, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done });
+  const linked = configActions.includes(a);
+  const tracked = ["cancel-held", "cancel-all-held", "cancel-queued", "retry-failed", "retry-all-failed", "rerun"].includes(a.name);
+  return Object.freeze({ ...a, fields: Object.freeze([...r.fields, ...(linked ? ["becauseRun"] : [])]), danger: r.danger, atConfirm: r.atConfirm ?? false, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done,
+    ...(linked ? {
+      async preview(body, ctx) {
+        const context = body.becauseRun ? await ctx.a.zeroTouch?.configurationContext(jobIdOf({ jobId: body.becauseRun })) : null;
+        if (body.becauseRun && !context?.runId) return { refusal: "The source refusal is no longer available for this configuration fix. Reload it before changing configuration." };
+        const out = await a.preview(body, ctx);
+        if (context && !out.refusal && !out.unchanged) return { ...out, payload: { ...out.payload, touchContext: context }, summary: [...out.summary, `This change targets refusal ${context.runId}; its effect is measured in Zero touch.`] };
+        return out;
+      },
+      apply(entry, ctx) {
+        return entry.payload.touchContext ? ctx.a.zeroTouch.trackConfiguration(entry, () => a.apply(entry, ctx)) : a.apply(entry, ctx);
+      },
+    } : tracked ? {
+      apply(entry, ctx) {
+        if (!ctx.a.zeroTouch?.withWriters) return a.apply(entry, ctx);
+        return ctx.a.zeroTouch.withWriters((writers) => {
+          const rm = { ...ctx.a.rm };
+          for (const key of ["cancelHeldJob", "cancelQueuedJob", "retryFailedJob", "retryFailedJobs"]) if (typeof ctx.a.rm[key] === "function") rm[key] = (args) => ctx.a.rm[key]({ ...args, ...writers });
+          if (typeof ctx.a.rm.enqueueRerun === "function") rm.enqueueRerun = (plan, opts) => ctx.a.rm.enqueueRerun(plan, { ...opts, ...writers });
+          return a.apply(entry, { ...ctx, a: { ...ctx.a, rm } });
+        });
+      },
+    } : {}),
+  });
 }
+
+/** These writes are console-only: no model tool can add instructions or create a model-owned group name. */
+const zeroTouchActions = ["group", "name", "instruction", "undo"].map((operation) => ({
+  name: `zero-touch-${operation}`, kind: `zero-touch-${operation}`, paid: operation === "group", bulk: false, needs: ["zeroTouch"],
+  async preview(body, ctx) {
+    const params = operation === "group" ? { runId: jobIdOf({ jobId: body.runId }) }
+      : operation === "name" ? { groupId: str(body, "groupId", { required: true, max: 32 }), name: str(body, "name", { required: true, max: 240 }) }
+      : operation === "undo" ? { fixId: str(body, "fixId", { required: true, max: 32 }) }
+      : { runId: jobIdOf({ jobId: body.runId }), ...(body.groupId ? { groupId: str(body, "groupId", { max: 32 }) } : {}), index: index(body, "index"), sentence: str(body, "sentence", { required: true, max: 2000 }) };
+    const got = await ctx.a.zeroTouch.preview(this.name, params);
+    if (!got.plan) return got;
+    const p = got.plan;
+    return { target: p.target, payload: { params, ...(p.configDigest ? { configDigest: p.configDigest, digest: p.digest } : {}) }, expect: p.expect,
+      beforeDigest: p.beforeText ? sha256(p.beforeText) : null, afterDigest: sha256(p.afterText ?? JSON.stringify({ params, configDigest: p.configDigest, digest: p.digest })),
+      summary: [p.title, ...p.summary], ...(p.beforeText !== undefined ? { diff: diffHtmlOf(p.beforeText, p.afterText, { file: p.target }) } : {}),
+      ...(operation === "group" ? { reserve: { dollarsMicros: Math.round(Number(p.maxCostUsd) * 1e6) } } : {}) };
+  },
+  apply(entry, ctx) { return ctx.a.zeroTouch.apply(this.name, entry); },
+}));
 
 /** Board writes use the same ticket and audit-before-write path as every other console change. */
 const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((operation) => ({
@@ -1967,7 +2015,8 @@ const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((ope
 }));
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions].map(withRules));
+export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {
@@ -2181,6 +2230,7 @@ function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done 
     }
   }
   const change = { summary: summary ?? String(meta.done ?? meta.title ?? action.name), by: String(ctx.session?.name ?? ""), auditSeq, auditLast, count, done, undo, inverse, kind: action.kind, at: clockOf(ctx.deps) };
+  if (result?.touchWarning || result?.warning || result?.results?.some((row) => row.touchWarning)) change.summary += " Zero touch accounting is incomplete and pending repair. The action succeeded; do not repeat it for its metric.";
   if (Buffer.byteLength(JSON.stringify(change), "utf8") > FLASH_MAX_BYTES) {
     change.inverse = null;
     change.undo = UNDO_SENTENCES.tooBigAfter;
@@ -2214,6 +2264,7 @@ export async function confirmAction(ctx, action) {
   }
   const entry = redeemed.entry;
   const tag = sha256(ticket).slice(0, 12);
+  entry.ticketDigest = sha256(ticket);
   const log = (line) => deps.log(String(line).replace(/^panel: /, "console: "));
   if (action.bulk) return confirmBulk(ctx, action, entry, { actor, tag, actx });
   const AUDIT = Symbol("audit");

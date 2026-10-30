@@ -1,0 +1,161 @@
+{
+  "card": "ZeroTouchViewer",
+  "pr": 770,
+  "panels": [
+    "p-zt-rate",
+    "p-zt-streak",
+    "p-zt-wait",
+    "p-zt-handled",
+    "p-zt-projects",
+    "p-zt-questions",
+    "p-zt-fixes",
+    "p-zt-causes"
+  ],
+  "elements": [
+    {
+      "el": "p-zt-rate",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchRate",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-zt-streak",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchStreak",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-zt-wait",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchWait",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-zt-handled",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchHandled",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-zt-projects",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchProjects",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-zt-questions",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchQuestions",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-zt-causes",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchCauses",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-zt-fixes",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchFixes",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "Second Runs tab and selected 7/30/90-day window",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchTabs",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "Rate with weekly trend, dashed goal, covered interval and change in words",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchRate",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "Native project rows opening to repository and folder counts",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchProjects",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "Six causes, common bar scale, worded levels and count once per run",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchCauses",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "Cause-linked fixes compare equal spans and show missing exposure",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchFixes",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    },
+    {
+      "el": "The fixture deployment, 214 runs, 38 touches, trend points, dates and two fixes",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Values are the published cards sample, not asserted deployment totals. Behavioral tests independently check the fold and counterexamples."
+    },
+    {
+      "el": "Standing answers, drafting and sent-draft counts",
+      "kind": "readme",
+      "status": "absent",
+      "sentence": "admin/src/console/panels/zero-touch.mjs#ZERO_TOUCH_WORDS.drafts",
+      "roles": [
+        "viewer"
+      ],
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ],
+      "reason": "#772 builds answer rules. #770 keeps the future sent-draft touch contract and an honest coming-next tile."
+    },
+    {
+      "el": "Viewer sees counts and safe fix descriptions, without groups or actions",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/zero-touch-view.mjs#zeroTouchView",
+      "golden": [
+        "panels/zero-touch-populated.viewer"
+      ]
+    }
+  ]
+}

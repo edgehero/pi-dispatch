@@ -51,7 +51,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -79,8 +79,9 @@ export async function loadModules() {
     import("../secrets-view.mjs"),
     import("../connections-view.mjs"),
     import("../project-view.mjs"),
+    import("../zero-touch-data.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -458,6 +459,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // waiting job pays no read for one.
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
+    const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
     const pricing = pricingOf(m.pricing);
     const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
     const pageDeps = {
@@ -497,6 +499,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
         return { ...capacity, hosts: (capacity?.hosts ?? []).filter((row) => row.name === host) };
       },
       watch: fleet.watch,
+      zeroTouch: zeroTouch ? (query) => zeroTouch.read(query) : undefined,
+      zeroTouchRuns: zeroTouch ? (query) => zeroTouch.runs(query) : undefined,
       insights: cachedPerWindow((window, opts) => (m.insights.assembleInsightsView ?? m.insights.assembleInsights)(side.paths, window, { ...opts, pricing, nowMs: now(), envFn: () => side.env }), { now }),
       // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers
       // bounded and cached per (model, flow, scan window) (`whatif.mjs`).
@@ -550,6 +554,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // the service reads, refused in the tools' own words.
       actionDeps: {
         watch: fleet.watch,
+        zeroTouch,
         rm: m.readModel,
         plans: m.writePlans ?? null,
         paths: side.paths,

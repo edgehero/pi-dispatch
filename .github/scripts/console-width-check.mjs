@@ -125,6 +125,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkTriggersBrowser } from "./console-triggers-browser.mjs";
 import { checkConfigBrowser } from "./console-config-browser.mjs";
 import { checkSpendBrowser } from "./console-spend-browser.mjs";
+import { checkZeroTouchBrowser } from "./console-zero-touch-browser.mjs";
 import { frozenDateSource, openChrome } from "../../launch/chrome-pipe.mjs";
 import { findOnPath } from "../../launch/server-binary.mjs";
 
@@ -1908,6 +1909,11 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		if (docs.some((d) => d.page === "triggers")) {
 			current = "triggers-browser";
 			results.push(...await checkTriggersBrowser({ browser, docs, origin, openPage, clockMs, shots }));
+			after();
+		}
+		if (docs.some((d) => d.page === "zero-touch")) {
+			current = "zero-touch-browser";
+			results.push(...await checkZeroTouchBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
 		}
 		for (const s of strays) {

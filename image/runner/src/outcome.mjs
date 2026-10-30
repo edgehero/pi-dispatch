@@ -6,6 +6,8 @@
  */
 export const EXIT_COMPLETED = 0; // agent ran -- INCLUDING concluding "I cannot fix this"
 export const EXIT_INFRA = 1; // retryable: provider 5xx/429, network, our own bug
+export const QUESTION_GROUP_REFUSED = "question-group-refused";
+export const QUESTION_GROUP_UNANSWERED = "question-group-unanswered";
 export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error, provider refused the credential
 
 /**

@@ -210,7 +210,7 @@ function discardTmp(fs, tmp) {
  * difference refuses with nothing written. Without it the write is byte-identical to what it always was; the lock
  * already serialises a single read-modify-write, and `expect` widens that to the whole preview-to-confirm dialog.
  */
-export function writeTriggers({ triggersPath, mutate, expect = null, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
+export function writeTriggers({ triggersPath, mutate, mutateDocument = null, expect = null, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
 	const fd = takeLock(triggersPath, fs, log, now);
 	if (fd === null) {
 		// Immediate, not retried: the callers sit on the pi TUI event loop, and the holder is a write
@@ -247,7 +247,8 @@ export function writeTriggers({ triggersPath, mutate, expect = null, fs = nodeFs
 			}
 		}
 		const next = mutate(current.map((t) => ({ ...t })));
-		const text = serialize(next, doc);
+		const nextDocument = typeof mutateDocument === "function" ? mutateDocument(JSON.parse(JSON.stringify(doc ?? { triggers: current }))) : doc;
+		const text = serialize(next, nextDocument);
 		try {
 			parseTriggers(text, triggersPath); // the loaders' own validator -- never write a file they would reject
 		} catch (e) {

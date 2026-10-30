@@ -104,6 +104,17 @@ test("a missing job id refuses with usage, before any connection", { skip: needs
 	assert.match(err.join(""), /a job id is required/);
 });
 
+test("successful queued and held cancellations say when touch publication failed, without retrying removal", { skip: needsDeps }, async () => {
+	for (const hash of [{}, { since: "1" }]) {
+		const { ops, out, err, seams } = world({ hash });
+		const touchStore = { begin: async (event) => ({ ok: true, event }), write: async () => ({ error: "touch-index-unavailable" }), abort: async () => ({ ok: true }) };
+		assert.equal(await runCancel("j1", "redis://x", { ...seams, touchStore, now: () => 1000 }), 0);
+		assert.match(out.join(""), /(?:cancelled|removed) j1/);
+		assert.match(err.join(""), /warning: the job was removed; touch tracking is incomplete\. Do not repeat/);
+		assert.equal(ops.filter(([name]) => name === "remove").length, 1);
+	}
+});
+
 test("not-found names the queue count, and a degraded registry read separately -- an unregistered host may still hold it", { skip: needsDeps }, async () => {
 	const plain = world({ jobKnown: false, queueNames: ["pi-jobs", "pi-jobs@a"] });
 	assert.equal(await runCancel("j1", "redis://x", plain.seams), 1);
