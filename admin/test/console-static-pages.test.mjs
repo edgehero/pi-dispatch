@@ -88,7 +88,7 @@ test("the static pages say what their card says: who is signed in only where a s
   const bad = pages["error-400.operator"].html;
   assert.match(bad, /The page refused its address, so it read nothing: <span class="code">before<\/span> must be a whole number/);
   assert.ok(bad.includes('href="/runs"') && !bad.includes("xyzzy"), "back to Runs, the value not echoed");
-  assert.ok(pages["error-403.viewer"].html.includes("The audit log is for operators"), "403: the operators-only card");
+  assert.ok(pages["error-403.viewer"].html.includes("This page is for operators"), "403: the operators-only card");
   // The 421 and the 503 draw no navigation and no session; the 421 names the refused host and the tunnel to use.
   for (const shot of ["error-421.anonymous", "error-503.anonymous"]) {
     const html = pages[shot].html;

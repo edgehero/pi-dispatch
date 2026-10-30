@@ -756,7 +756,7 @@ test("every page: signed out it redirects to /login; signed in it loads its data
     assert.equal(anon.status, 303, spec.path);
     assert.equal(anon.headers.location, "/login");
     // `run` needs an id; every other page renders bare.
-    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : spec.path;
+    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, 200, `${path}: ${res.text.slice(0, 200)}`);
     assert.equal(c.loads.at(-1).name, name);
@@ -772,7 +772,7 @@ test("a viewer is refused an operator page 403, and gets every viewer page", asy
   const c = await start();
   const { cookie } = await c.login(VIEW_TOKEN);
   for (const [name, spec] of Object.entries(realPages.PAGES)) {
-    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : spec.path;
+    const path = name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
     assert.equal(res.status, spec.auth === "operator" ? 403 : 200, path);
   }
@@ -1771,7 +1771,7 @@ test("a viewer's /audit is the operators-only page with the viewer's nav; a 400 
   assert.equal(forbidden.status, 403);
   assertSecurityHeaders(forbidden, "403 page");
   assert.deepEqual(panelsOf(forbidden.text), ["p-error"]);
-  assert.match(panelText(forbidden.text, "p-error"), /The audit log is for operators/);
+  assert.match(panelText(forbidden.text, "p-error"), /This page is for operators/);
   assert.match(forbidden.text, /vic/);
   const forbiddenJson = await c.send({ path: "/audit", headers: { cookie: viewer.cookie } });
   assert.match(forbiddenJson.json().error, /operator role/);
@@ -1912,9 +1912,8 @@ test("ERROR_SENTENCES: one per kind, frozen, each tile a STATUS_KINDS status and
   }
   // The host sentence never claims 127.0.0.1 alone, since PI_CONSOLE_ALLOWED_HOSTS may add names.
   assert.ok(!/127\.0\.0\.1 only/.test(ERROR_SENTENCES.host.sentence));
-  // The operators-only heading names the audit log, which holds while it is the one operator page; a second one would
-  // make the heading wrong, so this pins the relation to the page table.
-  assert.deepEqual(Object.entries(realPages.PAGES).filter(([, p]) => p.auth === "operator").map(([n]) => n), ["audit"]);
+  // Every operator-only screen uses the generic role refusal; pin the protected set so new pages need review.
+  assert.deepEqual(Object.entries(realPages.PAGES).filter(([, p]) => p.auth === "operator").map(([n]) => n), ["trigger-add", "audit"]);
 });
 
 const SOMEONE = Object.freeze({ name: "alice-nav-mark", role: "operator" });
@@ -1988,7 +1987,7 @@ test("errorPage 421: the name escaped and cut, the tunnel for the connection's p
 test("forbiddenContent is the operators-only panel errorPage draws, so the role refusal and renderPage's belt say the same", () => {
   const panel = String(forbiddenContent());
   assert.deepEqual(panelsOf(panel), ["p-error"]);
-  assert.match(panel, /The audit log is for operators/);
+  assert.match(panel, /This page is for operators/);
   assert.match(panel, /<a class="btn btn--primary" href="\/">/);
   assert.equal(panelText(String(errorPage({ kind: "operators-only", session: SOMEONE }).html), "p-error"), panel);
 });

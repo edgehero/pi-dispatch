@@ -1,0 +1,251 @@
+{
+  "card": "TriggerDetail",
+  "pr": 750,
+  "panels": [
+    "p-trigger-on",
+    "p-trigger-runs",
+    "p-trigger-run",
+    "p-trigger-edit",
+    "p-trigger-trust",
+    "p-trigger-kinds",
+    "p-trigger-change"
+  ],
+  "elements": [
+    {
+      "el": "p-trigger-on",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerOn",
+      "golden": [
+        "trigger.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-trigger-runs",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerRuns",
+      "golden": [
+        "trigger.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-trigger-run",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerRun",
+      "golden": [
+        "trigger.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-trigger-edit",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerEdit",
+      "golden": [
+        "trigger.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-trigger-trust",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerTrust",
+      "golden": [
+        "trigger.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-trigger-kinds",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerKinds",
+      "golden": [
+        "trigger.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-trigger-change",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerChange",
+      "golden": [
+        "trigger.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "Edit here and By hand",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#EDIT_FIELDS",
+      "reason": "Issue #750 joins the card\u2019s When adding group into Edit here, adding provider, maxTurns and run flags; prompt text is private to operators."
+    },
+    {
+      "el": "Title: kind, phrase, flow, forge and row number",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerTitle",
+      "golden": [
+        "trigger.operator"
+      ]
+    },
+    {
+      "el": "Open in Runs keeps the scheduler id or raw trigger index",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#renderPage",
+      "golden": [
+        "trigger.operator"
+      ],
+      "shows": "Open in Runs"
+    },
+    {
+      "el": "What starts it: selector, comment flow choice and permitted senders",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerOn",
+      "panel": "p-trigger-on",
+      "golden": [
+        "trigger.operator"
+      ]
+    },
+    {
+      "el": "Last 24 hours: count, metered spend, last five runs, and queued jobs",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerRuns",
+      "panel": "p-trigger-runs",
+      "golden": [
+        "trigger.operator"
+      ],
+      "shows": "metered spend"
+    },
+    {
+      "el": "Incomplete history and partially metered spend are named",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/read-model.mjs#triggerDetailOf"
+    },
+    {
+      "el": "Deployment defaults and every run field, set or unset",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerRun",
+      "panel": "p-trigger-run",
+      "golden": [
+        "trigger.operator"
+      ],
+      "shows": [
+        "run.maxTurns",
+        "run.maxCostUsd",
+        "By hand"
+      ]
+    },
+    {
+      "el": "Sandbox declaration, retention, OpenShell mode, replicas and secret names",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerRun",
+      "panel": "p-trigger-run",
+      "golden": [
+        "panels/trigger-cron.operator"
+      ],
+      "shows": [
+        "Its runs",
+        "sandbox",
+        "OpenShell"
+      ]
+    },
+    {
+      "el": "Edit previews the file and uses the shared five-minute confirmation",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerEdit",
+      "panel": "p-trigger-edit",
+      "golden": [
+        "trigger.operator"
+      ],
+      "shows": "trigger-edit"
+    },
+    {
+      "el": "Trust model and operator-only escaped instructions and task",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerTrust",
+      "panel": "p-trigger-trust",
+      "golden": [
+        "trigger.operator",
+        "trigger.viewer"
+      ]
+    },
+    {
+      "el": "Cron next fire, overdue state and stalls of the configured limit",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerKinds",
+      "panel": "p-trigger-kinds",
+      "golden": [
+        "panels/trigger-cron.operator"
+      ],
+      "shows": "stalls"
+    },
+    {
+      "el": "One-shot armed or spent by a run and re-arm instruction",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerKinds",
+      "panel": "p-trigger-kinds",
+      "golden": [
+        "panels/trigger-spent.operator"
+      ],
+      "shows": [
+        "Spent by",
+        "re-arm"
+      ]
+    },
+    {
+      "el": "Fire now uses the paid action planner or names its refusal",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerKinds",
+      "panel": "p-trigger-kinds",
+      "golden": [
+        "panels/trigger-cron.operator"
+      ],
+      "shows": "not served"
+    },
+    {
+      "el": "Before changing: exact queued-job skew, renumbering and named file trouble",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerChange",
+      "panel": "p-trigger-change",
+      "golden": [
+        "panels/trigger-file-invalid.operator"
+      ]
+    },
+    {
+      "el": "Viewer sees facts and runs without edit, delete or fire",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerEdit",
+      "golden": [
+        "trigger.viewer"
+      ]
+    },
+    {
+      "el": "Comment @pi, illustrative five run ids, totals, instructions and doctor quote",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The implementation uses actual fixture data and separate cron/spent/invalid-file goldens; the published card\u2019s totals and prose are sample values."
+    }
+  ]
+}

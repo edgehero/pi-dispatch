@@ -345,11 +345,11 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
  * and the two spec entries that carry the same enumeration had drifted identically (issue #280). That is
  * why the spec scan below exists rather than a fourth hand-maintained copy.
  */
-const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete", "dispatch_wait_cancel", "dispatch_project_add", "dispatch_project_edit", "dispatch_project_delete", "dispatch_priorities_set", "dispatch_envelope_set"];
+const WRITE_TOOLS = ["dispatch_trigger_fire", "dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete", "dispatch_wait_cancel", "dispatch_project_add", "dispatch_project_edit", "dispatch_project_delete", "dispatch_priorities_set", "dispatch_envelope_set"];
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 29, "exactly twenty-nine tools");
+  assert.equal(calls.registerTool.length, 30, "exactly thirty tools");
   assert.deepEqual(names, [
     "dispatch_allocations",
     "dispatch_capacity",
@@ -377,6 +377,7 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     "dispatch_trigger_add",
     "dispatch_trigger_delete",
     "dispatch_trigger_edit",
+    "dispatch_trigger_fire",
     "dispatch_triggers",
     "dispatch_wait_cancel",
     "dispatch_waits",

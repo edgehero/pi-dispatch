@@ -8,7 +8,6 @@ import {
   PAGES,
   loadPageData,
   renderPage,
-  LEGACY_PAGES,
 } from "../src/console/pages.mjs";
 import {
   responsiveInsightsSvg,
@@ -36,7 +35,6 @@ import {
   spendSummaryOf,
   spendChartsOf,
 } from "../src/insights-assembly.mjs";
-import { PD_TOKENS, SVG_EXTRA } from "../src/console/compat-css.mjs";
 import { PAGE_CSS, pageCss } from "../src/console/page-css.mjs";
 import { SPEND_DRAW, spendFixture } from "./helpers/spend-goldens.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
@@ -134,7 +132,6 @@ test("five Spend pages are viewer reads, non-live and outside the legacy layer",
     assert.equal(PAGES[name].path, path);
     assert.equal(PAGES[name].auth, "viewer");
     assert.equal(PAGES[name].live, false);
-    assert.ok(!LEGACY_PAGES.includes(name));
     assert.ok(SPEND_PANELS[name].length >= 4);
   }
 });
@@ -379,9 +376,41 @@ test("all five pages render clean HTML from the real slice assembler, across rol
     }
 });
 
+// Semantic paint roles survive removal of the compatibility adapter. Rendered colors are checked in the browser.
+const EXPECTED_PAINT_ROLES = {
+  canvas: "canvas",
+  panel: "surface",
+  border: "line",
+  fg: "ink",
+  dim: "ink-muted",
+  accent: "focus",
+  amber: "attention-ink",
+  danger: "failed-ink",
+  green: "ok-ink",
+  chipStroke: "line-strong",
+  bannerBg: "failed-tint",
+  control: "surface-3",
+};
+
+// Semantic paint roles survive removal of the compatibility adapter. Rendered colors are checked in the browser.
+const EXPECTED_EXTRA_ROLES = {
+  "#333": ["ink", "ink"],
+  "#d9d9d9": ["surface", "line-strong"],
+  "#a6bbcf": ["surface-3", "ink-faint"],
+  "#d8bfd8": ["surface-3", "line-strong"],
+  "#e7e7ae": ["surface-3", "line-strong"],
+  "#c0deed": ["surface-3", "line-strong"],
+  "#c7e9c0": ["surface-3", "line-strong"],
+  "#fdd0a2": ["surface-3", "line-strong"],
+  "#E6E0F8": ["ink-faint", "ink-faint"],
+  "#ff5f57": ["failed", "failed"],
+  "#6e7681": ["idle", "ink-muted"],
+  "#db6d28": ["attention", "attention"],
+};
+
 test("Spend paint mapping is pinned to the renderer palette's existing semantic roles", () => {
-  assert.deepEqual(SPEND_PAINT_TOKENS, PD_TOKENS);
-  assert.deepEqual(SPEND_EXTRA_PAINTS, SVG_EXTRA);
+  assert.deepEqual(SPEND_PAINT_TOKENS, EXPECTED_PAINT_ROLES);
+  assert.deepEqual(SPEND_EXTRA_PAINTS, EXPECTED_EXTRA_ROLES);
 });
 test("viewer full-path requests redact folder caps and local repository labels on every view", async () => {
   const p = {

@@ -134,7 +134,7 @@
  *     `/api/act/<data-action>/preview`. THE CONFIRM SLOT (`#confirm-slot`, `confirm-view.mjs`): one per page, drawn
  *     by the server after the content, hidden, holding the previewing skeleton (read once, `skeleton`). A submit moves
  *     it after the card that asked (`slotAnchor`: the form's panel, else its banner, lifted out of the panel's
- *     `.legacy` wrapper so the Pulse bar never sits under the legacy rules, then out of every layout grid marked
+ *     card grid so the preview remains a full-width bar, using every layout grid marked
  *     `data-slot-after`, so it is never a grid's cell), never inside a panel or a table cell,
  *     titles it "Previewing: <the button's words>" with Confirm disabled, and shows it, scrolled into view by the least
  *     move (`scrollIntoView`, block nearest), the focus on its title (issue #737: the slot can sit a screen away from
@@ -188,6 +188,7 @@
  * nothing calls `fetch` while the page loads: the tests run this script under stubs, where a global they did not stub
  * would be Node's own (its `fetch` reaches the network).
  */
+import { PR_ACTIONS } from "@edgehero/pi-dispatch/triggers";
 import { FIT_JS } from "../graph-html.mjs";
 import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID } from "./confirm-view.mjs";
 import { PAGES } from "./pages.mjs";
@@ -1219,7 +1220,6 @@ ${FIT_JS}
   }
   // Where the slot goes: after the card that asked. That is the form's panel (a section the stream may swap, so the
   // slot is never inside it), else the banner it sits in (the done banner's Undo), else the form itself; lifted out of
-  // the panel's own .legacy wrapper, whose rules would restyle the Pulse bar's buttons and lists; then lifted out of
   // every layout grid it sits in that says so (data-slot-after: a row of cards, where the slot would be one more
   // cell), to after the outermost. A column with no such mark keeps the slot right under its card.
   function slotCard(form) {
@@ -1227,8 +1227,6 @@ ${FIT_JS}
   }
   function slotAnchor(form) {
     var anchor = slotCard(form);
-    var up = anchor.parentElement;
-    if (up && up.classList && up.classList.contains("legacy")) anchor = up;
     for (var at = anchor.parentElement; at; at = at.parentElement) if (typeof at.hasAttribute === "function" && at.hasAttribute("data-slot-after")) anchor = at;
     return anchor;
   }
@@ -1379,11 +1377,13 @@ ${FIT_JS}
   function preview(form, action, label, opener) {
     var mine = openSlot(form, action, label, opener);
     var body;
-    try { body = bodyOf(form); } catch (e) { slotSays(e.message + "; nothing was sent."); return; }
+    fieldErrors(form, null);
+    try { body = bodyOf(form); } catch (e) { fieldErrors(form, e.message); slotSays(e.message + "; nothing was sent."); return; }
     post("/api/act/" + action + "/preview", body, true).then(function (r) {
       if (mine !== slotGen) return;
       var b = r.body || {};
       if (signedOut(r)) return;
+      if (!r.ok) fieldErrors(form, b.refusal || b.error || errorOf(r));
       if (typeof b.html === "string") {
         answerBar(b);
         if (r.ok && b.unchanged !== true && typeof b.ticket === "string") {
@@ -1554,12 +1554,86 @@ ${FIT_JS}
       outputs[i].textContent = valid && weight !== undefined ? "about " + (sum > 0 ? Math.round(weight / sum * 100) : 0) + "%" : "Share unknown";
     }
   });
+  var configControls = typeof document.querySelectorAll === "function" ? document.querySelectorAll("[data-config-controls]") : [];
+  for (var ci = 0; ci < configControls.length; ci++) configControls[ci].disabled = false;
+  var TRIGGER_ACTIONS = ${JSON.stringify(Object.fromEntries(Object.entries(PR_ACTIONS).map(([k,v])=>[k,[...v]])))};
+  function triggerFields(form) {
+    var kind = form.querySelector('[name="kind"]');
+    if (!kind) return;
+    var groups = form.querySelectorAll("[data-trigger-kind]");
+    for (var i = 0; i < groups.length; i++) {
+      var active = groups[i].getAttribute("data-trigger-kind") === kind.value;
+      groups[i].hidden = !active;
+      groups[i].disabled = !active;
+    }
+    var activeGroup = form.querySelector('[data-trigger-kind="' + kind.value + '"]');
+    var forge = activeGroup && activeGroup.querySelector('[name="forge"]');
+    var action = activeGroup && activeGroup.querySelector('[name="action"]');
+    if (action && forge && kind.value === "pull_request" && typeof document.createElement === "function") {
+      var actions = TRIGGER_ACTIONS[forge.value] || [];
+      if (action.getAttribute("data-forge") !== forge.value) {
+        var saved = action.value;
+        while (action.firstChild) action.removeChild(action.firstChild);
+        for (var ai = 0; ai < actions.length; ai++) { var option = document.createElement("option"); option.value = actions[ai]; option.textContent = actions[ai]; action.appendChild(option); }
+        if (actions.indexOf(saved) >= 0) action.value = saved;
+        action.setAttribute("data-forge", forge.value);
+      }
+    }
+    if (activeGroup && action && forge && kind.value === "issue" && action.value !== (forge.value === "gitlab" ? "close" : "closed")) {
+      while (action.firstChild) action.removeChild(action.firstChild);
+      var issueOption = document.createElement("option"); issueOption.value = forge.value === "gitlab" ? "close" : "closed"; issueOption.textContent = issueOption.value; action.appendChild(issueOption);
+    }
+    var review = activeGroup && activeGroup.querySelector('[name="reviewState"]');
+    if (review && action && forge) { var narrowed = forge.value === "github" && action.value === "review_submitted"; review.disabled = !narrowed; review.closest(".field").hidden = !narrowed; }
+    if (activeGroup && action && kind.value === "pull_request") {
+      var closeOnly = action.value === "closed" || action.value === "close";
+      for (var oneKey of ["once", "number"]) { var oneControl = activeGroup.querySelector('[name="' + oneKey + '"]'); if (oneControl) { oneControl.disabled = !closeOnly; oneControl.closest(".field").hidden = !closeOnly; } }
+    }
+    var cron = kind.value === "cron";
+    for (var key of ["statusComment", "recover"]) {
+      var control = form.querySelector('[name="' + key + '"]');
+      if (control) { control.disabled = cron; control.closest(".field").hidden = cron; }
+    }
+  }
+  var triggerForms = typeof document.querySelectorAll === "function" ? document.querySelectorAll('form[data-structured="trigger"]') : [];
+  for (var ti = 0; ti < triggerForms.length; ti++) triggerFields(triggerForms[ti]);
+  document.addEventListener("change", function (ev) {
+    var form = ev.target && ev.target.closest ? ev.target.closest('form[data-structured="trigger"]') : null;
+    if (form) triggerFields(form);
+  });
+  var configErrorSequence = 0;
+  function fieldErrors(form, message) {
+    var slots = form.querySelectorAll("[data-field-error]");
+    var matched = false;
+    for (var i = 0; i < slots.length; i++) {
+      var key = slots[i].getAttribute("data-field-error");
+      var control = slots[i].parentElement.querySelector("input, select, textarea");
+      var applies = message && message.toLowerCase().indexOf(key.toLowerCase()) >= 0;
+      slots[i].textContent = applies ? message + " Nothing was changed." : "";
+      slots[i].hidden = !applies;
+      if (control) {
+        if (applies) {
+          var id = slots[i].getAttribute("id");
+          if (!id) {
+            do { id = "cfg-error-" + (++configErrorSequence); } while (document.getElementById(id));
+            slots[i].id = id;
+          }
+          control.setAttribute("aria-describedby", id);
+          control.setAttribute("aria-invalid", "true");
+          if (!matched && typeof control.focus === "function") control.focus();
+          matched = true;
+        } else { control.removeAttribute("aria-invalid"); control.removeAttribute("aria-describedby"); }
+      }
+    }
+    var fallback = form.querySelector("[data-form-error]");
+    if (fallback) { fallback.hidden = !message || matched; fallback.textContent = message || ""; }
+  }
   function bodyOf(form) {
     var out = {};
     var els = form.elements;
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
-      if (!el.name || el.disabled) continue;
+      if (!el.name || el.disabled || (typeof el.closest === "function" && el.closest("fieldset[disabled]"))) continue;
       if (el.type === "checkbox") { if (el.checked) out[el.name] = true; continue; }
       var v = el.value;
       if (v === "") continue;
@@ -1606,6 +1680,7 @@ ${FIT_JS}
       if (!Array.isArray(out.writers)) out.writers = [];
       return { envelope: out };
     }
+    if (structured === "trigger") { if (out.once === false) delete out.once; return { trigger: out }; }
     return out;
   }
   document.addEventListener("submit", function (ev) {

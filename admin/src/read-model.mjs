@@ -15,6 +15,7 @@
  * `{ missing }` rather than throwing to the command handler.
  */
 
+import { readTriggerEgress } from "./read-trigger-egress.mjs";
 import { watchDurationMs, WATCH_ID_RE as WATCH_RULE_ID_RE } from "@edgehero/pi-dispatch/watch-contract";
 import { makeWatchStore } from "@edgehero/pi-dispatch/watch-store";
 import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
@@ -23,6 +24,7 @@ import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
 import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
@@ -72,6 +74,8 @@ import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
 import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueuesReporting, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { RUNS_INDEX, RUNS_INDEX_MAX, UNREAD_RECORD, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
+import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
+import { modelFrom, providerFrom, jobImageFrom, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
 import { parseSandboxes, parseBudgetFrom, parseCpuReserve } from "@edgehero/pi-dispatch/host-telemetry";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import { CAP_SECRET, parseCaps } from "@edgehero/pi-dispatch/capabilities";
@@ -95,7 +99,7 @@ import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, 
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
 import { parseSkillMeta, findSiblingMentions, findLoopHints, triggerMatchLabel } from "./graph-model.mjs";
-import { repoOfTarget } from "./costs.mjs";
+import { meteredRunMicros, repoOfTarget } from "./costs.mjs";
 import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs } from "./dollar-windows.mjs";
 // Issue #471: the ONE resolver of a deployment's service keys, shared with `doctor` (the package boundary allows it: the
 // admin already takes its config helpers from the worker the same way).
@@ -582,35 +586,14 @@ export function revParseHead(folder, { exec = execFileSync } = {}) {
 }
 
 /**
- * Enqueue a PAID local run -- the extension's one model-callable WRITE. Producer-side only: it spends
- * nothing here, so every bound refuses BEFORE any container starts; the daily cap stays the worker
- * processor's job (CONST-BUDGET-BEFORE-TOKENS). Returns a discriminated
- * `{ ok, jobId } | { refused } | { unreachable }` (mirrors setQueuePaused's failFast open/close-in-finally).
- * An `ok` the one-minute dedup swallowed also carries `deduplicated: true`, `existing` and `said` (issue #524).
- *
- * `aiInvoked` selects the bound set from the six-control analysis (DES-ADMIN-VIA-PI-EXTENSION):
- *   - `true`  (the `dispatch_run` tool): folder allowlist + committed flow gate + per-hour rate limit,
- *     plus the dirty-tree refusal.
- *   - `false` (the operator's `/dispatch run`): the dirty-tree refusal ONLY -- typing the command IS the
- *     approval, so the allowlist, gate, and rate limit are the AI path's compensating controls and are skipped.
- * Validation runs cheapest/most-definitive first. No spend-knob param (model/maxTurns/dailyCap/concurrency)
- * exists here; those resolve worker-side from the overlay/env. Refusal reasons carry folder/flow (operator
- * config) but NEVER task text, and nothing here logs.
+ * The paid-start bounds shared by dispatch_run and Fire now (#750). A preview performs the determinate
+ * checks without consuming the hourly allowance; the executor repeats them at HEAD and consumes it immediately
+ * before enqueue. Neither a preview nor a page load may spend that allowance.
  */
-export async function enqueueDispatchRun({
-  folder,
-  flow,
-  task,
-  aiInvoked,
-  env = process.env,
-  makeQueueFn = makeQueue,
-  parseConnectionFn = parseConnection,
-  readFlowGateFn = readFlowGate,
-  gitDirtyFn = gitDirty,
-  localRepoProblemFn = localRepoProblem,
-  revParseHeadFn = revParseHead,
-  redisFn = makeRedisClient,
-  now = () => Date.now(),
+export async function checkDispatchRun({
+  folder, flow, aiInvoked = true, consumeRate = true, env = process.env,
+  readFlowGateFn = readFlowGate, gitDirtyFn = gitDirty, localRepoProblemFn = localRepoProblem,
+  revParseHeadFn = revParseHead, redisFn = makeRedisClient, now = () => Date.now(),
 }) {
   // 1. flow required (both paths). Cheapest and most definitive: a flowless AI trigger is refused, and the
   // tool's `flow` is mandatory even though the CLI's `--flow` is optional.
@@ -670,9 +653,9 @@ export async function enqueueDispatchRun({
     try {
       redis = redisFn(valkeyUrl);
       const key = hourKey(now());
-      const count = Number(await redis.incr(key));
-      if (count === 1) await redis.expire(key, DISPATCH_RUN_TTL_SECONDS);
-      if (count > dispatchRunPerHour) {
+      const count = Number(consumeRate ? await redis.incr(key) : (await redis.get(key) ?? 0));
+      if (consumeRate && count === 1) await redis.expire(key, DISPATCH_RUN_TTL_SECONDS);
+      if (consumeRate ? count > dispatchRunPerHour : count >= dispatchRunPerHour) {
         return { refused: `dispatch_run hourly limit (${dispatchRunPerHour}) reached` };
       }
     } catch (err) {
@@ -687,6 +670,44 @@ export async function enqueueDispatchRun({
       }
     }
   }
+
+  return {};
+}
+
+/**
+ * Enqueue a PAID local run -- the extension's one model-callable WRITE. Producer-side only: it spends
+ * nothing here, so every bound refuses BEFORE any container starts; the daily cap stays the worker
+ * processor's job (CONST-BUDGET-BEFORE-TOKENS). Returns a discriminated
+ * `{ ok, jobId } | { refused } | { unreachable }` (mirrors setQueuePaused's failFast open/close-in-finally).
+ * An `ok` the one-minute dedup swallowed also carries `deduplicated: true`, `existing` and `said` (issue #524).
+ *
+ * `aiInvoked` selects the bound set from the six-control analysis (DES-ADMIN-VIA-PI-EXTENSION):
+ *   - `true`  (the `dispatch_run` tool): folder allowlist + committed flow gate + per-hour rate limit,
+ *     plus the dirty-tree refusal.
+ *   - `false` (the operator's `/dispatch run`): the dirty-tree refusal ONLY -- typing the command IS the
+ *     approval, so the allowlist, gate, and rate limit are the AI path's compensating controls and are skipped.
+ * Validation runs cheapest/most-definitive first. No spend-knob param (model/maxTurns/dailyCap/concurrency)
+ * exists here; those resolve worker-side from the overlay/env. Refusal reasons carry folder/flow (operator
+ * config) but NEVER task text, and nothing here logs.
+ */
+export async function enqueueDispatchRun({
+  folder,
+  flow,
+  task,
+  aiInvoked,
+  env = process.env,
+  makeQueueFn = makeQueue,
+  parseConnectionFn = parseConnection,
+  readFlowGateFn = readFlowGate,
+  gitDirtyFn = gitDirty,
+  localRepoProblemFn = localRepoProblem,
+  revParseHeadFn = revParseHead,
+  redisFn = makeRedisClient,
+  now = () => Date.now(),
+}) {
+  const admission = await checkDispatchRun({ folder, flow, aiInvoked, env, readFlowGateFn, gitDirtyFn, localRepoProblemFn, revParseHeadFn, redisFn, now });
+  if (admission.refused || admission.unreachable) return admission;
+  const { valkeyUrl } = resolvePaths(env);
 
   // 6. enqueue. A root run: no chainDepth/parentJobId, and provider/model/maxTurns stay absent so they
   // resolve worker-side against the overlay/env (INT-CONFIG-OVERLAY-CONTRACT).
@@ -867,6 +888,7 @@ export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
  * worker's reserve rule, for the reserve a paid action shows before confirm.
  */
 import { boundedText, heldClearedAnswer, heldRefused, heldRemovalUnanswered, parkedAnswerRefusalOf, rerunRefusalOf, RERUN_BAD_ID } from "./job-actions.mjs";
+export { planTriggerFire, enqueueTriggerFire } from "./trigger-fire.mjs";
 export { BULK_MAX, cancelQueuedJob, cancelQueuedRefusal, enqueueParkedAnswer, enqueueRerun, enqueueSteer, parkedAnswerRefusalOf, planCancelQueued, planFailedBulk, planParkedAnswer, planRerun, rerunRefusalOf, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
 export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 
@@ -2681,6 +2703,143 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
   return { triggers, count: entries.length, ...(bundles !== null && { secretBundles: bundles }) };
 }
 
+/** File locations for either role: only the final folder, with the account's home replaced before projection. */
+export function configLocationsOf({ paths = {}, deploymentDir = null, home = homedir() } = {}) {
+  const absolute = (p) => typeof p === "string" && p !== "" ? resolvePath(deploymentDir ?? ".", p) : null;
+  const describe = (p) => {
+    const full = absolute(p);
+    if (full === null) return null;
+    const parts = full.replace(/\\/g, "/").split("/").filter(Boolean);
+    const normalizedHome = resolvePath(home).replace(/\\/g, "/");
+    if (full.replace(/\\/g, "/") === `${normalizedHome}/.pi-dispatch/settings.json`) return "~/.pi-dispatch/settings.json";
+    if (parts.slice(0, -1).join("/") === normalizedHome.replace(/^\//, "")) return `~/${parts.at(-1)}`;
+    return `.../${parts.slice(-2).join("/")}`;
+  };
+  const settings = absolute(paths.settingsFile);
+  const deployment = deploymentDir === null ? null : resolvePath(deploymentDir);
+  return {
+    settings: describe(paths.settingsFile), triggers: describe(paths.triggersPath),
+    settingsOutsideDeployment: settings === null || deployment === null ? null : settings !== deployment && !settings.startsWith(`${deployment}${sep}`),
+  };
+}
+
+/** Editor hints are advisory reads, never authorization, and carry no secret values or prompt text. */
+export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDir = null, platform = process.platform, uid = process.geteuid?.(), fs = nodeFs, folderSkillsFn = readFolderSkills, overlaySkillsFn = readOverlaySkills, stagedSkillsFn = readStagedSkillsList } = {}) {
+  const settings = readSettingsView({ settingsFile: paths.settingsFile, fs });
+  const overlay = settings.overlay ?? {};
+  // These are display facts only. In particular, this never resolves PI_BACKENDS or paid-start grants from .env.
+  // Credentials are read only to decide endpoint presence and are projected to forge names before leaving here.
+  const metadata = deploymentDir === null ? null : deploymentServiceEnv({ env, dir: deploymentDir, keys: ["WEBHOOK_SECRET", "GITLAB_WEBHOOK_SECRET", "FORGEJO_WEBHOOK_SECRET", "AZURE_WEBHOOK_SECRET", "PI_MODEL", "PI_PROVIDER", "PI_MAX_TURNS", "PI_RUN_PROGRESS", "PI_JOB_IMAGE", "PI_ALLOWED_MODELS", "PI_MAX_COST_USD"], platform, fs, uid });
+  const hints = metadata?.env ?? env;
+  let backends = [];
+  let venueProblem = null;
+  try { backends = parseBackendList(env.PI_BACKENDS).map((name) => ({ name, serves: servesOf(name) })); } catch { venueProblem = "The deployment's blessed venues do not load."; }
+  const has = (k) => typeof hints[k] === "string" && hints[k].trim() !== "";
+  const forges = [
+    ...(has("WEBHOOK_SECRET") ? ["github"] : []),
+    ...(has("GITLAB_WEBHOOK_SECRET") ? ["gitlab"] : []),
+    ...(has("FORGEJO_WEBHOOK_SECRET") ? ["forgejo"] : []),
+    ...(has("AZURE_WEBHOOK_SECRET") ? ["azure"] : []),
+  ];
+  // Existing cron repositories are the only repository trees the admin knows locally. Forge repositories are not
+  // cloned for a suggestion. Bound these advisory git reads, and disclose a cut alongside an unread tier.
+  const configured = readTriggers({ triggersPath: paths.triggersPath, fs }).triggers ?? [];
+  const folders = [...new Set([folder, ...configured.filter((t) => t.type === "cron").map((t) => t.folder)].filter((f) => typeof f === "string" && f !== ""))];
+  const repositories = folders.slice(0, 16).map((folder) => folderSkillsFn({ folder }));
+  const tiers = [
+    { tier: "repository", skills: repositories.flatMap((r) => r.skills ?? []), unreachable: repositories.some((r) => r.unreachable) || folders.length === 0, truncated: folders.length > 16 || repositories.some((r) => r.truncated) },
+    { tier: "overlay", ...overlaySkillsFn({ globalPiDir: paths.globalPiDir, fs }) },
+    { tier: "packages", ...stagedSkillsFn({ globalPiDir: paths.globalPiDir, fs }) },
+  ];
+  let provider = null;
+  let model = null;
+  let image = null;
+  let models = null;
+  try { provider = overlay.provider ?? providerFrom(hints); model = overlay.model ?? modelFrom(hints); image = jobImageFrom(hints); models = allowedModelsFrom(hints); } catch {}
+  return {
+    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", command: "none", portfolio: false, fallbackModels: "none", excludeTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false },
+    ...readTriggerEgress({ deploymentDir, env, fs }),
+    backends, venueProblem, forges, settingsProblem: settings.invalid ?? null, progressAvailable: hints.PI_RUN_PROGRESS !== "0", forgeProblem: metadata && (metadata.unreadable || metadata.untrusted || metadata.hazardSkipped.length || metadata.unread.length) ? "The deployment metadata could not be read completely; configured webhook endpoints may be missing." : null,
+    flows: tiers.flatMap((t) => (t.skills ?? []).filter((s) => !s.isSub).map((s) => ({ name: s.name, tier: t.tier }))),
+    flowProblems: tiers.filter((t) => t.unreachable || t.truncated).map((t) => ({ tier: t.tier, unavailable: Boolean(t.unreachable), truncated: Boolean(t.truncated) })),
+  };
+}
+
+/**
+ * Read at most 200 in-line jobs through the worker's exact skew checker. Only ids and the missing field leave this
+ * function; job data can contain forge text. A short queue read is a floor, never evidence that no other job is skewed.
+ */
+export async function readTriggerSkew({ index, waiting, triggersPath, lookupJob, fs = nodeFs, timeoutMs = 2500 } = {}) {
+  if (!Array.isArray(waiting?.rows) || typeof lookupJob !== "function") return { rows: [], incomplete: true };
+  try {
+    if (!Array.isArray(JSON.parse(fs.readFileSync(triggersPath, "utf8"))?.triggers)) return { rows: [], incomplete: true };
+  } catch { return { rows: [], incomplete: true }; }
+  const check = makeCheckWaitSkew({ triggersPath, fs });
+  let incomplete = Boolean(waiting.truncated || waiting.queuesCut || waiting.unreachable || waiting.rows.length > 200);
+  const rows = [];
+  const queued = [];
+  await Promise.all(waiting.rows.slice(0, 200).map(async (row) => {
+    try {
+      const job = await withTimeout(Promise.resolve(lookupJob(row.queue, row.jobId)), timeoutMs, null);
+      if (!job?.data) { incomplete = true; return; }
+      if (job.data.trigger?.matched?.index !== index) return;
+      queued.push(Object.fromEntries(["jobId", "queue", "state", "bucket", "why", "dueAt", "queuedAt", "project", "host", "holder"].filter((k) => Object.hasOwn(row, k)).map((k) => [k, row[k]])));
+      const result = await check(job.data);
+      if (result.skewed) rows.push({ jobId: row.jobId, queue: row.queue, ...(result.field ? { field: result.field } : {}), ...(result.conditions ? { conditions: result.conditions } : {}) });
+    } catch { incomplete = true; }
+  }));
+  rows.sort((a, b) => a.jobId.localeCompare(b.jobId));
+  queued.sort((a, b) => a.jobId.localeCompare(b.jobId));
+  return { rows, queued, incomplete };
+}
+
+/** Cron stall counts beside the prompt-free tool display. An unread counter is null, never a fabricated zero. */
+export async function readTriggersWithStalls({ triggersPath, url, fs = nodeFs, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+  const view = readTriggers({ triggersPath, fs });
+  const cron = view.triggers?.filter((t) => t.type === "cron" && typeof t.id === "string" && t.id !== "") ?? [];
+  if (cron.length === 0) return view;
+  let redis;
+  let values = null;
+  try {
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    values = await withTimeout(redis.mget(...cron.map((t) => stallKey(t.id))), timeoutMs, null);
+  } catch {} finally { redis?.disconnect?.(); }
+  const counts = new Map(cron.map((t, i) => [t.index, Array.isArray(values) ? decimalOf(values[i] ?? "0") : null]));
+  return { ...view, triggers: view.triggers.map((t) => t.type === "cron" ? { ...t, stalls: counts.get(t.index) ?? null } : t) };
+}
+
+/**
+ * A trigger's bounded history, using the same raw-index/type guard as attribution and the same cost classifier as
+ * Spend. Prompt maps deliberately stay outside this object. Missing queue/record reads remain unknown.
+ */
+export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subscriptions = [], pricing } = {}) {
+  const trigger = snapshot?.triggers?.triggers?.find((t) => t.index === index);
+  if (!trigger) return null;
+  const value = trigger.type === "cron" ? trigger.id : String(index);
+  const matches = (r) => triggerValueOf(r) === value && (trigger.type === "cron" || r.triggerType === trigger.type);
+  const history = snapshot.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : snapshot.runs ?? [];
+  const runs = history.filter((r) => matches(r) && runAt(r) <= now).sort((a, b) => runAt(b) - runAt(a));
+  const runs24h = runs.filter((r) => runAt(r) >= now - DAY_MS && runAt(r) <= now);
+  const measured = runs24h.map((r) => meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) }));
+  const queued = snapshot.waiting?.unreachable || !snapshot.waiting ? null : (snapshot.waiting.rows ?? []).filter((r) => String(r.trigger ?? triggerValueOf(r)) === value);
+  const scheduler = snapshot.schedulers?.find((s) => s.key === trigger.id) ?? null;
+  const stalls = snapshot.schedulerStalls?.[trigger.id] ?? null;
+  const backend = trigger.backend ?? snapshot.defaultBackend ?? null;
+  return {
+    trigger, index, runs24h, count24h: runs24h.length,
+    cost24h: measured.reduce((sum, n) => sum + (n ?? 0), 0) / 1_000_000,
+    cost24hMicros: measured.reduce((sum, n) => sum + (n ?? 0), 0),
+    costIncomplete: measured.some((n) => n === null),
+    historyIncomplete: Boolean(snapshot.parkedUnreachable || snapshot.failures24hFloor),
+    lastRuns: runs.slice(0, 5), queued: trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
+    skewed: snapshot.triggerSkew?.[index]?.rows ?? null,
+    skewIncomplete: snapshot.triggerSkew?.[index]?.incomplete ?? true,
+    cron: trigger.type === "cron" ? { scheduler, next: scheduler?.next ?? null, overdueMs: scheduler?.overdueMs ?? null, stalls, stallLimit: (snapshot.schedulerStallMax ?? 2) + 1 } : null,
+    sandbox: { backend, deploymentDefault: trigger.backend == null, serves: servesOf(backend), retentionHours: snapshot.sandboxRetentionHours ?? 24, replicas: trigger.once ? 1 : trigger.replicas ?? 1 },
+  };
+}
+
 /** The most bundles, and the most endpoint names per bundle, the display keeps: the worker's own caps are smaller. */
 const BUNDLES_SHOWN_MAX = 256;
 const BUNDLE_ENDPOINTS_SHOWN_MAX = 64;
@@ -2727,19 +2886,22 @@ export function normalizeSecretBundlesForDisplay(value) {
  * describe two different versions of a file an operator saved between two reads. The view's shapes pass
  * through untouched (`missing`, `invalid`), with an empty map beside them.
  */
-export function readTriggersWithInstructions({ triggersPath, fs = nodeFs }) {
+export function readTriggersWithInstructions({ triggersPath, fs = nodeFs, includeTasks = false }) {
   let text = null;
   const capture = { readFileSync: (p, enc) => (text = fs.readFileSync(p, enc)) };
   const view = readTriggers({ triggersPath, fs: capture });
   const instructions = {};
+  const tasks = {};
   if (Array.isArray(view?.triggers) && typeof text === "string") {
     const entries = JSON.parse(text).triggers;
     for (const t of view.triggers) {
       const raw = entries?.[t.index]?.run?.instructions;
       if (typeof raw === "string" && raw.trim() !== "") instructions[t.index] = raw;
+      const task = entries?.[t.index]?.run?.task;
+      if (typeof task === "string" && task.trim() !== "") tasks[t.index] = task;
     }
   }
-  return { view, instructions };
+  return { view, instructions, ...(includeTasks ? { tasks } : {}) };
 }
 
 /**
@@ -2830,6 +2992,15 @@ export function normalizeTriggerForDisplay(entry) {
   // present, so a record for a trigger that names none keeps exactly its pre-#502 keys; cron keeps its
   // long-standing `model: null` sentinel below.
   const modelRef = {
+    // Prompt text stays in the separate operator read. Optional configuration stays absent when absent.
+    ...(typeof run.task === "string" && run.task.trim() !== "" && { task: true }),
+    ...(typeof run.repository === "string" && { repository: run.repository }),
+    ...(Array.isArray(run.gates) && { gates: run.gates.filter((g) => typeof g === "string") }),
+    ...(Number.isSafeInteger(run.gateTimeout) && { gateTimeout: run.gateTimeout }),
+    ...((typeof run.gateBudgetRaiseUsd === "number" || typeof run.gateBudgetRaiseUsd === "string") && { gateBudgetRaiseUsd: String(run.gateBudgetRaiseUsd) }),
+    ...(Array.isArray(on.reviewState) && { reviewState: on.reviewState.filter((v) => typeof v === "string") }),
+    ...(Array.isArray(run.waitFor) && { waitFor: run.waitFor.flatMap((v) => typeof v?.after === "string" ? [{ after: v.after }] : typeof v?.profile === "string" ? [{ profile: v.profile }] : []) }),
+    ...Object.fromEntries(["awaitInput", "github", "progress", "statusComment", "recover", "steer"].filter((k) => typeof run[k] === "boolean").map((k) => [k, run[k]])),
     ...(typeof run.provider === "string" && run.provider !== "" && { provider: run.provider }),
     ...(typeof run.model === "string" && run.model !== "" && { model: run.model }),
     ...(Number.isSafeInteger(run.maxTurns) && run.maxTurns >= 1 && { maxTurns: run.maxTurns }),
@@ -4269,6 +4440,13 @@ export function createFleetReader(
     // (and `opts.queue`, a one-queue preview's, wherever it stands), and says so beside them: `switchTotal`, how many the
     // switch flips; `switchTruncated`, true when `queueCounts` holds fewer; `switchIncomplete`, `SWITCH_SCAN_INCOMPLETE`
     // when the keyspace scan behind the set did not finish, else null.
+    async triggerSkew(index, waiting) {
+      return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs, lookupJob: async (name, id) => {
+        const queues = await fleetQueues();
+        const q = queues.find((q) => q.name === name) ?? pool.get(name);
+        return q ? q.getJob(id) : null;
+      }, timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
     async snapshot(opts = {}) {
       const waiting = opts?.waiting === true;
       const preview = opts?.switchQueues === true ? await switchPreviewQueues(opts?.queue) : null;
@@ -4283,7 +4461,7 @@ export function createFleetReader(
       // `wait:held` and `host:h:*` because the panel reads every second and a scan walks hardest when nothing is
       // registered. With the instructions TEXT beside the view rather than inside it (issue #482): the view's records
       // are the model-callable `dispatch_triggers` result, and the words belong to the overlay alone.
-      const { view: triggersView, instructions: triggerInstructions } = readTriggersWithInstructions({ triggersPath: paths.triggersPath });
+      const { view: triggersView, instructions: triggerInstructions, tasks: triggerTasks } = readTriggersWithInstructions({ triggersPath: paths.triggersPath, includeTasks: true });
       const cronIds = Array.isArray(triggersView?.triggers)
         ? triggersView.triggers.filter((t) => t?.type === "cron" && typeof t?.id === "string" && t.id !== "").map((t) => t.id)
         : [];
@@ -4310,7 +4488,7 @@ export function createFleetReader(
         // GETs. ONE MGET for every declared cron id, so this stays one round trip however many schedulers exist. An
         // absent key reads as an honest 0 -- a scheduler that has never stalled -- which is the same posture
         // `readScopedBudget` takes for a scope that has never run.
-        cronIds.length > 0 ? redis.mget(...cronIds.map((id) => stallKey(id))).catch(() => []) : Promise.resolve([]),
+        cronIds.length > 0 ? redis.mget(...cronIds.map((id) => stallKey(id))).catch(() => null) : Promise.resolve([]),
       ]);
       const workers = Array.isArray(workerList) && workerList.length > 0 ? workerList.length : "unknown";
       // Summed across the fleet, because a count of one queue is not a count of the deployment.
@@ -4525,8 +4703,9 @@ export function createFleetReader(
         }),
         // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so neither reader
         // changes.
-        schedulerStalls: Object.fromEntries(cronIds.map((id, i) => [id, Number(stallCounts?.[i] ?? 0) || 0])),
+        schedulerStalls: Object.fromEntries(cronIds.map((id, i) => [id, stallCounts === null ? null : decimalOf(stallCounts?.[i] ?? "0")])),
         schedulerStallMax: paths.schedulerStallMax,
+        sandboxRetentionHours: paths.sandboxRetentionHours,
         // Merged across the fleet (issue #57, Gap 3). This host's files stay the truth and the single-host path; the
         // mirror adds the other hosts' records. On a shared `PI_LOGS_DIR` the local read is already the merged read and
         // the mirror adds nothing, which is why there is no second code path.
@@ -4536,6 +4715,7 @@ export function createFleetReader(
         settings,
         triggers: triggersView,
         triggerInstructions,
+        triggerTasks,
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
         // The projects as the WORKER reads them (issue #499 part C): `{ unset }` when PI_PROJECTS_FILE is unset.
         projects: projectsView,

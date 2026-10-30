@@ -1,3 +1,4 @@
+from config_controls import CONFIG_CONTROLS_CSS
 """Configuration, package D: TriggerDetail, TriggerEditor, SecretsScreen, ConnectionsScreen, ProjectDetail on the Pulse kit.
 gen_fleet.py writes its screens at import, so its helpers are copied here, not imported."""
 from pulse import *
@@ -122,13 +123,13 @@ def trigger_detail():
         ("flow", "Flow", "<b>fix</b>", "here"),
         ("backend", "Venue", 'deployment default <span class="muted">(local)</span>', "here"),
         ("provider / model", "Model", 'deployment default <span class="muted">(anthropic / claude-sonnet-5-5)</span>', "here"),
-        ("maxTurns", "Turn budget", 'deployment default <span class="muted">(30)</span>', "file"),
+        ("maxTurns", "Turn budget", 'deployment default <span class="muted">(30)</span>', "here"),
         ("resume", "Keeps a session", yesno(True, "yes: the next run on the issue continues it"), "file"),
         ("awaitInput", "May stop to ask", yesno(False), "file"),
-        ("progress", "Reports phases", yesno(True), "add"),
-        ("statusComment", "Status comment", yesno(True, "yes: one comment, edited as it runs"), "add"),
-        ("steer", "Takes messages", yesno(False, no="no: Steer and Follow up are off for its runs"), "add"),
-        ("recover", "Recovers", yesno(False, no="no: an infrastructure loss retries from the start"), "add"),
+        ("progress", "Reports phases", yesno(True), "here"),
+        ("statusComment", "Status comment", yesno(True, "yes: one comment, edited as it runs"), "here"),
+        ("steer", "Takes messages", yesno(False, no="no: Steer and Follow up are off for its runs"), "here"),
+        ("recover", "Recovers", yesno(False, no="no: an infrastructure loss retries from the start"), "here"),
         ("replicas", "Replicas", '<span class="muted">one run per comment</span>', "file"),
         ("waitFor", "Waits for", '<span class="muted">nothing</span>', "file"),
         ("instructions", "Instructions", "2 lines, above the issue text", "file"),
@@ -141,12 +142,12 @@ def trigger_detail():
         ("models", "Allowed models", '<span class="muted">any model</span>', "file"),
         ("maxCostUsd", "Job cap", 'the deployment\'s <span class="muted">($2.00)</span>', "file"),
     ]
-    groups = [("here", "The Edit form below changes these."), ("add", "Set when a trigger is added here; after that, by hand."),
-              ("file", "In the triggers file, never from the console.")]
+    groups = [("here", "The Edit form below changes these."), ("file", "In the triggers file, never from the console.")]
     body = ""
     for g, note in groups:
         pairs = [(f'<span class="c2-cell"><b>{lab}</b><small class="code">run.{E(k)}</small></span>', v) for k, lab, v, w in F if w == g]
         body += f'<div class="c2-grp"><p class="c2-grp__h">{where(g)}<span class="muted">{note}</span></p>{facts(pairs, 2)}</div>'
+    body += '<h3>Its runs’ sandbox</h3><p>Local (deployment default): live transcript yes, steering yes, recovery yes, sandbox shell yes. Retained workspaces can be reopened for 24 hours. Each event starts one sandbox. Secret profile and bundle names only.</p>'
     p_run = card("What it runs", body, sub="every field, set or not", id_="p-trigger-run")
 
     edit = f"""<form class="c2-form" aria-label="Edit trigger 3">
@@ -183,7 +184,7 @@ def trigger_detail():
     p_runs = card("Runs it started", runs, id_="p-trigger-runs", flush=True, sub="last 24 hours")
 
     p_instr = card("Instructions", '<p class="c2-quote">This repo uses pnpm. Run pnpm test before you push.</p>',
-                   id_="p-trigger-instr", sub="above the issue text, 2 lines")
+                   id_="p-trigger-trust", sub="above the issue text, 2 lines")
 
     kinds = f"""<ul class="c2-list">
   <li class="tone-ok">{ic('clock')}<span><b>1 · cron {code('nightly-tidy')}</b> {code('0 3 * * *')}<br>Next 03:00 UTC tomorrow, in 11h 21m. {state_line('ok', 'done', 'On time')}</span></li>
@@ -210,8 +211,10 @@ def trigger_detail():
     side = f'<div class="stack">{p_instr}{p_kinds}{p_change}</div>'
     end = btn("Open in Runs", "", "runs", sm=False) + btn("Delete", "danger", sm=False)
     sub = f'<span class="c2-lead"><span class="c2-kind">{ic("comment", "ic ic--sm")}comment</span><span class="code">"@pi"</span><span class="muted">→ flow</span><b>fix</b><span class="muted">on github · row 3</span></span>'
-    inner = f'<div class="cols"><div class="stack">{p_on}{p_runs}{p_run}{p_edit}</div>{side}</div>'
+    inner = f'<div class="cols config-layout"><div class="stack">{p_on}{p_runs}{p_run}{p_edit}</div>{side}</div>'
     return shell("Triggers", inner, "Trigger 3", sub=sub, end=end, back="Triggers")
+
+COMMON_CSS += CONFIG_CONTROLS_CSS
 
 TD_CSS = COMMON_CSS + """
 .c2-pad { padding: 0 var(--space-5) var(--space-3); }
@@ -272,13 +275,13 @@ def trigger_editor():
     ["<b>Trigger 8: a github review that asks for changes → flow address-review.</b>",
      "It fires for a reviewer with write access. A comment-only review with an empty summary starts nothing.",
      "Each run it starts is paid: it holds 1 job slot and up to <b>$2.00</b> (the per-job cap) until it settles.",
-     f"Written to {code(FILE)} and audited as <b>trigger-add</b>. It gets its project's secret bundle; opt out by hand."],
+     f"Written to {code(FILE)} and audited as <b>trigger-add</b>. It opts out of project secret bundles (run.secretBundle: false), just as the add tool does; change that field by hand."],
     "Delete trigger 8", "Confirm: add trigger 8")}</div>"""
     p_form = card("New trigger", form, id_="p-trigger-add")
-    p_prev = card("Preview", prev, id_="p-trigger-preview", sub="the lines it adds, then Confirm")
+    p_prev = card("Preview", prev, id_="c-trigger-preview", sub="the lines it adds, then Confirm")
 
 
-    inner = f'<div class="cols cols--wide-side"><div class="stack">{p_form}</div><div class="stack">{p_prev}</div></div>'
+    inner = f'<div class="cols cols--wide-side config-layout"><div class="stack">{p_form}</div><div class="stack">{p_prev}{card('The five kinds', '<p>Cron, label, comment, pull request and issue. The selected kind sets its fields.</p>', id_='p-kinds')}{card('Pull request words per forge', '<p>Each forge has its own action vocabulary. Review states narrow submitted verdicts.</p>', id_='p-forge-words')}{card('Refusals', '<p>A refusal names its field and the loader’s reason. Nothing was changed.</p>', id_='p-refusals')}</div></div>'
     return shell("Triggers", inner, "Add a trigger", sub=f'Rows 1 to 7 exist; this one becomes row 8 of <span class="code">{FILE}</span>.', back="Triggers")
 
 TE_CSS = COMMON_CSS + """
@@ -638,9 +641,8 @@ README = {
 - **Start.** The title says the trigger in one line: kind, phrase, flow, forge and row number (rows are numbered 1 to 7 everywhere). Open in Runs filters the Runs page to it. Delete is outlined red until its confirm step.
 - **What starts it.** Kind, phrase, how a comment can pick another flow, the one-comment-trigger-per-forge rule, and who may fire it.
 - **Runs it started.** The count and metered spend for 24 hours, then the last five runs with project, outcome and reason sentence.
-- **What it runs.** Every `run` field, set or not, in three groups:
-  - *Edit here*: flow, venue and model, which the Edit form changes;
-  - *When adding*: progress, statusComment, steer and recover, which the add form sets;
+- **What it runs.** Every `run` field, set or not, in two groups:
+  - *Edit here*: flow, venue, provider, model, maxTurns, progress, statusComment, steer and recover, which the Edit form changes;
   - *By hand*: everything else, including the job cap, allowed models, MCP servers, secrets and the bundle opt-out, which only the triggers file sets.
 - **Edit.** Changing the venue previews the triggers file as a diff, then a confirm bar with the plan's own line, what it means for runs in line, the undo and the ticket.
 - **Instructions.** The trigger's instructions, quoted and escaped.
@@ -649,7 +651,7 @@ README = {
 
 A viewer sees the same facts and runs, and no Edit, Delete or Fire now.
 
-**Panels.** `p-trigger-on`, `p-trigger-runs`, `p-trigger-run`, `p-trigger-edit`, `p-trigger-instr`, `p-trigger-kinds`, `p-trigger-change`.
+**Panels.** `p-trigger-on`, `p-trigger-runs`, `p-trigger-run`, `p-trigger-edit`, `p-trigger-trust`, `p-trigger-kinds`, `p-trigger-change`.
 
 **The server provides.**
 - The trigger's display record, including the fields the current record leaves out: `task`, `repository`, `reviewState`, `waitFor`, `awaitInput`, `github`, `progress`, `statusComment`, `recover` and `steer`.
@@ -688,7 +690,7 @@ A refusal shows under the field it is about, in the loader's words, ending "Noth
 
 A viewer never sees this page.
 
-**Panels.** `p-trigger-add`, `p-trigger-preview`.
+**Panels.** `p-trigger-add`, `p-kinds`, `p-forge-words`, `p-refusals`. The preview is the shared confirm slot.
 
 **The server provides.**
 - The blessed venues and the deployment defaults.

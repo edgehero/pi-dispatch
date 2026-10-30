@@ -75,8 +75,352 @@
 <div class="page">
 <header class="top"><a class="brandpill" href="/"><span class="brandpill__m" aria-hidden="true">pi</span>pi-dispatch</a><nav class="pillnav" aria-label="Console screens"><a href="/"><svg class="ic" aria-hidden="true"><use href="#i-home"></use></svg>Overview</a><a href="/runs"><svg class="ic" aria-hidden="true"><use href="#i-runs"></use></svg>Runs</a><a href="/parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"></use></svg>Parked<span id="p-nav-parked" data-panel><span class="count tone-parked"><span aria-hidden="true">1</span><span class="sr">1 unanswered</span></span></span></a><a href="/fleet"><svg class="ic" aria-hidden="true"><use href="#i-fleet"></use></svg>Fleet</a><a href="/insights"><svg class="ic" aria-hidden="true"><use href="#i-spend"></use></svg>Spend</a><a href="/config" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-config"></use></svg>Configuration</a></nav><div class="top__end"><a class="roundbtn hide-phone top__search" href="/runs#q" aria-label="Search runs" title="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></a><button class="roundbtn" type="button" data-theme-toggle hidden aria-label="Theme: follows the system" title="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"></use></svg></button><span class="who" data-name="watcher" data-role="viewer" title="watcher, Viewer"><span><b>watcher</b><small>Viewer</small></span><span class="avatar">wa</span></span><button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out"><svg class="ic" aria-hidden="true"><use href="#i-logout"></use></svg></button></div></header>
 <main id="main" tabindex="-1">
-<div class="titlebar"><div class="titlebar__lead"><h1>Configuration</h1></div><div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> · not live</span></span><a class="btn btn--sm btn--ghost" href="/config"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a></div></div>
-<div class="legacy"><section id="p-triggers" data-panel><h2>Triggers</h2><div class="scroll"><table class="grid" aria-label="Triggers"><thead><tr><th scope="col" class="num">#</th><th scope="col">On</th><th scope="col">Runs</th><th scope="col">Model</th><th scope="col">Notes</th></tr></thead><tbody><tr><td class="num">0</td><td>cron nightly-tidy 0 3 * * *</td><td>flow tidy in .../site</td><td>kimi-coding / kimi-for-coding</td><td>-</td></tr><tr><td class="num">1</td><td>label; any pi:frontend</td><td>flow frontend-fix on github</td><td>deployment default</td><td>2 replicas; skills .../pi-skills</td></tr><tr><td class="num">2</td><td>comment &quot;@pi&quot;</td><td>flow fix on github</td><td>deployment default</td><td>keeps a session; has instructions</td></tr><tr><td class="num">3</td><td>pull request; action open, update</td><td>flow review on gitlab</td><td>deployment default</td><td>-</td></tr><tr><td class="num">4</td><td>issue; action closed; #40; once</td><td>flow deploy on github</td><td>deployment default</td><td>-</td></tr><tr><td class="num">5</td><td>cron pm-weekly 0 6 * * 1</td><td>flow portfolio-manager in .../pm</td><td>claude-haiku-5-5</td><td>writes the budget split</td></tr><tr><td class="num">6</td><td>label; any pi:triage</td><td>flow triage on github</td><td>deployment default</td><td>keeps a session; mcp linear</td></tr></tbody></table></div></section></div><div class="legacy"><section id="p-settings" data-panel><h2>Settings overlay</h2><dl class="facts"><dt>provider</dt><dd>anthropic</dd><dt>model</dt><dd>claude-sonnet-5-5</dd><dt>maxTurns</dt><dd>30</dd><dt>maxTokens</dt><dd>400000</dd><dt>concurrency</dt><dd>4</dd><dt>dailyCap</dt><dd>40</dd><dt>weeklyCap</dt><dd>200</dd><dt>monthlyCap</dt><dd>600</dd><dt>dailyTokenCap</dt><dd>8000000</dd><dt>softHoldPct</dt><dd>80</dd><dt>maxCostUsd</dt><dd>2</dd><dt>dailyCostUsd</dt><dd>25</dd><dt>weeklyCostUsd</dt><dd>120</dd></dl></section></div><div class="legacy"><section id="p-pause-windows" data-panel><h2>Pause windows</h2><div class="scroll"><table class="grid" aria-label="Pause windows"><thead><tr><th scope="col">Scope</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Zone</th><th scope="col">Days</th><th scope="col">Dates</th></tr></thead><tbody><tr><td class="mono">github:acme/web</td><td>22:00</td><td>06:00</td><td>Europe/Amsterdam</td><td>mon, tue, wed, thu, fri</td><td>-</td></tr></tbody></table></div></section></div><div class="legacy"><section id="p-scoped-limits" data-panel><h2>Scoped limits</h2><div class="scroll"><table class="grid" aria-label="Scoped limits"><thead><tr><th scope="col">Scope</th><th scope="col">Limits</th></tr></thead><tbody><tr><td class="mono">github:acme/web</td><td>20 jobs a day; 80 jobs a week; 6 at once</td></tr><tr><td class="mono">project:billing</td><td>8g memory; 4 CPUs</td></tr><tr><td class="mono">project:api</td><td>2g memory; 1 CPUs</td></tr><tr><td class="mono">project:ops</td><td>2g memory; 1 CPUs</td></tr><tr><td class="mono">project:web</td><td>$45.00 a week</td></tr><tr><td class="mono">model:anthropic/claude-sonnet-5-5</td><td>$80.00 a week</td></tr></tbody></table></div></section></div><div class="legacy"><section id="p-projects" data-panel><h2>Projects</h2><div class="scroll"><table class="grid" aria-label="Projects"><thead><tr><th scope="col">Project</th><th scope="col">Name</th><th scope="col">Members</th></tr></thead><tbody><tr><td class="mono">web</td><td>-</td><td class="mono">github:acme/web</td></tr><tr><td class="mono">api</td><td>-</td><td class="mono">github:acme/api</td></tr><tr><td class="mono">billing</td><td>-</td><td class="mono">github:acme/billing, gitlab:acme/billing-ui</td></tr><tr><td class="mono">ops</td><td>-</td><td class="mono">.../site, .../pm</td></tr></tbody></table></div><dl class="facts"><dt>Allocation envelope</dt><dd>set</dd></dl></section></div><div class="legacy"><section id="p-mcp" data-panel><h2>MCP servers</h2><div class="scroll"><table class="grid" aria-label="MCP servers"><thead><tr><th scope="col">Server</th><th scope="col">Transport</th><th scope="col">Where</th><th scope="col">Exposure</th><th scope="col">On</th><th scope="col">References</th></tr></thead><tbody><tr><td class="mono">linear</td><td>http</td><td class="mono">mcp.example.com</td><td>codemode</td><td>yes</td><td class="mono">LINEAR_API_KEY</td></tr></tbody></table></div></section></div><div class="legacy"><section id="p-packages" data-panel><h2>Staged pi packages</h2><p class="note">No pi package is staged.</p></section></div><div class="legacy"><section id="p-secret-profiles" data-panel><h2>Secret profiles</h2><p class="note">No secret profile is declared in the settings overlay.</p></section></div><div class="legacy"><section id="p-secret-bundles" data-panel><h2>Secret bundles</h2><p class="note">No bundle resolver is declared in the settings overlay.</p><p class="note">The triggers file binds no secret bundle.</p></section></div>
+<div class="titlebar"><div class="titlebar__lead"><h1>Configuration</h1><p class="titlebar__sub">Settings: .../deployment/settings.json. Triggers: .../deployment/triggers.json.</p></div><div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> · not live</span></span><a class="btn btn--sm btn--ghost" href="/config"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a></div></div>
+<div class="stack"><section id="cf-navigation" data-panel><nav class="config-sections" aria-label="Configuration sections">
+<a class="fpill" href="#cf-settings">Settings <b>13</b></a><a class="fpill" href="#cf-triggers">Triggers <b>7</b></a><a class="fpill" href="#cf-pause-windows">Pause windows <b>1</b></a><a class="fpill" href="#cf-scoped-limits">Scoped limits <b>6</b></a><a class="fpill" href="#cf-projects">Projects <b>4</b></a><a class="fpill" href="#cf-files">Files <b>2</b></a><a class="fpill" href="#cf-unset">Unset <b>0</b></a><a class="fpill" href="#cf-mcp-servers">MCP servers <b>1</b></a><span class="config-divider" aria-hidden="true"></span><a class="btn btn--sm" href="/config">Secrets</a><a class="btn btn--sm" href="/config">Connections</a>
+</nav></section></div><div class="cols cols--wide-side config-layout"><div class="stack"><section id="cf-settings" data-panel><div class="card"><div class="card__head"><h2>Settings overlay</h2></div><dl class="facts"><div class="fact"><dt>model</dt><dd>claude-sonnet-5-5</dd></div><div class="fact"><dt>provider</dt><dd>anthropic</dd></div><div class="fact"><dt>maxTurns</dt><dd>30</dd></div><div class="fact"><dt>dailyCap</dt><dd>40</dd></div><div class="fact"><dt>weeklyCap</dt><dd>200</dd></div><div class="fact"><dt>monthlyCap</dt><dd>600</dd></div><div class="fact"><dt>maxTokens</dt><dd>400000</dd></div><div class="fact"><dt>dailyTokenCap</dt><dd>8000000</dd></div><div class="fact"><dt>concurrency</dt><dd>4</dd></div><div class="fact"><dt>softHoldPct</dt><dd>80</dd></div><div class="fact"><dt>maxCostUsd</dt><dd>2</dd></div><div class="fact"><dt>dailyCostUsd</dt><dd>25</dd></div><div class="fact"><dt>weeklyCostUsd</dt><dd>120</dd></div><div class="fact"><dt>monthlyCostUsd</dt><dd>deployment default</dd></div></dl></div></section><section id="cf-triggers" data-panel><div class="card"><div class="card__head"><h2>Triggers</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Triggers">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+On
+</th><th scope="col">
+Runs
+</th><th scope="col">
+Model
+</th><th scope="col">
+Notes
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>
+<a href="/config/trigger?index=0"
+>cron nightly-tidy 0 3 * * *</a
+>
+</td>
+<td>flow tidy in .../site</td>
+<td>kimi-coding / kimi-for-coding</td>
+<td>-</td>
+<td>
+<div class="acts">
+
+</div>
+</td>
+</tr><tr>
+<td class="num">2</td>
+<td>
+<a href="/config/trigger?index=1"
+>label; any pi:frontend</a
+>
+</td>
+<td>flow frontend-fix on github</td>
+<td>deployment default</td>
+<td>2 replicas; skills .../pi-skills</td>
+<td>
+<div class="acts">
+
+</div>
+</td>
+</tr><tr>
+<td class="num">3</td>
+<td>
+<a href="/config/trigger?index=2"
+>comment &quot;@pi&quot;</a
+>
+</td>
+<td>flow fix on github</td>
+<td>deployment default</td>
+<td>keeps a session; has instructions</td>
+<td>
+<div class="acts">
+
+</div>
+</td>
+</tr><tr>
+<td class="num">4</td>
+<td>
+<a href="/config/trigger?index=3"
+>pull request; action open, update</a
+>
+</td>
+<td>flow review on gitlab</td>
+<td>deployment default</td>
+<td>-</td>
+<td>
+<div class="acts">
+
+</div>
+</td>
+</tr><tr>
+<td class="num">5</td>
+<td>
+<a href="/config/trigger?index=4"
+>issue; action closed; #40; once</a
+>
+</td>
+<td>flow deploy on github</td>
+<td>deployment default</td>
+<td>-</td>
+<td>
+<div class="acts">
+
+</div>
+</td>
+</tr><tr>
+<td class="num">6</td>
+<td>
+<a href="/config/trigger?index=5"
+>cron pm-weekly 0 6 * * 1</a
+>
+</td>
+<td>flow portfolio-manager in .../pm</td>
+<td>claude-haiku-5-5</td>
+<td>writes the budget split</td>
+<td>
+<div class="acts">
+
+</div>
+</td>
+</tr><tr>
+<td class="num">7</td>
+<td>
+<a href="/config/trigger?index=6"
+>label; any pi:triage</a
+>
+</td>
+<td>flow triage on github</td>
+<td>deployment default</td>
+<td>keeps a session; mcp linear</td>
+<td>
+<div class="acts">
+
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</div></div></section><section id="cf-pause-windows" data-panel><div class="card"><div class="card__head"><h2>Pause windows</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Pause windows">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+Scope
+</th><th scope="col">
+From
+</th><th scope="col">
+To
+</th><th scope="col">
+Zone
+</th><th scope="col">
+Days
+</th><th scope="col">
+Dates
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td class="code">github:acme/web</td>
+<td>22:00</td>
+<td>06:00</td>
+<td>Europe/Amsterdam</td>
+<td>
+mon, tue, wed, thu, fri
+</td>
+<td>
+-
+</td>
+<td>
+
+</td>
+</tr>
+</tbody>
+</table>
+</div></div></section><section id="cf-scoped-limits" data-panel><div class="card"><div class="card__head"><h2>Scoped limits</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Scoped limits">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+Scope
+</th><th scope="col">
+Limits
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td class="code">github:acme/web</td>
+<td>
+20 jobs a day; 80 jobs a week; 6 at once
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>2</td>
+<td class="code">project:billing</td>
+<td>
+8g memory; 4 CPUs
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>3</td>
+<td class="code">project:api</td>
+<td>
+2g memory; 1 CPUs
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>4</td>
+<td class="code">project:ops</td>
+<td>
+2g memory; 1 CPUs
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>5</td>
+<td class="code">project:web</td>
+<td>
+$45.00 a week
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>6</td>
+<td class="code">model:anthropic/claude-sonnet-5-5</td>
+<td>
+$80.00 a week
+</td>
+<td>
+
+</td>
+</tr>
+</tbody>
+</table>
+</div></div></section><section id="cf-projects" data-panel><div class="card"><div class="card__head"><h2>Projects</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Projects">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+Project
+</th><th scope="col">
+Name
+</th><th scope="col">
+Members
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td class="code">web</td>
+<td>-</td>
+<td class="mono">
+github:acme/web
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>2</td>
+<td class="code">api</td>
+<td>-</td>
+<td class="mono">
+github:acme/api
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>3</td>
+<td class="code">billing</td>
+<td>-</td>
+<td class="mono">
+github:acme/billing, gitlab:acme/billing-ui
+</td>
+<td>
+
+</td>
+</tr><tr>
+<td>4</td>
+<td class="code">ops</td>
+<td>-</td>
+<td class="mono">
+.../site, .../pm
+</td>
+<td>
+
+</td>
+</tr>
+</tbody>
+</table>
+</div><dl class="facts"><div class="fact"><dt>Allocation envelope</dt><dd>set</dd></div></dl></div></section><section id="cf-files" data-panel><div class="card"><div class="card__head"><h2>Files</h2></div><p>Settings: .../deployment/settings.json. Triggers: .../deployment/triggers.json.</p></div></section></div><div class="stack"><section id="cf-unset" data-panel><div class="card"><div class="card__head"><h2>Unset a setting</h2></div><p>Unset keys fall back to the deployment defaults.</p></div></section><section id="cf-mcp-servers" data-panel><div class="card"><div class="card__head"><h2>MCP servers</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="MCP servers">
+<thead>
+<tr>
+<th scope="col">
+Server
+</th><th scope="col">
+Transport
+</th><th scope="col">
+Where
+</th><th scope="col">
+Exposure
+</th><th scope="col">
+On
+</th><th scope="col">
+References
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="mono">linear</td>
+<td>http</td>
+<td class="mono">mcp.example.com</td>
+<td>codemode</td>
+<td>yes</td>
+<td class="mono">
+LINEAR_API_KEY
+</td>
+</tr>
+</tbody>
+</table>
+</div></div></section><section id="cf-packages" data-panel><div class="card"><div class="card__head"><h2>Staged pi packages</h2></div><p class="note">No pi package is staged.</p></div></section><section id="cf-secret-profiles" data-panel><div class="card"><div class="card__head"><h2>Secret profiles</h2></div><p class="note">
+No secret profile is
+declared in the settings overlay.
+</p>
+</div></section><section id="cf-secret-bundles" data-panel><div class="card"><div class="card__head"><h2>Secret bundles</h2></div><p class="note">
+No bundle resolver is declared in the settings overlay.
+</p><p class="muted">The triggers file binds no secret bundle.</p></div></section></div></div>
 </main>
 </div>
 </body>

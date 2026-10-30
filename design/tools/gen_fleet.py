@@ -1,3 +1,4 @@
+from config_controls import CONFIG_CONTROLS_CSS
 """Fleet, Configuration, Audit, Sign-in and Error screens on the Pulse kit."""
 import os
 from pulse import *
@@ -587,8 +588,10 @@ CONFIG_CSS = """
 
 def config():
     sub = 'Settings in <span class="code">~/.pi-dispatch/settings.json</span>; triggers in <span class="code">…/deploy/triggers.json</span>.'
-    inner = SAVED + TABS + f'<div class="cols"><div class="stack">{SETTINGS}{TRIGGERS}{PAUSE}{LIMITS}{PROJECTS}</div><div class="stack">{UNSET}{MCP}{EMPTIES}</div></div>'
+    inner = SAVED + TABS + f'<div class="cols config-layout"><div class="stack">{SETTINGS}{TRIGGERS}{PAUSE}{LIMITS}{PROJECTS}</div><div class="stack">{UNSET}{MCP}{EMPTIES}</div></div>'
     return shell("Configuration", inner, "Configuration", sub=sub)
+
+CONFIG_CSS += CONFIG_CONTROLS_CSS
 
 write("ConfigScreen", card_marker("Screens", 2400, 1440, "Configuration: a setting's edit with its diff preview and confirm bar open, triggers with row actions, a refused key"),
       "Configuration", config(), CONFIG_CSS)

@@ -666,7 +666,7 @@ test("readTriggers normalizes each on.type into its discriminated display record
   // Every entry omits `run.packages`, and packages is an OPT-OUT -- so all four normalize to `true`.
   // `index` is the RAW file position (issue #54), attached by readTriggers, not the normalizer.
   assert.deepEqual(res.triggers, [
-    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", command: null, model: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, index: 0 },
+    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", command: null, model: null, task: true, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, index: 0 },
     { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 1 },
     { type: "comment", phrase: "@pi", flow: "fix", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 2 },
     { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 3 },
@@ -684,7 +684,7 @@ test("a cron trigger's portfolio flag reaches the display record only when true,
     }),
   };
   const [on, off, junk] = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) }).triggers;
-  const base = { type: "cron", pattern: "0 6 * * 1", folder: "/srv/p", flow: "plan-week", command: null, model: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null };
+  const base = { type: "cron", pattern: "0 6 * * 1", folder: "/srv/p", flow: "plan-week", command: null, model: null, task: true, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null };
   assert.deepEqual(on, { ...base, id: "plan", portfolio: true, index: 0 });
   assert.deepEqual(off, { ...base, id: "off", index: 1 }, "false is the ordinary cron record, key for key");
   assert.deepEqual(junk, { ...base, id: "junk", index: 2 }, "a non-boolean is no flag: the loader refuses it, the display never claims it");

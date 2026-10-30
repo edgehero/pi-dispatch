@@ -67,6 +67,7 @@ import {
   readLogTail,
   readSettingsView,
   readTriggers,
+  readTriggersWithStalls,
   renderSecretBundles,
   secretBundlesView,
   modelRunRecord,
@@ -92,6 +93,8 @@ import {
   readProjects,
   writeProjects,
   enqueueDispatchRun,
+  planTriggerFire,
+  enqueueTriggerFire,
   KNOWN_KEYS,
   DEPLOYMENT_SCAFFOLD_FILES,
   readEnvelope,
@@ -140,7 +143,9 @@ import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
 import { tokensFilePath } from "@edgehero/pi-dispatch/console-tokens";
-import { defaultWorkerName } from "@edgehero/pi-dispatch/config";
+import { defaultWorkerName, modelEndpointsFilePath } from "@edgehero/pi-dispatch/config";
+import { loadModelEndpoints, readOverlayModels } from "@edgehero/pi-dispatch/model-endpoints";
+import { builtinModel } from "@edgehero/pi-dispatch/model-catalog";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
 // extension at a deployment built in another directory. Layered into process.env once at factory load
 // (the operator's env always wins), so resolvePaths stays env-only by contract while every one of its
@@ -487,6 +492,31 @@ function toolText(text: string): { content: { type: "text"; text: string }[]; de
   return { content: [{ type: "text", text }], details: {} };
 }
 
+/** The Fire now tool's injectable boundary; the audit writer itself is never replaceable in tests. */
+export async function executeTriggerFire(params: any, ctx: any, { planFn = planTriggerFire, enqueueFn = enqueueTriggerFire }: any = {}) {
+  const env = deploymentEnv();
+  const paths = resolvePaths(deploymentEnv());
+  let modelEndpoints = null;
+  try {
+    const endpoints = loadModelEndpoints({ modelEndpointsFile: modelEndpointsFilePath(env), valkeyUrl: paths.valkeyUrl }, { cwd: pointerState().deploymentDir ?? process.cwd() });
+    let models = null;
+    if (endpoints.length) { try { models = readOverlayModels(paths.globalPiDir); } catch {} }
+    modelEndpoints = { endpoints, models };
+  } catch { /* An unread endpoint declaration never earns a zero-rated estimate. */ }
+  const options = { triggersPath: paths.triggersPath, url: paths.valkeyUrl, env, overlay: readSettingsView({ settingsFile: paths.settingsFile }).overlay ?? {}, modelEndpoints, builtinModel };
+  const planned: any = await planFn({ index: params.index, ...options });
+  if (planned.refusal || planned.unreachable) throw new Error(planned.refusal ?? planned.unreachable);
+  const plan = planned.plan;
+  const reserve = plan.reserve;
+  const dollars = !reserve || reserve.unknown || reserve.invalid ? "the reserve cannot be estimated here" : reserve.dollarsMicros === null ? "one job slot is reserved, with no dollar reserve" : `one job slot and up to $${formatMicros(reserve.dollarsMicros)} are reserved per run`;
+  const result = await confirmedWrite(ctx, { title: plan.title, message: `${plan.message}\nPaid: ${dollars}.` }, async () => {
+    const res: any = await panelWrite(paths.logsDir, { kind: "trigger-fire", target: plan.schedulerId, beforeDigest: plan.fileDigest, reserve: Number.isSafeInteger(reserve?.dollarsMicros) ? reserve.dollarsMicros : null, failure: (r: any) => r?.invalid ?? r?.refused ?? r?.refusal ?? (r?.unreachable ? "could not reach the queue" : null) }, () => enqueueFn(plan, options));
+    if (res.invalid || res.refused || res.refusal || res.unreachable) throw new Error(res.invalid ?? res.refused ?? res.refusal ?? res.unreachable);
+    return { queued: true, index: params.index, jobId: res.jobId, queue: res.queue };
+  });
+  return toolText(JSON.stringify(result));
+}
+
 /**
  * Register the LLM-callable tools. Reads: `dispatch_status`, `dispatch_runs`, `dispatch_costs`,
  * `dispatch_triggers`, `dispatch_projects` (and the other reads below). On/off:
@@ -712,7 +742,7 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
-      const t = readTriggers({ triggersPath: paths.triggersPath });
+      const t = await readTriggersWithStalls({ triggersPath: paths.triggersPath, url: paths.valkeyUrl });
       const data = Array.isArray(t?.triggers)
         ? t.triggers.map((tr: any, index: number) => ({ index, ...tr }))
         : t;
@@ -853,12 +883,27 @@ function registerTools(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
+    name: "dispatch_trigger_fire",
+    label: "pi-dispatch fire trigger",
+    description:
+      "Fire a cron trigger now, once, by its array index from dispatch_triggers. PAID: the person's confirm shows " +
+      "the per-run reserve. Only a schedule served in this deployment's queue is eligible; commands and portfolio " +
+      "triggers are refused. Applies dispatch_run's folder allowlist, committed flow opt-in at HEAD, clean tree " +
+      "and shared hourly limit at enqueue. A second fire in the same minute is refused. With no UI it is refused.",
+    executionMode: "sequential",
+    parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return executeTriggerFire(params, ctx);
+    },
+  });
+
+  pi.registerTool({
     name: "dispatch_trigger_edit",
     label: "pi-dispatch edit trigger",
     description:
       "Changes which flow a trigger runs (by array index from dispatch_triggers) and applies it live, and " +
       "optionally which `backend` (venue) its container is built in, chosen from the names PI_BACKENDS " +
-      "blesses, and which `provider` and `model` its jobs run on (omitted, the trigger keeps what it has), and " +
+      "blesses, and which `provider`, `model` and `maxTurns` its jobs run on (omitted, the trigger keeps what it has), and " +
       "`progress` / `statusComment` / `recover` / `steer` (booleans, as on dispatch_trigger_add; omitted, the trigger keeps what it has). " +
       "The operator MUST approve a confirm dialog showing the before->after; with no interactive " +
       "operator it is refused.",
@@ -871,6 +916,7 @@ function registerTools(pi: ExtensionAPI): void {
       // the operator is asked, so a confirm dialog never shows a value the write would then refuse.
       provider: Type.Optional(Type.String()),
       model: Type.Optional(Type.String()),
+      maxTurns: Type.Optional(Type.Integer({ minimum: 1 })),
       // Issue #644, merged only when sent and judged against the entry's own type (no status comment on cron).
       progress: Type.Optional(Type.Boolean()),
       statusComment: Type.Optional(Type.Boolean()),

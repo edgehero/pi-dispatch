@@ -741,6 +741,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
 
+- **AMENDED 2026-10-30 (#750)**: `dispatch_trigger_fire(index)` previews and confirms a paid manual fire of a cron
+  trigger served by a scheduler in this deployment's queue. It shares the console's planner, reserve and refusals,
+  rechecks the trigger and scheduler at confirm, refuses commands and portfolio runs, and applies `dispatch_run`'s
+  realpath folder allowlist, clean tree, committed flow opt-in at current HEAD and shared hourly attempt count.
+  These grants come from the process environment only. A duplicate fire in the same minute is refused explicitly.
+  `dispatch_trigger_edit` also accepts `maxTurns`; its nine editable fields match the console. Trigger reads include
+  conditional safe display fields and cron stall counts, never task or instruction text. Adds still require a
+  person's confirmation and write `run.secretBundle: false`.
+
 - **AMENDED 2026-10-29 (#749)**: `/dispatch insights whatif <provider>/<model> --flow <flow>` prints `/insights/breakdown` with the model, flow and range; the ordinary insights command still prints Spend.
 
 - **Roles (#717)**: model-callable writes cannot set `modelRoles` under any nesting or near-miss spelling. Unrelated trigger edits preserve it. Run detail and the run API show validated role identity beside the resolved physical model and bounded agent-refusal counts. Both published ESM bundles must load in plain Node without a source loader supplying CommonJS require; bundled CommonJS dependencies receive Node builtin resolution through an explicit createRequire prelude.
@@ -767,7 +776,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`,
   `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_allocations`,
   `dispatch_capacity` (issue #599: the capacity report, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; the **confirm-gated writes**
-  `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_delete`, `dispatch_pause_add`,
+  `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`, `dispatch_trigger_delete`, `dispatch_pause_add`,
   `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`,
   `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`,
   `dispatch_project_delete`, `dispatch_envelope_set`; and the **delegated allocation write**
@@ -2337,14 +2346,34 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve and the live hosts advertising
     it), still with no resolver path, its real path included; the run page (c) shows an OpenShell run's sandbox policy
     (mode, credential providers, placeholders), its rule hosts and a run's secrets profile name. The names-only rule of
-    this item is UNCHANGED, checked. Tests: `admin/test/secret-profiles-view.test.mjs`. AMENDED 2026-10-24 (#737 PR
-    2): a secret bundle's opted-out triggers, and the triggers the "Secret profiles in use" table names, are named by
-    the 0-based index this page's Triggers table and its forms show ("index 0, index 2"), so the page says one number
-    for one row until it converts to row buttons (PR 7a of #737); before, both wrote that index after a `#` ("#0" for
-    the first), which reads as a count from 1. The pi panel and `/dispatch secrets list` name an opted-out trigger by
-    the 1-based number a person reads there (`#1` is the first, `rowNumber` in `admin/src/words.mjs`,
-    `REQ-ADMIN-VIA-PI-EXTENSION`); the index a form or a tool sends stays 0-based on every surface. Tests:
-    `admin/test/secret-bundles-view.test.mjs`, `admin/test/words.test.mjs`.
+    this item is UNCHANGED, checked. Tests: `admin/test/secret-profiles-view.test.mjs`. The pi panel, console and `/dispatch secrets list` name an opted-out trigger by the same
+    1-based row number a person reads; form and tool indexes remain zero-based (#750).
+    **AMENDED 2026-10-30 (#750)**: The ConfigScreen kit shows settings, triggers, pause windows, scoped
+    limits and projects with section counts, anchors, collapsed empty sections and Edit/Delete row controls.
+    Packages, secret profiles, secret bundles and MCP servers retain usable kit panels until #751 moves them.
+    Names and environment variable names are visible, never secret values, resolver paths or references.
+    The title discloses settings and triggers file locations, including whether the overlay is outside the deployment;
+    the default overlay reads `~/.pi-dispatch/settings.json`, other paths by their last folder, never a home prefix.
+    Every visible row reference counts from 1; hidden indexes and Runs filters keep their machine values.
+    A setting is chosen from the closed key list. Every form preserves input on refusal and associates an inline
+    field error. Previews show a diff, applicability, destination, Undo and the ticket's five minutes.
+  - (g1) **One trigger** (`/config/trigger?index=`, page `trigger`, viewer, not live). The title identifies kind,
+    phrase, flow, forge and row. Panels `p-trigger-on`, `p-trigger-runs`, `p-trigger-run`, `p-trigger-edit`,
+    `p-trigger-trust`, `p-trigger-kinds` and `p-trigger-change` explain selectors, authorization, last-24-hour count
+    and metered spend, last five runs, jobs in line, every run field and its fallback, trust, cron health, one-shot
+    state and the worker's actual trigger-skew refusals. Editable fields are flow, backend, provider, model, maxTurns,
+    progress, statusComment, steer and recover; cron leaves out statusComment and recover. Other fields are By hand.
+    Sandbox facts come from venue declarations: blessing, transcript, steering, recovery, shell, retention, OpenShell
+    copy/bind and egress, replicas and secret profile/bundle names. The configured stall threshold is shown.
+    Operators alone read escaped task/instruction text or see edit/delete/fire controls. A viewer sees presence only.
+    The newest named doctor check explains an invalid file. Runs and venue links preserve machine identity.
+  - (g2) **Add a trigger** (`/config/trigger-add`, page `trigger-add`, operator). The TriggerEditor offers structured
+    fields for cron, label, comment, pull_request and issue, configured webhook forges and their own action words,
+    review/label narrowing, skill-tier suggestions, blessed venues with capabilities, model/provider and maxTurns.
+    Options name their run keys and needs. Set by hand names fields neither form can set. The JSON fallback takes
+    the add tool's fields. Both forms persist exactly the tool-built entry, including `run.secretBundle: false`.
+    The preview shows added lines, who may fire, per-run reserve, destination and Undo. Inline refusals change nothing.
+    Read-only operators see forms are off; viewers cannot open the editor. Existing overview page-name links resolve.
   - (h) **Audit** (`/audit`). For the operator role, the page shows the console audit rows newest first, pages with
     `before`, and shows a line that is not a row as broken, in its place, rather than skipping it; for a viewer, it is
     refused (`REQ-CONSOLE-SECURITY` (l)). Tests: `worker/test/console-audit.test.mjs` (`readConsoleAudit`),
@@ -2815,6 +2844,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `.github/scripts/console-width-check.mjs --require`.
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
+
+- **AMENDED 2026-10-30 (#750)**: paid `trigger-fire` shares `dispatch_trigger_fire`'s planner and bounds. Page load
+  and preview consume no hourly allowance. Confirm revalidates the file version, queue scheduler and current local
+  admission gates, then counts the attempt before enqueueing the complete validated schedule. Concurrent fires in
+  one minute produce at most one job and an explicit duplicate refusal. Rate accounting and queue deduplication
+  remain separate operations; a refused duplicate may count as an attempt. Audit-before-write, tickets, reserve
+  disclosure and cancellation Undo apply. Trigger edit accepts the same nine fields as its tool and preserves
+  unrelated reviewed run fields. No config form asks a person to type an index.
 
 - **AMENDED 2026-10-29 (#749)**: The three allocation forms move from Configuration to Budget split. Existing body schemas, action names, audit kinds and five-minute ticket guards remain. Envelope preview includes the file diff and multi-host consequence; revert preview names its exceptions and undo identifies the previous plan id rather than a moving row number.
 
@@ -7914,3 +7951,4 @@ instead of drifting.
 | 2026-10-29 (#748, design fidelity) | **`REQ-OPERATOR-CONSOLE-SCREENS` (f) AMENDED**: component hierarchy and visible chart/declaration structure of all four published cards are explicit acceptance criteria, with structural and panel-scoped evidence checks. **`REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `INT-HOST-REGISTRY-CONTRACT`, `INT-CONSOLE-EVENT-STREAM` UNCHANGED, checked**: role guards, confirmed actions, telemetry authority and stream behavior stay intact. |
 | 2026-10-29 (#749) | `REQ-OPERATOR-CONSOLE-SCREENS` (e), `REQ-CONSOLE-SECURITY` (m), `REQ-TOPOLOGY-GRAPH`, `REQ-COST-ANALYTICS`, `REQ-CAPACITY-INSIGHTS`, `REQ-DELEGATED-ALLOCATION`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-SIZE-SUGGESTIONS` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: five Spend routes, held-money facts, fleet capacity, window-scoped estimates, structured allocation and accessible map/list. All unrelated requirements UNCHANGED, checked. |
 | 2026-10-29 (#749, review) | `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH` and `REQ-OPERATOR-CONSOLE-SCREENS` (e) clarified: unreserved ledger zero is not zero paid cost; missing prices retain unknown/floor/estimate marks and counter charges stay separate. Graph validation uses the worker loader on one byte snapshot; unread files differ from missing ones. Current, duplicate and neutral history facts remain visible to viewers. All other requirements UNCHANGED, checked. |
+| 2026-10-30 (#750) | `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: Pulse configuration, trigger detail/editor, row controls, safe reads, edit parity and bounded paid manual cron fire. `REQ-CONSOLE-SECURITY`, worker budget gates and forge authorization UNCHANGED, checked. |

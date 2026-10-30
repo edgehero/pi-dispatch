@@ -59,6 +59,8 @@
     "./run-progress": "./src/run-progress.mjs",
     "./reserve-estimate": "./src/reserve-estimate.mjs",
     "./model-endpoints": "./src/model-endpoints.mjs",
+    "./egress-allowlist": "./src/egress-allowlist.mjs",
+    "./openshell-policy": "./src/openshell-policy.mjs",
     "./model-catalog": "./src/model-catalog.mjs",
     "./model-ref": "./src/model-ref.mjs",
     "./model-failover-protocol": "./src/model-failover-protocol.mjs",

@@ -19,15 +19,14 @@
  * and (issue #642) the action controls, which a read-only console draws for nobody.
  * Data is read once for both roles, and the role decides only what is drawn, so a stream must be rendered per role.
  *
- * THE FRAME (issue #737) is `shell.mjs`'s: the top bar, the navigation and the title bar, around a page's panels. A page
- * whose panels are still the old markup is in `LEGACY_PAGES`, and its panels are drawn inside `<div class="legacy">`
- * (`legacyWrap`), byte for byte as before, until that page's own pull request converts it. A converted page may lay its
- * panels out in the kit's grids (`PAGE_LAYOUT`) and have a line under its title that the stream swaps
- * (`PAGE_HEADLINES`).
+ * THE FRAME is shell.mjs's Pulse navigation and title bar. Pages compose panels in PAGE_LAYOUT;
+ * every screen now uses the same kit (#750).
  */
+import { triggerOn, triggerRuns, triggerRun, triggerEdit, triggerTrust, triggerKinds, triggerChange, triggerAdd, triggerKindHelp, triggerForgeWords, triggerRefusals, triggerTitle } from "./panels/trigger.mjs";
+import { configNavigation, configFiles, configUnset, configDescription } from "./panels/config.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
-import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
+import { readTriggerEditor, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { ageText, beatAgeOf } from "./panels/common.mjs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { BACKEND_NAMES, BACKENDS } from "@edgehero/pi-dispatch/backends";
@@ -38,7 +37,7 @@ import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { RUN_FILTER_FIELDS, parseRunFilter } from "../run-filter.mjs";
 import { html, page } from "./html.mjs";
 import { seg } from "./kit.mjs";
-import { HEADLINE_ID, legacyWrap, NAV_PARKED_ID, navParkedHtml, shellHtml } from "./shell.mjs";
+import { HEADLINE_ID, NAV_PARKED_ID, navParkedHtml, shellHtml } from "./shell.mjs";
 import { TIMELINE_ROWS, TIMELINE_ZOOMS } from "./timeline.mjs";
 import { auditAbout, auditChain, auditFilter } from "./panels/audit.mjs";
 import { AUDIT_PARAMS, auditQueryString, parseAuditQuery, readAuditView } from "./audit-view.mjs";
@@ -132,24 +131,13 @@ export const PAGES = Object.freeze({
   fleet: Object.freeze({ path: "/fleet", auth: "viewer", live: true, title: "Fleet", nav: "Fleet", icon: "fleet" }),
   host: Object.freeze({ path: "/fleet/host", auth: "viewer", live: true, title: "Host", nav: null, icon: "fleet" }),
   venue: Object.freeze({ path: "/fleet/venue", auth: "viewer", live: false, title: VENUE_LABEL, nav: null, icon: "fleet" }),
+  trigger: Object.freeze({ path: "/config/trigger", auth: "viewer", live: false, title: "Trigger", nav: null, icon: "config" }),
+  "trigger-add": Object.freeze({ path: "/config/trigger-add", auth: "operator", live: false, title: "Add a trigger", nav: null, icon: "config" }),
   config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration", icon: "config" }),
   watch: Object.freeze({ path: "/watch", auth: "viewer", live: false, title: "Watch", nav: null, icon: "bolt" }),
   "watch-board": Object.freeze({ path: "/watch/board", auth: "viewer", live: false, title: "Watch board", nav: null, icon: "bolt" }),
   audit: Object.freeze({ path: "/audit", auth: "operator", live: false, title: "Audit log", nav: "Audit", icon: "audit" }),
 });
-
-/**
- * The pages still drawn in the old markup (issue #737): every screen, the two sign-in pages and the operators-only
- * refusal (`forbidden`, which renders with its screen's `data-page`). Each wraps its content in `<div class="legacy">`,
- * the one place the compatibility stylesheet (`compat-css.mjs`) applies. A page's own pull request converts it and
- * takes its name out; `console-compat.test.mjs` fails a converted page whose golden still holds the wrapper, and, once
- * this is empty, a compatibility layer that still exists.
- *
- * WRITTEN OUT, NOT DERIVED FROM `PAGES`, so a page a later pull request adds is drawn in the Pulse markup from its
- * first day instead of joining the old markup by default. A frozen ARRAY, not a Set: `Object.freeze` keeps a Set's
- * properties fixed but not its members (`.add()` still works on one), and nothing should add a page here at run time.
- */
-export const LEGACY_PAGES = Object.freeze(["config"]);
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
@@ -165,7 +153,9 @@ const PAGE_PANELS = Object.freeze({
   fleet: [["p-fleetbar", fleetBar], ["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-failed", fleetFailed], ["p-delayed", fleetDelayed], ["p-schedules", fleetSchedulers], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues]],
   host: [["p-hoststate", hostState], ["p-hostjobs", hostJobs], ["p-hostsandboxes", hostSandboxes], ["p-hostbudget", hostBudget], ["p-hostcap", hostCapacity], ["p-hostrow", hostRow], ["p-hostdoctor", hostDoctor]],
   venue: [["p-venue", venueSummary], ["p-venue-serves", venueServes], ["p-venue-hosts", venueHosts], ["p-venue-props", venueProperties], ["p-venue-fix", venueFix], ["p-venue-compare", venueCompare]],
-  config: [["p-triggers", configTriggers], ["p-settings", configSettings], ["p-pause-windows", configPauseWindows], ["p-scoped-limits", configScopedLimits], ["p-projects", configProjects], ["p-mcp", configMcp], ["p-packages", configPackages], ["p-secret-profiles", configSecretProfiles], ["p-secret-bundles", configSecretBundles]],
+  config: [["cf-navigation", configNavigation], ["cf-settings", configSettings], ["cf-triggers", configTriggers], ["cf-pause-windows", configPauseWindows], ["cf-scoped-limits", configScopedLimits], ["cf-projects", configProjects], ["cf-files", configFiles], ["cf-unset", configUnset], ["cf-mcp-servers", configMcp], ["cf-packages", configPackages], ["cf-secret-profiles", configSecretProfiles], ["cf-secret-bundles", configSecretBundles]],
+  trigger: [["p-trigger-on", triggerOn], ["p-trigger-runs", triggerRuns], ["p-trigger-run", triggerRun], ["p-trigger-edit", triggerEdit], ["p-trigger-trust", triggerTrust], ["p-trigger-kinds", triggerKinds], ["p-trigger-change", triggerChange]],
+  "trigger-add": [["p-trigger-add", triggerAdd], ["p-kinds", triggerKindHelp], ["p-forge-words", triggerForgeWords], ["p-refusals", triggerRefusals]],
   watch: [["p-watch", watchPanel]],
   "watch-board": [["p-watch-board", watchBoardPanel]],
   audit: [["p-audit-chain", auditChain], ["p-audit-filter", auditFilter], ["p-audit", auditLog], ["p-audit-about", auditAbout]],
@@ -204,6 +194,9 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  */
 const PAGE_LAYOUT = Object.freeze({
   ...SPEND_LAYOUTS,
+  config: [{ cls: "stack", items: ["cf-navigation"] }, { cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["cf-settings", "cf-triggers", "cf-pause-windows", "cf-scoped-limits", "cf-projects", "cf-files"] }, { cls: "stack", items: ["cf-unset", "cf-mcp-servers", "cf-packages", "cf-secret-profiles", "cf-secret-bundles"] }] }],
+  trigger: [{ cls: "cols config-layout", items: [{ cls: "stack", items: ["p-trigger-on", "p-trigger-runs", "p-trigger-run", "p-trigger-edit"] }, { cls: "stack", items: ["p-trigger-trust", "p-trigger-kinds", "p-trigger-change"] }] }],
+  "trigger-add": [{ cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["p-trigger-add"] }, { cls: "stack", items: ["p-kinds", "p-forge-words", "p-refusals"] }] }],
   fleet: [{ cls: "stack", items: ["p-fleetbar", "p-active"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-queues", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor"] }] }, { cls: "stack", items: ["p-venues"] }],
   host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
   venue: [{ cls: "cols", items: [{ cls: "stack", items: ["p-venue-props"] }, { cls: "stack", items: ["p-venue", "p-venue-serves", "p-venue-hosts", "p-venue-fix"] }] }, { cls: "stack", items: ["p-venue-compare"] }],
@@ -252,6 +245,8 @@ const PAGE_PARAMS = Object.freeze({
   host: ["name"],
   venue: ["name"],
   config: [],
+  trigger: ["index"],
+  "trigger-add": [],
   watch: ["rule"],
   "watch-board": ["rule", "finding"],
   audit: [...AUDIT_PARAMS],
@@ -317,6 +312,11 @@ export function parsePageQuery(name, searchParams) {
     return v === null || v === "" ? null : v;
   };
   switch (name) {
+    case "trigger": {
+      const index = one("index");
+      if (index === null || !/^(?:0|[1-9]\d{0,5})$/.test(index)) return { refusal: "index must be a triggers-file index" };
+      return { query: Object.freeze({ index: Number(index) }) };
+    }
     case "host":
     case "venue": {
       const value = one("name");
@@ -400,6 +400,7 @@ export function parsePageQuery(name, searchParams) {
 export function pageQueryString(name, query) {
   const p = new URLSearchParams();
   const q = query ?? {};
+  if (name === "trigger" && Number.isSafeInteger(q.index)) p.set("index", String(q.index));
   if (name === "watch" || name === "watch-board") {
     for (const k of ["rule", "finding"]) if (q[k]) p.set(k, q[k]);
   } else if (name === "runs") {
@@ -483,6 +484,8 @@ const PAGE_READS = Object.freeze({
   host: ["snapshot", "waiting", "hostCapacity"],
   venue: ["snapshot"],
   config: ["snapshot"],
+  trigger: ["snapshot", "waiting"],
+  "trigger-add": ["snapshot"],
   watch: ["parkedCount"],
   "watch-board": ["parkedCount"],
   audit: ["audit", "parkedCount"],
@@ -610,6 +613,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
   if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
   const reads = PAGE_READS[name];
+  if (["config", "trigger", "trigger-add"].includes(name) && typeof deps.configLocations === "function") data.configLocations = deps.configLocations();
   // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
   const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
   if (name === "run" && typeof deps.env?.PI_CHAIN_MAX_PER_JOB === "string" && /^\d{1,9}$/.test(deps.env.PI_CHAIN_MAX_PER_JOB)) data.chainMaxPerJob = Number(deps.env.PI_CHAIN_MAX_PER_JOB);
@@ -621,6 +625,18 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
     }
+  }
+  if (name === "trigger") {
+    if (data.snapshot && typeof deps.fleet?.triggerSkew === "function") {
+      try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await deps.fleet.triggerSkew(q.index, data.snapshot.waiting) } }; } catch { /* An unreadable skew check remains unknown. */ }
+    }
+    data.triggerDetail = triggerDetailOf(data.snapshot, q.index, { now });
+    if (formsDrawn(who)) {
+      try { data.triggerFireCheck = typeof deps.triggerFireCheck === "function" ? await deps.triggerFireCheck(q.index) : { refusal: "Fire now is not available in this deployment." }; } catch { data.triggerFireCheck = { refusal: "The console could not check whether this schedule can fire here." }; }
+    }
+  }
+  if (name === "trigger" || name === "trigger-add") {
+    try { data.triggerEditor = typeof deps.triggerEditor === "function" ? await deps.triggerEditor() : readTriggerEditor({ paths: deps.paths ?? {}, env: deps.env ?? {} }); } catch { data.triggerEditor = {}; }
   }
   if (name === "fleet") {
     try {
@@ -847,7 +863,7 @@ function panelFragments(name, ctx) {
  */
 export async function pagePanels(name, ctx) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
-  const panels = panelFragments(name, ctx).map(({ id, fragment }) => ({ id, html: String(fragment) }));
+  const panels = panelFragments(name, ctx).map(({ id, fragment }) => ({ id, html: String(fragment ?? "") }));
   if (!PAGES[name].live) return panels;
   const headline = headlineOf(name, ctx);
   return [...panels, { id: NAV_PARKED_ID, html: String(navParkedHtml(ctx?.data)) }, ...(headline === null ? [] : [{ id: HEADLINE_ID, html: String(headline) }])];
@@ -912,11 +928,11 @@ export async function renderPage(name, ctx) {
   // Issue #710: none for a run that never had one to show: refused before it started, or no record of a run that is not
   // running (not a run id, queued, or unknown), which the outcome banner says once.
   const extra = name === "run" && !ctx?.data?.run?.invalid ? html`<div id="transcript" class="run-transcript">${runTranscriptSection(viewOf(name, ctx))}</div>` : null;
-  const sections = new Map(panels.map(({ id, fragment }) => [id, legacyWrap(name, html`<section id="${id}" data-panel>${fragment}</section>`)]));
+  const sections = new Map(panels.map(({ id, fragment }) => [id, html`<section id="${id}" data-panel>${fragment}</section>`]));
   if (name === "run" && extra !== null) sections.set("p-transcript", html`${sections.get("p-transcript")}${extra}`);
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
-  const titleOptions = name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {};
+  const titleOptions = name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {};
   const body = shellHtml(name, ctx, html`${name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${inner}`, { ...titleOptions, ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = places !== null && !runPlaces(places).shown ? 503 : 200;

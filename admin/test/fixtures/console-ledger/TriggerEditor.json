@@ -1,0 +1,168 @@
+{
+  "card": "TriggerEditor",
+  "pr": 750,
+  "panels": [
+    "p-trigger-add",
+    "p-kinds",
+    "p-forge-words",
+    "p-refusals"
+  ],
+  "elements": [
+    {
+      "el": "p-trigger-add",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerAdd",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-kinds",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerKindHelp",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-forge-words",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerForgeWords",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "p-refusals",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerRefusals",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "Five kinds with kind-specific fields",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerAdd",
+      "panel": "p-trigger-add",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "shows": [
+        "data-trigger-kind=\"cron\"",
+        "data-trigger-kind=\"issue\""
+      ]
+    },
+    {
+      "el": "Forge actions in their own words and review-state narrowing",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerForgeWords",
+      "panel": "p-forge-words",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "shows": [
+        "review_submitted",
+        "synchronize"
+      ]
+    },
+    {
+      "el": "Only configured webhook forges and blessed venues are offered",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/read-model.mjs#readTriggerEditor"
+    },
+    {
+      "el": "Flow suggestions from repository, overlay and staged skill tiers",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/read-model.mjs#readTriggerEditor"
+    },
+    {
+      "el": "Blank run fields show their deployment default",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#editFields",
+      "panel": "p-trigger-add",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "shows": "Deployment default"
+    },
+    {
+      "el": "Progress, status comments, steering and recovery name their prerequisites",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerAdd",
+      "panel": "p-trigger-add",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "shows": [
+        "run.progress",
+        "run.recover"
+      ]
+    },
+    {
+      "el": "Set by hand: cap, models, MCP, bundle, sessions, image, secrets, waits and replicas",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerAdd",
+      "panel": "p-trigger-add",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "shows": "Set by hand"
+    },
+    {
+      "el": "JSON alternative sends exactly the same add tool contract",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerAdd",
+      "panel": "p-trigger-add",
+      "golden": [
+        "trigger-add.operator"
+      ],
+      "shows": "JSON"
+    },
+    {
+      "el": "Field refusal uses loader words and changes nothing",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/script.mjs#CONSOLE_SCRIPT",
+      "panel": "p-refusals",
+      "golden": [
+        "panels/trigger-editor-refusals.operator"
+      ],
+      "shows": "Nothing was changed"
+    },
+    {
+      "el": "Preview added lines, reserve, destination, undo and five-minute ticket",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/actions.mjs#previewAction"
+    },
+    {
+      "el": "Viewer cannot open the editor; read-only console says forms off",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#triggerAdd"
+    },
+    {
+      "el": "Trigger 8 address-review and six illustrative refusal examples",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Real loader/planner refusals and browser tests prove behavior; the card\u2019s row 8 and example values are illustrative."
+    }
+  ]
+}

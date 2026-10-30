@@ -2,8 +2,7 @@
  * The Pulse design system's one stylesheet (issue #737): `design/system/components/bundle.css`, pasted VERBATIM.
  * Not one byte is edited here, so the console and the design it was drawn from cannot drift apart unnoticed: the
  * stylesheet test pins the string's sha256 to the file's. A change to the look lands in the design first and is pasted
- * again, or goes in a rule after this one (`page-css.mjs` for the shell and a page, `compat-css.mjs` for the panels
- * not converted yet), never here. The design may run ahead of this paste by one recorded version
+ * again, or goes in a rule after this one (`page-css.mjs` for the shell and a page), never here. The design may run ahead of this paste by one recorded version
  * (`admin/test/design-folder.test.mjs`, `DESIGN_CSS_WAITING_SHA256`), and never by more.
  *
  * A string module for `style.mjs`'s reason: `dist/console.mjs` ships as one file. The file holds no backtick, `${`,

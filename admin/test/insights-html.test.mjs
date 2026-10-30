@@ -1083,6 +1083,7 @@ test("the console script runs under a DOM stub on the spend screen, and a split 
     getElementById: (id) => nodes[id] ?? null,
     getElementsByTagName: () => [],
     querySelector: () => null,
+    querySelectorAll: () => [],
     addEventListener: (type, fn) => (handlers[type] = fn),
   };
   new Function("document", "setTimeout", "location", "history", "MouseEvent", "EventSource", "fetch", CONSOLE_SCRIPT)(document, () => 0, {}, {}, function () {}, undefined, () => { throw new Error("no fetch on the spend screen"); });
@@ -1137,11 +1138,11 @@ test("the split says what this host sees: its mismatch, an outside edit, a plan 
   assert.ok(!block.includes("not counted"));
 });
 
-test("the split box scrolls sideways on a narrow window, and its labels never wrap (#507)", () => {
-  // The console's stylesheet: the insights CSS on theme tokens.
-  assert.match(CONSOLE_CSS, /#split\{[^}]*overflow-x:auto\}/);
-  assert.match(CONSOLE_CSS, /#split \.wl\{[^}]*flex-shrink:0\}/);
-  assert.match(CONSOLE_CSS, /#split \.state\.over\{[^}]*flex-shrink:0\}/);
+test("the Pulse split chart follows its panel width and keeps its labels visible (#750)", () => {
+  // #749 replaced the old #split box with the viewBox-scaled sp-split chart. The removed adapter's scrolling rules
+  // are no longer part of the served screen; the current SVG grows with its panel and does not clip its labels.
+  assert.match(CONSOLE_CSS, /body\[data-page="insights-budget-split"\] \.sp-split\{display: block; width: 100%; overflow: visible;\}/);
+  assert.doesNotMatch(CONSOLE_CSS, /#split\s*\{/);
 });
 
 // ---- the capacity section (issue #599, phase 4, REQ-CAPACITY-INSIGHTS) ----

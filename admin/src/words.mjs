@@ -30,7 +30,7 @@ export const STATUS_KINDS = Object.freeze(["running", "parked", "failed", "refus
 
 /**
  * The record's `outcome` values, each with its word, the panel's glyph and its tone. The tone is the panel's colour name
- * (`success`, `warning`, `error`) and the console's class (`TONE_CLASS`). Refused is a warning, not an error: nothing
+ * (`success`, `warning`, `error`) ; the console uses its status. Refused is a warning, not an error: nothing
  * broke, a rule said no, and the operator may want to change the rule. The `status` is the console's (`STATUS_KINDS`):
  * the panel keeps its glyph and tone, the Pulse console draws the status.
  */
@@ -125,9 +125,6 @@ export function capitalised(s) {
 
 /** A failed record with no reason (an older worker's untagged failure, or one whose reason was free text). */
 export const NO_REASON_FAILED = "Failed: no reason was recorded. The worker that ran it predates the reasons for infrastructure exits.";
-
-/** The console's CSS class for each tone (style.mjs `.good`, `.warn`, `.bad`); a completed run takes none, as before. */
-export const TONE_CLASS = Object.freeze({ success: null, warning: "warn", error: "bad" });
 
 /** What both surfaces call the record's `backend` field (issue #712's word): the field and the query name stay `backend`. */
 export const VENUE_LABEL = "Venue";

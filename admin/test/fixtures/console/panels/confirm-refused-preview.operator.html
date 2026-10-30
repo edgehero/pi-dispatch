@@ -75,8 +75,1058 @@
 <div class="page">
 <header class="top"><a class="brandpill" href="/"><span class="brandpill__m" aria-hidden="true">pi</span>pi-dispatch</a><nav class="pillnav" aria-label="Console screens"><a href="/"><svg class="ic" aria-hidden="true"><use href="#i-home"></use></svg>Overview</a><a href="/runs"><svg class="ic" aria-hidden="true"><use href="#i-runs"></use></svg>Runs</a><a href="/parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"></use></svg>Parked</a><a href="/fleet"><svg class="ic" aria-hidden="true"><use href="#i-fleet"></use></svg>Fleet</a><a href="/insights"><svg class="ic" aria-hidden="true"><use href="#i-spend"></use></svg>Spend</a><a href="/config" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-config"></use></svg>Configuration</a><details class="more"><summary aria-label="More: Audit" title="More"><svg class="ic" aria-hidden="true"><use href="#i-more"></use></svg></summary><div><a href="/audit"><svg class="ic" aria-hidden="true"><use href="#i-audit"></use></svg>Audit</a></div></details></nav><div class="top__end"><a class="roundbtn hide-phone top__search" href="/runs#q" aria-label="Search runs" title="Search runs"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></a><button class="roundbtn" type="button" data-theme-toggle hidden aria-label="Theme: follows the system" title="Theme: follows the system"><svg class="ic" aria-hidden="true"><use href="#i-theme"></use></svg></button><span class="who" data-name="ops" data-role="operator" title="ops, Operator"><span><b>ops</b><small>Operator</small></span><span class="avatar">op</span></span><button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out"><svg class="ic" aria-hidden="true"><use href="#i-logout"></use></svg></button></div></header>
 <main id="main" tabindex="-1">
-<div class="titlebar"><div class="titlebar__lead"><h1>Configuration</h1></div><div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> · not live</span></span><a class="btn btn--sm btn--ghost" href="/config"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a></div></div>
-<div class="legacy"><section id="p-triggers" data-panel><h2>Triggers</h2><div class="scroll"><table class="grid" aria-label="Triggers"><thead><tr><th scope="col" class="num">#</th><th scope="col">On</th><th scope="col">Runs</th><th scope="col">Model</th><th scope="col">Notes</th></tr></thead><tbody><tr><td class="num">0</td><td>label; any pi</td><td>flow triage on github</td><td>deployment default</td><td>staged packages</td></tr></tbody></table></div><details class="editor"><summary>Change the triggers</summary><div class="forms"><form class="act" data-action="trigger-add" autocomplete="off"><label>New trigger, as the add tool&#39;s fields (JSON)<textarea name="trigger" rows="6" data-type="json" required placeholder="{&quot;kind&quot;: &quot;label&quot;, &quot;labels&quot;: [&quot;pi&quot;], &quot;flow&quot;: &quot;triage&quot;}" maxlength="16384" spellcheck="false"></textarea></label><button type="submit">Preview the add</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="trigger-edit" autocomplete="off"><label>Row #<input name="index" type="number" data-type="int" required maxlength="6" autocomplete="off" spellcheck="false"></label><label>Flow<input name="flow" type="text" required maxlength="512" autocomplete="off" spellcheck="false"></label><label>Venue (optional)<input name="backend" type="text" maxlength="512" autocomplete="off" spellcheck="false"></label><label>Provider (optional)<input name="provider" type="text" maxlength="512" autocomplete="off" spellcheck="false"></label><label>Model (optional)<input name="model" type="text" maxlength="512" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the edit</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="trigger-delete" autocomplete="off"><label>Row #<input name="index" type="number" data-type="int" required maxlength="6" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the delete</button><div class="preview-area" data-preview hidden></div></form></div></details></section></div><div class="legacy"><section id="p-settings" data-panel><h2>Settings overlay</h2><dl class="facts"><dt>maxTurns</dt><dd>30</dd><dt>maxCostUsd</dt><dd>2</dd></dl><details class="editor"><summary>Change a setting</summary><div class="forms"><form class="act" data-action="setting-set" autocomplete="off"><label>Key<input name="key" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><label>Value<input name="value" type="text" required maxlength="512" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the change</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="setting-unset" autocomplete="off"><label>Key<input name="key" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the unset</button><div class="preview-area" data-preview hidden></div></form></div></details></section></div><div id="confirm-slot" class="cslot" role="region" aria-live="polite" aria-label="Preview"><div class="banner banner--sm tone-refused" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-refused"></use></svg></span><div><p class="banner__t">The change was refused</p><p class="banner__s">Rejected: maxTurns must be an integer &gt;= 1. Nothing was changed.</p></div><div class="banner__act"><button class="btn btn--sm" type="button" data-close>Close</button></div></div></div><div class="legacy"><section id="p-pause-windows" data-panel><h2>Pause windows</h2><div class="scroll"><table class="grid" aria-label="Pause windows"><thead><tr><th scope="col">Scope</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Zone</th><th scope="col">Days</th><th scope="col">Dates</th></tr></thead><tbody><tr><td class="mono">*</td><td>01:00</td><td>02:00</td><td>-</td><td>every day</td><td>-</td></tr></tbody></table></div><details class="editor"><summary>Change the pause windows</summary><div class="forms"><form class="act" data-action="pause-window-add" autocomplete="off"><label>Scope<input name="scope" type="text" required placeholder="owner/name, a folder, or *" maxlength="4096" autocomplete="off" spellcheck="false"></label><label>From (HH:MM)<input name="from" type="text" required maxlength="5" autocomplete="off" spellcheck="false"></label><label>To (HH:MM)<input name="to" type="text" required maxlength="5" autocomplete="off" spellcheck="false"></label><label>Zone (IANA, default UTC)<input name="tz" type="text" maxlength="64" autocomplete="off" spellcheck="false"></label><label>Days (mon..sun)<input name="days" type="text" data-type="list" maxlength="64" autocomplete="off" spellcheck="false"></label><label>From date (YYYY-MM-DD)<input name="dateFrom" type="text" maxlength="10" autocomplete="off" spellcheck="false"></label><label>To date (YYYY-MM-DD)<input name="dateTo" type="text" maxlength="10" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the add</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="pause-window-edit" autocomplete="off"><label>Row #<input name="index" type="number" data-type="int" required maxlength="6" autocomplete="off" spellcheck="false"></label><label>Scope<input name="scope" type="text" placeholder="owner/name, a folder, or *" maxlength="4096" autocomplete="off" spellcheck="false"></label><label>From (HH:MM)<input name="from" type="text" maxlength="5" autocomplete="off" spellcheck="false"></label><label>To (HH:MM)<input name="to" type="text" maxlength="5" autocomplete="off" spellcheck="false"></label><label>Zone (IANA, default UTC)<input name="tz" type="text" maxlength="64" autocomplete="off" spellcheck="false"></label><label>Days (mon..sun)<input name="days" type="text" data-type="list" maxlength="64" autocomplete="off" spellcheck="false"></label><label>From date (YYYY-MM-DD)<input name="dateFrom" type="text" maxlength="10" autocomplete="off" spellcheck="false"></label><label>To date (YYYY-MM-DD)<input name="dateTo" type="text" maxlength="10" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the edit</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="pause-window-delete" autocomplete="off"><label>Row #<input name="index" type="number" data-type="int" required maxlength="6" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the delete</button><div class="preview-area" data-preview hidden></div></form></div></details></section></div><div class="legacy"><section id="p-scoped-limits" data-panel><h2>Scoped limits</h2><div class="scroll"><table class="grid" aria-label="Scoped limits"><thead><tr><th scope="col">Scope</th><th scope="col">Limits</th></tr></thead><tbody><tr><td class="mono">acme/web</td><td>10 jobs a day</td></tr></tbody></table></div><details class="editor"><summary>Change the scoped limits</summary><div class="forms"><form class="act" data-action="limit-add" autocomplete="off"><label>The row, as the limit tools&#39; fields (JSON)<textarea name="limit" rows="4" data-type="json" required placeholder="{&quot;scope&quot;: &quot;acme/web&quot;, &quot;day&quot;: 10, &quot;concurrent&quot;: 2}" maxlength="16384" spellcheck="false"></textarea></label><button type="submit">Preview the add</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="limit-edit" autocomplete="off"><label>Row #<input name="index" type="number" data-type="int" required maxlength="6" autocomplete="off" spellcheck="false"></label><label>Fields to change (JSON)<textarea name="limit" rows="3" data-type="json" required placeholder="{&quot;day&quot;: 20}" maxlength="16384" spellcheck="false"></textarea></label><button type="submit">Preview the edit</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="limit-delete" autocomplete="off"><label>Row #<input name="index" type="number" data-type="int" required maxlength="6" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the delete</button><div class="preview-area" data-preview hidden></div></form></div></details></section></div><div class="legacy"><section id="p-projects" data-panel><h2>Projects</h2><div class="scroll"><table class="grid" aria-label="Projects"><thead><tr><th scope="col">Project</th><th scope="col">Name</th><th scope="col">Members</th></tr></thead><tbody><tr><td class="mono">web</td><td>-</td><td class="mono">github:acme/web</td></tr></tbody></table></div><dl class="facts"><dt>Allocation envelope</dt><dd>not set</dd></dl><details class="editor"><summary>Change the projects</summary><div class="forms"><form class="act" data-action="project-add" autocomplete="off"><label>Id<input name="id" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><label>Name (optional)<input name="name" type="text" maxlength="512" autocomplete="off" spellcheck="false"></label><label>Members, one repository or folder per line<textarea name="members" rows="3" required maxlength="16384" spellcheck="false"></textarea></label><button type="submit">Preview the add</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="project-edit" autocomplete="off"><label>Id<input name="id" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><label>Name (blank keeps it)<input name="name" type="text" maxlength="512" autocomplete="off" spellcheck="false"></label><label>Members, one repository or folder per line<textarea name="members" rows="3" maxlength="16384" spellcheck="false"></textarea></label><button type="submit">Preview the edit</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="project-delete" autocomplete="off"><label>Id<input name="id" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the delete</button><div class="preview-area" data-preview hidden></div></form><p class="note"><a href="/insights/budget-split">Edit the envelope, priorities and allocation history in Budget split</a>.</p></div></details></section></div><div class="legacy"><section id="p-mcp" data-panel><h2>MCP servers</h2><p class="note">The overlay declares no MCP server.</p></section></div><div class="legacy"><section id="p-packages" data-panel><h2>Staged pi packages</h2><p class="note">No pi package is staged.</p></section></div><div class="legacy"><section id="p-secret-profiles" data-panel><h2>Secret profiles</h2><p class="note">No secret profile is declared.</p><details class="editor"><summary>Change the secret profiles</summary><div class="forms"><form class="act" data-action="secret-profile-add" autocomplete="off"><label>Name<input name="name" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><label>Resolver (absolute path)<input name="path" type="text" required maxlength="4096" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the add</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="secret-profile-remove" autocomplete="off"><label>Name<input name="name" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the removal</button><div class="preview-area" data-preview hidden></div></form></div></details></section></div><div class="legacy"><section id="p-secret-bundles" data-panel><h2>Secret bundles</h2><p class="note">No bundle resolver is declared in the settings overlay.</p><p class="note">The triggers file binds no secret bundle.</p><details class="editor"><summary>Change the bundle resolvers</summary><div class="forms"><form class="act" data-action="secret-bundle-add" autocomplete="off"><label>Name<input name="name" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><label>Resolver (absolute path)<input name="path" type="text" required maxlength="4096" autocomplete="off" spellcheck="false"></label><label>Format it prints (dotenv or json)<input name="format" type="text" required placeholder="dotenv" maxlength="16" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the add</button><div class="preview-area" data-preview hidden></div></form><form class="act" data-action="secret-bundle-remove" autocomplete="off"><label>Name<input name="name" type="text" required maxlength="64" autocomplete="off" spellcheck="false"></label><button type="submit">Preview the removal</button><div class="preview-area" data-preview hidden></div></form></div></details></section></div>
+<div class="titlebar"><div class="titlebar__lead"><h1>Configuration</h1><p class="titlebar__sub">Settings: settings overlay unavailable. Triggers: triggers file unavailable.</p></div><div class="titlebar__end"><span class="drawn"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"></use></svg><span>Drawn at <time datetime="2026-10-08T15:39:08.000Z">15:39 UTC</time> · not live</span></span><a class="btn btn--sm btn--ghost" href="/config"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>Reload</a></div></div>
+<div class="stack"><section id="cf-navigation" data-panel><nav class="config-sections" aria-label="Configuration sections">
+<a class="fpill" href="#cf-settings">Settings <b>2</b></a><a class="fpill" href="#cf-triggers">Triggers <b>1</b></a><a class="fpill" href="#cf-pause-windows">Pause windows <b>1</b></a><a class="fpill" href="#cf-scoped-limits">Scoped limits <b>1</b></a><a class="fpill" href="#cf-projects">Projects <b>1</b></a><a class="fpill" href="#cf-files">Files <b>2</b></a><a class="fpill" href="#cf-unset">Unset <b>0</b></a><a class="fpill" href="#cf-mcp-servers">MCP servers <b>0</b></a><span class="config-divider" aria-hidden="true"></span><a class="btn btn--sm" href="/config">Secrets</a><a class="btn btn--sm" href="/config">Connections</a>
+</nav></section></div><div class="cols cols--wide-side config-layout"><div class="stack"><section id="cf-settings" data-panel><div class="card"><div class="card__head"><h2>Settings overlay</h2></div><dl class="facts"><div class="fact"><dt>model</dt><dd>deployment default</dd></div><div class="fact"><dt>provider</dt><dd>deployment default</dd></div><div class="fact"><dt>maxTurns</dt><dd>30</dd></div><div class="fact"><dt>dailyCap</dt><dd>deployment default</dd></div><div class="fact"><dt>weeklyCap</dt><dd>deployment default</dd></div><div class="fact"><dt>monthlyCap</dt><dd>deployment default</dd></div><div class="fact"><dt>maxTokens</dt><dd>deployment default</dd></div><div class="fact"><dt>dailyTokenCap</dt><dd>deployment default</dd></div><div class="fact"><dt>concurrency</dt><dd>deployment default</dd></div><div class="fact"><dt>softHoldPct</dt><dd>deployment default</dd></div><div class="fact"><dt>maxCostUsd</dt><dd>2</dd></div><div class="fact"><dt>dailyCostUsd</dt><dd>deployment default</dd></div><div class="fact"><dt>weeklyCostUsd</dt><dd>deployment default</dd></div><div class="fact"><dt>monthlyCostUsd</dt><dd>deployment default</dd></div></dl><details class="config-editor">
+<summary>Change a setting</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="setting-set"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Key<select
+class="select"
+name="key"
+
+
+>
+<option
+value="model"
+
+>
+model
+</option><option
+value="provider"
+
+>
+provider
+</option><option
+value="maxTurns"
+
+>
+maxTurns
+</option><option
+value="dailyCap"
+
+>
+dailyCap
+</option><option
+value="weeklyCap"
+
+>
+weeklyCap
+</option><option
+value="monthlyCap"
+
+>
+monthlyCap
+</option><option
+value="maxTokens"
+
+>
+maxTokens
+</option><option
+value="dailyTokenCap"
+
+>
+dailyTokenCap
+</option><option
+value="concurrency"
+
+>
+concurrency
+</option><option
+value="softHoldPct"
+
+>
+softHoldPct
+</option><option
+value="maxCostUsd"
+
+>
+maxCostUsd
+</option><option
+value="dailyCostUsd"
+
+>
+dailyCostUsd
+</option><option
+value="weeklyCostUsd"
+
+>
+weeklyCostUsd
+</option><option
+value="monthlyCostUsd"
+
+>
+monthlyCostUsd
+</option>
+</select></label
+>
+<p class="field__err" data-field-error="key" hidden></p>
+</div><div class="field">
+<label
+>Value<input
+class="input"
+name="value"
+type="text"
+value=""
+ required
+maxlength="512"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="value" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the change</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form><form
+class="act config-form stack"
+data-action="setting-unset"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Key<select
+class="select"
+name="key"
+
+
+>
+<option
+value="model"
+
+>
+model
+</option><option
+value="provider"
+
+>
+provider
+</option><option
+value="maxTurns"
+
+>
+maxTurns
+</option><option
+value="dailyCap"
+
+>
+dailyCap
+</option><option
+value="weeklyCap"
+
+>
+weeklyCap
+</option><option
+value="monthlyCap"
+
+>
+monthlyCap
+</option><option
+value="maxTokens"
+
+>
+maxTokens
+</option><option
+value="dailyTokenCap"
+
+>
+dailyTokenCap
+</option><option
+value="concurrency"
+
+>
+concurrency
+</option><option
+value="softHoldPct"
+
+>
+softHoldPct
+</option><option
+value="maxCostUsd"
+
+>
+maxCostUsd
+</option><option
+value="dailyCostUsd"
+
+>
+dailyCostUsd
+</option><option
+value="weeklyCostUsd"
+
+>
+weeklyCostUsd
+</option><option
+value="monthlyCostUsd"
+
+>
+monthlyCostUsd
+</option>
+</select></label
+>
+<p class="field__err" data-field-error="key" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the unset</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details></div></section><div id="confirm-slot" class="cslot" role="region" aria-live="polite" aria-label="Preview"><div class="banner banner--sm tone-refused" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-refused"></use></svg></span><div><p class="banner__t">The change was refused</p><p class="banner__s">Rejected: maxTurns must be an integer &gt;= 1. Nothing was changed.</p></div><div class="banner__act"><button class="btn btn--sm" type="button" data-close>Close</button></div></div></div><section id="cf-triggers" data-panel><div class="card"><div class="card__head"><h2>Triggers</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Triggers">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+On
+</th><th scope="col">
+Runs
+</th><th scope="col">
+Model
+</th><th scope="col">
+Notes
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>
+<a href="/config/trigger?index=0"
+>label; any pi</a
+>
+</td>
+<td>flow triage on github</td>
+<td>deployment default</td>
+<td>staged packages</td>
+<td>
+<div class="acts">
+<a class="btn btn--sm" href="/config/trigger?index=0#p-trigger-edit">Edit row 1</a><form
+class="act config-form stack"
+data-action="trigger-delete"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<input
+type="hidden"
+name="index"
+value="0"
+ data-type="int"
+/><button class="btn btn--danger btn--sm" type="submit">Delete row 1</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form>
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</div><a class="btn btn--primary" href="/config/trigger-add">Add a trigger</a></div></section><section id="cf-pause-windows" data-panel><div class="card"><div class="card__head"><h2>Pause windows</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Pause windows">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+Scope
+</th><th scope="col">
+From
+</th><th scope="col">
+To
+</th><th scope="col">
+Zone
+</th><th scope="col">
+Days
+</th><th scope="col">
+Dates
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td class="code">*</td>
+<td>01:00</td>
+<td>02:00</td>
+<td>-</td>
+<td>
+every day
+</td>
+<td>
+-
+</td>
+<td>
+<details class="config-editor">
+<summary>Edit row 1</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="pause-window-edit"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<input
+type="hidden"
+name="index"
+value="0"
+ data-type="int"
+/><div class="field">
+<label
+>Scope<input
+class="input"
+name="scope"
+type="text"
+value="*"
+ placeholder="Blank keeps *"
+maxlength="4096"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="scope" hidden></p>
+</div><div class="field">
+<label
+>From (HH:MM)<input
+class="input"
+name="from"
+type="text"
+value="01:00"
+
+maxlength="5"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="from" hidden></p>
+</div><div class="field">
+<label
+>To (HH:MM)<input
+class="input"
+name="to"
+type="text"
+value="02:00"
+
+maxlength="5"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="to" hidden></p>
+</div><div class="field">
+<label
+>Zone (IANA, default UTC)<input
+class="input"
+name="tz"
+type="text"
+value=""
+
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="tz" hidden></p>
+</div><div class="field">
+<label
+>Days (mon..sun)<input
+class="input"
+name="days"
+type="text"
+value=""
+ data-type="list"
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="days" hidden></p>
+</div><div class="field">
+<label
+>From date (YYYY-MM-DD)<input
+class="input"
+name="dateFrom"
+type="text"
+value=""
+
+maxlength="10"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="dateFrom" hidden></p>
+</div><div class="field">
+<label
+>To date (YYYY-MM-DD)<input
+class="input"
+name="dateTo"
+type="text"
+value=""
+
+maxlength="10"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="dateTo" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview edit of row 1</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details><form
+class="act config-form stack"
+data-action="pause-window-delete"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<input
+type="hidden"
+name="index"
+value="0"
+ data-type="int"
+/><button class="btn btn--danger btn--sm" type="submit">Delete row 1</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form>
+</td>
+</tr>
+</tbody>
+</table>
+</div><details class="config-editor">
+<summary>Change the pause windows</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="pause-window-add"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Scope<input
+class="input"
+name="scope"
+type="text"
+value=""
+ required placeholder="owner/name, a folder, or *"
+maxlength="4096"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="scope" hidden></p>
+</div><div class="field">
+<label
+>From (HH:MM)<input
+class="input"
+name="from"
+type="text"
+value=""
+ required
+maxlength="5"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="from" hidden></p>
+</div><div class="field">
+<label
+>To (HH:MM)<input
+class="input"
+name="to"
+type="text"
+value=""
+ required
+maxlength="5"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="to" hidden></p>
+</div><div class="field">
+<label
+>Zone (IANA, default UTC)<input
+class="input"
+name="tz"
+type="text"
+value=""
+
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="tz" hidden></p>
+</div><div class="field">
+<label
+>Days (mon..sun)<input
+class="input"
+name="days"
+type="text"
+value=""
+ data-type="list"
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="days" hidden></p>
+</div><div class="field">
+<label
+>From date (YYYY-MM-DD)<input
+class="input"
+name="dateFrom"
+type="text"
+value=""
+
+maxlength="10"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="dateFrom" hidden></p>
+</div><div class="field">
+<label
+>To date (YYYY-MM-DD)<input
+class="input"
+name="dateTo"
+type="text"
+value=""
+
+maxlength="10"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="dateTo" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details></div></section><section id="cf-scoped-limits" data-panel><div class="card"><div class="card__head"><h2>Scoped limits</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Scoped limits">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+Scope
+</th><th scope="col">
+Limits
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td class="code">acme/web</td>
+<td>
+10 jobs a day
+</td>
+<td>
+<details class="config-editor">
+<summary>Edit row 1</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="limit-edit"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<input
+type="hidden"
+name="index"
+value="0"
+ data-type="int"
+/><div class="field">
+<label
+>Fields to change (JSON; omitted fields keep their values)<textarea
+class="textarea"
+name="limit"
+rows="4"
+ data-type="json"
+maxlength="16384"
+>
+{   &quot;scope&quot;: &quot;acme/web&quot;,   &quot;day&quot;: 10 }</textarea
+>
+</label>
+<p class="field__err" data-field-error="limit" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview edit of row 1</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details><form
+class="act config-form stack"
+data-action="limit-delete"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<input
+type="hidden"
+name="index"
+value="0"
+ data-type="int"
+/><button class="btn btn--danger btn--sm" type="submit">Delete row 1</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form>
+</td>
+</tr>
+</tbody>
+</table>
+</div><details class="config-editor">
+<summary>Change the scoped limits</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="limit-add"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>The row, as the limit tools&#39; fields (JSON)<textarea
+class="textarea"
+name="limit"
+rows="4"
+ data-type="json" required placeholder="{&quot;scope&quot;: &quot;acme/web&quot;, &quot;day&quot;: 10, &quot;concurrent&quot;: 2}"
+maxlength="16384"
+>
+</textarea
+>
+</label>
+<p class="field__err" data-field-error="limit" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details></div></section><section id="cf-projects" data-panel><div class="card"><div class="card__head"><h2>Projects</h2></div><div class="tbl-wrap">
+<table class="tbl" aria-label="Projects">
+<thead>
+<tr>
+<th scope="col">
+Row
+</th><th scope="col">
+Project
+</th><th scope="col">
+Name
+</th><th scope="col">
+Members
+</th><th scope="col">
+Actions
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td class="code">web</td>
+<td>-</td>
+<td class="mono">
+github:acme/web
+</td>
+<td>
+<details class="config-editor">
+<summary>Edit row 1</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="project-edit"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<input
+type="hidden"
+name="id"
+value="web"
+
+/><div class="field">
+<label
+>Name<input
+class="input"
+name="name"
+type="text"
+value=""
+
+maxlength="512"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="name" hidden></p>
+</div><div class="field">
+<label
+>Members (blank keeps the current list)<textarea
+class="textarea"
+name="members"
+rows="4"
+
+maxlength="16384"
+>
+github:acme/web</textarea
+>
+</label>
+<p class="field__err" data-field-error="members" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview edit of row 1</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details><form
+class="act config-form stack"
+data-action="project-delete"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<input
+type="hidden"
+name="id"
+value="web"
+
+/><button class="btn btn--danger btn--sm" type="submit">Delete row 1</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form>
+</td>
+</tr>
+</tbody>
+</table>
+</div><dl class="facts"><div class="fact"><dt>Allocation envelope</dt><dd>not set</dd></div></dl><details class="config-editor">
+<summary>Change the projects</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="project-add"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Id<input
+class="input"
+name="id"
+type="text"
+value=""
+ required
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="id" hidden></p>
+</div><div class="field">
+<label
+>Name (optional)<input
+class="input"
+name="name"
+type="text"
+value=""
+
+maxlength="512"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="name" hidden></p>
+</div><div class="field">
+<label
+>Members, one repository or folder per line<textarea
+class="textarea"
+name="members"
+rows="3"
+ required
+maxlength="16384"
+>
+</textarea
+>
+</label>
+<p class="field__err" data-field-error="members" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form>
+<p class="note">
+<a href="/insights/budget-split"
+>Edit the envelope, priorities and allocation history in Budget
+split</a
+>.
+</p></div>
+</details></div></section><section id="cf-files" data-panel><div class="card"><div class="card__head"><h2>Files</h2></div><p>Settings: settings overlay unavailable. Triggers: triggers file unavailable.</p></div></section></div><div class="stack"><section id="cf-unset" data-panel><div class="card"><div class="card__head"><h2>Unset a setting</h2></div><form
+class="act config-form stack"
+data-action="setting-unset"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Key<select
+class="select"
+name="key"
+
+
+>
+<option
+value="model"
+
+>
+model
+</option><option
+value="provider"
+
+>
+provider
+</option><option
+value="maxTurns"
+
+>
+maxTurns
+</option><option
+value="dailyCap"
+
+>
+dailyCap
+</option><option
+value="weeklyCap"
+
+>
+weeklyCap
+</option><option
+value="monthlyCap"
+
+>
+monthlyCap
+</option><option
+value="maxTokens"
+
+>
+maxTokens
+</option><option
+value="dailyTokenCap"
+
+>
+dailyTokenCap
+</option><option
+value="concurrency"
+
+>
+concurrency
+</option><option
+value="softHoldPct"
+
+>
+softHoldPct
+</option><option
+value="maxCostUsd"
+
+>
+maxCostUsd
+</option><option
+value="dailyCostUsd"
+
+>
+dailyCostUsd
+</option><option
+value="weeklyCostUsd"
+
+>
+weeklyCostUsd
+</option><option
+value="monthlyCostUsd"
+
+>
+monthlyCostUsd
+</option>
+</select></label
+>
+<p class="field__err" data-field-error="key" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the unset</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div></section><section id="cf-mcp-servers" data-panel><div class="card"><div class="card__head"><h2>MCP servers</h2></div><p class="muted">The overlay declares no MCP server.</p></div></section><section id="cf-packages" data-panel><div class="card"><div class="card__head"><h2>Staged pi packages</h2></div><p class="note">No pi package is staged.</p></div></section><section id="cf-secret-profiles" data-panel><div class="card"><div class="card__head"><h2>Secret profiles</h2></div><p class="note">
+No secret profile is
+declared.
+</p>
+<details class="config-editor">
+<summary>Change the secret profiles</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="secret-profile-add"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Name<input
+class="input"
+name="name"
+type="text"
+value=""
+ required
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="name" hidden></p>
+</div><div class="field">
+<label
+>Resolver (absolute path)<input
+class="input"
+name="path"
+type="text"
+value=""
+ required
+maxlength="4096"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="path" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form><form
+class="act config-form stack"
+data-action="secret-profile-remove"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Name<input
+class="input"
+name="name"
+type="text"
+value=""
+ required
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="name" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the removal</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details></div></section><section id="cf-secret-bundles" data-panel><div class="card"><div class="card__head"><h2>Secret bundles</h2></div><p class="note">
+No bundle resolver is declared in the settings overlay.
+</p><p class="muted">The triggers file binds no secret bundle.</p><details class="config-editor">
+<summary>Change the bundle resolvers</summary>
+<div class="stack"><form
+class="act config-form stack"
+data-action="secret-bundle-add"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Name<input
+class="input"
+name="name"
+type="text"
+value=""
+ required
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="name" hidden></p>
+</div><div class="field">
+<label
+>Resolver (absolute path)<input
+class="input"
+name="path"
+type="text"
+value=""
+ required
+maxlength="4096"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="path" hidden></p>
+</div><div class="field">
+<label
+>Format it prints (dotenv or json)<input
+class="input"
+name="format"
+type="text"
+value=""
+ required placeholder="dotenv"
+maxlength="16"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="format" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the add</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form><form
+class="act config-form stack"
+data-action="secret-bundle-remove"
+
+autocomplete="off"
+>
+<fieldset data-config-controls disabled>
+<div class="field">
+<label
+>Name<input
+class="input"
+name="name"
+type="text"
+value=""
+ required
+maxlength="64"
+autocomplete="off"
+spellcheck="false"
+/></label
+>
+<p class="field__err" data-field-error="name" hidden></p>
+</div><button class="btn btn--primary btn--sm" type="submit">Preview the removal</button>
+</fieldset>
+<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
+<p class="field__err" data-form-error hidden role="alert"></p>
+</form></div>
+</details></div></section></div></div>
 </main>
 </div>
 </body>

@@ -5,7 +5,6 @@ import { test } from "node:test";
 import { PAGES, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { BEAT_FRESH_MS, COUNT_WINDOWS_UTC_TEXT, NO_WORKER_TEXT, STALE_BEATS_TEXT, ageText, insightsBody, moneyHtml, runCost, shownPath, timeHtml, usdText, utcText, workersOnline } from "../src/console/panels.mjs";
 import { SHELL_PANEL_IDS } from "../src/console/shell.mjs";
-import { LEGACY_CSS } from "../src/console/compat-css.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_PARAMS, AUDIT_Q_MAX, AUDIT_ROW_STATES, AUDIT_SEEK_BY, AUDIT_WHO_RE, auditQueryString, auditRowState, parseAuditQuery, readAuditView } from "../src/console/audit-view.mjs";
@@ -115,7 +114,7 @@ test("the role rule: a failure reason is the operator's, in a details element, a
 test("the secret profiles list PI_SECRET_PROFILES' names beside the overlay's, and never says none while the env holds some (#712)", async () => {
   const profilesOf = async (extra) => {
     const html = (await pagePanels("config", ctxOf("operator", { snapshot: { ...snapshot(), ...extra } }))).map((p) => p.html).join("");
-    return html.slice(html.indexOf("<h2>Secret profiles</h2>"), html.indexOf("<h2>Secret bundles</h2>"));
+    return html.slice(html.indexOf("<h2>Secret profiles</h2>"), html.indexOf("<h2>Secret bundles</h2>")).replace(/\s+/g, " ");
   };
   const noOverlay = { settings: { overlay: {} } };
   const envOnly = await profilesOf({ ...noOverlay, secretProfilesEnv: { names: ["prod"], malformed: false, seen: true } });
@@ -215,19 +214,11 @@ test("the insights body renders an empty payload and lists no tips", () => {
   assert.match(html, /<ol id="insights-tips" class="hidden-tips" hidden><\/ol>$/);
 });
 
-test("the stylesheet draws the old panels on the Pulse tokens, inside .legacy, with the charts' colours re-pointed", () => {
-  // The whole stylesheet is console-stylesheet.test.mjs's and the legacy layer's ratchet console-compat.test.mjs's; this
-  // holds what the panels drawn here rely on.
+test("the stylesheet serves Pulse themes and an explicit body background without the compatibility palette", () => {
   assert.ok(!/<|@import|url\(/.test(CONSOLE_CSS), "plain rules, nothing fetched");
-  assert.ok(CONSOLE_CSS.endsWith(LEGACY_CSS), "the old panels' rules come last");
-  assert.match(CONSOLE_CSS, /@media \(prefers-color-scheme: dark\)\{:root:not\(\[data-theme="light"\]\)\{color-scheme:dark;--canvas:/, "the system's dark preference, unless the page forces light");
-  assert.match(CONSOLE_CSS, /\nbody \{ margin: 0; background: var\(--canvas\);/, "the body background is explicit");
-  // The old palette is a set of properties defined from the tokens, so it follows the theme; no literal is left in a rule.
-  assert.match(LEGACY_CSS, /\.legacy\{--pd-canvas:var\(--canvas\);--pd-panel:var\(--surface\);/);
-  assert.match(LEGACY_CSS, /\.legacy svg \[fill="#58a6ff"\]\{fill:var\(--pd-accent\)\}/, "a chart's presentation attribute follows the theme");
-  assert.match(LEGACY_CSS, /\.legacy>section\[data-panel\]\{[^}]*border-radius:var\(--radius-lg\);background:var\(--surface\)\}/, "each old panel is a card");
-  const declarations = LEGACY_CSS.replace(/\[[^\]]*\]/g, "");
-  assert.ok(!/#[0-9a-f]{3,8}\b/i.test(declarations), "no colour literal outside an attribute selector");
+  assert.match(CONSOLE_CSS, /@media \(prefers-color-scheme: dark\)\{:root:not\(\[data-theme="light"\]\)\{color-scheme:dark;--canvas:/);
+  assert.match(CONSOLE_CSS, /\nbody \{ margin: 0; background: var\(--canvas\);/);
+  assert.doesNotMatch(CONSOLE_CSS, /--pd-|\.legacy/);
 });
 
 // ---- the audit screen (issue #737, the AuditScreen card; issue #711) ------------------------------------------------
@@ -1469,6 +1460,7 @@ function spendDom({ items, tips = [], hash = "", rect = { left: 0, top: 0, width
     getElementById: (id) => els[id] ?? null,
     getElementsByTagName: () => [],
     querySelector: () => null,
+    querySelectorAll: () => [],
     addEventListener: on("document"),
   };
   const location = { hash, pathname: "/insights", search: "?range=30d" };

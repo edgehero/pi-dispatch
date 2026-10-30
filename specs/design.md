@@ -1661,7 +1661,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `run.secretBundle: false` (its task or flow is the model's choice, and an operator confirm on one entry does not
     review what that entry's jobs would hold); the operator removes it by a hand edit. No tool call may carry the field
     at all, under any spelling the sweep folds, so `dispatch_trigger_edit` can neither remove nor set it. The
-    operator-typed console form and the dialogs, a person writing the entry, keep it as built. And the project tools
+    console structured add and JSON fallback retain the same opt-out (#750); operator-typed TUI dialogs keep the
+    entry as built. And the project tools
     refuse any change to the MEMBERSHIP of a project a bundle names, a creation under a bundled id included
     (`planProjectsWrite`, judged on the triggers file before the confirm and again by `writeProjects` after it, the
     scoped-limits "names this project" rule's shape): which jobs hold a bundle is which jobs are in its project.
@@ -2557,6 +2558,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-ADMIN-VIA-PI-EXTENSION
 
+- **AMENDED 2026-10-30 (#750)**: The confirm-gated writes include `dispatch_trigger_fire`. It shares the console fire planner/executor,
+  preserves the complete schedule payload, and adds maxTurns to trigger-edit parity. No new unattended role is added.
+
 - **Decision**: The admin surface is a **pi extension** shipped in an `admin/` workspace, loaded into the
   operator's own interactive pi session (via `-e`, `~/.pi/agent/extensions`, or a trust-gated
   `.pi/extensions`). It provides operator-only slash commands
@@ -2841,7 +2845,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   class), `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`,
   `dispatch_allocations`, `dispatch_capacity` (issue #599: the capacity report through the CLI's own read and
   function, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue**
-  `dispatch_run`; the **confirm-gated writes** `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`,
+  `dispatch_run`; the **confirm-gated writes** `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`,
   `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`,
   `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`,
   `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`, `dispatch_envelope_set`; and the
@@ -3772,6 +3776,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE`, `DES-WORKER-ON-HOST`
 
 ## DES-AI-TRIGGER-FLOW-GATE
+
+- **AMENDED 2026-10-30 (#750)**: Manual cron fire from either console or tool uses the same process-granted roots, clean-tree rule,
+  current-HEAD flow opt-in and hourly attempt counter as dispatch_run. Preview checks without consuming an attempt;
+  execution checks again. Actual scheduler membership and a trigger-file fingerprint prevent stale approvals.
+  The minute-scoped worker enqueue identity prevents duplicate jobs; a duplicate is an explicit refusal. The executor also
+  takes `trigger-fire:<queue>:<manualTriggerJobId>` by Redis SET NX EX 120. This minute latch survives cancellation
+  and uncertain enqueue acknowledgement, so removal cannot reopen the minute. Hourly accounting precedes the latch;
+  the existing worker and CLI enqueue contracts are unchanged.
 
 - **Decision**: A flow is **AI-triggerable only if** its `.pi/skills/<flow>/SKILL.md` YAML frontmatter
   carries **`ai-trigger: allow`**, read from the **git object store at the SHA the job was prepared from** —
@@ -11961,6 +11973,11 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **AMENDED 2026-10-30 (#750)**: Configuration and trigger detail/editor use the Pulse kit and source cards. Human row references count from 1,
+  while hidden machine indexes remain zero-based. The final config migration removes the compatibility layer.
+  Structured and JSON adds share the tool builder and its secret-bundle opt-out. Private prompt text is read only
+  for operator detail. Venue facts and skew predictions reuse worker declarations/checks rather than UI tables.
+
 - **AMENDED 2026-10-29 (#749)**: Five non-live Spend routes read independently through `assembleInsightsView`. Cache identity includes view, window, project, role and effective paths permission. The six Spend cards leave the legacy layer; their CSS stays pasted and pinned. Operator reasons never enter viewer reads or cache entries.
 
 - **Fleet, host and venue detail (#748).** Fleet leaves the compatibility wrapper and draws the FleetScreen and
@@ -12303,11 +12320,9 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
     (`INSIGHTS_CSS`, now exported), the panel's theme tokens (`PAGE_THEME`) and the console's layout rules; the one
     `style=` the insights renderers carried became a class. The insights section renderers are exported and reused,
     never copied, and their tooltips are `data-tip` indexes the served script reads. **AMENDED 2026-10-23 (#737 PR
-    1)**: still one served stylesheet under the same `style-src 'self'`, now five parts in cascade order: the tokens,
-    the design's bundle, the shell's rules, each converted page's rules and the temporary legacy layer
-    (`CONSOLE_CSS = [tokenCss(), PULSE_CSS, SHELL_CSS, pageCss(), LEGACY_CSS]`, "The visual system" below).
-    `INSIGHTS_CSS` and the old layout rules now apply only inside the legacy layer, the old palette rewritten to tokens
-    there (`PAGE_THEME` stays, for the standalone graph renderer). The page-only `<style>` block a design card carries
+    1)**: still one served stylesheet under the same `style-src 'self'`, now the tokens,
+    the design's bundle, the shell's rules and each page's rules. #750 removes the temporary compatibility part
+    (`PAGE_THEME` stays for standalone graph rendering). The page-only `<style>` block a design card carries
     joins the stylesheet as that page's `PAGE_CSS` entry, never as a `<style>` in a page.
 - **One fleet reader, so there is no second read model**: the panel's snapshot code (`createDashboardDeps` and
   `fetchSnapshot` in `dashboard.ts`, which held one client and a pool of failFast queues for the 1 s tick) moved into
@@ -13146,13 +13161,13 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
     link's focus target, the top bar's layout by width, the navigation's count panel, the More menu, and the live
     pill's states and its phone form: "The top bar's layout" below);
     `pageCss()`, each converted page's `PAGE_CSS` entry
-    confined to `body[data-page="<name>"]` (empty in PR 1); and `LEGACY_CSS`. The tokens come first so every later
-    part reads them, and the legacy layer last so it wins inside `.legacy`, the only place it applies. One function
+    confined to `body[data-page="<name>"]` (empty in PR 1), and Configuration's scoped form rules. The tokens come first so every later
+    part reads them. One function
     confines a block of rules, `scopeCss(prefix, css)`: it prefixes every selector, keeps one level of `@media`,
     maps a leading `html`, `body` or `:root` to the prefix, and THROWS on what it cannot confine (another at-rule, a
     nested rule, a selector that names the document after its start), so a page's rule cannot leak by forgetting its
     prefix. The stylesheet still fetches nothing (no `url(`, no `@import`, no `@font-face`, tested), and the shell's
-    and the legacy layer's declarations name no colour by hex: their colours are tokens (the drop shadow under the
+    declarations name no colour by hex: their colours are tokens (the drop shadow under the
     More menu and a chart's tooltip aside).
   - **Light, dark and the system.** `tokenCss()` writes three rules: `:root` with the light colours and every token
     that is not a colour, so a browser that reads nothing more still draws a whole light page;
@@ -13318,45 +13333,11 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
     `<section id="<id>" data-panel>` (the shell's to `<span id="p-nav-parked" data-panel>`, and since #737 PR 3b the
     overview's headline to `<span id="p-headline" data-panel>`, both from `SHELL_PANEL_IDS`) around exactly the HTML
     the stream sends.
-  - **The legacy layer: temporary, confined, and its deletion forced.** A page whose panels are not converted yet is
-    in `LEGACY_PAGES` (`pages.mjs`; in PR 1 every page, both sign-in pages and the operators-only refusal), and its
-    content is drawn inside `<div class="legacy">` (`legacyWrap`) as before. `LEGACY_CSS` (`compat-css.mjs`) applies
-    only inside that wrapper, in this order: a collision neutraliser (`NEUTRALISED`: each bundle selector whose
-    classes the old markup also emits, `.banner`, `.kpi`, `.note`, `.cap` and the rest, reverted by `all:revert`
-    under `:where(.legacy)`, so each rule keeps its own selector's specificity: it beats the bundle by coming later,
-    and every old rule, one class more specific, beats it back); the old `--pd-*` properties defined from tokens, so
-    the old panels follow the theme; `INSIGHTS_CSS` with its palette rewritten to tokens, and the old layout without
-    its header rules; overrides so an old panel reads as a Pulse card; the charts' SVG colour attributes re-pointed at
-    tokens; and the phone rules that keep `/insights` inside 375 px. `admin/test/console-compat.test.mjs` ratchets it:
-    the neutraliser must equal the collisions derived from bundle.css and the old sources; every class a legacy rule
-    names must still be emitted by old markup, so a converted page's dead rule fails; a page not in `LEGACY_PAGES`
-    may carry no `.legacy` and no legacy-only class in its golden; and an empty `LEGACY_PAGES` forces
-    `LEGACY_CSS === ""`. Configuration is the last legacy page and converts in PR 7a, which deletes the layer.
-    **AMENDED 2026-10-24 (#737 PR 2): a wrapper per section.** `renderPage` wraps each panel section (and the run
-    page's transcript section) in a `<div class="legacy">` of its own, not the page's sections in one, because the
-    confirm slot must sit outside every wrapper: inside one, `.legacy button` (one class and one element) beats the
-    bundle's `.btn--confirm-paid` (one class), `.legacy ul:not(.plain)` breaks `.confirm__list`, and the neutraliser
-    reverts `.confirm` and `.diff` there. The script puts the slot after the wrapper of the section that asked. The
-    spacing is the same: `main` is a grid whose gap is the old section margin, each section's margin goes to 0
-    inside its wrapper, and the wrapper draws no box of its own (`display: contents`, in `PULSE_LOOK`), so its one
-    section is the grid's cell: a panel with nothing to say is empty and not drawn (`section[data-panel]:empty`), and
-    takes no cell and no gap, where a wrapper drawn as a block was a cell of no height with a 16 px gap after it (the
-    run page drew a 112 px hole). The wrapper carried only what its section inherits (the `--pd-*` properties, the ink,
-    the font) and a ground that drew nothing, so no box is lost. REJECTED: hiding an empty panel's wrapper with
-    `:has()`, which needs Chrome 105, Safari 15.4 and Firefox 121, past the browser floor; `display: contents` is in
-    all three of the floor's versions. The kept-still note, the one piece of Pulse markup the script puts inside a
-    panel, says its spacing again at the panel (`section[data-panel]>.held`), which outranks the layer's reset of every
-    margin inside a legacy panel. The audit page, both sign-in pages and the operators-only page left the layer (Pulse markup;
-    `LEGACY_PAGES` is the seven other screens; since #737 PR 3b the six, the overview drawn in the Pulse markup, and
-    no rule of the layer went with it, since every class its old panels drew is still drawn by another old page or by
-    `panels/common.mjs`; since #737 PR 4a the four, run, insights, fleet and config, the runs and parked pages drawn in
-    the Pulse markup, the old pager's two rules and its `.pager` collision going with them, since the runs table's Newer
-    and Older links were the last old markup to draw it, and `.code` joining `NEUTRALISED`, since `panels/common.mjs`,
-    read as old markup while any page is legacy, now writes `outcomeCell`'s code span), and the rules nothing emits any
-    more went with them (the old preview
-    area's summary, reserve and confirm, `pre.diff`, every `#login-form` rule), `.confirm` and `.diff`
-    leaving `NEUTRALISED` once the derivation agreed. REJECTED: one wrapper with the slot drawn inside it and its
-    classes restyled back (a second copy of the bar's look under the legacy layer, for a slot that moves anyway).
+  - **All screens use the kit (#750).** Configuration completes the page migration. The temporary compatibility
+    stylesheet, wrapper, page list, tone-class map and old custom properties are removed. Source and golden guards
+    prevent their return. Confirm slots sit after their requesting panel and outside layout grids; no stylesheet
+    adapter can restyle their controls. The migration's earlier stages remain recorded in this entry's history.
+
   - **Two checks hold the look.** `admin/test/console-contrast.test.mjs` derives the colour pairs from the tokens'
     `usage` sentences (their backticked grounds, and a stated `N:1`, else 4.5:1 for a text token and 3:1 for any other),
     the bundle's tone classes and the pairs the design states elsewhere (the focus ring on the canvas and every surface,
@@ -13367,9 +13348,8 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
     `surface` in the light theme), because every status badge the kit draws is an icon and a word, the kit's rule is
     to draw a dot only beside what it marks (since #737 PR 3b the overview's hosts panel, beside each host's beat
     age), and every state of the live pill is a word,
-    except on a phone, where it is a mark whose shape says the state; and the legacy
-    layer's colour combinations inside `.legacy` are not measured (each page's own pull request moves its panels onto
-    the tokens' pairs). `.github/scripts/console-width-check.mjs` loads every golden page and both sign-in pages in
+    except on a phone, where it is a mark whose shape says the state. Every screen uses the
+    tokens' pairs since #750. `.github/scripts/console-width-check.mjs` loads every golden page and both sign-in pages in
     headless Chrome, served with the console's own security headers (`applySecurityHeaders`) and the real stylesheet and
     script, at 375 by 812 CSS pixels in the light and the dark system theme and with one page forced each way (its
     `<html>` tag and `color-scheme` meta exactly as `page()` draws them for that theme, read off a page it rendered,
@@ -16434,3 +16414,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-29 (#748, design fidelity) | **`DES-OPERATOR-CONSOLE` AMENDED**: the published cards also bind component hierarchy, full-width regions and page-local styling; explicit capacity KPI denominators and partial-history geometry prevent misleading charts. Ledgers require panel-scoped visible evidence instead of export presence alone. **`DES-HOST-REGISTRY`, `DES-HOST-BUDGET`, `DES-WAITING-REASONS`, all constitution constraints UNCHANGED, checked**: no admission or runtime action changes. |
 | 2026-10-29 (#749) | `DES-OPERATOR-CONSOLE`, `DES-COST-FOLD-BY-SCAN`, `DES-CAPACITY-FROM-RECORDS`, `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE` AMENDED: independent views and role-safe cache reads, reservation telemetry, shared fleet aggregates and structured allocation. Enforcement thresholds, read-only analytics and static export privacy UNCHANGED, checked. |
 | 2026-10-29 (#749, review) | `DES-COST-FOLD-BY-SCAN` clarified: record cost and enforcement ledger charges are distinct in unreserved/legacy runs, so no display infers zero paid work from a zero reservation. `DES-OPERATOR-CONSOLE` retains unknown/floor/estimate marks and role-independent history facts. Graph input validation now shares the worker loader and the display reader’s byte snapshot. Enforcement and static-export privacy UNCHANGED, checked. |
+| 2026-10-30 (#750) | `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION` and `DES-AI-TRIGGER-FLOW-GATE` AMENDED: Pulse configuration and shared bounded trigger fire. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: no paid container starts here, worker gates and isolation still apply; no merge path is added. |

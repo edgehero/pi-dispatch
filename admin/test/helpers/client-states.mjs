@@ -21,7 +21,7 @@ export const LEDGER_CARDS = Object.freeze(["ConfirmStates", "LiveStates", "SignI
 const row = (card, state, reached) => Object.freeze({ card, state, reached });
 
 export const T = Object.freeze({
-  previewing: "a preview opens the slot after the panel that asked, outside its .legacy wrapper, any table cell and any layout grid marked data-slot-after, titled, with Confirm disabled",
+  previewing: "a preview opens the slot after the panel that asked, outside any table cell and any layout grid marked data-slot-after, titled, with Confirm disabled",
   unchanged: "no change: the bar says so with Close alone, and Close puts the skeleton back and hides the slot",
   paid: "a paid preview: its reserve sentence, its Undo line and its label in the paid fill, and Confirm sends the ticket once, then reloads",
   bulk: "a bulk preview lists each job with its reserve and the total; a bulk confirm with jobs refused shows each job, its audit rows and Reload",

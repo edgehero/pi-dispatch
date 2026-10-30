@@ -41,7 +41,7 @@ STATUS = {
     **{n: (BUILT, "Built by #749, Spend as five views.") for n in ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown",
                                               "TopologyScreen", "SpendPhone"]},
     "TriggersScreen": (PLANNED, "#750. Its Watch and Dispatchers tabs are planned and proposed elsewhere."),
-    "TriggerDetail": (PLANNED, "#750."), "TriggerEditor": (PLANNED, "#750."), "ConfigScreen": (PLANNED, "#750."),
+    "TriggerDetail": (BUILT, "#750."), "TriggerEditor": (BUILT, "#750."), "ConfigScreen": (BUILT, "#750."),
     **{n: (PLANNED, "#751.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
     "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),

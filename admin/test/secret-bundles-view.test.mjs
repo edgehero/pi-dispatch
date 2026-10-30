@@ -208,9 +208,9 @@ test("the console's configuration lists each bundle with its facts, the resolver
   };
   const panels = await pagePanels("config", ctxOf("operator", { snapshot }));
   const html = panels.map((p) => p.html).join("");
-  const one = panels.find((p) => p.id === "p-secret-bundles")?.html ?? "";
+  const one = panels.find((p) => p.id === "cf-secret-bundles")?.html.replace(/\s+/g, " ") ?? "";
   assert.match(one, /<li class="mono">op-web \(dotenv\)<\/li>/);
-  assert.match(one, /<td class="mono">shop<\/td><td>shop<\/td><td>op-shop \(declared in PI_SECRET_BUNDLES, json; doctor --secrets checks it runs\)<\/td><td>yes<\/td><td class="mono">STRIPE_KEY at api\.stripe\.com<\/td><td>index 1, index 3<\/td>/, "the opt-outs by the index the Triggers table shows; the pi panel counts from 1");
+  assert.match(one, /<td class="mono">shop<\/td><td>shop<\/td><td>op-shop \(declared in PI_SECRET_BUNDLES, json; doctor --secrets checks it runs\)<\/td><td>yes<\/td><td class="mono">STRIPE_KEY at api\.stripe\.com<\/td><td>row 2, row 4<\/td>/, "the opt-outs by the index the Triggers table shows; the pi panel counts from 1");
   assert.match(one, /A_URL, B_TOKEN \(<a class="mono" href="\/run\?id=gh-new">gh-new<\/a>\)/);
   assert.match(one, /class="warn">nowhere \(not declared in the overlay or PI_SECRET_BUNDLES/, "an undeclared profile is marked");
   assert.match(one, /data-action="secret-bundle-add"/);

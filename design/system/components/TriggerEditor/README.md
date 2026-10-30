@@ -15,7 +15,7 @@ A refusal shows under the field it is about, in the loader's words, ending "Noth
 
 A viewer never sees this page.
 
-**Panels.** `p-trigger-add`, `p-trigger-preview`.
+**Panels.** `p-trigger-add`, `p-kinds`, `p-forge-words`, `p-refusals`. The preview is the shared confirm slot.
 
 **The server provides.**
 - The blessed venues and the deployment defaults.

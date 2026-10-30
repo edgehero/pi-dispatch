@@ -455,6 +455,16 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const pricing = pricingOf(m.pricing);
     const pageDeps = {
       fleet,
+      paths: side.paths,
+      configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
+      triggerEditor: () => m.readModel.readTriggerEditor({ paths: side.paths, env: side.env, deploymentDir: config.dir, fs, platform: io.platform ?? process.platform, uid }),
+      triggerFireCheck: (index) => m.readModel.planTriggerFire({
+        index, triggersPath: side.paths.triggersPath, url: side.paths.valkeyUrl,
+        env: side.env, grantsEnv: shellEnv,
+        overlay: m.readModel.readSettingsView({ settingsFile: side.paths.settingsFile, fs }).overlay ?? {},
+        modelEndpoints: endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.(),
+        builtinModel: m.modelCatalog?.builtinModel, fs, now,
+      }),
       killSwitchPlan: killSwitchPlanFn,
       hostCapacity: async (host) => {
         const capacity = await m.insights.assembleCapacityView(side.paths, "7d", now(), { envFn: () => side.env });
@@ -518,6 +528,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
         plans: m.writePlans ?? null,
         paths: side.paths,
         env: side.env,
+        grantsEnv: shellEnv,
         fleet,
         killSwitchPlanFn,
         urlShown: m.connection?.urlShown,

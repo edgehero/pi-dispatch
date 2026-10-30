@@ -1,0 +1,308 @@
+{
+  "card": "ConfigScreen",
+  "pr": 750,
+  "panels": [
+    "cf-navigation",
+    "cf-settings",
+    "cf-triggers",
+    "cf-pause-windows",
+    "cf-scoped-limits",
+    "cf-projects",
+    "cf-files",
+    "cf-unset",
+    "cf-mcp-servers",
+    "cf-packages",
+    "cf-secret-profiles",
+    "cf-secret-bundles"
+  ],
+  "elements": [
+    {
+      "el": "cf-navigation",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configNavigation",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-settings",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configSettings",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-triggers",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configTriggers",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-pause-windows",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configPauseWindows",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-scoped-limits",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configScopedLimits",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-projects",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configProjects",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-files",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configFiles",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-unset",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configUnset",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-mcp-servers",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configMcp",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-packages",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configPackages",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-secret-profiles",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configSecretProfiles",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "cf-secret-bundles",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configSecretBundles",
+      "golden": [
+        "config.operator"
+      ],
+      "reason": "Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."
+    },
+    {
+      "el": "Where it lives: settings overlay and triggers file, with no account home path",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configDescription",
+      "golden": [
+        "config.operator",
+        "config.viewer"
+      ]
+    },
+    {
+      "el": "After a write: change, actor, audit row and undo",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/shell.mjs#shellHtml",
+      "golden": [
+        "panels/confirm-done.operator"
+      ]
+    },
+    {
+      "el": "Section pills count rows and jump to the named section",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configNavigation",
+      "panel": "cf-navigation",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": [
+        "#cf-settings",
+        "#cf-triggers"
+      ]
+    },
+    {
+      "el": "Settings: every key as a fact and a closed key select",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configSettings",
+      "panel": "cf-settings",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": [
+        "maxTurns",
+        "<select"
+      ]
+    },
+    {
+      "el": "Settings preview: a diff before the five-minute confirm ticket",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/confirm-view.mjs#diffHtmlOf",
+      "golden": [
+        "panels/confirm-preview.operator"
+      ],
+      "shows": [
+        "d-add",
+        "d-del"
+      ]
+    },
+    {
+      "el": "Refusal: named key and valid values, nothing changed",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/write-plans.mjs#planSettingSet",
+      "golden": [
+        "panels/confirm-refused-preview.operator"
+      ],
+      "shows": [
+        "Nothing"
+      ]
+    },
+    {
+      "el": "Trigger row links, one-based numbering and hidden machine index",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configTriggers",
+      "panel": "cf-triggers",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": [
+        "/config/trigger?index=",
+        "Delete row 1"
+      ]
+    },
+    {
+      "el": "Pause window row actions prefill edits and preserve hidden local scope by omission",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configPauseWindows",
+      "panel": "cf-pause-windows",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": [
+        "pause-window-edit",
+        "pause-window-delete"
+      ]
+    },
+    {
+      "el": "Scoped limits retain JSON with row-specific prefilled edits",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configScopedLimits",
+      "panel": "cf-scoped-limits",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": [
+        "limit-edit",
+        "limit-delete"
+      ]
+    },
+    {
+      "el": "Projects have row numbers and stable-id row edit/delete actions",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configProjects",
+      "panel": "cf-projects",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": [
+        "project-edit",
+        "project-delete"
+      ]
+    },
+    {
+      "el": "MCP references and secrets expose names only",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configMcp",
+      "panel": "cf-mcp-servers",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": "References"
+    },
+    {
+      "el": "Empty pi packages, profiles and bundles keep their own usable panels",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/config.mjs#configSecretProfiles",
+      "panel": "cf-secret-profiles",
+      "golden": [
+        "config.operator"
+      ],
+      "shows": "No secret profile"
+    },
+    {
+      "el": "Rows and paths come from one snapshot",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#loadPageData"
+    },
+    {
+      "el": "Secrets, Connections and Project detail destinations",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "Issue #751 adds these named pages. Secrets and Connections resolve to Configuration meanwhile; project rows are deliberately unlinked until the page exists."
+    },
+    {
+      "el": "Fixture settings, seven triggers, window, limits, projects and sample write banner",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The real fixture deployment supplies screen values; confirm-state goldens cover the sample write and refusal separately."
+    }
+  ]
+}

@@ -7,7 +7,7 @@
  *
  * WHY HERE AND NOT IN `pages.mjs` OR `html.mjs`. Those two hold the old markup until each page converts, and the
  * stylesheet's compatibility test reads them as such (`console-compat.test.mjs`): a class the Pulse bundle styles,
- * written there, would count as old markup the legacy layer must neutralise. And `html.mjs` cannot import this
+ * written there, would couple the document and shell modules. And `html.mjs` cannot import this
  * module: the sprite is built with `html` while `pulse-icons.mjs` loads, which would be before `html.mjs` had run.
  *
  * WHAT THE SCRIPT RELIES ON, kept by every page: `#logout` (sign-out), `#live-status` with its `[data-live-word]`
@@ -51,7 +51,7 @@ import { html, page } from "./html.mjs";
 import * as ui from "./kit.mjs";
 // A cycle by design: `pages.mjs` draws through `shellHtml`, and this module reads the page table. Neither touches the
 // other's exports while it loads, only when a page is drawn, which ES modules allow.
-import { LEGACY_PAGES, PAGES, pageQueryString } from "./pages.mjs";
+import { PAGES, pageQueryString } from "./pages.mjs";
 import { ICON_NAMES, SPRITE } from "./pulse-icons.mjs";
 import { linkContent, signInContent } from "./signin.mjs";
 import { themeLabel } from "./theme.mjs";
@@ -206,16 +206,6 @@ function drawnHtml(now, reload, before = null) {
 }
 
 /**
- * `content` in the compatibility wrapper when page `name` is still drawn in the old markup (`LEGACY_PAGES`), so the
- * legacy stylesheet applies inside it and nowhere else; as it is once the page has converted. Called once per section
- * (PR 2 of issue #737): each old panel in a wrapper of its own, so the confirm slot the script puts after a section
- * that asked lands between two wrappers, never inside one, where the legacy layer would restyle its buttons and list.
- */
-export function legacyWrap(name, content) {
-  return LEGACY_PAGES.includes(name) ? html`<div class="legacy">${content}</div>` : content;
-}
-
-/**
  * Two letters for the avatar: the name's first two letters or digits, lower case (the Shell card's avatars read "op" and
  * "wa", and a name's case says nothing about who it is), or "-" for a name with none.
  */
@@ -302,11 +292,11 @@ const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(
  * `headline` is the page's headline panel's first content (text or a fragment, an empty one included, which the stream
  * fills later), drawn under the title as `#p-headline` (see the header); null, the default, draws no line.
  */
-export function shellHtml(name, ctx, inner, { headline = null, description = null, end = null } = {}) {
+export function shellHtml(name, ctx, inner, { headline = null, description = null, end = null, title = null } = {}) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const meta = PAGES[name];
   const role = roleOf(ctx?.session);
-  const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : name === "watch" || name === "watch-board" ? "config" : name;
+  const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add"].includes(name) ? "config" : name;
   // Drawn on a live page always, so the stream has a panel to fill; elsewhere only when there is a count to show.
   const count = navParkedHtml(ctx?.data);
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;
@@ -314,7 +304,7 @@ export function shellHtml(name, ctx, inner, { headline = null, description = nul
   const glyphs = Object.entries(LIVE_GLYPHS).map(([state, glyph]) => liveGlyph(state, glyph));
   const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
   const back = name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : ["host", "venue"].includes(name) ? html`<a class="back" href="${PAGES.fleet.path}">${ui.icon("chev-l", { size: "sm" })}Fleet</a>` : null;
-  const heading = name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : ["host", "venue"].includes(name) && typeof ctx?.query?.name === "string" ? html`${ctx.query.name}` : meta.title;
+  const heading = title ?? (name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : ["host", "venue"].includes(name) && typeof ctx?.query?.name === "string" ? html`${ctx.query.name}` : meta.title);
   const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;
   const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload, end) : end;
   const readOnly = Boolean(ctx?.readOnly);

@@ -82,7 +82,7 @@ export const RESERVED_ID_FAMILIES = Object.freeze(["n", "w", "sg", "g"]);
  * (`<section id="p-runs" data-panel>`, which `pages.mjs` draws and the live stream swaps by id), and a topology family
  * followed by its ordinal and nothing else (`n12`, never `nav` or `run1`).
  */
-const RESERVED_ID_RE = new RegExp(`^(?:i|p)-|^(?:${RESERVED_ID_FAMILIES.join("|")})\\d+$`);
+const RESERVED_ID_RE = new RegExp(`^(?:i|p|cf)-|^(?:${RESERVED_ID_FAMILIES.join("|")})\\d+$`);
 
 /** The sprite's own ids (`#hatch`, `#arrow` and every icon), read out of it, so a symbol added there is reserved here. */
 const SPRITE_IDS = new Set(Array.from(String(SPRITE).matchAll(/\sid="([^"]+)"/g), (m) => m[1]));

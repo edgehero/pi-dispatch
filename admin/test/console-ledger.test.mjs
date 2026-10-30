@@ -43,6 +43,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  ConfigScreen: 750, TriggerDetail: 750, TriggerEditor: 750,
   SpendScreen: 749, SpendBudgetSplit: 749, SpendCapacity: 749, SpendBreakdown: 749, TopologyScreen: 749, SpendPhone: 749,
   FleetScreen: 6, FleetPartPaused: 6, HostDetail: 6, VenueDetail: 6,
   RunLive: 5, RunEnded: 5, RunRefused: 5, RunParked: 5, RunRecovered: 5, RunSandboxed: 5, RunChatStates: 5, RunViewer: 5, Transcript: 5, FactsAndLevels: 5,
@@ -85,6 +86,8 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  "config.operator", "config.viewer", "trigger.operator", "trigger.viewer", "trigger-add.operator",
+  ...["trigger-editor-no-webhook.operator", "trigger-cron.operator", "trigger-spent.operator", "trigger-file-invalid.operator", "trigger-readonly.viewer", "trigger-editor-refusals.operator"].map(key=>`panels/${key}`),
   ...SPEND_PANEL_STATES.map((key) => `panels/${key}`),
   ...FLEET_PANEL_STATES.map((key) => `panels/${key}`),
   "fleet.operator", "fleet.viewer", "host.operator", "host.viewer", "venue.operator", "venue.viewer",
@@ -123,7 +126,7 @@ const KEYS = Object.freeze(["el", "kind", "status", "as", "panel", "source", "ho
 const CODE_KEYS = Object.freeze(["as", "panel", "source", "holds", "shows"]);
 const GOLDEN_RE = /^(?:panels\/)?[a-z0-9]+(?:-[a-z0-9]+)*\.(operator|viewer|anonymous)$/;
 const REF_RE = /^((?:admin|worker)\/src\/[A-Za-z0-9_/-]+\.(?:mjs|ts))#([A-Za-z_$][\w$]*)((?:\.[A-Za-z0-9_-]+)*)$/;
-const PANEL_ID_RE = /^p-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const PANEL_ID_RE = /^(?:p|cf)-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /** Every ledger file, parsed, by card name. */
 function loadLedgers() {

@@ -150,7 +150,7 @@ function scopeRule(prefix, { prelude, body }) {
 }
 
 /**
- * `css` with every selector confined to `prefix` (`.legacy`, `body[data-page="runs"]`): one rule per line, `@media`
+ * `css` with every selector confined to `prefix` (`body[data-page="runs"]`): one rule per line, `@media`
  * kept around its own rules (one level), `html`, `body` and `:root` at a selector's start mapped to the prefix itself.
  * Throws on anything it cannot confine (see the header): any other at-rule, a nested `@media`, a selector that names
  * the document after its start or starts with a combinator, an empty selector, a nested rule.
@@ -295,22 +295,19 @@ export const TOP_BAR = Object.freeze({ phoneMax: 760, navBreakMax: 939, oneRowMi
  *   on `surface` and `surface-2` (4.36:1 on the light canvas), is re-pointed to the muted ink inside such a card, so a
  *   hint or an axis stays readable too (the one token the shell declares). A tinted card keeps its tint, which is what
  *   it says.
- *   A secondary button (the kit's `.btn` with no act, the legacy layer's `button`) is drawn by its fill alone,
+ *   A secondary button (the kit's `.btn` with no act) is drawn by its fill alone,
  *   `surface-3`, which on the light canvas is 1.04:1: on a flat panel it was a word with no shape. Such a panel hands
  *   its controls a ring (`--stale-ring`, `line-strong`, 3:1 on the canvas in both themes, the contrast test's pair),
- *   and every control drawn with that fill wears it (`SECONDARY_BTN` here, the legacy controls in `compat-css.mjs`);
+ *   and every control drawn with that fill wears it (`SECONDARY_BTN` here);
  *   anywhere else the property is unset and the control draws no ring. An act draws its own fill or ring, and a ghost
  *   button none by design, so neither takes it.
- *   A legacy panel is its own card (`compat-css.mjs`), so it is named here beside the converted card: that half goes
- *   with the legacy layer (the compat test holds the shell to naming `.legacy` only while a page is legacy);
  * - the write flow (the ConfirmStates card, `confirm-view.mjs`): the slot (`.cslot`), the previewing skeleton's muted
  *   hourglass and grey ghost lines (and, once the script has dropped its busy mark to say why nothing was previewed,
  *   the skeleton's attention icon in the hourglass's place: `confirm-view.mjs` draws both, `data-slot-icon`), the
  *   no-change bar's quieter ring, a bar's note line, the bulk results' list, and the
  *   note a panel the script keeps still carries (`.held`), each the card's own demo rule under the class
  *   `confirm-view.mjs` `CONFIRM_CLASSES` names. The kept-still note is the one piece of Pulse markup the script puts
- *   INSIDE a panel, and on a legacy page that panel is old markup whose layer resets every margin and padding in it
- *   (`.legacy *`, from the insights page's own reset, as specific as a class and later): the note's space under it and
+ *   INSIDE a panel: the note's space under it and
  *   its chip's padding are said again at the panel (`section[data-panel]>.held`, `.held>.chip`), which outranks that
  *   reset, or the note sat flush on the panel's heading with its chip's words touching the pill's edges; and the
  *   Undo line's icon at the top of its sentence, centred on the first line (bundle.css centres it on the whole
@@ -402,7 +399,7 @@ details.more a[aria-current="page"]{background:var(--surface-2);color:var(--ink)
 .live-note{display:grid;gap:var(--space-3);min-width:0}
 .live-note:not(:has(>:not([hidden]))){position:absolute}
 .live-note__at:has(>time:empty){display:none}
-main.stale section[data-panel] .card:not(.card--tint),main.stale .legacy>section[data-panel]{--ink-faint:var(--ink-muted);--stale-ring:inset 0 0 0 1px var(--line-strong);background:transparent;box-shadow:inset 0 0 0 1px var(--line)}
+main.stale section[data-panel] .card:not(.card--tint){--ink-faint:var(--ink-muted);--stale-ring:inset 0 0 0 1px var(--line-strong);background:transparent;box-shadow:inset 0 0 0 1px var(--line)}
 ${SECONDARY_BTN}{box-shadow:var(--stale-ring,none)}
 .cmd{align-items:flex-start}
 .cmd code{white-space:pre-wrap;overflow-wrap:anywhere;padding:6px 0}

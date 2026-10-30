@@ -2,8 +2,7 @@
  * The two-step write's markup (issue #737, REQ-OPERATOR-CONSOLE-ACTIONS, the ConfirmStates, Actions, FieldsDiffCommand
  * and CardsAndBanners cards): the one confirm slot a page carries, every bar the preview and the confirm answer put in
  * it, the banner a page shows after a write, and the diff. Pulse markup through the kit, never the compatibility layer:
- * the slot sits outside every `.legacy` wrapper (the browser script moves it after the section that asked), so nothing
- * here is restyled by `compat-css.mjs`.
+ * the browser script moves the slot after the section that asked and outside card grids.
  *
  * EVERY STATE IS SERVER MARKUP. The browser script only moves the slot, toggles `hidden`, sets `textContent` and puts an
  * answer's `html` into the slot (`slot.innerHTML`, the one markup write it makes for a write). So the skeleton it shows
